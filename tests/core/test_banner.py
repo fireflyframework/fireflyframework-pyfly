@@ -1,4 +1,4 @@
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ class TestBannerPrinterText:
     def test_default_banner_contains_copyright(self):
         printer = BannerPrinter(mode=BannerMode.TEXT, version="0.1.0")
         output = printer.render()
-        assert "Copyright 2026 Firefly Software Solutions Inc." in output
+        assert "Copyright 2026 Firefly Software Foundation." in output
 
     def test_default_banner_contains_license(self):
         printer = BannerPrinter(mode=BannerMode.TEXT, version="0.1.0")

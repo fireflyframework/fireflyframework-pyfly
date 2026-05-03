@@ -168,7 +168,7 @@ export function renderSidebar(container, currentRoute, options = {}) {
     footer.className = 'admin-sidebar-footer';
 
     const footerLine1 = document.createElement('div');
-    footerLine1.textContent = '\u00A9 2026 Firefly Software Solutions Inc.';
+    footerLine1.textContent = '\u00A9 2026 Firefly Software Foundation.';
     footer.appendChild(footerLine1);
 
     const footerLine2 = document.createElement('div');

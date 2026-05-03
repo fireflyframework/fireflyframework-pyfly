@@ -1,4 +1,4 @@
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,7 +99,7 @@ class BannerPrinter:
         banner_text = self._replace_placeholders(banner_text)
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         framework_line = f":: PyFly Framework :: (v{self._version}) (Python {py_ver})"
-        copyright_line = "Copyright 2026 Firefly Software Solutions Inc. | Apache License 2.0"
+        copyright_line = "Copyright 2026 Firefly Software Foundation. | Apache License 2.0"
         return banner_text.rstrip("\n") + "\n\n" + framework_line + "\n" + copyright_line
 
     def _load_custom_banner(self) -> str | None:

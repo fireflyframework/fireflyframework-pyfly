@@ -1,4 +1,4 @@
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ def print_banner() -> None:
     console.print(banner)
     console.print()
     console.print(f"  [dim]:: PyFly Framework :: (v{__version__})[/dim]")
-    console.print("  [dim]Copyright 2026 Firefly Software Solutions Inc. | Apache 2.0 License[/dim]\n")
+    console.print("  [dim]Copyright 2026 Firefly Software Foundation. | Apache 2.0 License[/dim]\n")
 
 
 def print_step_header(step: int, total: int, title: str) -> None:

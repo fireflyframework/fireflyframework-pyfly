@@ -357,4 +357,4 @@ See [Installation](installation.md) for optional dependencies and extras.
 
 ## License
 
-Apache License 2.0 — Firefly Software Solutions Inc.
+Apache License 2.0 — Firefly Software Foundation.

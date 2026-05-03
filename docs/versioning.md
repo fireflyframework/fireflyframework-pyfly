@@ -137,7 +137,7 @@ ______ ___.__._/ ____\  | ___.__.
 |__|   \/                 \/
 
 :: PyFly Framework :: (v0.2.0-M11) (Python 3.13.9)
-Copyright 2026 Firefly Software Solutions Inc. | Apache License 2.0
+Copyright 2026 Firefly Software Foundation. | Apache License 2.0
 ```
 
 **Admin dashboard:**

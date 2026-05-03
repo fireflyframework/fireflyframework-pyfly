@@ -640,4 +640,4 @@ PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ec
 
 ## License
 
-Apache License 2.0 — [Firefly Software Solutions Inc.](https://github.com/fireflyframework)
+Apache License 2.0 — [Firefly Software Foundation.](https://github.com/fireflyframework)

@@ -1,4 +1,4 @@
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        assert "Copyright 2026 Firefly Software Solutions Inc." in result.output
+        assert "Copyright 2026 Firefly Software Foundation." in result.output
         assert "Apache 2.0 License" in result.output
 
     def test_help_shows_aligned_tagline(self):
@@ -1645,7 +1645,7 @@ class TestLicenseCommand:
         runner = CliRunner()
         result = runner.invoke(cli, ["license"])
         assert result.exit_code == 0
-        assert "Copyright 2026 Firefly Software Solutions Inc." in result.output
+        assert "Copyright 2026 Firefly Software Foundation." in result.output
 
     def test_license_shows_full_text(self):
         runner = CliRunner()

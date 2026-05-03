@@ -1,4 +1,4 @@
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ def license_command() -> None:
     """Display the Apache 2.0 license for PyFly."""
     console.print("\n[pyfly]PyFly Framework[/pyfly] [dim]— License[/dim]\n")
     console.print("[bold]Apache License, Version 2.0[/bold]")
-    console.print("[dim]Copyright 2026 Firefly Software Solutions Inc.[/dim]\n")
+    console.print("[dim]Copyright 2026 Firefly Software Foundation.[/dim]\n")
 
     # Try to read the full LICENSE file from the package or project root
     license_text = _load_license()

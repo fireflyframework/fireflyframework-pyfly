@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 authors = [
-    { name = "Firefly Software Solutions Inc", email = "dev@getfirefly.io" },
+    { name = "Firefly Software Foundation", email = "dev@getfirefly.io" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

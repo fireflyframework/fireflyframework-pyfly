@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Firefly Software Solutions Inc.
+# Copyright 2026 Firefly Software Foundation.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -93,7 +93,7 @@ ______ ___.__._/ ____\  | ___.__.
 BANNER
     printf "${RESET}\n"
     printf "  ${DIM}:: PyFly Framework Installer :: (v%s)${RESET}\n" "$PYFLY_VERSION"
-    printf "  ${DIM}Copyright 2026 Firefly Software Solutions Inc. | Apache 2.0 License${RESET}\n\n"
+    printf "  ${DIM}Copyright 2026 Firefly Software Foundation. | Apache 2.0 License${RESET}\n\n"
 }
 
 # Ensure the cli extra is always included in the extras list.
