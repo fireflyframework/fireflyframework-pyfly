@@ -470,7 +470,7 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-  PyFly v0.2.0-M11 | Python 3.12.0
+  PyFly v26.05.01 | Python 3.12.0
 
 2026-01-15T10:30:00Z [info] starting_application  app=my-service version=0.1.0
 2026-01-15T10:30:00Z [info] no_active_profiles     message=No active profiles set, falling back to default

@@ -11,7 +11,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-0.2.0--M11-yellow" alt="Version: 0.2.0-M11"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-26.05.01-brightgreen" alt="Version: 26.05.01"></a>
   <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -296,6 +296,444 @@ my-addon = "my_package.auto_configuration:MyAutoConfiguration"
 
 ---
 
+## Featured Patterns
+
+PyFly is more than a web framework — it ships **production-grade implementations of the distributed patterns** that power real microservices: distributed transactions, durable workflows, event sourcing, identity, content management, multi-channel notifications, inbound/outbound webhooks, business rules, and more. Each one is a first-class module with a port-and-adapter design, CLI scaffolding, REST controllers (where applicable), metrics, tracing, and persistence.
+
+The sections below show one representative example per pattern. The full guides live under [`docs/modules/`](docs/modules/README.md).
+
+### Saga — Distributed Transaction with Compensation
+
+Coordinate work across multiple services with automatic compensation on failure. Sagas are declared with decorators on a class; the engine builds the DAG, executes steps in dependency order, and rolls back via compensation steps if anything fails.
+
+```python
+from pyfly.transactional.saga import saga, saga_step
+from pyfly.transactional.saga.core.context import SagaContext
+
+@saga(name="place-order", timeout_ms=30_000)
+class PlaceOrderSaga:
+    def __init__(self, payments: PaymentService, inventory: InventoryService, ship: ShippingService) -> None:
+        self._payments = payments
+        self._inventory = inventory
+        self._ship = ship
+
+    # `compensate=` names a method on this class to invoke if a later step fails.
+    @saga_step(id="reserve-inventory", retry=3, backoff_ms=500, compensate="release_inventory")
+    async def reserve(self, ctx: SagaContext) -> str:
+        return await self._inventory.reserve(ctx.input["order_id"])
+
+    async def release_inventory(self, ctx: SagaContext) -> None:
+        await self._inventory.release(ctx.input["order_id"])
+
+    @saga_step(id="charge-payment", depends_on=["reserve-inventory"], compensate="refund_payment")
+    async def charge(self, ctx: SagaContext) -> str:
+        return await self._payments.charge(ctx.input["order_id"], ctx.input["amount"])
+
+    async def refund_payment(self, ctx: SagaContext) -> None:
+        await self._payments.refund(ctx.input["order_id"])
+
+    @saga_step(id="ship-order", depends_on=["charge-payment"])
+    async def ship_order(self, ctx: SagaContext) -> None:
+        await self._ship.dispatch(ctx.input["order_id"])
+```
+
+**Highlights:** parallel-by-default DAG execution, per-step retries with jitter, backpressure, idempotency keys, metrics + tracing, pluggable persistence (in-memory, Redis, SQLAlchemy, Cache), DLQ with `RecoveryService`, REST controllers for list/start/retry, and `OrchestrationHealthIndicator`. Programmatic API also available via `SagaBuilder()`. See [docs/modules/transactional.md](docs/modules/transactional.md).
+
+### Workflow — Durable, Signal-Driven Orchestration
+
+Long-running processes that can wait for external events, sleep for hours, spawn child workflows, and be queried while running. Inspired by Temporal/Cadence, native to PyFly.
+
+```python
+from pyfly.transactional.workflow import (
+    workflow, workflow_step, wait_for_signal, wait_for_timer,
+    child_workflow, workflow_query, on_workflow_complete,
+)
+
+@workflow(id="loan-approval", version=2, timeout_ms=7 * 24 * 3600 * 1000)
+class LoanApprovalWorkflow:
+    def __init__(self, scoring: ScoringService, kyc: KycService) -> None:
+        self._scoring = scoring
+        self._kyc = kyc
+        self._decision: str | None = None
+
+    @workflow_step(id="run-scoring")
+    async def run_scoring(self, ctx) -> int:
+        return await self._scoring.score(ctx.input["applicant_id"])
+
+    @child_workflow(workflow_id="kyc-verification", wait_for_completion=True, timeout_ms=3600_000)
+    @workflow_step(id="kyc", depends_on=["run-scoring"])
+    async def run_kyc(self, ctx) -> dict:
+        return {"applicant_id": ctx.input["applicant_id"]}
+
+    @wait_for_signal("manual-decision", timeout_ms=48 * 3600 * 1000)
+    @workflow_step(id="await-officer", depends_on=["kyc"])
+    async def await_officer(self, ctx, signal_payload: dict) -> str:
+        self._decision = signal_payload["decision"]
+        return self._decision
+
+    @wait_for_timer(delay_ms=24 * 3600 * 1000)
+    @workflow_step(id="cooling-off", depends_on=["await-officer"])
+    async def cooling_off(self, ctx) -> None: ...
+
+    @workflow_query(name="status")
+    def get_status(self) -> str:
+        return self._decision or "pending"
+
+    @on_workflow_complete
+    async def notify(self, ctx) -> None:
+        ctx.publish("LoanDecided", {"id": ctx.input["applicant_id"], "decision": self._decision})
+```
+
+**Highlights:** `@wait_for_signal` / `@wait_for_timer` / `@wait_for_all` / `@wait_for_any`, child workflows, queries, scheduling via cron, lifecycle hooks (`@on_workflow_complete`, `@on_workflow_error`, `@on_step_complete`), `SignalService` + `TimerService` + `ContinueAsNewService`, `WorkflowController` REST API. See [docs/modules/transactional.md](docs/modules/transactional.md).
+
+### TCC — Try / Confirm / Cancel
+
+Strong-consistency three-phase distributed transactions for financial workloads where compensation alone isn't enough.
+
+```python
+from pyfly.transactional.tcc import tcc, tcc_participant, try_method, confirm_method, cancel_method
+from pyfly.transactional.tcc.context import TccContext
+from typing import Annotated
+from pyfly.transactional.tcc.annotations import FromTry
+
+@tcc(name="transfer-funds", timeout_ms=10_000, retry_enabled=True, max_retries=3)
+class TransferFundsTcc: ...
+
+@tcc_participant(id="debit-source", order=1)
+class DebitSource:
+    def __init__(self, ledger: Ledger) -> None: self._ledger = ledger
+
+    @try_method(timeout_ms=5_000)
+    async def try_debit(self, ctx: TccContext) -> str:
+        return await self._ledger.hold(ctx.input["from"], ctx.input["amount"])
+
+    @confirm_method()
+    async def confirm(self, hold_id: Annotated[str, FromTry()], ctx: TccContext) -> None:
+        await self._ledger.commit_hold(hold_id)
+
+    @cancel_method()
+    async def cancel(self, hold_id: Annotated[str, FromTry()], ctx: TccContext) -> None:
+        await self._ledger.release_hold(hold_id)
+
+@tcc_participant(id="credit-target", order=2)
+class CreditTarget:
+    def __init__(self, ledger: Ledger) -> None: self._ledger = ledger
+
+    @try_method()
+    async def try_credit(self, ctx: TccContext) -> str:
+        return await self._ledger.reserve(ctx.input["to"], ctx.input["amount"])
+
+    @confirm_method()
+    async def confirm(self, reservation_id: Annotated[str, FromTry()], ctx: TccContext) -> None:
+        await self._ledger.commit_reservation(reservation_id)
+
+    @cancel_method()
+    async def cancel(self, reservation_id: Annotated[str, FromTry()], ctx: TccContext) -> None:
+        await self._ledger.release_reservation(reservation_id)
+```
+
+The TCC engine runs Try across all participants in `order`. If every Try succeeds, it runs Confirm. If any Try fails, it runs Cancel for every participant whose Try succeeded. Try-results flow into Confirm/Cancel via `Annotated[T, FromTry()]`. See [docs/modules/transactional.md](docs/modules/transactional.md).
+
+### Event Sourcing — Aggregates, Event Store, Outbox
+
+Persist state as an append-only event log. Aggregates rebuild from history; projections update read models; the outbox reliably publishes events to brokers.
+
+```python
+from dataclasses import dataclass
+from pyfly.eventsourcing import (
+    AggregateRoot, DomainEvent, domain_event,
+    EventStore, SqlAlchemyEventStore, TransactionalOutbox,
+)
+
+@domain_event
+@dataclass(frozen=True)
+class AccountOpened(DomainEvent):
+    account_id: str
+    owner: str
+    initial_balance: int
+
+@domain_event
+@dataclass(frozen=True)
+class MoneyDeposited(DomainEvent):
+    account_id: str
+    amount: int
+
+class Account(AggregateRoot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.owner: str = ""
+        self.balance: int = 0
+        self.when(AccountOpened, Account._on_opened)
+        self.when(MoneyDeposited, Account._on_deposit)
+
+    @classmethod
+    def open(cls, account_id: str, owner: str, initial_balance: int) -> "Account":
+        agg = cls()
+        agg.id = account_id
+        agg.apply(AccountOpened(account_id=account_id, owner=owner, initial_balance=initial_balance))
+        return agg
+
+    def deposit(self, amount: int) -> None:
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        self.apply(MoneyDeposited(account_id=self.id, amount=amount))
+
+    def _on_opened(self, e: AccountOpened) -> None:
+        self.owner, self.balance = e.owner, e.initial_balance
+
+    def _on_deposit(self, e: MoneyDeposited) -> None:
+        self.balance += e.amount
+
+# Persisting and rebuilding
+store: EventStore = SqlAlchemyEventStore(session_factory)
+account = Account.open("acc-42", "Alice", 100)
+account.deposit(25)
+await store.append(account.id, account.pending_events(), expected_version=account.version - len(account.pending_events()))
+account.mark_committed()
+
+# Later — reconstruct from the log:
+events = await store.load("acc-42")
+rebuilt = Account()
+rebuilt.id = "acc-42"
+for envelope in events:
+    rebuilt.replay(envelope.event_type, envelope.event)
+assert rebuilt.balance == 125
+```
+
+**Highlights:** `AggregateRoot` with `when()`/`apply()`/`replay()`, optimistic concurrency via `expected_version`, snapshots (`SnapshotStore`), `TransactionalOutbox` for at-least-once publishing, `Projection` + `ProjectionRunner` for read models, `EventUpcaster` for schema evolution. Adapters: `InMemoryEventStore`, `SqlAlchemyEventStore`. See [docs/modules/eventsourcing.md](docs/modules/eventsourcing.md).
+
+### CQRS — Command/Query Buses with Validation, Authorization, Caching
+
+```python
+from pydantic import BaseModel
+from pyfly.cqrs import command, query, CommandHandler, QueryHandler, CommandBus, QueryBus
+
+class CreateUser(BaseModel):
+    name: str
+    email: str
+
+class FindUserById(BaseModel):
+    user_id: int
+
+@command(CreateUser)
+class CreateUserHandler(CommandHandler[CreateUser, int]):
+    def __init__(self, repo: UserRepository) -> None:
+        self._repo = repo
+
+    async def handle(self, cmd: CreateUser) -> int:
+        return (await self._repo.save(User(name=cmd.name, email=cmd.email))).id
+
+@query(FindUserById, cache_ttl=60)
+class FindUserByIdHandler(QueryHandler[FindUserById, User]):
+    def __init__(self, repo: UserRepository) -> None: self._repo = repo
+    async def handle(self, q: FindUserById) -> User:
+        return await self._repo.find_by_id(q.user_id)
+
+# Dispatch:
+async def usage(commands: CommandBus, queries: QueryBus) -> None:
+    user_id = await commands.dispatch(CreateUser(name="Ada", email="ada@example.com"))
+    user = await queries.dispatch(FindUserById(user_id=user_id))
+```
+
+Command/query are auto-wired via the `CqrsAutoConfiguration` entry point. Cross-cutting concerns (`@validates`, `@authorizes`, `@cacheable`) compose declaratively. See [docs/modules/cqrs.md](docs/modules/cqrs.md).
+
+### Inbound Webhooks — Verify · Dedupe · Dispatch
+
+```python
+from pyfly.webhooks import (
+    AbstractWebhookEventListener, HmacSignatureValidator,
+    InMemoryWebhookEventStore, WebhookProcessor,
+)
+from pyfly.container import service
+
+@service
+class StripePaymentListener(AbstractWebhookEventListener):
+    source = "stripe"
+
+    async def handle(self, event_type: str, payload: dict) -> None:
+        match event_type:
+            case "payment_intent.succeeded":
+                await self._mark_paid(payload["data"]["object"]["id"])
+            case "charge.refunded":
+                await self._mark_refunded(payload["data"]["object"]["id"])
+
+# Auto-wired by AdapterAutoConfiguration:
+processor = WebhookProcessor(
+    validator=HmacSignatureValidator(secret=os.environ["STRIPE_SIGNING_SECRET"]),
+    store=InMemoryWebhookEventStore(),
+    listeners=[stripe_payment_listener],
+)
+```
+
+The `WebhookProcessor` validates the signature, deduplicates by event id, persists to the `WebhookEventStore`, and routes to `AbstractWebhookEventListener` instances by source. Plug it into any controller (`@post_mapping("/webhooks/stripe")`) and you get production-grade ingestion. See [docs/modules/webhooks.md](docs/modules/webhooks.md).
+
+### Outbound Callbacks — HMAC-Signed Webhook Dispatch
+
+```python
+from pyfly.callbacks import CallbackDispatcher, CallbackSubscription, CallbackConfig
+
+dispatcher: CallbackDispatcher  # @autowired
+
+await dispatcher.dispatch(
+    event_type="OrderShipped",
+    payload={"order_id": "ord-42", "tracking": "1Z..."},
+    correlation_id="corr-1",
+)
+# Reads subscriptions, filters authorized domains, signs with HMAC,
+# retries with exponential backoff, persists CallbackExecution records.
+```
+
+Subscriptions, authorized domains, and execution history are first-class persisted entities. Configure retry policies, secret rotation, and per-subscription filters declaratively. See [docs/modules/callbacks.md](docs/modules/callbacks.md).
+
+### Notifications — Email · SMS · Push (Provider-Agnostic)
+
+```python
+from pyfly.notifications import EmailMessage, EmailService, SmsMessage, SmsService
+
+email_service: EmailService  # auto-wired with SendGrid / Resend / SMTP / dummy
+sms_service:   SmsService    # auto-wired with Twilio / dummy
+
+await email_service.send(EmailMessage(
+    to=["alice@example.com"],
+    subject="Welcome to Acme",
+    html="<h1>Hi Alice</h1>",
+))
+
+await sms_service.send(SmsMessage(to="+34611222333", body="Your code is 4242"))
+```
+
+Configuration in `pyfly.yaml` selects the provider:
+
+```yaml
+pyfly:
+  notifications:
+    email:
+      provider: sendgrid     # sendgrid | resend | smtp | dummy
+      api-key: ${SENDGRID_API_KEY}
+    sms:
+      provider: twilio       # twilio | dummy
+      account-sid: ${TWILIO_ACCOUNT_SID}
+      auth-token: ${TWILIO_AUTH_TOKEN}
+    push:
+      provider: firebase     # firebase | dummy
+      credentials-file: /run/secrets/firebase.json
+```
+
+See [docs/modules/notifications.md](docs/modules/notifications.md).
+
+### Identity Provider (IDP) — Multi-Provider Auth
+
+Single port, four interchangeable adapters (Keycloak, AWS Cognito, Azure AD, internal-DB).
+
+```python
+from pyfly.idp import IdpAdapter, LoginRequest
+
+idp: IdpAdapter  # auto-wired
+
+result = await idp.login(LoginRequest(username="alice@acme.com", password="hunter2"))
+if result.requires_mfa:
+    result = await idp.verify_mfa(result.mfa_challenge_id, code="123456")
+
+session = await idp.introspect(result.access_token)
+print(session.user.email, session.roles)
+```
+
+```yaml
+pyfly:
+  idp:
+    provider: keycloak       # keycloak | aws-cognito | azure-ad | internal-db
+    realm: acme
+    server-url: https://auth.acme.com
+    client-id: acme-app
+    client-secret: ${KEYCLOAK_CLIENT_SECRET}
+```
+
+Switching providers is a YAML one-liner — your business code keeps depending on `IdpAdapter`. See [docs/modules/idp.md](docs/modules/idp.md).
+
+### ECM — Documents · Folders · E-Signature
+
+```python
+from pyfly.ecm import DocumentService, ESignatureService, SignatureRequest, Recipient
+
+documents: DocumentService     # auto-wired (S3 / Azure Blob / local-fs)
+esig: ESignatureService        # auto-wired (DocuSign / Adobe Sign / Logalty / no-op)
+
+doc = await documents.upload("contracts/2026/acme.pdf", file_bytes, mime_type="application/pdf")
+
+envelope = await esig.send(SignatureRequest(
+    document_id=doc.id,
+    recipients=[
+        Recipient(email="alice@acme.com", name="Alice", role="signer"),
+        Recipient(email="legal@acme.com", name="Legal", role="approver"),
+    ],
+    subject="Please sign the SaaS agreement",
+))
+
+status = await esig.status(envelope.id)
+```
+
+Storage and e-signature are independent ports — combine S3 storage with DocuSign, or Azure Blob with Adobe Sign, or local-fs with the no-op signer for tests. See [docs/modules/ecm.md](docs/modules/ecm.md).
+
+### Rule Engine — YAML DSL with AST Evaluation
+
+Externalize business rules so non-developers can change them without redeploys.
+
+```yaml
+# rules/credit_approval.yaml
+name: credit_approval
+description: Decision rules for personal loans
+inputs: [income, debt, credit_score, employment_years]
+rules:
+  - id: high_credit_fast_track
+    when: credit_score >= 750 and income >= 50000
+    then: { decision: "approve", limit: 50000 }
+  - id: standard_review
+    when: credit_score >= 650 and (debt / income) < 0.4
+    then: { decision: "review", limit: 25000 }
+  - id: reject_low_credit
+    when: credit_score < 600 or employment_years < 1
+    then: { decision: "reject" }
+```
+
+```python
+from pyfly.rule_engine import RuleEngine, RuleSetRepository
+
+rules: RuleEngine  # auto-wired
+
+decision = await rules.evaluate("credit_approval", {
+    "income": 75000, "debt": 12000, "credit_score": 770, "employment_years": 5,
+})
+# {'decision': 'approve', 'limit': 50000, '_rule_id': 'high_credit_fast_track'}
+```
+
+Audit trails (which rule fired, why), batch evaluation, hot-reload from `RuleSetRepository`. See [docs/modules/rule-engine.md](docs/modules/rule-engine.md).
+
+### Plugin SPI — `@plugin` / `@extension_point` / `@extension`
+
+Build extensible products: define extension points, let third-party packages contribute extensions.
+
+```python
+from pyfly.plugins import plugin, extension_point, extension
+
+@extension_point
+class PaymentMethod:
+    def display_name(self) -> str: ...
+    async def charge(self, amount: int, customer_id: str) -> str: ...
+
+@plugin(name="acme-stripe", version="1.0.0", depends_on=[])
+class StripePlugin: ...
+
+@extension(point=PaymentMethod, plugin="acme-stripe")
+class StripePayment(PaymentMethod):
+    def display_name(self) -> str: return "Credit Card (Stripe)"
+    async def charge(self, amount: int, customer_id: str) -> str:
+        return await self._stripe.charges.create(amount=amount, customer=customer_id)
+```
+
+The plugin manager resolves the dependency graph, loads plugins in order, and registers extensions with the DI container. See [docs/modules/plugins.md](docs/modules/plugins.md).
+
+---
+
 ## Installation
 
 > **Note:** PyFly is distributed exclusively via [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases). It is **not** published to PyPI.
@@ -304,13 +742,13 @@ my-addon = "my_package.auto_configuration:MyAutoConfiguration"
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -487,7 +925,7 @@ See the full [CLI Reference](docs/cli.md) for details.
 
 ## Modules
 
-PyFly currently implements **36 modules** organized into five layers:
+PyFly ships with **38 fully-implemented modules** organized into five layers — covering everything from HTTP routing and database access to distributed transactions, event sourcing, identity, content management, and observability:
 
 ### Foundation Layer
 
@@ -602,29 +1040,30 @@ Browse the full list in the [Documentation Table of Contents](docs/README.md).
 
 See **[ROADMAP.md](ROADMAP.md)** for the full roadmap toward feature parity with the Firefly Framework Java ecosystem (40+ modules).
 
-| Phase | Focus | Key Modules |
-|-------|-------|-------------|
-| **Phase 1** | Core Distributed Patterns | Event Sourcing, ~~Saga/TCC~~ (done), Workflow, DDD |
-| **Phase 2** | Business Logic | Rule Engine, Plugins, Data Processing |
-| **Phase 3** | Enterprise Integrations | Notifications, IDP, ECM, Webhooks |
-| **Phase 4** | Administrative | Backoffice, Config Server, Utils |
+| Phase | Focus | Key Modules | Status |
+|-------|-------|-------------|--------|
+| **Phase 1** | Core Distributed Patterns | Saga/TCC, Workflow, Event Sourcing | Complete (v26.05.01) |
+| **Phase 2** | Business Logic | Rule Engine, Plugins | Complete (v26.05.01) |
+| **Phase 3** | Enterprise Integrations | Notifications, IDP, ECM, Webhooks, Callbacks, Config Server | Complete (v26.05.01) |
+| **Phase 4** | Administrative | Backoffice, Utils, DDD starters | Planned |
+
+**v26.05.01** closes the parity gap with the Java Firefly Framework: the transactional engine has been rewritten from scratch (Saga + Workflow + TCC), nine new modules have been added (Event Sourcing, Callbacks, Webhooks, Notifications, IDP, ECM, Plugins, Rule Engine, Config Server), 12 third-party adapters were added, four new client protocols (SOAP/gRPC/GraphQL/WebSocket) were introduced, and the validation library now ships 16 domain validators. The framework is feature-complete for production microservice workloads.
 
 ---
 
 ## Versioning
 
-PyFly follows the same versioning system as Spring Boot, based on **Semantic Versioning** (`MAJOR.MINOR.PATCH`) with four release stages:
+PyFly uses **Calendar Versioning** ([CalVer](https://calver.org/)) — `YY.MM.PATCH` — to stay aligned with the rest of the Firefly Framework family (Java, .NET, Go).
 
-| Stage | Format | Description |
-|-------|--------|-------------|
-| **SNAPSHOT** | `0.2.0-SNAPSHOT` | Active development build. Unstable, changes daily. |
-| **Milestone** | `0.2.0-M11` | Pre-release feature preview. New functionality available for early feedback. |
-| **Release Candidate** | `0.2.0-RC1` | Feature-complete. Only bug fixes from this point. |
-| **GA** | `0.2.0` | General Availability. Production-ready, fully tested and stable. |
+| Component | Meaning |
+|-----------|---------|
+| `YY` | Two-digit year (e.g., `26` = 2026) |
+| `MM` | Two-digit month of the release |
+| `PATCH` | Patch number within the month (`01`, `02`, …) |
 
-**Release lifecycle:** `SNAPSHOT` → `M1` → `M2` → ... → `RC1` → `RC2` → ... → `GA`
+**Examples:** `26.05.01`, `26.05.02`, `26.06.01`.
 
-For Python packaging (PEP 440), milestone versions map to alpha pre-releases (`0.2.0a11`), release candidates map to `rc` (`0.2.0rc1`), and GA is the final release (`0.2.0`). See [docs/versioning.md](docs/versioning.md) for full details.
+The git tag and human-readable display use the leading-zero form (`v26.05.01`); the `pyproject.toml` `version` field uses PEP 440's normalized form (`26.5.1`) so Python tooling (uv, pip, hatchling) accepts it without warnings. Both reference the same release. See [docs/versioning.md](docs/versioning.md) for full details, including the migration from the previous SemVer-with-milestone scheme.
 
 ---
 
@@ -632,7 +1071,14 @@ For Python packaging (PEP 440), milestone versions map to alpha pre-releases (`0
 
 See **[CHANGELOG.md](CHANGELOG.md)** for detailed release notes.
 
-**Current:** 0.2.0-M11 (2026-03-01) — Thread-safety, correctness, and robustness audit: 18 fixes across DI container, web layer, resilience, security, and data modules.
+**Current:** `v26.05.01` (2026-05-07) — Full Java framework parity. Highlights:
+
+- **Transactional engine rewrite** — `pyfly.transactional` now ships Saga + Workflow + TCC patterns on a shared core (DAG topology, retries with jitter, backpressure, idempotency, DLQ, recovery, REST controllers, health indicators)
+- **Nine new modules** — `eventsourcing`, `callbacks`, `webhooks`, `notifications`, `idp`, `ecm`, `plugins`, `rule_engine`, `config_server`
+- **12 new third-party adapters** — Keycloak / AWS Cognito / Azure AD (IDP); AWS S3 / Azure Blob (ECM storage); DocuSign / Adobe Sign / Logalty (e-signature); SendGrid / Resend / Twilio / Firebase (notifications)
+- **Four new client protocols** — SOAP, gRPC, GraphQL, WebSocket (joining the existing HTTP / OpenAPI generators)
+- **16 domain validators** — including IBAN, BIC, ISO country/currency codes, phone numbers, dates, national IDs, sort codes, interest rates
+- **CalVer migration** — `YY.MM.PATCH` aligning with all Firefly Framework siblings (Java, .NET, Go)
 
 ---
 
@@ -643,7 +1089,8 @@ PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ec
 | Platform | Repository | Status |
 |----------|-----------|--------|
 | **Java / Spring Boot** | [`fireflyframework-*`](https://github.com/fireflyframework) (40+ modules) | Production |
-| **Python** | [`pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Milestone (M6) |
+| **.NET 9** | [`fireflyframework-dotnet`](https://github.com/fireflyframework/fireflyframework-dotnet) | Beta (CalVer 26.05+) |
+| **Python** | [`fireflyframework-pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Beta (CalVer 26.05+) |
 | **Frontend (Angular)** | [`flyfront`](https://github.com/fireflyframework/flyfront) | Active Development |
 | **GenAI** | [`fireflyframework-genai`](https://github.com/fireflyframework/fireflyframework-genai) | Active Development |
 | **CLI (Go)** | [`fireflyframework-cli`](https://github.com/fireflyframework/fireflyframework-cli) | Active Development |

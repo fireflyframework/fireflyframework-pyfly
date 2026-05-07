@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyfly"
-version = "0.3.0a1"
+# CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.1);
+# git tag, GitHub release and human-readable display use leading-zero form
+# (v26.05.01) to match the Java/.NET/Go siblings.
+version = "26.5.1"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -13,7 +16,7 @@ authors = [
     { name = "Firefly Software Foundation", email = "dev@getfirefly.io" },
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
