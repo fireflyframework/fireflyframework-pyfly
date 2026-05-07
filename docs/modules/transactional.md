@@ -1642,3 +1642,107 @@ streams (non-blocking but callback-heavy), while Python uses `asyncio`'s
 native `async/await` (sequential-looking code that runs concurrently). The
 API surface, configuration model, and extensibility points are otherwise
 identical.
+
+---
+
+## Workflow Pattern (new in v0.3.0)
+
+The **Workflow** pattern joins Saga and TCC as the third orchestration
+primitive. Where Saga is sequential-with-compensation and TCC is
+two-phase-commit-with-reservations, **Workflow is signal-driven and
+long-running** — perfect for human-in-the-loop processes (loan
+approvals, manual reviews, multi-day waits) and DAG fan-out / fan-in.
+
+It mirrors the Java engine's `org.fireflyframework.orchestration.workflow`
+package one-to-one.
+
+### Decorators
+
+```python
+from pyfly.transactional.workflow import (
+    workflow, workflow_step,
+    wait_for_signal, wait_for_timer, wait_for_all, wait_for_any,
+    child_workflow, compensation_step, workflow_query,
+    on_workflow_complete, on_workflow_error, on_step_complete,
+    scheduled_workflow,
+)
+```
+
+### Definition
+
+```python
+@workflow(id="loanApproval", trigger_event_type="LoanRequested",
+          trigger_mode=TriggerMode.SYNC, timeout_ms=86_400_000)
+class LoanApproval:
+    @workflow_step(id="enrich")
+    async def enrich(self, payload): ...
+
+    @workflow_step(id="autoCheck", depends_on=["enrich"])
+    async def auto_check(self): ...
+
+    @workflow_step(id="manualReview", depends_on=["autoCheck"], compensatable=True,
+                   compensation_method="releaseReview")
+    @wait_for_signal("approved", timeout_ms=86_400_000)
+    async def manual_review(self): ...
+
+    @compensation_step(for_step="manualReview")
+    async def releaseReview(self): ...
+
+    @workflow_step(id="cooldown", depends_on=["manualReview"])
+    @wait_for_timer(delay_ms=60_000)
+    async def cooldown(self): ...
+
+    @workflow_step(id="payout", depends_on=["cooldown"])
+    @child_workflow(workflow_id="payoutFlow", wait_for_completion=True)
+    async def payout(self): ...
+
+    @workflow_query()
+    async def status(self, ctx): return ctx.status
+
+    @on_workflow_complete
+    async def done(self, ctx): ...
+
+    @on_workflow_error
+    async def errored(self, ctx, err): ...
+```
+
+### Driving the engine
+
+```python
+result = await workflow_engine.start("loanApproval", input={"amount": 5000})
+# Suspended on `wait_for_signal`; somewhere later:
+await workflow_engine.deliver_signal(result.correlation_id, "approved",
+                                     payload={"by": "manager-A"})
+# Read-side query into the running workflow:
+status = await workflow_engine.query(result.correlation_id, "status")
+```
+
+### Programmatic builder
+
+```python
+from pyfly.transactional.workflow.builder import WorkflowBuilder
+
+definition = (
+    WorkflowBuilder("paymentFlow")
+    .step("validate", validate_handler)
+    .step("authorize", authorize_handler, depends_on=["validate"])
+    .wait_signal("approved", "human-approved", depends_on=["authorize"])
+    .step("settle", settle_handler, depends_on=["approved"])
+    .build()
+)
+workflow_registry._definitions[definition.id] = definition  # or expose register_definition
+```
+
+### Persistence + REST
+
+The workflow engine persists `ExecutionContext` after every layer through
+the configured `ExecutionPersistenceProvider` (in-memory, Redis,
+SQLAlchemy or cache). The REST controllers expose:
+
+```
+POST /api/orchestration/workflow/{workflow_id}/start
+POST /api/orchestration/workflow/{correlation_id}/signal/{signal}
+GET  /api/orchestration/workflow/{correlation_id}/query/{name}
+GET  /api/orchestration/executions
+GET  /api/orchestration/dlq
+```

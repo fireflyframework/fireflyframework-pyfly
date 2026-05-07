@@ -1,0 +1,193 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Workflow executor — orchestrates step execution layer-by-layer.
+
+Handles step pre-conditions (signal waits, timer waits, child workflows),
+delegates the actual method call to the shared :class:`StepInvoker`, and
+emits lifecycle events through :class:`OrchestrationEvents`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+from pyfly.transactional.core.argument import ArgumentResolver
+from pyfly.transactional.core.backpressure import (
+    AdaptiveBackpressureStrategy,
+    BackpressureStrategy,
+)
+from pyfly.transactional.core.context import ExecutionContext
+from pyfly.transactional.core.events import LoggerOrchestrationEvents, OrchestrationEvents
+from pyfly.transactional.core.exceptions import StepFailedError
+from pyfly.transactional.core.step_invoker import StepInvoker
+from pyfly.transactional.core.topology import TopologyBuilder
+from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
+from pyfly.transactional.workflow.definition import (
+    WorkflowDefinition,
+    WorkflowStepDefinition,
+)
+from pyfly.transactional.workflow.signal_service import SignalService
+from pyfly.transactional.workflow.timer_service import TimerService
+
+
+class WorkflowExecutor:
+    """Layer-by-layer execution engine for a single workflow run."""
+
+    def __init__(
+        self,
+        *,
+        step_invoker: StepInvoker | None = None,
+        signal_service: SignalService | None = None,
+        timer_service: TimerService | None = None,
+        child_service: ChildWorkflowService | None = None,
+        events: OrchestrationEvents | None = None,
+        backpressure: BackpressureStrategy | None = None,
+    ) -> None:
+        self._invoker = step_invoker or StepInvoker(ArgumentResolver())
+        self._signals = signal_service or SignalService()
+        self._timers = timer_service or TimerService()
+        self._children = child_service or ChildWorkflowService()
+        self._events = events or LoggerOrchestrationEvents()
+        self._backpressure = backpressure or AdaptiveBackpressureStrategy()
+
+    async def execute(self, definition: WorkflowDefinition, ctx: ExecutionContext) -> None:
+        """Run all steps respecting their dependency graph."""
+        layers = TopologyBuilder.build_layers(definition.graph())
+        for layer in layers:
+            steps = [definition.steps[sid] for sid in layer]
+            await self._execute_layer(definition, ctx, steps)
+
+    async def _execute_layer(
+        self,
+        definition: WorkflowDefinition,
+        ctx: ExecutionContext,
+        steps: list[WorkflowStepDefinition],
+    ) -> None:
+        async def run_one(step: WorkflowStepDefinition) -> None:
+            await self._run_step(definition, ctx, step)
+
+        await self._backpressure.apply(steps, run_one)
+
+    async def _run_step(
+        self,
+        definition: WorkflowDefinition,
+        ctx: ExecutionContext,
+        step: WorkflowStepDefinition,
+    ) -> None:
+        await self._events.on_step_started(name=definition.id, correlation_id=ctx.correlation_id, step_id=step.id)
+
+        # Handle pre-step waits and child invocations.
+        if step.wait_for_timer_ms > 0:
+            await self._events.on_workflow_suspended(
+                name=definition.id, correlation_id=ctx.correlation_id, reason=f"timer:{step.id}"
+            )
+            await self._timers.sleep_ms(step.wait_for_timer_ms)
+            await self._events.on_timer_fired(
+                name=definition.id, correlation_id=ctx.correlation_id, timer_id=step.id
+            )
+            await self._events.on_workflow_resumed(name=definition.id, correlation_id=ctx.correlation_id)
+
+        if step.wait_for_signal:
+            await self._events.on_workflow_suspended(
+                name=definition.id, correlation_id=ctx.correlation_id, reason=f"signal:{step.wait_for_signal}"
+            )
+            payload = await ctx.wait_for_signal(step.wait_for_signal, step.wait_for_signal_timeout_ms)
+            await ctx.set_variable(f"signal:{step.wait_for_signal}", payload)
+            await self._events.on_signal_delivered(
+                name=definition.id, correlation_id=ctx.correlation_id, signal=step.wait_for_signal
+            )
+            await self._events.on_workflow_resumed(name=definition.id, correlation_id=ctx.correlation_id)
+
+        if step.wait_for_all:
+            for sig in step.wait_for_all:
+                await ctx.wait_for_signal(sig, step.wait_for_signal_timeout_ms)
+
+        if step.wait_for_any:
+            tasks = [
+                asyncio.create_task(ctx.wait_for_signal(sig, step.wait_for_signal_timeout_ms))
+                for sig in step.wait_for_any
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        if step.child_workflow_id:
+            await self._events.on_child_workflow_started(
+                parent=definition.id,
+                correlation_id=ctx.correlation_id,
+                child_workflow=step.child_workflow_id,
+                child_correlation="<pending>",
+            )
+            child_result: Any
+            try:
+                child_result = await self._children.start(
+                    step.child_workflow_id,
+                    input=ctx.input,
+                    wait_for_completion=step.child_wait_for_completion,
+                    timeout_ms=step.child_timeout_ms,
+                )
+            except Exception:
+                await self._events.on_child_workflow_completed(
+                    parent=definition.id,
+                    correlation_id=ctx.correlation_id,
+                    child_workflow=step.child_workflow_id,
+                    success=False,
+                )
+                raise
+            await self._events.on_child_workflow_completed(
+                parent=definition.id,
+                correlation_id=ctx.correlation_id,
+                child_workflow=step.child_workflow_id,
+                success=True,
+            )
+            await ctx.record_step_success(step.id, child_result, latency_ms=0.0)
+            return
+
+        # Regular method invocation.
+        started = time.perf_counter()
+        try:
+            result = await self._invoker.invoke(
+                bean=definition.bean,
+                method=step.method,
+                step_id=step.id,
+                ctx=ctx,
+                retry_policy=step.to_retry_policy(),
+            )
+            elapsed = (time.perf_counter() - started) * 1000.0
+            await self._events.on_step_success(
+                name=definition.id,
+                correlation_id=ctx.correlation_id,
+                step_id=step.id,
+                attempts=ctx.get_step(step.id).attempts if ctx.get_step(step.id) else 1,
+                latency_ms=elapsed,
+            )
+            on_step_cb = definition.on_step_callbacks.get(step.id)
+            if on_step_cb is not None:
+                cb_result = on_step_cb(definition.bean, ctx, result)
+                if hasattr(cb_result, "__await__"):
+                    await cb_result
+        except StepFailedError as exc:
+            elapsed = (time.perf_counter() - started) * 1000.0
+            await self._events.on_step_failed(
+                name=definition.id,
+                correlation_id=ctx.correlation_id,
+                step_id=step.id,
+                error=exc,
+                attempts=exc.attempts,
+                latency_ms=elapsed,
+            )
+            raise

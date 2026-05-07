@@ -487,7 +487,7 @@ See the full [CLI Reference](docs/cli.md) for details.
 
 ## Modules
 
-PyFly currently implements **27 modules** organized into four layers:
+PyFly currently implements **36 modules** organized into five layers:
 
 ### Foundation Layer
 
@@ -524,7 +524,22 @@ PyFly currently implements **27 modules** organized into four layers:
 | **Scheduling** | Cron jobs, fixed-rate tasks | Spring Scheduling |
 | **Resilience** | Rate limiter, bulkhead, timeout, fallback | Resilience4j (in `fireflyframework-client`) |
 | **Shell** | CLI commands, interactive REPL, runners | Spring Shell |
-| **Transactional** | Distributed Saga and TCC transaction orchestration with compensation and recovery | `fireflyframework-transactional-engine` |
+| **Transactional** | Saga + Workflow + TCC orchestration: signal-driven, DAG, compensation, multi-backend persistence, DLQ, recovery | `fireflyframework-orchestration` |
+| **Event Sourcing** | AggregateRoot, EventStore, snapshots, transactional outbox, projections, upcasting | `fireflyframework-eventsourcing` |
+| **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | `fireflyframework-plugins` |
+| **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | `fireflyframework-rule-engine` |
+| **Config Server** | Spring Cloud Config Server analogue + client | `fireflyframework-config-server` |
+
+### Integration Layer
+
+| Module | Description | Firefly Java Equivalent |
+|--------|-------------|------------------------|
+| **IDP** | Identity-provider port + Keycloak / AWS Cognito / Azure AD / internal-DB adapters | `fireflyframework-idp` + adapters |
+| **ECM** | Document storage / metadata / folders / e-signature ports + AWS S3 / Azure Blob / DocuSign / Adobe Sign / Logalty / local-fs adapters | `fireflyframework-ecm` + adapters |
+| **Notifications** | Email / SMS / push ports + SendGrid / Twilio / Firebase / Resend / SMTP / dummy adapters | `fireflyframework-notifications` + adapters |
+| **Callbacks** | Outbound webhook dispatcher with HMAC signing, retries, execution tracking | `fireflyframework-callbacks` |
+| **Webhooks** | Inbound webhook ingestion with signature validation, idempotency, listener pattern | `fireflyframework-webhooks` |
+| **Starters** | Meta-packages (`enable_core_stack` / `application` / `data` / `domain`) | `fireflyframework-starter-*` |
 
 ### Cross-Cutting Layer
 
@@ -562,7 +577,15 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [WebFilters](docs/modules/web-filters.md) — Request/response filter chain
 - [Actuator](docs/modules/actuator.md) — Health checks, extensible endpoints
 - [Custom Actuator Endpoints](docs/modules/custom-actuator-endpoints.md) — Build your own actuator endpoints
-- [Transactional Engine](docs/modules/transactional.md) — SAGA and TCC distributed transaction patterns
+- [Transactional Engine](docs/modules/transactional.md) — Saga, Workflow, and TCC distributed transaction patterns
+- [Event Sourcing](docs/modules/eventsourcing.md) — Aggregates, event store, snapshots, outbox, projections
+- [Plugins](docs/modules/plugins.md) — Plugin SPI, extension points, lifecycle
+- [Rule Engine](docs/modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
+- [Callbacks (outbound)](docs/modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
+- [Webhooks (inbound)](docs/modules/webhooks.md) — Receive, verify, dedupe, dispatch
+- [Notifications](docs/modules/notifications.md) — Email / SMS / push abstractions
+- [IDP (Identity Provider)](docs/modules/idp.md) — Keycloak / AWS Cognito / Azure AD / internal-DB adapters
+- [ECM (Content Management)](docs/modules/ecm.md) — Documents, folders, e-signature workflows
 - [Admin Dashboard](docs/modules/admin.md) — Embedded management dashboard, server mode, custom views
 
 ### Adapter Reference

@@ -103,7 +103,24 @@ Coordinate multi-step operations across services with automatic compensation and
 
 | Guide | What You'll Learn |
 |-------|-------------------|
-| [Transactional Engine](transactional.md) | `@saga`, `@saga_step`, `@tcc`, `@tcc_participant`, `@try_method`, `@confirm_method`, `@cancel_method`, parameter injection (`Input`, `FromStep`, `Header`, `Variable`), 5 compensation policies, DAG-based execution, saga composition, backpressure strategies, persistence and recovery |
+| [Transactional Engine](transactional.md) | Saga (`@saga`, `@saga_step`), Workflow (`@workflow`, `@workflow_step`, `@wait_for_signal`, `@wait_for_timer`, `@child_workflow`), TCC (`@tcc`, `@tcc_participant`, `@try_method`, `@confirm_method`, `@cancel_method`), parameter injection (`Input`, `FromStep`, `Header`, `Variable`), 5 compensation policies, DAG execution, persistence (in-memory / Redis / SQLAlchemy / cache), recovery, dead-letter queue, scheduling, REST endpoints |
+| [Event Sourcing](eventsourcing.md) | `AggregateRoot`, `EventStore` (in-memory + SQLAlchemy), `SnapshotStore`, `TransactionalOutbox`, `Projection` / `ProjectionRunner`, `EventUpcaster`, `EventSourcedRepository` |
+
+---
+
+## Integration
+
+Bridge to the rest of your stack — outbound webhooks, inbound webhooks, identity, content management, notifications, plugins and rules.
+
+| Guide | What You'll Learn |
+|-------|-------------------|
+| [Callbacks (outbound webhooks)](callbacks.md) | Subscriptions, HMAC signing, retry, execution tracking |
+| [Webhooks (inbound)](webhooks.md) | Signature validation, idempotency, listener pattern |
+| [Notifications](notifications.md) | Email / SMS / push ports, dummy + SMTP adapters |
+| [IDP (Identity Provider)](idp.md) | `IdpAdapter` port + internal-DB reference adapter, login, MFA, roles |
+| [ECM (Content Management)](ecm.md) | Document storage, metadata, folders, e-signature ports + adapters |
+| [Plugins](plugins.md) | `@plugin`, `@extension`, `@extension_point`, `PluginManager`, dependency resolution |
+| [Rule Engine](rule-engine.md) | YAML DSL, AST, batch evaluation, repository |
 
 ---
 
@@ -179,7 +196,15 @@ pyfly/
 ├── observability/   Metrics, tracing, health checks
 ├── actuator/        Monitoring endpoints, extensible registry
 ├── admin/           Embedded management dashboard, SSE, server mode
-├── transactional/   SAGA and TCC distributed transactions
+├── transactional/   Saga, Workflow, TCC; persistence adapters; DLQ; scheduler
+├── eventsourcing/   Aggregates, event store, snapshots, outbox, projections
+├── callbacks/       Outbound webhooks (event → external HTTP)
+├── webhooks/        Inbound webhooks with signature validation + idempotency
+├── notifications/   Email / SMS / push provider abstraction
+├── idp/             Identity-provider adapter (auth, users, roles, MFA)
+├── ecm/             Documents, folders, e-signature ports + adapters
+├── plugins/         Plugin system with extension points + lifecycle
+├── rule_engine/     YAML-based business rules (AST + evaluator)
 ├── shell/           CLI commands, runners, Click adapter
 ├── testing/         Test fixtures and assertions
 └── cli/             Project scaffolding and tooling

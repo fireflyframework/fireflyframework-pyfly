@@ -6,6 +6,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v0.3.0-M1 (2026-05-07)
+
+### Java framework parity push — major release
+
+This milestone closes the parity gap with the Java Firefly Framework
+(``fireflyframework-orchestration`` and the surrounding modules). It rewrites
+the transactional engine from scratch and adds nine missing modules.
+
+### Added — additional adapters & meta-packages
+- **IDP adapters**: ``KeycloakIdpAdapter``, ``AwsCognitoIdpAdapter``,
+  ``AzureAdIdpAdapter`` (alongside the existing ``InternalDbIdpAdapter``).
+- **ECM storage adapters**: ``AwsS3StorageAdapter``, ``AzureBlobStorageAdapter``.
+- **ECM e-signature adapters**: ``DocuSignESignatureAdapter``,
+  ``AdobeSignESignatureAdapter``, ``LogaltyESignatureAdapter``.
+- **Notification provider adapters**: ``SendGridEmailProvider``,
+  ``TwilioSmsProvider``, ``FirebasePushProvider``, ``ResendEmailProvider``.
+- **Client protocols**: ``SoapClient``/``SoapClientBuilder``,
+  ``GrpcClientBuilder``, ``GraphQLClient``/``GraphQLClientBuilder``,
+  ``WebSocketClient``/``WebSocketClientBuilder``.
+- **Config server**: ``pyfly.config_server`` with
+  ``ConfigServer``/``ConfigClient`` and filesystem + in-memory backends.
+- **Starter meta-packages**: ``pyfly.starters`` exposing
+  ``enable_core_stack``, ``enable_application_stack``, ``enable_data_stack``,
+  ``enable_domain_stack`` mirroring the Java starter modules.
+- **Extra domain validators**: ``is_valid_date``, ``is_valid_datetime``,
+  ``is_valid_national_id``, ``is_valid_sort_code``, ``is_valid_interest_rate``.
+
+### Added — transactional engine, complete rewrite
+- **`pyfly.transactional.core`** — new shared foundation: `ExecutionContext`,
+  `ExecutionStatus`, `ExecutionPattern`, `RetryPolicy`, `TopologyBuilder`,
+  `ArgumentResolver`, `StepInvoker`, `BackpressureStrategy` (adaptive,
+  batched, circuit-breaker), `OrchestrationEvents` /
+  `CompositeOrchestrationEvents` / `LoggerOrchestrationEvents`,
+  `OrchestrationMetrics`, `OrchestrationTracer`, `DeadLetterService`,
+  `RecoveryService`, `OrchestrationScheduler`, `OrchestrationValidator`,
+  `EventGateway`, `ExecutionReport`, `InMemoryPersistenceProvider`.
+- **`pyfly.transactional.workflow`** — entirely new pattern: `@workflow`,
+  `@workflow_step`, `@wait_for_signal`, `@wait_for_timer`,
+  `@wait_for_all`/`@wait_for_any`, `@child_workflow`, `@compensation_step`,
+  `@workflow_query`, `@on_workflow_complete`/`@on_workflow_error`,
+  `@scheduled_workflow`, plus `WorkflowEngine`, `WorkflowExecutor`,
+  `WorkflowRegistry`, `SignalService`, `TimerService`,
+  `ChildWorkflowService`, `ContinueAsNewService`, `WorkflowQueryService`,
+  `WorkflowBuilder`.
+- **Persistence adapters** — `pyfly.transactional.persistence.RedisPersistenceProvider`,
+  `CachePersistenceProvider`, `SqlAlchemyPersistenceProvider`.
+- **REST controllers** — `OrchestrationController`, `DeadLetterController`,
+  `WorkflowController` exposing list/start/signal/retry endpoints.
+- **HealthIndicator** + composite `OrchestrationHealthIndicator`.
+- `OrchestrationBuilder` root + `SagaBuilder` + `TccBuilder` for programmatic
+  pattern definition.
+- `@scheduled_saga`, `@scheduled_tcc`, `@step_event`, `@tcc_event`
+  annotations.
+
+### Added — new modules
+- **`pyfly.eventsourcing`** — `AggregateRoot`, `EventStore` (in-memory and
+  SQLAlchemy), `SnapshotStore`, `TransactionalOutbox`, `Projection` /
+  `ProjectionRunner`, `EventUpcaster`, `EventSourcedRepository`.
+- **`pyfly.callbacks`** — outbound callback dispatcher with HMAC signing,
+  retries, configurable subscriptions and execution tracking.
+- **`pyfly.webhooks`** — inbound webhook ingestion with signature validation,
+  idempotency dedup, and pluggable listeners.
+- **`pyfly.notifications`** — email / SMS / push abstractions with port
+  pattern and dummy + SMTP adapters.
+- **`pyfly.idp`** — identity provider port + internal-DB adapter with bcrypt
+  password hashing, user / session / role management.
+- **`pyfly.ecm`** — document storage, metadata, folders, e-signature ports
+  with local-filesystem and no-op adapters.
+- **`pyfly.plugins`** — pluggable module system: `@plugin`, `@extension`,
+  `@extension_point`, `PluginManager`, `PluginDependencyResolver`,
+  `ExtensionRegistry`.
+- **`pyfly.rule_engine`** — YAML-based business rules with logical
+  composition, batch evaluation and an in-memory rule-set repository.
+
+### Added — EDA enhancements
+- `EventCircuitBreaker`, `InMemoryEdaDeadLetterStore`,
+  `JsonEventSerializer` / `AvroEventSerializer` / `ProtobufEventSerializer`,
+  `HeaderEventFilter` / `PredicateEventFilter`.
+
+### Added — domain validators (`pyfly.validation.domain`)
+- `is_valid_iban` / `valid_iban`, `is_valid_bic` / `valid_bic`,
+  `is_valid_phone_number`, `is_valid_credit_card`, `is_valid_cvv`,
+  `is_valid_currency_code`, `is_valid_amount`, `is_valid_account_number`,
+  `is_valid_tax_id`, `is_valid_pin`, `is_strong_password`.
+
+### Tests
+- 2700+ tests passing, ~135 new tests for the new modules.
+
+---
+
 ## v0.2.0-M11 (2026-03-01)
 
 ### Fixed

@@ -18,15 +18,45 @@ Import concrete adapter types from the adapter package::
     from pyfly.eda.adapters.memory import InMemoryEventBus
 """
 
+from pyfly.eda.circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    EventCircuitBreaker,
+)
 from pyfly.eda.decorators import event_listener, event_publisher, publish_result
+from pyfly.eda.dlq import (
+    EdaDeadLetterEntry,
+    EdaDeadLetterStore,
+    InMemoryEdaDeadLetterStore,
+)
+from pyfly.eda.filter import EventFilter, HeaderEventFilter, PredicateEventFilter
 from pyfly.eda.ports.outbound import EventHandler, EventPublisher
+from pyfly.eda.serializers import (
+    AvroEventSerializer,
+    EventSerializer,
+    JsonEventSerializer,
+    ProtobufEventSerializer,
+)
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
 
 __all__ = [
+    "AvroEventSerializer",
+    "CircuitBreakerConfig",
+    "CircuitOpenError",
+    "EdaDeadLetterEntry",
+    "EdaDeadLetterStore",
     "ErrorStrategy",
+    "EventCircuitBreaker",
     "EventEnvelope",
+    "EventFilter",
     "EventHandler",
     "EventPublisher",
+    "EventSerializer",
+    "HeaderEventFilter",
+    "InMemoryEdaDeadLetterStore",
+    "JsonEventSerializer",
+    "PredicateEventFilter",
+    "ProtobufEventSerializer",
     "event_listener",
     "event_publisher",
     "publish_result",
