@@ -1687,11 +1687,13 @@ class TestSbomCommand:
 
 class TestInfoCommand:
     def test_info_shows_version(self):
+        from pyfly import __version__
+
         runner = CliRunner()
         result = runner.invoke(cli, ["info"])
         assert result.exit_code == 0
         assert "PyFly Framework" in result.output
-        assert "0.2.0" in result.output
+        assert __version__ in result.output
 
     def test_info_shows_python_version(self):
         runner = CliRunner()
