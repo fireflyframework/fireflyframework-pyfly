@@ -68,7 +68,7 @@ class KeycloakIdpAdapter:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "KeycloakIdpAdapter requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -243,9 +243,7 @@ class KeycloakIdpAdapter:
         import secrets
 
         new_password = secrets.token_urlsafe(16)
-        await self.change_password(
-            PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password)
-        )
+        await self.change_password(PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password))
         return new_password
 
     async def assign_role(self, user_id: str, role: str) -> bool:

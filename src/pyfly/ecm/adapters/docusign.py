@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -42,7 +41,7 @@ class DocuSignESignatureAdapter:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "DocuSignESignatureAdapter requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -122,7 +121,7 @@ class DocuSignESignatureAdapter:
                 json={"status": "voided", "voidedReason": "cancelled by application"},
                 headers=self._headers,
             )
-            return resp.status_code == 200
+            return bool(resp.status_code == 200)
 
 
 def _map_status(value: str) -> ESignatureStatus:

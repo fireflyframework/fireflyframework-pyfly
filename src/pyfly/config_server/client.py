@@ -32,13 +32,15 @@ class ConfigClient:
 
     async def fetch(self) -> dict[str, Any]:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "ConfigClient requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
 
         path = f"{self._url}/{self._application}/{self._profile}/{self._label}"
-        auth = (self._username, self._password) if self._username else None
+        auth: tuple[str, str] | None = (
+            (self._username, self._password) if self._username is not None and self._password is not None else None
+        )
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(path, auth=auth)
             if resp.status_code != 200:

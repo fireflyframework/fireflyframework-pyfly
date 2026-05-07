@@ -4,13 +4,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from datetime import UTC, datetime
 
 from pyfly.ecm.models import (
     Document,
-    DocumentVersion,
     ESignatureEnvelope,
     Folder,
     SignatureRequest,

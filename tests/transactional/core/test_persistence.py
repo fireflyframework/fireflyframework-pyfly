@@ -73,9 +73,7 @@ class TestInMemoryProvider:
         assert len(stale) == 1
 
     @pytest.mark.asyncio
-    async def test_cleanup_removes_terminal_old_records(
-        self, provider: InMemoryPersistenceProvider
-    ) -> None:
+    async def test_cleanup_removes_terminal_old_records(self, provider: InMemoryPersistenceProvider) -> None:
         s = _state(status=ExecutionStatus.COMPLETED)
         old = datetime.now(UTC) - timedelta(days=10)
         s.updated_at = old

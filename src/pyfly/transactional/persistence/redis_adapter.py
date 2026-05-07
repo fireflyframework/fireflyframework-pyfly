@@ -23,7 +23,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pyfly.transactional.core.persistence import (
-    ExecutionPersistenceProvider,
     ExecutionState,
     StateSerializer,
 )
@@ -99,9 +98,12 @@ class RedisPersistenceProvider:
         all_states = await self.find_all()
         count = 0
         for s in all_states:
-            if s.status.is_terminal and (s.completed_at or s.updated_at) < cutoff:
-                if await self.delete(s.correlation_id):
-                    count += 1
+            if (
+                s.status.is_terminal
+                and (s.completed_at or s.updated_at) < cutoff
+                and await self.delete(s.correlation_id)
+            ):
+                count += 1
         return count
 
     async def is_healthy(self) -> bool:
@@ -112,4 +114,3 @@ class RedisPersistenceProvider:
 
 
 # Make sure the adapter satisfies the structural Protocol.
-_: ExecutionPersistenceProvider = RedisPersistenceProvider(redis_client=None)  # type: ignore[arg-type]

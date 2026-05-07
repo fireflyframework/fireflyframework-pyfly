@@ -33,13 +33,11 @@ class AwsS3StorageAdapter:
         if self._client is not None:
             return self._client
         try:
-            import boto3  # type: ignore[import-not-found]
+            import boto3  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AwsS3StorageAdapter requires boto3 — `pip install boto3`"
             raise ImportError(msg) from exc
-        self._client = (
-            boto3.client("s3", region_name=self._region) if self._region else boto3.client("s3")
-        )
+        self._client = boto3.client("s3", region_name=self._region) if self._region else boto3.client("s3")
         return self._client
 
     async def _run(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -73,9 +71,7 @@ class AwsS3StorageAdapter:
             raise FileNotFoundError(msg)
         target_version = version or document.versions[-1].version
         client = self._ensure_client()
-        resp = await self._run(
-            client.get_object, Bucket=self._bucket, Key=self._key(document.id, target_version)
-        )
+        resp = await self._run(client.get_object, Bucket=self._bucket, Key=self._key(document.id, target_version))
         body = resp["Body"].read() if hasattr(resp["Body"], "read") else resp["Body"]
         return body if isinstance(body, bytes) else bytes(body)
 

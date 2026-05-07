@@ -22,13 +22,15 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+_otel_trace: Any = None
+_HAS_OTEL = False
 try:
-    from opentelemetry import trace as _otel_trace  # type: ignore[import-not-found]
+    from opentelemetry import trace as _otel_trace_imported  # type: ignore[import-not-found, unused-ignore]
 
+    _otel_trace = _otel_trace_imported
     _HAS_OTEL = True
 except Exception:  # noqa: BLE001
-    _otel_trace = None
-    _HAS_OTEL = False
+    pass
 
 
 class OrchestrationTracer:
@@ -40,9 +42,7 @@ class OrchestrationTracer:
 
     def __init__(self, service_name: str = "pyfly.orchestration") -> None:
         self._service_name = service_name
-        self._tracer: Any = (
-            _otel_trace.get_tracer(service_name) if _HAS_OTEL else None
-        )
+        self._tracer: Any = _otel_trace.get_tracer(service_name) if _HAS_OTEL else None
 
     @contextlib.contextmanager
     def span(self, name: str, **attributes: Any) -> Any:
@@ -52,10 +52,8 @@ class OrchestrationTracer:
             return
         with self._tracer.start_as_current_span(name) as span:
             for k, v in attributes.items():
-                try:
+                with contextlib.suppress(Exception):
                     span.set_attribute(k, v)
-                except Exception:  # noqa: BLE001
-                    pass
             yield span
 
     def is_enabled(self) -> bool:

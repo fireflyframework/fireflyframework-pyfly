@@ -8,8 +8,6 @@ client covers the 80% case (no schema, just envelope construction)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
-
 
 _ENVELOPE = (
     '<?xml version="1.0" encoding="UTF-8"?>'
@@ -43,7 +41,7 @@ class SoapClient:
 
     async def call(self, body_xml: str) -> str:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "SoapClient requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc

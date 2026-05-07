@@ -76,9 +76,7 @@ class FilesystemConfigBackend:
             properties = await asyncio.get_event_loop().run_in_executor(
                 None, _parse_text, text, candidate.suffix.lstrip(".")
             )
-            return ConfigSource(
-                application=application, profile=profile, label=label, properties=properties
-            )
+            return ConfigSource(application=application, profile=profile, label=label, properties=properties)
         return None
 
     async def save(self, source: ConfigSource) -> None:
@@ -87,9 +85,7 @@ class FilesystemConfigBackend:
         target = self._root / source.label if source.label else self._root
         target.mkdir(parents=True, exist_ok=True)
         path = target / f"{source.application}-{source.profile}.json"
-        await asyncio.get_event_loop().run_in_executor(
-            None, path.write_text, json.dumps(source.properties, indent=2)
-        )
+        await asyncio.get_event_loop().run_in_executor(None, path.write_text, json.dumps(source.properties, indent=2))
 
     async def list(self) -> list[ConfigSource]:
         results: list[ConfigSource] = []
@@ -114,7 +110,9 @@ def _parse_text(text: str, fmt: str) -> dict[str, Any]:
     if fmt == "json":
         import json
 
-        return json.loads(text)
-    import yaml
+        result: dict[str, Any] = json.loads(text)
+        return result
+    import yaml  # type: ignore[import-untyped]
 
-    return yaml.safe_load(text) or {}
+    parsed: dict[str, Any] | None = yaml.safe_load(text)
+    return parsed or {}

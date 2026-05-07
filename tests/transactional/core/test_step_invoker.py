@@ -49,9 +49,7 @@ class TestStepInvoker:
         def step(payload: Annotated[dict, Input()]) -> int:
             return payload["x"] + 1
 
-        result = await invoker.invoke(
-            bean=None, method=step, step_id="s", ctx=_ctx(), retry_policy=RetryPolicy()
-        )
+        result = await invoker.invoke(bean=None, method=step, step_id="s", ctx=_ctx(), retry_policy=RetryPolicy())
         assert result == 2
 
     @pytest.mark.asyncio

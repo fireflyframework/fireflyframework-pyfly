@@ -52,9 +52,7 @@ class SmtpEmailProvider:
                 if self._username and self._password:
                     server.login(self._username, self._password)
                 server.send_message(msg)
-            return NotificationResult(
-                id=message.id, provider=self.name, status=EmailStatus.SENT
-            )
+            return NotificationResult(id=message.id, provider=self.name, status=EmailStatus.SENT)
         except Exception as exc:  # noqa: BLE001
             return NotificationResult(
                 id=message.id,

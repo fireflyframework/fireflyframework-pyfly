@@ -17,9 +17,7 @@ class ConfigServer:
     def __init__(self, backend: ConfigBackend) -> None:
         self._backend = backend
 
-    async def fetch(
-        self, application: str, profile: str = "default", label: str = "main"
-    ) -> dict[str, Any] | None:
+    async def fetch(self, application: str, profile: str = "default", label: str = "main") -> dict[str, Any] | None:
         source = await self._backend.fetch(application, profile, label)
         if source is None:
             return None
@@ -42,14 +40,11 @@ class ConfigServer:
         properties: dict[str, Any],
         label: str = "main",
     ) -> dict[str, Any]:
-        source = ConfigSource(
-            application=application, profile=profile, label=label, properties=properties
-        )
+        source = ConfigSource(application=application, profile=profile, label=label, properties=properties)
         await self._backend.save(source)
         return {"saved": True}
 
     async def list(self) -> list[dict[str, Any]]:
         return [
-            {"application": s.application, "profile": s.profile, "label": s.label}
-            for s in await self._backend.list()
+            {"application": s.application, "profile": s.profile, "label": s.label} for s in await self._backend.list()
         ]

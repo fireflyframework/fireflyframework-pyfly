@@ -37,7 +37,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pyfly.transactional.core.persistence import (
-    ExecutionPersistenceProvider,
     ExecutionState,
     StateSerializer,
 )
@@ -64,13 +63,13 @@ class SqlAlchemyPersistenceProvider:
         self._table = table_name
 
     async def initialize(self) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         async with self._engine.begin() as conn:
             await conn.execute(text(self.DDL))
 
     async def save(self, state: ExecutionState) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         raw = StateSerializer.serialize(state)
         sql = text(
@@ -101,7 +100,7 @@ class SqlAlchemyPersistenceProvider:
             )
 
     async def find(self, correlation_id: str) -> ExecutionState | None:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         sql = text(f"SELECT payload FROM {self._table} WHERE correlation_id = :cid")
         async with self._engine.connect() as conn:
@@ -111,7 +110,7 @@ class SqlAlchemyPersistenceProvider:
         return StateSerializer.deserialize(row[0])
 
     async def find_all(self, *, status: Any = None, pattern: Any = None) -> list[ExecutionState]:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         clauses: list[str] = []
         params: dict[str, Any] = {}
@@ -128,7 +127,7 @@ class SqlAlchemyPersistenceProvider:
         return [StateSerializer.deserialize(r[0]) for r in rows]
 
     async def find_stale(self, before: datetime) -> list[ExecutionState]:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         sql = text(
             f"""SELECT payload FROM {self._table}
@@ -140,15 +139,15 @@ class SqlAlchemyPersistenceProvider:
         return [StateSerializer.deserialize(r[0]) for r in rows]
 
     async def delete(self, correlation_id: str) -> bool:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         sql = text(f"DELETE FROM {self._table} WHERE correlation_id = :cid")
         async with self._engine.begin() as conn:
             result = await conn.execute(sql, {"cid": correlation_id})
-        return result.rowcount > 0
+        return bool(result.rowcount > 0)
 
     async def cleanup(self, older_than: timedelta) -> int:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         cutoff = datetime.now(UTC) - older_than
         sql = text(
@@ -158,17 +157,14 @@ class SqlAlchemyPersistenceProvider:
         )
         async with self._engine.begin() as conn:
             result = await conn.execute(sql, {"cutoff": cutoff})
-        return result.rowcount
+        return int(result.rowcount)
 
     async def is_healthy(self) -> bool:
         try:
-            from sqlalchemy import text  # type: ignore[import-not-found]
+            from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
             async with self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             return True
         except Exception:  # noqa: BLE001
             return False
-
-
-_: ExecutionPersistenceProvider = SqlAlchemyPersistenceProvider(engine=None)  # type: ignore[arg-type]

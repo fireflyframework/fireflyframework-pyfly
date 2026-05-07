@@ -26,9 +26,7 @@ class DummyEmailProvider:
     async def send(self, message: EmailMessage) -> NotificationResult:
         self.sent.append(message)
         _logger.info("[dummy email] to=%s subject=%s", message.to, message.subject)
-        return NotificationResult(
-            id=message.id, provider=self.name, status=EmailStatus.SENT, provider_id=message.id
-        )
+        return NotificationResult(id=message.id, provider=self.name, status=EmailStatus.SENT, provider_id=message.id)
 
 
 class DummySmsProvider:

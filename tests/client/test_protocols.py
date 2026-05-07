@@ -55,10 +55,7 @@ def test_grpc_builder_requires_target() -> None:
 
 def test_websocket_builder_assembles_client() -> None:
     client = (
-        WebSocketClientBuilder()
-        .with_url("wss://example.com/ws")
-        .with_header("Origin", "https://example.com")
-        .build()
+        WebSocketClientBuilder().with_url("wss://example.com/ws").with_header("Origin", "https://example.com").build()
     )
     assert isinstance(client, WebSocketClient)
     assert client._url == "wss://example.com/ws"

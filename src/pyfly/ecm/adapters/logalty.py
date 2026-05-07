@@ -30,7 +30,7 @@ class LogaltyESignatureAdapter:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "LogaltyESignatureAdapter requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -50,14 +50,9 @@ class LogaltyESignatureAdapter:
                 "documentId": request.document_id,
                 "subject": request.subject,
                 "message": request.message,
-                "signers": [
-                    {"name": r.name, "email": r.email, "role": r.role}
-                    for r in request.recipients
-                ],
+                "signers": [{"name": r.name, "email": r.email, "role": r.role} for r in request.recipients],
             }
-            resp = await client.post(
-                f"{self._api_base}/envelopes", json=payload, headers=self._headers
-            )
+            resp = await client.post(f"{self._api_base}/envelopes", json=payload, headers=self._headers)
             resp.raise_for_status()
             data = resp.json()
             return ESignatureEnvelope(

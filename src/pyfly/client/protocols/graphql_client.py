@@ -30,7 +30,7 @@ class GraphQLClient:
         operation_name: str | None = None,
     ) -> dict[str, Any]:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "GraphQLClient requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -46,7 +46,8 @@ class GraphQLClient:
             data = resp.json()
             if "errors" in data:
                 raise RuntimeError(f"GraphQL errors: {data['errors']}")
-            return data.get("data", {})
+            payload: dict[str, Any] = data.get("data") or {}
+            return payload
 
 
 @dataclass

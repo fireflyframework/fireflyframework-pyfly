@@ -135,16 +135,14 @@ class StepInvoker:
     def _compute_backoff(policy: RetryPolicy, attempt: int) -> float:
         if policy.backoff_ms <= 0:
             return 0.0
-        base_ms = policy.backoff_ms * (2 ** (attempt - 1))
+        base_ms: float = float(policy.backoff_ms * (2 ** (attempt - 1)))
         if policy.jitter and policy.jitter_factor > 0:
             jitter_range = base_ms * policy.jitter_factor
             base_ms += random.uniform(0, jitter_range)
         return base_ms / 1000.0
 
     @staticmethod
-    async def _apply_set_variables(
-        method: Callable[..., Any], kwargs: dict[str, Any], ctx: ExecutionContext
-    ) -> None:
+    async def _apply_set_variables(method: Callable[..., Any], kwargs: dict[str, Any], ctx: ExecutionContext) -> None:
         try:
             type_hints = typing.get_type_hints(method, include_extras=True)
         except Exception:

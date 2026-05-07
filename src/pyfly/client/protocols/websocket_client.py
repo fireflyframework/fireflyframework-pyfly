@@ -27,7 +27,7 @@ class WebSocketClient:
 
     async def connect(self) -> Any:
         try:
-            import websockets  # type: ignore[import-not-found]
+            import websockets  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "WebSocketClient requires websockets — `pip install websockets`"
             raise ImportError(msg) from exc

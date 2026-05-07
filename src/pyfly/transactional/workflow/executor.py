@@ -95,9 +95,7 @@ class WorkflowExecutor:
                 name=definition.id, correlation_id=ctx.correlation_id, reason=f"timer:{step.id}"
             )
             await self._timers.sleep_ms(step.wait_for_timer_ms)
-            await self._events.on_timer_fired(
-                name=definition.id, correlation_id=ctx.correlation_id, timer_id=step.id
-            )
+            await self._events.on_timer_fired(name=definition.id, correlation_id=ctx.correlation_id, timer_id=step.id)
             await self._events.on_workflow_resumed(name=definition.id, correlation_id=ctx.correlation_id)
 
         if step.wait_for_signal:
@@ -168,11 +166,12 @@ class WorkflowExecutor:
                 retry_policy=step.to_retry_policy(),
             )
             elapsed = (time.perf_counter() - started) * 1000.0
+            step_record = ctx.get_step(step.id)
             await self._events.on_step_success(
                 name=definition.id,
                 correlation_id=ctx.correlation_id,
                 step_id=step.id,
-                attempts=ctx.get_step(step.id).attempts if ctx.get_step(step.id) else 1,
+                attempts=step_record.attempts if step_record is not None else 1,
                 latency_ms=elapsed,
             )
             on_step_cb = definition.on_step_callbacks.get(step.id)

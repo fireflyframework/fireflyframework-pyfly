@@ -38,13 +38,9 @@ class EventStore(Protocol):
         expected_version: int,
     ) -> None: ...
 
-    async def load(
-        self, aggregate_id: str, *, after_sequence: int = 0
-    ) -> list[StoredEventEnvelope]: ...
+    async def load(self, aggregate_id: str, *, after_sequence: int = 0) -> list[StoredEventEnvelope]: ...
 
-    async def stream_all(
-        self, *, after_event_id: str | None = None, limit: int = 100
-    ) -> list[StoredEventEnvelope]: ...
+    async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]: ...
 
     async def latest_version(self, aggregate_id: str) -> int: ...
 
@@ -78,16 +74,12 @@ class InMemoryEventStore:
                 self._all.append(evt)
             self._by_aggregate[aggregate_id] = current
 
-    async def load(
-        self, aggregate_id: str, *, after_sequence: int = 0
-    ) -> list[StoredEventEnvelope]:
+    async def load(self, aggregate_id: str, *, after_sequence: int = 0) -> list[StoredEventEnvelope]:
         async with self._lock:
             events = self._by_aggregate.get(aggregate_id, [])
             return [e for e in events if e.sequence > after_sequence]
 
-    async def stream_all(
-        self, *, after_event_id: str | None = None, limit: int = 100
-    ) -> list[StoredEventEnvelope]:
+    async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]:
         async with self._lock:
             if after_event_id is None:
                 return list(self._all[:limit])
@@ -128,7 +120,7 @@ class SqlAlchemyEventStore:
         self._engine = engine
 
     async def initialize(self) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         async with self._engine.begin() as conn:
             await conn.execute(text(self.DDL))
@@ -141,7 +133,7 @@ class SqlAlchemyEventStore:
         *,
         expected_version: int,
     ) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         latest = await self.latest_version(aggregate_id)
         if latest != expected_version:
@@ -176,7 +168,7 @@ class SqlAlchemyEventStore:
                 )
 
     async def load(self, aggregate_id: str, *, after_sequence: int = 0) -> list[StoredEventEnvelope]:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         async with self._engine.connect() as conn:
             rows = (
@@ -191,10 +183,8 @@ class SqlAlchemyEventStore:
             ).fetchall()
         return [StoredEventEnvelope.from_json(r[0]) for r in rows]
 
-    async def stream_all(
-        self, *, after_event_id: str | None = None, limit: int = 100
-    ) -> list[StoredEventEnvelope]:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+    async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]:
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         async with self._engine.connect() as conn:
             if after_event_id is None:
@@ -220,7 +210,7 @@ class SqlAlchemyEventStore:
         return [StoredEventEnvelope.from_json(r[0]) for r in rows]
 
     async def latest_version(self, aggregate_id: str) -> int:
-        from sqlalchemy import text  # type: ignore[import-not-found]
+        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
 
         async with self._engine.connect() as conn:
             result = await conn.execute(
@@ -228,7 +218,3 @@ class SqlAlchemyEventStore:
                 {"aid": aggregate_id},
             )
             return int(result.scalar() or 0)
-
-
-_: EventStore = InMemoryEventStore()
-_: EventStore = SqlAlchemyEventStore(engine=None)  # type: ignore[arg-type, assignment]

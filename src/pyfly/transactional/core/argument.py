@@ -30,7 +30,6 @@ from typing import Annotated, Any, get_args, get_origin
 
 from pyfly.transactional.core.context import ExecutionContext
 
-
 # --- Annotation markers -------------------------------------------------------
 
 
@@ -196,9 +195,7 @@ class ArgumentResolver:
         sig = inspect.signature(method)
         plans: list[ResolvedParameter] = []
         params = list(sig.parameters.values())
-        if skip_first and params and params[0].name in {"self", "cls"}:
-            params = params[1:]
-        elif skip_first and params:
+        if skip_first and params and params[0].name in {"self", "cls"} or skip_first and params:
             params = params[1:]
 
         try:

@@ -104,9 +104,7 @@ class WorkflowEngine:
     async def query(self, correlation_id: str, query_name: str, *args: Any, **kwargs: Any) -> Any:
         return await self._queries.query(correlation_id, query_name, *args, **kwargs)
 
-    async def list_executions(
-        self, *, status: ExecutionStatus | None = None
-    ) -> list[ExecutionState]:
+    async def list_executions(self, *, status: ExecutionStatus | None = None) -> list[ExecutionState]:
         return await self._persistence.find_all(status=status, pattern=ExecutionPattern.WORKFLOW)
 
     async def get_execution(self, correlation_id: str) -> ExecutionState | None:
@@ -114,12 +112,8 @@ class WorkflowEngine:
 
     # --- private --------------------------------------------------------
 
-    async def _start_async(
-        self, definition: Any, input: Any
-    ) -> WorkflowResult:
-        ctx = ExecutionContext(
-            name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input
-        )
+    async def _start_async(self, definition: Any, input: Any) -> WorkflowResult:
+        ctx = ExecutionContext(name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input)
         await ctx.set_status(ExecutionStatus.PENDING)
         await self._persistence.save(ExecutionState.from_context(ctx))
         asyncio.create_task(self._run(definition, input, preset_ctx=ctx))
@@ -137,9 +131,7 @@ class WorkflowEngine:
         *,
         preset_ctx: ExecutionContext | None = None,
     ) -> WorkflowResult:
-        ctx = preset_ctx or ExecutionContext(
-            name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input
-        )
+        ctx = preset_ctx or ExecutionContext(name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input)
         started = time.perf_counter()
         await self._signals.register(ctx)
         await self._queries.register(definition, ctx)
@@ -153,9 +145,7 @@ class WorkflowEngine:
         error: BaseException | None = None
         try:
             if definition.timeout_ms > 0:
-                await asyncio.wait_for(
-                    self._executor.execute(definition, ctx), timeout=definition.timeout_ms / 1000.0
-                )
+                await asyncio.wait_for(self._executor.execute(definition, ctx), timeout=definition.timeout_ms / 1000.0)
             else:
                 await self._executor.execute(definition, ctx)
             await ctx.set_status(ExecutionStatus.COMPLETED)

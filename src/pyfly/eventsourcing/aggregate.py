@@ -34,9 +34,7 @@ class AggregateRoot:
     id: str = ""
     version: int = 0
     _pending_events: list[DomainEvent] = field(default_factory=list, init=False, repr=False)
-    _handlers: dict[str, Callable[[Any, Any], None]] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _handlers: dict[str, Callable[[Any, Any], None]] = field(default_factory=dict, init=False, repr=False)
 
     def when(
         self,

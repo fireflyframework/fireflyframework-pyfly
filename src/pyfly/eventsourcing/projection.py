@@ -16,9 +16,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.store import EventStore
@@ -62,10 +63,8 @@ class ProjectionRunner:
         if self._task is None:
             return
         self._stop.set()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._task
-        except asyncio.CancelledError:
-            pass
         self._task = None
 
     async def _loop(self) -> None:
@@ -94,9 +93,7 @@ class ProjectionRunner:
 class FunctionProjection:
     """Quick projection wrapper around a single async callable."""
 
-    def __init__(
-        self, name: str, handler: Callable[[StoredEventEnvelope], Awaitable[None]]
-    ) -> None:
+    def __init__(self, name: str, handler: Callable[[StoredEventEnvelope], Awaitable[None]]) -> None:
         self.name = name
         self._handler = handler
 

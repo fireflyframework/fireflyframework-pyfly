@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -155,9 +155,7 @@ class ExecutionContext:
             rec = self._steps.setdefault(step_id, StepRecord())
             rec.compensation_result = result
             rec.compensation_error = str(error) if error else None
-            rec.status = (
-                StepStatus.COMPENSATION_FAILED if error else StepStatus.COMPENSATED
-            )
+            rec.status = StepStatus.COMPENSATION_FAILED if error else StepStatus.COMPENSATED
             self._touch()
 
     def get_step(self, step_id: str) -> StepRecord | None:
@@ -302,9 +300,7 @@ class ExecutionContext:
             ctx.tcc_phase = TccPhase(data["tcc_phase"])
         ctx.started_at = datetime.fromisoformat(data["started_at"])
         ctx.updated_at = datetime.fromisoformat(data["updated_at"])
-        ctx.completed_at = (
-            datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
-        )
+        ctx.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
         ctx.error = data.get("error")
         ctx._variables = dict(data.get("variables", {}))
         for sid, raw in data.get("steps", {}).items():

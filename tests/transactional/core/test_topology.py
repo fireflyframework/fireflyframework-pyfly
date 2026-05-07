@@ -20,9 +20,7 @@ class TestTopologyBuilder:
         assert layers == [["a"], ["b"], ["c"]]
 
     def test_diamond_dag(self) -> None:
-        layers = TopologyBuilder.build_layers(
-            {"a": [], "b": ["a"], "c": ["a"], "d": ["b", "c"]}
-        )
+        layers = TopologyBuilder.build_layers({"a": [], "b": ["a"], "c": ["a"], "d": ["b", "c"]})
         assert layers[0] == ["a"]
         assert sorted(layers[1]) == ["b", "c"]
         assert layers[2] == ["d"]

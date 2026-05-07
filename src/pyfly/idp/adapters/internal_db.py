@@ -161,7 +161,7 @@ class InternalDbIdpAdapter:
     @staticmethod
     def _hash(password: str) -> bytes:
         try:
-            import bcrypt  # type: ignore[import-not-found]
+            import bcrypt  # type: ignore[import-not-found, unused-ignore]
 
             return bcrypt.hashpw(password.encode(), bcrypt.gensalt())
         except Exception:  # noqa: BLE001
@@ -174,7 +174,7 @@ class InternalDbIdpAdapter:
     @staticmethod
     def _verify(password: str, hashed: bytes) -> bool:
         try:
-            import bcrypt  # type: ignore[import-not-found]
+            import bcrypt  # type: ignore[import-not-found, unused-ignore]
 
             return bool(bcrypt.checkpw(password.encode(), hashed))
         except Exception:  # noqa: BLE001
