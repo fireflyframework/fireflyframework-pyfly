@@ -28,10 +28,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fireflyframework/pyfly"
-Repository = "https://github.com/fireflyframework/pyfly"
+Homepage = "https://github.com/fireflyframework/fireflyframework-pyfly"
+Repository = "https://github.com/fireflyframework/fireflyframework-pyfly"
 Organization = "https://github.com/fireflyframework"
-Issues = "https://github.com/fireflyframework/pyfly/issues"
+Issues = "https://github.com/fireflyframework/fireflyframework-pyfly/issues"
 
 [project.optional-dependencies]
 web = [

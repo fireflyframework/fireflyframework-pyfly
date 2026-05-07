@@ -28,7 +28,7 @@ This guide covers every way to install PyFly — from the interactive installer 
 
 ```bash
 # Clone the repository
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # Full installation (all modules)
@@ -172,7 +172,7 @@ For CI/CD pipelines, Docker images, or automated setups, the installer detects w
 ### Pipe from GitHub
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fireflyframework/pyfly/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash
 ```
 
 ### Default Behavior (Non-Interactive)
@@ -205,7 +205,7 @@ PYFLY_EXTRAS=web,data-relational bash install.sh
 PYFLY_HOME=/opt/pyfly PYFLY_EXTRAS=web,data-relational,cli PYFLY_SOURCE=/src/pyfly bash install.sh
 
 # CI/CD: non-interactive with full extras
-curl -fsSL https://raw.githubusercontent.com/fireflyframework/pyfly/main/install.sh | PYFLY_HOME=/app/pyfly bash
+curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | PYFLY_HOME=/app/pyfly bash
 ```
 
 ### Docker Example
@@ -235,7 +235,7 @@ If you prefer to manage your own virtual environment, you can install PyFly dire
 
 ```bash
 # Clone the repository
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # Install with all extras
@@ -252,7 +252,7 @@ uv sync
 
 ```bash
 # Clone the repository
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # Create and activate a virtual environment
@@ -427,7 +427,7 @@ If any step fails, the installer removes the partially-created installation dire
 For contributing to PyFly itself, install with dev dependencies which include all modules plus testing and linting tools:
 
 ```bash
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # With uv (recommended)

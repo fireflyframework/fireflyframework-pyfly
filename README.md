@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/fireflyframework/pyfly/actions/workflows/ci.yml"><img src="https://github.com/fireflyframework/pyfly/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/fireflyframework/fireflyframework-pyfly/actions/workflows/ci.yml"><img src="https://github.com/fireflyframework/fireflyframework-pyfly/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
@@ -298,19 +298,19 @@ my-addon = "my_package.auto_configuration:MyAutoConfiguration"
 
 ## Installation
 
-> **Note:** PyFly is distributed exclusively via [GitHub Releases](https://github.com/fireflyframework/pyfly/releases). It is **not** published to PyPI.
+> **Note:** PyFly is distributed exclusively via [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases). It is **not** published to PyPI.
 
 ### Install from GitHub Release (Recommended)
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-0.2.0a11-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -320,7 +320,7 @@ pip install "pyfly @ https://github.com/fireflyframework/pyfly/releases/latest/d
 curl -fsSL https://get.pyfly.io/ | bash
 
 # Or directly from GitHub
-curl -fsSL https://raw.githubusercontent.com/fireflyframework/pyfly/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash
 ```
 
 The installer clones the repo, creates a virtual environment, installs PyFly with all extras, and adds `pyfly` to your PATH. You can customize with environment variables:
@@ -337,7 +337,7 @@ PYFLY_EXTRAS=web,data-relational,security curl -fsSL https://get.pyfly.io/ | bas
 
 ```bash
 # Clone the repository
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # Run the interactive installer
@@ -643,7 +643,7 @@ PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ec
 | Platform | Repository | Status |
 |----------|-----------|--------|
 | **Java / Spring Boot** | [`fireflyframework-*`](https://github.com/fireflyframework) (40+ modules) | Production |
-| **Python** | [`pyfly`](https://github.com/fireflyframework/pyfly) | Milestone (M6) |
+| **Python** | [`pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Milestone (M6) |
 | **Frontend (Angular)** | [`flyfront`](https://github.com/fireflyframework/flyfront) | Active Development |
 | **GenAI** | [`fireflyframework-genai`](https://github.com/fireflyframework/fireflyframework-genai) | Active Development |
 | **CLI (Go)** | [`fireflyframework-cli`](https://github.com/fireflyframework/fireflyframework-cli) | Active Development |

@@ -60,7 +60,7 @@ PyFly is part of the broader [Firefly Framework](https://github.com/fireflyframe
 | Platform | Repository | Status |
 |----------|-----------|--------|
 | **Java / Spring Boot** | [`fireflyframework-*`](https://github.com/fireflyframework) (40+ modules) | Production |
-| **Python** | [`pyfly`](https://github.com/fireflyframework/pyfly) | Milestone (M6) |
+| **Python** | [`pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Milestone (M6) |
 | **Frontend (Angular)** | [`flyfront`](https://github.com/fireflyframework/flyfront) | Active Development |
 | **GenAI** | [`fireflyframework-genai`](https://github.com/fireflyframework/fireflyframework-genai) | Active Development |
 | **CLI (Go)** | [`fireflyframework-cli`](https://github.com/fireflyframework/fireflyframework-cli) | Active Development |

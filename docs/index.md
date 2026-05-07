@@ -233,7 +233,7 @@ PyFly detects installed libraries at startup and wires the right adapters automa
 
 ```bash
 # Clone the repository
-git clone https://github.com/fireflyframework/pyfly.git
+git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
 cd pyfly
 
 # Install PyFly
