@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.01 (2026-05-07)
+
+### CalVer migration
+
+PyFly switches from SemVer-with-milestone (`0.X.Y-MN`) to **Calendar
+Versioning** (`YY.MM.PATCH`), aligning with every other Firefly Framework
+sibling (Java, .NET, Go) on the same monthly release cadence. See
+[`docs/versioning.md`](docs/versioning.md) for the full convention.
+
+The `26.05.01` release ships exactly the same code as `0.3.0-M1`. No
+behaviour change — only:
+
+- `pyproject.toml` `version` field: `0.3.0a1` → `26.5.1` (PEP 440 normalised
+  form of `26.05.01`).
+- `pyfly.__version__`: `"0.2.0-M11"` → `"26.05.01"`.
+- `install.sh` `PYFLY_VERSION`: `0.2.0-M11` → `26.05.01`.
+- README badge, install commands, "Current" line, and CLI doctor example all
+  show the new version.
+- `docs/versioning.md` rewritten for the CalVer convention.
+- `Development Status` classifier bumped to `4 - Beta` to reflect the
+  Java-parity payload that landed under the previous milestone.
+
+The previous tag (`v0.3.0-M1`) and its GitHub release stay in place for
+historical reference; new clones, badges, and install-from-release links
+should use `v26.05.01`.
+
+---
+
 ## v0.3.0-M1 (2026-05-07)
 
 ### Java framework parity push — major release

@@ -4,51 +4,54 @@ PyFly's roadmap is driven by achieving feature parity with the full [Firefly Fra
 
 ---
 
-## Current State (v0.2.0-M11)
+## Current State (v26.05.01)
 
-PyFly ships with **27 modules** covering the foundation, application, infrastructure, and cross-cutting layers. See the [Changelog](CHANGELOG.md) for full details on what's included.
+PyFly ships with **38 fully-implemented modules** covering the foundation, application, infrastructure, integration, and cross-cutting layers — including the rewritten transactional engine (Saga + Workflow + TCC), Event Sourcing, IDP, ECM, Notifications, Webhooks, Callbacks, Plugins, Rule Engine, and Config Server. See the [Changelog](CHANGELOG.md) for full details on what's included.
 
----
-
-## Phase 1 — Core Distributed Patterns
-
-| Module | Description | Java Source |
-|--------|-------------|-------------|
-| **Event Sourcing** | Event store, aggregate roots, snapshots, projections, outbox pattern | [`fireflyframework-eventsourcing`](https://github.com/fireflyframework/fireflyframework-eventsourcing) |
-| ~~**Saga / Transactions**~~ | ~~Distributed Saga and TCC transaction orchestration with compensation and recovery~~ | ~~[`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine)~~ **Done in v0.1.0-M5** |
-| **Workflow** | Workflow orchestration engine with state persistence, scheduling, and DLQ | [`fireflyframework-workflow`](https://github.com/fireflyframework/fireflyframework-workflow) |
-| **Domain** | DDD building blocks — base entities, value objects, aggregate roots, domain events | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) |
+Phases 1, 2, and 3 of the original roadmap have all landed in `v26.05.01`. Phase 4 is the remaining set.
 
 ---
 
-## Phase 2 — Business Logic
+## Phase 1 — Core Distributed Patterns ✅ **Complete (v26.05.01)**
 
-| Module | Description | Java Source |
-|--------|-------------|-------------|
-| **Rule Engine** | YAML DSL-based business rule engine with AST evaluation and audit trails | [`fireflyframework-rule-engine`](https://github.com/fireflyframework/fireflyframework-rule-engine) |
-| **Plugins** | Plugin system with annotation-based discovery, lifecycle, and dependency resolution | [`fireflyframework-plugins`](https://github.com/fireflyframework/fireflyframework-plugins) |
-| **Data Processing** | Job orchestration, enrichment pipelines, CQRS integration for batch workloads | [`fireflyframework-data`](https://github.com/fireflyframework/fireflyframework-data) |
-
----
-
-## Phase 3 — Enterprise Integrations
-
-| Module | Description | Java Source |
-|--------|-------------|-------------|
-| **Notifications** | Email, SMS, and push notification abstractions with provider adapters (SendGrid, Twilio, Firebase) | [`fireflyframework-notifications`](https://github.com/fireflyframework/fireflyframework-notifications) |
-| **Identity Provider** | IDP abstraction with adapters for Keycloak, AWS Cognito, and internal DB | [`fireflyframework-idp`](https://github.com/fireflyframework/fireflyframework-idp) |
-| **ECM** | Enterprise Content Management — document storage, versioning, e-signature (Adobe Sign, DocuSign) | [`fireflyframework-ecm`](https://github.com/fireflyframework/fireflyframework-ecm) |
-| **Webhooks** | Inbound webhook ingestion with signature validation, rate limiting, and idempotency | [`fireflyframework-webhooks`](https://github.com/fireflyframework/fireflyframework-webhooks) |
-| **Callbacks** | Outbound event dispatching to external systems with circuit breakers and retry | [`fireflyframework-callbacks`](https://github.com/fireflyframework/fireflyframework-callbacks) |
+| Module | Description | Java Source | Status |
+|--------|-------------|-------------|--------|
+| **Saga / Transactions** | Distributed Saga orchestration with compensation, DAG topology, retries, idempotency, recovery | [`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine) | Done (rewritten in v26.05.01) |
+| **TCC** | Try / Confirm / Cancel three-phase transactions with `Annotated[T, FromTry()]` propagation | [`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine) | Done in v26.05.01 |
+| **Workflow** | Durable, signal-driven orchestration: `@wait_for_signal`/`@wait_for_timer`/child workflows/queries/cron | [`fireflyframework-workflow`](https://github.com/fireflyframework/fireflyframework-workflow) | Done in v26.05.01 |
+| **Event Sourcing** | `AggregateRoot`, `EventStore`, snapshots, transactional outbox, projections, upcasting | [`fireflyframework-eventsourcing`](https://github.com/fireflyframework/fireflyframework-eventsourcing) | Done in v26.05.01 |
 
 ---
 
-## Phase 4 — Administrative & Infrastructure
+## Phase 2 — Business Logic ✅ **Complete (v26.05.01)**
+
+| Module | Description | Java Source | Status |
+|--------|-------------|-------------|--------|
+| **Rule Engine** | YAML DSL-based business rule engine with AST evaluation, audit trails, batch evaluation, hot reload | [`fireflyframework-rule-engine`](https://github.com/fireflyframework/fireflyframework-rule-engine) | Done in v26.05.01 |
+| **Plugins** | Plugin SPI: `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | [`fireflyframework-plugins`](https://github.com/fireflyframework/fireflyframework-plugins) | Done in v26.05.01 |
+| **Data Processing** | Job orchestration, enrichment pipelines, CQRS integration for batch workloads | [`fireflyframework-data`](https://github.com/fireflyframework/fireflyframework-data) | Covered by `pyfly.data` + `pyfly.cqrs` + `pyfly.transactional` |
+
+---
+
+## Phase 3 — Enterprise Integrations ✅ **Complete (v26.05.01)**
+
+| Module | Description | Java Source | Status |
+|--------|-------------|-------------|--------|
+| **Notifications** | Email, SMS, and push notifications with provider adapters (SendGrid, Resend, SMTP, Twilio, Firebase, dummy) | [`fireflyframework-notifications`](https://github.com/fireflyframework/fireflyframework-notifications) | Done in v26.05.01 |
+| **IDP** | Identity-provider port + Keycloak / AWS Cognito / Azure AD / internal-DB adapters | [`fireflyframework-idp`](https://github.com/fireflyframework/fireflyframework-idp) | Done in v26.05.01 |
+| **ECM** | Enterprise Content Management — documents, folders, e-signature (S3 / Azure Blob / local-fs storage; DocuSign / Adobe Sign / Logalty / no-op signing) | [`fireflyframework-ecm`](https://github.com/fireflyframework/fireflyframework-ecm) | Done in v26.05.01 |
+| **Webhooks** | Inbound webhook ingestion with HMAC validation, idempotency, listener dispatch | [`fireflyframework-webhooks`](https://github.com/fireflyframework/fireflyframework-webhooks) | Done in v26.05.01 |
+| **Callbacks** | Outbound callback dispatcher with HMAC signing, retries, authorized domains, execution tracking | [`fireflyframework-callbacks`](https://github.com/fireflyframework/fireflyframework-callbacks) | Done in v26.05.01 |
+| **Config Server** | Centralized configuration server (`ConfigServer` / `ConfigClient`) with filesystem + in-memory backends | [`fireflyframework-config-server`](https://github.com/fireflyframework/fireflyframework-config-server) | Done in v26.05.01 |
+
+---
+
+## Phase 4 — Administrative & Infrastructure 🔄 **Planned**
 
 | Module | Description | Java Source |
 |--------|-------------|-------------|
 | **Backoffice** | Admin/backoffice layer with impersonation and enhanced audit | [`fireflyframework-backoffice`](https://github.com/fireflyframework/fireflyframework-backoffice) |
-| **Config Server** | Centralized configuration server for multi-service deployments | [`fireflyframework-config-server`](https://github.com/fireflyframework/fireflyframework-config-server) |
+| **Domain (DDD starters)** | DDD building blocks — base entities, value objects, aggregate roots, domain events | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) |
 | **Utils** | Shared utility library — template rendering, filtering, common helpers | [`fireflyframework-utils`](https://github.com/fireflyframework/fireflyframework-utils) |
 
 ---
@@ -60,7 +63,8 @@ PyFly is part of the broader [Firefly Framework](https://github.com/fireflyframe
 | Platform | Repository | Status |
 |----------|-----------|--------|
 | **Java / Spring Boot** | [`fireflyframework-*`](https://github.com/fireflyframework) (40+ modules) | Production |
-| **Python** | [`pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Milestone (M6) |
+| **.NET 9** | [`fireflyframework-dotnet`](https://github.com/fireflyframework/fireflyframework-dotnet) | Beta (CalVer 26.05+) |
+| **Python** | [`fireflyframework-pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Beta (CalVer 26.05+) |
 | **Frontend (Angular)** | [`flyfront`](https://github.com/fireflyframework/flyfront) | Active Development |
 | **GenAI** | [`fireflyframework-genai`](https://github.com/fireflyframework/fireflyframework-genai) | Active Development |
 | **CLI (Go)** | [`fireflyframework-cli`](https://github.com/fireflyframework/fireflyframework-cli) | Active Development |
