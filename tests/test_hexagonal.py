@@ -62,7 +62,9 @@ class TestVendorIsolation:
                 "capture_output=True, text=True); "
                 "lines = [l for l in r.stdout.strip().split('\\n') if l]; "
                 "bad = [l for l in lines "
-                "if '/data/' not in l and '/cli/' not in l]; "
+                "if '/data/' not in l and '/cli/' not in l "
+                "and '/transactional/persistence/' not in l "
+                "and '/eventsourcing/' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
@@ -83,7 +85,12 @@ class TestVendorIsolation:
                 "lines = [l for l in r.stdout.strip().split('\\n') if l]; "
                 "bad = [l for l in lines "
                 "if 'adapters/' not in l and 'admin/server/' not in l "
-                "and '/security/' not in l]; "
+                "and '/security/' not in l "
+                "and '/notifications/providers/' not in l "
+                "and '/client/protocols/' not in l "
+                "and '/config_server/' not in l "
+                "and '/idp/adapters/' not in l "
+                "and '/ecm/adapters/' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

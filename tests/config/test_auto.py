@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 27
+        assert len(classes) == 36
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -76,21 +76,29 @@ class TestDiscoverAutoConfigurations:
             "AdminAutoConfiguration",
             "AopAutoConfiguration",
             "CacheAutoConfiguration",
+            "CallbacksAutoConfiguration",
             "ClientAutoConfiguration",
+            "ConfigServerAutoConfiguration",
             "CqrsAutoConfiguration",
             "DocumentAutoConfiguration",
+            "EcmAutoConfiguration",
             "EventLoopAutoConfiguration",
+            "EventSourcingAutoConfiguration",
             "I18nAutoConfiguration",
+            "IdpAutoConfiguration",
             "JwtAutoConfiguration",
             "MessagingAutoConfiguration",
             "MetricsActuatorAutoConfiguration",
             "MetricsAutoConfiguration",
+            "NotificationsAutoConfiguration",
             "OAuth2AuthorizationServerAutoConfiguration",
             "OAuth2ClientAutoConfiguration",
             "OAuth2LoginAutoConfiguration",
             "OAuth2ResourceServerAutoConfiguration",
             "PasswordEncoderAutoConfiguration",
+            "PluginsAutoConfiguration",
             "RelationalAutoConfiguration",
+            "RuleEngineAutoConfiguration",
             "SchedulingAutoConfiguration",
             "ServerAutoConfiguration",
             "SessionFilterAutoConfiguration",
@@ -99,6 +107,7 @@ class TestDiscoverAutoConfigurations:
             "TracingAutoConfiguration",
             "TransactionalEngineAutoConfiguration",
             "WebAutoConfiguration",
+            "WebhooksAutoConfiguration",
         }
 
 

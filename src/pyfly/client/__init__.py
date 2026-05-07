@@ -11,20 +11,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyFly Client — Resilient HTTP client with circuit breaker and retry."""
+"""PyFly Client — REST + SOAP + gRPC + GraphQL + WebSocket clients with circuit breaker and retry."""
 
 from pyfly.client.circuit_breaker import CircuitBreaker, CircuitState
 from pyfly.client.declarative import delete, get, http_client, patch, post, put, service_client
 from pyfly.client.ports.outbound import HttpClientPort
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
+from pyfly.client.protocols import (
+    GraphQLClient,
+    GraphQLClientBuilder,
+    GrpcClientBuilder,
+    SoapClient,
+    SoapClientBuilder,
+    WebSocketClient,
+    WebSocketClientBuilder,
+)
 from pyfly.client.retry import RetryPolicy
 
 __all__ = [
     "CircuitBreaker",
     "CircuitState",
+    "GraphQLClient",
+    "GraphQLClientBuilder",
+    "GrpcClientBuilder",
     "HttpClientBeanPostProcessor",
     "HttpClientPort",
     "RetryPolicy",
+    "SoapClient",
+    "SoapClientBuilder",
+    "WebSocketClient",
+    "WebSocketClientBuilder",
     "delete",
     "get",
     "http_client",

@@ -11,15 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transactional engine auto-configuration — wires all transactional beans into the DI container.
+"""Transactional engine auto-configuration — wires everything into the DI container.
 
-Creates beans for:
-
-* Configuration properties (saga, TCC, backpressure)
-* Default persistence and observability adapters
-* Saga engine components (resolver, invoker, compensator, orchestrator, engine, registry)
-* TCC engine components (resolver, invoker, orchestrator, engine, registry)
-* Recovery service
+Wires the *full* orchestration stack: shared core (events, metrics, tracer,
+DLQ, recovery, scheduler, validator, persistence), saga subsystem, workflow
+subsystem, TCC subsystem, REST controllers, health indicator.
 """
 
 from __future__ import annotations
@@ -28,6 +24,33 @@ import logging
 
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_property
+
+# core/
+from pyfly.transactional.core.argument import ArgumentResolver as CoreArgumentResolver
+from pyfly.transactional.core.dlq import DeadLetterService, InMemoryDeadLetterStore
+from pyfly.transactional.core.event_gateway import EventGateway
+from pyfly.transactional.core.events import (
+    CompositeOrchestrationEvents,
+    LoggerOrchestrationEvents,
+)
+from pyfly.transactional.core.metrics import OrchestrationMetrics
+from pyfly.transactional.core.persistence import (
+    ExecutionPersistenceProvider,
+    InMemoryPersistenceProvider,
+)
+from pyfly.transactional.core.recovery import RecoveryService
+from pyfly.transactional.core.scheduling import OrchestrationScheduler
+from pyfly.transactional.core.step_invoker import StepInvoker as CoreStepInvoker
+from pyfly.transactional.core.tracer import OrchestrationTracer
+from pyfly.transactional.core.validator import OrchestrationValidator
+from pyfly.transactional.health import OrchestrationHealthIndicator
+from pyfly.transactional.rest.controllers import (
+    DeadLetterController,
+    OrchestrationController,
+    WorkflowController,
+)
+
+# saga/
 from pyfly.transactional.saga.config.properties import (
     BackpressureProperties,
     SagaEngineProperties,
@@ -41,8 +64,8 @@ from pyfly.transactional.saga.engine.saga_engine import SagaEngine
 from pyfly.transactional.saga.engine.step_invoker import StepInvoker
 from pyfly.transactional.saga.persistence.recovery import SagaRecoveryService
 from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
-from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
-from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+
+# tcc/
 from pyfly.transactional.tcc.config.properties import TccEngineProperties
 from pyfly.transactional.tcc.engine.argument_resolver import TccArgumentResolver
 from pyfly.transactional.tcc.engine.execution_orchestrator import (
@@ -52,74 +75,123 @@ from pyfly.transactional.tcc.engine.participant_invoker import TccParticipantInv
 from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
 from pyfly.transactional.tcc.registry.tcc_registry import TccRegistry
 
+# workflow/
+from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
+from pyfly.transactional.workflow.continue_as_new_service import ContinueAsNewService
+from pyfly.transactional.workflow.engine import WorkflowEngine
+from pyfly.transactional.workflow.executor import WorkflowExecutor
+from pyfly.transactional.workflow.query_service import WorkflowQueryService
+from pyfly.transactional.workflow.registry import WorkflowRegistry
+from pyfly.transactional.workflow.signal_service import SignalService
+from pyfly.transactional.workflow.timer_service import TimerService
+
+# Shared (legacy adapters kept for back-compat).
+from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
+from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+
 _logger = logging.getLogger(__name__)
 
 
 @auto_configuration
 @conditional_on_property("pyfly.transactional.enabled", having_value="true")
 class TransactionalEngineAutoConfiguration:
-    """Auto-configures the transactional engine subsystem.
-
-    Creates the following beans:
-
-    * :class:`SagaEngineProperties`
-    * :class:`TccEngineProperties`
-    * :class:`BackpressureProperties`
-    * :class:`InMemoryPersistenceAdapter` — default persistence (when no external store is configured)
-    * :class:`LoggerEventsAdapter` — default events adapter
-    * :class:`ArgumentResolver` — saga argument resolver
-    * :class:`StepInvoker` — saga step invoker
-    * :class:`SagaCompensator` — saga compensator
-    * :class:`SagaExecutionOrchestrator` — saga execution orchestrator
-    * :class:`SagaEngine` — main saga engine
-    * :class:`SagaRegistry` — saga registry
-    * :class:`TccRegistry` — TCC registry
-    * :class:`TccEngine` — TCC engine (with its own invoker and orchestrator)
-    * :class:`SagaRecoveryService` — recovery service
-    """
+    """Wire the full orchestration engine into the DI container."""
 
     # -- Configuration properties -------------------------------------------
 
     @bean
     def saga_engine_properties(self) -> SagaEngineProperties:
-        """Create default saga engine configuration properties."""
         return SagaEngineProperties()
 
     @bean
     def tcc_engine_properties(self) -> TccEngineProperties:
-        """Create default TCC engine configuration properties."""
         return TccEngineProperties()
 
     @bean
     def backpressure_properties(self) -> BackpressureProperties:
-        """Create default backpressure configuration properties."""
         return BackpressureProperties()
 
-    # -- Default infrastructure adapters ------------------------------------
+    # -- Core observability infrastructure ----------------------------------
+
+    @bean
+    def orchestration_metrics(self) -> OrchestrationMetrics:
+        return OrchestrationMetrics()
+
+    @bean
+    def orchestration_tracer(self) -> OrchestrationTracer:
+        return OrchestrationTracer()
+
+    @bean
+    def logger_orchestration_events(self) -> LoggerOrchestrationEvents:
+        return LoggerOrchestrationEvents()
+
+    @bean
+    def composite_orchestration_events(
+        self,
+        logger_events: LoggerOrchestrationEvents,
+        metrics: OrchestrationMetrics,
+    ) -> CompositeOrchestrationEvents:
+        composite = CompositeOrchestrationEvents()
+        composite.add(logger_events)
+        composite.add(metrics)
+        return composite
+
+    # -- Core persistence + DLQ + recovery + scheduler + validator ----------
+
+    @bean
+    def orchestration_persistence(self) -> ExecutionPersistenceProvider:
+        return InMemoryPersistenceProvider()
+
+    @bean
+    def dead_letter_store(self) -> InMemoryDeadLetterStore:
+        return InMemoryDeadLetterStore()
+
+    @bean
+    def dead_letter_service(self, store: InMemoryDeadLetterStore) -> DeadLetterService:
+        return DeadLetterService(store=store)
+
+    @bean
+    def recovery_service(self, persistence: ExecutionPersistenceProvider) -> RecoveryService:
+        return RecoveryService(persistence=persistence)
+
+    @bean
+    def orchestration_scheduler(self) -> OrchestrationScheduler:
+        return OrchestrationScheduler()
+
+    @bean
+    def orchestration_validator(self) -> OrchestrationValidator:
+        return OrchestrationValidator()
+
+    @bean
+    def event_gateway(self) -> EventGateway:
+        return EventGateway()
+
+    @bean
+    def core_argument_resolver(self) -> CoreArgumentResolver:
+        return CoreArgumentResolver()
+
+    @bean
+    def core_step_invoker(self, resolver: CoreArgumentResolver) -> CoreStepInvoker:
+        return CoreStepInvoker(argument_resolver=resolver)
+
+    # -- Legacy infrastructure adapters (kept for back-compat) --------------
 
     @bean
     def in_memory_persistence_adapter(self) -> InMemoryPersistenceAdapter:
-        """Create in-memory persistence adapter as the default transaction store."""
         return InMemoryPersistenceAdapter()
 
     @bean
     def logger_events_adapter(self) -> LoggerEventsAdapter:
-        """Create logger-based events adapter as the default observability sink."""
         return LoggerEventsAdapter()
 
     # -- Saga engine components ---------------------------------------------
 
     @bean
     def saga_argument_resolver(self) -> ArgumentResolver:
-        """Create the argument resolver for saga step parameter injection."""
         return ArgumentResolver()
 
     @bean
-    def saga_step_invoker(
-        self,
-        argument_resolver: ArgumentResolver,
-    ) -> StepInvoker:
-        """Create the step invoker that executes saga step and compensation methods."""
+    def saga_step_invoker(self, argument_resolver: ArgumentResolver) -> StepInvoker:
         return StepInvoker(argument_resolver=argument_resolver)
 
     @bean
@@ -128,11 +200,7 @@ class TransactionalEngineAutoConfiguration:
         step_invoker: StepInvoker,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaCompensator:
-        """Create the compensator that reverses completed steps on saga failure."""
-        return SagaCompensator(
-            step_invoker=step_invoker,
-            events_port=events_adapter,
-        )
+        return SagaCompensator(step_invoker=step_invoker, events_port=events_adapter)
 
     @bean
     def saga_execution_orchestrator(
@@ -140,15 +208,10 @@ class TransactionalEngineAutoConfiguration:
         step_invoker: StepInvoker,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaExecutionOrchestrator:
-        """Create the orchestrator that executes saga steps in topological layer order."""
-        return SagaExecutionOrchestrator(
-            step_invoker=step_invoker,
-            events_port=events_adapter,
-        )
+        return SagaExecutionOrchestrator(step_invoker=step_invoker, events_port=events_adapter)
 
     @bean
     def saga_registry(self) -> SagaRegistry:
-        """Create the saga registry that discovers and indexes ``@saga``-decorated beans."""
         return SagaRegistry()
 
     @bean
@@ -161,7 +224,6 @@ class TransactionalEngineAutoConfiguration:
         persistence_adapter: InMemoryPersistenceAdapter,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaEngine:
-        """Create the saga engine that coordinates execution, compensation, and persistence."""
         return SagaEngine(
             registry=registry,
             step_invoker=step_invoker,
@@ -175,7 +237,6 @@ class TransactionalEngineAutoConfiguration:
 
     @bean
     def tcc_registry(self) -> TccRegistry:
-        """Create the TCC registry that discovers and indexes ``@tcc``-decorated beans."""
         return TccRegistry()
 
     @bean
@@ -185,11 +246,9 @@ class TransactionalEngineAutoConfiguration:
         persistence_adapter: InMemoryPersistenceAdapter,
         events_adapter: LoggerEventsAdapter,
     ) -> TccEngine:
-        """Create the TCC engine that orchestrates Try-Confirm-Cancel transactions."""
         tcc_argument_resolver = TccArgumentResolver()
         tcc_invoker = TccParticipantInvoker(argument_resolver=tcc_argument_resolver)
         tcc_orchestrator = TccExecutionOrchestrator(participant_invoker=tcc_invoker)
-
         return TccEngine(
             registry=tcc_registry,
             participant_invoker=tcc_invoker,
@@ -198,7 +257,75 @@ class TransactionalEngineAutoConfiguration:
             events_port=events_adapter,
         )
 
-    # -- Recovery service ---------------------------------------------------
+    # -- Workflow engine components -----------------------------------------
+
+    @bean
+    def signal_service(self) -> SignalService:
+        return SignalService()
+
+    @bean
+    def timer_service(self) -> TimerService:
+        return TimerService()
+
+    @bean
+    def child_workflow_service(self) -> ChildWorkflowService:
+        return ChildWorkflowService()
+
+    @bean
+    def continue_as_new_service(self) -> ContinueAsNewService:
+        return ContinueAsNewService()
+
+    @bean
+    def workflow_query_service(self) -> WorkflowQueryService:
+        return WorkflowQueryService()
+
+    @bean
+    def workflow_registry(self) -> WorkflowRegistry:
+        return WorkflowRegistry()
+
+    @bean
+    def workflow_executor(
+        self,
+        signal_service: SignalService,
+        timer_service: TimerService,
+        child_service: ChildWorkflowService,
+        events: CompositeOrchestrationEvents,
+        invoker: CoreStepInvoker,
+    ) -> WorkflowExecutor:
+        return WorkflowExecutor(
+            step_invoker=invoker,
+            signal_service=signal_service,
+            timer_service=timer_service,
+            child_service=child_service,
+            events=events,
+        )
+
+    @bean
+    def workflow_engine(
+        self,
+        registry: WorkflowRegistry,
+        executor: WorkflowExecutor,
+        persistence: ExecutionPersistenceProvider,
+        events: CompositeOrchestrationEvents,
+        signals: SignalService,
+        queries: WorkflowQueryService,
+        children: ChildWorkflowService,
+        cont: ContinueAsNewService,
+        dlq: DeadLetterService,
+    ) -> WorkflowEngine:
+        return WorkflowEngine(
+            registry=registry,
+            executor=executor,
+            persistence=persistence,
+            events=events,
+            signal_service=signals,
+            query_service=queries,
+            child_service=children,
+            continue_service=cont,
+            dead_letter_service=dlq,
+        )
+
+    # -- Recovery and REST --------------------------------------------------
 
     @bean
     def saga_recovery_service(
@@ -207,9 +334,28 @@ class TransactionalEngineAutoConfiguration:
         saga_engine: SagaEngine,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaRecoveryService:
-        """Create the recovery service that resumes stale or in-flight sagas."""
         return SagaRecoveryService(
             persistence_port=persistence_adapter,
             saga_engine=saga_engine,
             events_port=events_adapter,
         )
+
+    @bean
+    def orchestration_health_indicator(
+        self, persistence: ExecutionPersistenceProvider
+    ) -> OrchestrationHealthIndicator:
+        return OrchestrationHealthIndicator(persistence=persistence)
+
+    @bean
+    def orchestration_controller(
+        self, persistence: ExecutionPersistenceProvider
+    ) -> OrchestrationController:
+        return OrchestrationController(persistence=persistence)
+
+    @bean
+    def dead_letter_controller(self, dlq: DeadLetterService) -> DeadLetterController:
+        return DeadLetterController(dlq=dlq)
+
+    @bean
+    def workflow_controller(self, engine: WorkflowEngine) -> WorkflowController:
+        return WorkflowController(engine=engine)
