@@ -65,6 +65,10 @@ from pyfly.transactional.saga.engine.step_invoker import StepInvoker
 from pyfly.transactional.saga.persistence.recovery import SagaRecoveryService
 from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
 
+# Shared (legacy adapters kept for back-compat).
+from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
+from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+
 # tcc/
 from pyfly.transactional.tcc.config.properties import TccEngineProperties
 from pyfly.transactional.tcc.engine.argument_resolver import TccArgumentResolver
@@ -84,10 +88,6 @@ from pyfly.transactional.workflow.query_service import WorkflowQueryService
 from pyfly.transactional.workflow.registry import WorkflowRegistry
 from pyfly.transactional.workflow.signal_service import SignalService
 from pyfly.transactional.workflow.timer_service import TimerService
-
-# Shared (legacy adapters kept for back-compat).
-from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
-from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
 
 _logger = logging.getLogger(__name__)
 
@@ -341,15 +341,11 @@ class TransactionalEngineAutoConfiguration:
         )
 
     @bean
-    def orchestration_health_indicator(
-        self, persistence: ExecutionPersistenceProvider
-    ) -> OrchestrationHealthIndicator:
+    def orchestration_health_indicator(self, persistence: ExecutionPersistenceProvider) -> OrchestrationHealthIndicator:
         return OrchestrationHealthIndicator(persistence=persistence)
 
     @bean
-    def orchestration_controller(
-        self, persistence: ExecutionPersistenceProvider
-    ) -> OrchestrationController:
+    def orchestration_controller(self, persistence: ExecutionPersistenceProvider) -> OrchestrationController:
         return OrchestrationController(persistence=persistence)
 
     @bean

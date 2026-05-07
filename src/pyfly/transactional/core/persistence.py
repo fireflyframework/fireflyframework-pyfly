@@ -88,9 +88,7 @@ class StateSerializer:
             status=ExecutionStatus(data["status"]),
             started_at=datetime.fromisoformat(data["started_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
-            completed_at=(
-                datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
-            ),
+            completed_at=(datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None),
             payload=data["payload"],
         )
 
@@ -144,11 +142,7 @@ class InMemoryPersistenceProvider:
 
     async def find_stale(self, before: datetime) -> list[ExecutionState]:
         async with self._lock:
-            return [
-                s
-                for s in self._store.values()
-                if not s.status.is_terminal and s.updated_at < before
-            ]
+            return [s for s in self._store.values() if not s.status.is_terminal and s.updated_at < before]
 
     async def delete(self, correlation_id: str) -> bool:
         async with self._lock:

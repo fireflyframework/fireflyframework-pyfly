@@ -132,9 +132,7 @@ class OrchestrationMetrics(_BaseOrchestrationEvents):
                     "duration_p50_ms": self.execution_duration.get(name, _Histogram()).p50,
                     "duration_p95_ms": self.execution_duration.get(name, _Histogram()).p95,
                 }
-                for name in set(self.executions_started)
-                | set(self.executions_completed)
-                | set(self.executions_failed)
+                for name in set(self.executions_started) | set(self.executions_completed) | set(self.executions_failed)
             },
             "steps": {
                 key: {
@@ -144,9 +142,7 @@ class OrchestrationMetrics(_BaseOrchestrationEvents):
                     "p50_ms": self.step_latency.get(key, _Histogram()).p50,
                     "p95_ms": self.step_latency.get(key, _Histogram()).p95,
                 }
-                for key in set(self.steps_started)
-                | set(self.steps_succeeded)
-                | set(self.steps_failed)
+                for key in set(self.steps_started) | set(self.steps_succeeded) | set(self.steps_failed)
             },
             "compensations": dict(self.compensations),
             "compensation_failures": dict(self.compensation_failures),

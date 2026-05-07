@@ -26,9 +26,7 @@ class SagaBuilder:
     """Build a :class:`SagaDefinition` without decorators."""
 
     def __init__(self, name: str, *, layer_concurrency: int = 0) -> None:
-        self._definition = SagaDefinition(
-            name=name, bean=None, layer_concurrency=layer_concurrency
-        )
+        self._definition = SagaDefinition(name=name, bean=None, layer_concurrency=layer_concurrency)
 
     def step(
         self,

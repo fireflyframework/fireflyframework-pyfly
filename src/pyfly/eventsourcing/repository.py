@@ -76,9 +76,7 @@ class EventSourcedRepository(Generic[A]):
             for evt in pending
         ]
         expected = aggregate.version - len(pending)
-        await self._store.append(
-            aggregate.id, aggregate_type, envelopes, expected_version=expected
-        )
+        await self._store.append(aggregate.id, aggregate_type, envelopes, expected_version=expected)
         aggregate.mark_committed()
 
         if self._snapshots is not None and aggregate.version % self._snapshot_interval == 0:
@@ -104,11 +102,7 @@ class EventSourcedRepository(Generic[A]):
 
     @staticmethod
     def _dehydrate(aggregate: AggregateRoot) -> dict[str, object]:
-        return {
-            k: v
-            for k, v in vars(aggregate).items()
-            if not k.startswith("_") and k not in {"id", "version"}
-        }
+        return {k: v for k, v in vars(aggregate).items() if not k.startswith("_") and k not in {"id", "version"}}
 
     @staticmethod
     def _restore(aggregate: AggregateRoot, snapshot: Snapshot) -> None:

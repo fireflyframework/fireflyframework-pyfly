@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -71,10 +72,8 @@ class RecoveryService:
         if self._task is None:
             return
         self._stop_event.set()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._task
-        except asyncio.CancelledError:
-            pass
         self._task = None
 
     async def _loop(self) -> None:
@@ -97,8 +96,6 @@ class RecoveryService:
             except Exception as exc:  # noqa: BLE001
                 _logger.error("recovery scan failed: %s", exc)
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._scan_interval.total_seconds()
-                )
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._scan_interval.total_seconds())
             except TimeoutError:
                 continue

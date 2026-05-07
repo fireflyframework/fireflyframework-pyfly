@@ -41,7 +41,10 @@ class GrpcClientBuilder:
             msg = "GrpcClientBuilder requires a target"
             raise ValueError(msg)
         try:
-            from grpc import aio, ssl_channel_credentials  # type: ignore[import-not-found]
+            from grpc import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+                aio,
+                ssl_channel_credentials,
+            )
         except ImportError as exc:  # noqa: BLE001
             msg = "GrpcClientBuilder requires grpcio — `pip install grpcio`"
             raise ImportError(msg) from exc

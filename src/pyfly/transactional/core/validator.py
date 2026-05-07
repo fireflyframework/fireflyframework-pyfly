@@ -73,9 +73,7 @@ class OrchestrationValidator:
         try:
             TopologyBuilder.build_layers(graph)
         except TopologyError as exc:
-            report.issues.append(
-                ValidationIssue(target=target, level=IssueLevel.ERROR, message=str(exc))
-            )
+            report.issues.append(ValidationIssue(target=target, level=IssueLevel.ERROR, message=str(exc)))
         return report
 
     def fail_if_needed(self, report: ValidationReport) -> None:

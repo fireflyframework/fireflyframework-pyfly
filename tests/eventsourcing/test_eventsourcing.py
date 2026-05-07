@@ -82,9 +82,7 @@ class TestRepository:
     @pytest.mark.asyncio
     async def test_save_and_load_round_trip(self) -> None:
         store = InMemoryEventStore()
-        repo: EventSourcedRepository[Order] = EventSourcedRepository(
-            store=store, factory=Order
-        )
+        repo: EventSourcedRepository[Order] = EventSourcedRepository(store=store, factory=Order)
         order = Order()
         order.id = "o-1"
         order.apply(OrderPlaced(order_id="o-1", amount=99))
@@ -144,9 +142,7 @@ class TestProjection:
         async def collect(evt: StoredEventEnvelope) -> None:
             seen.append(evt)
 
-        runner = ProjectionRunner(
-            FunctionProjection("test", collect), store, poll_interval_s=0.05
-        )
+        runner = ProjectionRunner(FunctionProjection("test", collect), store, poll_interval_s=0.05)
         await runner.start()
         await asyncio.sleep(0.2)
         await runner.stop()

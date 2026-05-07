@@ -25,7 +25,7 @@ class FirebasePushProvider:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "FirebasePushProvider requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc

@@ -83,9 +83,7 @@ class DeadLetterController:
     def __init__(self, dlq: DeadLetterService) -> None:
         self._dlq = dlq
 
-    async def list(
-        self, execution_name: str | None = None, correlation_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def list(self, execution_name: str | None = None, correlation_id: str | None = None) -> list[dict[str, Any]]:
         entries = await self._dlq.list(execution_name=execution_name, correlation_id=correlation_id)
         return [_dlq_to_dict(e) for e in entries]
 

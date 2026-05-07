@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 from typing import Any
 
@@ -36,7 +37,7 @@ class AzureBlobStorageAdapter:
         if self._service is not None:
             return self._service
         try:
-            from azure.storage.blob import BlobServiceClient  # type: ignore[import-not-found]
+            from azure.storage.blob import BlobServiceClient  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AzureBlobStorageAdapter requires azure-storage-blob — `pip install azure-storage-blob`"
             raise ImportError(msg) from exc
@@ -44,9 +45,7 @@ class AzureBlobStorageAdapter:
             self._service = BlobServiceClient.from_connection_string(self._connection_string)
         else:
             assert self._account_url is not None
-            self._service = BlobServiceClient(
-                account_url=self._account_url, credential=self._credential
-            )
+            self._service = BlobServiceClient(account_url=self._account_url, credential=self._credential)
         return self._service
 
     async def _run(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -84,10 +83,8 @@ class AzureBlobStorageAdapter:
         if version is None:
             for v in document.versions:
                 blob = service.get_blob_client(container=self._container, blob=self._key(document.id, v.version))
-                try:
+                with contextlib.suppress(Exception):
                     await self._run(blob.delete_blob)
-                except Exception:  # noqa: BLE001
-                    pass
             return bool(document.versions)
         blob = service.get_blob_client(container=self._container, blob=self._key(document.id, version))
         try:

@@ -107,6 +107,6 @@ class RuleSetLoader:
 
     @staticmethod
     def from_yaml(text: str) -> RuleSet:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
 
         return RuleSetLoader.from_dict(yaml.safe_load(text))

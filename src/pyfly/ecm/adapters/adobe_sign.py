@@ -30,7 +30,7 @@ class AdobeSignESignatureAdapter:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AdobeSignESignatureAdapter requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -61,9 +61,7 @@ class AdobeSignESignatureAdapter:
                 "state": "IN_PROCESS",
                 "message": request.message,
             }
-            resp = await client.post(
-                f"{self._api_base}/agreements", json=payload, headers=self._headers
-            )
+            resp = await client.post(f"{self._api_base}/agreements", json=payload, headers=self._headers)
             resp.raise_for_status()
             data = resp.json()
             return ESignatureEnvelope(

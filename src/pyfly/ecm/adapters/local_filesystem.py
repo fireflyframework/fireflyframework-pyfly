@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import pathlib
-from typing import Any
 
 from pyfly.ecm.models import Document, DocumentVersion
 

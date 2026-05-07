@@ -55,7 +55,7 @@ class AzureAdIdpAdapter:
 
     async def _client(self) -> Any:
         try:
-            import httpx  # type: ignore[import-not-found]
+            import httpx  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AzureAdIdpAdapter requires httpx — `pip install pyfly[client]`"
             raise ImportError(msg) from exc
@@ -221,9 +221,7 @@ class AzureAdIdpAdapter:
         import secrets
 
         new_password = secrets.token_urlsafe(16)
-        await self.change_password(
-            PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password)
-        )
+        await self.change_password(PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password))
         return new_password
 
     async def assign_role(self, user_id: str, role: str) -> bool:
@@ -251,10 +249,7 @@ class AzureAdIdpAdapter:
             headers = await self._app_auth_header()
             resp = await client.get(f"{self._graph}/groups", headers=headers)
             resp.raise_for_status()
-            return [
-                IdpRole(name=g["id"], description=g.get("displayName", ""))
-                for g in resp.json().get("value", [])
-            ]
+            return [IdpRole(name=g["id"], description=g.get("displayName", "")) for g in resp.json().get("value", [])]
 
 
 def _from_aad(data: dict[str, Any]) -> IdpUser:

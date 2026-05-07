@@ -21,18 +21,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+_croniter: Any = None
+_HAS_CRONITER = False
 try:
-    from croniter import croniter as _croniter  # type: ignore[import-not-found]
+    from croniter import croniter as _croniter_imported  # type: ignore[import-untyped, import-not-found, unused-ignore]
 
+    _croniter = _croniter_imported
     _HAS_CRONITER = True
 except Exception:  # noqa: BLE001
-    _croniter = None
-    _HAS_CRONITER = False
+    pass
 
 _logger = logging.getLogger(__name__)
 
@@ -107,9 +109,7 @@ class OrchestrationScheduler:
     async def _run_loop(self, task: ScheduledTask) -> None:
         if task.initial_delay_ms > 0:
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=task.initial_delay_ms / 1000.0
-                )
+                await asyncio.wait_for(self._stop_event.wait(), timeout=task.initial_delay_ms / 1000.0)
                 return
             except TimeoutError:
                 pass
@@ -144,8 +144,8 @@ class OrchestrationScheduler:
         if task.cron is not None and _HAS_CRONITER:
             base = datetime.now(UTC)
             iter_ = _croniter(task.cron, base)
-            next_dt = iter_.get_next(datetime)
-            return max(0.0, (next_dt - base).total_seconds())
+            next_dt: datetime = iter_.get_next(datetime)
+            return max(0.0, float((next_dt - base).total_seconds()))
         # Cron requested but croniter missing — back off long enough that the
         # admin notices when checking logs.
         _logger.warning("croniter not installed; cron task '%s' is inactive", task.id)

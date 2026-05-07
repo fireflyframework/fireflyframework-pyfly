@@ -51,9 +51,9 @@ class RuleEvaluator:
         actual = self._read(c.field, ctx) if c.field else None
         expected = c.value
         if op == "eq":
-            return actual == expected
+            return bool(actual == expected)
         if op == "ne":
-            return actual != expected
+            return bool(actual != expected)
         if op == "gt":
             return actual is not None and actual > expected
         if op == "ge":
@@ -95,10 +95,7 @@ class RuleEvaluator:
     def _read(path: str, ctx: dict[str, Any]) -> Any:
         cur: Any = ctx
         for part in path.split("."):
-            if isinstance(cur, dict):
-                cur = cur.get(part)
-            else:
-                cur = getattr(cur, part, None)
+            cur = cur.get(part) if isinstance(cur, dict) else getattr(cur, part, None)
             if cur is None:
                 return None
         return cur

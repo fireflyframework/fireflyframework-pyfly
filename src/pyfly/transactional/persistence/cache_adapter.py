@@ -23,7 +23,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pyfly.transactional.core.persistence import (
-    ExecutionPersistenceProvider,
     ExecutionState,
 )
 
@@ -44,7 +43,8 @@ class CachePersistenceProvider:
         self._index.add(state.correlation_id)
 
     async def find(self, correlation_id: str) -> ExecutionState | None:
-        return await self._cache.get(self._key(correlation_id))
+        result: ExecutionState | None = await self._cache.get(self._key(correlation_id))
+        return result
 
     async def find_all(self, *, status: Any = None, pattern: Any = None) -> list[ExecutionState]:
         results: list[ExecutionState] = []
@@ -72,13 +72,13 @@ class CachePersistenceProvider:
         cutoff = datetime.now(UTC) - older_than
         count = 0
         for s in await self.find_all():
-            if s.status.is_terminal and (s.completed_at or s.updated_at) < cutoff:
-                if await self.delete(s.correlation_id):
-                    count += 1
+            if (
+                s.status.is_terminal
+                and (s.completed_at or s.updated_at) < cutoff
+                and await self.delete(s.correlation_id)
+            ):
+                count += 1
         return count
 
     async def is_healthy(self) -> bool:
         return True
-
-
-_: ExecutionPersistenceProvider = CachePersistenceProvider(cache_adapter=None)  # type: ignore[arg-type]

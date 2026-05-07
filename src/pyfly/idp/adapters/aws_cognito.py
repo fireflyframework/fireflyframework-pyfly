@@ -48,7 +48,7 @@ class AwsCognitoIdpAdapter:
         if self._client is not None:
             return self._client
         try:
-            import boto3  # type: ignore[import-not-found]
+            import boto3  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AwsCognitoIdpAdapter requires boto3 — `pip install boto3`"
             raise ImportError(msg) from exc
@@ -87,9 +87,7 @@ class AwsCognitoIdpAdapter:
     async def get_user(self, user_id: str) -> IdpUser | None:
         client = self._ensure_client()
         try:
-            data = await self._run(
-                client.admin_get_user, UserPoolId=self._user_pool_id, Username=user_id
-            )
+            data = await self._run(client.admin_get_user, UserPoolId=self._user_pool_id, Username=user_id)
         except Exception:  # noqa: BLE001
             return None
         return _from_cognito(data)
@@ -203,9 +201,7 @@ class AwsCognitoIdpAdapter:
         import secrets
 
         new_password = secrets.token_urlsafe(16)
-        await self.change_password(
-            PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password)
-        )
+        await self.change_password(PasswordChangeRequest(user_id=user_id, old_password="", new_password=new_password))
         return new_password
 
     async def assign_role(self, user_id: str, role: str) -> bool:
