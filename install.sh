@@ -16,7 +16,7 @@
 # PyFly Framework Installer
 # Usage:
 #   Interactive:     bash install.sh
-#   Via curl:        curl -fsSL https://raw.githubusercontent.com/fireflyframework/pyfly/main/install.sh | bash
+#   Via curl:        curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash
 #   Via get.pyfly:   curl -fsSL https://get.pyfly.io/ | bash
 #   Uninstall:       bash install.sh --uninstall
 #   Custom dir:      PYFLY_HOME=/opt/pyfly bash install.sh
@@ -27,7 +27,7 @@ set -euo pipefail
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 PYFLY_VERSION="0.2.0-M11"
-PYFLY_REPO="https://github.com/fireflyframework/pyfly.git"
+PYFLY_REPO="https://github.com/fireflyframework/fireflyframework-pyfly.git"
 DEFAULT_INSTALL_DIR="$HOME/.pyfly"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=12
