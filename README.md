@@ -11,7 +11,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-26.05.02-brightgreen" alt="Version: 26.05.02"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-26.05.03-brightgreen" alt="Version: 26.05.03"></a>
   <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -804,13 +804,13 @@ See **[`samples/order_service/`](samples/order_service/README.md)** for an end-t
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1081,6 +1081,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [Transactional Engine](docs/modules/transactional.md) — Saga, Workflow, and TCC distributed transaction patterns
 - [Event Sourcing](docs/modules/eventsourcing.md) — Aggregates, event store, snapshots, outbox, projections
 - [Domain (DDD primitives)](docs/modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification, DomainRepository, exceptions
+- [Starters](docs/modules/starters.md) — Layered bundles (`@enable_core_stack`, `@enable_web_stack`, `@enable_application_stack`, `@enable_data_stack`, `@enable_domain_stack`) with one-line imperative APIs for .NET parity
 - [Plugins](docs/modules/plugins.md) — Plugin SPI, extension points, lifecycle
 - [Rule Engine](docs/modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
 - [Callbacks (outbound)](docs/modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
@@ -1135,7 +1136,15 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 See **[CHANGELOG.md](CHANGELOG.md)** for detailed release notes.
 
-**Current:** `v26.05.02` (2026-05-08) — DDD primitives + OrderService sample + async-saga fix:
+**Current:** `v26.05.03` (2026-05-08) — Functional starters + Java/.NET parity:
+
+- **Starters now actually do something** — `@enable_*_stack` decorators no longer just set a marker attribute. They now inject their property defaults between framework defaults and the user's `pyfly.yaml`, so the bundle activates the modules it promises (`pyfly.cqrs.enabled`, `pyfly.transactional.enabled`, etc.) while explicit user values still win.
+- **`@enable_web_stack` (new)** — dedicated web-tier starter for HTTP/REST APIs that don't need EDA, CQRS, or cache. Activates web framework adapter (Starlette/FastAPI), ASGI server, validation, actuator, observability, and resilience filters.
+- **Imperative API for parity with .NET** — every starter now ships a `register_*_stack(app)` function (`register_core_stack`, `register_web_stack`, `register_application_stack`, `register_data_stack`, `register_domain_stack`) — the Pythonic counterpart to .NET's `services.AddFireflyXxx(...)` extension methods. Imperative registration is authoritative (last-call-wins).
+- **One-import-line ergonomics** — every starter re-exports the most commonly used decorators and types of its tier. `from pyfly.starters.web import rest_controller, post_mapping, Body, Valid, ...`; `from pyfly.starters.domain import AggregateRoot, BusinessRuleViolation, Command, CommandHandler, command_handler, ...`.
+- **Layered docs** — new [`docs/modules/starters.md`](docs/modules/starters.md) explains the property-layering model (framework defaults < starter defaults < user yaml < profile overlays < env vars) and shows the cross-language correspondence table.
+
+**Previous:** `v26.05.02` (2026-05-08) — DDD primitives + OrderService sample + async-saga fix:
 
 - **`pyfly.domain`** — pure-Python DDD building blocks: `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification` (with `&` / `|` / `~` combinators), `DomainRepository` protocol, `DomainException` / `BusinessRuleViolation` / `AggregateNotFound`. Mirrors `fireflyframework-starter-domain` (Java) and `FireflyFramework.Starter.Domain` (.NET).
 - **OrderService sample** — `samples/order_service/` is a complete DDD-flavoured microservice with the same layered split (interfaces / models / core / web / sdk) used by the firefly-oss Java services and the .NET OrdersService sample. Includes a real `Order` aggregate, CQRS handlers, and a `ConfirmOrderSaga` that walks the order through `PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation. 13/13 tests pass end-to-end.
