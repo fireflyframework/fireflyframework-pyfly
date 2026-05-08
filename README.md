@@ -11,7 +11,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-26.05.03-brightgreen" alt="Version: 26.05.03"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-26.05.04-brightgreen" alt="Version: 26.05.04"></a>
   <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -804,13 +804,13 @@ See **[`samples/order_service/`](samples/order_service/README.md)** for an end-t
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.3-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1136,7 +1136,12 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 See **[CHANGELOG.md](CHANGELOG.md)** for detailed release notes.
 
-**Current:** `v26.05.03` (2026-05-08) — Functional starters + Java/.NET parity:
+**Current:** `v26.05.04` (2026-05-08) — `pyfly.security` import-chain fix:
+
+- **Bug fix** — `pyfly.security/__init__.py` no longer eagerly imports a starlette-specific `SecurityMiddleware` that transitively pulls in `pyjwt`. Importing `pyfly` (and instantiating `PyFlyApplication`) now works without `[security]` extras installed. Optional symbols (`SecurityMiddleware`, `JWTService`, `BcryptPasswordEncoder`) only export when their underlying packages (`starlette`, `pyjwt`, `bcrypt`) are present. Regression test pinned in `tests/security/test_optional_imports.py`.
+- Verified: bare wheel install (`pip install pyfly`) now exposes `pyfly.domain` immediately; the `[web,cqrs,transactional,eventsourcing]` extras unblock the full application bootstrap path.
+
+**Previous:** `v26.05.03` (2026-05-08) — Functional starters + Java/.NET parity:
 
 - **Starters now actually do something** — `@enable_*_stack` decorators no longer just set a marker attribute. They now inject their property defaults between framework defaults and the user's `pyfly.yaml`, so the bundle activates the modules it promises (`pyfly.cqrs.enabled`, `pyfly.transactional.enabled`, etc.) while explicit user values still win.
 - **`@enable_web_stack` (new)** — dedicated web-tier starter for HTTP/REST APIs that don't need EDA, CQRS, or cache. Activates web framework adapter (Starlette/FastAPI), ASGI server, validation, actuator, observability, and resilience filters.

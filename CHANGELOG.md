@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.04 (2026-05-08)
+
+### Fixed — `pyfly.security` no longer needs `pyjwt` to import
+
+`pyfly.security/__init__.py` used to eagerly re-export
+`SecurityMiddleware`, which transitively imported the starlette
+adapter and `pyjwt` at module load time. The chain meant that
+`import pyfly` itself failed when those optional packages were
+missing — even for non-HTTP services that just want the kernel + DDD
+primitives.
+
+The import is now wrapped in `try / except ImportError`, matching the
+pattern already used for `JWTService` and `BcryptPasswordEncoder`.
+Optional symbols (`SecurityMiddleware`, `JWTService`,
+`BcryptPasswordEncoder`) only land in the `__all__` export list when
+their underlying packages (`starlette`, `pyjwt`, `bcrypt`) are present.
+
+Regression test pinned in
+[`tests/security/test_optional_imports.py`](tests/security/test_optional_imports.py).
+
+### Verified — bare-wheel install works end-to-end
+
+* `pip install pyfly` (no extras) → `pyfly.domain` primitives
+  importable, no infra deps required.
+* `pip install "pyfly[web,cqrs,transactional,eventsourcing]"` →
+  `PyFlyApplication`, `@enable_*_stack` decorators, and
+  `register_*_stack(app)` imperative API all work without `pyjwt`
+  installed.
+
+---
+
 ## v26.05.03 (2026-05-08)
 
 ### Changed — starter decorators are now functional
