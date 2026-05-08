@@ -88,15 +88,20 @@ class Config:
         base_dir: str | Path,
         active_profiles: list[str] | None = None,
         load_defaults: bool = True,
+        starter_defaults: dict[str, Any] | None = None,
     ) -> Config:
         """Load and merge config from multiple sources (Spring Boot style).
 
         Merge order (later wins):
         1. Framework defaults (pyfly-defaults.yaml from package)
-        2. config/pyfly.yaml or config/pyfly.toml (config subdirectory)
-        3. pyfly.yaml or pyfly.toml (project root)
-        4. Profile overlays: config/pyfly-{profile}.yaml, pyfly-{profile}.yaml
-        5. Environment variables (handled at read time in get())
+        2. *Starter defaults* — properties activated by ``@enable_*_stack``
+           decorators (passed in via *starter_defaults*). They sit between
+           the framework defaults and the user files so the bundle takes
+           effect, while explicit user values still win.
+        3. config/pyfly.yaml or config/pyfly.toml (config subdirectory)
+        4. pyfly.yaml or pyfly.toml (project root)
+        5. Profile overlays: config/pyfly-{profile}.yaml, pyfly-{profile}.yaml
+        6. Environment variables (handled at read time in get())
         """
         base_dir = Path(base_dir)
         data: dict[str, Any] = {}
@@ -106,6 +111,11 @@ class Config:
         if load_defaults:
             data = cls._load_framework_defaults()
             sources.append("pyfly-defaults.yaml (framework defaults)")
+
+        # 1b. Starter defaults (between framework defaults and user files)
+        if starter_defaults:
+            data = cls._deep_merge(data, starter_defaults)
+            sources.append("starter defaults (@enable_*_stack)")
 
         # 2. config/ subdirectory
         for ext in (".yaml", ".toml"):

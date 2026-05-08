@@ -6,6 +6,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.03 (2026-05-08)
+
+### Changed — starter decorators are now functional
+
+The ``@enable_*_stack`` decorators (`enable_core_stack`,
+`enable_application_stack`, `enable_data_stack`,
+`enable_domain_stack`) used to set a marker attribute that nothing
+read at boot, so the bundle they advertised did not actually take
+effect. They now inject their property defaults between framework
+defaults and the user's ``pyfly.yaml``:
+
+```
+framework defaults  <  starter defaults  <  user pyfly.yaml  <  profiles  <  env
+```
+
+`Config.from_sources()` accepts a new ``starter_defaults`` parameter
+that ``PyFlyApplication.__init__`` populates by scanning the
+application class for ``__pyfly_starter_*__`` attributes. Auto-configs
+guarded on ``pyfly.X.enabled = "true"`` (CQRS, EDA, cache,
+event sourcing, transactional, IDP, etc.) now wire up automatically
+when the matching starter is applied.
+
+### Added — `@enable_web_stack` (new)
+
+Pure web-tier bundle separate from `@enable_core_stack`. Activates
+``pyfly.web``, ``pyfly.server``, ``pyfly.observability``,
+``pyfly.actuator`` and ``pyfly.resilience`` — useful for HTTP/REST
+APIs that don't need EDA, CQRS, or cache. Java rolls these into
+``starter-core``; .NET rolls them into ``Starter.Core``; pyfly keeps
+them split so a non-HTTP service (worker, scheduler, CLI tool) can
+opt out of the web stack entirely.
+
+### Added — imperative `register_*_stack(app)` API
+
+Every starter now ships an imperative counterpart for parity with
+.NET's ``services.AddFireflyXxx(...)`` extension methods:
+
+* ``register_core_stack(app)``
+* ``register_web_stack(app)``
+* ``register_application_stack(app)``
+* ``register_data_stack(app)``
+* ``register_domain_stack(app)``
+
+Imperative registration is **authoritative** — it merges starter
+properties on top of whatever's already in the config, including the
+user's ``pyfly.yaml``. Mirrors .NET's last-call-wins DI semantics.
+
+### Added — re-exports
+
+Each starter now re-exports the most commonly used types and
+decorators of its tier so a controller / service file needs only a
+single import line:
+
+* `pyfly.starters.core` re-exports `service`, `component`,
+  `configuration`, `rest_controller`, `Autowired`, `Scope`,
+  `pyfly_application`, `Command`, `CommandBus`, `CommandHandler`,
+  `command_handler`, `Query`, `QueryBus`, `QueryHandler`,
+  `query_handler`.
+* `pyfly.starters.web` re-exports `rest_controller`, `controller`,
+  `controller_advice`, `exception_handler`, `request_mapping`,
+  `get_mapping`, `post_mapping`, `put_mapping`, `patch_mapping`,
+  `delete_mapping`, `sse_mapping`, `Body`, `PathVar`, `QueryParam`,
+  `Header`, `Cookie`, `File`, `UploadedFile`, `Valid`.
+* `pyfly.starters.domain` re-exports the full DDD primitive set
+  (`Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`,
+  `Specification`, `DomainRepository`, `DomainException`,
+  `BusinessRuleViolation`, `AggregateNotFound`) plus the core
+  re-exports above.
+
+### Documentation
+
+New module guide [`docs/modules/starters.md`](docs/modules/starters.md)
+explains the property-layering model, shows the cross-language
+correspondence table (Java / .NET / Python), and documents both the
+declarative (decorator) and imperative (function) usage patterns.
+
+---
+
 ## v26.05.02 (2026-05-08)
 
 ### Added — `pyfly.domain` DDD building blocks

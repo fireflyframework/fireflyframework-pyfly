@@ -77,14 +77,31 @@ class PyFlyApplication:
         self._scan_packages: list[str] = getattr(app_class, "__pyfly_scan_packages__", [])
         self._startup_time: float = 0.0
 
-        # 1. Load configuration (with profile merging, multi-source)
+        # 1a. Compute starter property defaults from any @enable_*_stack
+        #     decorators on the application class. These flow into the
+        #     config loader as a layer between framework defaults and the
+        #     user's pyfly.yaml — so the bundle activates the modules it
+        #     promises while explicit user values still win.
+        starter_defaults = self._collect_starter_properties(app_class)
+
+        # 1b. Load configuration (with profile merging, multi-source)
         config_dir = self._find_config_dir(config_path)
         active_profiles = self._resolve_profiles_early(config_dir)
         if config_dir:
-            self.config = Config.from_sources(config_dir, active_profiles=active_profiles)
+            self.config = Config.from_sources(
+                config_dir,
+                active_profiles=active_profiles,
+                starter_defaults=starter_defaults,
+            )
         else:
-            self.config = Config(Config._load_framework_defaults())
-            self.config._loaded_sources = ["pyfly-defaults.yaml (framework defaults)"]
+            base = Config._load_framework_defaults()
+            if starter_defaults:
+                base = Config._deep_merge(base, starter_defaults)
+            self.config = Config(base)
+            sources = ["pyfly-defaults.yaml (framework defaults)"]
+            if starter_defaults:
+                sources.append("starter defaults (@enable_*_stack)")
+            self.config._loaded_sources = sources
 
         # 2. Configure logging
         self._logging = _DefaultLoggingAdapter()
@@ -319,6 +336,38 @@ class PyFlyApplication:
         """Shutdown the application — stop the ApplicationContext."""
         self._logger.info("shutting_down", app=self._name)
         await self._context.stop()
+
+    @staticmethod
+    def _collect_starter_properties(app_class: type) -> dict[str, Any]:
+        """Build the nested starter-defaults dict from ``@enable_*_stack`` decorators.
+
+        Returns a nested mapping ready to be deep-merged with
+        :code:`Config._load_framework_defaults()` and the user's
+        ``pyfly.yaml``. Empty dict if no starter decorators are present.
+        """
+        defaults: dict[str, Any] = {}
+        for attr_name in dir(app_class):
+            if not attr_name.startswith("__pyfly_starter_") or not attr_name.endswith("__"):
+                continue
+            stack_props = getattr(app_class, attr_name, None)
+            if not isinstance(stack_props, dict):
+                continue
+            for dotted_key, raw_value in stack_props.items():
+                PyFlyApplication._merge_dotted(defaults, dotted_key, raw_value)
+        return defaults
+
+    @staticmethod
+    def _merge_dotted(target: dict[str, Any], key: str, value: Any) -> None:
+        """Insert *value* into *target* under the dotted *key*."""
+        parts = key.split(".")
+        cursor = target
+        for part in parts[:-1]:
+            existing = cursor.get(part)
+            if not isinstance(existing, dict):
+                existing = {}
+                cursor[part] = existing
+            cursor = existing
+        cursor[parts[-1]] = value
 
     def _find_config_dir(self, config_path: str | Path | None) -> Path | None:
         """Find the project directory containing config files."""
