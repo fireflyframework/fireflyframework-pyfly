@@ -1,0 +1,36 @@
+[project]
+name = "order-service"
+version = "1.0.0"
+description = "DDD-flavoured Order Service sample for the PyFly framework"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Firefly Software Foundation" }]
+dependencies = [
+    # Sample uses the local checkout via uv's [tool.uv.sources] table below.
+    "pyfly[web,cqrs,transactional,eventsourcing]",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+]
+
+[tool.uv.sources]
+pyfly = { path = "../..", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/order_service"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -11,7 +11,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-26.05.01-brightgreen" alt="Version: 26.05.01"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-26.05.02-brightgreen" alt="Version: 26.05.02"></a>
   <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -732,6 +732,68 @@ class StripePayment(PaymentMethod):
 
 The plugin manager resolves the dependency graph, loads plugins in order, and registers extensions with the DI container. See [docs/modules/plugins.md](docs/modules/plugins.md).
 
+### Domain — DDD Building Blocks
+
+`pyfly.domain` ships the foundational types every domain-driven design codebase ends up reinventing — `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification`, `DomainRepository`, and domain-flavoured exceptions. The module is **pure standard-library Python** with zero runtime dependencies.
+
+```python
+from dataclasses import dataclass
+from pyfly.domain import AggregateRoot, BusinessRuleViolation, DomainEvent, ValueObject
+
+@dataclass(frozen=True, slots=True)
+class Money(ValueObject):
+    amount: int
+    currency: str
+
+@dataclass(frozen=True)
+class OrderShipped(DomainEvent):
+    order_id: str = ""
+    tracking_number: str = ""
+
+class Order(AggregateRoot[str]):
+    def __init__(self, id: str, total: Money) -> None:
+        super().__init__(id)
+        self.total = total
+        self.status = "placed"
+
+    def ship(self, tracking_number: str) -> None:
+        if self.status == "shipped":
+            raise BusinessRuleViolation("order-already-shipped")
+        self.status = "shipped"
+        assert self.id is not None
+        self.raise_event(OrderShipped(order_id=self.id, tracking_number=tracking_number))
+
+# Application service:
+order = Order("o-1", Money(100, "EUR"))
+order.ship("trk-42")
+
+events = order.clear_events()      # drained by the repository
+# repository.save(order); for e in events: bus.publish(e)
+```
+
+For domain-tier microservices, the **`@enable_domain_stack`** starter activates CQRS, the transactional engine (saga/workflow/TCC), event sourcing, the rule engine, and the relational data layer in a single decorator — mirroring `fireflyframework-starter-domain` (Java) and `AddFireflyDomain` (.NET):
+
+```python
+from pyfly.core import pyfly_application
+from pyfly.starters.domain import enable_domain_stack
+
+@enable_domain_stack
+@pyfly_application(name="my-service", scan_packages=["my_service"])
+class Application:
+    pass
+```
+
+The full DDD primitives are also re-exported from `pyfly.starters.domain` so a single import line is enough:
+
+```python
+from pyfly.starters.domain import (
+    AggregateRoot, BusinessRuleViolation, DomainEvent, DomainRepository,
+    Entity, Specification, ValueObject, enable_domain_stack,
+)
+```
+
+See **[`samples/order_service/`](samples/order_service/README.md)** for an end-to-end DDD microservice that uses every primitive: layered split (interfaces / models / core / web / sdk), a real `Order` aggregate that protects its invariants, CQRS handlers, and a `ConfirmOrderSaga` that walks the order through `PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation. See [docs/modules/domain.md](docs/modules/domain.md).
+
 ---
 
 ## Installation
@@ -742,13 +804,13 @@ The plugin manager resolves the dependency graph, loads plugins in order, and re
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.1-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.2-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -925,7 +987,7 @@ See the full [CLI Reference](docs/cli.md) for details.
 
 ## Modules
 
-PyFly ships with **38 fully-implemented modules** organized into five layers — covering everything from HTTP routing and database access to distributed transactions, event sourcing, identity, content management, and observability:
+PyFly ships with **39 fully-implemented modules** organized into five layers — covering everything from HTTP routing and database access to distributed transactions, event sourcing, identity, content management, observability, and DDD building blocks:
 
 ### Foundation Layer
 
@@ -964,6 +1026,7 @@ PyFly ships with **38 fully-implemented modules** organized into five layers —
 | **Shell** | CLI commands, interactive REPL, runners | Spring Shell |
 | **Transactional** | Saga + Workflow + TCC orchestration: signal-driven, DAG, compensation, multi-backend persistence, DLQ, recovery | `fireflyframework-orchestration` |
 | **Event Sourcing** | AggregateRoot, EventStore, snapshots, transactional outbox, projections, upcasting | `fireflyframework-eventsourcing` |
+| **Domain (DDD)** | `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation` | `fireflyframework-starter-domain` |
 | **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | `fireflyframework-plugins` |
 | **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | `fireflyframework-rule-engine` |
 | **Config Server** | Spring Cloud Config Server analogue + client | `fireflyframework-config-server` |
@@ -1017,6 +1080,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [Custom Actuator Endpoints](docs/modules/custom-actuator-endpoints.md) — Build your own actuator endpoints
 - [Transactional Engine](docs/modules/transactional.md) — Saga, Workflow, and TCC distributed transaction patterns
 - [Event Sourcing](docs/modules/eventsourcing.md) — Aggregates, event store, snapshots, outbox, projections
+- [Domain (DDD primitives)](docs/modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification, DomainRepository, exceptions
 - [Plugins](docs/modules/plugins.md) — Plugin SPI, extension points, lifecycle
 - [Rule Engine](docs/modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
 - [Callbacks (outbound)](docs/modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
@@ -1045,7 +1109,7 @@ See **[ROADMAP.md](ROADMAP.md)** for the full roadmap toward feature parity with
 | **Phase 1** | Core Distributed Patterns | Saga/TCC, Workflow, Event Sourcing | Complete (v26.05.01) |
 | **Phase 2** | Business Logic | Rule Engine, Plugins | Complete (v26.05.01) |
 | **Phase 3** | Enterprise Integrations | Notifications, IDP, ECM, Webhooks, Callbacks, Config Server | Complete (v26.05.01) |
-| **Phase 4** | Administrative | Backoffice, Utils, DDD starters | Planned |
+| **Phase 4** | Administrative & DDD | Backoffice, Utils, ~~DDD starters~~ (done in v26.05.02) | DDD complete; backoffice / utils planned |
 
 **v26.05.01** closes the parity gap with the Java Firefly Framework: the transactional engine has been rewritten from scratch (Saga + Workflow + TCC), nine new modules have been added (Event Sourcing, Callbacks, Webhooks, Notifications, IDP, ECM, Plugins, Rule Engine, Config Server), 12 third-party adapters were added, four new client protocols (SOAP/gRPC/GraphQL/WebSocket) were introduced, and the validation library now ships 16 domain validators. The framework is feature-complete for production microservice workloads.
 
@@ -1071,7 +1135,13 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 See **[CHANGELOG.md](CHANGELOG.md)** for detailed release notes.
 
-**Current:** `v26.05.01` (2026-05-07) — Full Java framework parity. Highlights:
+**Current:** `v26.05.02` (2026-05-08) — DDD primitives + OrderService sample + async-saga fix:
+
+- **`pyfly.domain`** — pure-Python DDD building blocks: `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification` (with `&` / `|` / `~` combinators), `DomainRepository` protocol, `DomainException` / `BusinessRuleViolation` / `AggregateNotFound`. Mirrors `fireflyframework-starter-domain` (Java) and `FireflyFramework.Starter.Domain` (.NET).
+- **OrderService sample** — `samples/order_service/` is a complete DDD-flavoured microservice with the same layered split (interfaces / models / core / web / sdk) used by the firefly-oss Java services and the .NET OrdersService sample. Includes a real `Order` aggregate, CQRS handlers, and a `ConfirmOrderSaga` that walks the order through `PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation. 13/13 tests pass end-to-end.
+- **Async-saga fix** — `@saga_step` / `@try_method` / `@confirm_method` / `@cancel_method` no longer wrap the function with a sync adapter that masked `inspect.iscoroutinefunction`. `async def` saga and TCC steps are now correctly awaited by the engine. Regression test pinned in `tests/transactional/saga/test_async_steps.py`.
+
+**Previous:** `v26.05.01` (2026-05-07) — Full Java framework parity:
 
 - **Transactional engine rewrite** — `pyfly.transactional` now ships Saga + Workflow + TCC patterns on a shared core (DAG topology, retries with jitter, backpressure, idempotency, DLQ, recovery, REST controllers, health indicators)
 - **Nine new modules** — `eventsourcing`, `callbacks`, `webhooks`, `notifications`, `idp`, `ecm`, `plugins`, `rule_engine`, `config_server`

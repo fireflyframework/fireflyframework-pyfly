@@ -87,11 +87,11 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.05.01"
+print(pyfly.__version__)  # → "26.05.02"
 ```
 
 ```bash
-pyfly --version            # → 26.05.01
+pyfly --version            # → 26.05.02
 ```
 
 The startup banner displays the leading-zero form:

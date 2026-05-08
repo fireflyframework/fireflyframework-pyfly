@@ -105,6 +105,7 @@ Coordinate multi-step operations across services with automatic compensation and
 |-------|-------------------|
 | [Transactional Engine](transactional.md) | Saga (`@saga`, `@saga_step`), Workflow (`@workflow`, `@workflow_step`, `@wait_for_signal`, `@wait_for_timer`, `@child_workflow`), TCC (`@tcc`, `@tcc_participant`, `@try_method`, `@confirm_method`, `@cancel_method`), parameter injection (`Input`, `FromStep`, `Header`, `Variable`), 5 compensation policies, DAG execution, persistence (in-memory / Redis / SQLAlchemy / cache), recovery, dead-letter queue, scheduling, REST endpoints |
 | [Event Sourcing](eventsourcing.md) | `AggregateRoot`, `EventStore` (in-memory + SQLAlchemy), `SnapshotStore`, `TransactionalOutbox`, `Projection` / `ProjectionRunner`, `EventUpcaster`, `EventSourcedRepository` |
+| [Domain (DDD primitives)](domain.md) | `Entity[TID]`, `ValueObject`, `AggregateRoot[TID]`, `DomainEvent`, `Specification` (in-memory predicate), `DomainRepository` protocol, `DomainException` / `BusinessRuleViolation` / `AggregateNotFound`, `enable_domain_stack` |
 
 ---
 
