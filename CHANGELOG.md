@@ -6,6 +6,92 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.02 (2026-05-08)
+
+### Added — `pyfly.domain` DDD building blocks
+
+A new pure-Python module that mirrors `fireflyframework-starter-domain`
+(Java) and `FireflyFramework.Starter.Domain` (.NET). Zero runtime
+dependencies — just standard-library Python — so it imports from any
+layer of the application.
+
+- **`pyfly.domain.Entity[TID]`** — base class with identity-based
+  equality, transient-vs-persisted distinction, and `(type, id)` hashing.
+- **`pyfly.domain.ValueObject`** — marker base for `@dataclass(frozen=True)`
+  records with structural equality, immutability, and a uniform
+  `replace(...)` helper.
+- **`pyfly.domain.AggregateRoot[TID]`** — extends `Entity[TID]` with a
+  `pending_events` buffer plus `raise_event` / `pending_events` /
+  `clear_events`. Distinct from the event-sourced
+  `pyfly.eventsourcing.AggregateRoot`; both coexist.
+- **`pyfly.domain.DomainEvent`** — frozen-dataclass base that
+  auto-assigns a UUID `event_id` and UTC `occurred_at` timestamp; the
+  `event_type` property defaults to the subclass name.
+- **`pyfly.domain.Specification[T]`** — composable in-memory predicate
+  with `&` / `|` / `~` combinators and a `Specification.of(callable)`
+  factory.
+- **`pyfly.domain.DomainRepository[A, TID]`** — runtime-checkable
+  collection-like protocol (`add`, `find`, `remove`, `next_id`).
+- **`pyfly.domain.DomainException`** + **`BusinessRuleViolation`**
+  (`code="DOMAIN_RULE_VIOLATION"`) + **`AggregateNotFound`**
+  (`code="DOMAIN_AGGREGATE_NOT_FOUND"`) — extend
+  `pyfly.kernel.BusinessException` so existing RFC 7807 mappers,
+  filters, and `@controller_advice` handlers translate them
+  automatically.
+- **`pyfly.starters.domain`** now re-exports every primitive above
+  alongside `enable_domain_stack`, so a single import line is enough
+  for a domain-tier service.
+
+### Added — OrderService sample
+
+`samples/order_service/` is a complete, runnable DDD microservice that
+mirrors the layered split used by Java domain services in
+[`firefly-oss`](https://github.com/firefly-oss) and the .NET
+`FireflyFramework.Samples.OrdersService`:
+
+```
+samples/order_service/
+├── interfaces/         DTOs + enums (PlaceOrderRequest, OrderDto, OrderStatus)
+├── models/             Order aggregate root + repository (port + in-memory adapter)
+├── core/               Commands, queries, handlers, mapper, ConfirmOrderSaga
+├── web/                @rest_controller exposing /api/v1/orders
+├── sdk/                Typed httpx-based client
+└── app.py              @pyfly_application + @enable_domain_stack
+```
+
+`Order` is a real `AggregateRoot[str]` with state-machine invariants
+enforced by `BusinessRuleViolation`. `PlaceOrderHandler` creates and
+persists the aggregate and publishes its pending events.
+`ConfirmOrderSaga` walks the order through
+`PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation
+via three stub external services (`InventoryService`, `PaymentService`,
+`ShippingService`). 13/13 end-to-end tests pass against the real CQRS
+bus and saga engine — no mocks.
+
+### Fixed — async saga and TCC step support
+
+The `@saga_step`, `@try_method`, `@confirm_method`, and `@cancel_method`
+decorators used to wrap the target function with a synchronous
+`functools.wraps` adapter. That made `inspect.iscoroutinefunction`
+return `False` for `async def` steps, so the engine called them
+without `await` and the actual coroutine never ran. The wrappers were
+no-ops (they just forwarded args to the original); they have been
+removed and the metadata is now attached directly to the original
+function. Regression test added at
+`tests/transactional/saga/test_async_steps.py`.
+
+### Documentation
+
+- New module guide [`docs/modules/domain.md`](docs/modules/domain.md)
+  with end-to-end examples for every primitive.
+- README adds a "Domain — DDD Building Blocks" section to the
+  Featured Patterns and a row to the Modules table; module count
+  updated from 38 to 39.
+- ROADMAP marks Phase 4 DDD as complete; Backoffice and Utils remain
+  planned.
+
+---
+
 ## v26.05.01 (2026-05-07)
 
 ### CalVer migration

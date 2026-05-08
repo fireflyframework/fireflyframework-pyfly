@@ -4,11 +4,11 @@ PyFly's roadmap is driven by achieving feature parity with the full [Firefly Fra
 
 ---
 
-## Current State (v26.05.01)
+## Current State (v26.05.02)
 
-PyFly ships with **38 fully-implemented modules** covering the foundation, application, infrastructure, integration, and cross-cutting layers — including the rewritten transactional engine (Saga + Workflow + TCC), Event Sourcing, IDP, ECM, Notifications, Webhooks, Callbacks, Plugins, Rule Engine, and Config Server. See the [Changelog](CHANGELOG.md) for full details on what's included.
+PyFly ships with **39 fully-implemented modules** covering the foundation, application, infrastructure, integration, and cross-cutting layers — including the rewritten transactional engine (Saga + Workflow + TCC), Event Sourcing, IDP, ECM, Notifications, Webhooks, Callbacks, Plugins, Rule Engine, Config Server, and the new **`pyfly.domain` DDD primitives** (`v26.05.02`). See the [Changelog](CHANGELOG.md) for full details on what's included.
 
-Phases 1, 2, and 3 of the original roadmap have all landed in `v26.05.01`. Phase 4 is the remaining set.
+Phases 1, 2, and 3 of the original roadmap landed in `v26.05.01`. The **DDD starters** portion of Phase 4 landed in `v26.05.02`. Backoffice and Utils remain planned.
 
 ---
 
@@ -46,13 +46,13 @@ Phases 1, 2, and 3 of the original roadmap have all landed in `v26.05.01`. Phase
 
 ---
 
-## Phase 4 — Administrative & Infrastructure 🔄 **Planned**
+## Phase 4 — Administrative & DDD 🔄 **Partially complete (DDD done in v26.05.02)**
 
-| Module | Description | Java Source |
-|--------|-------------|-------------|
-| **Backoffice** | Admin/backoffice layer with impersonation and enhanced audit | [`fireflyframework-backoffice`](https://github.com/fireflyframework/fireflyframework-backoffice) |
-| **Domain (DDD starters)** | DDD building blocks — base entities, value objects, aggregate roots, domain events | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) |
-| **Utils** | Shared utility library — template rendering, filtering, common helpers | [`fireflyframework-utils`](https://github.com/fireflyframework/fireflyframework-utils) |
+| Module | Description | Java Source | Status |
+|--------|-------------|-------------|--------|
+| **Domain (DDD starters)** | `Entity[TID]`, `ValueObject`, `AggregateRoot[TID]`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation`, `AggregateNotFound`, plus the `enable_domain_stack` decorator. Pure-Python primitives with zero runtime dependencies. Includes a complete OrderService sample under `samples/order_service/`. | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) | Done in v26.05.02 |
+| **Backoffice** | Admin/backoffice layer with impersonation and enhanced audit | [`fireflyframework-backoffice`](https://github.com/fireflyframework/fireflyframework-backoffice) | Planned |
+| **Utils** | Shared utility library — template rendering, filtering, common helpers | [`fireflyframework-utils`](https://github.com/fireflyframework/fireflyframework-utils) | Planned |
 
 ---
 

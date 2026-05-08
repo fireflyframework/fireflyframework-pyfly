@@ -29,7 +29,6 @@ Parameter injection markers (for use with ``typing.Annotated``):
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -177,8 +176,9 @@ def saga_step(
 ) -> Callable[[F], F]:
     """Mark a method as a saga step.
 
-    Wraps the function with ``@functools.wraps`` and sets
-    ``__pyfly_saga_step__`` on the wrapper.
+    Sets ``__pyfly_saga_step__`` directly on the function so that
+    ``inspect.iscoroutinefunction`` keeps working for ``async def``
+    steps.
 
     Args:
         id: Unique step identifier within the saga.
@@ -199,11 +199,10 @@ def saga_step(
     resolved_depends_on: list[str] = depends_on if depends_on is not None else []
 
     def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        wrapper.__pyfly_saga_step__ = {  # type: ignore[attr-defined]
+        # Attach metadata directly to *func* — no wrapper. A wrapper would
+        # mask ``inspect.iscoroutinefunction(func)`` and the engine would
+        # call async steps without awaiting them.
+        func.__pyfly_saga_step__ = {  # type: ignore[attr-defined]
             "id": id,
             "compensate": compensate,
             "depends_on": resolved_depends_on,
@@ -219,7 +218,7 @@ def saga_step(
             "compensation_timeout_ms": compensation_timeout_ms,
             "compensation_critical": compensation_critical,
         }
-        return wrapper  # type: ignore[return-value]
+        return func
 
     return decorator
 

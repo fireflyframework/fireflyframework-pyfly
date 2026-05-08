@@ -28,7 +28,6 @@ Parameter injection markers (for use with ``typing.Annotated``):
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -126,8 +125,9 @@ def try_method(
 ) -> Callable[[F], F]:
     """Mark a method as the Try phase of a TCC participant.
 
-    Wraps the function with ``@functools.wraps`` and sets
-    ``__pyfly_try_method__`` on the wrapper.
+    Sets ``__pyfly_try_method__`` directly on the function so that
+    ``inspect.iscoroutinefunction`` keeps working for ``async def``
+    phases.
 
     Args:
         timeout_ms: Execution timeout in milliseconds. Defaults to 0 (no timeout).
@@ -136,16 +136,12 @@ def try_method(
     """
 
     def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        wrapper.__pyfly_try_method__ = {  # type: ignore[attr-defined]
+        func.__pyfly_try_method__ = {  # type: ignore[attr-defined]
             "timeout_ms": timeout_ms,
             "retry": retry,
             "backoff_ms": backoff_ms,
         }
-        return wrapper  # type: ignore[return-value]
+        return func
 
     return decorator
 
@@ -157,8 +153,9 @@ def confirm_method(
 ) -> Callable[[F], F]:
     """Mark a method as the Confirm phase of a TCC participant.
 
-    Wraps the function with ``@functools.wraps`` and sets
-    ``__pyfly_confirm_method__`` on the wrapper.
+    Sets ``__pyfly_confirm_method__`` directly on the function so that
+    ``inspect.iscoroutinefunction`` keeps working for ``async def``
+    phases.
 
     Args:
         timeout_ms: Execution timeout in milliseconds. Defaults to 0 (no timeout).
@@ -167,16 +164,12 @@ def confirm_method(
     """
 
     def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        wrapper.__pyfly_confirm_method__ = {  # type: ignore[attr-defined]
+        func.__pyfly_confirm_method__ = {  # type: ignore[attr-defined]
             "timeout_ms": timeout_ms,
             "retry": retry,
             "backoff_ms": backoff_ms,
         }
-        return wrapper  # type: ignore[return-value]
+        return func
 
     return decorator
 
@@ -188,8 +181,9 @@ def cancel_method(
 ) -> Callable[[F], F]:
     """Mark a method as the Cancel phase of a TCC participant.
 
-    Wraps the function with ``@functools.wraps`` and sets
-    ``__pyfly_cancel_method__`` on the wrapper.
+    Sets ``__pyfly_cancel_method__`` directly on the function so that
+    ``inspect.iscoroutinefunction`` keeps working for ``async def``
+    phases.
 
     Args:
         timeout_ms: Execution timeout in milliseconds. Defaults to 0 (no timeout).
@@ -198,16 +192,12 @@ def cancel_method(
     """
 
     def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        wrapper.__pyfly_cancel_method__ = {  # type: ignore[attr-defined]
+        func.__pyfly_cancel_method__ = {  # type: ignore[attr-defined]
             "timeout_ms": timeout_ms,
             "retry": retry,
             "backoff_ms": backoff_ms,
         }
-        return wrapper  # type: ignore[return-value]
+        return func
 
     return decorator
 
