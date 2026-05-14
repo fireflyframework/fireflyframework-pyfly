@@ -27,6 +27,7 @@ from pyfly.web.adapters.fastapi.controller import FastAPIControllerRegistrar
 from pyfly.web.adapters.fastapi.errors import register_exception_handlers
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
+    CorrelationFilter,
     RequestLoggingFilter,
     SecurityHeadersFilter,
     TransactionIdFilter,
@@ -71,6 +72,7 @@ def create_app(
     """
     # --- Build the WebFilter chain ---
     filters: list[WebFilter] = [
+        CorrelationFilter(),
         TransactionIdFilter(),
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
@@ -84,7 +86,7 @@ def create_app(
                 and isinstance(reg.instance, WebFilter)
                 and not isinstance(
                     reg.instance,
-                    (TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
+                    (CorrelationFilter, TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
                 )
             ):
                 filters.append(reg.instance)
@@ -175,12 +177,24 @@ def create_app(
 
         agg = HealthAggregator()
 
-        # Auto-discover HealthIndicator beans from context
-        if context is not None:
+        # See the matching block in ``pyfly.web.adapters.starlette.app``
+        # for the timing rationale — beans are not yet instantiated at
+        # ``create_app`` time, so we expose the scanner on ``app.state``
+        # and let the downstream lifespan rerun it after startup.
+        def _install_indicators() -> None:
+            if context is None:
+                return
+            seen = set(agg._indicators.keys())  # noqa: SLF001
             for cls, reg in context.container._registrations.items():
                 if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
                     indicator_name = reg.name or cls.__name__
+                    if indicator_name in seen:
+                        continue
                     agg.add_indicator(indicator_name, reg.instance)
+                    seen.add(indicator_name)
+
+        _install_indicators()
+        app.state.pyfly_install_health_indicators = _install_indicators
 
         config = context.config if context is not None else None
         registry = ActuatorRegistry(config=config)

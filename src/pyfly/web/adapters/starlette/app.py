@@ -32,6 +32,7 @@ from pyfly.web.adapters.starlette.docs import (
 from pyfly.web.adapters.starlette.errors import global_exception_handler
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
+    CorrelationFilter,
     RequestLoggingFilter,
     SecurityHeadersFilter,
     TransactionIdFilter,
@@ -74,6 +75,7 @@ def create_app(
     """
     # --- Build the WebFilter chain ---
     filters: list[WebFilter] = [
+        CorrelationFilter(),
         TransactionIdFilter(),
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
@@ -87,7 +89,7 @@ def create_app(
                 and isinstance(reg.instance, WebFilter)
                 and not isinstance(
                     reg.instance,
-                    (TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
+                    (CorrelationFilter, TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
                 )
             ):
                 filters.append(reg.instance)
@@ -161,12 +163,31 @@ def create_app(
 
         agg = HealthAggregator()
 
-        # Auto-discover HealthIndicator beans from context
-        if context is not None:
+        # Auto-discover HealthIndicator beans from context.
+        #
+        # NOTE: ``create_app`` is typically called BEFORE the ApplicationContext
+        # has started (the startup happens inside the ASGI ``lifespan``
+        # function). At this point user / auto-configuration beans have
+        # been *registered* but not *instantiated*, so the eager loop only
+        # finds indicators that were attached as static singletons.
+        #
+        # The remaining indicators are picked up by ``_install_indicators``
+        # which we attach to the Starlette ``on_startup`` hook below — by
+        # the time on_startup fires, the lifespan has already triggered
+        # ``PyFlyApplication.startup()`` and every bean has been built.
+        def _install_indicators() -> None:
+            if context is None:
+                return
+            seen = set(agg._indicators.keys())  # noqa: SLF001 — intentional, indicator names
             for cls, reg in context.container._registrations.items():
                 if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
                     indicator_name = reg.name or cls.__name__
+                    if indicator_name in seen:
+                        continue
                     agg.add_indicator(indicator_name, reg.instance)
+                    seen.add(indicator_name)
+
+        _install_indicators()
 
         config = context.config if context is not None else None
         registry = ActuatorRegistry(config=config)
@@ -304,6 +325,14 @@ def create_app(
     # Store metadata for startup logging
     app.state.pyfly_route_metadata = route_metadata
     app.state.pyfly_docs_enabled = docs_enabled
+
+    # Expose the indicator rescan so the downstream lifespan can rerun
+    # it AFTER ``ApplicationContext.start()`` has instantiated every
+    # bean. The eager call above only catches indicators that already
+    # had ``.instance`` set at create_app time (rare — most live as
+    # @bean methods on @auto_configuration classes).
+    if actuator_enabled:
+        app.state.pyfly_install_health_indicators = _install_indicators  # type: ignore[name-defined]
 
     # Register global exception handler
     app.add_exception_handler(Exception, global_exception_handler)

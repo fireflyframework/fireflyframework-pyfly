@@ -11,12 +11,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyFly Observability — Metrics and tracing decorators."""
+"""PyFly Observability — Metrics, tracing decorators, and correlation context."""
 
+from pyfly.observability.correlation import (
+    CORRELATION_ID_HEADER,
+    REQUEST_ID_HEADER,
+    TENANT_ID_HEADER,
+    TRACEPARENT_HEADER,
+    TRACESTATE_HEADER,
+    bind_correlation_context,
+    current_correlation_context,
+    get_correlation_id,
+    get_request_id,
+    get_tenant_id,
+    get_traceparent,
+    get_tracestate,
+    set_correlation_id,
+    set_request_id,
+    set_tenant_id,
+    set_traceparent,
+    set_tracestate,
+    unbind_correlation_context,
+)
 from pyfly.observability.tracing import span
 
 __all__ = [
+    "CORRELATION_ID_HEADER",
+    "REQUEST_ID_HEADER",
+    "TENANT_ID_HEADER",
+    "TRACEPARENT_HEADER",
+    "TRACESTATE_HEADER",
+    "bind_correlation_context",
+    "current_correlation_context",
+    "get_correlation_id",
+    "get_request_id",
+    "get_tenant_id",
+    "get_traceparent",
+    "get_tracestate",
+    "set_correlation_id",
+    "set_request_id",
+    "set_tenant_id",
+    "set_traceparent",
+    "set_tracestate",
     "span",
+    "unbind_correlation_context",
 ]
 
 try:

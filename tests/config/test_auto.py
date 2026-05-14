@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 36
+        assert len(classes) == 38
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -82,6 +82,8 @@ class TestDiscoverAutoConfigurations:
             "CqrsAutoConfiguration",
             "DocumentAutoConfiguration",
             "EcmAutoConfiguration",
+            "EdaAutoConfiguration",
+            "EdaHealthAutoConfiguration",
             "EventLoopAutoConfiguration",
             "EventSourcingAutoConfiguration",
             "I18nAutoConfiguration",
