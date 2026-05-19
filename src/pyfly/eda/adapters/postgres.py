@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import json
 import logging
 import re
@@ -74,6 +75,23 @@ def _quote_ident(name: str) -> str:
         msg = f"invalid identifier: {name!r}"
         raise ValueError(msg)
     return name
+
+
+def _group_lock_key(group: str) -> int:
+    """Stable signed-64-bit key for ``pg_try_advisory_lock``.
+
+    Postgres advisory locks take a single ``bigint``. We hash the
+    consumer-group name with SHA-256 and fold the first 8 bytes into a
+    signed 64-bit integer (the wire-format Postgres expects) so two
+    workers configured with the same group land on the same lock key
+    deterministically across replicas and restarts.
+    """
+    digest = hashlib.sha256(group.encode("utf-8")).digest()
+    raw = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    # Fold into signed 64-bit range.
+    if raw >= 2**63:
+        raw -= 2**64
+    return raw
 
 
 def _normalise_dsn(dsn: str) -> str:
@@ -266,6 +284,34 @@ class PostgresEventBus:
         # be silently dropped.
         if not self._handlers:
             return
+        # Per-group advisory lock makes the drainer single-writer even
+        # when multiple replicas share the same consumer_group. Whoever
+        # holds the lock advances the cursor; everyone else returns and
+        # picks up on the next NOTIFY / poll. Session-level lock auto-
+        # releases on connection close, so a crashed worker never zombies
+        # the lock.
+        lock_key = _group_lock_key(self._group)
+        async with self._pool.acquire() as lock_conn:
+            got_lock = await lock_conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", lock_key
+            )
+            if not got_lock:
+                return
+            try:
+                await self._drain_with_lock()
+            finally:
+                try:
+                    await lock_conn.fetchval(
+                        "SELECT pg_advisory_unlock($1)", lock_key
+                    )
+                except Exception:
+                    logger.debug(
+                        "pg_advisory_unlock raised; lock will release on conn close",
+                        exc_info=True,
+                    )
+
+    async def _drain_with_lock(self) -> None:
+        """Drain loop body; only invoked while holding the group's advisory lock."""
         while not self._closed:
             async with self._pool.acquire() as conn:
                 offset = await conn.fetchval(
