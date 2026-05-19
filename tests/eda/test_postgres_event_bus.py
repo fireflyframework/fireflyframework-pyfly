@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from pyfly.eda.adapters.postgres import PostgresEventBus, _normalise_dsn, _quote_ident
+from pyfly.eda.adapters.postgres import (
+    PostgresEventBus,
+    _group_lock_key,
+    _normalise_dsn,
+    _quote_ident,
+)
 from pyfly.eda.ports.outbound import EventPublisher
 
 
@@ -62,3 +67,19 @@ class TestPostgresEventBus:
         )
         assert bus._dsn == "postgresql://idp:idp@pg:5432/flydesk_idp"
         assert bus._listen_dsn == "postgresql://idp:idp@pg:5432/flydesk_idp"
+
+
+class TestGroupLockKey:
+    """``_group_lock_key`` -- deterministic, signed-64-bit advisory lock."""
+
+    def test_same_group_yields_same_key(self) -> None:
+        assert _group_lock_key("flydocs-workers") == _group_lock_key("flydocs-workers")
+
+    def test_different_groups_yield_different_keys(self) -> None:
+        assert _group_lock_key("flydocs-workers") != _group_lock_key("flydocs-bbox-workers")
+
+    def test_fits_in_signed_bigint(self) -> None:
+        """Postgres advisory locks take ``bigint`` (signed 64-bit)."""
+        for group in ("a", "flydocs-workers", "very-long-group-name-with-suffix"):
+            key = _group_lock_key(group)
+            assert -(2**63) <= key < 2**63
