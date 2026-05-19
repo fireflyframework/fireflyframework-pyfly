@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.05 (2026-05-19)
+
+### Fixed — `PostgresEventBus` is multi-worker safe
+
+The Postgres EDA adapter (`pyfly.eda.adapters.postgres`) used a
+per-group cursor (`pyfly_eda_offsets.last_event_id`) without any
+row-level claim, so scaling consumers in the same group resulted in
+**every replica dispatching every event in parallel**. The
+`WHERE last_event_id < $1` guard on the cursor-advance UPDATE only
+prevents going backwards — it doesn't prevent duplicate dispatch when
+two replicas read the same offset concurrently.
+
+Wrapped `_drain` in `pg_try_advisory_lock(group_key)`. The key is a
+deterministic SHA-256 fold of the consumer-group name into a signed
+bigint. Whoever wins the lock drains the outbox; everyone else
+returns immediately and waits for the next NOTIFY or poll tick.
+Session-level lock — auto-releases on connection death, so a crashed
+worker never zombies the group.
+
+The Kafka and Redis Streams adapters were already safe (their
+respective brokers handle competitive consumption natively).
+
+Helper `_group_lock_key()` exposed for tests; pinned in
+[`tests/eda/test_postgres_event_bus.py::TestGroupLockKey`](tests/eda/test_postgres_event_bus.py).
+
+---
+
 ## v26.05.04 (2026-05-08)
 
 ### Fixed — `pyfly.security` no longer needs `pyjwt` to import
