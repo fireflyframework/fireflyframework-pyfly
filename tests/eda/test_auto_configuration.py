@@ -18,20 +18,20 @@ def _config(values: dict[str, object]) -> object:
 
 class TestEdaAutoConfiguration:
     def test_memory_provider(self) -> None:
-        bus = EdaAutoConfiguration().event_publisher(
-            _config({"pyfly.eda.provider": "memory"})
-        )
+        bus = EdaAutoConfiguration().event_publisher(_config({"pyfly.eda.provider": "memory"}))
         assert isinstance(bus, InMemoryEventBus)
 
     def test_kafka_provider(self) -> None:
         from pyfly.eda.adapters.kafka import KafkaEventBus
 
         bus = EdaAutoConfiguration().event_publisher(
-            _config({
-                "pyfly.eda.provider": "kafka",
-                "pyfly.eda.destinations": "flydesk.idp.jobs",
-                "pyfly.eda.kafka.bootstrap-servers": "kafka:9092",
-            })
+            _config(
+                {
+                    "pyfly.eda.provider": "kafka",
+                    "pyfly.eda.destinations": "flydesk.idp.jobs",
+                    "pyfly.eda.kafka.bootstrap-servers": "kafka:9092",
+                }
+            )
         )
         assert isinstance(bus, KafkaEventBus)
         assert bus._bootstrap_servers == "kafka:9092"
@@ -42,12 +42,14 @@ class TestEdaAutoConfiguration:
             from pyfly.eda.adapters.redis import RedisStreamsEventBus
 
             bus = EdaAutoConfiguration().event_publisher(
-                _config({
-                    "pyfly.eda.provider": "redis",
-                    "pyfly.eda.redis.url": "redis://r:6379/1",
-                    "pyfly.eda.destinations": "a, b",
-                    "pyfly.eda.group": "flydesk-idp",
-                })
+                _config(
+                    {
+                        "pyfly.eda.provider": "redis",
+                        "pyfly.eda.redis.url": "redis://r:6379/1",
+                        "pyfly.eda.destinations": "a, b",
+                        "pyfly.eda.group": "flydesk-idp",
+                    }
+                )
             )
             assert isinstance(bus, RedisStreamsEventBus)
             assert bus._streams == ["a", "b"]
@@ -57,12 +59,14 @@ class TestEdaAutoConfiguration:
         from pyfly.eda.adapters.postgres import PostgresEventBus
 
         bus = EdaAutoConfiguration().event_publisher(
-            _config({
-                "pyfly.eda.provider": "postgres",
-                "pyfly.eda.postgres.dsn": "postgresql://x/y",
-                "pyfly.eda.destinations": "flydesk.idp.jobs",
-                "pyfly.eda.postgres.channel": "flydesk_eda",
-            })
+            _config(
+                {
+                    "pyfly.eda.provider": "postgres",
+                    "pyfly.eda.postgres.dsn": "postgresql://x/y",
+                    "pyfly.eda.destinations": "flydesk.idp.jobs",
+                    "pyfly.eda.postgres.channel": "flydesk_eda",
+                }
+            )
         )
         assert isinstance(bus, PostgresEventBus)
         assert bus._destinations == ["flydesk.idp.jobs"]
@@ -72,9 +76,7 @@ class TestEdaAutoConfiguration:
         import pytest
 
         with pytest.raises(ValueError, match="postgres.dsn is required"):
-            EdaAutoConfiguration().event_publisher(
-                _config({"pyfly.eda.provider": "postgres"})
-            )
+            EdaAutoConfiguration().event_publisher(_config({"pyfly.eda.provider": "postgres"}))
 
     def test_auto_provider_picks_kafka_when_available(self) -> None:
         with patch("pyfly.config.auto.AutoConfiguration.is_available") as is_avail:

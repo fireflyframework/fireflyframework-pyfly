@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -78,9 +79,15 @@ class CallbackDispatcher:
 
         headers = dict(sub.headers)
         if config.secret:
+            # Sign the canonical JSON serialization of the payload — NOT
+            # ``str(payload)`` (Python dict repr with single quotes / ``True`` /
+            # ``None``), which is invalid JSON and unverifiable by any receiver.
+            # Receivers verify with HmacSignatureValidator over this same compact,
+            # key-sorted JSON body (see pyfly.webhooks.signature).
+            canonical_body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
             sig = hmac.new(
                 config.secret.encode("utf-8"),
-                str(payload).encode("utf-8"),
+                canonical_body.encode("utf-8"),
                 hashlib.sha256,
             ).hexdigest()
             headers["X-Pyfly-Signature"] = f"sha256={sig}"

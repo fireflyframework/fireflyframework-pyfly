@@ -15,6 +15,7 @@
 
 from pyfly.web.adapters.starlette.filters.correlation_filter import CorrelationFilter
 from pyfly.web.adapters.starlette.filters.http_security_filter import HttpSecurityFilter
+from pyfly.web.adapters.starlette.filters.request_context_filter import RequestContextFilter
 from pyfly.web.adapters.starlette.filters.request_logging_filter import RequestLoggingFilter
 from pyfly.web.adapters.starlette.filters.security_headers_filter import SecurityHeadersFilter
 from pyfly.web.adapters.starlette.filters.transaction_id_filter import TransactionIdFilter
@@ -22,6 +23,7 @@ from pyfly.web.adapters.starlette.filters.transaction_id_filter import Transacti
 __all__ = [
     "CorrelationFilter",
     "HttpSecurityFilter",
+    "RequestContextFilter",
     "RequestLoggingFilter",
     "SecurityHeadersFilter",
     "TransactionIdFilter",

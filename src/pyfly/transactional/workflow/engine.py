@@ -98,6 +98,20 @@ class WorkflowEngine:
 
         return await self._run(definition, input)
 
+    async def start_async(self, workflow_id: str, input: Any = None) -> WorkflowResult:
+        """Start a workflow fire-and-forget.
+
+        Returns immediately with a :class:`WorkflowResult` carrying the child's
+        real ``correlation_id`` (status PENDING); the run continues in the
+        background. Use this instead of scheduling :meth:`start` as a bare task
+        when you need the correlation id up front (e.g. child workflows).
+        """
+        definition = self._registry.get(workflow_id)
+        if definition is None:
+            msg = f"unknown workflow '{workflow_id}'"
+            raise OrchestrationError(msg)
+        return await self._start_async(definition, input)
+
     async def deliver_signal(self, correlation_id: str, signal: str, payload: Any = None) -> bool:
         return await self._signals.deliver(correlation_id, signal, payload)
 

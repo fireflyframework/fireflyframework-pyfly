@@ -99,9 +99,26 @@ class InMemoryPersistenceAdapter:
             return [s for s in self._store.values() if s.get("status") == "IN_FLIGHT"]
 
     async def get_stale(self, before: datetime) -> list[dict[str, Any]]:
-        """Return transactions whose ``started_at`` is older than *before*."""
+        """Return transactions whose ``started_at`` is older than *before*.
+
+        Tolerates ``started_at`` stored as either a ``datetime`` or an ISO-8601
+        string so a comparison never raises ``TypeError`` regardless of how the
+        caller persisted it.
+        """
         async with self._lock:
-            return [s for s in self._store.values() if s.get("started_at") is not None and s["started_at"] < before]
+            stale: list[dict[str, Any]] = []
+            for s in self._store.values():
+                started = s.get("started_at")
+                if started is None:
+                    continue
+                if isinstance(started, str):
+                    try:
+                        started = datetime.fromisoformat(started)
+                    except ValueError:
+                        continue
+                if started < before:
+                    stale.append(s)
+            return stale
 
     # -- maintenance --------------------------------------------------------
 

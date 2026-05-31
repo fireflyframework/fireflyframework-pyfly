@@ -29,6 +29,7 @@ The building blocks that every PyFly application relies on.
 | [Core & Lifecycle](core.md) | Application bootstrap with `@pyfly_application`, startup/shutdown sequence, configuration loading, profile overlays, banner rendering |
 | [Dependency Injection](dependency-injection.md) | `@service`, `@repository`, `@controller`, `@component` stereotypes, constructor injection, `Autowired()`, scopes (singleton, transient, request), `@bean` factories, `@primary`, `Qualifier`, conditional beans, lifecycle hooks |
 | [Configuration](configuration.md) | YAML/TOML config files, `Config` class, profile-specific overlays, `@config_properties` binding, environment variable overrides |
+| [Config Server](config-server.md) | Centralized config server (`ConfigServer`, `ConfigClient`), `ConfigBackend` SPI, in-memory & filesystem backends, Spring-Cloud-Config-compatible responses |
 | [Error Handling](error-handling.md) | 25+ exception types, `ErrorResponse`, `ErrorCategory`, `ErrorSeverity`, HTTP status mapping, structured error responses, `@exception_handler` |
 
 ---
@@ -152,6 +153,7 @@ Monitor, schedule, and observe your applications in production.
 | Guide | What You'll Learn |
 |-------|-------------------|
 | [Observability](observability.md) | `@timed`, `@counted`, `@span`, `MetricsRegistry`, `HealthChecker`, Prometheus metrics export, OpenTelemetry tracing, structured logging with correlation IDs |
+| [Logging](logging.md) | `get_logger`, `LoggingPort`, structlog & stdlib adapters, structured `event + key=value` logging, runtime level control |
 | [Scheduling](scheduling.md) | `@scheduled`, `@async_method`, `CronExpression`, `TaskScheduler`, fixed-rate tasks, fixed-delay tasks, asyncio and thread pool executors |
 
 ---

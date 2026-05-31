@@ -13,10 +13,36 @@
 # limitations under the License.
 """PyFly Logging — hexagonal logging port and adapters."""
 
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 from pyfly.logging.port import LoggingPort
 from pyfly.logging.stdlib_adapter import StdlibLoggingAdapter
 
-__all__ = ["LoggingPort", "StdlibLoggingAdapter"]
+__all__ = ["LoggingPort", "StdlibLoggingAdapter", "get_logger"]
+
+
+def get_logger(name: str) -> Any:
+    """Return a structured logger that accepts ``logger.info(event, **kwargs)``.
+
+    Uses ``structlog`` when installed, otherwise a stdlib-backed shim that
+    renders ``event | key=value`` output. This keeps every call site
+    structlog-style and safe even when the ``observability`` extra (which
+    ships ``structlog``) is not installed — passing keyword fields to a raw
+    stdlib :class:`logging.Logger` would otherwise raise ``TypeError`` on
+    every call.
+    """
+    try:
+        import structlog
+
+        return structlog.get_logger(name)
+    except ImportError:
+        from pyfly.logging.stdlib_adapter import _StructuredLogger
+
+        return _StructuredLogger(logging.getLogger(name))
+
 
 try:
     from pyfly.logging.structlog_adapter import StructlogAdapter

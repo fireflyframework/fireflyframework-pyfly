@@ -21,6 +21,8 @@ emits lifecycle events through :class:`OrchestrationEvents`.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import time
 from typing import Any
 
@@ -42,6 +44,8 @@ from pyfly.transactional.workflow.definition import (
 from pyfly.transactional.workflow.signal_service import SignalService
 from pyfly.transactional.workflow.timer_service import TimerService
 
+_logger = logging.getLogger(__name__)
+
 
 class WorkflowExecutor:
     """Layer-by-layer execution engine for a single workflow run."""
@@ -57,6 +61,11 @@ class WorkflowExecutor:
         backpressure: BackpressureStrategy | None = None,
     ) -> None:
         self._invoker = step_invoker or StepInvoker(ArgumentResolver())
+        # Dedicated resolver for compensation calls (mirrors the invoker's own
+        # resolver). Compensation methods are invoked directly — without retry,
+        # timeout, or step-record mutation — so they cannot clobber the
+        # already-recorded success of the step they roll back.
+        self._compensation_resolver = ArgumentResolver()
         self._signals = signal_service or SignalService()
         self._timers = timer_service or TimerService()
         self._children = child_service or ChildWorkflowService()
@@ -64,11 +73,82 @@ class WorkflowExecutor:
         self._backpressure = backpressure or AdaptiveBackpressureStrategy()
 
     async def execute(self, definition: WorkflowDefinition, ctx: ExecutionContext) -> None:
-        """Run all steps respecting their dependency graph."""
+        """Run all steps respecting their dependency graph.
+
+        On any step failure, already-completed *compensatable* steps are rolled
+        back (in reverse execution order) before the original error propagates.
+        """
         layers = TopologyBuilder.build_layers(definition.graph())
+        try:
+            for layer in layers:
+                steps = [definition.steps[sid] for sid in layer]
+                await self._execute_layer(definition, ctx, steps)
+        except BaseException as exc:
+            await self._compensate(definition, ctx, layers, exc)
+            raise
+
+    async def _compensate(
+        self,
+        definition: WorkflowDefinition,
+        ctx: ExecutionContext,
+        layers: list[list[str]],
+        error: BaseException,
+    ) -> None:
+        """Roll back completed compensatable steps in reverse execution order.
+
+        The set of completed steps is derived from the context (a step may have
+        succeeded concurrently with the one that failed), and ordered using the
+        topology layers so compensation runs newest-first. Compensation errors
+        are recorded and surfaced via events but never mask the original
+        failure that triggered the rollback.
+        """
+        completed_ids: list[str] = []
         for layer in layers:
-            steps = [definition.steps[sid] for sid in layer]
-            await self._execute_layer(definition, ctx, steps)
+            for step_id in layer:
+                step = definition.steps.get(step_id)
+                if step is None or not step.compensatable or step.compensation_method is None:
+                    continue
+                if ctx.is_step_done(step_id):
+                    completed_ids.append(step_id)
+
+        if not completed_ids:
+            return
+
+        await self._events.on_compensation_started(name=definition.id, correlation_id=ctx.correlation_id)
+
+        for step_id in reversed(completed_ids):
+            step = definition.steps[step_id]
+            method = step.compensation_method
+            assert method is not None  # filtered above
+            comp_error: BaseException | None = None
+            comp_result: Any = None
+            try:
+                kwargs = self._compensation_resolver.resolve(
+                    method,
+                    ctx,
+                    compensation_error=error,
+                    skip_first=definition.bean is not None,
+                )
+                call = method(definition.bean, **kwargs)
+                if inspect.isawaitable(call):
+                    comp_result = await call
+                else:
+                    comp_result = call
+            except Exception as exc:  # noqa: BLE001
+                comp_error = exc
+                _logger.warning(
+                    "compensation for %s.%s failed: %s",
+                    definition.id,
+                    step_id,
+                    exc,
+                )
+            await ctx.record_step_compensated(step_id, comp_result, comp_error)
+            await self._events.on_step_compensated(
+                name=definition.id,
+                correlation_id=ctx.correlation_id,
+                step_id=step_id,
+                error=comp_error,
+            )
 
     async def _execute_layer(
         self,
@@ -111,12 +191,11 @@ class WorkflowExecutor:
 
         if step.wait_for_all:
             for sig in step.wait_for_all:
-                await ctx.wait_for_signal(sig, step.wait_for_signal_timeout_ms)
+                await ctx.wait_for_signal(sig, step.wait_for_all_timeout_ms)
 
         if step.wait_for_any:
             tasks = [
-                asyncio.create_task(ctx.wait_for_signal(sig, step.wait_for_signal_timeout_ms))
-                for sig in step.wait_for_any
+                asyncio.create_task(ctx.wait_for_signal(sig, step.wait_for_any_timeout_ms)) for sig in step.wait_for_any
             ]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for t in pending:

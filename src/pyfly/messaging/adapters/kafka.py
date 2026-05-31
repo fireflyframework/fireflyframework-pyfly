@@ -34,6 +34,7 @@ class KafkaAdapter:
         self._consumers: list[Any] = []
         self._handlers: list[tuple[str, MessageHandler, str | None]] = []
         self._consumer_tasks: list[asyncio.Task[None]] = []
+        self._started = False
 
     async def publish(
         self,
@@ -53,31 +54,42 @@ class KafkaAdapter:
         group: str | None = None,
     ) -> None:
         self._handlers.append((topic, handler, group))
+        # PyFly's ApplicationContext auto-starts adapter beans BEFORE @message_listener
+        # wiring calls subscribe(), so a subscription that arrives after start() must
+        # spin up its own consumer immediately — otherwise the handler never consumes.
+        if self._started:
+            await self._start_consumer(topic, [handler], group)
 
     async def start(self) -> None:
-        from aiokafka import AIOKafkaConsumer, AIOKafkaProducer  # type: ignore[import-untyped]
+        from aiokafka import AIOKafkaProducer  # type: ignore[import-untyped]
 
         self._producer = AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
         await self._producer.start()
 
-        grouped: dict[tuple[str, str | None], list[tuple[str, MessageHandler]]] = {}
+        grouped: dict[tuple[str, str | None], list[MessageHandler]] = {}
         for topic, handler, group in self._handlers:
-            key = (topic, group)
-            grouped.setdefault(key, []).append((topic, handler))
+            grouped.setdefault((topic, group), []).append(handler)
 
-        for (topic, group), entries in grouped.items():
-            consumer = AIOKafkaConsumer(
-                topic,
-                bootstrap_servers=self._bootstrap_servers,
-                group_id=group,
-            )
-            await consumer.start()
-            self._consumers.append(consumer)
-            handlers_for_consumer = [h for _, h in entries]
-            task = asyncio.create_task(self._consume_loop(consumer, handlers_for_consumer))
-            self._consumer_tasks.append(task)
+        for (topic, group), handlers in grouped.items():
+            await self._start_consumer(topic, handlers, group)
+
+        self._started = True
+
+    async def _start_consumer(self, topic: str, handlers: list[MessageHandler], group: str | None) -> None:
+        from aiokafka import AIOKafkaConsumer
+
+        consumer = AIOKafkaConsumer(
+            topic,
+            bootstrap_servers=self._bootstrap_servers,
+            group_id=group,
+        )
+        await consumer.start()
+        self._consumers.append(consumer)
+        task = asyncio.create_task(self._consume_loop(consumer, list(handlers)))
+        self._consumer_tasks.append(task)
 
     async def stop(self) -> None:
+        self._started = False
         for task in self._consumer_tasks:
             task.cancel()
         if self._consumer_tasks:

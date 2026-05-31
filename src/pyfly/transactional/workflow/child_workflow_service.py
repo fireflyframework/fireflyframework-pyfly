@@ -59,10 +59,8 @@ class ChildWorkflowService:
             if timeout_ms > 0:
                 return await asyncio.wait_for(coro, timeout=timeout_ms / 1000.0)
             return await coro
-        # Fire and forget: schedule and return placeholder correlation id.
-        task = asyncio.create_task(self._engine.start(workflow_id, input))
-        # Allow the new task to begin so it can populate its correlation id;
-        # we then return the (possibly synthetic) id.  In practice the engine
-        # generates the id eagerly and stores it, so we can reach in.
-        await asyncio.sleep(0)
-        return getattr(task, "get_name", lambda: "unknown")()
+        # Fire and forget: the engine eagerly creates the child's ExecutionContext
+        # and schedules the run in the background, returning the real child
+        # correlation id (previously this returned the asyncio Task name).
+        result = await self._engine.start_async(workflow_id, input)
+        return result.correlation_id

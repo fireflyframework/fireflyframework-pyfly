@@ -9,6 +9,8 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+import yaml  # type: ignore[import-untyped]
+
 
 @dataclass
 class ConfigSource:
@@ -82,10 +84,33 @@ class FilesystemConfigBackend:
     async def save(self, source: ConfigSource) -> None:
         import json
 
-        target = self._root / source.label if source.label else self._root
-        target.mkdir(parents=True, exist_ok=True)
-        path = target / f"{source.application}-{source.profile}.json"
-        await asyncio.get_event_loop().run_in_executor(None, path.write_text, json.dumps(source.properties, indent=2))
+        candidates = self._path_candidates(source.application, source.profile, source.label)
+        existing = [c for c in candidates if c.exists()]
+
+        # Write back to the SAME file fetch() would read (highest-priority
+        # existing candidate), preserving its format — otherwise a save that
+        # wrote a fresh .json would be silently shadowed by a pre-existing
+        # higher-priority .yaml. If none exists yet, create a .json.
+        if existing:
+            path = existing[0]
+        else:
+            target = self._root / source.label if source.label else self._root
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / f"{source.application}-{source.profile}.json"
+
+        if path.suffix.lstrip(".") in {"yaml", "yml"}:
+            text = yaml.safe_dump(source.properties, sort_keys=False)
+        else:
+            text = json.dumps(source.properties, indent=2)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.get_event_loop().run_in_executor(None, path.write_text, text)
+
+        # Guarantee exactly one file backs this (application, profile, label) so
+        # future fetches/saves can't diverge across stale duplicate formats.
+        for other in existing:
+            if other != path:
+                other.unlink(missing_ok=True)
 
     async def list(self) -> list[ConfigSource]:
         results: list[ConfigSource] = []
@@ -112,7 +137,6 @@ def _parse_text(text: str, fmt: str) -> dict[str, Any]:
 
         result: dict[str, Any] = json.loads(text)
         return result
-    import yaml  # type: ignore[import-untyped]
 
     parsed: dict[str, Any] | None = yaml.safe_load(text)
     return parsed or {}

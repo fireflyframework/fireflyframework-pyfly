@@ -22,13 +22,36 @@ from typing import Any
 
 
 class ServerProvider:
-    """Provides ASGI server runtime info for the admin dashboard."""
+    """Provides ASGI server runtime info for the admin dashboard.
 
-    def __init__(self, server: Any) -> None:
+    The server adapter (``ApplicationServerPort``) is instantiated during
+    ``ApplicationContext.start()`` — after the web app is assembled — so it is
+    resolved lazily from the context on each request rather than captured at
+    construction time. An explicit ``server`` argument still takes precedence
+    when supplied (e.g. in tests).
+    """
+
+    def __init__(self, server: Any = None, context: Any = None) -> None:
         self._server = server
+        self._context = context
+
+    def _resolve_server(self) -> Any:
+        if self._server is not None:
+            return self._server
+        if self._context is None:
+            return None
+        try:
+            from pyfly.server.ports.outbound import ApplicationServerPort
+        except ImportError:
+            return None
+        for _cls, reg in self._context.container._registrations.items():
+            if reg.instance is not None and isinstance(reg.instance, ApplicationServerPort):
+                return reg.instance
+        return None
 
     async def get_server_info(self) -> dict[str, Any]:
-        if self._server is None:
+        server = self._resolve_server()
+        if server is None:
             return {
                 "name": "unknown",
                 "version": "unknown",
@@ -39,7 +62,7 @@ class ServerProvider:
                 "port": 0,
             }
 
-        info = self._server.server_info
+        info = server.server_info
         return {
             "name": info.name,
             "version": info.version,

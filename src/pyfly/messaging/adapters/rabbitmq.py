@@ -39,6 +39,7 @@ class RabbitMQAdapter:
         self._channel: Any = None
         self._exchange: Any = None
         self._handlers: list[tuple[str, MessageHandler, str | None]] = []
+        self._started = False
 
     async def publish(
         self,
@@ -60,6 +61,10 @@ class RabbitMQAdapter:
         group: str | None = None,
     ) -> None:
         self._handlers.append((topic, handler, group))
+        # The ApplicationContext starts adapter beans before @message_listener
+        # wiring subscribes, so a late subscription must bind its own queue now.
+        if self._started:
+            await self._start_consumer(topic, handler, group)
 
     async def start(self) -> None:
         import aio_pika
@@ -71,25 +76,33 @@ class RabbitMQAdapter:
         )
 
         for topic, handler, group in self._handlers:
-            queue_name = group or f"pyfly.{topic}"
-            queue = await self._channel.declare_queue(queue_name, durable=True)
-            await queue.bind(self._exchange, routing_key=topic)
+            await self._start_consumer(topic, handler, group)
 
-            async def on_message(
-                message: aio_pika.IncomingMessage,
-                _handler: MessageHandler = handler,
-                _topic: str = topic,
-            ) -> None:
-                async with message.process():
-                    msg = Message(
-                        topic=_topic,
-                        value=message.body,
-                        headers={k: str(v) for k, v in (message.headers or {}).items()},
-                    )
-                    await _handler(msg)
+        self._started = True
 
-            await queue.consume(on_message)
+    async def _start_consumer(self, topic: str, handler: MessageHandler, group: str | None) -> None:
+        import aio_pika
+
+        queue_name = group or f"pyfly.{topic}"
+        queue = await self._channel.declare_queue(queue_name, durable=True)
+        await queue.bind(self._exchange, routing_key=topic)
+
+        async def on_message(
+            message: aio_pika.IncomingMessage,
+            _handler: MessageHandler = handler,
+            _topic: str = topic,
+        ) -> None:
+            async with message.process():
+                msg = Message(
+                    topic=_topic,
+                    value=message.body,
+                    headers={k: str(v) for k, v in (message.headers or {}).items()},
+                )
+                await _handler(msg)
+
+        await queue.consume(on_message)
 
     async def stop(self) -> None:
+        self._started = False
         if self._connection is not None:
             await self._connection.close()

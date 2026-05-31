@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import logging
 from collections.abc import Callable
@@ -70,6 +71,12 @@ class TaskScheduler:
         for bean in beans:
             for name in dir(bean):
                 if name.startswith("_"):
+                    continue
+                # Look up statically first so @property / cached_property getters
+                # are never evaluated during discovery — a side-effecting or
+                # raising property must not break scheduled-task scanning.
+                static_attr = inspect.getattr_static(bean, name, None)
+                if isinstance(static_attr, (property, functools.cached_property)):
                     continue
                 try:
                     attr = getattr(bean, name)
@@ -183,7 +190,12 @@ class TaskScheduler:
             await asyncio.sleep(initial_delay.total_seconds())
         while self._running:
             task = await self._executor.submit(self._invoke(bean, method))
-            await task  # Wait for completion
+            try:
+                await task  # Wait for completion
+            except Exception:
+                # A failing iteration must not permanently kill the loop —
+                # match the fault tolerance of cron/fixed_rate scheduling.
+                logger.exception("scheduled fixed_delay task failed; continuing")
             if not self._running:
                 break
             await asyncio.sleep(delay.total_seconds())

@@ -53,6 +53,7 @@ Requires ``asyncpg`` (``pip install pyfly[postgresql]`` or
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -98,7 +99,7 @@ def _normalise_dsn(dsn: str) -> str:
     """Strip SQLAlchemy dialect markers so asyncpg can parse the URL."""
     for marker in ("postgresql+asyncpg://", "postgresql+psycopg://", "postgres+asyncpg://"):
         if dsn.startswith(marker):
-            return "postgresql://" + dsn[len(marker):]
+            return "postgresql://" + dsn[len(marker) :]
     return dsn
 
 
@@ -219,7 +220,9 @@ class PostgresEventBus:
         self._started = True
         logger.info(
             "PostgresEventBus started: channel=%s destinations=%s group=%s",
-            self._channel, self._destinations, self._group,
+            self._channel,
+            self._destinations,
+            self._group,
         )
 
     async def stop(self) -> None:
@@ -228,10 +231,8 @@ class PostgresEventBus:
         self._wake.set()  # wake the loop so it can observe _closed
         if self._consume_task is not None:
             self._consume_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._consume_task
-            except asyncio.CancelledError:
-                pass
             self._consume_task = None
         if self._listen_conn is not None:
             try:
@@ -270,10 +271,8 @@ class PostgresEventBus:
                         await asyncio.sleep(0.5)
                 if self._closed:
                     return
-                try:
+                with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval_s)
-                except asyncio.TimeoutError:
-                    pass
                 self._wake.clear()
         except asyncio.CancelledError:
             pass
@@ -292,18 +291,14 @@ class PostgresEventBus:
         # the lock.
         lock_key = _group_lock_key(self._group)
         async with self._pool.acquire() as lock_conn:
-            got_lock = await lock_conn.fetchval(
-                "SELECT pg_try_advisory_lock($1)", lock_key
-            )
+            got_lock = await lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", lock_key)
             if not got_lock:
                 return
             try:
                 await self._drain_with_lock()
             finally:
                 try:
-                    await lock_conn.fetchval(
-                        "SELECT pg_advisory_unlock($1)", lock_key
-                    )
+                    await lock_conn.fetchval("SELECT pg_advisory_unlock($1)", lock_key)
                 except Exception:
                     logger.debug(
                         "pg_advisory_unlock raised; lock will release on conn close",

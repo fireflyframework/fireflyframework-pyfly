@@ -29,6 +29,28 @@ def test_registers_workflow() -> None:
     assert reg.get("a") is definition
 
 
+def test_wait_for_all_any_timeouts_propagated() -> None:
+    """Regression: @wait_for_all/@wait_for_any timeout_ms must reach the step
+    definition (previously dropped, causing unbounded waits)."""
+    from pyfly.transactional.workflow.annotations import wait_for_all, wait_for_any
+
+    @workflow(id="waits")
+    class W:
+        @workflow_step(id="all")
+        @wait_for_all("a", "b", timeout_ms=1500)
+        async def all_step(self) -> None: ...
+
+        @workflow_step(id="any")
+        @wait_for_any("x", "y", timeout_ms=2500)
+        async def any_step(self) -> None: ...
+
+    definition = WorkflowRegistry().register_from_bean(W())
+    assert definition.steps["all"].wait_for_all == ("a", "b")
+    assert definition.steps["all"].wait_for_all_timeout_ms == 1500
+    assert definition.steps["any"].wait_for_any == ("x", "y")
+    assert definition.steps["any"].wait_for_any_timeout_ms == 2500
+
+
 def test_unregistered_class_raises() -> None:
     class NotADecorated: ...
 

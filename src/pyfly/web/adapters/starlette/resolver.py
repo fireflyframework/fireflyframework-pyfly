@@ -16,9 +16,10 @@
 from __future__ import annotations
 
 import inspect
+import types
 import typing
 from dataclasses import dataclass
-from typing import Any, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
 from starlette.requests import Request
@@ -213,16 +214,28 @@ class ParameterResolver:
         return value
 
     def _coerce(self, value: str, target_type: type) -> Any:
-        """Coerce a string value to the target type."""
-        if target_type is str:
+        """Coerce a string value to the target type.
+
+        Handles ``Optional[T]`` / ``T | None`` union types by unwrapping to the
+        first non-NoneType argument before coercion.
+        """
+        # Unwrap Optional[T] (typing.Union[T, None]) or T | None (types.UnionType)
+        actual_type = target_type
+        origin = get_origin(target_type)
+        if origin is Union or isinstance(target_type, types.UnionType):
+            non_none = [a for a in get_args(target_type) if a is not type(None)]
+            actual_type = non_none[0] if non_none else str
+
+        if actual_type is str:
             return value
         try:
-            return target_type(value)
+            return actual_type(value)
         except (ValueError, TypeError) as exc:
+            type_name = getattr(actual_type, "__name__", repr(actual_type))
             from pyfly.kernel.exceptions import InvalidRequestException
 
             raise InvalidRequestException(
-                f"Cannot convert '{value}' to {target_type.__name__}",
+                f"Cannot convert '{value}' to {type_name}",
                 code="TYPE_CONVERSION_ERROR",
             ) from exc
 

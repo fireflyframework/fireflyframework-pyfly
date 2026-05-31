@@ -39,6 +39,11 @@ class SmtpEmailProvider:
         msg["To"] = ", ".join(message.to)
         if message.cc:
             msg["Cc"] = ", ".join(message.cc)
+        # ``send_message`` reads recipients from the To/Cc/Bcc headers and
+        # strips the Bcc header before transmission, so BCC recipients are
+        # delivered without being exposed to other recipients.
+        if message.bcc:
+            msg["Bcc"] = ", ".join(message.bcc)
         msg["Subject"] = message.subject
         if message.body_text:
             msg.set_content(message.body_text)

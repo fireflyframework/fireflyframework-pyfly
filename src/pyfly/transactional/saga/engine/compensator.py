@@ -28,7 +28,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from pyfly.transactional.shared.types import CompensationPolicy
+from pyfly.transactional.shared.types import CompensationPolicy, StepStatus
 
 if TYPE_CHECKING:
     from pyfly.transactional.saga.core.context import SagaContext
@@ -242,11 +242,13 @@ class SagaCompensator:
 
         async def _compensate_one(sd: StepDefinition) -> Exception | None:
             try:
-                await self._step_invoker.invoke_compensation(
+                result = await self._step_invoker.invoke_compensation(
                     sd,
                     saga_def.bean,
                     ctx,
                 )
+                ctx.compensation_results[sd.id] = result
+                ctx.set_step_status(sd.id, StepStatus.COMPENSATED)
                 await self._emit_compensated(saga_name, sd.id, ctx, error=None)
                 return None
             except Exception as exc:  # noqa: BLE001
@@ -290,11 +292,13 @@ class SagaCompensator:
     ) -> None:
         """Invoke a single compensation, emit events, and optionally handle errors."""
         try:
-            await self._step_invoker.invoke_compensation(
+            result = await self._step_invoker.invoke_compensation(
                 step_def,
                 saga_def.bean,
                 ctx,
             )
+            ctx.compensation_results[step_def.id] = result
+            ctx.set_step_status(step_def.id, StepStatus.COMPENSATED)
             await self._emit_compensated(saga_name, step_def.id, ctx, error=None)
         except Exception as exc:
             await self._emit_compensated(saga_name, step_def.id, ctx, error=exc)

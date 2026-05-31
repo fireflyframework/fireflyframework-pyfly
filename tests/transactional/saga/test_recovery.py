@@ -467,3 +467,27 @@ class TestConstructor:
             events_port=None,
         )
         assert service is not None
+
+
+class TestRecoveryWithStringTimestamp:
+    """Regression: the engine historically persisted ``started_at`` as an ISO
+    string, which made ``recover_stale`` raise ``TypeError`` (str < datetime)."""
+
+    async def test_recover_stale_tolerates_isoformat_started_at(
+        self,
+        adapter: InMemoryPersistenceAdapter,
+        recovery_service: SagaRecoveryService,
+    ) -> None:
+        await adapter.persist_state(
+            {
+                "correlation_id": "saga-iso",
+                "saga_name": "order-saga",
+                "status": "IN_FLIGHT",
+                "started_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            }
+        )
+        recovered = await recovery_service.recover_stale(stale_threshold_seconds=60)
+        assert recovered == 1
+        state = await adapter.get_state("saga-iso")
+        assert state is not None
+        assert state["status"] != "IN_FLIGHT"

@@ -138,6 +138,14 @@ class BaseRepositoryPostProcessor(ABC):
         consts.discard(None)
         consts.discard(Ellipsis)
 
+        # A docstring is stored as a code constant; on its own it does not make
+        # the method a real implementation, so a documented ``...``/``pass`` body
+        # must still count as a stub (otherwise documented derived-query methods
+        # are silently left as no-ops instead of getting a generated query).
+        doc = getattr(func, "__doc__", None)
+        if doc is not None:
+            consts.discard(doc)
+
         # If nothing meaningful remains in the constants and there is
         # very little bytecode, treat as a stub.
         return len(consts) == 0 and code.co_code is not None

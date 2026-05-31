@@ -6,6 +6,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.06 (2026-05-31)
+
+### Hardening pass — framework-wide bug fixes
+
+A deep audit of the whole framework surfaced a class of *silent wiring gaps*
+and correctness bugs — features that existed but were never connected to the
+runtime path, so the test suite passed while the behaviour was broken. This
+release fixes them. The full test suite passes and CI (`ruff`, `ruff format`,
+`mypy --strict`) is green.
+
+#### Admin dashboard
+
+- **HTTP traces are now recorded.** The `TraceCollectorFilter` was resolved
+  from the DI container at `create_app()` time — before beans are instantiated —
+  so it was always `None` and never joined the request filter chain. It is now
+  created and owned by `create_app` and wired into the chain; `/admin/api/traces`
+  and the SSE trace stream show real traffic.
+- **Live updates (SSE) now stream.** `WebFilterChainMiddleware` buffered the
+  *entire* response body before returning, which hung every infinite SSE stream
+  (this broke **all** Server-Sent Events framework-wide, not just admin). The
+  filter chain now forwards streaming responses incrementally.
+- **Server info** resolves lazily instead of showing `unknown`.
+
+#### Dependency injection & AOP
+
+- **Same-type beans no longer collapse.** Two `@bean` methods returning the same
+  concrete type overwrote each other in the type-keyed registry and vanished
+  from `list[T]` resolution. All registrations are now tracked and
+  `resolve_all`/`list[T]` returns every bean.
+- **AOP advice is woven regardless of registration order.** Bean post-processing
+  is now two-pass (all `before_init`, then `post_construct`+`after_init`), so a
+  target initialised before its `@aspect` is still advised.
+- **A side-effecting `@property` no longer aborts startup.** Weaving, scheduled-
+  task discovery and every context wiring/lifecycle scan now look attributes up
+  statically (`inspect.getattr_static`) instead of triggering property getters.
+- **`RequestContextFilter` is wired by default**, so `REQUEST`-scoped beans and
+  `@pre_authorize`/`@post_authorize` work out of the box.
+
+#### Web
+
+- `RequestLoggingFilter`/middleware no longer crash on every request when
+  `structlog` is not installed (new `pyfly.logging.get_logger` shim).
+- The FastAPI adapter now generates a correct OpenAPI document for controller
+  routes and honours `@controller_advice` global exception handlers.
+- The health-indicator rescan hook now actually runs after startup, so
+  `/actuator/health` reflects `DOWN` subsystems instead of always reporting `UP`.
+- `/actuator/prometheus` returns the Prometheus text exposition format (was JSON).
+
+#### Transactional engine
+
+- **Workflow `@compensation_step` now executes on failure** — completed
+  compensatable steps are rolled back in reverse order.
+- **Transactional REST controllers** (`/api/orchestration`, `/dlq`, `/workflow`)
+  are now mounted as HTTP routes.
+- The saga compensator records compensation outcomes, so
+  `SagaResult.compensated`/`compensation_result` are populated.
+- Saga stale-recovery no longer raises `TypeError` (`started_at` is persisted as
+  a `datetime`; `get_stale` tolerates ISO strings).
+- Workflow `@wait_for_all`/`@wait_for_any` timeouts are honoured (no unbounded waits).
+- Fire-and-forget child workflows return the real child correlation id.
+
+#### CQRS
+
+- The query cache adapter now receives the `CacheAdapter`, so `@cacheable`
+  queries are actually cached.
+- Domain-event publishing is wired when an EDA/messaging producer bean is
+  present (was a permanent no-op).
+
+#### EDA, messaging & scheduling
+
+- The EDA circuit breaker no longer gets permanently stuck `OPEN`.
+- Kafka/RabbitMQ message-broker adapters handle `@message_listener` subscriptions
+  that arrive after `start()` (they previously never consumed).
+- A scheduled `fixed_delay` task that raises no longer kills its loop.
+
+#### Data, config, event sourcing, notifications, callbacks
+
+- Derived-query stub detection no longer misclassifies documented repository
+  methods as real implementations (SQLAlchemy + MongoDB).
+- MongoDB derived-query `LIKE` wildcards (`%`, `_`) are now translated to regex.
+- `Config.bind()` resolves `${...}` placeholders and binds nested dataclass fields.
+- `ConfigServer` filesystem backend writes back the file `fetch()` reads, so
+  saves are no longer silently shadowed by a stale `.yaml`.
+- The event-sourcing `ProjectionRunner` no longer advances its cursor past a
+  failed event (at-least-once, in-order; was silent data loss).
+- The SMTP notification provider no longer drops BCC recipients.
+- Outbound callback/webhook HMAC signatures are computed over canonical JSON
+  (were computed over `str(dict)` — unverifiable).
+
+#### Internal
+
+- `pyfly.__version__` is back in sync with the packaged version (it was stale).
+- Lint/format/type fixes across the EDA adapters and correlation surface.
+
+---
+
 ## v26.05.05 (2026-05-19)
 
 ### Fixed — `PostgresEventBus` is multi-worker safe

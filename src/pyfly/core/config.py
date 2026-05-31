@@ -20,9 +20,10 @@ import importlib.resources
 import os
 import re
 import tomllib
+import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast, get_type_hints
+from typing import Any, TypeVar, Union, cast, get_args, get_origin, get_type_hints
 
 import yaml  # type: ignore[import-untyped]
 
@@ -320,7 +321,10 @@ class Config:
         if prefix is None:
             raise ValueError(f"{config_cls.__name__} is not decorated with @config_properties")
 
-        section = self.get_section(prefix)
+        # Resolve ``${...}`` placeholders across the whole section before binding.
+        # ``_resolve_tree`` builds a fresh structure, so ``self._data`` stays raw
+        # (single-value ``get()`` continues to resolve lazily).
+        section = self._resolve_tree(self.get_section(prefix))
 
         # Pydantic BaseModel path — fail-fast with ValidationError
         try:
@@ -336,19 +340,46 @@ class Config:
         except ImportError:
             pass
 
-        # Existing dataclass path (unchanged)
+        # Dataclass path (recurses into nested dataclass fields).
+        return cast(T, self._bind_dataclass(config_cls, section))
+
+    def _resolve_tree(self, value: Any, _depth: int = 0) -> Any:
+        """Recursively resolve ``${...}`` placeholders inside nested structures,
+        returning a new structure without mutating the underlying config data."""
+        if isinstance(value, str):
+            return self._resolve_placeholders(value, _depth) if "${" in value else value
+        if isinstance(value, dict):
+            return {k: self._resolve_tree(v, _depth) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_tree(v, _depth) for v in value]
+        return value
+
+    def _bind_dataclass(self, config_cls: Any, section: dict[str, Any]) -> Any:
+        """Bind a (possibly nested) dataclass from an already placeholder-resolved dict."""
         hints = get_type_hints(config_cls)
         kwargs: dict[str, Any] = {}
-        for field in dataclasses.fields(config_cls):  # type: ignore[arg-type]
-            if field.name in section:
-                value = section[field.name]
-                expected_type = hints.get(field.name)
-                if expected_type is int and isinstance(value, str):
-                    value = int(value)
-                elif expected_type is float and isinstance(value, str):
-                    value = float(value)
-                elif expected_type is bool and isinstance(value, str):
-                    value = value.lower() in ("true", "1", "yes")
-                kwargs[field.name] = value
-
+        for field in dataclasses.fields(config_cls):
+            if field.name not in section:
+                continue
+            kwargs[field.name] = self._coerce_value(hints.get(field.name), section[field.name])
         return config_cls(**kwargs)
+
+    def _coerce_value(self, expected_type: Any, value: Any) -> Any:
+        """Coerce a raw config value to the field's declared type, recursing into
+        nested dataclasses (so e.g. ``ServerProperties.granian`` becomes a
+        ``GranianProperties`` rather than a raw dict)."""
+        # Unwrap Optional[T] / T | None to the underlying type.
+        if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
+            non_none = [a for a in get_args(expected_type) if a is not type(None)]
+            if non_none:
+                expected_type = non_none[0]
+
+        if dataclasses.is_dataclass(expected_type) and isinstance(value, dict):
+            return self._bind_dataclass(expected_type, value)
+        if expected_type is int and isinstance(value, str):
+            return int(value)
+        if expected_type is float and isinstance(value, str):
+            return float(value)
+        if expected_type is bool and isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return value

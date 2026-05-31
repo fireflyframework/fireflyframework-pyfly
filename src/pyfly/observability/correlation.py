@@ -47,21 +47,11 @@ TENANT_ID_HEADER = "X-Tenant-Id"
 TRACEPARENT_HEADER = "traceparent"
 TRACESTATE_HEADER = "tracestate"
 
-_correlation_id: ContextVar[str | None] = ContextVar(
-    "pyfly_correlation_id", default=None
-)
-_request_id: ContextVar[str | None] = ContextVar(
-    "pyfly_request_id", default=None
-)
-_tenant_id: ContextVar[str | None] = ContextVar(
-    "pyfly_tenant_id", default=None
-)
-_traceparent: ContextVar[str | None] = ContextVar(
-    "pyfly_traceparent", default=None
-)
-_tracestate: ContextVar[str | None] = ContextVar(
-    "pyfly_tracestate", default=None
-)
+_correlation_id: ContextVar[str | None] = ContextVar("pyfly_correlation_id", default=None)
+_request_id: ContextVar[str | None] = ContextVar("pyfly_request_id", default=None)
+_tenant_id: ContextVar[str | None] = ContextVar("pyfly_tenant_id", default=None)
+_traceparent: ContextVar[str | None] = ContextVar("pyfly_traceparent", default=None)
+_tracestate: ContextVar[str | None] = ContextVar("pyfly_tracestate", default=None)
 
 
 def set_correlation_id(value: str | None) -> Token[str | None]:

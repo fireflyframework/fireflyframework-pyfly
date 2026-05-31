@@ -25,6 +25,7 @@ Requires ``redis`` (``pip install pyfly[redis]``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import logging
 import socket
@@ -68,7 +69,7 @@ class RedisStreamsEventBus:
         block_ms: int = 5000,
         serializer: EventSerializer | None = None,
     ) -> None:
-        from redis import asyncio as redis_asyncio  # type: ignore[import-not-found]
+        from redis import asyncio as redis_asyncio
 
         self._url = url
         self._streams = list(streams) if streams else ["pyfly.events"]
@@ -129,15 +130,13 @@ class RedisStreamsEventBus:
         self._started = False
         if self._consume_task is not None:
             self._consume_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._consume_task
-            except asyncio.CancelledError:
-                pass
             self._consume_task = None
         await self._client.close()
 
     async def _consume_loop(self) -> None:
-        streams = {s: ">" for s in self._streams}
+        streams: dict[Any, Any] = {s: ">" for s in self._streams}
         try:
             while not self._closed:
                 try:
@@ -171,7 +170,8 @@ class RedisStreamsEventBus:
         if raw is None:
             logger.warning(
                 "Stream entry %s/%s missing 'envelope' field; acking and skipping",
-                stream_name, entry_id,
+                stream_name,
+                entry_id,
             )
             await self._client.xack(stream_name, self._group, entry_id)
             return
@@ -180,7 +180,8 @@ class RedisStreamsEventBus:
         except Exception:
             logger.exception(
                 "Failed to deserialize envelope for %s/%s; acking to prevent redelivery",
-                stream_name, entry_id,
+                stream_name,
+                entry_id,
             )
             await self._client.xack(stream_name, self._group, entry_id)
             return
@@ -192,14 +193,17 @@ class RedisStreamsEventBus:
                     await handler(envelope)
                 except Exception:
                     logger.exception(
-                        "Handler for pattern=%s raised on event_type=%s; "
-                        "leaving entry %s unacked for re-delivery",
-                        pattern, envelope.event_type, entry_id,
+                        "Handler for pattern=%s raised on event_type=%s; leaving entry %s unacked for re-delivery",
+                        pattern,
+                        envelope.event_type,
+                        entry_id,
                     )
                     return
         if not delivered:
             # No handler matched; ack so we don't redeliver forever.
             logger.debug(
-                "No handler matched event_type=%s on %s; acking", envelope.event_type, stream_name,
+                "No handler matched event_type=%s on %s; acking",
+                envelope.event_type,
+                stream_name,
             )
         await self._client.xack(stream_name, self._group, entry_id)

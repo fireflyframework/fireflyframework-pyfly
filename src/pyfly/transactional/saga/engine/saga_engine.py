@@ -109,7 +109,11 @@ class SagaEngine:
                     "saga_name": saga_name,
                     "correlation_id": ctx.correlation_id,
                     "headers": ctx.headers,
-                    "started_at": started_at.isoformat(),
+                    # Store the datetime itself (not an ISO string) so the
+                    # persistence port's get_stale() can compare it against a
+                    # datetime cutoff — passing a string raised TypeError during
+                    # stale-saga recovery.
+                    "started_at": started_at,
                 }
             )
 

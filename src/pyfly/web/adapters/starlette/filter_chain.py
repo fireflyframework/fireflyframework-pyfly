@@ -27,6 +27,23 @@ from pyfly.web.ports.filter import CallNext, WebFilter
 MAX_RESPONSE_BODY_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
+class _AlreadySentResponse(Response):
+    """Sentinel returned by the terminal when a streaming response has already
+    been forwarded to the client. Sending it again is a no-op.
+
+    Filters that post-process the response (e.g. add headers) operate on this
+    object harmlessly — for streaming responses the headers were already
+    flushed, so mutations are silently ignored, matching the behaviour of any
+    pass-through ASGI middleware.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(b"", status_code=200)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: D401
+        return
+
+
 class WebFilterChainMiddleware:
     """Pure ASGI middleware that executes a sorted chain of :class:`WebFilter` instances.
 
@@ -54,18 +71,43 @@ class WebFilterChainMiddleware:
         request = Request(scope, receive, send)
 
         async def _call_app(req: Any) -> Response:
-            """Terminal: run downstream ASGI app and capture its response."""
+            """Terminal: run the downstream ASGI app and adapt its response.
+
+            Single-shot responses are buffered into a :class:`Response` so filters
+            can inspect/modify them. Streaming responses (SSE, chunked downloads —
+            anything that emits a body frame with ``more_body=True``) are detected
+            on their first chunk and forwarded to the client **live**, so they are
+            never buffered in memory and reach the client incrementally.
+            """
             status_code = 200
             raw_headers: list[tuple[bytes, bytes]] = []
             body_parts: list[bytes] = []
+            state = {"streaming": False}
 
             async def _intercept(message: Any) -> None:
                 nonlocal status_code, raw_headers
-                if message["type"] == "http.response.start":
+                msg_type = message["type"]
+                if msg_type == "http.response.start":
                     status_code = message["status"]
                     raw_headers = list(message.get("headers", []))
-                elif message["type"] == "http.response.body":
+                elif msg_type == "http.response.body":
                     body = message.get("body", b"")
+                    more_body = message.get("more_body", False)
+                    # Detect streaming on the first body frame that signals more to
+                    # come. Once detected, flush the captured start line and forward
+                    # every frame (including this one) straight to the client.
+                    if not state["streaming"] and more_body:
+                        state["streaming"] = True
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": status_code,
+                                "headers": raw_headers,
+                            }
+                        )
+                    if state["streaming"]:
+                        await send({"type": "http.response.body", "body": body, "more_body": more_body})
+                        return
                     if body:
                         body_parts.append(body)
                         if sum(len(p) for p in body_parts) > MAX_RESPONSE_BODY_SIZE:
@@ -73,7 +115,7 @@ class WebFilterChainMiddleware:
                                 f"Response body exceeds {MAX_RESPONSE_BODY_SIZE} bytes. "
                                 "Consider excluding this route from the filter chain."
                             )
-                elif message["type"] == "http.response.pathsend":
+                elif msg_type == "http.response.pathsend":
                     # ASGI pathsend extension (Granian zero-copy file serving).
                     # Stream the file in chunks to avoid OOM on large files.
                     from pathlib import Path
@@ -90,6 +132,10 @@ class WebFilterChainMiddleware:
                                 body_parts.append(chunk)
 
             await self.app(scope, receive, _intercept)
+
+            if state["streaming"]:
+                # Body already forwarded live; nothing left to send.
+                return _AlreadySentResponse()
 
             response = Response(content=b"".join(body_parts), status_code=status_code)
             response.raw_headers[:] = raw_headers

@@ -18,11 +18,12 @@ from __future__ import annotations
 import json
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
 from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
 from pyfly.actuator.endpoints.loggers_endpoint import LoggersEndpoint
+from pyfly.actuator.endpoints.prometheus_endpoint import PrometheusEndpoint
 from pyfly.actuator.registry import ActuatorRegistry
 
 
@@ -50,10 +51,26 @@ def make_starlette_actuator_routes(
             routes.extend(_make_health_routes(ep))
         elif isinstance(ep, LoggersEndpoint):
             routes.extend(_make_loggers_routes(ep))
+        elif isinstance(ep, PrometheusEndpoint):
+            routes.append(_make_prometheus_route(ep))
         else:
             routes.append(_make_generic_route(eid, ep))
 
     return routes
+
+
+def _make_prometheus_route(ep: PrometheusEndpoint) -> Route:
+    """Prometheus scrape endpoint — must serve the raw text exposition format
+    (``text/plain; version=0.0.4``), not a JSON wrapper."""
+
+    async def handler(request: Request) -> Response:
+        data = await ep.handle()
+        return PlainTextResponse(
+            data.get("body", ""),
+            media_type=data.get("content_type") or "text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    return Route("/actuator/prometheus", handler, methods=["GET"])
 
 
 def _make_health_routes(ep: HealthEndpoint) -> list[Route]:

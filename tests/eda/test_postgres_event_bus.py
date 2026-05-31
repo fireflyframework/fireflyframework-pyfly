@@ -50,14 +50,8 @@ class TestPostgresEventBus:
         ]
 
     def test_normalise_dsn_strips_dialect_markers(self) -> None:
-        assert (
-            _normalise_dsn("postgresql+asyncpg://u:p@h:5432/db")
-            == "postgresql://u:p@h:5432/db"
-        )
-        assert (
-            _normalise_dsn("postgresql+psycopg://u:p@h/db")
-            == "postgresql://u:p@h/db"
-        )
+        assert _normalise_dsn("postgresql+asyncpg://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
+        assert _normalise_dsn("postgresql+psycopg://u:p@h/db") == "postgresql://u:p@h/db"
         assert _normalise_dsn("postgresql://u:p@h/db") == "postgresql://u:p@h/db"
 
     def test_normalise_dsn_applied_in_constructor(self) -> None:

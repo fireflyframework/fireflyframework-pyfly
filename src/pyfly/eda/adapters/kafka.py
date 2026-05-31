@@ -26,6 +26,7 @@ or ``pip install pyfly[eda]``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import logging
 from typing import Any
@@ -132,10 +133,8 @@ class KafkaEventBus:
         self._started = False
         if self._consume_task is not None:
             self._consume_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._consume_task
-            except asyncio.CancelledError:
-                pass
             self._consume_task = None
         if self._consumer is not None:
             await self._consumer.stop()
@@ -152,7 +151,8 @@ class KafkaEventBus:
                 except Exception:
                     logger.exception(
                         "Failed to deserialize record from topic=%s offset=%s",
-                        record.topic, record.offset,
+                        record.topic,
+                        record.offset,
                     )
                     continue
                 for pattern, handler in self._handlers:
@@ -162,7 +162,8 @@ class KafkaEventBus:
                         except Exception:
                             logger.exception(
                                 "Handler for pattern=%s raised on event_type=%s",
-                                pattern, envelope.event_type,
+                                pattern,
+                                envelope.event_type,
                             )
         except asyncio.CancelledError:
             pass

@@ -134,7 +134,5 @@ class EdaHealthAutoConfiguration:
     """
 
     @bean(name="eda_health")
-    def eda_health_indicator(
-        self, event_publisher: EventPublisher
-    ) -> EventPublisherHealthIndicator:
+    def eda_health_indicator(self, event_publisher: EventPublisher) -> EventPublisherHealthIndicator:
         return EventPublisherHealthIndicator(event_publisher)
