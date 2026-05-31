@@ -1,7 +1,7 @@
 /* PyFly Admin Dashboard — Main Stylesheet */
 
 /* ── Google Fonts ───────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Maven+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* ── Reset / Base ───────────────────────────────────────────────── */
 *,
@@ -245,12 +245,12 @@ a:hover {
     position: relative;
     background:
         linear-gradient(
-            rgba(59, 130, 246, 0.015) 1px,
+            rgba(95, 191, 46, 0.018) 1px,
             transparent 1px
         ),
         linear-gradient(
             90deg,
-            rgba(59, 130, 246, 0.015) 1px,
+            rgba(95, 191, 46, 0.018) 1px,
             transparent 1px
         );
     background-size: 40px 40px;
@@ -258,16 +258,21 @@ a:hover {
 
 /* ── Cards ──────────────────────────────────────────────────────── */
 .admin-card {
-    background: var(--admin-surface);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 120px),
+        var(--admin-surface);
     border: 1px solid var(--admin-border);
     border-radius: var(--admin-radius-lg);
     box-shadow: var(--admin-shadow);
     overflow: hidden;
-    transition: box-shadow var(--admin-transition);
+    transition:
+        box-shadow var(--admin-transition),
+        border-color var(--admin-transition);
 }
 
 .admin-card:hover {
     box-shadow: var(--admin-shadow-lg);
+    border-color: var(--admin-primary-dim);
 }
 
 .admin-card-header {
@@ -281,7 +286,8 @@ a:hover {
 .admin-card-header h3 {
     font-family: var(--admin-font-sans);
     font-size: 0.95rem;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     color: var(--admin-text);
     margin: 0;
 }
@@ -654,20 +660,27 @@ a:hover {
 
 /* ── Stat Cards ─────────────────────────────────────────────────── */
 .stat-card {
-    background: var(--admin-surface);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 90px),
+        var(--admin-surface);
     border: 1px solid var(--admin-border);
     border-radius: var(--admin-radius-lg);
     padding: 20px;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    transition: all var(--admin-transition);
+    gap: 12px;
+    transition:
+        transform var(--admin-transition),
+        border-color var(--admin-transition),
+        box-shadow var(--admin-transition);
     box-shadow: var(--admin-shadow);
 }
 
 .stat-card:hover {
     border-color: var(--admin-primary-dim);
     box-shadow: var(--admin-shadow-lg);
+    transform: translateY(-2px);
 }
 
 .stat-card-content {
@@ -695,13 +708,14 @@ a:hover {
 }
 
 .stat-card-icon {
-    width: 40px;
-    height: 40px;
+    width: 42px;
+    height: 42px;
     border-radius: var(--admin-radius);
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
 .stat-card-icon svg {

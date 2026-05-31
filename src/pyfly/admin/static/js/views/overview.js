@@ -35,7 +35,7 @@ function formatUptime(seconds) {
 /**
  * Create a stat card element.
  */
-function createStatCard({ label, value, subtitle, iconClass = 'primary' }) {
+function createStatCard({ label, value, subtitle, iconClass = 'primary', icon = '' }) {
     const card = document.createElement('div');
     card.className = 'stat-card';
 
@@ -67,12 +67,21 @@ function createStatCard({ label, value, subtitle, iconClass = 'primary' }) {
 
     card.appendChild(content);
 
-    const icon = document.createElement('div');
-    icon.className = `stat-card-icon ${iconClass}`;
-    card.appendChild(icon);
+    const iconEl = document.createElement('div');
+    iconEl.className = `stat-card-icon ${iconClass}`;
+    if (icon) iconEl.innerHTML = icon;
+    card.appendChild(iconEl);
 
     return card;
 }
+
+// Feather-style line icons (20×20, inherit `currentColor` from the icon tint).
+const STAT_ICONS = {
+    health: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+    beans: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+    uptime: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    profiles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
+};
 
 /**
  * Build a wiring progress bar item.
@@ -182,13 +191,16 @@ export async function render(container, api) {
 
     // 1) Health status
     const healthBadge = createStatusBadge(health.status || 'UNKNOWN');
-    statsRow.appendChild(createStatCard({ label: 'Health Status', value: healthBadge, iconClass: 'success' }));
+    statsRow.appendChild(
+        createStatCard({ label: 'Health Status', value: healthBadge, iconClass: 'success', icon: STAT_ICONS.health }),
+    );
 
     // 2) Total beans
     statsRow.appendChild(createStatCard({
         label: 'Total Beans',
         value: String(beans.total != null ? beans.total : 0),
         iconClass: 'primary',
+        icon: STAT_ICONS.beans,
     }));
 
     // 3) Uptime
@@ -197,6 +209,7 @@ export async function render(container, api) {
         value: formatUptime(app.uptime_seconds),
         subtitle: `Port ${app.web_port || 8080}`,
         iconClass: 'info',
+        icon: STAT_ICONS.uptime,
     }));
 
     // 4) Active profiles
@@ -206,6 +219,7 @@ export async function render(container, api) {
         value: profiles.length > 0 ? profiles.join(', ') : 'default',
         subtitle: `Python ${app.python_version || ''}`,
         iconClass: 'warning',
+        icon: STAT_ICONS.profiles,
     }));
 
     wrapper.appendChild(statsRow);
