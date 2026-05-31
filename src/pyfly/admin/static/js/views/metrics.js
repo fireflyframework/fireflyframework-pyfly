@@ -1,15 +1,89 @@
 /**
  * PyFly Admin — Metrics View.
  *
- * Metric browser with searchable list and drill-down detail panel.
- * Split layout: metric names on left, measurement detail on right.
+ * Metric browser with a searchable list and a live drill-down panel.
+ * Split layout: metric names on the left, live trend + measurements on
+ * the right. Selecting a numeric metric starts a rolling time-series
+ * chart that polls the metric on the configured refresh interval.
  *
  * Data sources:
  *   GET /admin/api/metrics          -> { names: [...], available: boolean }
  *   GET /admin/api/metrics/{name}   -> { name, measurements: [{statistic, value, tags}, ...] }
+ *   GET /admin/api/settings         -> { refreshInterval, ... }
  */
 
+/* global Chart */
+
+import { createLineChart } from '../charts.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+
+/* ── Constants ────────────────────────────────────────────────── */
+
+const MAX_POINTS = 60;
+const DEFAULT_INTERVAL_MS = 5000;
+const MIN_INTERVAL_MS = 1000;
+
+/* ── Value helpers ────────────────────────────────────────────── */
+
+/**
+ * Is a measurement value chartable as a number?
+ * @param {*} v
+ * @returns {boolean}
+ */
+function isNumericValue(v) {
+    if (typeof v === 'number') return Number.isFinite(v);
+    if (typeof v === 'string' && v.trim() !== '') return Number.isFinite(Number(v));
+    return false;
+}
+
+/**
+ * Coerce a numeric-ish value to a Number.
+ * @param {number|string} v
+ * @returns {number}
+ */
+function toNumber(v) {
+    return typeof v === 'number' ? v : Number(v);
+}
+
+/**
+ * Stable identity for a measurement (statistic + tags), used to keep the
+ * chart tracking the same series across polls.
+ * @param {{statistic?: string, tags?: object}} m
+ * @returns {string}
+ */
+function measurementKey(m) {
+    const tags = m.tags && Object.keys(m.tags).length > 0 ? JSON.stringify(m.tags) : '';
+    return `${m.statistic || 'value'}${tags ? ' ' + tags : ''}`;
+}
+
+/**
+ * Filter a measurements array down to the numeric ones.
+ * @param {Array} measurements
+ * @returns {Array}
+ */
+function numericMeasurements(measurements) {
+    return (measurements || []).filter((m) => isNumericValue(m.value));
+}
+
+/**
+ * Format a number for compact display.
+ * @param {number|null} n
+ * @returns {string}
+ */
+function formatNumber(n) {
+    if (n == null || Number.isNaN(n)) return '--';
+    if (!Number.isFinite(n)) return String(n);
+    if (Number.isInteger(n)) return n.toLocaleString();
+    const abs = Math.abs(n);
+    if (abs >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+    if (abs >= 1) return n.toFixed(2);
+    return n.toFixed(4);
+}
+
+/** Current wall-clock label. */
+function nowLabel() {
+    return new Date().toLocaleTimeString();
+}
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -79,12 +153,32 @@ function buildMeasurementsTable(measurements) {
     return tableWrap;
 }
 
+/**
+ * Build one stat block for the trend summary strip.
+ * @param {string} label
+ * @returns {{ el: HTMLElement, set: (text: string) => void }}
+ */
+function buildTrendStat(label) {
+    const el = document.createElement('div');
+    el.className = 'trend-stat';
+    const lab = document.createElement('div');
+    lab.className = 'trend-stat-label';
+    lab.textContent = label;
+    el.appendChild(lab);
+    const val = document.createElement('div');
+    val.className = 'trend-stat-value';
+    val.textContent = '--';
+    el.appendChild(val);
+    return { el, set: (text) => { val.textContent = text; } };
+}
+
 /* ── Render ───────────────────────────────────────────────────── */
 
 /**
  * Render the metrics browser view.
  * @param {HTMLElement} container
  * @param {import('../api.js').AdminAPI} api
+ * @returns {Promise<function>} cleanup
  */
 export async function render(container, api) {
     container.replaceChildren();
@@ -112,10 +206,18 @@ export async function render(container, api) {
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
-    // Fetch metric names
+    // Resolve the poll interval from server settings (best-effort).
+    let intervalMs = DEFAULT_INTERVAL_MS;
     let data;
     try {
-        data = await api.get('/metrics');
+        const [names, settings] = await Promise.all([
+            api.get('/metrics'),
+            api.get('/settings').catch(() => null),
+        ]);
+        data = names;
+        if (settings && Number.isFinite(settings.refreshInterval)) {
+            intervalMs = Math.max(MIN_INTERVAL_MS, settings.refreshInterval);
+        }
     } catch (err) {
         wrapper.removeChild(loader);
         const errCard = document.createElement('div');
@@ -128,7 +230,7 @@ export async function render(container, api) {
         errBody.appendChild(errText);
         errCard.appendChild(errBody);
         wrapper.appendChild(errCard);
-        return;
+        return () => {};
     }
 
     wrapper.removeChild(loader);
@@ -145,7 +247,7 @@ export async function render(container, api) {
         infoBody.appendChild(infoText);
         infoCard.appendChild(infoBody);
         wrapper.appendChild(infoCard);
-        return;
+        return () => {};
     }
 
     const names = data.names || [];
@@ -162,7 +264,7 @@ export async function render(container, api) {
         emptyBody.appendChild(emptyText);
         emptyCard.appendChild(emptyBody);
         wrapper.appendChild(emptyCard);
-        return;
+        return () => {};
     }
 
     // ── Filter toolbar ──────────────────────────────────────────
@@ -237,16 +339,11 @@ export async function render(container, api) {
 
     // ── Split layout ────────────────────────────────────────────
     const splitLayout = document.createElement('div');
-    splitLayout.style.display = 'flex';
-    splitLayout.style.gap = '16px';
-    splitLayout.style.alignItems = 'flex-start';
+    splitLayout.className = 'metrics-split';
 
     // ── Left panel: metric list ─────────────────────────────────
     const leftPanel = document.createElement('div');
-    leftPanel.className = 'admin-card';
-    leftPanel.style.width = '300px';
-    leftPanel.style.minWidth = '300px';
-    leftPanel.style.flexShrink = '0';
+    leftPanel.className = 'admin-card metrics-list-panel';
 
     const leftHeader = document.createElement('div');
     leftHeader.className = 'admin-card-header';
@@ -347,8 +444,7 @@ export async function render(container, api) {
 
     // ── Right panel: metric detail ──────────────────────────────
     const rightPanel = document.createElement('div');
-    rightPanel.style.flex = '1';
-    rightPanel.style.minWidth = '0';
+    rightPanel.className = 'metrics-detail-panel';
 
     const detailCard = document.createElement('div');
     detailCard.className = 'admin-card';
@@ -361,7 +457,7 @@ export async function render(container, api) {
     placeholder.className = 'empty-state';
     const placeholderText = document.createElement('div');
     placeholderText.className = 'empty-state-text';
-    placeholderText.textContent = 'Select a metric from the list to view details';
+    placeholderText.textContent = 'Select a metric from the list to view its live trend';
     placeholder.appendChild(placeholderText);
     detailBody.appendChild(placeholder);
 
@@ -371,11 +467,86 @@ export async function render(container, api) {
 
     wrapper.appendChild(splitLayout);
 
+    /* ── Live trend state ───────────────────────────────────────
+     * Only one metric is tracked at a time. Selecting another (or
+     * navigating away) tears down the timer + chart first.
+     */
+    let pollTimer = null;
+    let liveChart = null;
+    let points = [];                 // [{ t: epochMs, v: number, label: string }]
+    let mode = 'value';              // 'value' | 'rate'
+    let paused = false;
+    let selectedKey = null;          // measurement currently charted
+    let loadToken = 0;               // guards against out-of-order metric loads
+
+    /** Stop polling + destroy the chart and reset the rolling buffer. */
+    function stopLive() {
+        if (pollTimer !== null) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+        if (liveChart) {
+            liveChart.destroy();
+            liveChart = null;
+        }
+        points = [];
+    }
+
+    /** Push a reading into the rolling window. */
+    function pushPoint(v) {
+        points.push({ t: Date.now(), v, label: nowLabel() });
+        if (points.length > MAX_POINTS) points.shift();
+    }
+
     /**
-     * Load and display metric detail data.
+     * Derive the chart series for the current mode.
+     * In 'rate' mode each point is the per-second delta from the prior point.
+     * @returns {{ labels: string[], data: number[] }}
+     */
+    function computeSeries() {
+        const labels = points.map((p) => p.label);
+        if (mode === 'rate') {
+            // A downward step is shown as-is (not clamped): for a gauge a
+            // negative per-second rate is correct, and for a counter a drop
+            // signals a reset (e.g. process restart) — both are honest signals.
+            const dataPts = points.map((p, i) => {
+                if (i === 0) return 0;
+                const dt = (p.t - points[i - 1].t) / 1000;
+                if (dt <= 0) return 0;
+                return (p.v - points[i - 1].v) / dt;
+            });
+            return { labels, data: dataPts };
+        }
+        return { labels, data: points.map((p) => p.v) };
+    }
+
+    /**
+     * Find the chosen measurement in a fresh measurements array, falling
+     * back to the first numeric measurement if the selected one vanished.
+     * @param {Array} measurements
+     * @returns {object|null}
+     */
+    function pickChosen(measurements) {
+        const found = (measurements || []).find((m) => measurementKey(m) === selectedKey);
+        if (found && isNumericValue(found.value)) return found;
+        const numeric = numericMeasurements(measurements);
+        return numeric.length > 0 ? numeric[0] : null;
+    }
+
+    /**
+     * Load and display metric detail, wiring up the live trend chart.
      * @param {string} metricName
      */
     async function loadMetricDetail(metricName) {
+        // Always tear down any prior live session first.
+        stopLive();
+        mode = 'value';
+        paused = false;
+        selectedKey = null;
+        // Token guards against a slower earlier fetch resolving after a newer
+        // selection — without it, a stale load could install a second timer.
+        const myToken = ++loadToken;
+
         detailBody.replaceChildren();
 
         // Loading state
@@ -383,44 +554,261 @@ export async function render(container, api) {
         loadingEl.className = 'loading-spinner';
         detailBody.appendChild(loadingEl);
 
+        let detail;
         try {
-            const detail = await api.get('/metrics/' + encodeURIComponent(metricName));
-            detailBody.replaceChildren();
-
-            // Metric name header
-            const nameHeader = document.createElement('h3');
-            nameHeader.style.marginBottom = '4px';
-            nameHeader.style.fontSize = '1rem';
-            nameHeader.style.fontWeight = '600';
-            nameHeader.style.fontFamily = 'var(--admin-font-mono)';
-            nameHeader.style.wordBreak = 'break-all';
-            nameHeader.textContent = detail.name || metricName;
-            detailBody.appendChild(nameHeader);
-
-            // Description and metadata
-            if (detail.description || detail.unit || detail.source) {
-                const meta = document.createElement('div');
-                meta.style.marginBottom = '16px';
-                meta.style.fontSize = '0.8rem';
-                meta.style.color = 'var(--admin-text-muted)';
-                const parts = [];
-                if (detail.description) parts.push(detail.description);
-                if (detail.unit) parts.push(`Unit: ${detail.unit}`);
-                if (detail.source) parts.push(`Source: ${detail.source}`);
-                meta.textContent = parts.join(' · ');
-                detailBody.appendChild(meta);
-            }
-
-            // Measurements table
-            const measurements = detail.measurements || [];
-            detailBody.appendChild(buildMeasurementsTable(measurements));
+            detail = await api.get('/metrics/' + encodeURIComponent(metricName));
         } catch (err) {
+            if (myToken !== loadToken) return;  // superseded by a newer selection
             detailBody.replaceChildren();
             const errMsg = document.createElement('div');
             errMsg.className = 'text-muted text-sm';
             errMsg.style.padding = '16px 0';
             errMsg.textContent = 'Failed to load metric detail: ' + err.message;
             detailBody.appendChild(errMsg);
+            return;
         }
+
+        // A newer selection (or navigation) superseded this load while awaiting.
+        if (myToken !== loadToken) return;
+
+        detailBody.replaceChildren();
+
+        // Metric name header
+        const nameHeader = document.createElement('h3');
+        nameHeader.style.marginBottom = '4px';
+        nameHeader.style.fontSize = '1rem';
+        nameHeader.style.fontWeight = '600';
+        nameHeader.style.fontFamily = 'var(--admin-font-mono)';
+        nameHeader.style.wordBreak = 'break-all';
+        nameHeader.textContent = detail.name || metricName;
+        detailBody.appendChild(nameHeader);
+
+        // Description and metadata
+        if (detail.description || detail.unit || detail.source) {
+            const meta = document.createElement('div');
+            meta.style.marginBottom = '16px';
+            meta.style.fontSize = '0.8rem';
+            meta.style.color = 'var(--admin-text-muted)';
+            const parts = [];
+            if (detail.description) parts.push(detail.description);
+            if (detail.unit) parts.push(`Unit: ${detail.unit}`);
+            if (detail.source) parts.push(`Source: ${detail.source}`);
+            meta.textContent = parts.join(' · ');
+            detailBody.appendChild(meta);
+        }
+
+        const measurements = detail.measurements || [];
+        const numeric = numericMeasurements(measurements);
+
+        // Container for the (live-refreshing) measurements table.
+        const tableHost = document.createElement('div');
+
+        function renderTable(ms) {
+            tableHost.replaceChildren();
+            tableHost.appendChild(buildMeasurementsTable(ms));
+        }
+
+        if (numeric.length === 0) {
+            // Non-numeric metric — no chart, just the snapshot table.
+            const note = document.createElement('div');
+            note.className = 'text-muted text-sm';
+            note.style.margin = '4px 0 16px';
+            note.textContent = 'No numeric value to trend — showing the latest snapshot.';
+            detailBody.appendChild(note);
+            renderTable(measurements);
+            detailBody.appendChild(tableHost);
+            return;
+        }
+
+        // Track the first numeric measurement by default.
+        selectedKey = measurementKey(numeric[0]);
+
+        // ── Trend card ──────────────────────────────────────────
+        const trendCard = document.createElement('div');
+        trendCard.className = 'admin-card mb-lg';
+
+        // Header: title + live indicator
+        const trendHeader = document.createElement('div');
+        trendHeader.className = 'admin-card-header';
+        const trendTitle = document.createElement('h3');
+        trendTitle.textContent = 'Live Trend';
+        trendHeader.appendChild(trendTitle);
+
+        const liveBadge = document.createElement('span');
+        liveBadge.className = 'trend-live';
+        const liveDot = document.createElement('span');
+        liveDot.className = 'trend-live-dot';
+        liveBadge.appendChild(liveDot);
+        const liveText = document.createElement('span');
+        liveText.textContent = `live · ${(intervalMs / 1000).toFixed(intervalMs % 1000 ? 1 : 0)}s`;
+        liveBadge.appendChild(liveText);
+        trendHeader.appendChild(liveBadge);
+        trendCard.appendChild(trendHeader);
+
+        const trendBody = document.createElement('div');
+        trendBody.className = 'admin-card-body';
+
+        // Toolbar: measurement selector + value/rate toggle + pause
+        const trendToolbar = document.createElement('div');
+        trendToolbar.className = 'trend-toolbar';
+
+        // Measurement selector (only when more than one numeric series)
+        if (numeric.length > 1) {
+            const select = document.createElement('select');
+            select.className = 'select';
+            select.style.width = 'auto';
+            select.setAttribute('aria-label', 'Measurement to chart');
+            for (const m of numeric) {
+                const opt = document.createElement('option');
+                opt.value = measurementKey(m);
+                opt.textContent = measurementKey(m);
+                select.appendChild(opt);
+            }
+            select.value = selectedKey;
+            select.addEventListener('change', () => {
+                selectedKey = select.value;
+                // Reseed the series from the freshly-chosen measurement.
+                points = [];
+                const chosen = numeric.find((m) => measurementKey(m) === selectedKey);
+                if (chosen) pushPoint(toNumber(chosen.value));
+                refresh();
+            });
+            trendToolbar.appendChild(select);
+        }
+
+        // Value / Rate segmented toggle
+        const seg = document.createElement('div');
+        seg.className = 'seg-toggle';
+        seg.setAttribute('role', 'group');
+        seg.setAttribute('aria-label', 'Trend mode');
+        const segButtons = {};
+        for (const m of [['value', 'Value'], ['rate', 'Rate Δ/s']]) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'seg-btn' + (m[0] === mode ? ' active' : '');
+            btn.textContent = m[1];
+            btn.addEventListener('click', () => {
+                if (mode === m[0]) return;
+                mode = m[0];
+                segButtons.value.classList.toggle('active', mode === 'value');
+                segButtons.rate.classList.toggle('active', mode === 'rate');
+                refresh();
+            });
+            segButtons[m[0]] = btn;
+            seg.appendChild(btn);
+        }
+        trendToolbar.appendChild(seg);
+
+        // Pause / Resume
+        const pauseBtn = document.createElement('button');
+        pauseBtn.type = 'button';
+        pauseBtn.className = 'btn btn-sm';
+        pauseBtn.textContent = 'Pause';
+        pauseBtn.addEventListener('click', () => {
+            paused = !paused;
+            pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+            liveBadge.classList.toggle('paused', paused);
+            liveText.textContent = paused ? 'paused' : `live · ${(intervalMs / 1000).toFixed(intervalMs % 1000 ? 1 : 0)}s`;
+        });
+        trendToolbar.appendChild(pauseBtn);
+
+        trendBody.appendChild(trendToolbar);
+
+        // Canvas
+        const canvasWrap = document.createElement('div');
+        canvasWrap.style.height = '220px';
+        canvasWrap.style.marginTop = '12px';
+        const canvas = document.createElement('canvas');
+        canvasWrap.appendChild(canvas);
+        trendBody.appendChild(canvasWrap);
+
+        // Summary stats strip
+        const statsStrip = document.createElement('div');
+        statsStrip.className = 'trend-stats';
+        const statCurrent = buildTrendStat('Current');
+        const statMin = buildTrendStat('Min');
+        const statMax = buildTrendStat('Max');
+        const statAvg = buildTrendStat('Avg');
+        statsStrip.appendChild(statCurrent.el);
+        statsStrip.appendChild(statMin.el);
+        statsStrip.appendChild(statMax.el);
+        statsStrip.appendChild(statAvg.el);
+        trendBody.appendChild(statsStrip);
+
+        trendCard.appendChild(trendBody);
+        detailBody.appendChild(trendCard);
+
+        // Measurements table below the trend.
+        renderTable(measurements);
+        detailBody.appendChild(tableHost);
+
+        // Seed first reading.
+        const seed = pickChosen(measurements);
+        if (seed) pushPoint(toNumber(seed.value));
+
+        /** Recompute series + stats and repaint the chart. */
+        function refresh() {
+            const { labels, data: series } = computeSeries();
+            if (liveChart) liveChart.update([...series], [...labels]);
+
+            const finite = series.filter((x) => Number.isFinite(x));
+            if (finite.length === 0) {
+                statCurrent.set('--');
+                statMin.set('--');
+                statMax.set('--');
+                statAvg.set('--');
+                return;
+            }
+            const current = series[series.length - 1];
+            const min = Math.min(...finite);
+            const max = Math.max(...finite);
+            const avg = finite.reduce((a, b) => a + b, 0) / finite.length;
+            statCurrent.set(formatNumber(current));
+            statMin.set(formatNumber(min));
+            statMax.set(formatNumber(max));
+            statAvg.set(formatNumber(avg));
+        }
+
+        // Create the chart once the canvas is laid out.
+        requestAnimationFrame(() => {
+            // Guard: the view may have been torn down before the frame fired.
+            if (!canvas.isConnected) return;
+            const { labels, data: series } = computeSeries();
+            liveChart = createLineChart(canvas, {
+                label: metricName,
+                color: '--admin-primary',
+                data: [...series],
+                labels: [...labels],
+            });
+            refresh();
+        });
+
+        // ── Poll loop ───────────────────────────────────────────
+        pollTimer = setInterval(async () => {
+            if (paused) return;
+            let fresh;
+            try {
+                fresh = await api.get('/metrics/' + encodeURIComponent(metricName));
+            } catch {
+                // Network hiccup — keep the timer, skip this tick.
+                return;
+            }
+            // A metric switch (or navigation) during the request would have
+            // bumped the token; drop this stale tick so it can't write another
+            // metric's reading into the now-shared buffer/chart.
+            if (myToken !== loadToken) return;
+            const ms = fresh.measurements || [];
+            const chosen = pickChosen(ms);
+            if (!chosen) return;
+            pushPoint(toNumber(chosen.value));
+            renderTable(ms);
+            refresh();
+        }, intervalMs);
     }
+
+    // ── Cleanup ─────────────────────────────────────────────────
+    return function cleanup() {
+        loadToken++;  // abort any in-flight metric load
+        stopLive();
+    };
 }
