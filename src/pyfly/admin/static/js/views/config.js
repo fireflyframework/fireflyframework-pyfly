@@ -8,7 +8,9 @@
  *   -> { groups: { "pyfly.web": { port: 8080, adapter: "auto" }, ... } }
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+import { pageSkeleton } from '../components/skeleton.js';
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -257,9 +259,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (two stat cards + property rows)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 2, rows: 6 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -269,16 +271,12 @@ export async function render(container, api) {
         configData = await api.get('/config');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load configuration: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load configuration',
+            text: err.message,
+        }));
         return;
     }
 
@@ -288,16 +286,11 @@ export async function render(container, api) {
     const groupNames = Object.keys(groups);
 
     if (groupNames.length === 0) {
-        const emptyCard = document.createElement('div');
-        emptyCard.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent = 'No configuration groups found';
-        emptyBody.appendChild(emptyText);
-        emptyCard.appendChild(emptyBody);
-        wrapper.appendChild(emptyCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'inbox',
+            title: 'No configuration groups found',
+            text: 'No application configuration properties were exposed by this service.',
+        }));
         return;
     }
 

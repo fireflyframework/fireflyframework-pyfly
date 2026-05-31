@@ -9,6 +9,9 @@
  *   GET /admin/api/transactions -> { sagas, tcc, saga_count, tcc_count, total, in_flight }
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
+
 /* ── Helpers ──────────────────────────────────────────────────── */
 
 /**
@@ -429,9 +432,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (four stat cards + a table)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 4, rows: 6 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -441,16 +444,12 @@ export async function render(container, api) {
         data = await api.get('/transactions');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load transaction data: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load transaction data',
+            text: err.message,
+        }));
         return;
     }
 
@@ -488,16 +487,11 @@ export async function render(container, api) {
     sagaSection.appendChild(sagaHeader);
 
     if (sagaCount === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent = 'No saga definitions registered';
-        emptyBody.appendChild(emptyText);
-        empty.appendChild(emptyBody);
-        sagaSection.appendChild(empty);
+        sagaSection.appendChild(createEmptyStateCard({
+            icon: 'inbox',
+            title: 'No sagas registered',
+            text: 'No @saga definitions are registered in this application.',
+        }));
     } else {
         for (const saga of data.sagas) {
             sagaSection.appendChild(renderSagaCard(saga));
@@ -522,16 +516,11 @@ export async function render(container, api) {
     tccSection.appendChild(tccHeader);
 
     if (tccCount === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent = 'No TCC definitions registered';
-        emptyBody.appendChild(emptyText);
-        empty.appendChild(emptyBody);
-        tccSection.appendChild(empty);
+        tccSection.appendChild(createEmptyStateCard({
+            icon: 'inbox',
+            title: 'No TCC transactions registered',
+            text: 'No @tcc definitions are registered in this application.',
+        }));
     } else {
         for (const tcc of data.tcc) {
             tccSection.appendChild(renderTccCard(tcc));

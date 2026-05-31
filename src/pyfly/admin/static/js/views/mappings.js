@@ -9,6 +9,8 @@
  *   GET /admin/api/mappings -> { mappings: [...], total: N }
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { createMethodBadge } from '../components/status-badge.js';
 import { createTable } from '../components/table.js';
 
@@ -190,9 +192,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (method stat cards + mappings table)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 4, rows: 8 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -202,16 +204,12 @@ export async function render(container, api) {
         data = await api.get('/mappings');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load mappings: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load mappings',
+            text: err.message,
+        }));
         return;
     }
 
@@ -269,16 +267,11 @@ export async function render(container, api) {
 
     // ── Empty state ──────────────────────────────────────────────
     if (total === 0) {
-        const emptyCard = document.createElement('div');
-        emptyCard.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent = 'No request mappings';
-        emptyBody.appendChild(emptyText);
-        emptyCard.appendChild(emptyBody);
-        wrapper.appendChild(emptyCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'inbox',
+            title: 'No request mappings',
+            text: 'No HTTP routes are registered in this application.',
+        }));
         return;
     }
 

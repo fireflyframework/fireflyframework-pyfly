@@ -16,6 +16,9 @@
 
 /* global d3 */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { skeletonCard } from '../components/skeleton.js';
+
 const STEREOTYPE_COLORS = {
     service:         '#3b82f6',
     controller:      '#8b5cf6',
@@ -25,28 +28,6 @@ const STEREOTYPE_COLORS = {
     configuration:   '#06b6d4',
     none:            '#64748b',
 };
-
-/**
- * Build an error/empty card using safe DOM methods only.
- */
-function _buildMessageCard(title, text) {
-    const card = document.createElement('div');
-    card.className = 'admin-card';
-    const body = document.createElement('div');
-    body.className = 'admin-card-body empty-state';
-    const h = document.createElement('div');
-    h.className = 'empty-state-title';
-    h.textContent = title;
-    body.appendChild(h);
-    if (text) {
-        const p = document.createElement('div');
-        p.className = 'empty-state-text';
-        p.textContent = text;
-        body.appendChild(p);
-    }
-    card.appendChild(body);
-    return card;
-}
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 
@@ -546,19 +527,35 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
+    // Loading skeleton (graph area is non-tabular)
+    const loader = document.createElement('div');
+    loader.appendChild(skeletonCard({ lines: 6 }));
+    wrapper.appendChild(loader);
+    container.appendChild(wrapper);
+
     // Fetch graph data
     let data;
     try {
         data = await api.get('/beans/graph');
     } catch (err) {
-        wrapper.appendChild(_buildMessageCard('Failed to load graph', err.message));
-        container.appendChild(wrapper);
+        wrapper.removeChild(loader);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load graph',
+            text: err.message,
+        }));
         return;
     }
 
+    wrapper.removeChild(loader);
+
     if (!data.nodes || data.nodes.length === 0) {
-        wrapper.appendChild(_buildMessageCard('No beans registered'));
-        container.appendChild(wrapper);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'activity',
+            title: 'No beans registered',
+            text: 'No beans are registered in the application context to visualize.',
+        }));
         return;
     }
 

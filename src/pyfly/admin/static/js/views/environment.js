@@ -8,8 +8,10 @@
  *   -> { active_profiles: [...], properties: {...}, sources: [...] }
  */
 
-import { createTable } from '../components/table.js';
+import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+import { pageSkeleton } from '../components/skeleton.js';
+import { createTable } from '../components/table.js';
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -126,9 +128,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (profiles + sources stat cards, properties table)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 2, rows: 8 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -138,16 +140,12 @@ export async function render(container, api) {
         envData = await api.get('/env');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load environment data: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load environment data',
+            text: err.message,
+        }));
         return;
     }
 

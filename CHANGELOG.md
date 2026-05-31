@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.11 (2026-05-31)
+
+### Admin dashboard — loading skeletons & consistent empty states
+
+A cross-cutting polish pass over every view:
+
+- **Skeleton loaders.** While a view fetches its data it now shows a shimmer
+  skeleton that mirrors the eventual layout (stat cards + table/cards) instead of
+  a bare spinner, so the page doesn't jump and loads feel faster. New reusable
+  `components/skeleton.js` (`pageSkeleton`, `skeletonStatCards`, `skeletonTable`,
+  `skeletonCard`, `skeletonLine`); theme-aware sheen; honours
+  `prefers-reduced-motion`.
+- **Consistent empty / error states.** "No data" and "failed to load" panels are
+  now a single iconographic component (`components/empty-state.js` —
+  `createEmptyState` / `createEmptyStateCard`) with a fitting icon, a clear title
+  and a helpful sentence, replacing the ad-hoc title+text blocks scattered across
+  views. Errors use a danger-tinted alert icon and preserve the error message.
+- Applied across all 17 views; behaviour is otherwise unchanged (data handling,
+  SSE/chart lifecycle and cleanup are untouched). Verified live across every view
+  with zero console errors.
+
+---
+
 ## v26.05.10 (2026-05-31)
 
 ### Admin dashboard — HTTP request analytics on Traces

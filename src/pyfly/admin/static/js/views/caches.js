@@ -10,7 +10,9 @@
  *   POST /admin/api/caches/{name}/evict  -> { cleared } | { evicted, key } | { error }
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { showToast } from '../components/toast.js';
 
 /* ── Render ───────────────────────────────────────────────────── */
@@ -57,9 +59,9 @@ export async function render(container, api) {
     header.appendChild(headerRight);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (stat cards + keys table)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 4, rows: 6 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -69,16 +71,12 @@ export async function render(container, api) {
         data = await api.get('/caches');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load cache data: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load cache data',
+            text: err.message,
+        }));
         return;
     }
 
@@ -86,16 +84,11 @@ export async function render(container, api) {
 
     // ── Cache not available ──────────────────────────────────
     if (!data.available) {
-        const infoCard = document.createElement('div');
-        infoCard.className = 'admin-card';
-        const infoBody = document.createElement('div');
-        infoBody.className = 'admin-card-body empty-state';
-        const infoText = document.createElement('div');
-        infoText.className = 'empty-state-text';
-        infoText.textContent = 'No cache adapter is configured. Register a CacheAdapter bean to enable caching.';
-        infoBody.appendChild(infoText);
-        infoCard.appendChild(infoBody);
-        wrapper.appendChild(infoCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'database',
+            title: 'No cache adapter configured',
+            text: 'Register a CacheAdapter bean to enable caching.',
+        }));
         return;
     }
 

@@ -8,6 +8,8 @@
  * Data source: GET /admin/api/instances
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { createStatusBadge } from '../components/status-badge.js';
 
 /* -- Helpers --------------------------------------------------------- */
@@ -153,9 +155,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading spinner
+    // Loading skeleton (stat cards + instance list)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 3, rows: 5 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -165,20 +167,12 @@ export async function render(container, api) {
         data = await api.get('/instances');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errTitle = document.createElement('div');
-        errTitle.className = 'empty-state-title';
-        errTitle.textContent = 'Failed to load instances';
-        errBody.appendChild(errTitle);
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load instances',
+            text: err.message,
+        }));
         return;
     }
 
@@ -188,21 +182,11 @@ export async function render(container, api) {
 
     // -- Empty state --
     if (instances.length === 0) {
-        const emptyCard = document.createElement('div');
-        emptyCard.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyTitle = document.createElement('div');
-        emptyTitle.className = 'empty-state-title';
-        emptyTitle.textContent = 'No instances registered';
-        emptyBody.appendChild(emptyTitle);
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent =
-            'Register application instances via the admin server API or configure static discovery.';
-        emptyBody.appendChild(emptyText);
-        emptyCard.appendChild(emptyBody);
-        wrapper.appendChild(emptyCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'server',
+            title: 'No instances registered',
+            text: 'Register application instances via the admin server API or configure static discovery.',
+        }));
         return;
     }
 

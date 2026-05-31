@@ -9,6 +9,8 @@
  *   GET /admin/api/cqrs -> { handlers: [...], total: N, pipeline: {...} }
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { createTable } from '../components/table.js';
 
 /* ── Helpers ──────────────────────────────────────────────────── */
@@ -73,9 +75,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (three stat cards + a table)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 3, rows: 6 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -85,16 +87,12 @@ export async function render(container, api) {
         data = await api.get('/cqrs');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load CQRS data: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load CQRS data',
+            text: err.message,
+        }));
         return;
     }
 
