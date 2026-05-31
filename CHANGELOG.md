@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.07 (2026-05-31)
+
+### Admin dashboard — brand refresh & UI foundation
+
+First pass of the best-in-class admin dashboard overhaul.
+
+- **Logo-aligned theme.** The palette is retargeted to the pyfly logo's vivid
+  lime-green brand — accent/primary, sidebar, focus/active states and all chart
+  palettes are green; dark surfaces shifted from navy to a desaturated
+  dark-forest charcoal. Light theme accents greened to match.
+- **Typography.** Switched the UI font to **Maven Pro** (rounded,
+  friendly-professional — matches the logo), keeping JetBrains Mono for
+  tabular/numeric data.
+- **Stat cards.** Implemented the previously-empty overview stat-card icons
+  (health / beans / uptime / profiles) and refined card depth (subtle gradient,
+  hover lift, bolder headers).
+- **Asset caching.** Admin static assets now serve with `Cache-Control: no-cache`
+  and the SPA injects a `?v={__version__}` query, so theme/JS updates are picked
+  up on upgrade instead of being served stale from the browser cache.
+- **Responsive.** Verified zero horizontal overflow at mobile (390px) and desktop
+  (1440px); mobile drawer, stacked stat cards and horizontally-scrollable tables
+  all behave.
+- `pyfly.__version__` kept in sync with the packaged version.
+
+---
+
 ## v26.05.06 (2026-05-31)
 
 ### Hardening pass — framework-wide bug fixes
