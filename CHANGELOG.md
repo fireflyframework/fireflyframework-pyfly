@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.08 (2026-05-31)
+
+### Admin dashboard — ⌘K command palette
+
+- A keyboard-first **command palette**: press <kbd>⌘K</kbd> / <kbd>Ctrl-K</kbd>
+  (or the new navbar **Search** button) to fuzzy-filter every view plus quick
+  actions (toggle theme, wallboard mode) and jump on <kbd>Enter</kbd>.
+- Full keyboard navigation (↑/↓ with clamping, Enter to run, Esc to close),
+  click-to-run, and a blurred modal backdrop. Brand-green active state, Maven Pro.
+- Reuses the sidebar's navigation definition (now exported) so the palette
+  always stays in sync with the nav. The navbar Search trigger collapses to an
+  icon on mobile.
+
+---
+
 ## v26.05.07 (2026-05-31)
 
 ### Admin dashboard — brand refresh & UI foundation
