@@ -2010,3 +2010,52 @@ body.wallboard-mode .admin-content {
         grid-template-columns: repeat(2, 1fr);
     }
 }
+
+/* ── Traces: status-mix bar ─────────────────────────────────────── */
+.status-bar {
+    display: flex;
+    height: 14px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--admin-bg-subtle);
+    border: 1px solid var(--admin-border-subtle);
+}
+
+.status-bar-seg {
+    height: 100%;
+    transition: width var(--admin-transition);
+    min-width: 0;
+}
+
+.status-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    margin-top: 16px;
+}
+
+.status-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    color: var(--admin-text-secondary);
+}
+
+.status-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.status-legend-count {
+    font-family: var(--admin-font-mono);
+    font-weight: 600;
+    color: var(--admin-text);
+}
+
+.status-legend-pct {
+    color: var(--admin-text-muted);
+    font-size: 0.72rem;
+}

@@ -238,7 +238,7 @@ stream for live updates.
 |------|-----------|-------------|
 | **Metrics** | `metrics` | Built-in process metrics (CPU, memory, threads, GC, uptime) always available without external dependencies. Optional Prometheus metrics included when `prometheus_client` is installed. Selecting a numeric metric opens a **live time-series trend** — a rolling chart polled at the configured refresh interval with a Value / Rate (Δ/s) toggle, pause/resume, Current/Min/Max/Avg summary, a measurement selector for multi-series (tagged) metrics, and a live-refreshing measurements table. Non-numeric metrics show a snapshot instead. |
 | **Scheduled Tasks** | `scheduled` | All `@scheduled` tasks with cron expressions, fixed-rate/delay configuration, and execution status. |
-| **HTTP Traces** | `traces` | Recent HTTP request/response traces captured by `TraceCollectorFilter`. Shows method, path, status code, duration, query string, client host, content type, user agent, and response content-length. Click-to-detail panel. Status code filter pills (All, 2xx, 3xx, 4xx, 5xx). Real-time SSE for new traces. Ring buffer of 500 entries. |
+| **HTTP Traces** | `traces` | Recent HTTP request/response traces captured by `TraceCollectorFilter`. **Live request analytics**: total requests, average/max latency, error rate (4xx+5xx), a status-code mix bar (2xx/3xx/4xx/5xx), a latency-distribution histogram and latency percentiles (p50/p90/p95/p99) — all updating live as requests arrive. Shows method, path, status code, duration, query string, client host, content type, user agent, and response content-length. Click-to-detail panel. Status code filter pills (All, 2xx, 3xx, 4xx, 5xx). Real-time SSE for new traces. Client buffer bounded to the 500-entry ring buffer. |
 
 ### Infrastructure
 
