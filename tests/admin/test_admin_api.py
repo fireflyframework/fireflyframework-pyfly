@@ -257,3 +257,17 @@ class TestAdminAPI:
         resp = admin_client.get("/admin")
         assert resp.status_code == 200
         assert '<base href="/admin/">' in resp.text
+
+    def test_spa_shell_is_no_cache(self, admin_client):
+        # The SPA shell must revalidate so version-stamped asset URLs are
+        # picked up after an upgrade (a heuristically cached index.html would
+        # otherwise keep referencing the previous version's assets).
+        resp = admin_client.get("/admin/")
+        assert resp.headers.get("cache-control") == "no-cache"
+
+    def test_spa_stamps_asset_versions(self, admin_client):
+        from pyfly import __version__
+
+        resp = admin_client.get("/admin/")
+        # Local static assets carry the framework version as a cache-busting query.
+        assert f"?v={__version__}" in resp.text

@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.09 (2026-05-31)
+
+### Admin dashboard — live time-series metrics
+
+- **Live trend on the Metrics view.** Selecting a numeric metric now opens a
+  rolling **time-series chart** (Chart.js, themed) that polls the metric on the
+  configured refresh interval and keeps a 60-point window — replacing the old
+  static value snapshot.
+- **Value / Rate toggle.** Switch between the absolute value and a per-second
+  delta (Δ/s); a downward step is shown honestly (real gauge decrease or counter
+  reset) rather than smoothed away.
+- **Pause/Resume** the live feed, a **Current / Min / Max / Avg** summary strip,
+  and a **measurement selector** for multi-series (tagged) Prometheus metrics —
+  switching reseeds the series. The measurements table refreshes live too.
+- Non-numeric metrics (e.g. `python.version`) show a snapshot with a clear note
+  instead of an empty chart. Rapid metric switching and navigation are race-safe
+  (a load-generation token drops superseded fetches and poll ticks) and tear down
+  the timer + chart on exit — no dangling intervals.
+- **Responsive.** The list/detail split stacks on mobile and the chart canvas
+  resizes; verified zero horizontal overflow at 390px and side-by-side at 1440px,
+  in both dark and light themes.
+
+### Admin dashboard — cache correctness
+
+- The SPA shell (`index.html`) is now served with `Cache-Control: no-cache`, so
+  the version-stamped (`?v=…`) asset URLs are actually revalidated after a
+  framework upgrade. Previously a heuristically cached shell could keep pointing
+  at the prior version's CSS/JS.
+
+---
+
 ## v26.05.08 (2026-05-31)
 
 ### Admin dashboard — ⌘K command palette

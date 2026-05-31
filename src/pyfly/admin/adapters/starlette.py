@@ -410,4 +410,11 @@ class AdminRouteBuilder:
             rf'\1="\2?v={__version__}"',
             content,
         )
-        return Response(content, media_type="text/html")
+        # The SPA shell must revalidate so version-stamped asset URLs (?v=...)
+        # are picked up after a framework upgrade. Without this, a heuristically
+        # cached index.html keeps pointing at the previous version's assets.
+        return Response(
+            content,
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache"},
+        )
