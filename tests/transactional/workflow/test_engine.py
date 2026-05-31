@@ -77,6 +77,34 @@ class TestSimpleWorkflow:
         assert not result.successful
 
 
+class TestChildWorkflowFireAndForget:
+    @pytest.mark.asyncio
+    async def test_fire_and_forget_returns_real_correlation_id(self) -> None:
+        """Regression: fire-and-forget child start must return the child's real
+        correlation id (and persist it), not the asyncio Task name."""
+        from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
+
+        @workflow(id="child-wf")
+        class ChildWf:
+            @workflow_step(id="only")
+            async def only(self) -> str:
+                return "ok"
+
+        engine, registry = _make_engine()
+        registry.register_from_bean(ChildWf())
+
+        svc = ChildWorkflowService()
+        svc.bind(engine)
+        correlation_id = await svc.start("child-wf", wait_for_completion=False)
+
+        assert isinstance(correlation_id, str)
+        assert not correlation_id.startswith("Task-")
+        # The engine persisted the execution under this id before returning.
+        state = await engine.get_execution(correlation_id)
+        assert state is not None
+        assert state.correlation_id == correlation_id
+
+
 class TestSignalDriven:
     @pytest.mark.asyncio
     async def test_wait_for_signal_resumes_workflow(self) -> None:

@@ -64,3 +64,8 @@ class EventCircuitBreaker:
             self._failures += 1
             if self._failures >= self._config.failure_threshold:
                 self._opened_at = time.monotonic()
+                # Reset the half-open trial budget so the NEXT recovery window
+                # gets a fresh quota. Without this the counter accumulates across
+                # re-opens and the breaker becomes permanently stuck OPEN once
+                # half_open_max_calls total trials have failed over its lifetime.
+                self._half_open_calls = 0

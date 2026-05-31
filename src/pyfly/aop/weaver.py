@@ -39,6 +39,14 @@ def weave_bean(bean: Any, qualified_prefix: str, registry: AspectRegistry) -> No
         if attr_name.startswith("_"):
             continue
 
+        # Look the attribute up statically on the class FIRST so we never trigger
+        # descriptor ``__get__`` side effects. A plain ``getattr`` here would
+        # evaluate @property / cached_property getters during weaving — a
+        # side-effecting or raising property would then abort application startup.
+        static_attr = inspect.getattr_static(bean, attr_name, None)
+        if isinstance(static_attr, (property, functools.cached_property)):
+            continue
+
         attr = getattr(bean, attr_name, None)
         if attr is None or not callable(attr):
             continue

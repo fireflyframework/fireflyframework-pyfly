@@ -19,10 +19,20 @@ Mirrors Spring Boot's @RequestMapping, @GetMapping, @PostMapping, etc.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 T = TypeVar("T", bound=type)
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+class MethodMapping(Protocol):
+    """Typed signature of an HTTP method mapping decorator factory.
+
+    Calling it (e.g. ``get_mapping("/path")``) returns a decorator that
+    attaches routing metadata to the handler method.
+    """
+
+    def __call__(self, path: str = ..., *, status_code: int = ...) -> Callable[[F], F]: ...
 
 
 def request_mapping(path: str) -> Callable[[T], T]:
@@ -35,7 +45,7 @@ def request_mapping(path: str) -> Callable[[T], T]:
     return decorator
 
 
-def _make_method_mapping(method: str) -> Callable[..., Any]:
+def _make_method_mapping(method: str) -> MethodMapping:
     """Factory that creates an HTTP method mapping decorator."""
 
     def mapping(path: str = "", *, status_code: int = 200) -> Callable[[F], F]:

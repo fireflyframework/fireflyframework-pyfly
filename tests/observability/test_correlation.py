@@ -32,7 +32,6 @@ from pyfly.observability.correlation import (
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters.correlation_filter import CorrelationFilter
 
-
 # ---------------------------------------------------------------------------
 # correlation context vars
 # ---------------------------------------------------------------------------
@@ -107,13 +106,15 @@ class TestCorrelationContextVars:
 
 def _build_app() -> Starlette:
     async def endpoint(request):
-        return JSONResponse({
-            "correlation_id": get_correlation_id(),
-            "request_id": get_request_id(),
-            "tenant_id": get_tenant_id(),
-            "traceparent": get_traceparent(),
-            "tracestate": get_tracestate(),
-        })
+        return JSONResponse(
+            {
+                "correlation_id": get_correlation_id(),
+                "request_id": get_request_id(),
+                "tenant_id": get_tenant_id(),
+                "traceparent": get_traceparent(),
+                "tracestate": get_tracestate(),
+            }
+        )
 
     middleware = [Middleware(WebFilterChainMiddleware, filters=[CorrelationFilter()])]
     return Starlette(routes=[Route("/echo", endpoint)], middleware=middleware)

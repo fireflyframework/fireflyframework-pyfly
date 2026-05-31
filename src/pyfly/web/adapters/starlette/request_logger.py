@@ -15,19 +15,15 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-try:
-    import structlog
+from pyfly.logging import get_logger
 
-    logger = structlog.get_logger("pyfly.web")
-except ImportError:
-    logger = logging.getLogger("pyfly.web")
+logger = get_logger("pyfly.web")
 
 
 class RequestLoggingMiddleware:

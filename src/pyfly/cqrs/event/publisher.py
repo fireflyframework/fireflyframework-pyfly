@@ -19,7 +19,11 @@ Mirrors Java's ``CommandEventPublisher`` / ``EdaCommandEventPublisher``.
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import asdict, is_dataclass
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from pyfly.eda.ports.outbound import EventPublisher
 
 _logger = logging.getLogger(__name__)
 
@@ -39,20 +43,32 @@ class NoOpEventPublisher:
 
 
 class EdaCommandEventPublisher:
-    """Event publisher backed by pyfly's EDA messaging subsystem.
+    """Event publisher backed by pyfly's EDA :class:`EventPublisher`.
 
-    Delegates to the messaging ``Producer`` from ``pyfly.messaging``.
+    Delegates to the EDA :class:`~pyfly.eda.ports.outbound.EventPublisher`
+    port, adapting each domain event to that port's
+    ``publish(destination, event_type, payload, headers)`` contract:
+
+    * ``event_type`` is taken from the event's ``event_type`` attribute when
+      present, otherwise the event class name.
+    * ``payload`` is the event serialised to a ``dict`` — via
+      :func:`dataclasses.asdict` for dataclasses, else ``__dict__``.
     """
 
-    def __init__(self, producer: Any, default_destination: str = "cqrs.events") -> None:
+    def __init__(self, producer: EventPublisher, default_destination: str = "cqrs.events") -> None:
         self._producer = producer
         self._default_destination = default_destination
 
     async def publish(self, event: Any, *, destination: str | None = None) -> None:
         target = destination or self._default_destination
+        event_type = str(getattr(event, "event_type", None) or type(event).__name__)
+        if is_dataclass(event) and not isinstance(event, type):
+            payload: dict[str, Any] = asdict(event)
+        else:
+            payload = dict(getattr(event, "__dict__", {}))
         try:
-            await self._producer.send(target, event)
-            _logger.debug("Published event %s to %s", type(event).__name__, target)
+            await self._producer.publish(target, event_type, payload)
+            _logger.debug("Published event %s to %s", event_type, target)
         except Exception as exc:
-            _logger.error("Failed to publish event %s to %s: %s", type(event).__name__, target, exc)
+            _logger.error("Failed to publish event %s to %s: %s", event_type, target, exc)
             raise

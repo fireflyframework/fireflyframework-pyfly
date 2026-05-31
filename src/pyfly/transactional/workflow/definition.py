@@ -42,7 +42,9 @@ class WorkflowStepDefinition:
     wait_for_signal_timeout_ms: int = 0
     wait_for_timer_ms: int = 0
     wait_for_all: tuple[str, ...] = ()
+    wait_for_all_timeout_ms: int = 0
     wait_for_any: tuple[str, ...] = ()
+    wait_for_any_timeout_ms: int = 0
     child_workflow_id: str | None = None
     child_wait_for_completion: bool = True
     child_timeout_ms: int = 0

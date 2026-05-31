@@ -18,7 +18,7 @@ from importlib.util import find_spec
 import pytest
 from pydantic import BaseModel
 
-from pyfly.container.stereotypes import rest_controller, service
+from pyfly.container.stereotypes import controller_advice, rest_controller, service
 from pyfly.web.exception_handler import exception_handler
 from pyfly.web.mappings import delete_mapping, get_mapping, post_mapping, request_mapping
 from pyfly.web.params import Body, PathVar, QueryParam
@@ -37,6 +37,17 @@ class CreateItemRequest(BaseModel):
 
 class ItemNotFoundError(Exception):
     pass
+
+
+class ItemConflictError(Exception):
+    """Raised by the controller but handled by a global @controller_advice bean."""
+
+
+@controller_advice
+class GlobalErrorAdvice:
+    @exception_handler(ItemConflictError)
+    async def handle_conflict(self, exc: ItemConflictError):
+        return 409, {"error": str(exc), "scope": "global"}
 
 
 @service
@@ -74,6 +85,10 @@ class ItemController:
     @delete_mapping("/{item_id}", status_code=204)
     async def delete_item(self, item_id: PathVar[str]) -> None:
         pass
+
+    @get_mapping("/{item_id}/conflict")
+    async def conflicting_item(self, item_id: PathVar[str]) -> dict:
+        raise ItemConflictError(f"Item {item_id} already exists")
 
     @exception_handler(ItemNotFoundError)
     async def handle_not_found(self, exc: ItemNotFoundError):
@@ -201,3 +216,64 @@ class TestFastAPIControllerRegistration:
         response = client.get("/api/items/not-found")
         assert response.status_code == 404
         assert "not found" in response.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_global_controller_advice_handler(self):
+        """A @controller_advice global handler converts a controller exception."""
+        from starlette.testclient import TestClient
+
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.web.adapters.fastapi.adapter import FastAPIWebAdapter
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(ItemService)
+        ctx.register_bean(ItemController)
+        ctx.register_bean(GlobalErrorAdvice)
+        await ctx.start()
+
+        adapter = FastAPIWebAdapter()
+        app = adapter.create_app(context=ctx, docs_enabled=False)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/api/items/abc/conflict")
+        assert response.status_code == 409
+        body = response.json()
+        assert body["scope"] == "global"
+        assert "already exists" in body["error"]
+
+
+class TestFastAPIOpenAPIGeneration:
+    @pytest.mark.asyncio
+    async def test_openapi_json_includes_controller_route(self):
+        """The generated /openapi.json includes auto-discovered controller paths."""
+        from starlette.testclient import TestClient
+
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.web.adapters.fastapi.adapter import FastAPIWebAdapter
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(ItemService)
+        ctx.register_bean(ItemController)
+        await ctx.start()
+
+        adapter = FastAPIWebAdapter()
+        app = adapter.create_app(context=ctx, docs_enabled=True)
+        client = TestClient(app)
+
+        response = client.get("/openapi.json")
+        assert response.status_code == 200
+        spec = response.json()
+        assert spec["openapi"] == "3.1.0"
+        # Controller routes appear in the generated spec even though FastAPI's
+        # own introspection registers them with include_in_schema=False.
+        assert "/api/items/{item_id}" in spec["paths"]
+        get_op = spec["paths"]["/api/items/{item_id}"]["get"]
+        # These fields come from PyFly's OpenAPIGenerator reading the handler's
+        # binding metadata — FastAPI's native introspection of a `PathVar[str]`
+        # handler cannot produce them (it mangles operationId and omits the path
+        # parameter), so this asserts the generated spec is actually in use.
+        assert get_op["operationId"] == "get_item"
+        path_params = [p for p in get_op.get("parameters", []) if p.get("in") == "path"]
+        assert any(p["name"] == "item_id" for p in path_params)

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -28,10 +29,12 @@ from pyfly.web.adapters.fastapi.errors import register_exception_handlers
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
     CorrelationFilter,
+    RequestContextFilter,
     RequestLoggingFilter,
     SecurityHeadersFilter,
     TransactionIdFilter,
 )
+from pyfly.web.openapi import OpenAPIGenerator
 from pyfly.web.ports.filter import WebFilter
 
 if TYPE_CHECKING:
@@ -57,8 +60,12 @@ def create_app(
     and mounts their routes.  Also auto-discovers user ``WebFilter``,
     ``ActuatorEndpoint``, ``@websocket_mapping``, and ``@sse_mapping`` beans.
 
-    FastAPI provides built-in OpenAPI docs (Swagger UI at ``/docs``, ReDoc at
-    ``/redoc``), so no custom OpenAPI generator is needed.
+    FastAPI's own introspection cannot read the PyFly parameter-binding metadata
+    on controller handlers, so controller routes are registered with
+    ``include_in_schema=False`` and the OpenAPI document is generated with the
+    same :class:`pyfly.web.openapi.OpenAPIGenerator` machinery used by the
+    Starlette adapter. FastAPI's built-in ``/docs`` and ``/redoc`` pages still
+    render, but read from this generated spec.
 
     Includes:
     - WebFilter chain (transaction ID, request logging, security headers, + user filters)
@@ -70,13 +77,31 @@ def create_app(
     - WebSocket routes (auto-discovered from @websocket_mapping)
     - SSE routes (auto-discovered from @sse_mapping)
     """
+    # Detect the admin dashboard early so its HTTP trace collector can join the
+    # filter chain here (before ApplicationContext.start() instantiates beans).
+    # See the Starlette adapter for the full rationale.
+    admin_enabled = False
+    if context is not None:
+        admin_enabled = str(context.config.get("pyfly.admin.enabled", "false")).lower() in ("true", "1", "yes")
+
+    admin_trace_collector = None
+    if admin_enabled:
+        from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
+
+        admin_trace_collector = TraceCollectorFilter()
+
     # --- Build the WebFilter chain ---
+    # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
+    # and @pre_authorize/@post_authorize have a live RequestContext to read.
     filters: list[WebFilter] = [
+        RequestContextFilter(),
         CorrelationFilter(),
         TransactionIdFilter(),
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
     ]
+    if admin_trace_collector is not None:
+        filters.append(admin_trace_collector)
 
     # Auto-discover user WebFilter beans from context
     if context is not None:
@@ -86,7 +111,13 @@ def create_app(
                 and isinstance(reg.instance, WebFilter)
                 and not isinstance(
                     reg.instance,
-                    (CorrelationFilter, TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
+                    (
+                        RequestContextFilter,
+                        CorrelationFilter,
+                        TransactionIdFilter,
+                        RequestLoggingFilter,
+                        SecurityHeadersFilter,
+                    ),
                 )
             ):
                 filters.append(reg.instance)
@@ -130,9 +161,11 @@ def create_app(
         lifespan=lifespan,  # type: ignore[arg-type]
     )
 
-    # Auto-discover and register controller routes from ApplicationContext
+    # Auto-discover and register controller routes from ApplicationContext.
+    # Routes are registered with include_in_schema=False; the OpenAPI document
+    # is built below from collected route metadata instead.
+    registrar = FastAPIControllerRegistrar()
     if context is not None:
-        registrar = FastAPIControllerRegistrar()
         registrar.register_controllers(app, context)
 
     # Auto-discover WebSocket routes from ApplicationContext
@@ -196,6 +229,21 @@ def create_app(
         _install_indicators()
         app.state.pyfly_install_health_indicators = _install_indicators
 
+        # Beans (incl. health indicators) are instantiated by the lifespan's
+        # startup, after this factory returns. Wrap the app's lifespan context
+        # so the indicator rescan runs once startup completes — otherwise
+        # /actuator/health reports UP even when a subsystem is DOWN.
+        if lifespan is not None:
+            _inner_lifespan_ctx = app.router.lifespan_context
+
+            @contextlib.asynccontextmanager
+            async def _lifespan_with_indicator_rescan(app_: FastAPI) -> AsyncIterator[None]:
+                async with _inner_lifespan_ctx(app_):
+                    _install_indicators()
+                    yield
+
+            app.router.lifespan_context = _lifespan_with_indicator_rescan
+
         config = context.config if context is not None else None
         registry = ActuatorRegistry(config=config)
 
@@ -214,19 +262,10 @@ def create_app(
 
         app.routes.extend(make_starlette_actuator_routes(registry))
 
-    # Mount admin dashboard when enabled
-    admin_enabled = False
-    if context is not None:
-        admin_enabled = str(context.config.get("pyfly.admin.enabled", "false")).lower() in (
-            "true",
-            "1",
-            "yes",
-        )
-
+    # Mount admin dashboard when enabled (admin_enabled computed above)
     if admin_enabled and context is not None:
         from pyfly.admin.adapters.starlette import AdminRouteBuilder
         from pyfly.admin.config import AdminProperties
-        from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
         from pyfly.admin.providers.beans_provider import BeansProvider
         from pyfly.admin.providers.cache_provider import CacheProvider
         from pyfly.admin.providers.config_provider import ConfigProvider
@@ -249,12 +288,8 @@ def create_app(
         with contextlib.suppress(Exception):
             admin_props = context.config.bind(AdminProperties)
 
-        # Find trace collector from context (registered by auto-config)
-        trace_collector = None
-        for _cls, reg in context.container._registrations.items():
-            if reg.instance is not None and isinstance(reg.instance, TraceCollectorFilter):
-                trace_collector = reg.instance
-                break
+        # Use the trace collector created above and wired into the filter chain.
+        trace_collector = admin_trace_collector
 
         # Find view registry from context
         view_registry = AdminViewRegistry()
@@ -275,18 +310,6 @@ def create_app(
                     indicator_name = reg.name or cls.__name__
                     health_agg.add_indicator(indicator_name, reg.instance)
 
-        # Find server adapter from context for admin dashboard
-        server_adapter = None
-        try:
-            from pyfly.server.ports.outbound import ApplicationServerPort
-
-            for _cls, reg in context.container._registrations.items():
-                if reg.instance is not None and isinstance(reg.instance, ApplicationServerPort):
-                    server_adapter = reg.instance
-                    break
-        except ImportError:
-            pass
-
         admin_builder = AdminRouteBuilder(
             properties=admin_props,
             overview=OverviewProvider(context, health_agg),
@@ -306,14 +329,35 @@ def create_app(
             trace_collector=trace_collector,
             logfile=LogfileProvider(context),
             runtime=RuntimeProvider(),
-            server=ServerProvider(server_adapter),
+            server=ServerProvider(context=context),
         )
         app.routes.extend(admin_builder.build_routes())
 
     # Register global exception handler
     register_exception_handlers(app)
 
+    # Collect route metadata (used for OpenAPI generation and startup logging)
+    route_metadata = registrar.collect_route_metadata(context) if context is not None else []
+
+    # Generate the OpenAPI spec ourselves. FastAPI's built-in introspection
+    # cannot read PyFly's parameter-binding metadata (controller routes are
+    # registered with include_in_schema=False), so we override ``app.openapi``
+    # to serve the spec produced by ``OpenAPIGenerator`` from the collected
+    # route metadata. FastAPI's ``/openapi.json``, ``/docs``, and ``/redoc``
+    # routes then render from this spec — all guarded by ``docs_enabled`` via
+    # the ``openapi_url``/``docs_url``/``redoc_url`` set on the constructor.
+    if docs_enabled:
+        generator = OpenAPIGenerator(title=title, version=version, description=description)
+        spec = generator.generate(route_metadata or None)
+
+        def _custom_openapi() -> dict[str, object]:
+            app.openapi_schema = spec
+            return spec
+
+        app.openapi = _custom_openapi  # type: ignore[method-assign]
+
     # Store metadata for startup logging
+    app.state.pyfly_route_metadata = route_metadata
     app.state.pyfly_docs_enabled = docs_enabled
 
     return app

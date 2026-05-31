@@ -52,8 +52,11 @@ async def test_dispatcher_signs_with_secret() -> None:
     executions = InMemoryCallbackExecutionRepository()
     captured_headers: list[dict[str, str]] = []
 
+    captured_payloads: list[dict[str, Any]] = []
+
     async def fake_post(url: str, payload: dict[str, Any], headers: dict[str, str]) -> int:
         captured_headers.append(headers)
+        captured_payloads.append(payload)
         return 200
 
     config = CallbackConfig(
@@ -66,8 +69,20 @@ async def test_dispatcher_signs_with_secret() -> None:
     )
     await configs.save(config)
     dispatcher = CallbackDispatcher(configs, executions, http=fake_post)
-    await dispatcher.dispatch("t", "X", {"a": 1})
-    assert "X-Pyfly-Signature" in captured_headers[0]
+    await dispatcher.dispatch("t", "X", {"a": 1, "b": 2})
+
+    sig_header = captured_headers[0]["X-Pyfly-Signature"]
+    assert sig_header.startswith("sha256=")
+
+    # The signature must be a valid, reproducible HMAC over the canonical JSON
+    # body (not Python's str(dict)), verifiable by the inbound validator.
+    import json
+
+    from pyfly.webhooks.signature import HmacSignatureValidator
+
+    canonical = json.dumps(captured_payloads[0], separators=(",", ":"), sort_keys=True).encode("utf-8")
+    validator = HmacSignatureValidator(secret="topsecret")
+    assert validator.is_valid(body=canonical, signature=sig_header.removeprefix("sha256="))
 
 
 @pytest.mark.asyncio

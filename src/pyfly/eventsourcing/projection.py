@@ -82,6 +82,12 @@ class ProjectionRunner:
                             evt.event_id,
                             exc,
                         )
+                        # Do NOT advance past a failed event: stop the batch
+                        # here so the cursor stays put and this event is retried
+                        # on the next poll (at-least-once, in-order). Continuing
+                        # would let the next success move the cursor past the
+                        # failed event, silently dropping it.
+                        break
             except Exception as exc:  # noqa: BLE001
                 _logger.error("projection runner error: %s", exc)
             try:

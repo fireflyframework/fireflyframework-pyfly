@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
@@ -33,6 +34,7 @@ from pyfly.web.adapters.starlette.errors import global_exception_handler
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
     CorrelationFilter,
+    RequestContextFilter,
     RequestLoggingFilter,
     SecurityHeadersFilter,
     TransactionIdFilter,
@@ -73,13 +75,34 @@ def create_app(
     - WebSocket routes (auto-discovered from @websocket_mapping)
     - SSE routes (auto-discovered from @sse_mapping)
     """
+    # Detect the admin dashboard early. Its HTTP trace collector is a WebFilter
+    # that must join the chain *here*, while the ASGI middleware is being
+    # assembled — which happens before ``ApplicationContext.start()`` runs. The
+    # auto-configuration bean for it is therefore not yet instantiated, so we
+    # create and own the instance directly and hand the same object to the
+    # admin route providers below.
+    admin_enabled = False
+    if context is not None:
+        admin_enabled = str(context.config.get("pyfly.admin.enabled", "false")).lower() in ("true", "1", "yes")
+
+    admin_trace_collector = None
+    if admin_enabled:
+        from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
+
+        admin_trace_collector = TraceCollectorFilter()
+
     # --- Build the WebFilter chain ---
+    # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
+    # and @pre_authorize/@post_authorize have a live RequestContext to read.
     filters: list[WebFilter] = [
+        RequestContextFilter(),
         CorrelationFilter(),
         TransactionIdFilter(),
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
     ]
+    if admin_trace_collector is not None:
+        filters.append(admin_trace_collector)
 
     # Auto-discover user WebFilter beans from context
     if context is not None:
@@ -89,7 +112,13 @@ def create_app(
                 and isinstance(reg.instance, WebFilter)
                 and not isinstance(
                     reg.instance,
-                    (CorrelationFilter, TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
+                    (
+                        RequestContextFilter,
+                        CorrelationFilter,
+                        TransactionIdFilter,
+                        RequestLoggingFilter,
+                        SecurityHeadersFilter,
+                    ),
                 )
             ):
                 filters.append(reg.instance)
@@ -207,15 +236,10 @@ def create_app(
 
         routes.extend(make_starlette_actuator_routes(registry))
 
-    # Mount admin dashboard when enabled
-    admin_enabled = False
-    if context is not None:
-        admin_enabled = str(context.config.get("pyfly.admin.enabled", "false")).lower() in ("true", "1", "yes")
-
+    # Mount admin dashboard when enabled (admin_enabled computed above)
     if admin_enabled and context is not None:
         from pyfly.admin.adapters.starlette import AdminRouteBuilder
         from pyfly.admin.config import AdminProperties
-        from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
         from pyfly.admin.providers.beans_provider import BeansProvider
         from pyfly.admin.providers.cache_provider import CacheProvider
         from pyfly.admin.providers.config_provider import ConfigProvider
@@ -238,12 +262,9 @@ def create_app(
         with contextlib.suppress(Exception):
             admin_props = context.config.bind(AdminProperties)
 
-        # Find trace collector from context (registered by auto-config)
-        trace_collector = None
-        for _cls, reg in context.container._registrations.items():
-            if reg.instance is not None and isinstance(reg.instance, TraceCollectorFilter):
-                trace_collector = reg.instance
-                break
+        # Use the trace collector that was created above and wired into the
+        # filter chain — it is the live instance recording HTTP traffic.
+        trace_collector = admin_trace_collector
 
         # Find view registry from context
         view_registry = AdminViewRegistry()
@@ -264,18 +285,6 @@ def create_app(
                     indicator_name = reg.name or cls.__name__
                     health_agg.add_indicator(indicator_name, reg.instance)
 
-        # Find server adapter from context for admin dashboard
-        server_adapter = None
-        try:
-            from pyfly.server.ports.outbound import ApplicationServerPort
-
-            for _cls, reg in context.container._registrations.items():
-                if reg.instance is not None and isinstance(reg.instance, ApplicationServerPort):
-                    server_adapter = reg.instance
-                    break
-        except ImportError:
-            pass
-
         admin_builder = AdminRouteBuilder(
             properties=admin_props,
             overview=OverviewProvider(context, health_agg),
@@ -295,7 +304,7 @@ def create_app(
             trace_collector=trace_collector,
             logfile=LogfileProvider(context),
             runtime=RuntimeProvider(),
-            server=ServerProvider(server_adapter),
+            server=ServerProvider(context=context),
         )
         routes.extend(admin_builder.build_routes())  # type: ignore[arg-type]
 
@@ -315,24 +324,39 @@ def create_app(
             ]
         )
 
+    # Health indicators (and other late beans) are only instantiated by
+    # ``ApplicationContext.start()``, which runs inside the provided lifespan —
+    # AFTER this factory returns. So wrap the caller's lifespan to rerun the
+    # indicator scan immediately after startup. Without this, /actuator/health
+    # and the admin health view see an empty indicator set and report UP even
+    # when a subsystem is DOWN. (When no lifespan is supplied — e.g. tests pass
+    # an already-started context — the eager scan above already caught them.)
+    effective_lifespan = lifespan
+    if actuator_enabled and lifespan is not None:
+        _user_lifespan = lifespan
+
+        @contextlib.asynccontextmanager
+        async def _lifespan_with_indicator_rescan(app_: Starlette) -> AsyncIterator[None]:
+            async with _user_lifespan(app_):  # type: ignore[operator]
+                _install_indicators()  # beans are now instantiated
+                yield
+
+        effective_lifespan = _lifespan_with_indicator_rescan
+
     app = Starlette(
         debug=debug,
         middleware=middleware,
         routes=routes,
-        lifespan=lifespan,  # type: ignore[arg-type]
+        lifespan=effective_lifespan,  # type: ignore[arg-type]
     )
 
     # Store metadata for startup logging
     app.state.pyfly_route_metadata = route_metadata
     app.state.pyfly_docs_enabled = docs_enabled
 
-    # Expose the indicator rescan so the downstream lifespan can rerun
-    # it AFTER ``ApplicationContext.start()`` has instantiated every
-    # bean. The eager call above only catches indicators that already
-    # had ``.instance`` set at create_app time (rare — most live as
-    # @bean methods on @auto_configuration classes).
+    # Also expose the rescan for callers that manage their own lifespan.
     if actuator_enabled:
-        app.state.pyfly_install_health_indicators = _install_indicators  # type: ignore[name-defined]
+        app.state.pyfly_install_health_indicators = _install_indicators
 
     # Register global exception handler
     app.add_exception_handler(Exception, global_exception_handler)

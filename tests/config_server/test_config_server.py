@@ -26,6 +26,26 @@ async def test_in_memory_round_trip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filesystem_save_updates_existing_yaml(tmp_path: pathlib.Path) -> None:
+    """Regression: save() must update the file fetch() reads (a pre-existing
+    .yaml), not write a shadowed .json that fetch ignores."""
+    import yaml
+
+    yaml_file = tmp_path / "main" / "orders-prod.yaml"
+    yaml_file.parent.mkdir(parents=True, exist_ok=True)
+    yaml_file.write_text(yaml.safe_dump({"v": "old"}))
+
+    backend = FilesystemConfigBackend(tmp_path)
+    await backend.save(ConfigSource(application="orders", profile="prod", label="main", properties={"v": "new"}))
+
+    fetched = await backend.fetch("orders", "prod", "main")
+    assert fetched is not None
+    assert fetched.properties == {"v": "new"}  # not the stale "old"
+    # And no shadow .json was created alongside the .yaml.
+    assert not (tmp_path / "main" / "orders-prod.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_round_trip(tmp_path: pathlib.Path) -> None:
     backend = FilesystemConfigBackend(tmp_path)
     await backend.save(ConfigSource(application="orders", profile="dev", properties={"y": "v"}))

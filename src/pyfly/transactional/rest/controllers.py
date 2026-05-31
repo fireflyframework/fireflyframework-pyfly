@@ -13,16 +13,22 @@
 # limitations under the License.
 """Framework-agnostic controller classes — bind into Starlette/FastAPI elsewhere.
 
-Each controller is a *plain class* with async methods that return
-JSON-serializable dicts.  The pyfly web auto-configuration takes care of
-mapping HTTP verbs / paths to those methods, but the controllers themselves
-have no hard dependency on Starlette so they remain easy to unit-test.
+Each controller is a ``@rest_controller`` bean with async methods that return
+JSON-serializable dicts.  Routing is declared with pure-metadata decorators
+(``@request_mapping`` / ``@get_mapping`` / ``@post_mapping`` / ``@delete_mapping``)
+and parameter binders (``PathVar`` / ``QueryParam`` / ``Body`` / ``Valid``).
+Those decorators add no runtime dependency on Starlette, so the transactional
+module stays decoupled from any concrete web adapter while still being
+discovered and mounted by the ``ControllerRegistrar``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
+from pydantic import BaseModel
+
+from pyfly.container import rest_controller
 from pyfly.transactional.core.dlq import DeadLetterEntry, DeadLetterService
 from pyfly.transactional.core.model import ExecutionStatus
 from pyfly.transactional.core.persistence import (
@@ -30,6 +36,31 @@ from pyfly.transactional.core.persistence import (
     ExecutionState,
 )
 from pyfly.transactional.workflow.engine import WorkflowEngine
+from pyfly.web import (
+    Body,
+    PathVar,
+    QueryParam,
+    Valid,
+    delete_mapping,
+    get_mapping,
+    post_mapping,
+    request_mapping,
+)
+
+
+class StartRequest(BaseModel):
+    """Request body for :meth:`WorkflowController.start`."""
+
+    workflow_id: str
+    input: Any = None
+
+
+class SignalRequest(BaseModel):
+    """Request body for :meth:`WorkflowController.signal`."""
+
+    correlation_id: str
+    signal: str
+    payload: Any = None
 
 
 def _state_to_dict(state: ExecutionState) -> dict[str, Any]:
@@ -57,6 +88,8 @@ def _dlq_to_dict(entry: DeadLetterEntry) -> dict[str, Any]:
     }
 
 
+@rest_controller
+@request_mapping("/api/orchestration")
 class OrchestrationController:
     """``GET /api/orchestration/executions`` — surface persisted runs."""
 
@@ -65,16 +98,22 @@ class OrchestrationController:
     def __init__(self, persistence: ExecutionPersistenceProvider) -> None:
         self._persistence = persistence
 
-    async def list_executions(self, status: str | None = None) -> list[dict[str, Any]]:
-        status_enum = ExecutionStatus(status) if status else None
+    @get_mapping("/executions")
+    async def list_executions(self, status: QueryParam[str]) -> list[dict[str, Any]]:
+        status_str = cast("str | None", status)
+        status_enum = ExecutionStatus(status_str) if status_str else None
         states = await self._persistence.find_all(status=status_enum)
         return [_state_to_dict(s) for s in states]
 
-    async def get_execution(self, correlation_id: str) -> dict[str, Any] | None:
-        state = await self._persistence.find(correlation_id)
+    @get_mapping("/executions/{correlation_id}")
+    async def get_execution(self, correlation_id: PathVar[str]) -> dict[str, Any] | None:
+        cid = cast(str, correlation_id)
+        state = await self._persistence.find(cid)
         return _state_to_dict(state) if state is not None else None
 
 
+@rest_controller
+@request_mapping("/api/orchestration/dlq")
 class DeadLetterController:
     """``/api/orchestration/dlq`` — list, retry and delete dead-lettered runs."""
 
@@ -83,23 +122,38 @@ class DeadLetterController:
     def __init__(self, dlq: DeadLetterService) -> None:
         self._dlq = dlq
 
-    async def list(self, execution_name: str | None = None, correlation_id: str | None = None) -> list[dict[str, Any]]:
-        entries = await self._dlq.list(execution_name=execution_name, correlation_id=correlation_id)
+    @get_mapping("")
+    async def list(
+        self,
+        execution_name: QueryParam[str],
+        correlation_id: QueryParam[str],
+    ) -> list[dict[str, Any]]:
+        name = cast("str | None", execution_name)
+        cid = cast("str | None", correlation_id)
+        entries = await self._dlq.list(execution_name=name, correlation_id=cid)
         return [_dlq_to_dict(e) for e in entries]
 
-    async def get(self, entry_id: str) -> dict[str, Any] | None:
-        entry = await self._dlq.get(entry_id)
+    @get_mapping("/{entry_id}")
+    async def get(self, entry_id: PathVar[str]) -> dict[str, Any] | None:
+        eid = cast(str, entry_id)
+        entry = await self._dlq.get(eid)
         return _dlq_to_dict(entry) if entry is not None else None
 
-    async def retry(self, entry_id: str) -> dict[str, Any]:
-        ok = await self._dlq.mark_retried(entry_id)
+    @post_mapping("/{entry_id}/retry")
+    async def retry(self, entry_id: PathVar[str]) -> dict[str, Any]:
+        eid = cast(str, entry_id)
+        ok = await self._dlq.mark_retried(eid)
         return {"retried": ok}
 
-    async def delete(self, entry_id: str) -> dict[str, Any]:
-        ok = await self._dlq.delete(entry_id)
+    @delete_mapping("/{entry_id}")
+    async def delete(self, entry_id: PathVar[str]) -> dict[str, Any]:
+        eid = cast(str, entry_id)
+        ok = await self._dlq.delete(eid)
         return {"deleted": ok}
 
 
+@rest_controller
+@request_mapping("/api/orchestration/workflow")
 class WorkflowController:
     """``/api/orchestration/workflow`` — start workflows / deliver signals."""
 
@@ -108,8 +162,10 @@ class WorkflowController:
     def __init__(self, engine: WorkflowEngine) -> None:
         self._engine = engine
 
-    async def start(self, workflow_id: str, input: Any = None) -> dict[str, Any]:
-        result = await self._engine.start(workflow_id, input)
+    @post_mapping("/start")
+    async def start(self, body: Valid[Body[StartRequest]]) -> dict[str, Any]:
+        req = cast(StartRequest, body)
+        result = await self._engine.start(req.workflow_id, req.input)
         return {
             "workflow_id": result.workflow_id,
             "correlation_id": result.correlation_id,
@@ -121,8 +177,10 @@ class WorkflowController:
             "error": result.error,
         }
 
-    async def signal(self, correlation_id: str, signal: str, payload: Any = None) -> dict[str, Any]:
-        ok = await self._engine.deliver_signal(correlation_id, signal, payload)
+    @post_mapping("/signal")
+    async def signal(self, body: Valid[Body[SignalRequest]]) -> dict[str, Any]:
+        req = cast(SignalRequest, body)
+        ok = await self._engine.deliver_signal(req.correlation_id, req.signal, req.payload)
         return {"delivered": ok}
 
     async def query(self, correlation_id: str, query: str, **kwargs: Any) -> Any:

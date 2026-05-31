@@ -54,6 +54,12 @@ class Container:
         self._bindings: dict[type, list[type]] = {}
         self._resolving: dict[type, None] = {}  # insertion-ordered, O(1) lookup
         self._metrics: dict[type, BeanMetrics] = {}
+        # Every registration keyed by (impl_type, name), preserving insertion
+        # order. ``_registrations`` keeps only the last registration per type, so
+        # this is the source of truth for ``resolve_all``/``list[T]`` — without it,
+        # two @bean methods returning the same concrete type would collapse and
+        # one bean would silently vanish from type/list resolution.
+        self._all: dict[tuple[type, str], Registration] = {}
         self._lock = threading.RLock()
 
     def register(
@@ -73,6 +79,7 @@ class Container:
             name=bean_name,
         )
         self._registrations[cls] = reg
+        self._all[(cls, bean_name)] = reg
         if bean_name:
             self._named[bean_name] = reg
 
@@ -119,9 +126,31 @@ class Container:
         return self._resolve_registration(self._named[name])
 
     def resolve_all(self, cls: type[T]) -> list[T]:
-        """Resolve all implementations bound to an interface."""
-        impls = self._bindings.get(cls, [])
-        return [self._resolve_registration(self._registrations[impl]) for impl in impls]
+        """Resolve every bean assignable to *cls*.
+
+        Includes both implementations bound to an interface AND beans whose own
+        concrete type is *cls* (so multiple @bean methods returning the same
+        concrete type are all returned). Deduplicated by resolved-instance
+        identity so the synthetic interface registration does not double-count
+        an already-bound implementation.
+        """
+        results: list[T] = []
+        seen: set[int] = set()
+
+        def _add(reg: Registration) -> None:
+            instance = self._resolve_registration(reg)
+            if id(instance) not in seen:
+                seen.add(id(instance))
+                results.append(cast(T, instance))
+
+        for impl in self._bindings.get(cls, []):
+            reg = self._registrations.get(impl)
+            if reg is not None:
+                _add(reg)
+        for reg in self._all.values():
+            if reg.impl_type is cls:
+                _add(reg)
+        return results
 
     def contains(self, name: str) -> bool:
         """Check if a named bean exists."""

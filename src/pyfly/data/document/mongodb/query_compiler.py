@@ -188,8 +188,19 @@ class MongoQueryMethodCompiler:
         if op == "lte":
             return {field_name: {"$lte": args[arg_idx]}}, arg_idx + 1
         if op == "like":
-            pattern = re.escape(str(args[arg_idx])).replace(r"\%", ".*").replace(r"\_", ".")
-            return {field_name: {"$regex": pattern}}, arg_idx + 1
+            # Translate SQL LIKE wildcards per-character: ``%`` -> ``.*`` and
+            # ``_`` -> ``.``; every other character is regex-escaped. (Note:
+            # ``re.escape`` does NOT escape ``%``/``_``, so the previous
+            # ``.replace(r"\%", ...)`` calls were dead code and never matched.)
+            parts: list[str] = []
+            for char in str(args[arg_idx]):
+                if char == "%":
+                    parts.append(".*")
+                elif char == "_":
+                    parts.append(".")
+                else:
+                    parts.append(re.escape(char))
+            return {field_name: {"$regex": "".join(parts)}}, arg_idx + 1
         if op == "containing":
             escaped = re.escape(str(args[arg_idx]))
             return {field_name: {"$regex": f".*{escaped}.*", "$options": "i"}}, arg_idx + 1

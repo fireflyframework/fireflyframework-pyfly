@@ -197,22 +197,30 @@ class ApplicationContext:
                 except BeanCreationException as exc:
                     logger.debug("deferred_bean_resolution", extra={"bean": cls.__name__, "reason": str(exc)})
 
-        # 5. Run post-processors and lifecycle hooks
+        # 5. Run post-processors and lifecycle hooks.
+        #
+        # Two passes (not one per-bean loop): every BeanPostProcessor.before_init
+        # runs across ALL beans before any after_init. Otherwise weaving is
+        # registration-order dependent — a target bean initialized before its
+        # @aspect bean would have its advice silently skipped, because the aspect
+        # is only collected during the aspect's own before_init. Snapshotting the
+        # registrations also avoids "dict changed size during iteration" if a hook
+        # lazily creates another bean.
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
-        for reg in self._container._registrations.values():
-            if reg.instance is not None:
-                bean_name = reg.name or reg.impl_type.__name__
+        live_regs = [reg for reg in self._container._registrations.values() if reg.instance is not None]
 
-                # BeanPostProcessor.before_init
-                for pp in sorted_pps:
-                    reg.instance = pp.before_init(reg.instance, bean_name)
+        # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
+        for reg in live_regs:
+            bean_name = reg.name or reg.impl_type.__name__
+            for pp in sorted_pps:
+                reg.instance = pp.before_init(reg.instance, bean_name)
 
-                # @post_construct
-                await self._call_post_construct(reg.instance)
-
-                # BeanPostProcessor.after_init
-                for pp in sorted_pps:
-                    reg.instance = pp.after_init(reg.instance, bean_name)
+        # Pass 2: @post_construct then after_init (weaving now sees every aspect)
+        for reg in live_regs:
+            bean_name = reg.name or reg.impl_type.__name__
+            await self._call_post_construct(reg.instance)
+            for pp in sorted_pps:
+                reg.instance = pp.after_init(reg.instance, bean_name)
 
         # 6. Wire decorator-based beans to their targets
         self._wire_app_event_listeners()
@@ -545,19 +553,38 @@ class ApplicationContext:
         if count:
             logger.debug("Discovered %d BeanPostProcessor(s)", count)
 
+    @staticmethod
+    def _safe_members(instance: Any, *, skip_private: bool = True) -> list[tuple[str, Any]]:
+        """Return ``(name, member)`` for an instance's attributes, skipping
+        ``@property`` / ``cached_property``.
+
+        Bean wiring and lifecycle scans iterate ``dir(instance)`` to find
+        decorator-marked methods. A plain ``getattr`` would evaluate property
+        getters — a side-effecting or *raising* property would then corrupt or
+        abort startup. Looking the attribute up statically on the class first
+        avoids triggering any descriptor ``__get__``.
+        """
+        members: list[tuple[str, Any]] = []
+        for attr_name in dir(instance):
+            if skip_private and attr_name.startswith("_"):
+                continue
+            static_attr = inspect.getattr_static(instance, attr_name, None)
+            if isinstance(static_attr, (property, functools.cached_property)):
+                continue
+            try:
+                member = getattr(instance, attr_name)
+            except Exception:
+                continue
+            members.append((attr_name, member))
+        return members
+
     def _wire_app_event_listeners(self) -> None:
         """Scan singleton beans for @app_event_listener methods and subscribe to event bus."""
         count = 0
         for reg in self._container._registrations.values():
             if reg.instance is None:
                 continue
-            for attr_name in dir(reg.instance):
-                if attr_name.startswith("_"):
-                    continue
-                try:
-                    method = getattr(reg.instance, attr_name)
-                except Exception:
-                    continue
+            for _attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_app_event_listener__", False):
                     continue
                 # Infer event type from the method's type hints
@@ -582,13 +609,7 @@ class ApplicationContext:
         for reg in self._container._registrations.values():
             if reg.instance is None:
                 continue
-            for attr_name in dir(reg.instance):
-                if attr_name.startswith("_"):
-                    continue
-                try:
-                    method = getattr(reg.instance, attr_name)
-                except Exception:
-                    continue
+            for _attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_message_listener__", False):
                     continue
                 # Lazy-resolve broker on first hit
@@ -673,13 +694,7 @@ class ApplicationContext:
         for reg in self._container._registrations.values():
             if reg.instance is None:
                 continue
-            for attr_name in dir(reg.instance):
-                if attr_name.startswith("_"):
-                    continue
-                try:
-                    method = getattr(reg.instance, attr_name)
-                except Exception:
-                    continue
+            for attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_async__", False):
                     continue
 
@@ -718,13 +733,7 @@ class ApplicationContext:
                     logger.debug("No ShellRunnerPort registered; skipping @shell_method wiring")
                     self._wiring_counts["shell_commands"] = 0
                     return
-            for attr_name in dir(reg.instance):
-                if attr_name.startswith("_"):
-                    continue
-                try:
-                    method = getattr(reg.instance, attr_name)
-                except Exception:
-                    continue
+            for attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_shell_method__", False):
                     continue
 
@@ -816,9 +825,8 @@ class ApplicationContext:
 
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""
-        for attr_name in dir(instance):
-            method = getattr(instance, attr_name, None)
-            if method is not None and getattr(method, "__pyfly_post_construct__", False):
+        for attr_name, method in self._safe_members(instance, skip_private=False):
+            if getattr(method, "__pyfly_post_construct__", False):
                 try:
                     result = method()
                     if inspect.isawaitable(result):
@@ -832,9 +840,8 @@ class ApplicationContext:
 
     async def _call_pre_destroy(self, instance: Any) -> None:
         """Call all @pre_destroy methods on an instance."""
-        for attr_name in dir(instance):
-            method = getattr(instance, attr_name, None)
-            if method is not None and getattr(method, "__pyfly_pre_destroy__", False):
+        for attr_name, method in self._safe_members(instance, skip_private=False):
+            if getattr(method, "__pyfly_pre_destroy__", False):
                 try:
                     result = method()
                     if inspect.isawaitable(result):

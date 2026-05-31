@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -192,6 +194,94 @@ class TestFilterChainPathsend:
         # Verify filter headers were applied
         headers = dict(start_msg["headers"])
         assert headers[b"x-filter-a"] == b"applied"
+
+
+class TestFilterChainStreaming:
+    """Streaming responses (SSE, large downloads) must pass through incrementally,
+    not be buffered until the generator completes."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_response_forwarded_incrementally(self):
+        """First chunk must reach the client BEFORE the generator produces the last one."""
+        release = asyncio.Event()
+        chunk1_seen = asyncio.Event()
+
+        async def streaming_app(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"chunk1", "more_body": True})
+            await release.wait()  # block until the test confirms chunk1 was delivered
+            await send({"type": "http.response.body", "body": b"chunk2", "more_body": False})
+
+        mw = WebFilterChainMiddleware(app=streaming_app, filters=[HeaderFilter()])
+
+        sent: list[dict] = []
+
+        async def capture_send(message):
+            sent.append(message)
+            if message.get("type") == "http.response.body" and message.get("body") == b"chunk1":
+                chunk1_seen.set()
+
+        scope = {"type": "http", "method": "GET", "path": "/sse", "query_string": b"", "headers": []}
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        task = asyncio.create_task(mw(scope, receive, capture_send))
+
+        # If the middleware buffers the whole response, this times out (the second
+        # chunk is gated behind ``release`` which we have not set yet).
+        await asyncio.wait_for(chunk1_seen.wait(), timeout=2.0)
+
+        start_msgs = [m for m in sent if m["type"] == "http.response.start"]
+        assert start_msgs, "start message must be flushed before the body streams"
+        body_msgs = [m for m in sent if m["type"] == "http.response.body"]
+        assert body_msgs[0]["body"] == b"chunk1"
+        assert body_msgs[0]["more_body"] is True
+
+        release.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert sent[-1]["body"] == b"chunk2"
+        assert sent[-1]["more_body"] is False
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_response_still_buffered_and_filtered(self):
+        """Single-shot responses keep working and filters can still mutate headers."""
+
+        async def json_app(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"ok":true}', "more_body": False})
+
+        mw = WebFilterChainMiddleware(app=json_app, filters=[HeaderFilter()])
+        sent: list[dict] = []
+
+        async def capture_send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "method": "GET", "path": "/data", "query_string": b"", "headers": []}
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        await mw(scope, receive, capture_send)
+
+        start = sent[0]
+        assert start["type"] == "http.response.start"
+        assert dict(start["headers"])[b"x-filter-a"] == b"applied"
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        assert body == b'{"ok":true}'
 
 
 class TestFilterChainCustomDiscovery:

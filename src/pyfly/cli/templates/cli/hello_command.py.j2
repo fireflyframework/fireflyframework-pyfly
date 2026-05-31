@@ -12,12 +12,12 @@ class HelloCommand:
     def __init__(self, greeting_service: GreetingService) -> None:
         self._greeting_service = greeting_service
 
-    @shell_method(description="Say hello")
+    @shell_method(help="Say hello")
     def hello(self, name: str = "World") -> str:
         """Greet someone by name."""
         return self._greeting_service.greet(name)
 
-    @shell_method(description="Say goodbye")
+    @shell_method(help="Say goodbye")
     def goodbye(self, name: str = "World") -> str:
         """Say goodbye to someone."""
         return f"Goodbye, {name}!"

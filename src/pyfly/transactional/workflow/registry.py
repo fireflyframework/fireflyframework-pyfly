@@ -83,9 +83,11 @@ class WorkflowRegistry:
                 wait_all = getattr(attr, "__pyfly_workflow_wait_all__", None)
                 if wait_all is not None:
                     step.wait_for_all = wait_all.signals
+                    step.wait_for_all_timeout_ms = wait_all.timeout_ms
                 wait_any = getattr(attr, "__pyfly_workflow_wait_any__", None)
                 if wait_any is not None:
                     step.wait_for_any = wait_any.signals
+                    step.wait_for_any_timeout_ms = wait_any.timeout_ms
                 child = getattr(attr, "__pyfly_workflow_child__", None)
                 if child is not None:
                     step.child_workflow_id = child.workflow_id

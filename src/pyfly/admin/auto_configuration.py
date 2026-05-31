@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from pyfly.admin.config import AdminClientProperties, AdminProperties
 from pyfly.admin.log_handler import AdminLogHandler
-from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
 from pyfly.admin.providers.runtime_provider import RuntimeProvider
 from pyfly.admin.registry import AdminViewRegistry
 from pyfly.admin.server.client_registration import AdminClientRegistration
@@ -48,9 +47,11 @@ class AdminAutoConfiguration:
     def runtime_provider(self) -> RuntimeProvider:
         return RuntimeProvider()
 
-    @bean
-    def admin_trace_collector(self) -> TraceCollectorFilter:
-        return TraceCollectorFilter()
+    # NOTE: the HTTP trace collector (TraceCollectorFilter) is created and wired
+    # into the WebFilter chain directly by ``create_app`` — it must join the
+    # chain while the ASGI middleware is assembled, which happens before this
+    # auto-configuration's beans are instantiated. Registering it here as a bean
+    # would never reach the request path, so it is intentionally not a bean.
 
     @bean
     def admin_log_handler(self) -> AdminLogHandler:
