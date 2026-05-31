@@ -12,6 +12,7 @@
 
 import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+import { attachFullscreen } from '../components/fullscreen.js';
 import { pageSkeleton } from '../components/skeleton.js';
 import { showToast } from '../components/toast.js';
 import { sse } from '../sse.js';
@@ -281,6 +282,15 @@ export async function render(container, api) {
     logCard.appendChild(logOutput);
     wrapper.appendChild(logCard);
 
+    // Expand the log output to fullscreen (button lives in the card header).
+    const fullscreen = attachFullscreen(logCard, {
+        anchor: logHeader,
+        label: 'Expand log output',
+        onResize: () => {
+            if (autoScrollCheck.checked) logOutput.scrollTop = logOutput.scrollHeight;
+        },
+    });
+
     function updateStats() {
         totalVal.textContent = String(records.length);
     }
@@ -344,5 +354,6 @@ export async function render(container, api) {
     // ── Cleanup ──────────────────────────────────────────────
     return function cleanup() {
         sse.disconnect('/logfile');
+        fullscreen.destroy();
     };
 }

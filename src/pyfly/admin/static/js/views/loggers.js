@@ -178,6 +178,68 @@ export async function render(container, api) {
 
     wrapper.appendChild(statsRow);
 
+    // ── Effective level distribution ─────────────────────────
+    const LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+    if (loggerEntries.length > 0) {
+        const distCard = document.createElement('div');
+        distCard.className = 'admin-card mb-lg';
+        const distHeader = document.createElement('div');
+        distHeader.className = 'admin-card-header';
+        const distTitle = document.createElement('h3');
+        distTitle.textContent = 'Effective Level Distribution';
+        distHeader.appendChild(distTitle);
+        distCard.appendChild(distHeader);
+        const distBody = document.createElement('div');
+        distBody.className = 'admin-card-body';
+
+        const bar = document.createElement('div');
+        bar.className = 'status-bar';
+        bar.setAttribute('aria-hidden', 'true');
+        const legend = document.createElement('div');
+        legend.className = 'status-legend';
+
+        const total = loggerEntries.length;
+        // Include any non-standard effective levels (e.g. NOTSET) so the bar
+        // segments and percentages sum to 100% rather than silently dropping them.
+        const extraLevels = Object.keys(levelCounts).filter((l) => !LEVEL_ORDER.includes(l));
+        for (const lvl of [...LEVEL_ORDER, ...extraLevels]) {
+            const count = levelCounts[lvl] || 0;
+            if (count === 0) continue;
+            const pct = (count / total) * 100;
+            const color = LEVEL_COLORS[lvl] || 'var(--admin-text-muted)';
+
+            const seg = document.createElement('div');
+            seg.className = 'status-bar-seg';
+            seg.style.background = color;
+            seg.style.width = pct + '%';
+            seg.title = `${lvl}: ${count}`;
+            bar.appendChild(seg);
+
+            const item = document.createElement('div');
+            item.className = 'status-legend-item';
+            const dot = document.createElement('span');
+            dot.className = 'status-legend-dot';
+            dot.style.background = color;
+            item.appendChild(dot);
+            const lab = document.createElement('span');
+            lab.textContent = lvl;
+            item.appendChild(lab);
+            const c = document.createElement('span');
+            c.className = 'status-legend-count';
+            c.textContent = String(count);
+            item.appendChild(c);
+            const p = document.createElement('span');
+            p.className = 'status-legend-pct';
+            p.textContent = `(${pct.toFixed(0)}%)`;
+            item.appendChild(p);
+            legend.appendChild(item);
+        }
+        distBody.appendChild(bar);
+        distBody.appendChild(legend);
+        distCard.appendChild(distBody);
+        wrapper.appendChild(distCard);
+    }
+
     // ── Loggers table card ───────────────────────────────────
     const tableCard = document.createElement('div');
     tableCard.className = 'admin-card';
@@ -193,9 +255,12 @@ export async function render(container, api) {
     tableBody.className = 'admin-card-body';
     tableBody.style.padding = '12px 20px 0';
 
-    // Table container
+    // Table container — scrolls within a viewport-relative height so the
+    // toolbar, stats and distribution stay visible (sticky header).
     const tableWrap = document.createElement('div');
     tableWrap.className = 'admin-table-wrapper';
+    tableWrap.style.maxHeight = 'min(58vh, 620px)';
+    tableWrap.style.overflowY = 'auto';
 
     const table = document.createElement('table');
     table.className = 'admin-table';

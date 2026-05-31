@@ -346,10 +346,15 @@ export async function render(container, api) {
 
     const leftBody = document.createElement('div');
     leftBody.style.padding = '12px';
+    leftBody.style.flex = '1';
+    leftBody.style.minHeight = '0';
+    leftBody.style.display = 'flex';
+    leftBody.style.flexDirection = 'column';
 
-    // Metric list container (scrollable)
+    // Metric list container — fills the panel height and scrolls internally.
     const metricList = document.createElement('div');
-    metricList.style.maxHeight = '520px';
+    metricList.style.flex = '1';
+    metricList.style.minHeight = '0';
     metricList.style.overflowY = 'auto';
 
     let activeItem = null;
