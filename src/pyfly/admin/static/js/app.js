@@ -111,14 +111,21 @@ function renderNavbar() {
 
     navbar.appendChild(left);
 
-    // Right: refresh label + theme toggle
+    // Right: live status pill + search + controls
     const right = document.createElement('div');
     right.className = 'admin-navbar-right';
 
-    const refreshLabel = document.createElement('span');
-    refreshLabel.className = 'refresh-label';
-    refreshLabel.textContent = `refresh: ${settings.refreshInterval / 1000}s`;
-    right.appendChild(refreshLabel);
+    // Live auto-refresh indicator (pulsing dot + interval).
+    const statusPill = document.createElement('span');
+    statusPill.className = 'navbar-status';
+    statusPill.title = `Auto-refresh every ${settings.refreshInterval / 1000}s`;
+    const statusDot = document.createElement('span');
+    statusDot.className = 'navbar-status-dot';
+    statusPill.appendChild(statusDot);
+    const statusText = document.createElement('span');
+    statusText.textContent = `Live · ${settings.refreshInterval / 1000}s`;
+    statusPill.appendChild(statusText);
+    right.appendChild(statusPill);
 
     // Command palette trigger (⌘K)
     const searchBtn = document.createElement('button');
@@ -136,6 +143,11 @@ function renderNavbar() {
     searchBtn.appendChild(searchKbd);
     searchBtn.addEventListener('click', () => commandPalette && commandPalette.open());
     right.appendChild(searchBtn);
+
+    // Divider between the search group and the icon controls.
+    const navDivider = document.createElement('span');
+    navDivider.className = 'navbar-divider';
+    right.appendChild(navDivider);
 
     // Theme toggle button
     const themeBtn = document.createElement('button');

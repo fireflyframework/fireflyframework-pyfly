@@ -97,7 +97,7 @@ export function renderSidebar(container, currentRoute, options = {}) {
     // Clear previous content
     container.textContent = '';
 
-    // Brand header
+    // Brand header — the pyfly wordmark logo (no secondary label).
     const brand = document.createElement('div');
     brand.className = 'admin-sidebar-brand';
 
@@ -105,14 +105,6 @@ export function renderSidebar(container, currentRoute, options = {}) {
     logo.src = 'static/assets/pyfly-logo.png';
     logo.alt = 'PyFly';
     brand.appendChild(logo);
-
-    const divider = document.createElement('div');
-    divider.className = 'admin-sidebar-brand-divider';
-    brand.appendChild(divider);
-
-    const brandText = document.createElement('span');
-    brandText.textContent = 'Admin Dashboard';
-    brand.appendChild(brandText);
 
     container.appendChild(brand);
 

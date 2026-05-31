@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.12 (2026-05-31)
+
+### Admin dashboard — responsive cards, fullscreen, navbar polish
+
+- **Fullscreen / expand cards.** New reusable affordance: the **Bean Graph** and
+  **Log Viewer** cards gain a maximize button that expands them to fill the
+  viewport (Escape to exit) — ideal for exploring a large dependency graph or a
+  busy log stream. The expanded card re-parents to the document root so it sits
+  above the page (the ⌘K palette, toasts and the bean detail panel still layer
+  correctly on top).
+- **Responsive sizing.** The dependency graph now scales with the viewport
+  (was a fixed 600px) and re-lays out on window resize / fullscreen toggle; the
+  log output grows with the window instead of a fixed 600px cap.
+- **Bean Graph** also gains a **Reset view** control (clears pan/zoom).
+- **Loggers** view: an **Effective Level Distribution** bar (share of each level)
+  and the table now scrolls within a viewport-relative height with a sticky header.
+- **Metrics** view: the metric-list card now stretches to the full height of the
+  detail panel (was capped at 520px) and scrolls internally, so it uses the
+  available vertical space.
+- **Navbar & sidebar.** The sidebar brand is now exactly the navbar height so the
+  two top bars line up across the split; the brand shows the pyfly wordmark only.
+  The navbar gains a live auto-refresh status pill and tidier, grouped controls.
+
+---
+
 ## v26.05.11 (2026-05-31)
 
 ### Admin dashboard — loading skeletons & consistent empty states

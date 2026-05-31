@@ -17,6 +17,7 @@
 /* global d3 */
 
 import { createEmptyStateCard } from '../components/empty-state.js';
+import { attachFullscreen } from '../components/fullscreen.js';
 import { skeletonCard } from '../components/skeleton.js';
 
 const STEREOTYPE_COLORS = {
@@ -628,7 +629,7 @@ export async function render(container, api) {
     const card = document.createElement('div');
     card.className = 'admin-card';
     const cardBody = document.createElement('div');
-    cardBody.className = 'admin-card-body';
+    cardBody.className = 'admin-card-body bean-graph-body';
     cardBody.style.padding = '0';
     cardBody.style.overflow = 'hidden';
     cardBody.style.position = 'relative';
@@ -636,14 +637,15 @@ export async function render(container, api) {
     wrapper.appendChild(card);
     container.appendChild(wrapper);
 
-    const width = cardBody.clientWidth || 900;
-    const height = 600;
+    // Responsive dimensions (re-measured on resize / fullscreen toggle).
+    let width = cardBody.clientWidth || 900;
+    let height = cardBody.clientHeight || 600;
 
-    // Create SVG with D3
+    // Create SVG with D3 — fills the card body; the viewBox tracks its pixel size.
     const svg = d3.select(cardBody)
         .append('svg')
         .attr('width', '100%')
-        .attr('height', height)
+        .attr('height', '100%')
         .attr('viewBox', `0 0 ${width} ${height}`);
 
     // Arrow marker for directed edges
@@ -994,6 +996,45 @@ export async function render(container, api) {
         labels.attr('x', d => d.x).attr('y', d => d.y);
     });
 
+    // ── Responsive resize + fullscreen ───────────────────────
+    let _destroyed = false;
+    function resizeGraph() {
+        // A deferred resize must not revive a stopped simulation after teardown.
+        if (_destroyed || !cardBody.isConnected) return;
+        width = cardBody.clientWidth || width;
+        height = cardBody.clientHeight || height;
+        svg.attr('viewBox', `0 0 ${width} ${height}`);
+        simulation.force('center', d3.forceCenter(width / 2, height / 2));
+        simulation.alpha(0.3).restart();
+    }
+
+    let _resizeRAF = null;
+    function onWindowResize() {
+        if (_resizeRAF) return;
+        _resizeRAF = requestAnimationFrame(() => {
+            _resizeRAF = null;
+            resizeGraph();
+        });
+    }
+    window.addEventListener('resize', onWindowResize);
+
+    // Expand-to-fullscreen (re-measures the graph once the card has resized).
+    const fullscreen = attachFullscreen(card, { onResize: () => resizeGraph(), label: 'Expand graph' });
+
+    // Reset view (clears pan/zoom back to the default transform).
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'btn btn-sm';
+    resetBtn.textContent = 'Reset view';
+    resetBtn.style.position = 'absolute';
+    resetBtn.style.top = '10px';
+    resetBtn.style.left = '10px';
+    resetBtn.style.zIndex = '5';
+    resetBtn.addEventListener('click', () => {
+        svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity);
+    });
+    card.appendChild(resetBtn);
+
     // ── Legend ────────────────────────────────────────────────
     const legendCard = document.createElement('div');
     legendCard.className = 'admin-card';
@@ -1112,6 +1153,10 @@ export async function render(container, api) {
 
     // ── Cleanup ──────────────────────────────────────────────
     return function cleanup() {
+        _destroyed = true;
+        if (_resizeRAF) { cancelAnimationFrame(_resizeRAF); _resizeRAF = null; }
+        window.removeEventListener('resize', onWindowResize);
+        fullscreen.destroy();
         simulation.stop();
         detailPanel.destroy();
         searchInput.removeEventListener('input', _onSearchInput);
