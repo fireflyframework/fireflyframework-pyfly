@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.05.10 (2026-05-31)
+
+### Admin dashboard — HTTP request analytics on Traces
+
+- The **Traces** view now leads with **live request analytics** computed from the
+  trace stream:
+  - **Stat cards**: Total Requests, Avg Duration, **Error Rate** (4xx+5xx %, tinted
+    amber/red when elevated), and Max Latency.
+  - **Status Mix**: a segmented bar + legend showing the 2xx/3xx/4xx/5xx split with
+    counts and percentages.
+  - **Latency Distribution**: a histogram across latency buckets (<10 ms … ≥1 s)
+    plus a **p50 / p90 / p95 / p99** percentile strip.
+- Everything updates live as requests arrive (debounced) and resets on **Clear**.
+- The client trace buffer is now **bounded to 500 entries** (matching the server
+  ring buffer): the in-memory array, the table DOM and the per-refresh analytics
+  cost no longer grow without bound on a long-lived dashboard tab.
+- Responsive (cards/charts stack and resize on mobile, dark + light themes) and
+  accessible (the decorative mix bar is `aria-hidden`; the legend carries the
+  numbers). Avg Duration reads `--` (not `0.0 ms`) when no trace carries a duration.
+
+---
+
 ## v26.05.09 (2026-05-31)
 
 ### Admin dashboard — live time-series metrics
