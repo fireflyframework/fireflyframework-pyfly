@@ -2,17 +2,18 @@
 
 :root,
 [data-theme="dark"] {
-    --admin-bg: #0c1222;
-    --admin-bg-subtle: #111a2e;
-    --admin-surface: #162032;
-    --admin-surface-hover: #1c2a42;
-    --admin-surface-active: #243352;
-    --admin-text: #e2e8f0;
-    --admin-text-secondary: #94a3b8;
-    --admin-text-muted: #64748b;
-    --admin-primary: #3b82f6;
-    --admin-primary-hover: #60a5fa;
-    --admin-primary-dim: rgba(59, 130, 246, 0.15);
+    --admin-bg: #0b120d;
+    --admin-bg-subtle: #0f1812;
+    --admin-surface: #141f18;
+    --admin-surface-hover: #1b2a20;
+    --admin-surface-active: #233529;
+    --admin-text: #e6f0e0;
+    --admin-text-secondary: #9db59a;
+    --admin-text-muted: #6b806a;
+    /* Brand accent — derived from the pyfly logo's vivid lime-green */
+    --admin-primary: #5fbf2e;
+    --admin-primary-hover: #7ad94a;
+    --admin-primary-dim: rgba(95, 191, 46, 0.16);
     --admin-success: #10b981;
     --admin-success-dim: rgba(16, 185, 129, 0.15);
     --admin-danger: #f43f5e;
@@ -21,14 +22,14 @@
     --admin-warning-dim: rgba(245, 158, 11, 0.15);
     --admin-info: #06b6d4;
     --admin-info-dim: rgba(6, 182, 212, 0.15);
-    --admin-border: #1e293b;
-    --admin-border-subtle: #162032;
-    --admin-sidebar-bg: #070d1a;
-    --admin-sidebar-text: #94a3b8;
-    --admin-sidebar-text-active: #e2e8f0;
-    --admin-sidebar-hover: #0f1729;
-    --admin-sidebar-active: #162032;
-    --admin-sidebar-accent: #3b82f6;
+    --admin-border: #213127;
+    --admin-border-subtle: #18241c;
+    --admin-sidebar-bg: #070d09;
+    --admin-sidebar-text: #9db59a;
+    --admin-sidebar-text-active: #e6f0e0;
+    --admin-sidebar-hover: #0e160f;
+    --admin-sidebar-active: #15211a;
+    --admin-sidebar-accent: #5fbf2e;
     --admin-sidebar-width: 260px;
     --admin-navbar-height: 56px;
     --admin-radius: 8px;
@@ -36,9 +37,9 @@
     --admin-radius-lg: 12px;
     --admin-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
     --admin-shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --admin-font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --admin-font-sans: 'Maven Pro', -apple-system, BlinkMacSystemFont, sans-serif;
     --admin-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-    --admin-card-bg: #1a2744;
+    --admin-card-bg: #16241a;
     --admin-transition: 150ms ease;
 }
 
@@ -51,9 +52,9 @@
     --admin-text: #0f172a;
     --admin-text-secondary: #475569;
     --admin-text-muted: #94a3b8;
-    --admin-primary: #2563eb;
-    --admin-primary-hover: #3b82f6;
-    --admin-primary-dim: rgba(37, 99, 235, 0.1);
+    --admin-primary: #4a9e1f;
+    --admin-primary-hover: #5fbf2e;
+    --admin-primary-dim: rgba(74, 158, 31, 0.12);
     --admin-success: #059669;
     --admin-success-dim: rgba(5, 150, 105, 0.1);
     --admin-danger: #e11d48;
@@ -69,7 +70,7 @@
     --admin-sidebar-text-active: #f1f5f9;
     --admin-sidebar-hover: #1e293b;
     --admin-sidebar-active: #1e293b;
-    --admin-sidebar-accent: #3b82f6;
+    --admin-sidebar-accent: #5fbf2e;
     --admin-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
     --admin-card-bg: #ffffff;
     --admin-shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.1);

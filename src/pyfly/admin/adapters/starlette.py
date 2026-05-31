@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 if TYPE_CHECKING:
     from pyfly.admin.config import AdminProperties
@@ -44,6 +45,21 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.transactions_provider import TransactionsProvider
     from pyfly.admin.registry import AdminViewRegistry
     from pyfly.admin.server.instance_registry import InstanceRegistry
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Serve admin assets with ``Cache-Control: no-cache`` so browsers revalidate.
+
+    The dashboard's JS is loaded as ES modules whose relative imports carry no
+    version query, so a plain far-future cache would serve stale views/styles
+    after a framework upgrade. ``no-cache`` keeps revalidation cheap (304s) while
+    guaranteeing updated assets are always picked up.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response: Response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class AdminRouteBuilder:
@@ -158,7 +174,7 @@ class AdminRouteBuilder:
         routes.append(
             Mount(
                 f"{base}/static",
-                app=StaticFiles(packages=[("pyfly.admin", "static")]),
+                app=_NoCacheStaticFiles(packages=[("pyfly.admin", "static")]),
                 name="admin-static",
             )
         )
@@ -376,6 +392,9 @@ class AdminRouteBuilder:
     async def _handle_spa(self, request: Request) -> Response:
         """Serve index.html for SPA client-side routing."""
         import importlib.resources
+        import re
+
+        from pyfly import __version__
 
         index_path = importlib.resources.files("pyfly.admin") / "static" / "index.html"
         content = index_path.read_text(encoding="utf-8")
@@ -383,4 +402,12 @@ class AdminRouteBuilder:
         # correctly regardless of whether the browser path has a trailing slash.
         base_href = self._props.path.rstrip("/") + "/"
         content = content.replace("<head>", f'<head>\n    <base href="{base_href}">', 1)
+        # Version-stamp local static assets so a framework upgrade busts stale
+        # browser caches (otherwise a cached themes.css/admin.css/app.js keeps the
+        # old look after an upgrade).
+        content = re.sub(
+            r'(href|src)="(static/[^"?]+)"',
+            rf'\1="\2?v={__version__}"',
+            content,
+        )
         return Response(content, media_type="text/html")
