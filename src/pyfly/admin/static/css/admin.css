@@ -1709,3 +1709,173 @@ body.wallboard-mode .admin-content {
     opacity: 0.6;
     pointer-events: none;
 }
+
+/* ── Command Palette (⌘K) ───────────────────────────────────────── */
+.cmd-palette-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 10px;
+    background: var(--admin-bg-subtle);
+    border: 1px solid var(--admin-border);
+    border-radius: var(--admin-radius);
+    color: var(--admin-text-muted);
+    font-family: var(--admin-font-sans);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: border-color var(--admin-transition), color var(--admin-transition);
+}
+
+.cmd-palette-trigger:hover {
+    border-color: var(--admin-primary-dim);
+    color: var(--admin-text-secondary);
+}
+
+.cmd-palette-trigger svg {
+    width: 15px;
+    height: 15px;
+}
+
+.cmd-palette-trigger kbd {
+    font-family: var(--admin-font-mono);
+    font-size: 0.68rem;
+    padding: 1px 6px;
+    border: 1px solid var(--admin-border);
+    border-radius: 4px;
+    background: var(--admin-surface);
+    color: var(--admin-text-muted);
+}
+
+.cmd-palette-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+    background: rgba(4, 8, 5, 0.55);
+    backdrop-filter: blur(3px);
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+.cmd-palette-overlay.open {
+    opacity: 1;
+}
+
+.cmd-palette {
+    width: min(92vw, 600px);
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--admin-card-bg);
+    border: 1px solid var(--admin-border);
+    border-radius: var(--admin-radius-lg);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    transform: translateY(-8px) scale(0.98);
+    transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cmd-palette-overlay.open .cmd-palette {
+    transform: translateY(0) scale(1);
+}
+
+.cmd-palette-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--admin-border);
+}
+
+.cmd-palette-input-wrap svg {
+    width: 18px;
+    height: 18px;
+    color: var(--admin-text-muted);
+    flex-shrink: 0;
+}
+
+.cmd-palette-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--admin-text);
+    font-family: var(--admin-font-sans);
+    font-size: 1rem;
+}
+
+.cmd-palette-input::placeholder {
+    color: var(--admin-text-muted);
+}
+
+.cmd-palette-esc {
+    font-family: var(--admin-font-mono);
+    font-size: 0.62rem;
+    padding: 2px 6px;
+    border: 1px solid var(--admin-border);
+    border-radius: 4px;
+    color: var(--admin-text-muted);
+}
+
+.cmd-palette-list {
+    overflow-y: auto;
+    padding: 6px;
+}
+
+.cmd-palette-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--admin-radius);
+    cursor: pointer;
+    color: var(--admin-text-secondary);
+}
+
+.cmd-palette-item.active {
+    background: var(--admin-primary-dim);
+    color: var(--admin-text);
+}
+
+.cmd-palette-item-icon {
+    width: 17px;
+    height: 17px;
+    color: var(--admin-text-muted);
+    flex-shrink: 0;
+}
+
+.cmd-palette-item.active .cmd-palette-item-icon {
+    color: var(--admin-primary);
+}
+
+.cmd-palette-item-label {
+    flex: 1;
+    font-family: var(--admin-font-sans);
+    font-size: 0.9rem;
+}
+
+.cmd-palette-item-hint {
+    font-family: var(--admin-font-mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--admin-text-muted);
+}
+
+.cmd-palette-empty {
+    padding: 28px;
+    text-align: center;
+    color: var(--admin-text-muted);
+    font-size: 0.9rem;
+}
+
+@media (max-width: 768px) {
+    .cmd-palette-trigger-label,
+    .cmd-palette-trigger kbd {
+        display: none;
+    }
+}

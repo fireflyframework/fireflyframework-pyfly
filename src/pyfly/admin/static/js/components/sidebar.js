@@ -6,7 +6,7 @@
  */
 
 /* ── SVG Icon Paths ───────────────────────────────────────────── */
-const ICONS = {
+export const ICONS = {
     home: 'M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z M9 22V12h6v10',
     cube: 'M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z M3.27 6.96L12 12.01l8.73-5.05 M12 22.08V12',
     heart: 'M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z',
@@ -29,7 +29,7 @@ const ICONS = {
  * Each item: { id, label, icon, section? }
  * section creates a section header before the item.
  */
-const NAV_ITEMS = [
+export const NAV_ITEMS = [
     { id: '',          label: 'Overview',      icon: 'home',     section: 'Dashboard' },
     { id: 'health',    label: 'Health',         icon: 'heart' },
     { id: 'beans',     label: 'Beans',          icon: 'cube',     section: 'Application' },
@@ -49,7 +49,7 @@ const NAV_ITEMS = [
 ];
 
 /** Navigation item only shown in server mode. */
-const SERVER_ITEMS = [
+export const SERVER_ITEMS = [
     { id: 'instances', label: 'Instances',  icon: 'server', section: 'Fleet' },
 ];
 
@@ -58,7 +58,7 @@ const SERVER_ITEMS = [
  * @param {string} pathData  Space-separated SVG path "d" strings.
  * @returns {SVGElement}
  */
-function createSvgIcon(pathData) {
+export function createSvgIcon(pathData) {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('width', '18');

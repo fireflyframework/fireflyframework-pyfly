@@ -8,7 +8,8 @@
 
 import { api } from './api.js';
 import { sse } from './sse.js';
-import { renderSidebar, updateSidebarActive } from './components/sidebar.js';
+import { installCommandPalette } from './components/command-palette.js';
+import { createSvgIcon, renderSidebar, updateSidebarActive } from './components/sidebar.js';
 import { showToast } from './components/toast.js';
 
 /* ── Route Registry ───────────────────────────────────────────── */
@@ -45,6 +46,7 @@ let settings = {
 
 let currentRoute = '';
 let currentCleanup = null;  // Cleanup function from current view
+let commandPalette = null;  // ⌘K launcher (installed in init)
 
 /* ── DOM References ───────────────────────────────────────────── */
 
@@ -117,6 +119,23 @@ function renderNavbar() {
     refreshLabel.className = 'refresh-label';
     refreshLabel.textContent = `refresh: ${settings.refreshInterval / 1000}s`;
     right.appendChild(refreshLabel);
+
+    // Command palette trigger (⌘K)
+    const searchBtn = document.createElement('button');
+    searchBtn.className = 'cmd-palette-trigger';
+    searchBtn.setAttribute('aria-label', 'Open command palette');
+    searchBtn.title = 'Search & commands (⌘K / Ctrl-K)';
+    const searchIcon = createSvgIcon('M21 21l-4.35-4.35 M11 19a8 8 0 100-16 8 8 0 000 16z');
+    searchBtn.appendChild(searchIcon);
+    const searchText = document.createElement('span');
+    searchText.className = 'cmd-palette-trigger-label';
+    searchText.textContent = 'Search';
+    searchBtn.appendChild(searchText);
+    const searchKbd = document.createElement('kbd');
+    searchKbd.textContent = '⌘K';
+    searchBtn.appendChild(searchKbd);
+    searchBtn.addEventListener('click', () => commandPalette && commandPalette.open());
+    right.appendChild(searchBtn);
 
     // Theme toggle button
     const themeBtn = document.createElement('button');
@@ -307,6 +326,13 @@ async function init() {
 
     // Render navbar
     renderNavbar();
+
+    // Install the ⌘K command palette
+    commandPalette = installCommandPalette({
+        onNavigate: (route) => navigateTo(route),
+        serverMode: settings.serverMode,
+        onToggleTheme: toggleTheme,
+    });
 
     // Listen for hash changes
     window.addEventListener('hashchange', () => {
