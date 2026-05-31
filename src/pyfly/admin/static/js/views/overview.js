@@ -8,6 +8,8 @@
  */
 
 import { DonutChart, GaugeChart, createLineChart, createGaugeChart, createBarChart } from '../charts.js';
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { createStatusBadge } from '../components/status-badge.js';
 import { sse } from '../sse.js';
 
@@ -150,9 +152,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (4 stat cards + charts/content)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 4, rows: 5 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -161,20 +163,12 @@ export async function render(container, api) {
         data = await api.get('/overview');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errTitle = document.createElement('div');
-        errTitle.className = 'empty-state-title';
-        errTitle.textContent = 'Failed to load overview';
-        errBody.appendChild(errTitle);
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load overview',
+            text: err.message,
+        }));
         return;
     }
 

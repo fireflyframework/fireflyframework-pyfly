@@ -8,6 +8,8 @@
  * SSE stream:   /health  (event type "health")
  */
 
+import { createEmptyStateCard } from '../components/empty-state.js';
+import { pageSkeleton } from '../components/skeleton.js';
 import { createStatusBadge } from '../components/status-badge.js';
 import { sse } from '../sse.js';
 
@@ -231,9 +233,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (overall status stat cards + component indicator rows)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 4, rows: 5 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -243,16 +245,12 @@ export async function render(container, api) {
         healthData = await api.get('/health');
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load health data: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load health data',
+            text: err.message,
+        }));
         return;
     }
 
@@ -312,16 +310,11 @@ export async function render(container, api) {
             componentTree.appendChild(buildComponentCard(name, comp));
         }
     } else {
-        const noComp = document.createElement('div');
-        noComp.className = 'admin-card';
-        const noCompBody = document.createElement('div');
-        noCompBody.className = 'admin-card-body empty-state';
-        const noCompText = document.createElement('div');
-        noCompText.className = 'empty-state-text';
-        noCompText.textContent = 'No health components registered';
-        noCompBody.appendChild(noCompText);
-        noComp.appendChild(noCompBody);
-        componentTree.appendChild(noComp);
+        componentTree.appendChild(createEmptyStateCard({
+            icon: 'activity',
+            title: 'No health components registered',
+            text: 'This application has not registered any health indicators.',
+        }));
     }
 
     treeSection.appendChild(componentTree);

@@ -15,7 +15,9 @@
 /* global Chart */
 
 import { createLineChart } from '../charts.js';
+import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
+import { pageSkeleton } from '../components/skeleton.js';
 
 /* ── Constants ────────────────────────────────────────────────── */
 
@@ -200,9 +202,9 @@ export async function render(container, api) {
     header.appendChild(headerLeft);
     wrapper.appendChild(header);
 
-    // Loading
+    // Loading skeleton (3 stat cards + a metric list)
     const loader = document.createElement('div');
-    loader.className = 'loading-spinner';
+    loader.appendChild(pageSkeleton({ stats: 3, rows: 6 }));
     wrapper.appendChild(loader);
     container.appendChild(wrapper);
 
@@ -220,16 +222,12 @@ export async function render(container, api) {
         }
     } catch (err) {
         wrapper.removeChild(loader);
-        const errCard = document.createElement('div');
-        errCard.className = 'admin-card';
-        const errBody = document.createElement('div');
-        errBody.className = 'admin-card-body empty-state';
-        const errText = document.createElement('div');
-        errText.className = 'empty-state-text';
-        errText.textContent = 'Failed to load metrics: ' + err.message;
-        errBody.appendChild(errText);
-        errCard.appendChild(errBody);
-        wrapper.appendChild(errCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'alert',
+            tone: 'danger',
+            title: 'Failed to load metrics',
+            text: err.message,
+        }));
         return () => {};
     }
 
@@ -237,16 +235,11 @@ export async function render(container, api) {
 
     // If metrics not available at all
     if (data.available === false) {
-        const infoCard = document.createElement('div');
-        infoCard.className = 'admin-card';
-        const infoBody = document.createElement('div');
-        infoBody.className = 'admin-card-body empty-state';
-        const infoText = document.createElement('div');
-        infoText.className = 'empty-state-text';
-        infoText.textContent = 'Metrics are not available.';
-        infoBody.appendChild(infoText);
-        infoCard.appendChild(infoBody);
-        wrapper.appendChild(infoCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'activity',
+            title: 'Metrics not available',
+            text: 'The metrics registry is not enabled for this application.',
+        }));
         return () => {};
     }
 
@@ -254,16 +247,11 @@ export async function render(container, api) {
     const hasPrometheus = data.has_prometheus || false;
 
     if (names.length === 0) {
-        const emptyCard = document.createElement('div');
-        emptyCard.className = 'admin-card';
-        const emptyBody = document.createElement('div');
-        emptyBody.className = 'admin-card-body empty-state';
-        const emptyText = document.createElement('div');
-        emptyText.className = 'empty-state-text';
-        emptyText.textContent = 'No metrics registered';
-        emptyBody.appendChild(emptyText);
-        emptyCard.appendChild(emptyBody);
-        wrapper.appendChild(emptyCard);
+        wrapper.appendChild(createEmptyStateCard({
+            icon: 'activity',
+            title: 'No metrics registered',
+            text: 'No metrics have been published by this application yet.',
+        }));
         return () => {};
     }
 
