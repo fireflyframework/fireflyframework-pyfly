@@ -24,6 +24,7 @@ import logging
 
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_property
+from pyfly.core.config import Config
 
 # core/
 from pyfly.transactional.core.argument import ArgumentResolver as CoreArgumentResolver
@@ -101,8 +102,10 @@ class TransactionalEngineAutoConfiguration:
     # -- Configuration properties -------------------------------------------
 
     @bean
-    def saga_engine_properties(self) -> SagaEngineProperties:
-        return SagaEngineProperties()
+    def saga_engine_properties(self, config: Config) -> SagaEngineProperties:
+        # Bind from pyfly.transactional.saga.* so compensation_policy and the
+        # other saga settings are actually honored (audit #170).
+        return config.bind(SagaEngineProperties)
 
     @bean
     def tcc_engine_properties(self) -> TccEngineProperties:
@@ -224,7 +227,15 @@ class TransactionalEngineAutoConfiguration:
         compensator: SagaCompensator,
         persistence_adapter: InMemoryPersistenceAdapter,
         events_adapter: LoggerEventsAdapter,
+        saga_properties: SagaEngineProperties,
     ) -> SagaEngine:
+        from pyfly.transactional.shared.types import CompensationPolicy
+
+        # Honor the configured global compensation policy (audit #170).
+        try:
+            policy = CompensationPolicy[str(saga_properties.compensation_policy).upper()]
+        except KeyError:
+            policy = CompensationPolicy.STRICT_SEQUENTIAL
         return SagaEngine(
             registry=registry,
             step_invoker=step_invoker,
@@ -232,6 +243,7 @@ class TransactionalEngineAutoConfiguration:
             compensator=compensator,
             persistence_port=persistence_adapter,
             events_port=events_adapter,
+            default_compensation_policy=policy,
         )
 
     # -- TCC engine components ----------------------------------------------

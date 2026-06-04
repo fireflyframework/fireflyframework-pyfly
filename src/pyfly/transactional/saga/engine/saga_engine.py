@@ -49,6 +49,7 @@ class SagaEngine:
         compensator: SagaCompensator,
         persistence_port: TransactionalPersistencePort | None = None,
         events_port: TransactionalEventsPort | None = None,
+        default_compensation_policy: CompensationPolicy = CompensationPolicy.STRICT_SEQUENTIAL,
     ) -> None:
         self._registry = registry
         self._step_invoker = step_invoker
@@ -56,6 +57,9 @@ class SagaEngine:
         self._compensator = compensator
         self._persistence_port = persistence_port
         self._events_port = events_port
+        # Configured global default (saga compensation_policy property) used when
+        # a caller does not override per-execution (audit #170).
+        self._default_compensation_policy = default_compensation_policy
 
     async def execute(
         self,
@@ -63,7 +67,7 @@ class SagaEngine:
         input_data: Any = None,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        compensation_policy: CompensationPolicy = CompensationPolicy.STRICT_SEQUENTIAL,
+        compensation_policy: CompensationPolicy | None = None,
     ) -> SagaResult:
         """Execute a saga by name.
 
@@ -80,6 +84,10 @@ class SagaEngine:
         Raises:
             ValueError: If saga_name is not registered.
         """
+        # Fall back to the configured global policy when not overridden (#170).
+        if compensation_policy is None:
+            compensation_policy = self._default_compensation_policy
+
         # 1. Look up saga from registry.
         saga_def: SagaDefinition | None = self._registry.get(saga_name)
         if saga_def is None:

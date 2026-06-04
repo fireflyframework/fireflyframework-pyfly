@@ -45,7 +45,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pyfly.core.config import config_properties
 
+
+@config_properties(prefix="pyfly.transactional.saga")
 @dataclass
 class SagaEngineProperties:
     """Configuration for the saga engine."""
