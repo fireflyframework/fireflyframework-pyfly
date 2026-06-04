@@ -420,9 +420,11 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content)
 
 
-def _build_context(name: str, archetype: str, features: list[str]) -> dict[str, object]:
+def _build_context(
+    name: str, archetype: str, features: list[str], package_name: str | None = None
+) -> dict[str, object]:
     """Build the Jinja2 template context."""
-    package_name = _to_package_name(name)
+    package_name = package_name or _to_package_name(name)
     return {
         "name": name,
         "package_name": package_name,
@@ -456,7 +458,13 @@ def _get_env() -> Environment:
     )
 
 
-def generate_project(name: str, project_dir: Path, archetype: str, features: list[str]) -> None:
+def generate_project(
+    name: str,
+    project_dir: Path,
+    archetype: str,
+    features: list[str],
+    package_name: str | None = None,
+) -> None:
     """Generate a project from Jinja2 templates.
 
     Args:
@@ -464,10 +472,11 @@ def generate_project(name: str, project_dir: Path, archetype: str, features: lis
         project_dir: Target directory to create.
         archetype: One of ``core``, ``web-api``, ``fastapi-api``, ``web``, ``hexagonal``, ``library``, ``cli``.
         features: Selected PyFly extras (e.g. ``["web", "data-relational"]``).
+        package_name: Explicit Python package name; defaults to one derived from ``name``.
     """
     env = _get_env()
-    context = _build_context(name, archetype, features)
-    package_name = _to_package_name(name)
+    package_name = package_name or _to_package_name(name)
+    context = _build_context(name, archetype, features, package_name)
 
     for template_name, output_path in _ARCHETYPE_FILES[archetype]:
         output_path = output_path.replace("{package_name}", package_name)

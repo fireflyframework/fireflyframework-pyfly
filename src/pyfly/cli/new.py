@@ -267,8 +267,9 @@ def _prompt_interactive() -> tuple[str, str, str, list[str]]:
 def new_command(name: str | None, archetype: str | None, features_str: str | None, directory: str) -> None:
     """Create a new PyFly project."""
     # Interactive mode when no name provided
+    pkg: str | None = None
     if name is None:
-        name, _pkg, archetype, features = _prompt_interactive()
+        name, pkg, archetype, features = _prompt_interactive()
     else:
         # Validate name in non-interactive mode
         error = _validate_project_name(name)
@@ -296,7 +297,7 @@ def new_command(name: str | None, archetype: str | None, features_str: str | Non
         console.print(f"[error]Directory '{project_dir}' already exists.[/error]")
         raise SystemExit(1)
 
-    generate_project(name, project_dir, archetype, features)
+    generate_project(name, project_dir, archetype, features, package_name=pkg)
 
     # Build a tree showing created structure
     tree = Tree(f"[success]{name}/[/success]")

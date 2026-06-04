@@ -88,11 +88,12 @@ def infer_params(func: Callable[..., Any]) -> list[ShellParam]:
         arg_meta = argument_overrides.get(name)
 
         if opt_meta is not None:
-            # Explicit @shell_option override
+            # Explicit @shell_option override — honor an explicit type= (audit #9),
+            # falling back to the signature-inferred inner_type when unset.
             params.append(
                 ShellParam(
                     name=name,
-                    param_type=inner_type,
+                    param_type=opt_meta.get("type") or inner_type,
                     is_option=True,
                     default=opt_meta.get("default", default),
                     help_text=opt_meta.get("help", ""),
@@ -103,11 +104,11 @@ def infer_params(func: Callable[..., Any]) -> list[ShellParam]:
             continue
 
         if arg_meta is not None:
-            # Explicit @shell_argument override
+            # Explicit @shell_argument override — honor an explicit type= (audit #9).
             params.append(
                 ShellParam(
                     name=name,
-                    param_type=inner_type,
+                    param_type=arg_meta.get("type") or inner_type,
                     is_option=False,
                     default=arg_meta.get("default", default),
                     help_text=arg_meta.get("help", ""),
