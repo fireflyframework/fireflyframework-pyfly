@@ -252,6 +252,7 @@ class ApplicationContext:
         # 6. Wire decorator-based beans to their targets
         self._wire_app_event_listeners()
         self._wire_message_listeners()
+        self._wire_event_listeners()
         self._wire_cqrs_handlers()
         self._wire_scheduled()
         self._wire_async_methods()
@@ -689,6 +690,34 @@ class ApplicationContext:
         self._wiring_counts["message_listeners"] = count
         if count:
             logger.debug("Wired %d @message_listener method(s)", count)
+
+    def _wire_event_listeners(self) -> None:
+        """Scan beans for @event_listener methods and subscribe to the EventPublisher.
+
+        Mirrors @message_listener discovery so context-driven @event_listener
+        beans are auto-subscribed without a hand-wired bus (audit #134).
+        """
+        count = 0
+        publisher: Any | None = None
+        for reg in self._unique_live_instances():
+            for _attr_name, method in self._safe_members(reg.instance):
+                if not getattr(method, "__pyfly_event_listener__", False):
+                    continue
+                if publisher is None:
+                    try:
+                        from pyfly.eda.ports.outbound import EventPublisher
+
+                        publisher = self._container.resolve(EventPublisher)  # type: ignore[type-abstract]
+                    except BeanCreationException:
+                        logger.debug("No EventPublisher registered; skipping @event_listener wiring")
+                        self._wiring_counts["event_listeners_eda"] = 0
+                        return
+                for pattern in getattr(method, "__pyfly_event_patterns__", ()):
+                    publisher.subscribe(pattern, method)
+                    count += 1
+        self._wiring_counts["event_listeners_eda"] = count
+        if count:
+            logger.debug("Wired %d @event_listener subscription(s)", count)
 
     def _wire_cqrs_handlers(self) -> None:
         """Scan beans for @command_handler / @query_handler and register with HandlerRegistry."""

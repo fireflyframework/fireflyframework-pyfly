@@ -57,7 +57,10 @@ def event_publisher(
             result = await func(*args, **kwargs)
 
             if timing in ("AFTER", "BOTH"):
-                await bus.publish(destination, event_type, payload)
+                # AFTER/BOTH augments the payload with the method result rather
+                # than re-publishing the pre-call arguments (audit #140).
+                after_payload = {**payload, "result": result}
+                await bus.publish(destination, event_type, after_payload)
 
             return result
 
@@ -99,15 +102,28 @@ def publish_result(
 
 
 def event_listener(
-    bus: EventPublisher,
-    event_types: list[str],
+    bus: EventPublisher | list[str] | None = None,
+    event_types: list[str] | None = None,
 ) -> Callable[[F], F]:
-    """Register a function as an event listener.
+    """Register a method as an EDA event listener.
+
+    Usage:
+    - ``@event_listener(["user.created"])`` or
+      ``@event_listener(event_types=["user.created"])`` — context-driven: the
+      method is stamped with metadata and auto-subscribed to the
+      ``EventPublisher`` bean during ApplicationContext startup (audit #134).
+    - ``@event_listener(bus=bus, event_types=[...])`` — hand-wired: also
+      subscribes immediately to the supplied bus (back-compat).
 
     Args:
-        bus: Event bus instance.
+        bus: Event bus instance, or the list of patterns when used positionally.
         event_types: List of event type patterns to subscribe to.
     """
+    # ``@event_listener(["pattern"])`` — first positional is the pattern list.
+    if event_types is None and isinstance(bus, (list, tuple)):
+        event_types = list(bus)
+        bus = None
+    patterns = tuple(event_types or ())
 
     def decorator(func: F) -> F:
         if not asyncio.iscoroutinefunction(func):
@@ -116,8 +132,12 @@ def event_listener(
                 "Consider making it async for proper concurrency.",
                 stacklevel=2,
             )
-        for pattern in event_types:
-            bus.subscribe(pattern, func)
+        # Stamp metadata so the context wiring pass can discover + subscribe it.
+        func.__pyfly_event_listener__ = True  # type: ignore[attr-defined]
+        func.__pyfly_event_patterns__ = patterns  # type: ignore[attr-defined]
+        if bus is not None:
+            for pattern in patterns:
+                bus.subscribe(pattern, func)  # type: ignore[union-attr]
         return func
 
     return decorator
