@@ -37,12 +37,32 @@ class AwsCognitoIdpAdapter:
         user_pool_id: str,
         client_id: str,
         region: str,
+        client_secret: str | None = None,
         client: Any | None = None,
     ) -> None:
         self._user_pool_id = user_pool_id
         self._client_id = client_id
         self._region = region
+        self._client_secret = client_secret
         self._client = client
+
+    def _secret_hash(self, username: str) -> str | None:
+        """Cognito SECRET_HASH = Base64(HMAC-SHA256(secret, username + client_id)).
+
+        Required for any app client configured with a secret (audit #23).
+        """
+        if not self._client_secret:
+            return None
+        import base64
+        import hashlib
+        import hmac
+
+        digest = hmac.new(
+            self._client_secret.encode("utf-8"),
+            (username + self._client_id).encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return base64.b64encode(digest).decode("utf-8")
 
     def _ensure_client(self) -> Any:
         if self._client is not None:
@@ -128,17 +148,24 @@ class AwsCognitoIdpAdapter:
 
     async def login(self, request: LoginRequest) -> AuthResult:
         client = self._ensure_client()
+        auth_params = {"USERNAME": request.username, "PASSWORD": request.password}
+        secret_hash = self._secret_hash(request.username)
+        if secret_hash is not None:
+            auth_params["SECRET_HASH"] = secret_hash
         try:
             resp = await self._run(
                 client.initiate_auth,
                 ClientId=self._client_id,
                 AuthFlow="USER_PASSWORD_AUTH",
-                AuthParameters={"USERNAME": request.username, "PASSWORD": request.password},
+                AuthParameters=auth_params,
             )
         except Exception as exc:  # noqa: BLE001
             msg = "invalid credentials"
             raise PermissionError(msg) from exc
-        result = resp["AuthenticationResult"]
+        result = resp.get("AuthenticationResult")
+        if not result:
+            msg = "authentication challenge required or failed"
+            raise PermissionError(msg)
         user = await self.get_user(request.username) or IdpUser(username=request.username)
         return AuthResult(
             user=user,
@@ -157,17 +184,26 @@ class AwsCognitoIdpAdapter:
 
     async def refresh(self, refresh_token: str) -> AuthResult:
         client = self._ensure_client()
-        resp = await self._run(
-            client.initiate_auth,
-            ClientId=self._client_id,
-            AuthFlow="REFRESH_TOKEN_AUTH",
-            AuthParameters={"REFRESH_TOKEN": refresh_token},
-        )
-        result = resp["AuthenticationResult"]
+        try:
+            resp = await self._run(
+                client.initiate_auth,
+                ClientId=self._client_id,
+                AuthFlow="REFRESH_TOKEN_AUTH",
+                AuthParameters={"REFRESH_TOKEN": refresh_token},
+            )
+        except Exception as exc:  # noqa: BLE001 — surface as an auth error like login (#28)
+            msg = "refresh failed"
+            raise PermissionError(msg) from exc
+        result = resp.get("AuthenticationResult")
+        if not result:
+            msg = "refresh did not return a new token"
+            raise PermissionError(msg)
         return AuthResult(
             user=IdpUser(),
             access_token=result["AccessToken"],
-            refresh_token=refresh_token,
+            # Cognito rotates the refresh token only for some flows; keep the
+            # rotated one when present, else the supplied token (#28).
+            refresh_token=result.get("RefreshToken", refresh_token),
             expires_in=result.get("ExpiresIn", 3600),
         )
 

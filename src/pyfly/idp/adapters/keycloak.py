@@ -55,6 +55,7 @@ class KeycloakIdpAdapter:
         self._client_secret = client_secret
         self._verify = verify_ssl
         self._admin_token: str | None = None
+        self._admin_token_expiry: float = 0.0  # monotonic deadline
 
     # -- helpers -----------------------------------------------------------
 
@@ -75,7 +76,12 @@ class KeycloakIdpAdapter:
         return httpx.AsyncClient(verify=self._verify, timeout=30.0)
 
     async def _admin_auth_header(self) -> dict[str, str]:
-        if self._admin_token is None:
+        import time
+
+        # Re-fetch when the cached admin token is absent or within the safety
+        # margin of expiry — Keycloak's client_credentials token defaults to a
+        # ~60s TTL, so a cached-forever token breaks every later admin call (#26).
+        if self._admin_token is None or time.monotonic() >= self._admin_token_expiry:
             async with await self._client() as client:
                 resp = await client.post(
                     self._token_url,
@@ -86,7 +92,10 @@ class KeycloakIdpAdapter:
                     },
                 )
                 resp.raise_for_status()
-                self._admin_token = resp.json()["access_token"]
+                payload = resp.json()
+                self._admin_token = payload["access_token"]
+                expires_in = float(payload.get("expires_in", 60))
+                self._admin_token_expiry = time.monotonic() + max(expires_in - 10.0, 1.0)
         return {"Authorization": f"Bearer {self._admin_token}"}
 
     # -- IdpAdapter protocol ----------------------------------------------
