@@ -41,9 +41,19 @@ class PrometheusEndpoint:
 
     @property
     def enabled(self) -> bool:
-        return True
+        # Only active when prometheus_client is importable (audit #162).
+        return generate_latest is not None
 
     async def handle(self, context: Any = None) -> dict[str, Any]:
+        if generate_latest is None:
+            # Defensive: the endpoint should not be registered without
+            # prometheus_client, but never raise an unconverted TypeError at
+            # request time if it is (audit #162).
+            return {
+                "content_type": "text/plain; charset=utf-8",
+                "body": "# prometheus_client is not installed\n",
+                "status": 503,
+            }
         output = generate_latest().decode("utf-8")
         return {
             "content_type": _CONTENT_TYPE,

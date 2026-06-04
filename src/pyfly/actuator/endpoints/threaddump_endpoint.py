@@ -39,15 +39,23 @@ class ThreadDumpEndpoint:
         threads: list[dict[str, Any]] = []
         for thread_id, frame in frames.items():
             thread = threads_by_id.get(thread_id)
-            stack = [
-                {
-                    "className": fs.name,
-                    "methodName": fs.name,
-                    "fileName": fs.filename,
-                    "lineNumber": fs.lineno,
-                }
-                for fs in traceback.extract_stack(frame)
-            ]
+            # Java threaddumps separate className from methodName. A Python frame
+            # has no declaring class, so the module (``__name__``) is the closest
+            # analogue; the method name is the qualified function name when
+            # available (``co_qualname`` carries the enclosing class in 3.11+),
+            # falling back to the bare function name (audit #161).
+            stack = []
+            for stack_frame, lineno in traceback.walk_stack(frame):
+                code = stack_frame.f_code
+                stack.append(
+                    {
+                        "className": stack_frame.f_globals.get("__name__", ""),
+                        "methodName": getattr(code, "co_qualname", code.co_name),
+                        "fileName": code.co_filename,
+                        "lineNumber": lineno,
+                    }
+                )
+            stack.reverse()  # oldest frame first, matching extract_stack order
             threads.append(
                 {
                     "threadName": thread.name if thread else f"Thread-{thread_id}",

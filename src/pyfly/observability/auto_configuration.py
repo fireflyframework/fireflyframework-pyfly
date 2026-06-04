@@ -16,6 +16,10 @@
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
 # must resolve return types at runtime for @bean method registration.
 
+import logging
+import os
+from typing import Any
+
 try:
     from pyfly.observability.metrics import MetricsRegistry
 except ImportError:
@@ -29,6 +33,8 @@ except ImportError:
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_class
 from pyfly.core.config import Config
+
+_logger = logging.getLogger(__name__)
 
 
 @auto_configuration
@@ -67,5 +73,54 @@ class TracingAutoConfiguration:
         )
         resource = Resource.create({"service.name": service_name})
         provider = _TracerProvider(resource=resource)
+        # Attach a span processor + exporter (audit #153). Without one, every
+        # @span span is recorded into the provider and immediately discarded.
+        self._install_span_processor(provider, config)
         trace.set_tracer_provider(provider)
         return provider
+
+    @staticmethod
+    def _install_span_processor(provider: Any, config: Config) -> None:
+        """Wire a BatchSpanProcessor + exporter chosen from configuration.
+
+        ``pyfly.observability.tracing.exporter`` selects ``otlp`` | ``console`` |
+        ``none``. When unset, OTLP is used iff an endpoint is configured (via
+        ``pyfly.observability.tracing.otlp.endpoint`` or the standard
+        ``OTEL_EXPORTER_OTLP_ENDPOINT`` env var); otherwise no exporter is wired
+        and a single info line is logged so the drop is not silent.
+        """
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        otlp_endpoint = config.get("pyfly.observability.tracing.otlp.endpoint") or os.environ.get(
+            "OTEL_EXPORTER_OTLP_ENDPOINT"
+        )
+        kind = str(config.get("pyfly.observability.tracing.exporter", "")).strip().lower()
+        if not kind:
+            kind = "otlp" if otlp_endpoint else "none"
+
+        if kind == "console":
+            from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
+            provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+            return
+
+        if kind == "otlp":
+            try:
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found, unused-ignore]
+                    OTLPSpanExporter,
+                )
+            except ImportError:
+                _logger.warning(
+                    "Tracing exporter 'otlp' requested but opentelemetry-exporter-otlp is not "
+                    "installed — spans will be dropped. Install it or set "
+                    "pyfly.observability.tracing.exporter=console."
+                )
+                return
+            exporter = OTLPSpanExporter(endpoint=otlp_endpoint) if otlp_endpoint else OTLPSpanExporter()
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            return
+
+        _logger.info(
+            "Tracing is active but no span exporter is configured — spans are dropped. "
+            "Set pyfly.observability.tracing.exporter=otlp|console or OTEL_EXPORTER_OTLP_ENDPOINT."
+        )
