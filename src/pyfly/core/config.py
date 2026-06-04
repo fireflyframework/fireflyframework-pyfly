@@ -431,8 +431,12 @@ class Config:
             else:
                 ref_key, default_val = inner, None
 
-            # Try environment variable first
+            # Try environment variable first — both the literal dotted name and
+            # the PYFLY_* relaxed mapping, so ${app.name} honors PYFLY_APP_NAME
+            # and env overrides win over raw file data (audit #87/#89).
             env_val = os.environ.get(ref_key)
+            if env_val is None:
+                env_val = os.environ.get(self._env_key(ref_key))
             if env_val is not None:
                 return env_val
 
