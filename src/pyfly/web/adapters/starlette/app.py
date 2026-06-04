@@ -199,6 +199,14 @@ def create_app(
         Middleware(WebFilterChainMiddleware, filters=filters),
     ]
 
+    # CORS auto-configuration (audit #204): when no explicit CORSConfig is passed,
+    # build one from ``pyfly.web.cors.*`` so CORS is enabled purely via YAML, like
+    # Spring's CorsAutoConfiguration. Secure-by-default: disabled unless opted in.
+    if cors is None and context is not None:
+        from pyfly.web.cors import CORSConfig as _CORSConfig
+
+        cors = _CORSConfig.from_config(context.config)
+
     if cors is not None:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -399,6 +407,12 @@ def create_app(
                 existing.add(key)
         for hook in _extra_post_start:
             hook()
+        # Rebuild the exception-converter chain now that user @bean ExceptionConverter
+        # instances exist (they are only created during start()) — audit #202.
+        if context is not None:
+            from pyfly.web.converters import build_exception_converter_service
+
+            app_.state.pyfly_exception_converter_service = build_exception_converter_service(context)
 
     effective_lifespan = lifespan
     if context is not None and lifespan is not None:
@@ -428,7 +442,12 @@ def create_app(
     if actuator_active:
         app.state.pyfly_install_health_indicators = _install_indicators
 
-    # Register global exception handler
+    # Register global exception handler + its converter chain (audit #202).
+    # Built-ins are available immediately; user converter beans are folded in by
+    # _install_dynamic_wiring once the context has started.
+    from pyfly.web.converters import build_exception_converter_service
+
+    app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
     app.add_exception_handler(Exception, global_exception_handler)
 
     return app

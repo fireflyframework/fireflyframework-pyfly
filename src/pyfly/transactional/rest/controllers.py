@@ -99,7 +99,7 @@ class OrchestrationController:
         self._persistence = persistence
 
     @get_mapping("/executions")
-    async def list_executions(self, status: QueryParam[str]) -> list[dict[str, Any]]:
+    async def list_executions(self, status: QueryParam[str | None]) -> list[dict[str, Any]]:
         status_str = cast("str | None", status)
         status_enum = ExecutionStatus(status_str) if status_str else None
         states = await self._persistence.find_all(status=status_enum)
@@ -125,8 +125,8 @@ class DeadLetterController:
     @get_mapping("")
     async def list(
         self,
-        execution_name: QueryParam[str],
-        correlation_id: QueryParam[str],
+        execution_name: QueryParam[str | None],
+        correlation_id: QueryParam[str | None],
     ) -> list[dict[str, Any]]:
         name = cast("str | None", execution_name)
         cid = cast("str | None", correlation_id)

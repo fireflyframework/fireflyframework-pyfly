@@ -180,6 +180,14 @@ def create_app(
         Middleware(WebFilterChainMiddleware, filters=filters),
     ]
 
+    # CORS auto-configuration (audit #204): build a CORSConfig from
+    # ``pyfly.web.cors.*`` when none is passed, matching Spring's
+    # CorsAutoConfiguration. Secure-by-default: disabled unless opted in.
+    if cors is None and context is not None:
+        from pyfly.web.cors import CORSConfig as _CORSConfig
+
+        cors = _CORSConfig.from_config(context.config)
+
     if cors is not None:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -363,6 +371,9 @@ def create_app(
 
     # Register global exception handler
     register_exception_handlers(app)
+    from pyfly.web.converters import build_exception_converter_service
+
+    app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
 
     # Collect route metadata (used for OpenAPI generation and startup logging)
     route_metadata = registrar.collect_route_metadata(context) if context is not None else []
@@ -398,6 +409,11 @@ def create_app(
         _install_context_routes()
         for hook in _extra_post_start:
             hook()
+        # Fold user @bean ExceptionConverter instances into the chain (audit #202).
+        if context is not None:
+            from pyfly.web.converters import build_exception_converter_service
+
+            app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
 
     app.state.pyfly_install_dynamic_wiring = _install_dynamic_wiring
 
