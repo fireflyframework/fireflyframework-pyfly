@@ -187,6 +187,9 @@ class ApplicationContext:
         # 3. Auto-discover BeanPostProcessors from registered beans
         self._discover_post_processors()
 
+        # 3b. Bind @config_properties beans from config (audit #118)
+        self._bind_config_properties()
+
         # 4. Eagerly resolve all singletons (sorted by @order)
         sorted_entries = sorted(
             self._container._registrations.items(),
@@ -598,6 +601,22 @@ class ApplicationContext:
         self._wiring_counts["post_processors"] = count
         if count:
             logger.debug("Discovered %d BeanPostProcessor(s)", count)
+
+    def _bind_config_properties(self) -> None:
+        """Bind @config_properties beans from config so they inject by type.
+
+        Each registered class carrying ``__pyfly_config_prefix__`` gets a factory
+        that produces an instance bound from the active Config (audit #118).
+        """
+        count = 0
+        for cls, reg in self._container._registrations.items():
+            if not hasattr(cls, "__pyfly_config_prefix__") or reg.instance is not None or reg.factory is not None:
+                continue
+            reg.factory = lambda c=cls: self._config.bind(c)
+            count += 1
+        self._wiring_counts["config_properties"] = count
+        if count:
+            logger.debug("Bound %d @config_properties bean(s)", count)
 
     @staticmethod
     def _safe_members(instance: Any, *, skip_private: bool = True) -> list[tuple[str, Any]]:

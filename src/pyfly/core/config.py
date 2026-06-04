@@ -121,6 +121,12 @@ def config_properties(prefix: str) -> Callable[[type[T]], type[T]]:
 
     def decorator(cls: type[T]) -> type[T]:
         setattr(cls, _CONFIG_PROPERTIES_ATTR, prefix)
+        # Make the class an injectable bean (Spring @EnableConfigurationProperties
+        # equivalent) so the scanner registers it and the context binds it from
+        # config, making it constructor-injectable by type (audit #118).
+        cls.__pyfly_injectable__ = True  # type: ignore[attr-defined]
+        if not hasattr(cls, "__pyfly_stereotype__"):
+            cls.__pyfly_stereotype__ = "config_properties"  # type: ignore[attr-defined]
         return cls
 
     return decorator
