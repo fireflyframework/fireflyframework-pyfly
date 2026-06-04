@@ -202,7 +202,15 @@ class TaskScheduler:
 
     @staticmethod
     async def _invoke(bean: Any, method: Callable[..., Any]) -> None:
-        """Invoke a scheduled method, handling both sync and async methods."""
-        result = method()
-        if inspect.isawaitable(result):
-            await result
+        """Invoke a scheduled method, handling both sync and async methods.
+
+        Exceptions are logged (not propagated) so a failing iteration of a
+        cron / fixed-rate job — whose task is not awaited by the loop — is still
+        reported through the framework logger instead of vanishing (audit #186).
+        """
+        try:
+            result = method()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("scheduled task '%s' failed", getattr(method, "__name__", method))
