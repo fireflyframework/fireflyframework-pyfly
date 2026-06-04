@@ -34,6 +34,7 @@ from pyfly.cqrs.context.execution_context import ExecutionContext
 from pyfly.cqrs.exceptions import CommandProcessingException
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Command
+from pyfly.cqrs.validation.exceptions import CqrsValidationException
 
 R = TypeVar("R")
 
@@ -115,6 +116,7 @@ class DefaultCommandBus:
     async def _execute(self, command: Command[Any], context: ExecutionContext | None) -> Any:
         start = self._metrics.now()
         command_name = type(command).__name__
+        previous_cid = CorrelationContext.get_correlation_id()
 
         try:
             # 1. Correlation
@@ -150,6 +152,8 @@ class DefaultCommandBus:
 
         except Exception as exc:
             duration = self._metrics.now() - start
+            if isinstance(exc, CqrsValidationException):
+                self._metrics.record_validation_failure(command)  # audit #99
             self._metrics.record_command_failure(command, exc, duration)
             if not isinstance(exc, CommandProcessingException):
                 raise CommandProcessingException(
@@ -158,6 +162,14 @@ class DefaultCommandBus:
                     cause=exc,
                 ) from exc
             raise
+        finally:
+            # Restore the prior correlation id so it never leaks into the next
+            # command on the same task/thread, while preserving an outer
+            # (e.g. per-request) correlation id (audit #98).
+            if previous_cid is None:
+                CorrelationContext.clear()
+            else:
+                CorrelationContext.set_correlation_id(previous_cid)
 
     async def _try_publish_events(self, command: Any, result: Any) -> None:
         """Publish domain events if the handler/command produced any."""

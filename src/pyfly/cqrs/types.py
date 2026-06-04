@@ -163,20 +163,20 @@ class Query(Generic[R]):
         object.__setattr__(self, "_cqrs_cacheable", enabled)
 
     def get_cache_key(self) -> str | None:
-        """Smart cache key — override for custom keys, else auto-generated from class + fields."""
+        """Smart cache key — override for custom keys, else auto-generated from class + fields.
+
+        Uses a stable SHA-256 digest (not the process-randomized built-in
+        ``hash()``) so the same query maps to the same key across processes and
+        restarts (audit #100).
+        """
         import dataclasses
+        import hashlib
 
         if not dataclasses.is_dataclass(self):
             return type(self).__name__
-        fields = {}
-        for f in dataclasses.fields(self):
-            value = getattr(self, f.name)
-            try:
-                hash(value)
-                fields[f.name] = value
-            except TypeError:
-                fields[f.name] = repr(value)
-        return f"{type(self).__name__}:{hash(tuple(sorted(fields.items())))}"
+        fields = {f.name: repr(getattr(self, f.name)) for f in dataclasses.fields(self)}
+        digest = hashlib.sha256(repr(sorted(fields.items())).encode("utf-8")).hexdigest()[:16]
+        return f"{type(self).__name__}:{digest}"
 
     # ── hooks for bus pipeline ─────────────────────────────────
 
