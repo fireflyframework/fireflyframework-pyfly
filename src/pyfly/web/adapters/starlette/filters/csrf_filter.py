@@ -37,6 +37,7 @@ from typing import Any
 
 from starlette.responses import JSONResponse
 
+from pyfly.container.ordering import HIGHEST_PRECEDENCE
 from pyfly.security.csrf import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -63,11 +64,12 @@ def _set_csrf_cookie(response: Any, token: str) -> None:
 class CsrfFilter(OncePerRequestFilter):
     """Double-submit cookie CSRF filter.
 
-    Ordering: runs after RequestContext (``-100``) but before the
-    SecurityFilter so that CSRF is validated before authorization checks.
+    Ordering: runs after the request-context/correlation filters but before
+    the JWT ``SecurityFilter`` (``HIGHEST_PRECEDENCE + 220``) so CSRF is
+    validated before authentication/authorization.
     """
 
-    __pyfly_order__ = -50
+    __pyfly_order__ = HIGHEST_PRECEDENCE + 210
 
     exclude_patterns = ["/actuator/*", "/health", "/ready"]
 

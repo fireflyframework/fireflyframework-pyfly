@@ -169,6 +169,8 @@ i18n = "pyfly.i18n.auto_configuration:I18nAutoConfiguration"
 session = "pyfly.session.auto_configuration:SessionStoreAutoConfiguration"
 session-filter = "pyfly.session.auto_configuration:SessionFilterAutoConfiguration"
 oauth2-login = "pyfly.security.auto_configuration:OAuth2LoginAutoConfiguration"
+csrf-filter = "pyfly.web.security_filters_auto_configuration:CsrfFilterAutoConfiguration"
+http-security-filter = "pyfly.web.security_filters_auto_configuration:HttpSecurityFilterAutoConfiguration"
 
 [project.scripts]
 pyfly = "pyfly.cli.main:cli"

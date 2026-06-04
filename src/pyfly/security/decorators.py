@@ -36,7 +36,7 @@ def _parse_string_args(args_str: str) -> list[str]:
     Returns:
         List of extracted string values.
     """
-    return re.findall(r"'([^']+)'", args_str)
+    return re.findall(r"['\"]([^'\"]+)['\"]", args_str)
 
 
 def _eval_node(node: ast.AST) -> bool:
@@ -152,12 +152,12 @@ def _evaluate_expression(expr: str, ctx: SecurityContext) -> bool:
         result,
     )
     result = re.sub(
-        r"hasRole\('([^']+)'\)",
+        r"hasRole\(['\"]([^'\"]+)['\"]\)",
         lambda m: str(ctx.has_role(m.group(1))),
         result,
     )
     result = re.sub(
-        r"hasPermission\('([^']+)'\)",
+        r"hasPermission\(['\"]([^'\"]+)['\"]\)",
         lambda m: str(ctx.has_permission(m.group(1))),
         result,
     )

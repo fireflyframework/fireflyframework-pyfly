@@ -31,10 +31,11 @@ _SECURITY_CONTEXT_KEY = "SECURITY_CONTEXT"
 class OAuth2SessionSecurityFilter(OncePerRequestFilter):
     """Restores a :class:`SecurityContext` from the HTTP session.
 
-    Runs at ``HIGHEST_PRECEDENCE + 225``, which is *before* the JWT-based
-    ``SecurityFilter`` (at ``+250``) and the ``OAuth2ResourceServerFilter``
-    (at ``+250``).  This ensures session-based authentication takes priority
-    over token-based authentication.
+    Runs at ``HIGHEST_PRECEDENCE + 225``, which is *after* the JWT-based
+    ``SecurityFilter`` (at ``+220``) but before the
+    ``OAuth2ResourceServerFilter`` (at ``+250``).  Running after the JWT filter
+    means a session-established context overwrites a token-established one, so
+    session-based authentication takes priority over symmetric-token auth.
 
     If a ``SECURITY_CONTEXT`` attribute is found in the session, it is set on
     ``request.state.security_context``.  Otherwise an anonymous context is

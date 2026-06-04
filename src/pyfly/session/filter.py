@@ -43,10 +43,12 @@ class SessionFilter(OncePerRequestFilter):
         store: SessionStore,
         cookie_name: str = _DEFAULT_COOKIE_NAME,
         ttl: int = _DEFAULT_TTL,
+        secure: bool = False,
     ) -> None:
         self._store = store
         self._cookie_name = cookie_name
         self._ttl = ttl
+        self._secure = secure
 
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         session = await self._load_or_create_session(request)
@@ -57,11 +59,16 @@ class SessionFilter(OncePerRequestFilter):
         finally:
             await self._persist_session(session)
 
-        if session.is_new and not session.invalidated:
+        # Issue the cookie for a new session, and re-issue it for an existing,
+        # still-valid session so its max-age slides forward on each access
+        # (audit #52). The Secure attribute is configurable (default off for
+        # local HTTP development).
+        if not session.invalidated:
             response.set_cookie(
                 key=self._cookie_name,
                 value=session.id,
                 httponly=True,
+                secure=self._secure,
                 samesite="lax",
                 max_age=self._ttl,
             )

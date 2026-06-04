@@ -56,6 +56,13 @@ try:
 except ImportError:
     OAuth2SessionSecurityFilter = object  # type: ignore[misc,assignment]
 
+try:
+    from pyfly.web.ports.filter import WebFilter
+except ImportError:
+    WebFilter = object  # type: ignore[misc,assignment]
+
+from collections.abc import Sequence
+
 from pyfly.container.bean import bean
 from pyfly.context.conditions import (
     auto_configuration,
@@ -64,6 +71,16 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+
+
+def _exclude_patterns(config: Config, key: str) -> Sequence[str]:
+    """Read a list / comma-separated string of exclude path patterns from config."""
+    raw = config.get(key)
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple)):
+        return [str(p) for p in raw]
+    return [p.strip() for p in str(raw).split(",") if p.strip()]
 
 
 @auto_configuration
@@ -77,6 +94,19 @@ class JwtAutoConfiguration:
         secret = str(config.get("pyfly.security.jwt.secret", "change-me-in-production"))
         algorithm = str(config.get("pyfly.security.jwt.algorithm", "HS256"))
         return JWTService(secret=secret, algorithm=algorithm)
+
+    @bean
+    @conditional_on_property("pyfly.security.jwt.filter.enabled", having_value="true")
+    @conditional_on_class("starlette")
+    def security_filter(self, jwt_service: JWTService, config: Config) -> WebFilter:
+        # Symmetric-JWT authentication filter (opt-in). Registered as a bean so
+        # the post-start filter rescan in create_app adds it to the chain (#41).
+        from pyfly.web.adapters.starlette.filters.security_filter import SecurityFilter
+
+        return SecurityFilter(
+            jwt_service=jwt_service,
+            exclude_patterns=_exclude_patterns(config, "pyfly.security.jwt.exclude-patterns"),
+        )
 
 
 @auto_configuration
@@ -117,6 +147,18 @@ class OAuth2ResourceServerAutoConfiguration:
             jwks_uri=jwks_uri,
             issuer=str(issuer) if issuer is not None else None,
             audience=str(audience) if audience is not None else None,
+        )
+
+    @bean
+    @conditional_on_class("starlette")
+    def oauth2_resource_server_filter(self, token_validator: JWKSTokenValidator, config: Config) -> WebFilter:
+        # Bearer-token resource-server filter; registered so the post-start
+        # rescan adds it to the chain whenever the resource server is on (#41).
+        from pyfly.web.adapters.starlette.filters.oauth2_resource_filter import OAuth2ResourceServerFilter
+
+        return OAuth2ResourceServerFilter(
+            token_validator=token_validator,
+            exclude_patterns=_exclude_patterns(config, "pyfly.security.oauth2.resource-server.exclude-patterns"),
         )
 
 
