@@ -15,8 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+from pyfly.actuator.health import HealthStatus
 from pyfly.transactional.core.persistence import ExecutionPersistenceProvider
 
 
@@ -26,9 +25,9 @@ class OrchestrationHealthIndicator:
     def __init__(self, persistence: ExecutionPersistenceProvider) -> None:
         self._persistence = persistence
 
-    async def check(self) -> dict[str, Any]:
+    async def health(self) -> HealthStatus:
         healthy = await self._persistence.is_healthy()
-        return {
-            "status": "UP" if healthy else "DOWN",
-            "details": {"persistence": "ok" if healthy else "unreachable"},
-        }
+        return HealthStatus(
+            status="UP" if healthy else "DOWN",
+            details={"persistence": "ok" if healthy else "unreachable"},
+        )

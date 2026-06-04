@@ -18,10 +18,15 @@ from __future__ import annotations
 from typing import Any
 
 try:
-    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    from prometheus_client import generate_latest
 except ImportError:
-    CONTENT_TYPE_LATEST = ""
     generate_latest = None  # type: ignore[assignment]
+
+# Spring Boot / Micrometer serve the classic Prometheus text exposition format
+# (``version=0.0.4``). prometheus_client now defaults ``CONTENT_TYPE_LATEST`` to
+# the OpenMetrics ``version=1.0.0``; pin the Spring-compatible value so existing
+# Prometheus scrapers and Spring tooling consume it unchanged.
+_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 
 class PrometheusEndpoint:
@@ -41,6 +46,6 @@ class PrometheusEndpoint:
     async def handle(self, context: Any = None) -> dict[str, Any]:
         output = generate_latest().decode("utf-8")
         return {
-            "content_type": CONTENT_TYPE_LATEST,
+            "content_type": _CONTENT_TYPE,
             "body": output,
         }

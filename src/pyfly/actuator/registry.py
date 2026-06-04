@@ -61,12 +61,20 @@ class ActuatorRegistry:
                     self._endpoints[ep.endpoint_id] = ep
 
     def _is_enabled(self, endpoint: ActuatorEndpoint) -> bool:
-        """Check if an endpoint is enabled considering config overrides."""
+        """Check if an endpoint is enabled considering config overrides.
+
+        Honors (highest priority first) the Spring-style
+        ``pyfly.management.endpoint.{id}.enabled`` key, then the legacy
+        ``pyfly.actuator.endpoints.{id}.enabled`` key, then the endpoint default.
+        """
         if self._config is not None:
-            config_key = f"pyfly.actuator.endpoints.{endpoint.endpoint_id}.enabled"
-            override = self._config.get(config_key)
-            if override is not None:
-                if isinstance(override, bool):
-                    return override
-                return str(override).lower() in ("true", "1", "yes")
+            for config_key in (
+                f"pyfly.management.endpoint.{endpoint.endpoint_id}.enabled",
+                f"pyfly.actuator.endpoints.{endpoint.endpoint_id}.enabled",
+            ):
+                override = self._config.get(config_key)
+                if override is not None:
+                    if isinstance(override, bool):
+                        return override
+                    return str(override).lower() in ("true", "1", "yes")
         return endpoint.enabled

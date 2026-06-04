@@ -17,14 +17,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyfly.actuator.health import HealthAggregator
+from pyfly.actuator.health import DOWN_STATUSES, HealthAggregator, HealthResult
 
 
 class HealthEndpoint:
-    """Exposes aggregated health check results at ``/actuator/health``."""
+    """Exposes aggregated health check results at ``/actuator/health``.
 
-    def __init__(self, health_aggregator: HealthAggregator) -> None:
+    ``show_details`` / ``show_components`` mirror Spring's
+    ``management.endpoint.health.show-details`` / ``show-components`` and control
+    how much of each contributor's payload is exposed.
+    """
+
+    def __init__(
+        self,
+        health_aggregator: HealthAggregator,
+        *,
+        show_details: bool = True,
+        show_components: bool = True,
+    ) -> None:
         self._aggregator = health_aggregator
+        self._show_details = show_details
+        self._show_components = show_components
 
     @property
     def endpoint_id(self) -> str:
@@ -34,27 +47,46 @@ class HealthEndpoint:
     def enabled(self) -> bool:
         return True
 
+    def _serialize(self, result: HealthResult) -> dict[str, Any]:
+        return result.to_dict(show_details=self._show_details, show_components=self._show_components)
+
+    @staticmethod
+    def _status_code(status: str) -> int:
+        return 503 if status in DOWN_STATUSES else 200
+
     async def handle(self, context: Any = None) -> dict[str, Any]:
-        result = await self._aggregator.check()
-        return result.to_dict()
+        return self._serialize(await self._aggregator.check())
 
     async def get_status_code(self) -> int:
         """Return the HTTP status code based on health state."""
-        result = await self._aggregator.check()
-        return 503 if result.status == "DOWN" else 200
+        return self._status_code((await self._aggregator.check()).status)
 
     async def handle_liveness(self) -> dict[str, Any]:
-        result = await self._aggregator.check_liveness()
-        return result.to_dict()
+        return self._serialize(await self._aggregator.check_liveness())
 
     async def handle_readiness(self) -> dict[str, Any]:
-        result = await self._aggregator.check_readiness()
-        return result.to_dict()
+        return self._serialize(await self._aggregator.check_readiness())
 
     async def get_liveness_status_code(self) -> int:
-        result = await self._aggregator.check_liveness()
-        return 503 if result.status == "DOWN" else 200
+        return self._status_code((await self._aggregator.check_liveness()).status)
 
     async def get_readiness_status_code(self) -> int:
-        result = await self._aggregator.check_readiness()
-        return 503 if result.status == "DOWN" else 200
+        return self._status_code((await self._aggregator.check_readiness()).status)
+
+    async def handle_path(self, path: str) -> tuple[dict[str, Any] | None, int]:
+        """Drill into ``/actuator/health/{path}`` — a configured group or a single
+        component contributor. Returns ``(payload, status_code)`` or ``(None, 404)``
+        when *path* matches neither."""
+        group = await self._aggregator.check_group(path)
+        if group is not None:
+            return self._serialize(group), self._status_code(group.status)
+
+        result = await self._aggregator.check()
+        component = result.components.get(path)
+        if component is not None:
+            payload: dict[str, Any] = {"status": component.status}
+            if self._show_details and component.details:
+                payload["details"] = component.details
+            return payload, self._status_code(component.status)
+
+        return None, 404

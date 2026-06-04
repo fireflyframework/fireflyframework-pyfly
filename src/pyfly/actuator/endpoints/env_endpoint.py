@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Environment actuator endpoint — shows active profiles."""
+"""Environment actuator endpoint — Spring Boot ``/actuator/env`` parity."""
 
 from __future__ import annotations
 
@@ -22,7 +22,13 @@ if TYPE_CHECKING:
 
 
 class EnvEndpoint:
-    """Exposes active profiles at ``/actuator/env``."""
+    """Exposes profiles + ordered, masked property sources at ``/actuator/env``.
+
+    ``GET /actuator/env``          -> {activeProfiles, propertySources:[{name, properties}]}
+    ``GET /actuator/env/{toMatch}`` -> the value of one property across sources.
+    """
+
+    supports_selector = True
 
     def __init__(self, context: ApplicationContext) -> None:
         self._context = context
@@ -35,5 +41,39 @@ class EnvEndpoint:
     def enabled(self) -> bool:
         return True
 
-    async def handle(self, context: Any = None) -> dict[str, Any]:
-        return {"activeProfiles": self._context.environment.active_profiles}
+    async def handle(self, context: Any = None) -> dict[str, Any] | None:
+        selector = None
+        if isinstance(context, dict):
+            selector = context.get("selector") or context.get("name")
+        profiles = list(self._context.environment.active_profiles)
+        sources = self._property_sources()
+
+        if selector:
+            return self._property_detail(str(selector), profiles, sources)
+
+        return {"activeProfiles": profiles, "propertySources": sources}
+
+    def _property_sources(self) -> list[dict[str, Any]]:
+        config = self._context.config
+        fn = getattr(config, "property_sources", None)
+        if callable(fn):
+            result = fn()
+            if isinstance(result, list):
+                return result
+        return []
+
+    def _property_detail(self, name: str, profiles: list[str], sources: list[dict[str, Any]]) -> dict[str, Any]:
+        """Spring ``/actuator/env/{toMatch}`` — the property across all sources."""
+        winning: dict[str, Any] | None = None
+        per_source: list[dict[str, Any]] = []
+        for source in sources:
+            prop = source.get("properties", {}).get(name)
+            if prop is not None:
+                per_source.append({"name": source.get("name", ""), "property": prop})
+                if winning is None:
+                    winning = {"source": source.get("name", ""), "value": prop.get("value")}
+        return {
+            "property": winning,
+            "activeProfiles": profiles,
+            "propertySources": per_source,
+        }

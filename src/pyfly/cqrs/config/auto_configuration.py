@@ -24,6 +24,7 @@ from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_property
 from pyfly.core.config import Config
+from pyfly.cqrs.actuator.health import CqrsHealthIndicator
 from pyfly.cqrs.authorization.service import AuthorizationService
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
 from pyfly.cqrs.command.bus import DefaultCommandBus
@@ -94,6 +95,12 @@ class CqrsAutoConfiguration:
     @bean
     def handler_registry(self) -> HandlerRegistry:
         return HandlerRegistry()
+
+    @bean
+    def cqrs_health_indicator(self, handler_registry: HandlerRegistry) -> CqrsHealthIndicator:
+        """CQRS ``HealthIndicator`` — auto-discovered by the actuator and
+        contributed to ``/actuator/health``."""
+        return CqrsHealthIndicator(handler_registry)
 
     @bean
     def command_event_publisher(self, producer: EventPublisher | None = None) -> CommandEventPublisher:

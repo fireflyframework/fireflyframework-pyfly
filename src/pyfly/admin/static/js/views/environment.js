@@ -151,12 +151,18 @@ export async function render(container, api) {
 
     wrapper.removeChild(loader);
 
-    const activeProfiles = envData.active_profiles || [];
+    const activeProfiles = envData.active_profiles || envData.activeProfiles || [];
     const properties = envData.properties || {};
+    const origins = envData.origins || {};
+    const propertySources = envData.propertySources || [];
     const sources = envData.sources || [];
 
     // ── Flatten properties for table and toolbar ─────────────
     const propsFlat = flattenProperties(properties);
+    // Attribute each effective property to its winning source.
+    for (const entry of propsFlat) {
+        entry.origin = origins[entry.key] || '';
+    }
 
     // ── Filter Toolbar ──────────────────────────────────────
     const toolbar = createFilterToolbar({
@@ -216,18 +222,27 @@ export async function render(container, api) {
     profileCard.appendChild(profileBody);
     wrapper.appendChild(profileCard);
 
-    // ── Config Sources card ──────────────────────────────────
-    if (sources.length > 0) {
+    // ── Property Sources card (Spring /actuator/env ordering) ──
+    // Prefer the rich propertySources (name + property count, highest
+    // precedence first); fall back to the flat source-name list.
+    const sourceRows = propertySources.length
+        ? propertySources.map((s) => ({
+              name: s.name,
+              count: s.properties ? Object.keys(s.properties).length : 0,
+          }))
+        : sources.map((s) => ({ name: typeof s === 'string' ? s : (s.name || ''), count: null }));
+
+    if (sourceRows.length > 0) {
         const sourcesCard = document.createElement('div');
         sourcesCard.className = 'admin-card mb-lg';
 
         const sourcesHeader = document.createElement('div');
         sourcesHeader.className = 'admin-card-header';
         const sourcesTitle = document.createElement('h3');
-        sourcesTitle.textContent = 'Config Sources';
+        sourcesTitle.textContent = 'Property Sources';
         const sourcesCount = document.createElement('span');
         sourcesCount.className = 'card-subtitle';
-        sourcesCount.textContent = sources.length + ' loaded';
+        sourcesCount.textContent = sourceRows.length + ' sources (highest precedence first)';
         sourcesHeader.appendChild(sourcesTitle);
         sourcesHeader.appendChild(sourcesCount);
         sourcesCard.appendChild(sourcesHeader);
@@ -237,14 +252,14 @@ export async function render(container, api) {
         sourcesBody.style.padding = '0';
 
         const sourcesList = document.createElement('div');
-        for (let i = 0; i < sources.length; i++) {
-            const src = sources[i];
+        for (let i = 0; i < sourceRows.length; i++) {
+            const src = sourceRows[i];
             const item = document.createElement('div');
             item.style.padding = '10px 20px';
             item.style.display = 'flex';
             item.style.alignItems = 'center';
             item.style.gap = '12px';
-            if (i < sources.length - 1) {
+            if (i < sourceRows.length - 1) {
                 item.style.borderBottom = '1px solid var(--admin-border-subtle)';
             }
 
@@ -256,8 +271,16 @@ export async function render(container, api) {
 
             const name = document.createElement('span');
             name.className = 'text-mono text-sm';
-            name.textContent = typeof src === 'string' ? src : (src.name || JSON.stringify(src));
+            name.style.flex = '1';
+            name.textContent = src.name;
             item.appendChild(name);
+
+            if (src.count != null) {
+                const badge = document.createElement('span');
+                badge.className = 'badge badge-neutral';
+                badge.textContent = src.count + (src.count === 1 ? ' property' : ' properties');
+                item.appendChild(badge);
+            }
 
             sourcesList.appendChild(item);
         }
@@ -303,6 +326,20 @@ export async function render(container, api) {
                 label: 'Value',
                 render(val) {
                     return renderValue(val);
+                },
+            },
+            {
+                key: 'origin',
+                label: 'Source',
+                render(val) {
+                    const span = document.createElement('span');
+                    span.className = 'text-xs text-muted';
+                    let s = val ? String(val) : '';
+                    const slash = s.lastIndexOf('/');
+                    if (slash >= 0) s = s.slice(slash + 1);
+                    span.textContent = s.length > 40 ? s.slice(0, 39) + '…' : s;
+                    span.title = val || '';
+                    return span;
                 },
             },
         ],

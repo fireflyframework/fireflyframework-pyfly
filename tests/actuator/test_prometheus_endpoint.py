@@ -37,3 +37,10 @@ class TestPrometheusEndpoint:
         assert "body" in data
         assert isinstance(data["body"], str)
         assert "content_type" in data
+
+    @pytest.mark.asyncio
+    async def test_content_type_is_spring_compatible_004(self) -> None:
+        # Spring Boot / Micrometer serve version=0.0.4, not OpenMetrics 1.0.0.
+        ep = PrometheusEndpoint()
+        data = await ep.handle()
+        assert data["content_type"] == "text/plain; version=0.0.4; charset=utf-8"

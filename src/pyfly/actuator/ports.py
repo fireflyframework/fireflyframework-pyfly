@@ -37,6 +37,10 @@ class ActuatorEndpoint(Protocol):
         """Default enable state.  Can be overridden via config."""
         ...
 
-    async def handle(self, context: Any = None) -> dict[str, Any]:
-        """Handle a request to this endpoint and return a JSON-serializable dict."""
+    async def handle(self, context: Any = None) -> dict[str, Any] | None:
+        """Handle a request and return a JSON-serializable dict.
+
+        May return ``None`` for a selector that matches nothing (e.g.
+        ``/actuator/metrics/{unknown}``), which the adapter renders as 404.
+        """
         ...

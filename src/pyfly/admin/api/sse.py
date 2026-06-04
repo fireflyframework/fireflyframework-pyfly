@@ -68,7 +68,8 @@ async def metrics_stream(
 ) -> AsyncGenerator[str, None]:
     try:
         while True:
-            data = await metrics_provider.get_metric_names()
+            # Stream live values (not just names) so the admin trend is push-based.
+            data = await metrics_provider.get_metric_values()
             yield _sse_event(data, event="metrics")
             await asyncio.sleep(interval)
     except asyncio.CancelledError:

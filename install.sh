@@ -164,7 +164,10 @@ uninstall_pyfly() {
 # ── Prerequisite checks ───────────────────────────────────────────────────────
 
 find_python() {
-    for cmd in python3 python; do
+    # Probe version-suffixed interpreters first: on macOS/Homebrew/uv setups the
+    # bare `python3` is often an old system build (e.g. 3.9) while a newer
+    # `python3.12`/`python3.13` is installed alongside it.
+    for cmd in python3.14 python3.13 python3.12 python3 python; do
         if command -v "$cmd" &>/dev/null; then
             local version
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null) || continue

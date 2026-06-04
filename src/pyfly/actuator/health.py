@@ -30,11 +30,27 @@ class ProbeGroup(enum.Enum):
     READINESS = "readiness"
 
 
+# Spring Boot status severity (most → least severe). Aggregation reports the
+# most-severe status present; HTTP 503 is returned for DOWN / OUT_OF_SERVICE.
+_STATUS_SEVERITY = {"DOWN": 4, "OUT_OF_SERVICE": 3, "UP": 2, "UNKNOWN": 1}
+DOWN_STATUSES = ("DOWN", "OUT_OF_SERVICE")
+
+
+def aggregate_status(statuses: list[str]) -> str:
+    """Return the most-severe status (Spring ``SimpleStatusAggregator`` order).
+
+    Non-canonical statuses (e.g. legacy ``DEGRADED``) are treated as ``DOWN``."""
+    if not statuses:
+        return "UP"
+    worst = max(statuses, key=lambda s: _STATUS_SEVERITY.get(s, _STATUS_SEVERITY["DOWN"]))
+    return worst if worst in _STATUS_SEVERITY else "DOWN"
+
+
 @dataclass
 class HealthStatus:
-    """Health status for a single component."""
+    """Health status for a single component (UP / DOWN / OUT_OF_SERVICE / UNKNOWN)."""
 
-    status: str  # "UP", "DOWN", "DEGRADED"
+    status: str
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -45,13 +61,21 @@ class HealthResult:
     status: str
     components: dict[str, HealthStatus] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-friendly dictionary."""
+    def to_dict(self, *, show_details: bool = True, show_components: bool = True) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dictionary.
+
+        ``show_components``/``show_details`` mirror Spring's
+        ``management.endpoint.health.show-components`` / ``show-details``.
+        """
         result: dict[str, Any] = {"status": self.status}
-        if self.components:
-            result["components"] = {
-                name: {"status": hs.status, "details": hs.details} for name, hs in self.components.items()
-            }
+        if self.components and show_components:
+            components: dict[str, Any] = {}
+            for name, hs in self.components.items():
+                entry: dict[str, Any] = {"status": hs.status}
+                if show_details and hs.details:
+                    entry["details"] = hs.details
+                components[name] = entry
+            result["components"] = components
         return result
 
 
@@ -68,6 +92,9 @@ class HealthAggregator:
     def __init__(self) -> None:
         self._indicators: dict[str, HealthIndicator] = {}
         self._groups: dict[str, set[ProbeGroup]] = {}
+        # Named health groups (Spring ``management.endpoint.health.group.<name>``):
+        # group name -> set of indicator names included in that group.
+        self._custom_groups: dict[str, set[str]] = {}
 
     def add_indicator(
         self,
@@ -107,22 +134,37 @@ class HealthAggregator:
         }
         return await self._check_indicators(filtered)
 
+    def add_group(self, name: str, indicator_names: set[str]) -> None:
+        """Register a named health group with the indicator names it includes."""
+        self._custom_groups[name] = set(indicator_names)
+
+    async def check_group(self, name: str) -> HealthResult | None:
+        """Run a named group's indicators. Returns ``None`` if no such group.
+
+        The built-in ``liveness``/``readiness`` probe groups are always available;
+        other groups must be registered via :meth:`add_group`."""
+        if name == "liveness":
+            return await self.check_liveness()
+        if name == "readiness":
+            return await self.check_readiness()
+        if name in self._custom_groups:
+            members = self._custom_groups[name]
+            filtered = {n: ind for n, ind in self._indicators.items() if n in members}
+            return await self._check_indicators(filtered)
+        return None
+
     async def _check_indicators(self, indicators: dict[str, HealthIndicator]) -> HealthResult:
         if not indicators:
             return HealthResult(status="UP")
 
         components: dict[str, HealthStatus] = {}
-        overall = "UP"
 
         for name, indicator in indicators.items():
             try:
-                status = await indicator.health()
-                components[name] = status
-                if status.status == "DOWN":
-                    overall = "DOWN"
+                components[name] = await indicator.health()
             except Exception:
                 logger.exception("Health indicator '%s' raised an exception", name)
                 components[name] = HealthStatus(status="DOWN", details={"error": "check failed"})
-                overall = "DOWN"
 
+        overall = aggregate_status([hs.status for hs in components.values()])
         return HealthResult(status=overall, components=components)

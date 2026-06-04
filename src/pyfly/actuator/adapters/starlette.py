@@ -29,37 +29,49 @@ from pyfly.actuator.registry import ActuatorRegistry
 
 def make_starlette_actuator_routes(
     registry: ActuatorRegistry,
+    exposed_ids: set[str] | None = None,
+    base_path: str = "/actuator",
 ) -> list[Route]:
-    """Build Starlette ``Route`` objects from all enabled endpoints in *registry*."""
+    """Build Starlette ``Route`` objects from all enabled endpoints in *registry*.
+
+    *exposed_ids* — if provided, only endpoints whose id is in the set are mounted
+    over HTTP (Spring Boot ``management.endpoints.web.exposure``). ``None`` exposes
+    every enabled endpoint (used by low-level callers/tests).
+    *base_path* — the actuator base path (Spring ``management.endpoints.web.base-path``).
+    """
     enabled = registry.get_enabled_endpoints()
+    if exposed_ids is not None:
+        enabled = {eid: ep for eid, ep in enabled.items() if eid in exposed_ids}
+
+    bp = base_path.rstrip("/")
     routes: list[Route] = []
 
-    # Index endpoint: /actuator — lists all enabled endpoints with _links
+    # Index endpoint: /actuator — lists all exposed endpoints with _links
     async def index_endpoint(request: Request) -> JSONResponse:
-        links: dict[str, dict[str, str]] = {"self": {"href": "/actuator"}}
+        links: dict[str, dict[str, str]] = {"self": {"href": bp or "/"}}
         for eid in enabled:
-            links[eid] = {"href": f"/actuator/{eid}"}
+            links[eid] = {"href": f"{bp}/{eid}"}
         if "health" in enabled:
-            links["health/liveness"] = {"href": "/actuator/health/liveness"}
-            links["health/readiness"] = {"href": "/actuator/health/readiness"}
+            links["health/liveness"] = {"href": f"{bp}/health/liveness"}
+            links["health/readiness"] = {"href": f"{bp}/health/readiness"}
         return JSONResponse({"_links": links})
 
-    routes.append(Route("/actuator", index_endpoint, methods=["GET"]))
+    routes.append(Route(bp or "/", index_endpoint, methods=["GET"]))
 
     for eid, ep in enabled.items():
         if isinstance(ep, HealthEndpoint):
-            routes.extend(_make_health_routes(ep))
+            routes.extend(_make_health_routes(ep, bp))
         elif isinstance(ep, LoggersEndpoint):
-            routes.extend(_make_loggers_routes(ep))
+            routes.extend(_make_loggers_routes(ep, bp))
         elif isinstance(ep, PrometheusEndpoint):
-            routes.append(_make_prometheus_route(ep))
+            routes.append(_make_prometheus_route(ep, bp))
         else:
-            routes.append(_make_generic_route(eid, ep))
+            routes.extend(_make_generic_routes(eid, ep, bp))
 
     return routes
 
 
-def _make_prometheus_route(ep: PrometheusEndpoint) -> Route:
+def _make_prometheus_route(ep: PrometheusEndpoint, bp: str) -> Route:
     """Prometheus scrape endpoint — must serve the raw text exposition format
     (``text/plain; version=0.0.4``), not a JSON wrapper."""
 
@@ -70,11 +82,15 @@ def _make_prometheus_route(ep: PrometheusEndpoint) -> Route:
             media_type=data.get("content_type") or "text/plain; version=0.0.4; charset=utf-8",
         )
 
-    return Route("/actuator/prometheus", handler, methods=["GET"])
+    return Route(f"{bp}/prometheus", handler, methods=["GET"])
 
 
-def _make_health_routes(ep: HealthEndpoint) -> list[Route]:
-    """Health endpoint returns dynamic status codes (200/503)."""
+def _make_health_routes(ep: HealthEndpoint, bp: str) -> list[Route]:
+    """Health endpoint returns dynamic status codes (200/503).
+
+    Supports the built-in ``liveness``/``readiness`` probe groups plus a generic
+    ``/health/{path}`` selector for any other group or single component.
+    """
 
     async def handler(request: Request) -> JSONResponse:
         data = await ep.handle()
@@ -91,41 +107,77 @@ def _make_health_routes(ep: HealthEndpoint) -> list[Route]:
         status_code = await ep.get_readiness_status_code()
         return JSONResponse(data, status_code=status_code)
 
+    async def selector_handler(request: Request) -> JSONResponse:
+        # /actuator/health/{path} — a configured group, or a single component.
+        path = request.path_params["path"]
+        data, status_code = await ep.handle_path(path)
+        if data is None:
+            return JSONResponse({"error": f"No such health component or group: {path}"}, status_code=404)
+        return JSONResponse(data, status_code=status_code)
+
     return [
-        Route("/actuator/health", handler, methods=["GET"]),
-        Route("/actuator/health/liveness", liveness_handler, methods=["GET"]),
-        Route("/actuator/health/readiness", readiness_handler, methods=["GET"]),
+        Route(f"{bp}/health", handler, methods=["GET"]),
+        Route(f"{bp}/health/liveness", liveness_handler, methods=["GET"]),
+        Route(f"{bp}/health/readiness", readiness_handler, methods=["GET"]),
+        Route(f"{bp}/health/{{path:path}}", selector_handler, methods=["GET"]),
     ]
 
 
-def _make_loggers_routes(ep: LoggersEndpoint) -> list[Route]:
-    """Loggers endpoint supports GET (list) and POST (change level)."""
+def _make_loggers_routes(ep: LoggersEndpoint, bp: str) -> list[Route]:
+    """Loggers endpoint — Spring Boot shape.
+
+    GET  /loggers            -> levels + loggers + groups
+    GET  /loggers/{name}     -> {configuredLevel, effectiveLevel}
+    POST /loggers/{name}     -> body {"configuredLevel": "DEBUG"} (or null to reset), 204
+    """
 
     async def get_handler(request: Request) -> JSONResponse:
         data = await ep.handle()
         return JSONResponse(data)
 
-    async def post_handler(request: Request) -> JSONResponse:
+    async def get_named_handler(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        return JSONResponse(await ep.get_logger(name))
+
+    async def post_named_handler(request: Request) -> Response:
+        name = request.path_params["name"]
         body = await request.body()
         payload = json.loads(body) if body else {}
-        logger_name = payload.get("logger", "ROOT")
-        level = payload.get("level", "INFO")
-        result = await ep.set_logger_level(logger_name, level)
-        if "error" in result:
+        level = payload.get("configuredLevel")
+        result = await ep.set_logger_level(name, level)
+        if isinstance(result, dict) and "error" in result:
             return JSONResponse(result, status_code=400)
-        return JSONResponse(result)
+        return Response(status_code=204)
 
     return [
-        Route("/actuator/loggers", get_handler, methods=["GET"]),
-        Route("/actuator/loggers", post_handler, methods=["POST"]),
+        Route(f"{bp}/loggers", get_handler, methods=["GET"]),
+        Route(f"{bp}/loggers/{{name}}", get_named_handler, methods=["GET"]),
+        Route(f"{bp}/loggers/{{name}}", post_named_handler, methods=["POST"]),
     ]
 
 
-def _make_generic_route(eid: str, ep: object) -> Route:
-    """Generic endpoint — calls ``handle()`` and returns 200 JSON."""
+def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
+    """Generic endpoint — ``GET /actuator/{id}`` plus an optional
+    ``GET /actuator/{id}/{selector}`` drill-down when the endpoint opts in via
+    ``supports_selector = True``."""
 
     async def handler(request: Request) -> JSONResponse:
-        data = await ep.handle()  # type: ignore[attr-defined]
+        data = await ep.handle({"query": dict(request.query_params)})  # type: ignore[attr-defined]
         return JSONResponse(data)
 
-    return Route(f"/actuator/{eid}", handler, methods=["GET"])
+    routes = [Route(f"{bp}/{eid}", handler, methods=["GET"])]
+
+    if getattr(ep, "supports_selector", False):
+
+        async def selector_handler(request: Request) -> JSONResponse:
+            selector = request.path_params["selector"]
+            data = await ep.handle(  # type: ignore[attr-defined]
+                {"selector": selector, "query": dict(request.query_params)}
+            )
+            if data is None:
+                return JSONResponse({"error": f"No such {eid}: {selector}"}, status_code=404)
+            return JSONResponse(data)
+
+        routes.append(Route(f"{bp}/{eid}/{{selector:path}}", selector_handler, methods=["GET"]))
+
+    return routes

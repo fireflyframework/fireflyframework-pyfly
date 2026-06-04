@@ -11,97 +11,152 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for MetricsFilter — HTTP auto-instrumentation."""
+"""Tests for MetricsFilter — Spring Boot / Micrometer-compatible HTTP metrics."""
 
 from __future__ import annotations
 
-import contextlib
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
-from prometheus_client import REGISTRY
+from prometheus_client import REGISTRY, generate_latest
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
-from pyfly.web.adapters.starlette.filters.metrics_filter import MetricsFilter
-
-
-def _make_request(method: str = "GET", path: str = "/api/users") -> MagicMock:
-    req = MagicMock()
-    req.method = method
-    req.url.path = path
-    return req
-
-
-def _make_response(status_code: int = 200) -> MagicMock:
-    resp = MagicMock()
-    resp.status_code = status_code
-    return resp
+from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
+from pyfly.web.adapters.starlette.filters import metrics_filter as mf
+from pyfly.web.adapters.starlette.filters.metrics_filter import MetricsFilter, _outcome
 
 
 @pytest.fixture(autouse=True)
-def _clean_prometheus_registry():
-    """Unregister MetricsFilter collectors between tests."""
-    collectors_before = set(REGISTRY._names_to_collectors.keys())
+def _fresh_collectors():
+    """Each test gets brand-new, isolated request-timer collectors."""
+    mf.reset_collectors()
     yield
-    for name in list(REGISTRY._names_to_collectors.keys()):
-        if name not in collectors_before:
-            with contextlib.suppress(Exception):
-                REGISTRY.unregister(REGISTRY._names_to_collectors[name])
+    mf.reset_collectors()
 
 
-class TestMetricsFilter:
-    @pytest.mark.asyncio
-    async def test_increments_request_counter(self) -> None:
+def _build_app(*, histogram: bool = False) -> Starlette:
+    async def get_user(request):  # noqa: ANN001
+        return JSONResponse({"id": request.path_params["user_id"]})
+
+    async def boom(request):  # noqa: ANN001
+        raise RuntimeError("kaboom")
+
+    return Starlette(
+        middleware=[Middleware(WebFilterChainMiddleware, filters=[MetricsFilter(histogram=histogram)])],
+        routes=[
+            Route("/users/{user_id}", get_user, methods=["GET"]),
+            Route("/boom", boom, methods=["GET"]),
+        ],
+    )
+
+
+def _timer_count(method: str, uri: str, status: str, outcome: str, exception: str) -> float:
+    child = mf._timer.labels(method, uri, status, outcome, exception)
+    return child._count.get()
+
+
+class TestMicrometerNaming:
+    def test_meter_is_named_http_server_requests_seconds(self) -> None:
+        client = TestClient(_build_app())
+        client.get("/users/42")
+
+        exposition = generate_latest(REGISTRY).decode()
+        # Spring Boot / Micrometer exact names — drives Grafana/Prometheus tooling.
+        assert "http_server_requests_seconds_count" in exposition
+        assert "http_server_requests_seconds_sum" in exposition
+        assert "http_server_requests_seconds_max" in exposition
+        # The legacy ad-hoc names must be gone.
+        assert "http_requests_total" not in exposition
+        assert "http_request_duration_seconds" not in exposition
+
+    def test_uri_tag_is_templated_not_raw_path(self) -> None:
+        """The cardinality-safe ``uri`` tag must be the route template, not /users/42."""
+        client = TestClient(_build_app())
+        client.get("/users/42")
+        client.get("/users/99")
+
+        # Both requests collapse onto the single templated series.
+        assert _timer_count("GET", "/users/{user_id}", "200", "SUCCESS", "None") == 2.0
+        # The raw path must never appear as a label value.
+        exposition = generate_latest(REGISTRY).decode()
+        assert 'uri="/users/42"' not in exposition
+        assert 'uri="/users/{user_id}"' in exposition
+
+    def test_success_outcome_and_status_tags(self) -> None:
+        client = TestClient(_build_app())
+        client.get("/users/7")
+        assert _timer_count("GET", "/users/{user_id}", "200", "SUCCESS", "None") == 1.0
+
+    def test_not_found_uri_and_client_error_outcome(self) -> None:
+        client = TestClient(_build_app())
+        client.get("/nope")
+        # Unmatched route -> uri NOT_FOUND, outcome CLIENT_ERROR (Micrometer semantics).
+        assert _timer_count("GET", "NOT_FOUND", "404", "CLIENT_ERROR", "None") == 1.0
+
+    def test_server_error_records_exception_class(self) -> None:
+        client = TestClient(_build_app(), raise_server_exceptions=False)
+        client.get("/boom")
+        # exception tag carries the thrown class; outcome SERVER_ERROR; status 500.
+        assert _timer_count("GET", "/boom", "500", "SERVER_ERROR", "RuntimeError") == 1.0
+
+    def test_max_gauge_is_populated(self) -> None:
+        client = TestClient(_build_app())
+        client.get("/users/1")
+        child = mf._max_gauge.labels("GET", "/users/{user_id}", "200", "SUCCESS", "None")
+        assert child._value.get() > 0.0
+
+    def test_histogram_mode_emits_buckets(self) -> None:
+        client = TestClient(_build_app(histogram=True))
+        client.get("/users/1")
+        exposition = generate_latest(REGISTRY).decode()
+        assert "http_server_requests_seconds_bucket" in exposition
+
+
+class TestOutcomeMapping:
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (100, "INFORMATIONAL"),
+            (200, "SUCCESS"),
+            (204, "SUCCESS"),
+            (301, "REDIRECTION"),
+            (404, "CLIENT_ERROR"),
+            (422, "CLIENT_ERROR"),
+            (500, "SERVER_ERROR"),
+            (503, "SERVER_ERROR"),
+            (700, "UNKNOWN"),
+        ],
+    )
+    def test_outcome_for_status(self, status: int, expected: str) -> None:
+        assert _outcome(status) == expected
+
+
+class TestExclusions:
+    def test_excludes_prometheus_scrape_endpoint(self) -> None:
         f = MetricsFilter()
-        req = _make_request()
-        resp = _make_response(200)
-        call_next = AsyncMock(return_value=resp)
 
-        await f.do_filter(req, call_next)
+        class _Req:
+            class url:  # noqa: N801
+                path = "/actuator/prometheus"
 
-        sample = f._requests_total.labels(method="GET", path="/api/users", status="200")
-        assert sample._value.get() == 1.0
+        assert f.should_not_filter(_Req()) is True
 
-    @pytest.mark.asyncio
-    async def test_records_duration_histogram(self) -> None:
+    def test_excludes_admin_sse_streams(self) -> None:
         f = MetricsFilter()
-        req = _make_request()
-        resp = _make_response(200)
-        call_next = AsyncMock(return_value=resp)
 
-        await f.do_filter(req, call_next)
+        class _Req:
+            class url:  # noqa: N801
+                path = "/admin/api/sse/metrics"
 
-        sample = f._request_duration.labels(method="GET", path="/api/users")
-        assert sample._sum.get() > 0
+        assert f.should_not_filter(_Req()) is True
 
-    @pytest.mark.asyncio
-    async def test_active_requests_gauge_returns_to_zero(self) -> None:
+    def test_does_not_exclude_normal_routes(self) -> None:
         f = MetricsFilter()
-        req = _make_request()
-        resp = _make_response(200)
-        call_next = AsyncMock(return_value=resp)
 
-        await f.do_filter(req, call_next)
+        class _Req:
+            class url:  # noqa: N801
+                path = "/api/users"
 
-        assert f._active_requests._value.get() == 0.0
-
-    @pytest.mark.asyncio
-    async def test_records_500_on_exception(self) -> None:
-        f = MetricsFilter()
-        req = _make_request("POST", "/api/orders")
-        call_next = AsyncMock(side_effect=RuntimeError("boom"))
-
-        with pytest.raises(RuntimeError, match="boom"):
-            await f.do_filter(req, call_next)
-
-        sample = f._requests_total.labels(method="POST", path="/api/orders", status="500")
-        assert sample._value.get() == 1.0
-
-    def test_excludes_actuator_paths(self) -> None:
-        f = MetricsFilter()
-        req = _make_request("GET", "/actuator/health")
-        assert f.should_not_filter(req) is True
-
-    def test_does_not_exclude_api_paths(self) -> None:
-        f = MetricsFilter()
-        req = _make_request("GET", "/api/users")
-        assert f.should_not_filter(req) is False
+        assert f.should_not_filter(_Req()) is False

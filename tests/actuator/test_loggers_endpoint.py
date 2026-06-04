@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the loggers actuator endpoint."""
+"""Tests for the loggers actuator endpoint — Spring Boot parity."""
 
 from __future__ import annotations
 
@@ -36,41 +36,70 @@ def _make_loggers_client() -> TestClient:
 
 
 class TestLoggersEndpoint:
-    def test_get_lists_loggers(self):
+    def test_get_lists_loggers_levels_and_groups(self):
         client = _make_loggers_client()
         resp = client.get("/actuator/loggers")
         assert resp.status_code == 200
         data = resp.json()
-        assert "loggers" in data
         assert "ROOT" in data["loggers"]
-        assert "levels" in data
+        # Spring level vocabulary, not Python's.
+        assert data["levels"] == ["OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"]
+        assert "groups" in data
 
-    def test_get_includes_standard_levels(self):
+    def test_levels_use_spring_names_not_python(self):
+        test_logger = logging.getLogger("pyfly.test.levelnames")
+        test_logger.setLevel(logging.WARNING)
         client = _make_loggers_client()
         data = client.get("/actuator/loggers").json()
-        assert "DEBUG" in data["levels"]
-        assert "INFO" in data["levels"]
+        # WARNING -> WARN (Spring), never the Python name.
+        assert data["loggers"]["pyfly.test.levelnames"]["configuredLevel"] == "WARN"
 
-    def test_post_changes_logger_level(self):
-        # Create a test logger with a known level
-        test_logger = logging.getLogger("pyfly.test.loggers_endpoint")
+    def test_get_single_logger_by_name(self):
+        test_logger = logging.getLogger("pyfly.test.single")
+        test_logger.setLevel(logging.DEBUG)
+        client = _make_loggers_client()
+        resp = client.get("/actuator/loggers/pyfly.test.single")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["configuredLevel"] == "DEBUG"
+        assert "effectiveLevel" in body
+
+    def test_post_sets_level_via_path_and_returns_204(self):
+        test_logger = logging.getLogger("pyfly.test.postset")
         test_logger.setLevel(logging.WARNING)
-
         client = _make_loggers_client()
         resp = client.post(
-            "/actuator/loggers",
-            content=json.dumps({"logger": "pyfly.test.loggers_endpoint", "level": "DEBUG"}),
+            "/actuator/loggers/pyfly.test.postset",
+            content=json.dumps({"configuredLevel": "DEBUG"}),
         )
-        assert resp.status_code == 200
-        result = resp.json()
-        assert result["configuredLevel"] == "DEBUG"
+        assert resp.status_code == 204
         assert test_logger.level == logging.DEBUG
+
+    def test_post_null_resets_level(self):
+        test_logger = logging.getLogger("pyfly.test.reset")
+        test_logger.setLevel(logging.DEBUG)
+        client = _make_loggers_client()
+        resp = client.post(
+            "/actuator/loggers/pyfly.test.reset",
+            content=json.dumps({"configuredLevel": None}),
+        )
+        assert resp.status_code == 204
+        assert test_logger.level == logging.NOTSET
+
+    def test_post_accepts_trace_and_off(self):
+        client = _make_loggers_client()
+        for level in ("TRACE", "OFF"):
+            resp = client.post(
+                "/actuator/loggers/pyfly.test.traceoff",
+                content=json.dumps({"configuredLevel": level}),
+            )
+            assert resp.status_code == 204
 
     def test_post_invalid_level_returns_400(self):
         client = _make_loggers_client()
         resp = client.post(
-            "/actuator/loggers",
-            content=json.dumps({"logger": "ROOT", "level": "BANANA"}),
+            "/actuator/loggers/ROOT",
+            content=json.dumps({"configuredLevel": "BANANA"}),
         )
         assert resp.status_code == 400
         assert "error" in resp.json()
@@ -80,12 +109,12 @@ class TestLoggersEndpoint:
         ep = LoggersEndpoint()
         data = await ep.handle()
         assert "ROOT" in data["loggers"]
-        root_info = data["loggers"]["ROOT"]
-        assert "configuredLevel" in root_info
-        assert "effectiveLevel" in root_info
+        assert "configuredLevel" in data["loggers"]["ROOT"]
+        assert "effectiveLevel" in data["loggers"]["ROOT"]
 
     @pytest.mark.asyncio
-    async def test_set_logger_level_direct(self):
+    async def test_set_logger_level_direct_returns_none_on_success(self):
         ep = LoggersEndpoint()
         result = await ep.set_logger_level("pyfly.test.direct", "ERROR")
-        assert result["configuredLevel"] == "ERROR"
+        assert result is None
+        assert logging.getLogger("pyfly.test.direct").level == logging.ERROR

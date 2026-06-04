@@ -18,6 +18,7 @@ import { createLineChart } from '../charts.js';
 import { createEmptyStateCard } from '../components/empty-state.js';
 import { createFilterToolbar } from '../components/filter-toolbar.js';
 import { pageSkeleton } from '../components/skeleton.js';
+import { sse } from '../sse.js';
 
 /* ── Constants ────────────────────────────────────────────────── */
 
@@ -464,7 +465,6 @@ export async function render(container, api) {
      * Only one metric is tracked at a time. Selecting another (or
      * navigating away) tears down the timer + chart first.
      */
-    let pollTimer = null;
     let liveChart = null;
     let points = [];                 // [{ t: epochMs, v: number, label: string }]
     let mode = 'value';              // 'value' | 'rate'
@@ -472,12 +472,9 @@ export async function render(container, api) {
     let selectedKey = null;          // measurement currently charted
     let loadToken = 0;               // guards against out-of-order metric loads
 
-    /** Stop polling + destroy the chart and reset the rolling buffer. */
+    /** Tear down the live SSE subscription + chart and reset the rolling buffer. */
     function stopLive() {
-        if (pollTimer !== null) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-        }
+        sse.disconnect('/metrics');
         if (liveChart) {
             liveChart.destroy();
             liveChart = null;
@@ -645,30 +642,6 @@ export async function render(container, api) {
         const trendToolbar = document.createElement('div');
         trendToolbar.className = 'trend-toolbar';
 
-        // Measurement selector (only when more than one numeric series)
-        if (numeric.length > 1) {
-            const select = document.createElement('select');
-            select.className = 'select';
-            select.style.width = 'auto';
-            select.setAttribute('aria-label', 'Measurement to chart');
-            for (const m of numeric) {
-                const opt = document.createElement('option');
-                opt.value = measurementKey(m);
-                opt.textContent = measurementKey(m);
-                select.appendChild(opt);
-            }
-            select.value = selectedKey;
-            select.addEventListener('change', () => {
-                selectedKey = select.value;
-                // Reseed the series from the freshly-chosen measurement.
-                points = [];
-                const chosen = numeric.find((m) => measurementKey(m) === selectedKey);
-                if (chosen) pushPoint(toNumber(chosen.value));
-                refresh();
-            });
-            trendToolbar.appendChild(select);
-        }
-
         // Value / Rate segmented toggle
         const seg = document.createElement('div');
         seg.className = 'seg-toggle';
@@ -735,9 +708,10 @@ export async function render(container, api) {
         renderTable(measurements);
         detailBody.appendChild(tableHost);
 
-        // Seed first reading.
-        const seed = pickChosen(measurements);
-        if (seed) pushPoint(toNumber(seed.value));
+        // Seed the first reading with the metric's total (sum across label sets) —
+        // the same quantity the SSE `values` stream pushes for live updates.
+        const metricTotal = (ms) => numericMeasurements(ms).reduce((s, m) => s + toNumber(m.value), 0);
+        pushPoint(metricTotal(measurements));
 
         /** Recompute series + stats and repaint the chart. */
         function refresh() {
@@ -776,27 +750,21 @@ export async function render(container, api) {
             refresh();
         });
 
-        // ── Poll loop ───────────────────────────────────────────
-        pollTimer = setInterval(async () => {
+        // ── Live updates via SSE (push, not REST polling) ───────
+        // The metrics SSE stream pushes a {name: total_value} snapshot at the
+        // server cadence; track the selected metric's value live.
+        sse.connectTyped('/metrics', 'metrics', (data) => {
             if (paused) return;
-            let fresh;
-            try {
-                fresh = await api.get('/metrics/' + encodeURIComponent(metricName));
-            } catch {
-                // Network hiccup — keep the timer, skip this tick.
-                return;
-            }
-            // A metric switch (or navigation) during the request would have
-            // bumped the token; drop this stale tick so it can't write another
-            // metric's reading into the now-shared buffer/chart.
+            // A metric switch (or navigation) bumps the token — drop stale ticks
+            // so another metric's reading can't land in this buffer/chart.
             if (myToken !== loadToken) return;
-            const ms = fresh.measurements || [];
-            const chosen = pickChosen(ms);
-            if (!chosen) return;
-            pushPoint(toNumber(chosen.value));
-            renderTable(ms);
+            const values = data && data.values;
+            if (!values || !(metricName in values)) return;
+            const v = values[metricName];
+            if (!isNumericValue(v)) return;
+            pushPoint(toNumber(v));
             refresh();
-        }, intervalMs);
+        });
     }
 
     // ── Cleanup ─────────────────────────────────────────────────

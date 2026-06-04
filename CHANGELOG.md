@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.00 (2026-06-04)
+
+### Spring Boot parity — observability, actuator & configuration
+
+Brings pyfly's observability, actuator, and configuration to drop-in Spring Boot
+parity: identical Micrometer metric names, the full `/actuator/*` endpoint surface,
+and Spring-style YAML config semantics (Spring's `management.*` key structure under
+the `pyfly.*` namespace; legacy keys still work).
+
+- **Observability.** HTTP auto-instrumentation now emits Micrometer's
+  `http_server_requests_seconds` (count/sum + `_max` gauge; optional histogram)
+  tagged `method`/`uri` (templated, cardinality-safe)/`status`/`outcome`/`exception`.
+  The metrics filter is wired directly in `create_app` (it was previously a bean
+  built too late to ever join the chain, so HTTP metrics were silently never
+  collected). Process/system meters use Micrometer names (`process_uptime_seconds`,
+  `process_cpu_usage`, `system_cpu_count`, …). `@timed`/`@counted` follow Micrometer
+  naming + tags (`class`/`method`/`exception`, `result` for counters).
+- **Actuator.** On by default with Spring-exact secure exposure
+  (`pyfly.management.endpoints.web.exposure.include`, default `health,info`),
+  configurable base-path, and a now-registered `/actuator/prometheus`
+  (pinned to `version=0.0.4`). `/actuator/metrics` returns Micrometer JSON
+  (dot names, `COUNT`/`TOTAL_TIME`/`MAX`, `availableTags`, `?tag=` drill-down).
+  New endpoints: `configprops`, `mappings`, `scheduledtasks`, `threaddump`,
+  `caches`, `conditions`, `httpexchanges`; `/actuator/beans` uses the `contexts`
+  envelope; loggers use the Spring shape (`WARN`/`OFF`, `GET`/`POST /loggers/{name}`,
+  groups). The Starlette and FastAPI adapters share one wiring path.
+- **Health.** Severity-based status aggregation (`UP`/`UNKNOWN`/`OUT_OF_SERVICE`/`DOWN`),
+  503 for down states, `show-details`/`show-components` config, `/health/{component|group}`.
+  The DB and CQRS health indicators are now registered and conform to the protocol.
+- **Configuration.** Relaxed binding (kebab→snake), env-var overrides visible to
+  `@config_properties` binding and type-coerced, ordered property sources, and secret
+  masking (incl. URI userinfo passwords). The admin Configuration/Environment views
+  are sorted, grouped, source-attributed, and masked; the admin Metrics view uses the
+  Prometheus names and is now SSE-push driven.
+- **Fixes.** mongomock + beanie 2.x test compatibility shim; `install.sh` now probes
+  version-suffixed interpreters (`python3.13`/`3.12`) so it no longer aborts when the
+  bare `python3` is an older build.
+
 ## v26.05.12 (2026-05-31)
 
 ### Admin dashboard — responsive cards, fullscreen, navbar polish
