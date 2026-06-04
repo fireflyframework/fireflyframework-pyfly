@@ -113,10 +113,12 @@ class ConditionEvaluator:
     def _eval_on_property(self, cond: dict[str, Any]) -> bool:
         value = self._config.get(cond["key"])
         if value is None:
-            return False
+            # Absent property: match only when matchIfMissing is requested.
+            return cast(bool, cond.get("match_if_missing", False))
         if cond["having_value"]:
             return cast(bool, str(value).lower() == cond["having_value"].lower())
-        return True  # Key exists, no specific value required
+        # No specific value required: present and not explicitly "false".
+        return str(value).strip().lower() != "false"
 
     def _eval_on_missing_bean(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
         return not self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)

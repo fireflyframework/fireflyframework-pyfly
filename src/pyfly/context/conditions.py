@@ -25,8 +25,16 @@ F = TypeVar("F")
 T = TypeVar("T", bound=type)
 
 
-def conditional_on_property(key: str, having_value: str = "") -> Callable[[F], F]:
+def conditional_on_property(key: str, having_value: str = "", *, match_if_missing: bool = False) -> Callable[[F], F]:
     """Only register this bean if the given config property matches.
+
+    Mirrors Spring Boot's ``@ConditionalOnProperty``:
+
+    - With ``having_value`` set, matches only when the property equals it
+      (case-insensitive).
+    - Without ``having_value``, matches when the property is present and not
+      ``"false"`` (so ``key: false`` becomes an opt-out switch).
+    - When the property is absent, matches iff ``match_if_missing`` is True.
 
     Evaluated at ApplicationContext startup against the active Environment.
     """
@@ -38,6 +46,7 @@ def conditional_on_property(key: str, having_value: str = "") -> Callable[[F], F
                 "type": "on_property",
                 "key": key,
                 "having_value": having_value,
+                "match_if_missing": match_if_missing,
             }
         )
         cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]

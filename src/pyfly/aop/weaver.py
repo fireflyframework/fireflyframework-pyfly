@@ -85,6 +85,7 @@ def weave_bean(bean: Any, qualified_prefix: str, registry: AspectRegistry) -> No
                 after_returning_bindings,
                 after_throwing_bindings,
                 after_bindings,
+                around_bindings,
             )
 
         # Replace the method on the instance
@@ -171,6 +172,22 @@ def _make_around_link(handler: Any, jp: JoinPoint, next_proceed: Any) -> Any:
     return chained
 
 
+def _make_sync_around_link(handler: Any, jp: JoinPoint, next_proceed: Any) -> Any:
+    """Build one link in a synchronous around advice chain.
+
+    Returns a sync callable that sets ``jp.proceed`` to *next_proceed* and then
+    invokes *handler*. The handler is expected to be synchronous; if it returns
+    an awaitable the value is passed through unchanged (the sync path cannot
+    await), so users must keep @around advice on sync joinpoints synchronous.
+    """
+
+    def chained(*_a: Any, **_kw: Any) -> Any:
+        jp.proceed = next_proceed
+        return handler(jp)
+
+    return chained
+
+
 def _build_sync_wrapper(
     bean: Any,
     method_name: str,
@@ -179,8 +196,9 @@ def _build_sync_wrapper(
     after_returning_bindings: list[Any],
     after_throwing_bindings: list[Any],
     after_bindings: list[Any],
+    around_bindings: list[Any],
 ) -> Any:
-    """Build a sync wrapper that applies the advice chain (no @around support)."""
+    """Build a sync wrapper that applies the advice chain (including @around)."""
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -196,8 +214,19 @@ def _build_sync_wrapper(
             binding.handler(jp)
 
         try:
-            # 2. Execute the original method
-            result = original(*args, **kwargs)
+            # 2. Execute the method (with or without @around)
+            if around_bindings:
+
+                def _invoke_original(*_a: Any, **_kw: Any) -> Any:
+                    return original(*args, **kwargs)
+
+                proceed_fn = _invoke_original
+                for binding in reversed(around_bindings):
+                    proceed_fn = _make_sync_around_link(binding.handler, jp, proceed_fn)
+
+                result = proceed_fn()
+            else:
+                result = original(*args, **kwargs)
 
             # 3. On success: set return_value, run @after_returning
             jp.return_value = result
