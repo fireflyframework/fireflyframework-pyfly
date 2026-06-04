@@ -252,6 +252,13 @@ def create_app(
 
     routes.extend(_collect_context_routes())
 
+    # Config-server routes when the context is already started at create_app time
+    # (otherwise the post-start rescan mounts them) — audit #83.
+    if context is not None:
+        from pyfly.config_server.wiring import build_config_server_routes
+
+        routes.extend(build_config_server_routes(context))
+
     # Append caller-supplied routes (e.g. test helpers)
     if extra_routes:
         routes.extend(extra_routes)
@@ -405,6 +412,16 @@ def create_app(
             if key not in existing:
                 app_.router.routes.append(r)
                 existing.add(key)
+        # Mount config-server routes — its ConfigServer bean only exists after
+        # start(), so it must be discovered here, not at create_app time (#83).
+        if context is not None:
+            from pyfly.config_server.wiring import build_config_server_routes
+
+            for r in build_config_server_routes(context):
+                key = _route_key(r)
+                if key not in existing:
+                    app_.router.routes.append(r)
+                    existing.add(key)
         for hook in _extra_post_start:
             hook()
         # Rebuild the exception-converter chain now that user @bean ExceptionConverter

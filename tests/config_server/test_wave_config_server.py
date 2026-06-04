@@ -22,11 +22,16 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
 
+from pyfly.config_server.adapters.starlette import make_starlette_config_server_routes
 from pyfly.config_server.auto_configuration import ConfigServerAutoConfiguration
 from pyfly.config_server.backend import ConfigSource, FilesystemConfigBackend, InMemoryConfigBackend
 from pyfly.config_server.server import ConfigServer
+from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
+from pyfly.web.adapters.starlette.app import create_app
 
 
 async def _save(backend: InMemoryConfigBackend, app: str, profile: str, props: dict) -> None:
@@ -91,3 +96,45 @@ class TestBackendRoot:
         backend = ConfigServerAutoConfiguration().config_backend(Config({}))
         assert backend._root.name.startswith("pyfly-config-")
         assert backend._root.exists()
+
+
+# ---------------------------------------------------------------------------
+# #83 — config-server routes are mounted on the HTTP app
+# ---------------------------------------------------------------------------
+
+
+class TestConfigServerRoutes:
+    def test_adapter_routes_round_trip(self):
+        server = ConfigServer(InMemoryConfigBackend())
+        app = Starlette(routes=make_starlette_config_server_routes(server))
+        client = TestClient(app)
+
+        assert client.post("/orders/dev/main", json={"x": 1}).json() == {"saved": True}
+        payload = client.get("/orders/dev/main").json()
+        assert payload["propertySources"][0]["source"] == {"x": 1}
+        assert client.get("/missing/dev/main").status_code == 404
+        assert client.get("/_list").json()[0]["application"] == "orders"
+
+    @pytest.mark.asyncio
+    async def test_routes_mounted_when_enabled(self):
+        ctx = ApplicationContext(Config({"pyfly": {"config-server": {"enabled": "true"}}}))
+        await ctx.start()
+        try:
+            server = ctx.get_bean(ConfigServer)
+            await server.save("orders", "prod", {"a": "b"})
+            client = TestClient(create_app(context=ctx))
+            resp = client.get("/orders/prod/main")
+            assert resp.status_code == 200
+            assert resp.json()["propertySources"][0]["source"] == {"a": "b"}
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_routes_absent_when_disabled(self):
+        ctx = ApplicationContext(Config({}))
+        await ctx.start()
+        try:
+            client = TestClient(create_app(context=ctx))
+            assert client.get("/orders/prod/main").status_code == 404
+        finally:
+            await ctx.stop()
