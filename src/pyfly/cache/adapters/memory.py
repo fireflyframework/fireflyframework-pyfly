@@ -29,18 +29,24 @@ class InMemoryCache:
 
     def __init__(self) -> None:
         self._store: dict[str, tuple[Any, float | None]] = {}
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
 
     async def get(self, key: str) -> Any | None:
         """Get a value by key. Returns None if missing or expired."""
         entry = self._store.get(key)
         if entry is None:
+            self._misses += 1
             return None
 
         value, expires_at = entry
         if expires_at is not None and time.monotonic() > expires_at:
             del self._store[key]
+            self._misses += 1
             return None
 
+        self._hits += 1
         return value
 
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
@@ -50,12 +56,28 @@ class InMemoryCache:
             expires_at = time.monotonic() + ttl.total_seconds()
         self._store[key] = (value, expires_at)
 
+    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
+        """Store *value* only if *key* is absent — atomic under asyncio (audit #75)."""
+        if await self.exists(key):
+            return False
+        await self.put(key, value, ttl)
+        return True
+
     async def evict(self, key: str) -> bool:
         """Remove a key. Returns True if the key existed."""
         if key in self._store:
             del self._store[key]
+            self._evictions += 1
             return True
         return False
+
+    async def evict_by_prefix(self, prefix: str) -> int:
+        """Evict every key starting with *prefix* (audit #78)."""
+        matches = [k for k in self._store if k.startswith(prefix)]
+        for k in matches:
+            del self._store[k]
+        self._evictions += len(matches)
+        return len(matches)
 
     async def exists(self, key: str) -> bool:
         """Check if a key exists and is not expired."""
@@ -69,10 +91,20 @@ class InMemoryCache:
         return True
 
     def get_stats(self) -> dict[str, Any]:
-        """Return cache statistics, excluding expired entries."""
+        """Return cache statistics including hit-rate (audit #76)."""
         now = time.monotonic()
         active = sum(1 for _, (_, exp) in self._store.items() if exp is None or exp > now)
-        return {"size": active, "type": "memory", "max_size": None}
+        requests = self._hits + self._misses
+        return {
+            "size": active,
+            "type": "memory",
+            "max_size": None,
+            "requests": requests,
+            "hits": self._hits,
+            "misses": self._misses,
+            "evictions": self._evictions,
+            "hit_rate": (self._hits / requests) if requests else 0.0,
+        }
 
     def get_keys(self) -> list[str]:
         """Return keys of non-expired entries."""
