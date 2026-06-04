@@ -31,10 +31,21 @@ class RuleEvaluator:
             return EvaluationResult(rule_id=rule.id, matched=False, error=str(exc))
         actions = rule.then if matched else rule.otherwise
         executed: list[Action] = []
+        errors: list[str] = []
         for action in actions:
-            self._execute_action(action, ctx)
-            executed.append(action)
-        return EvaluationResult(rule_id=rule.id, matched=matched, actions_executed=executed)
+            # Isolate each action: one failing action records its error and the
+            # rest still run, matching Java's isolate-and-continue (audit #216).
+            try:
+                self._execute_action(action, ctx)
+                executed.append(action)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{action.type}: {exc}")
+        return EvaluationResult(
+            rule_id=rule.id,
+            matched=matched,
+            actions_executed=executed,
+            error="; ".join(errors) or None,
+        )
 
     # -- internals ---------------------------------------------------------
 
@@ -47,7 +58,12 @@ class RuleEvaluator:
         if op == "or":
             return any(self._eval_condition(child, ctx) for child in c.children)
         if op == "not":
-            return not self._eval_condition(c.children[0], ctx) if c.children else True
+            # 'not' must negate exactly one child; empty/multiple children are
+            # malformed and would otherwise be silently ignored (audit #222).
+            if len(c.children) != 1:
+                msg = f"'not' requires exactly one child, got {len(c.children)}"
+                raise ValueError(msg)
+            return not self._eval_condition(c.children[0], ctx)
         actual = self._read(c.field, ctx) if c.field else None
         expected = c.value
         if op == "eq":
@@ -87,9 +103,13 @@ class RuleEvaluator:
             import logging
 
             logging.getLogger(__name__).info("rule action: %s", action.value or action.target)
-        # Other action types (call, calculate) intentionally left as no-op
-        # in the default evaluator — real services override _execute_action
-        # to plug in HTTP calls, expression evaluation, etc.
+        else:
+            # 'call'/'calculate' and any unknown type are not implemented by the
+            # default evaluator — fail loudly so a typo or an unsupported action
+            # surfaces instead of silently doing nothing (audit #215). Real
+            # services override _execute_action to plug in HTTP calls, etc.
+            msg = f"unsupported action type '{action.type}'; override _execute_action to handle it"
+            raise NotImplementedError(msg)
 
     @staticmethod
     def _read(path: str, ctx: dict[str, Any]) -> Any:
