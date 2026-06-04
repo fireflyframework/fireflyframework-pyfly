@@ -101,8 +101,12 @@ class OrchestrationController:
     @get_mapping("/executions")
     async def list_executions(self, status: QueryParam[str | None]) -> list[dict[str, Any]]:
         status_str = cast("str | None", status)
-        status_enum = ExecutionStatus(status_str) if status_str else None
-        states = await self._persistence.find_all(status=status_enum)
+        if status_str:
+            states = await self._persistence.find_all(status=ExecutionStatus(status_str))
+        else:
+            # Default to in-flight executions only (Java parity), not the whole
+            # store including terminal history (audit #169).
+            states = [s for s in await self._persistence.find_all() if not s.status.is_terminal]
         return [_state_to_dict(s) for s in states]
 
     @get_mapping("/executions/{correlation_id}")
@@ -132,6 +136,11 @@ class DeadLetterController:
         cid = cast("str | None", correlation_id)
         entries = await self._dlq.list(execution_name=name, correlation_id=cid)
         return [_dlq_to_dict(e) for e in entries]
+
+    @get_mapping("/count")
+    async def count(self) -> dict[str, int]:
+        """Total dead-letter entries — cardinality for ops dashboards (audit #167)."""
+        return {"count": await self._dlq.count()}
 
     @get_mapping("/{entry_id}")
     async def get(self, entry_id: PathVar[str]) -> dict[str, Any] | None:

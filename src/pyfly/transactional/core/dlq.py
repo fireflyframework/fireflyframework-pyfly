@@ -51,6 +51,7 @@ class DeadLetterStore(Protocol):
     ) -> list[DeadLetterEntry]: ...
     async def delete(self, entry_id: str) -> bool: ...
     async def clear(self) -> int: ...
+    async def count(self) -> int: ...
 
 
 class InMemoryDeadLetterStore:
@@ -92,6 +93,10 @@ class InMemoryDeadLetterStore:
             self._store.clear()
             return count
 
+    async def count(self) -> int:
+        async with self._lock:
+            return len(self._store)
+
 
 class DeadLetterService:
     """High-level facade that orchestration components call into."""
@@ -129,6 +134,10 @@ class DeadLetterService:
 
     async def get(self, entry_id: str) -> DeadLetterEntry | None:
         return await self._store.get(entry_id)
+
+    async def count(self) -> int:
+        """Number of dead-letter entries currently stored (audit #167)."""
+        return await self._store.count()
 
     async def mark_retried(self, entry_id: str) -> bool:
         entry = await self._store.get(entry_id)
