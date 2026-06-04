@@ -332,6 +332,27 @@ class PyFlyApplication:
             admin_path = str(self.config.get("pyfly.admin.path", "/admin"))
             self._logger.info("admin_dashboard", url=f"{base_url}{admin_path}")
 
+    async def run(self, args: list[str] | None = None) -> int:
+        """Start the app, dispatch the shell, then shut down (CLI entry point).
+
+        Resolves the :class:`ShellRunnerPort` (populated with ``@shell_command``
+        handlers during startup) and runs the given args — or ``sys.argv[1:]`` —
+        falling back to an interactive REPL when no command is supplied. This is
+        what the generated ``cli`` archetype's ``main()`` awaits (audit #1).
+        """
+        from pyfly.shell.ports.outbound import ShellRunnerPort
+
+        await self.startup()
+        try:
+            runner = self._context.get_bean(ShellRunnerPort)  # type: ignore[type-abstract]
+            argv = sys.argv[1:] if args is None else args
+            if argv:
+                return await runner.run(argv)
+            await runner.run_interactive()
+            return 0
+        finally:
+            await self.shutdown()
+
     async def shutdown(self) -> None:
         """Shutdown the application — stop the ApplicationContext."""
         self._logger.info("shutting_down", app=self._name)
