@@ -41,30 +41,46 @@ class TestMetrics:
         assert gauge._value.get() == 1.0
 
     @pytest.mark.asyncio
-    async def test_timed_decorator(self):
+    async def test_timed_decorator_micrometer_naming_and_tags(self):
         registry = MetricsRegistry()
 
-        @timed(registry, "operation_duration_seconds", "Operation duration")
+        # Micrometer dot.case name -> Prometheus <name>_seconds timer.
+        @timed(registry, "operation.duration", "Operation duration")
         async def slow_operation() -> str:
             return "done"
 
-        result = await slow_operation()
-        assert result == "done"
+        assert await slow_operation() == "done"
+
+        from prometheus_client import REGISTRY, generate_latest
+
+        exposition = generate_latest(REGISTRY).decode()
+        # Micrometer naming (_seconds timer) + class/method/exception tags.
+        assert "operation_duration_seconds_count{" in exposition
+        assert 'method="slow_operation"' in exposition
+        assert 'exception="none"' in exposition
+        assert 'operation_duration_seconds_count{class="",exception="none",method="slow_operation"} 1.0' in exposition
 
     @pytest.mark.asyncio
-    async def test_counted_decorator(self):
+    async def test_counted_decorator_success_and_failure(self):
         registry = MetricsRegistry()
 
-        @counted(registry, "operation_calls_total", "Operation calls")
-        async def my_operation() -> str:
+        @counted(registry, "operation.calls", "Operation calls")
+        async def my_operation(fail: bool = False) -> str:
+            if fail:
+                raise RuntimeError("boom")
             return "ok"
 
         await my_operation()
         await my_operation()
 
-        counter = registry._counters.get("operation_calls_total")
-        assert counter is not None
-        assert counter._value.get() == 2.0
+        counter = registry._counters["operation_calls"]  # prometheus appends _total
+        success = counter.labels(method="my_operation", result="success", exception="none", **{"class": ""})
+        assert success._value.get() == 2.0
+
+        with pytest.raises(RuntimeError):
+            await my_operation(fail=True)
+        failure = counter.labels(method="my_operation", result="failure", exception="RuntimeError", **{"class": ""})
+        assert failure._value.get() == 1.0
 
 
 class TestTracing:

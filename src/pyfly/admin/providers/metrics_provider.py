@@ -58,6 +58,35 @@ class MetricsProvider:
             "prometheus_count": len(names) - len(infra),
         }
 
+    async def get_metric_values(self) -> dict[str, Any]:
+        """Snapshot of current numeric values per metric (summed across labels).
+
+        Streamed over SSE so the admin live trend is push-based rather than
+        REST-polled — the value for each metric name is its total across all
+        label sets, which is the natural single-series trend."""
+        values: dict[str, float] = {}
+        try:
+            from prometheus_client import REGISTRY
+        except ImportError:
+            return {"names": [], "values": values, "available": False, "has_prometheus": False}
+
+        for metric in REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name.endswith("_created"):
+                    continue
+                values[sample.name] = values.get(sample.name, 0.0) + sample.value
+
+        names = sorted(values)
+        infra = [n for n in names if n.startswith(_INFRA_PREFIXES)]
+        return {
+            "names": names,
+            "values": values,
+            "available": True,
+            "has_prometheus": True,
+            "builtin_count": len(infra),
+            "prometheus_count": len(names) - len(infra),
+        }
+
     async def get_metric_detail(self, name: str) -> dict[str, Any]:
         try:
             from prometheus_client import REGISTRY

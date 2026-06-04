@@ -43,6 +43,18 @@ def _to_plain(obj: Any) -> Any:
     return obj
 
 
+def _kebab_keys(value: Any) -> Any:
+    """Recursively rename dict keys snake_case -> kebab-case (the YAML form).
+
+    Spring shows bean property names; pyfly shows the kebab keys users actually
+    write in ``pyfly.yaml`` (``event-loop``, not ``event_loop``)."""
+    if isinstance(value, dict):
+        return {str(k).replace("_", "-"): _kebab_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_kebab_keys(v) for v in value]
+    return value
+
+
 def _mask_tree(config: Any, prefix: str, value: Any) -> Any:
     """Recursively mask sensitive leaves under *prefix* using config rules."""
     if isinstance(value, dict):
@@ -92,7 +104,7 @@ class ConfigPropsEndpoint:
                 bound: Any = config.bind(cls)
             except Exception:  # noqa: BLE001 - skip classes that fail to bind
                 continue
-            properties = _mask_tree(config, prefix, _to_plain(bound))
+            properties = _mask_tree(config, prefix, _kebab_keys(_to_plain(bound)))
             beans[cls.__name__] = {"prefix": prefix, "properties": properties}
 
         return {"contexts": {"application": {"beans": beans}}}

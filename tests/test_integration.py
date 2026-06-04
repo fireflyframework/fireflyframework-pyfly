@@ -181,14 +181,15 @@ class TestEndToEndOrderService:
         assert result1 == result2
         assert result1["product"] == "Widget"
 
-        # 8. Metrics
-        @counted(metrics, "orders_created_total", "Total orders created")
+        # 8. Metrics — Micrometer @Counted style (counter "orders_created" -> _total)
+        @counted(metrics, "orders.created", "Total orders created")
         async def tracked_create(data: dict) -> dict:
             return data
 
         await tracked_create(order)
-        counter = metrics._counters["orders_created_total"]
-        assert counter._value.get() == 1.0
+        counter = metrics._counters["orders_created"]
+        child = counter.labels(method="tracked_create", result="success", exception="none", **{"class": ""})
+        assert child._value.get() == 1.0
 
     @pytest.mark.asyncio
     async def test_validation_rejects_bad_input(self):

@@ -71,12 +71,15 @@ class TestExtraActuatorEndpoints:
         assert beans["WidgetController"]["scope"] == "singleton"
 
     @pytest.mark.asyncio
-    async def test_configprops_groups_by_prefix_and_masks(self):
+    async def test_configprops_groups_by_prefix_and_uses_kebab_keys(self):
         client = await _client()
         data = client.get("/actuator/configprops").json()
         beans = data["contexts"]["application"]["beans"]
         # Framework property classes are reported with their prefix.
-        assert any(b.get("prefix") == "pyfly.server" for b in beans.values())
+        server = next(b for b in beans.values() if b.get("prefix") == "pyfly.server")
+        # Properties use the kebab-case YAML form (event-loop, not event_loop).
+        assert "event-loop" in server["properties"]
+        assert "event_loop" not in server["properties"]
 
     @pytest.mark.asyncio
     async def test_mappings_lists_controller_routes(self):

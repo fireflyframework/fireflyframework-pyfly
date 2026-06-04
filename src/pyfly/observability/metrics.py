@@ -78,66 +78,137 @@ class MetricsRegistry:
         return self._gauges[name]
 
 
-def timed(registry: MetricsRegistry, name: str, description: str) -> Callable[[F], F]:
-    """Decorator that records function execution duration as a histogram.
+def _sanitize(name: str) -> str:
+    """Convert a Micrometer dot.case meter name to a Prometheus name."""
+    return name.replace(".", "_").replace("-", "_")
+
+
+def _class_method(func: Callable[..., Any]) -> tuple[str, str]:
+    """Derive Micrometer ``class``/``method`` tags from a function's qualname."""
+    qualname = getattr(func, "__qualname__", func.__name__)
+    parts = qualname.split(".")
+    method = func.__name__
+    cls = parts[-2] if len(parts) >= 2 and parts[-2] != "<locals>" else ""
+    return cls, method
+
+
+def timed(
+    registry: MetricsRegistry,
+    name: str = "method.timed",
+    description: str = "Timed method execution",
+    *,
+    extra_tags: dict[str, str] | None = None,
+) -> Callable[[F], F]:
+    """Decorator that times a function, Micrometer ``@Timed`` style.
+
+    The meter name accepts Micrometer dot.case (``orders.process``) and is exposed
+    as a Prometheus timer ``<name>_seconds`` (``_count``/``_sum``/``_bucket``)
+    tagged with ``class``, ``method``, ``exception`` (+ any ``extra_tags``).
 
     Usage:
-        @timed(registry, "request_duration_seconds", "Request processing time")
-        async def handle_request(): ...
+        @timed(registry, "orders.process", "Order processing time")
+        async def process(): ...
     """
+    extra = extra_tags or {}
+    prom_name = _sanitize(name)
+    if not prom_name.endswith("_seconds"):
+        prom_name += "_seconds"
+    label_names = ["class", "method", "exception", *extra.keys()]
 
     def decorator(func: F) -> F:
-        histogram = registry.histogram(name, description)
+        histogram = registry.histogram(prom_name, description, labels=label_names)
+        cls, method = _class_method(func)
+
+        def _labels(exception: str) -> dict[str, str]:
+            return {"class": cls, "method": method, "exception": exception, **extra}
 
         if asyncio.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 start = time.perf_counter()
+                exception = "none"
                 try:
                     return await func(*args, **kwargs)
+                except Exception as exc:
+                    exception = type(exc).__name__
+                    raise
                 finally:
-                    histogram.observe(time.perf_counter() - start)
+                    histogram.labels(**_labels(exception)).observe(time.perf_counter() - start)
 
             return async_wrapper  # type: ignore[return-value]
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             start = time.perf_counter()
+            exception = "none"
             try:
                 return func(*args, **kwargs)
+            except Exception as exc:
+                exception = type(exc).__name__
+                raise
             finally:
-                histogram.observe(time.perf_counter() - start)
+                histogram.labels(**_labels(exception)).observe(time.perf_counter() - start)
 
         return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
 
-def counted(registry: MetricsRegistry, name: str, description: str) -> Callable[[F], F]:
-    """Decorator that counts function invocations.
+def counted(
+    registry: MetricsRegistry,
+    name: str = "method.counted",
+    description: str = "Counted method invocations",
+    *,
+    extra_tags: dict[str, str] | None = None,
+) -> Callable[[F], F]:
+    """Decorator that counts invocations, Micrometer ``@Counted`` style.
+
+    The meter name accepts Micrometer dot.case and is exposed as a Prometheus
+    counter ``<name>_total`` tagged with ``class``, ``method``, ``result``
+    (``success``/``failure``), ``exception`` (+ any ``extra_tags``).
 
     Usage:
-        @counted(registry, "requests_total", "Total request count")
-        async def handle_request(): ...
+        @counted(registry, "orders.created", "Orders created")
+        async def create(): ...
     """
+    extra = extra_tags or {}
+    # prometheus_client appends ``_total`` itself; drop a user-supplied suffix.
+    prom_name = _sanitize(name)
+    if prom_name.endswith("_total"):
+        prom_name = prom_name[: -len("_total")]
+    label_names = ["class", "method", "result", "exception", *extra.keys()]
 
     def decorator(func: F) -> F:
-        counter = registry.counter(name, description)
+        counter = registry.counter(prom_name, description, labels=label_names)
+        cls, method = _class_method(func)
+
+        def _labels(result: str, exception: str) -> dict[str, str]:
+            return {"class": cls, "method": method, "result": result, "exception": exception, **extra}
 
         if asyncio.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                counter.inc()
-                return await func(*args, **kwargs)
+                try:
+                    result = await func(*args, **kwargs)
+                except Exception as exc:
+                    counter.labels(**_labels("failure", type(exc).__name__)).inc()
+                    raise
+                counter.labels(**_labels("success", "none")).inc()
+                return result
 
             return async_wrapper  # type: ignore[return-value]
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            counter.inc()
-            return func(*args, **kwargs)
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:
+                counter.labels(**_labels("failure", type(exc).__name__)).inc()
+                raise
+            counter.labels(**_labels("success", "none")).inc()
+            return result
 
         return sync_wrapper  # type: ignore[return-value]
 
