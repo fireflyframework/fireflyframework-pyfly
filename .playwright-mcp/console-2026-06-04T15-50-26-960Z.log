@@ -1,0 +1,4 @@
+[  591884ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8099/admin/static/js/views/scheduled.js:0
+[  591884ms] [ERROR] Failed to load view "scheduled": TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:8099/admin/static/js/views/scheduled.js @ http://127.0.0.1:8099/admin/static/js/app.js?v=26.05.12:299
+[  592352ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8099/admin/api/metrics:0
+[  592352ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8099/admin/api/settings:0

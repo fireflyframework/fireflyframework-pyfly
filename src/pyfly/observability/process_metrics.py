@@ -75,40 +75,55 @@ class ProcessMetricsCollector:
             return 0.0
         return max(0.0, min(1.0, cpu_delta / (wall_delta * cores)))
 
+    def describe(self):  # type: ignore[no-untyped-def]
+        # Declare nothing up front so registration does NOT pre-call collect()
+        # (and therefore cannot raise "Duplicated timeseries" against names that
+        # prometheus_client's own ProcessCollector already exports on Linux, e.g.
+        # process_start_time_seconds). Collisions are skipped in collect() below.
+        return iter(())
+
+    def _taken_names(self) -> set[str]:
+        """Sample names already exported by *other* registered collectors."""
+        taken: set[str] = set()
+        mapping = getattr(REGISTRY, "_collector_to_names", {})
+        for collector, names in list(mapping.items()):
+            if collector is self:
+                continue
+            taken |= set(names)
+        return taken
+
     def collect(self):  # type: ignore[no-untyped-def]
         if not _HAS_PROMETHEUS:
             return
 
+        taken = self._taken_names()
         now = time.time()
-        uptime = max(0.0, now - _START_EPOCH)
 
-        yield GaugeMetricFamily("process_uptime_seconds", "The uptime of the process", value=uptime)
-        yield GaugeMetricFamily(
-            "process_start_time_seconds", "Start time of the process since unix epoch", value=_START_EPOCH
-        )
-        yield GaugeMetricFamily(
-            "system_cpu_count", "The number of processors available to the process", value=float(os.cpu_count() or 1)
-        )
-        yield GaugeMetricFamily(
-            "process_cpu_usage", "The recent CPU usage for the process", value=self._process_cpu_usage()
-        )
+        candidates: list[tuple[str, str, float]] = [
+            ("process_uptime_seconds", "The uptime of the process", max(0.0, now - _START_EPOCH)),
+            ("process_start_time_seconds", "Start time of the process since unix epoch", _START_EPOCH),
+            ("system_cpu_count", "The number of processors available to the process", float(os.cpu_count() or 1)),
+            ("process_cpu_usage", "The recent CPU usage for the process", self._process_cpu_usage()),
+        ]
 
         if _HAS_PSUTIL and _PROC is not None:
-            system_cpu: float | None = None
             with contextlib.suppress(Exception):
-                system_cpu = psutil.cpu_percent() / 100.0
-            if system_cpu is not None:
-                yield GaugeMetricFamily("system_cpu_usage", "The recent CPU usage of the system", value=system_cpu)
-
-            open_fds: int | None = None
+                candidates.append(
+                    ("system_cpu_usage", "The recent CPU usage of the system", psutil.cpu_percent() / 100.0)
+                )
             with contextlib.suppress(Exception):
-                open_fds = _PROC.num_fds()
-            if open_fds is not None:
-                yield GaugeMetricFamily("process_files_open", "The open file descriptor count", value=float(open_fds))
+                candidates.append(("process_files_open", "The open file descriptor count", float(_PROC.num_fds())))
 
         max_fds = self._max_fds()
         if max_fds is not None:
-            yield GaugeMetricFamily("process_files_max", "The maximum file descriptor count", value=float(max_fds))
+            candidates.append(("process_files_max", "The maximum file descriptor count", float(max_fds)))
+
+        for name, doc, value in candidates:
+            # Skip any meter another collector already provides (e.g. the built-in
+            # ProcessCollector exports process_start_time_seconds on Linux).
+            if name in taken:
+                continue
+            yield GaugeMetricFamily(name, doc, value=value)
 
     @staticmethod
     def _max_fds() -> int | None:
