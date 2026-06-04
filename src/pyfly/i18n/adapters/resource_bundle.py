@@ -127,11 +127,49 @@ class ResourceBundleMessageSource:
 
     @staticmethod
     def _substitute(template: str, args: tuple[Any, ...]) -> str:
-        """Replace ``{0}``, ``{1}``, ... placeholders with *args*."""
-        result = template
-        for idx, arg in enumerate(args):
-            result = result.replace(f"{{{idx}}}", str(arg))
-        return result
+        """Substitute ``{0}``, ``{1}``, ... placeholders, honoring MessageFormat quoting.
+
+        Mirrors the quote semantics of ``java.text.MessageFormat`` (audit #187):
+
+        - ``''`` renders as a literal single quote.
+        - Single-quoted text (``'...'``) is copied literally; placeholders inside
+          are NOT substituted, so ``'{0}'`` renders as ``{0}``.
+        - ``{n}`` and ``{n,type,style}`` reference ``args[n]``. The format
+          type/style after the index is parsed but NOT locale-applied — only the
+          positional argument is inserted (documented subset of MessageFormat).
+        - An index with no corresponding argument is left as the literal
+          placeholder, matching the previous lenient behavior.
+        """
+        out: list[str] = []
+        i = 0
+        n = len(template)
+        in_quote = False
+        while i < n:
+            ch = template[i]
+            if ch == "'":
+                if i + 1 < n and template[i + 1] == "'":
+                    out.append("'")  # '' -> literal single quote
+                    i += 2
+                    continue
+                in_quote = not in_quote  # toggle a literal-text section
+                i += 1
+                continue
+            if ch == "{" and not in_quote:
+                close = template.find("}", i + 1)
+                if close == -1:
+                    out.append(ch)
+                    i += 1
+                    continue
+                index_part = template[i + 1 : close].split(",", 1)[0].strip()
+                if index_part.isdigit() and 0 <= int(index_part) < len(args):
+                    out.append(str(args[int(index_part)]))
+                else:
+                    out.append(template[i : close + 1])  # leave unmatched placeholder literal
+                i = close + 1
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
 
 
 # ---------------------------------------------------------------------------
