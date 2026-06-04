@@ -27,6 +27,10 @@ from typing import Any
 from pyfly.eventsourcing.event import DomainEvent
 
 
+class EventHandlerException(Exception):
+    """Raised when an aggregate receives an event it has no handler for."""
+
+
 @dataclass
 class AggregateRoot:
     """Base aggregate root with built-in event sourcing machinery."""
@@ -68,4 +72,11 @@ class AggregateRoot:
             handler(self, event)
         elif hasattr(self, f"on_{event_type}"):
             getattr(self, f"on_{event_type}")(event)
+        else:
+            # A missing handler would silently corrupt reconstructed state, so
+            # fail loudly instead of swallowing the event (audit #146).
+            raise EventHandlerException(
+                f"No handler for event '{event_type}' on {type(self).__name__} "
+                f"(define a handler or an on_{event_type} method)"
+            )
         self.version += 1

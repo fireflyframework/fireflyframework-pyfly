@@ -147,3 +147,19 @@ class TestProjection:
         await asyncio.sleep(0.2)
         await runner.stop()
         assert len(seen) == 3
+
+
+@dataclass
+class UnhandledEvent(DomainEvent):
+    note: str = ""
+
+
+class TestUnhandledEventFailsLoudly:
+    """Audit #146 — an event with no handler must raise, not corrupt state."""
+
+    def test_apply_unhandled_event_raises(self) -> None:
+        from pyfly.eventsourcing.aggregate import EventHandlerException
+
+        order = Order()
+        with pytest.raises(EventHandlerException):
+            order.apply(UnhandledEvent(note="oops"))
