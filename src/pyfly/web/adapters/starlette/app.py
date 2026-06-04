@@ -56,7 +56,7 @@ def create_app(
     context: ApplicationContext | None = None,
     docs_enabled: bool = True,
     extra_routes: list[Route] | None = None,
-    actuator_enabled: bool = False,
+    actuator_enabled: bool | None = None,
     cors: CORSConfig | None = None,
     lifespan: object | None = None,
 ) -> Starlette:
@@ -91,6 +91,52 @@ def create_app(
 
         admin_trace_collector = TraceCollectorFilter()
 
+    # HTTP auto-instrumentation (Spring Boot `http.server.requests` parity). Like
+    # the admin trace collector, the MetricsFilter is a WebFilter that must join
+    # the chain HERE while the ASGI middleware is assembled — which happens before
+    # ``ApplicationContext.start()`` instantiates beans. Resolving it as a bean
+    # would therefore yield ``None`` and silently leave HTTP metrics uncollected,
+    # so we own the instance directly (enabled by default, like Spring Boot).
+    metrics_filter_instance: WebFilter | None = None
+    metrics_filter_type: type | None = None
+    if context is not None:
+        metrics_enabled = str(context.config.get("pyfly.observability.metrics.enabled", "true")).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        if metrics_enabled:
+            try:
+                from pyfly.web.adapters.starlette.filters.metrics_filter import MetricsFilter
+
+                # Histogram buckets for http.server.requests (Spring key:
+                # management.metrics.distribution.percentiles-histogram.http.server.requests).
+                # The meter-name segment contains dots, so read it from the section.
+                hist_section = context.config.get_section("pyfly.management.metrics.distribution.percentiles-histogram")
+                histogram = str(
+                    hist_section.get(
+                        "http.server.requests",
+                        context.config.get("pyfly.observability.metrics.histogram.enabled", "false"),
+                    )
+                ).lower() in ("true", "1", "yes")
+                metrics_filter_instance = MetricsFilter(histogram=histogram)
+                metrics_filter_type = MetricsFilter
+
+                # Register Micrometer-named process/system meters (process_uptime_seconds,
+                # process_cpu_usage, system_cpu_count, ...) into the Prometheus registry.
+                from pyfly.observability.process_metrics import register_process_metrics
+
+                register_process_metrics()
+            except (ImportError, AssertionError):
+                metrics_filter_instance = None  # prometheus_client not installed
+
+    # Resolve actuator state early so the httpexchanges recorder filter (if any)
+    # can join the chain alongside the metrics filter and trace collector.
+    from pyfly.actuator.wiring import make_http_exchange_filter, resolve_actuator_active
+
+    actuator_active = resolve_actuator_active(context, actuator_enabled)
+    http_exchange_recorder, http_exchange_filter = make_http_exchange_filter(context, actuator_active)
+
     # --- Build the WebFilter chain ---
     # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
     # and @pre_authorize/@post_authorize have a live RequestContext to read.
@@ -101,6 +147,10 @@ def create_app(
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
     ]
+    if metrics_filter_instance is not None:
+        filters.append(metrics_filter_instance)
+    if http_exchange_filter is not None:
+        filters.append(http_exchange_filter)
     if admin_trace_collector is not None:
         filters.append(admin_trace_collector)
 
@@ -120,6 +170,9 @@ def create_app(
                         SecurityHeadersFilter,
                     ),
                 )
+                # The MetricsFilter is owned directly above; skip the bean copy so
+                # the request timer is not wired (and counted) twice.
+                and not (metrics_filter_type is not None and isinstance(reg.instance, metrics_filter_type))
             ):
                 filters.append(reg.instance)
 
@@ -177,18 +230,11 @@ def create_app(
     if extra_routes:
         routes.extend(extra_routes)
 
-    # Mount actuator endpoints when enabled
+    # Mount actuator endpoints when active (actuator_active resolved above).
     agg = None
-    if actuator_enabled:
-        from pyfly.actuator.adapters.starlette import make_starlette_actuator_routes
-        from pyfly.actuator.endpoints.beans_endpoint import BeansEndpoint
-        from pyfly.actuator.endpoints.env_endpoint import EnvEndpoint
-        from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
-        from pyfly.actuator.endpoints.info_endpoint import InfoEndpoint
-        from pyfly.actuator.endpoints.loggers_endpoint import LoggersEndpoint
-        from pyfly.actuator.endpoints.metrics_endpoint import MetricsEndpoint
+    if actuator_active:
         from pyfly.actuator.health import HealthAggregator, HealthIndicator
-        from pyfly.actuator.registry import ActuatorRegistry
+        from pyfly.actuator.wiring import build_actuator_routes
 
         agg = HealthAggregator()
 
@@ -218,23 +264,7 @@ def create_app(
 
         _install_indicators()
 
-        config = context.config if context is not None else None
-        registry = ActuatorRegistry(config=config)
-
-        # Register built-in endpoints
-        registry.register(HealthEndpoint(agg))
-        if context is not None:
-            registry.register(BeansEndpoint(context))
-            registry.register(EnvEndpoint(context))
-            registry.register(InfoEndpoint(context))
-        registry.register(LoggersEndpoint())
-        registry.register(MetricsEndpoint())
-
-        # Auto-discover custom ActuatorEndpoint beans from context
-        if context is not None:
-            registry.discover_from_context(context)
-
-        routes.extend(make_starlette_actuator_routes(registry))
+        routes.extend(build_actuator_routes(context, agg, http_exchange_recorder))
 
     # Mount admin dashboard when enabled (admin_enabled computed above)
     if admin_enabled and context is not None:
@@ -332,7 +362,7 @@ def create_app(
     # when a subsystem is DOWN. (When no lifespan is supplied — e.g. tests pass
     # an already-started context — the eager scan above already caught them.)
     effective_lifespan = lifespan
-    if actuator_enabled and lifespan is not None:
+    if actuator_active and lifespan is not None:
         _user_lifespan = lifespan
 
         @contextlib.asynccontextmanager
@@ -355,7 +385,7 @@ def create_app(
     app.state.pyfly_docs_enabled = docs_enabled
 
     # Also expose the rescan for callers that manage their own lifespan.
-    if actuator_enabled:
+    if actuator_active:
         app.state.pyfly_install_health_indicators = _install_indicators
 
     # Register global exception handler

@@ -45,7 +45,8 @@ class GitInfoEndpoint:
 class TestCustomActuatorEndpoint:
     @pytest.mark.asyncio
     async def test_custom_endpoint_auto_discovered(self):
-        ctx = ApplicationContext(Config({}))
+        cfg = Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}})
+        ctx = ApplicationContext(cfg)
         ctx.register_bean(GitInfoEndpoint)
         await ctx.start()
 
@@ -60,7 +61,8 @@ class TestCustomActuatorEndpoint:
 
     @pytest.mark.asyncio
     async def test_custom_endpoint_in_index(self):
-        ctx = ApplicationContext(Config({}))
+        cfg = Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}})
+        ctx = ApplicationContext(cfg)
         ctx.register_bean(GitInfoEndpoint)
         await ctx.start()
 
@@ -74,7 +76,17 @@ class TestCustomActuatorEndpoint:
 
     @pytest.mark.asyncio
     async def test_custom_endpoint_disabled_by_config(self):
-        cfg = Config({"pyfly": {"actuator": {"endpoints": {"git": {"enabled": False}}}}})
+        # git is exposed but explicitly disabled -> must 404.
+        cfg = Config(
+            {
+                "pyfly": {
+                    "management": {
+                        "endpoints": {"web": {"exposure": {"include": "*"}}},
+                        "endpoint": {"git": {"enabled": False}},
+                    }
+                }
+            }
+        )
         ctx = ApplicationContext(cfg)
         ctx.register_bean(GitInfoEndpoint)
         await ctx.start()

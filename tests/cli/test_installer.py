@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,43 @@ from click.testing import CliRunner
 from pyfly.cli.main import cli
 
 INSTALLER_PATH = Path(__file__).resolve().parent.parent.parent / "install.sh"
+
+
+def _system_python_ge_312() -> bool:
+    """True if a Python >= 3.12 is available on PATH for ``install.sh`` to use.
+
+    The end-to-end installer tests shell out to ``install.sh``, whose hard
+    precondition is a system Python >= 3.12 (the framework's minimum). When the
+    host only exposes an older interpreter (e.g. macOS system Python 3.9), the
+    installer correctly aborts — so we skip rather than report a false failure.
+    """
+    for cmd in ("python3.14", "python3.13", "python3.12", "python3", "python"):
+        path = shutil.which(cmd)
+        if not path:
+            continue
+        try:
+            out = subprocess.run(
+                [path, "-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0:
+            try:
+                major, minor = (int(x) for x in out.stdout.split())
+            except ValueError:
+                continue
+            if (major, minor) >= (3, 12):
+                return True
+    return False
+
+
+requires_system_py312 = pytest.mark.skipif(
+    not _system_python_ge_312(),
+    reason="install.sh requires a system Python >= 3.12 on PATH (end-to-end installer test)",
+)
 
 
 @pytest.fixture
@@ -43,6 +81,7 @@ class TestInstaller:
         assert "MIN_PYTHON_MAJOR" in content
         assert "MIN_PYTHON_MINOR" in content
 
+    @requires_system_py312
     def test_installer_non_interactive_dry_run(self, project_root: Path, tmp_path: Path):
         """Run installer non-interactively with PYFLY_HOME pointing to tmp."""
         install_dir = tmp_path / "pyfly-test"
@@ -66,6 +105,7 @@ class TestInstaller:
         assert (install_dir / "bin" / "pyfly").exists(), "pyfly wrapper not created"
         assert os.access(install_dir / "bin" / "pyfly", os.X_OK), "pyfly wrapper not executable"
 
+    @requires_system_py312
     def test_installer_wrapper_runs(self, project_root: Path, tmp_path: Path):
         """Test that the installed pyfly wrapper actually works."""
         install_dir = tmp_path / "pyfly-run-test"

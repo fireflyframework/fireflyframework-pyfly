@@ -19,27 +19,25 @@ one handler is registered.
 
 from __future__ import annotations
 
-from typing import Any
-
+from pyfly.actuator.health import HealthStatus
 from pyfly.cqrs.command.registry import HandlerRegistry
 
 
 class CqrsHealthIndicator:
     """Health check for the CQRS subsystem.
 
-    Reports ``UP`` if at least one command or query handler is registered.
+    Reports ``UP`` if at least one command or query handler is registered,
+    otherwise ``UNKNOWN`` (the subsystem is present but idle).
     """
 
     def __init__(self, registry: HandlerRegistry) -> None:
         self._registry = registry
 
-    def health(self) -> dict[str, Any]:
-        total = self._registry.command_handler_count + self._registry.query_handler_count
-        status = "UP" if total > 0 else "UNKNOWN"
-        return {
-            "status": status,
-            "details": {
-                "command_handlers": self._registry.command_handler_count,
-                "query_handlers": self._registry.query_handler_count,
-            },
-        }
+    async def health(self) -> HealthStatus:
+        commands = self._registry.command_handler_count
+        queries = self._registry.query_handler_count
+        status = "UP" if (commands + queries) > 0 else "UNKNOWN"
+        return HealthStatus(
+            status=status,
+            details={"command_handlers": commands, "query_handlers": queries},
+        )

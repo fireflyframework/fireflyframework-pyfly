@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Beans actuator endpoint — lists all registered DI beans."""
+"""Beans actuator endpoint — Spring Boot ``/actuator/beans`` parity."""
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class BeansEndpoint:
-    """Exposes DI bean registry at ``/actuator/beans``."""
+    """Exposes the DI bean registry at ``/actuator/beans`` (contexts envelope)."""
 
     def __init__(self, context: ApplicationContext) -> None:
         self._context = context
@@ -36,12 +37,39 @@ class BeansEndpoint:
         return True
 
     async def handle(self, context: Any = None) -> dict[str, Any]:
+        registrations = self._context.container._registrations
+        type_to_name = {cls: (reg.name or cls.__name__) for cls, reg in registrations.items()}
+
         beans: dict[str, Any] = {}
-        for cls, reg in self._context.container._registrations.items():
+        for cls, reg in registrations.items():
             bean_name = reg.name or cls.__name__
             beans[bean_name] = {
+                "aliases": [],
+                "scope": reg.scope.name.lower(),
                 "type": f"{cls.__module__}.{cls.__qualname__}",
-                "scope": reg.scope.name,
+                "resource": getattr(cls, "__module__", ""),
+                "dependencies": self._dependencies(cls, type_to_name),
+                # pyfly extension — handy in the admin/UI, ignored by Spring tooling.
                 "stereotype": getattr(cls, "__pyfly_stereotype__", "none"),
             }
-        return {"beans": beans}
+
+        return {"contexts": {"application": {"beans": beans}}}
+
+    @staticmethod
+    def _dependencies(cls: type, type_to_name: dict[type, str]) -> list[str]:
+        """Resolve constructor dependency bean names from ``__init__`` type hints."""
+        deps: list[str] = []
+        try:
+            signature = inspect.signature(cls)
+        except (ValueError, TypeError):
+            return deps
+        for name, param in signature.parameters.items():
+            if name == "self":
+                continue
+            annotation = param.annotation
+            dep_name = type_to_name.get(annotation)
+            if dep_name:
+                deps.append(dep_name)
+            elif annotation is not inspect.Parameter.empty:
+                deps.append(getattr(annotation, "__name__", str(annotation)))
+        return deps

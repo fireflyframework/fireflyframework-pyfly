@@ -80,11 +80,10 @@ class TestBeansEndpoint:
         resp = client.get("/actuator/beans")
         assert resp.status_code == 200
         data = resp.json()
-        assert "beans" in data
-        # DummyComponent and DummyService should be listed (plus Config itself)
-        bean_names = list(data["beans"].keys())
-        assert "DummyComponent" in bean_names
-        assert "DummyService" in bean_names
+        # Spring Boot contexts envelope.
+        beans = data["contexts"]["application"]["beans"]
+        assert "DummyComponent" in beans
+        assert "DummyService" in beans
 
     @pytest.mark.asyncio
     async def test_bean_details_include_type_scope_stereotype(self):
@@ -97,10 +96,12 @@ class TestBeansEndpoint:
         client = TestClient(app)
 
         resp = client.get("/actuator/beans")
-        svc_info = resp.json()["beans"]["DummyService"]
+        svc_info = resp.json()["contexts"]["application"]["beans"]["DummyService"]
         assert "type" in svc_info
-        assert svc_info["scope"] == "SINGLETON"
+        assert svc_info["scope"] == "singleton"  # Spring uses lowercase scope
         assert svc_info["stereotype"] == "service"
+        assert "dependencies" in svc_info
+        assert "aliases" in svc_info
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +184,9 @@ class TestActuatorIndex:
 class TestCreateAppActuatorWiring:
     @pytest.mark.asyncio
     async def test_actuator_endpoints_present_when_enabled(self):
-        ctx = ApplicationContext(Config({}))
+        # Expose all endpoints (Spring-exact default exposes only health + info).
+        cfg = Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}})
+        ctx = ApplicationContext(cfg)
         await ctx.start()
 
         app = create_app(context=ctx, actuator_enabled=True)
@@ -197,7 +200,7 @@ class TestCreateAppActuatorWiring:
         # /actuator/beans should be present (context was provided)
         resp = client.get("/actuator/beans")
         assert resp.status_code == 200
-        assert "beans" in resp.json()
+        assert "beans" in resp.json()["contexts"]["application"]
 
         # /actuator/env should be present
         resp = client.get("/actuator/env")

@@ -5,7 +5,8 @@
  * using collapsible accordion sections with search filtering.
  *
  * Data source:  GET /admin/api/config
- *   -> { groups: { "pyfly.web": { port: 8080, adapter: "auto" }, ... } }
+ *   -> { groups: { "pyfly.web": { "port": {value, origin, sensitive}, ... }, ... } }
+ *      (effective values, sorted, masked, attributed to their source)
  */
 
 import { createEmptyStateCard } from '../components/empty-state.js';
@@ -44,7 +45,13 @@ function buildGroupTable(props) {
     table.className = 'kv-table';
     const tbody = document.createElement('tbody');
 
-    for (const [key, val] of Object.entries(props)) {
+    for (const [key, entry] of Object.entries(props)) {
+        // Each entry is { value, origin, sensitive }. Tolerate a bare scalar too.
+        const isRich = entry != null && typeof entry === 'object' && !Array.isArray(entry) && 'value' in entry;
+        const val = isRich ? entry.value : entry;
+        const origin = isRich ? entry.origin : '';
+        const sensitive = isRich ? entry.sensitive : false;
+
         const tr = document.createElement('tr');
 
         const th = document.createElement('th');
@@ -52,30 +59,47 @@ function buildGroupTable(props) {
         tr.appendChild(th);
 
         const td = document.createElement('td');
-        if (val != null && typeof val === 'object') {
-            td.className = 'text-mono text-sm';
-            td.textContent = JSON.stringify(val);
-        } else {
-            td.className = 'text-mono text-sm';
-            const text = val != null ? String(val) : '';
-            td.textContent = text;
+        td.className = 'text-mono text-sm';
+        const display = Array.isArray(val) ? val.join(', ') : (val != null ? String(val) : '');
+        td.textContent = display;
 
-            // Style based on type
-            if (val === true || val === false || val === 'true' || val === 'false') {
-                td.style.color = 'var(--admin-warning)';
-                td.style.fontWeight = '600';
-            } else if (typeof val === 'number' || (typeof val === 'string' && val !== '' && !isNaN(Number(val)))) {
-                td.style.color = 'var(--admin-info)';
-                td.style.fontWeight = '600';
-            }
+        if (sensitive) {
+            td.style.color = 'var(--admin-text-muted)';
+        } else if (val === true || val === false || val === 'true' || val === 'false') {
+            td.style.color = 'var(--admin-warning)';
+            td.style.fontWeight = '600';
+        } else if (typeof val === 'number' || (typeof val === 'string' && val !== '' && !isNaN(Number(val)))) {
+            td.style.color = 'var(--admin-info)';
+            td.style.fontWeight = '600';
         }
-
         tr.appendChild(td);
+
+        // Origin (source) attribution column.
+        const originTd = document.createElement('td');
+        originTd.className = 'text-xs text-muted';
+        originTd.style.textAlign = 'right';
+        originTd.textContent = origin ? _shortOrigin(origin) : '';
+        originTd.title = origin || '';
+        tr.appendChild(originTd);
+
         tbody.appendChild(tr);
     }
 
     table.appendChild(tbody);
     return table;
+}
+
+/**
+ * Shorten a verbose source name (file path / annotation) for the origin badge.
+ * @param {string} origin
+ * @returns {string}
+ */
+function _shortOrigin(origin) {
+    let s = String(origin);
+    // Strip directory, keep the filename / source label.
+    const slash = s.lastIndexOf('/');
+    if (slash >= 0) s = s.slice(slash + 1);
+    return s.length > 40 ? s.slice(0, 39) + '…' : s;
 }
 
 /**

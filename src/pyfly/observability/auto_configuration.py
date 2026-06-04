@@ -26,11 +26,6 @@ try:
 except ImportError:
     TracerProvider = object  # type: ignore[misc,assignment]
 
-try:
-    from pyfly.web.ports.filter import WebFilter
-except ImportError:
-    WebFilter = object  # type: ignore[misc,assignment]
-
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_class
 from pyfly.core.config import Config
@@ -45,12 +40,12 @@ class MetricsAutoConfiguration:
     def metrics_registry(self) -> MetricsRegistry:
         return MetricsRegistry()
 
-    @bean
-    @conditional_on_class("starlette")
-    def metrics_filter(self) -> WebFilter:
-        from pyfly.web.adapters.starlette.filters.metrics_filter import MetricsFilter
-
-        return MetricsFilter()
+    # NOTE: The HTTP ``MetricsFilter`` is NOT registered as a bean. It must join
+    # the WebFilter chain while the ASGI app is being assembled in ``create_app``
+    # — which runs before ``ApplicationContext.start()`` instantiates beans — so
+    # ``create_app`` owns the instance directly (gated on
+    # ``pyfly.observability.metrics.enabled``). A bean here would be built too
+    # late to ever reach the chain.
 
 
 @auto_configuration

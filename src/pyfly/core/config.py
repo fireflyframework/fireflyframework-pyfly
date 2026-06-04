@@ -33,6 +33,71 @@ _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
 _CONFIG_PROPERTIES_ATTR = "__pyfly_config_prefix__"
 
+# Substrings that mark a property as sensitive — matched case-insensitively
+# against the (dotted) key, mirroring Spring Boot's ``Sanitizer`` defaults.
+_SENSITIVE_KEY_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "api-key",
+    "apikey",
+    "api_key",
+    "private-key",
+    "private_key",
+    "client-secret",
+    "client_secret",
+)
+_MASK = "******"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Return True if *key*'s final segment looks like a secret."""
+    leaf = key.rsplit(".", 1)[-1].lower()
+    full = key.lower()
+    if leaf == "key" or leaf.endswith("-key") or leaf.endswith("_key"):
+        return True
+    return any(part in full for part in _SENSITIVE_KEY_PARTS)
+
+
+# Matches the password in a URI's userinfo, e.g. ``scheme://user:PASSWORD@host``.
+_URI_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://[^:/?#@\s]+:)(?P<pwd>[^@/?#\s]+)(?P<at>@)")
+
+
+def _sanitize_uri(value: str) -> str:
+    """Redact the password embedded in a URI's userinfo (Spring Sanitizer parity)."""
+    return _URI_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}{_MASK}{m.group('at')}", value)
+
+
+def _relaxed(name: str) -> str:
+    """Normalize a property key segment for relaxed binding (Spring Boot style):
+    kebab-case / whitespace -> snake_case, lower-cased."""
+    return name.replace("-", "_").replace(" ", "_").lower()
+
+
+def _coerce_like(raw: str, reference: Any) -> Any:
+    """Coerce a raw string to the type of *reference* (relaxed-binding style).
+
+    Used for environment-variable overrides, whose values always arrive as
+    strings but should adopt the type of the value they replace.
+    """
+    if isinstance(reference, bool):
+        return raw.strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(reference, int):
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
+    if isinstance(reference, float):
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+    if isinstance(reference, list):
+        return [item.strip() for item in raw.split(",")] if raw else []
+    return raw
+
 
 def config_properties(prefix: str) -> Callable[[type[T]], type[T]]:
     """Mark a class as bindable to a configuration prefix.
@@ -73,6 +138,10 @@ class Config:
     def __init__(self, data: dict[str, Any] | None = None) -> None:
         self._data: dict[str, Any] = data or {}
         self._loaded_sources: list[str] = []
+        # Per-source raw data, in merge order (earliest = lowest precedence).
+        # Each entry is (source_name, raw_dict). Populated by the from_* loaders;
+        # empty for dict-constructed instances (a synthetic source is derived).
+        self._source_data: list[tuple[str, dict[str, Any]]] = []
 
     @property
     def loaded_sources(self) -> list[str]:
@@ -82,6 +151,78 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         """Return a shallow copy of the raw configuration data."""
         return dict(self._data)
+
+    def effective_dict(self) -> dict[str, Any]:
+        """Return the fully-resolved effective configuration tree.
+
+        Unlike :meth:`to_dict` (raw file values), this resolves ``${...}``
+        placeholders and overlays environment-variable overrides — i.e. the
+        values the application actually sees at runtime. Used by the admin
+        Configuration view and ``/actuator/env``."""
+        tree = self._resolve_tree(self._data)
+        if isinstance(tree, dict):
+            self._apply_env_overrides("", tree)
+            return tree
+        return {}
+
+    def property_sources(self) -> list[dict[str, Any]]:
+        """Return ordered property sources (highest precedence first), Spring
+        Boot ``/actuator/env`` style. Each entry is
+        ``{"name": str, "properties": {dotted_key: {"value", "origin"}}}``.
+
+        Sensitive values (passwords, secrets, tokens, keys) are masked."""
+        sources: list[dict[str, Any]] = []
+
+        # 1. systemEnvironment — every PYFLY_* override, highest precedence.
+        env_props: dict[str, Any] = {}
+        for name, value in sorted(os.environ.items()):
+            if name.startswith("PYFLY_"):
+                env_props[name] = {
+                    "value": self.mask_value(name, value),
+                    "origin": "System Environment Property",
+                }
+        if env_props:
+            sources.append({"name": "systemEnvironment", "properties": env_props})
+
+        # 2. File / starter / default sources — last loaded wins, so reverse to
+        #    list highest precedence first (matching Spring's ordering).
+        entries = self._source_data or [("applicationConfig", self._data)]
+        for name, raw in reversed(entries):
+            flat = self._flatten(raw)
+            sources.append(
+                {
+                    "name": name,
+                    "properties": {
+                        key: {
+                            "value": self.mask_value(key, value),
+                            "origin": name,
+                        }
+                        for key, value in flat.items()
+                    },
+                }
+            )
+        return sources
+
+    def mask_value(self, key: str, value: Any) -> Any:
+        """Mask sensitive values: fully if *key* names a secret, else redact any
+        password embedded in a URI value (Spring Boot Sanitizer parity)."""
+        if _is_sensitive_key(key):
+            return _MASK
+        if isinstance(value, str) and "://" in value:
+            return _sanitize_uri(value)
+        return value
+
+    @staticmethod
+    def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+        """Flatten a nested dict into dot-notation leaf keys."""
+        result: dict[str, Any] = {}
+        for key, value in data.items():
+            full = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                result.update(Config._flatten(value, full))
+            else:
+                result[full] = value
+        return result
 
     @classmethod
     def from_sources(
@@ -107,30 +248,33 @@ class Config:
         base_dir = Path(base_dir)
         data: dict[str, Any] = {}
         sources: list[str] = []
+        source_data: list[tuple[str, dict[str, Any]]] = []
+
+        def _add(name: str, raw: dict[str, Any]) -> None:
+            nonlocal data
+            data = cls._deep_merge(data, raw)
+            sources.append(name)
+            source_data.append((name, raw))
 
         # 1. Framework defaults
         if load_defaults:
-            data = cls._load_framework_defaults()
-            sources.append("pyfly-defaults.yaml (framework defaults)")
+            _add("pyfly-defaults.yaml (framework defaults)", cls._load_framework_defaults())
 
         # 1b. Starter defaults (between framework defaults and user files)
         if starter_defaults:
-            data = cls._deep_merge(data, starter_defaults)
-            sources.append("starter defaults (@enable_*_stack)")
+            _add("starter defaults (@enable_*_stack)", starter_defaults)
 
         # 2. config/ subdirectory
         for ext in (".yaml", ".toml"):
             candidate = base_dir / "config" / f"pyfly{ext}"
             if candidate.is_file():
-                data = cls._deep_merge(data, cls._load_config_data(candidate))
-                sources.append(str(candidate))
+                _add(str(candidate), cls._load_config_data(candidate))
 
         # 3. Project root
         for ext in (".yaml", ".toml"):
             candidate = base_dir / f"pyfly{ext}"
             if candidate.is_file():
-                data = cls._deep_merge(data, cls._load_config_data(candidate))
-                sources.append(str(candidate))
+                _add(str(candidate), cls._load_config_data(candidate))
 
         # 4. Profile overlays (from both locations)
         for profile in active_profiles or []:
@@ -138,11 +282,11 @@ class Config:
                 for ext in (".yaml", ".toml"):
                     candidate = search_dir / f"pyfly-{profile}{ext}"
                     if candidate.is_file():
-                        data = cls._deep_merge(data, cls._load_config_data(candidate))
-                        sources.append(f"{candidate} (profile: {profile})")
+                        _add(f"{candidate} (profile: {profile})", cls._load_config_data(candidate))
 
         instance = cls(data)
         instance._loaded_sources = sources
+        instance._source_data = source_data
         return instance
 
     @classmethod
@@ -172,26 +316,29 @@ class Config:
         # Fallback: load the exact file (original from_file behaviour)
         data: dict[str, Any] = {}
         sources: list[str] = []
+        source_data: list[tuple[str, dict[str, Any]]] = []
+
+        def _add(name: str, raw: dict[str, Any]) -> None:
+            nonlocal data
+            data = cls._deep_merge(data, raw)
+            sources.append(name)
+            source_data.append((name, raw))
 
         if load_defaults:
-            data = cls._load_framework_defaults()
-            sources.append("pyfly-defaults.yaml (framework defaults)")
+            _add("pyfly-defaults.yaml (framework defaults)", cls._load_framework_defaults())
 
         if path.exists():
-            user_data = cls._load_config_data(path)
-            data = cls._deep_merge(data, user_data)
-            sources.append(str(path))
+            _add(str(path), cls._load_config_data(path))
 
         if path.exists():
             for profile in active_profiles or []:
                 profile_path = path.parent / f"{path.stem}-{profile}{path.suffix}"
                 if profile_path.exists():
-                    profile_data = cls._load_config_data(profile_path)
-                    data = cls._deep_merge(data, profile_data)
-                    sources.append(f"{profile_path} (profile: {profile})")
+                    _add(f"{profile_path} (profile: {profile})", cls._load_config_data(profile_path))
 
         instance = cls(data)
         instance._loaded_sources = sources
+        instance._source_data = source_data
         return instance
 
     @staticmethod
@@ -230,27 +377,38 @@ class Config:
         - ``${key:default}`` — uses default if key/env not found
         """
         # Check environment variable override: pyfly.app.name -> PYFLY_APP_NAME
-        env_base = key.removeprefix("pyfly.") if key.startswith("pyfly.") else key
-        env_key = "PYFLY_" + env_base.upper().replace(".", "_").replace("-", "_")
-        env_val = os.environ.get(env_key)
+        env_val = os.environ.get(self._env_key(key))
         if env_val is not None:
-            return env_val
+            # Relaxed binding: coerce the raw env string to match the type of the
+            # value it overrides (so PYFLY_WEB_PORT=9000 yields int 9000, not "9000").
+            return _coerce_like(env_val, self._raw_get(key))
 
-        # Walk nested dict
-        parts = key.split(".")
-        current: Any = self._data
-        for part in parts:
-            if isinstance(current, dict):
-                current = current.get(part)
-                if current is None:
-                    return default
-            else:
-                return default
+        current = self._raw_get(key)
+        if current is None:
+            return default
 
         # Resolve placeholders in string values
         if isinstance(current, str) and "${" in current:
             return self._resolve_placeholders(current)
 
+        return current
+
+    @staticmethod
+    def _env_key(key: str) -> str:
+        """Map a dotted config key to its environment-variable name (PYFLY_*)."""
+        env_base = key.removeprefix("pyfly.") if key.startswith("pyfly.") else key
+        return "PYFLY_" + env_base.upper().replace(".", "_").replace("-", "_")
+
+    def _raw_get(self, key: str) -> Any:
+        """Walk the merged file data for *key* without env/placeholder handling."""
+        current: Any = self._data
+        for part in key.split("."):
+            if isinstance(current, dict):
+                current = current.get(part)
+                if current is None:
+                    return None
+            else:
+                return None
         return current
 
     def _resolve_placeholders(self, value: str, _depth: int = 0) -> str:
@@ -305,26 +463,36 @@ class Config:
         return _PLACEHOLDER_RE.sub(_replace, value)
 
     def get_section(self, prefix: str) -> dict[str, Any]:
-        """Get all values under a prefix as a flat dict."""
-        parts = prefix.split(".")
+        """Get all raw values under a prefix as a nested dict (no env/placeholder)."""
         current: Any = self._data
-        for part in parts:
+        for part in prefix.split("."):
             if isinstance(current, dict):
                 current = current.get(part, {})
             else:
                 return {}
         return current if isinstance(current, dict) else {}
 
+    def effective_section(self, prefix: str) -> dict[str, Any]:
+        """Return the *effective* section under *prefix*: a fresh nested dict with
+        ``${...}`` placeholders resolved and environment-variable overrides applied
+        (so binding sees the same values ``get()`` would, including env overrides)."""
+        section = self._resolve_tree(self.get_section(prefix))
+        if isinstance(section, dict):
+            self._apply_env_overrides(prefix, section)
+        return section if isinstance(section, dict) else {}
+
     def bind(self, config_cls: type[T]) -> T:
-        """Bind configuration to a @config_properties dataclass or Pydantic model."""
+        """Bind configuration to a @config_properties dataclass or Pydantic model.
+
+        Binding is *relaxed* (Spring Boot style): kebab-case YAML keys map to
+        snake_case fields, ``${...}`` placeholders are resolved, and
+        environment-variable overrides are applied before binding.
+        """
         prefix = getattr(config_cls, _CONFIG_PROPERTIES_ATTR, None)
         if prefix is None:
             raise ValueError(f"{config_cls.__name__} is not decorated with @config_properties")
 
-        # Resolve ``${...}`` placeholders across the whole section before binding.
-        # ``_resolve_tree`` builds a fresh structure, so ``self._data`` stays raw
-        # (single-value ``get()`` continues to resolve lazily).
-        section = self._resolve_tree(self.get_section(prefix))
+        section = self.effective_section(prefix)
 
         # Pydantic BaseModel path — fail-fast with ValidationError
         try:
@@ -332,7 +500,7 @@ class Config:
 
             if isinstance(config_cls, type) and issubclass(config_cls, BaseModel):
                 try:
-                    return config_cls.model_validate(section)
+                    return config_cls.model_validate(self._normalize_keys(section))
                 except ValidationError as exc:
                     raise ValueError(
                         f"Configuration validation failed for '{config_cls.__name__}' (prefix='{prefix}'):\n{exc}"
@@ -342,6 +510,31 @@ class Config:
 
         # Dataclass path (recurses into nested dataclass fields).
         return cast(T, self._bind_dataclass(config_cls, section))
+
+    def _apply_env_overrides(self, prefix: str, node: dict[str, Any]) -> None:
+        """Overlay environment-variable overrides onto an existing (copied) subtree.
+
+        Mutates *node* in place: for every leaf whose dotted key has a matching
+        ``PYFLY_*`` environment variable, the value is replaced with the env value
+        coerced to the leaf's existing type.
+        """
+        for key, value in list(node.items()):
+            dotted = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                self._apply_env_overrides(dotted, value)
+            else:
+                env_val = os.environ.get(self._env_key(dotted))
+                if env_val is not None:
+                    node[key] = _coerce_like(env_val, value)
+
+    @staticmethod
+    def _normalize_keys(value: Any) -> Any:
+        """Recursively relax dict keys (kebab/space -> snake) for binding."""
+        if isinstance(value, dict):
+            return {_relaxed(k): Config._normalize_keys(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [Config._normalize_keys(v) for v in value]
+        return value
 
     def _resolve_tree(self, value: Any, _depth: int = 0) -> Any:
         """Recursively resolve ``${...}`` placeholders inside nested structures,
@@ -355,13 +548,18 @@ class Config:
         return value
 
     def _bind_dataclass(self, config_cls: Any, section: dict[str, Any]) -> Any:
-        """Bind a (possibly nested) dataclass from an already placeholder-resolved dict."""
+        """Bind a (possibly nested) dataclass from an already placeholder-resolved dict.
+
+        Field matching is relaxed: a snake_case field binds to a kebab-case YAML
+        key (``graceful-timeout`` -> ``graceful_timeout``)."""
         hints = get_type_hints(config_cls)
+        normalized = {_relaxed(k): v for k, v in section.items()}
         kwargs: dict[str, Any] = {}
         for field in dataclasses.fields(config_cls):
-            if field.name not in section:
+            key = _relaxed(field.name)
+            if key not in normalized:
                 continue
-            kwargs[field.name] = self._coerce_value(hints.get(field.name), section[field.name])
+            kwargs[field.name] = self._coerce_value(hints.get(field.name), normalized[key])
         return config_cls(**kwargs)
 
     def _coerce_value(self, expected_type: Any, value: Any) -> Any:
