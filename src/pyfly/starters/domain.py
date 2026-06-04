@@ -102,7 +102,7 @@ DOMAIN_STACK_PROPERTIES: dict[str, str] = {
     # Rule engine — YAML DSL for externalised business rules
     "pyfly.rule-engine.enabled": "true",
     # Relational data — domain microservices typically own at least one DB
-    "pyfly.relational.enabled": "true",
+    "pyfly.data.relational.enabled": "true",
     # Outbound HTTP client — for cross-service domain calls
     "pyfly.client.enabled": "true",
     # Plugin SPI — domain services often expose extension points

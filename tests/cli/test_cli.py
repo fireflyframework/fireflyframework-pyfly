@@ -770,6 +770,21 @@ class TestConfigKeyAlignment:
         assert "provider: memory" in config
         assert "eda:" not in config  # Must NOT use old wrong key
 
+    def test_security_feature_sets_security_enabled(self, tmp_path: Path):
+        # The scaffolded security app must set pyfly.security.enabled so
+        # JwtAutoConfiguration / PasswordEncoderAutoConfiguration actually wire
+        # their beans (audit #4).
+        import yaml
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["new", "my-svc", "--features", "security", "--directory", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        config = yaml.safe_load((tmp_path / "my-svc" / "pyfly.yaml").read_text())
+        assert config["pyfly"]["security"]["enabled"] is True
+
     def test_cache_uses_enabled_and_provider_keys(self, tmp_path: Path):
         runner = CliRunner()
         result = runner.invoke(

@@ -70,16 +70,17 @@ CORE_STACK_PROPERTIES: dict[str, str] = {
     "pyfly.tracing.enabled": "true",
     # Caching — Redis if installed, in-memory fallback otherwise
     "pyfly.cache.enabled": "true",
-    # Event-Driven Architecture — Kafka/RabbitMQ if installed,
-    # in-memory broker otherwise
-    "pyfly.eda.enabled": "true",
+    # Event-Driven Architecture — Kafka/RabbitMQ if installed, in-memory broker
+    # otherwise. EdaAutoConfiguration gates on ``pyfly.eda.provider`` (not
+    # *.enabled); "auto" resolves to the best installed broker, falling back to
+    # the in-memory bus.
+    "pyfly.eda.provider": "auto",
     # CQRS — CommandBus / QueryBus + handler discovery
     "pyfly.cqrs.enabled": "true",
     # Resilience — rate limiter, bulkhead, timeout, fallback
     "pyfly.resilience.enabled": "true",
-    # Actuator — /health, /info, /metrics
-    "pyfly.actuator.enabled": "true",
-    "pyfly.actuator.metrics.enabled": "true",
+    # Actuator — /health, /info, /metrics (gated on pyfly.web.actuator.enabled)
+    "pyfly.web.actuator.enabled": "true",
     # AOP — required by @cacheable, @authorize, etc.
     "pyfly.aop.enabled": "true",
 }

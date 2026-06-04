@@ -71,9 +71,8 @@ WEB_STACK_PROPERTIES: dict[str, str] = {
     "pyfly.observability.enabled": "true",
     "pyfly.metrics.enabled": "true",
     "pyfly.tracing.enabled": "true",
-    # Actuator — /health, /info, /metrics, /prometheus
-    "pyfly.actuator.enabled": "true",
-    "pyfly.actuator.metrics.enabled": "true",
+    # Actuator — /health, /info, /metrics, /prometheus (gated on pyfly.web.actuator.enabled)
+    "pyfly.web.actuator.enabled": "true",
     # Resilience filters in front of every endpoint
     "pyfly.resilience.enabled": "true",
 }
