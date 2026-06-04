@@ -77,6 +77,9 @@ class WorkflowEngine:
         )
         self._children.bind(self)
         self._continue.bind(self)
+        # Strong references to fire-and-forget run tasks so the event loop does
+        # not GC-cancel an ASYNC workflow mid-flight (audit #62).
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def signals(self) -> SignalService:
@@ -126,11 +129,35 @@ class WorkflowEngine:
 
     # --- private --------------------------------------------------------
 
+    @staticmethod
+    def _should_suppress(definition: Any, error: BaseException) -> bool:
+        """Decide whether a failed workflow should be downgraded to COMPLETED.
+
+        Honors @on_workflow_error(suppress_error, error_types, step_ids):
+        suppression requires suppress_error=True and, when given, a matching
+        exception class name and failed step id (audit #58).
+        """
+        if not getattr(definition, "on_error_suppress", False):
+            return False
+        error_types = getattr(definition, "on_error_types", ())
+        if error_types:
+            names = {cls.__name__ for cls in type(error).__mro__}
+            if not (set(error_types) & names):
+                return False
+        step_ids = getattr(definition, "on_error_step_ids", ())
+        if step_ids:
+            failed_step = getattr(error, "step_id", None)
+            if failed_step not in step_ids:
+                return False
+        return True
+
     async def _start_async(self, definition: Any, input: Any) -> WorkflowResult:
         ctx = ExecutionContext(name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input)
         await ctx.set_status(ExecutionStatus.PENDING)
         await self._persistence.save(ExecutionState.from_context(ctx))
-        asyncio.create_task(self._run(definition, input, preset_ctx=ctx))
+        task = asyncio.create_task(self._run(definition, input, preset_ctx=ctx))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
         return WorkflowResult(
             workflow_id=definition.id,
             correlation_id=ctx.correlation_id,
@@ -156,7 +183,7 @@ class WorkflowEngine:
         await self._persistence.save(ExecutionState.from_context(ctx))
 
         success = False
-        error: BaseException | None = None
+        original_error: BaseException | None = None  # actual error → drives the callback
         try:
             if definition.timeout_ms > 0:
                 await asyncio.wait_for(self._executor.execute(definition, ctx), timeout=definition.timeout_ms / 1000.0)
@@ -165,31 +192,42 @@ class WorkflowEngine:
             await ctx.set_status(ExecutionStatus.COMPLETED)
             success = True
         except StepFailedError as exc:
-            error = exc
-            await ctx.set_status(ExecutionStatus.FAILED, exc)
-            if self._dlq is not None:
-                await self._dlq.capture(
-                    execution_name=definition.id,
-                    correlation_id=ctx.correlation_id,
-                    error=exc,
-                    step_id=exc.step_id,
-                    input=input,
-                )
+            original_error = exc
+            if self._should_suppress(definition, exc):
+                await ctx.set_status(ExecutionStatus.COMPLETED)
+                success = True
+            else:
+                await ctx.set_status(ExecutionStatus.FAILED, exc)
+                if self._dlq is not None:
+                    await self._dlq.capture(
+                        execution_name=definition.id,
+                        correlation_id=ctx.correlation_id,
+                        error=exc,
+                        step_id=exc.step_id,
+                        input=input,
+                    )
         except TimeoutError as exc:
-            error = exc
+            original_error = exc
             await ctx.set_status(ExecutionStatus.TIMED_OUT, exc)
         except Exception as exc:  # noqa: BLE001
-            error = exc
-            await ctx.set_status(ExecutionStatus.FAILED, exc)
+            original_error = exc
+            if self._should_suppress(definition, exc):
+                await ctx.set_status(ExecutionStatus.COMPLETED)
+                success = True
+            else:
+                await ctx.set_status(ExecutionStatus.FAILED, exc)
         finally:
             duration_ms = (time.perf_counter() - started) * 1000.0
             try:
-                if success and definition.on_complete is not None:
-                    cb_result = definition.on_complete(definition.bean, ctx)
+                # The @on_workflow_error handler fires whenever an error
+                # occurred, even when suppressed (it is what declares the
+                # suppression); on_complete fires only on a clean run.
+                if original_error is not None and definition.on_error is not None:
+                    cb_result = definition.on_error(definition.bean, ctx, original_error)
                     if inspect.isawaitable(cb_result):
                         await cb_result
-                if not success and definition.on_error is not None and error is not None:
-                    cb_result = definition.on_error(definition.bean, ctx, error)
+                elif success and definition.on_complete is not None:
+                    cb_result = definition.on_complete(definition.bean, ctx)
                     if inspect.isawaitable(cb_result):
                         await cb_result
             except Exception as cb_exc:  # noqa: BLE001

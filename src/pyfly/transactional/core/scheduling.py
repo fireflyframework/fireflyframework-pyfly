@@ -73,6 +73,11 @@ class OrchestrationScheduler:
             msg = f"scheduled task '{task.id}' must define cron, fixed_rate_ms or fixed_delay_ms"
             raise ValueError(msg)
         self._tasks[task.id] = task
+        # If the scheduler is already running (the context lifecycle starts it
+        # before orchestration beans are post-processed), spin the loop up now
+        # so tasks registered post-start still fire (audit #54).
+        if self._running and task.enabled and task._task is None:
+            task._task = asyncio.create_task(self._run_loop(task))
 
     def unregister(self, task_id: str) -> None:
         task = self._tasks.pop(task_id, None)

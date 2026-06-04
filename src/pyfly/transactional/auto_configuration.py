@@ -44,6 +44,7 @@ from pyfly.transactional.core.step_invoker import StepInvoker as CoreStepInvoker
 from pyfly.transactional.core.tracer import OrchestrationTracer
 from pyfly.transactional.core.validator import OrchestrationValidator
 from pyfly.transactional.health import OrchestrationHealthIndicator
+from pyfly.transactional.post_processor import OrchestrationBeanPostProcessor
 from pyfly.transactional.rest.controllers import (
     DeadLetterController,
     OrchestrationController,
@@ -282,6 +283,29 @@ class TransactionalEngineAutoConfiguration:
     @bean
     def workflow_registry(self) -> WorkflowRegistry:
         return WorkflowRegistry()
+
+    @bean
+    def orchestration_bean_post_processor(
+        self,
+        saga_registry: SagaRegistry,
+        workflow_registry: WorkflowRegistry,
+        tcc_registry: TccRegistry,
+        scheduler: OrchestrationScheduler,
+        workflow_engine: WorkflowEngine,
+        tcc_engine: TccEngine,
+        saga_engine: SagaEngine,
+    ) -> OrchestrationBeanPostProcessor:
+        # Auto-discovers @saga/@workflow/@tcc beans into their registries and
+        # schedules any @scheduled_* orchestration during startup (audit #53/#54).
+        return OrchestrationBeanPostProcessor(
+            saga_registry=saga_registry,
+            workflow_registry=workflow_registry,
+            tcc_registry=tcc_registry,
+            scheduler=scheduler,
+            workflow_engine=workflow_engine,
+            tcc_engine=tcc_engine,
+            saga_engine=saga_engine,
+        )
 
     @bean
     def workflow_executor(

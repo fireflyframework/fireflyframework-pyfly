@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pyfly.transactional.core.exceptions import OrchestrationValidationError
@@ -23,6 +24,8 @@ from pyfly.transactional.workflow.definition import (
     WorkflowDefinition,
     WorkflowStepDefinition,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowRegistry:
@@ -49,6 +52,8 @@ class WorkflowRegistry:
             timeout_ms=meta.timeout_ms,
             publish_events=meta.publish_events,
             layer_concurrency=meta.layer_concurrency,
+            max_retries=getattr(meta, "max_retries", 0),
+            retry_delay_ms=getattr(meta, "retry_delay_ms", 0),
         )
 
         # Discover all decorated methods on the class.
@@ -80,14 +85,17 @@ class WorkflowRegistry:
                 wait_timer = getattr(attr, "__pyfly_workflow_wait_timer__", None)
                 if wait_timer is not None:
                     step.wait_for_timer_ms = wait_timer.delay_ms
+                    step.wait_for_timer_id = getattr(wait_timer, "timer_id", "") or ""
                 wait_all = getattr(attr, "__pyfly_workflow_wait_all__", None)
                 if wait_all is not None:
                     step.wait_for_all = wait_all.signals
                     step.wait_for_all_timeout_ms = wait_all.timeout_ms
+                    step.wait_for_all_timers = tuple(getattr(wait_all, "timers", ()))
                 wait_any = getattr(attr, "__pyfly_workflow_wait_any__", None)
                 if wait_any is not None:
                     step.wait_for_any = wait_any.signals
                     step.wait_for_any_timeout_ms = wait_any.timeout_ms
+                    step.wait_for_any_timers = tuple(getattr(wait_any, "timers", ()))
                 child = getattr(attr, "__pyfly_workflow_child__", None)
                 if child is not None:
                     step.child_workflow_id = child.workflow_id
@@ -105,6 +113,9 @@ class WorkflowRegistry:
             on_error = getattr(attr, "__pyfly_workflow_on_error__", None)
             if on_error is not None:
                 definition.on_error = attr
+                definition.on_error_suppress = bool(getattr(on_error, "suppress_error", False))
+                definition.on_error_types = tuple(getattr(on_error, "error_types", ()) or ())
+                definition.on_error_step_ids = tuple(getattr(on_error, "step_ids", ()) or ())
             on_step = getattr(attr, "__pyfly_workflow_on_step__", None)
             if on_step is not None:
                 definition.on_step_callbacks[on_step.step_id] = attr
@@ -112,12 +123,26 @@ class WorkflowRegistry:
             if query is not None:
                 definition.queries[query.name] = attr
 
-        # Wire compensation methods into step definitions.
+        # Wire compensation methods into step definitions; propagate the
+        # workflow-level retry policy to steps that declare none (audit #61).
         for step_id, step in definition.steps.items():
             if step.compensation_method_name and step.compensation_method_name in compensation_methods:
                 step.compensation_method = compensation_methods[step.compensation_method_name]
             elif step_id in compensation_methods:
                 step.compensation_method = compensation_methods[step_id]
+
+            if step.max_retries == 0 and definition.max_retries > 0:
+                step.max_retries = definition.max_retries
+                if step.retry_delay_ms == 0:
+                    step.retry_delay_ms = definition.retry_delay_ms
+
+            # A compensatable step with no resolvable compensation method would
+            # be silently skipped during rollback — surface the misconfig (#65).
+            if step.compensatable and step.compensation_method is None:
+                logger.warning(
+                    "workflow_compensation_method_unresolved",
+                    extra={"workflow": definition.id, "step": step_id},
+                )
 
         # Validate DAG.
         try:
