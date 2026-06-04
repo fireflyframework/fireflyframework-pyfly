@@ -35,6 +35,29 @@ async def _default_sender(url: str, payload: dict[str, Any], headers: dict[str, 
     return 200
 
 
+# Statuses worth retrying — transient server/timeout/rate-limit only; a 4xx
+# (other than 408/429) is a permanent client error and is not retried (#194).
+_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _is_retryable(status: int) -> bool:
+    return status in _RETRYABLE_STATUS or status >= 500
+
+
+def _is_authorized(target_url: str, domains: Any) -> bool:
+    """Return True if *target_url*'s host matches one of the authorized domains."""
+    from urllib.parse import urlparse
+
+    host = (urlparse(target_url).hostname or "").lower()
+    if not host:
+        return False
+    for entry in domains:
+        allowed = getattr(entry, "domain", entry).lower().strip()
+        if host == allowed or host.endswith("." + allowed):
+            return True
+    return False
+
+
 class CallbackDispatcher:
     """Dispatches events to all matching :class:`CallbackSubscription`s."""
 
@@ -77,6 +100,14 @@ class CallbackDispatcher:
         )
         await self._executions.save(execution)
 
+        # SSRF protection: when an allowlist is configured, the target host must
+        # match one of the authorized domains before any request is made (#190).
+        if config.authorized_domains and not _is_authorized(sub.target_url, config.authorized_domains):
+            execution.status = CallbackStatus.FAILED
+            execution.last_error = "Domain not authorized"
+            await self._executions.save(execution)
+            return execution
+
         headers = dict(sub.headers)
         if config.secret:
             # Sign the canonical JSON serialization of the payload — NOT
@@ -95,6 +126,7 @@ class CallbackDispatcher:
 
         for attempt in range(1, config.max_attempts + 1):
             execution.attempts = attempt
+            retryable = True
             try:
                 status = await self._http(sub.target_url, payload, headers)
                 execution.response_status = status
@@ -103,10 +135,16 @@ class CallbackDispatcher:
                     execution.delivered_at = datetime.now(UTC)
                     break
                 execution.last_error = f"http {status}"
-            except Exception as exc:  # noqa: BLE001
+                retryable = _is_retryable(status)  # 4xx (except 408/429) is permanent (#194)
+            except Exception as exc:  # noqa: BLE001 — transport errors are retryable
                 execution.last_error = str(exc)
+            if not retryable:
+                execution.status = CallbackStatus.FAILED
+                break
             if attempt < config.max_attempts:
-                await asyncio.sleep(config.backoff_ms / 1000.0)
+                # Exponential backoff (capped at 5 min), matching Java (#194).
+                delay_ms = min(config.backoff_ms * (2 ** (attempt - 1)), 300_000)
+                await asyncio.sleep(delay_ms / 1000.0)
         else:
             execution.status = CallbackStatus.FAILED
 
