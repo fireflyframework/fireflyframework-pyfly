@@ -57,7 +57,11 @@ class WebFilterChainMiddleware:
 
     def __init__(self, app: ASGIApp, filters: Sequence[WebFilter] = ()) -> None:
         self.app = app
-        self._filters = list(filters)
+        # Keep the *live* list reference when a list is passed so filters
+        # discovered after ApplicationContext.start() (security / session / CSRF
+        # bean filters) can be appended in place and picked up per request
+        # (audit #40). A non-list (e.g. the tuple default) is copied.
+        self._filters = filters if isinstance(filters, list) else list(filters)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
