@@ -14,9 +14,12 @@ class ResendEmailProvider:
 
     name = "resend"
 
-    def __init__(self, api_key: str, *, api_base: str = "https://api.resend.com") -> None:
+    def __init__(
+        self, api_key: str, *, api_base: str = "https://api.resend.com", default_from: str | None = None
+    ) -> None:
         self._api_key = api_key
         self._api_base = api_base.rstrip("/")
+        self._default_from = default_from
 
     async def _client(self) -> Any:
         try:
@@ -29,7 +32,7 @@ class ResendEmailProvider:
     async def send(self, message: EmailMessage) -> NotificationResult:
         async with await self._client() as client:
             payload: dict[str, Any] = {
-                "from": message.sender,
+                "from": message.sender or self._default_from,
                 "to": message.to,
                 "subject": message.subject,
             }

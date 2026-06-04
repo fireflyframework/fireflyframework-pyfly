@@ -50,6 +50,22 @@ class SmtpEmailProvider:
         if message.body_html:
             msg.add_alternative(message.body_html, subtype="html")
 
+        # Attach files (audit #31) — EmailMessage promotes to multipart/mixed.
+        for attachment in message.attachments:
+            maintype, _, subtype = (attachment.content_type or "application/octet-stream").partition("/")
+            msg.add_attachment(
+                attachment.data,
+                maintype=maintype or "application",
+                subtype=subtype or "octet-stream",
+                filename=attachment.filename,
+            )
+
+        # Custom headers (audit #35), without clobbering the standard ones.
+        _reserved = {"from", "to", "cc", "bcc", "subject"}
+        for key, value in message.headers.items():
+            if key.lower() not in _reserved:
+                msg[key] = value
+
         try:
             with smtplib.SMTP(self._host, self._port, timeout=30) as server:
                 if self._use_tls:
