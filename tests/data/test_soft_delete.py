@@ -214,3 +214,31 @@ class TestSoftDeleteRepository:
         await repo.delete(b.id)
 
         assert await repo.count() == 2
+
+
+class TestSoftDeletePaginatedExcludesDeleted:
+    """Audit #103 — paginated / by-ids / by-spec readers must exclude soft-deleted rows."""
+
+    @pytest.mark.asyncio
+    async def test_find_paginated_excludes_deleted(self, repo, session):
+        a = SoftOrder(name="a")
+        b = SoftOrder(name="b")
+        session.add_all([a, b])
+        await session.flush()
+        await repo.delete(a.id)
+
+        page = await repo.find_paginated(page=1, size=10)
+        names = {o.name for o in page.items}
+        assert names == {"b"}
+        assert page.total == 1  # the deleted row is not counted
+
+    @pytest.mark.asyncio
+    async def test_find_all_by_ids_excludes_deleted(self, repo, session):
+        a = SoftOrder(name="a")
+        b = SoftOrder(name="b")
+        session.add_all([a, b])
+        await session.flush()
+        await repo.delete(a.id)
+
+        found = await repo.find_all_by_ids([a.id, b.id])
+        assert {o.name for o in found} == {"b"}

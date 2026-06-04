@@ -103,3 +103,50 @@ class SoftDeleteRepository(Repository[T, ID]):
         )
         result = await session.execute(stmt)
         return result.scalar_one()
+
+    # The base paginated / by-ids / by-spec readers do not know about soft
+    # deletes, so they would leak deleted rows and miscount the page total.
+    # Override every read path to apply the not-deleted predicate (audit #103).
+
+    @property
+    def _active(self) -> Any:
+        return self._model.deleted_at == None  # type: ignore[attr-defined]  # noqa: E711
+
+    async def find_paginated(self, page: int = 1, size: int = 20, pageable: Any | None = None) -> Any:
+        session = self._require_session()
+        if pageable is not None:
+            page = pageable.page
+            size = pageable.size
+
+        from pyfly.data.page import Page
+
+        total = (await session.execute(select(func.count()).select_from(self._model).where(self._active))).scalar_one()
+
+        stmt = select(self._model).where(self._active)
+        if pageable is not None:
+            stmt = self._apply_sort(stmt, pageable)
+        stmt = stmt.offset((page - 1) * size).limit(size)
+        items = list((await session.execute(stmt)).scalars().all())
+        return Page(items=items, total=total, page=page, size=size)
+
+    async def find_all_by_ids(self, ids: list[ID]) -> list[T]:
+        if not ids:
+            return []
+        session = self._require_session()
+        stmt = select(self._model).where(self._pk_column.in_(ids)).where(self._active)
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def find_all_by_spec(self, spec: Any) -> list[T]:
+        session = self._require_session()
+        stmt = spec.to_predicate(self._model, select(self._model)).where(self._active)
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def find_all_by_spec_paged(self, spec: Any, pageable: Any) -> Any:
+        session = self._require_session()
+        from pyfly.data.page import Page
+
+        filtered = spec.to_predicate(self._model, select(self._model)).where(self._active)
+        total = (await session.execute(select(func.count()).select_from(filtered.subquery()))).scalar_one()
+        stmt = self._apply_sort(filtered, pageable).offset(pageable.offset).limit(pageable.size)
+        items = list((await session.execute(stmt)).scalars().all())
+        return Page(items=items, total=total, page=pageable.page, size=pageable.size)
