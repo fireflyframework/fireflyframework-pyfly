@@ -17,12 +17,44 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
 from pyfly.client.circuit_breaker import CircuitBreaker
+from pyfly.client.exceptions import (
+    ServiceRateLimitException,
+    ServiceUnavailableException,
+    map_http_error,
+)
 from pyfly.client.retry import RetryPolicy
+
+logger = logging.getLogger(__name__)
+
+
+def _retryable_exceptions() -> tuple[type[Exception], ...]:
+    """Exception types the client retry policy may retry: transient only.
+
+    Covers 429/5xx-mapped responses, connection and timeout failures — but NOT
+    4xx validation/not-found or the circuit-open signal (audit #13).
+    """
+    retryable: tuple[type[Exception], ...] = (
+        ServiceRateLimitException,
+        ServiceUnavailableException,
+        ConnectionError,
+        TimeoutError,
+    )
+    try:
+        # importlib keeps httpx out of this vendor-neutral module (the httpx
+        # import lives only in client/adapters per the hexagonal boundary).
+        import importlib
+
+        transport_error = importlib.import_module("httpx").TransportError
+        retryable = (*retryable, transport_error)
+    except ImportError:  # pragma: no cover - httpx is the gating dependency
+        pass
+    return retryable
 
 
 class HttpClientBeanPostProcessor:
@@ -122,6 +154,9 @@ class HttpClientBeanPostProcessor:
         return RetryPolicy(
             max_attempts=max_attempts,
             base_delay=timedelta(seconds=base_delay),
+            # Only transient failures are retried — 4xx validation/not-found and
+            # the circuit-open signal are NOT (audit #13).
+            retry_on=_retryable_exceptions(),
         )
 
     @staticmethod
@@ -130,23 +165,45 @@ class HttpClientBeanPostProcessor:
         cb: CircuitBreaker | None,
         retry: RetryPolicy | None,
     ) -> Any:
-        """Wrap a generated method impl: retry outside, circuit breaker inside."""
+        """Wrap a generated method impl: circuit breaker OUTSIDE, retry INSIDE.
+
+        With the breaker outside the retry, an OPEN circuit short-circuits
+        immediately and the CircuitBreakerException is never retried (audit #13).
+        """
         if cb is None and retry is None:
             return impl
 
         original = impl
 
         async def resilient_impl(self_arg: Any, *args: Any, **kwargs: Any) -> Any:
-            async def call() -> Any:
-                if cb is not None:
-                    return await cb.call(original, self_arg, *args, **kwargs)
+            async def inner() -> Any:
+                if retry is not None:
+                    return await retry.execute(original, self_arg, *args, **kwargs)
                 return await original(self_arg, *args, **kwargs)
 
-            if retry is not None:
-                return await retry.execute(call)
-            return await call()
+            if cb is not None:
+                return await cb.call(inner)
+            return await inner()
 
         return resilient_impl
+
+    # ------------------------------------------------------------------
+    # Lifecycle (close per-bean HTTP clients on shutdown — audit #14)
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """No-op: per-bean adapters are created lazily during ``after_init``."""
+
+    async def stop(self) -> None:
+        """Close every per-bean HTTP client to release its connection pool."""
+        for client in self._clients.values():
+            stop = getattr(client, "stop", None) or getattr(client, "aclose", None)
+            if stop is not None:
+                try:
+                    await stop()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    logger.debug("client_adapter_close_failed", exc_info=True)
+        self._clients.clear()
 
     # ------------------------------------------------------------------
     # Method implementation (unchanged)
@@ -176,10 +233,23 @@ class HttpClientBeanPostProcessor:
             request_kwargs: dict[str, Any] = {}
             if http_method in ("POST", "PUT", "PATCH") and "body" in remaining:
                 request_kwargs["json"] = remaining.pop("body")
+            # A `headers` parameter is sent as request headers (per-method
+            # headers / auth injection), not as a query param (audit #18).
+            if "headers" in remaining and isinstance(remaining["headers"], dict):
+                request_kwargs["headers"] = remaining.pop("headers")
             if remaining:
                 request_kwargs["params"] = remaining
 
             response = await client.request(http_method, path, **request_kwargs)
+            # Surface 4xx/5xx as typed exceptions instead of returning the error
+            # payload as if it were a success (audit #12).
+            if response.status_code >= 400:
+                raise map_http_error(
+                    response.status_code,
+                    method=http_method,
+                    url=path,
+                    body=response.text,
+                )
             try:
                 return response.json()
             except (json.JSONDecodeError, ValueError):

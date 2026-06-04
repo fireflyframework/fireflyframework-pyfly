@@ -45,6 +45,8 @@ class ClientAutoConfiguration:
 
     @bean
     def http_client_post_processor(self, config: Config) -> HttpClientBeanPostProcessor:
+        from datetime import timedelta
+
         retry_cfg = config.get("pyfly.client.retry")
         cb_cfg = config.get("pyfly.client.circuit_breaker") or config.get("pyfly.client.circuit-breaker")
 
@@ -56,7 +58,17 @@ class ClientAutoConfiguration:
         if isinstance(cb_cfg, dict):
             default_cb = cb_cfg
 
+        # Build per-bean adapters with the configured timeout so declarative
+        # clients honor pyfly.client.timeout (audit #15).
+        timeout_s = int(config.get("pyfly.client.timeout", 30))
+
+        def factory(base_url: str) -> Any:
+            from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
+
+            return HttpxClientAdapter(base_url=base_url, timeout=timedelta(seconds=timeout_s))
+
         return HttpClientBeanPostProcessor(
+            factory,
             default_retry=default_retry,
             default_circuit_breaker=default_cb,
         )
