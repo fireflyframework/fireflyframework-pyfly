@@ -1,4 +1,4 @@
-"""Inbound ports — use-case interfaces."""
+"""Inbound ports — use-case interfaces (driven side)."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from {{ package_name }}.domain.models import Todo
 
 
 class CreateTodoUseCase(Protocol):
-    def create(self, title: str, description: str) -> Todo: ...
+    async def create(self, title: str, description: str) -> Todo: ...
 
 
 class GetTodoUseCase(Protocol):
-    def get(self, todo_id: str) -> Todo: ...
+    async def get(self, todo_id: str) -> Todo: ...
 
 
 class ListTodosUseCase(Protocol):
-    def list_all(self) -> list[Todo]: ...
+    async def list_all(self) -> list[Todo]: ...
 
 
 class DeleteTodoUseCase(Protocol):
-    def delete(self, todo_id: str) -> None: ...
+    async def delete(self, todo_id: str) -> None: ...

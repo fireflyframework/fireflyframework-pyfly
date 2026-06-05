@@ -1,10 +1,17 @@
-"""Application services — use-case implementations."""
+"""Application services — use-case (inbound port) implementations."""
 
 from __future__ import annotations
 
 from pyfly.container import service
+from pyfly.kernel.exceptions import ResourceNotFoundException
 
 from {{ package_name }}.domain.models import Todo
+from {{ package_name }}.domain.ports.inbound import (
+    CreateTodoUseCase,
+    DeleteTodoUseCase,
+    GetTodoUseCase,
+    ListTodosUseCase,
+)
 {% if has_data %}
 from {{ package_name }}.domain.models import TodoEntity
 from {{ package_name }}.infrastructure.adapters.persistence import TodoRepository
@@ -12,87 +19,107 @@ from {{ package_name }}.infrastructure.adapters.persistence import TodoRepositor
 from {{ package_name }}.domain.models import TodoDocument
 from {{ package_name }}.infrastructure.adapters.persistence import TodoDocumentRepository
 {% else %}
-from {{ package_name }}.infrastructure.adapters.persistence import InMemoryTodoRepository
+from {{ package_name }}.domain.ports.outbound import TodoRepositoryPort
 {% endif %}
 
 
 @service
-class TodoService:
-    """Implements the inbound ports for todo management."""
+class TodoService(CreateTodoUseCase, GetTodoUseCase, ListTodosUseCase, DeleteTodoUseCase):
+    """Implements the inbound use-case ports for todo management."""
 {% if has_data %}
 
     def __init__(self, repository: TodoRepository) -> None:
         self._repository = repository
 
-    async def create(self, title: str, description: str) -> Todo:
-        entity = TodoEntity(title=title, description=description)
-        saved = await self._repository.save(entity)
-        return Todo(id=str(saved.id), title=saved.title, description=saved.description, completed=saved.completed)
+    @staticmethod
+    def _entity_id(todo_id: str) -> int:
+        try:
+            return int(todo_id)
+        except ValueError as exc:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND") from exc
 
-    async def get(self, todo_id: int) -> Todo:
-        entity = await self._repository.find_by_id(todo_id)
+    @staticmethod
+    def _to_domain(entity: TodoEntity) -> Todo:
         return Todo(id=str(entity.id), title=entity.title, description=entity.description, completed=entity.completed)
 
+    async def create(self, title: str, description: str) -> Todo:
+        saved = await self._repository.save(TodoEntity(title=title, description=description))
+        return self._to_domain(saved)
+
+    async def get(self, todo_id: str) -> Todo:
+        entity = await self._repository.find_by_id(self._entity_id(todo_id))
+        if entity is None:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND")
+        return self._to_domain(entity)
+
     async def list_all(self) -> list[Todo]:
-        entities = await self._repository.find_all()
-        return [Todo(id=str(e.id), title=e.title, description=e.description, completed=e.completed) for e in entities]
+        return [self._to_domain(e) for e in await self._repository.find_all()]
 
-    async def toggle_complete(self, todo_id: int) -> Todo:
-        entity = await self._repository.find_by_id(todo_id)
+    async def toggle_complete(self, todo_id: str) -> Todo:
+        entity = await self._repository.find_by_id(self._entity_id(todo_id))
+        if entity is None:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND")
         entity.completed = not entity.completed
-        saved = await self._repository.save(entity)
-        return Todo(id=str(saved.id), title=saved.title, description=saved.description, completed=saved.completed)
+        return self._to_domain(await self._repository.save(entity))
 
-    async def delete(self, todo_id: int) -> None:
-        await self._repository.delete(todo_id)
+    async def delete(self, todo_id: str) -> None:
+        await self._repository.delete(self._entity_id(todo_id))
 {% elif has_mongodb %}
 
     def __init__(self, repository: TodoDocumentRepository) -> None:
         self._repository = repository
 
+    @staticmethod
+    def _to_domain(doc: TodoDocument) -> Todo:
+        return Todo(id=str(doc.id), title=doc.title, description=doc.description, completed=doc.completed)
+
     async def create(self, title: str, description: str) -> Todo:
-        doc = TodoDocument(title=title, description=description)
-        saved = await self._repository.save(doc)
-        return Todo(id=str(saved.id), title=saved.title, description=saved.description, completed=saved.completed)
+        saved = await self._repository.save(TodoDocument(title=title, description=description))
+        return self._to_domain(saved)
 
     async def get(self, todo_id: str) -> Todo:
         doc = await self._repository.find_by_id(todo_id)
-        return Todo(id=str(doc.id), title=doc.title, description=doc.description, completed=doc.completed)
+        if doc is None:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND")
+        return self._to_domain(doc)
 
     async def list_all(self) -> list[Todo]:
-        docs = await self._repository.find_all()
-        return [Todo(id=str(d.id), title=d.title, description=d.description, completed=d.completed) for d in docs]
+        return [self._to_domain(d) for d in await self._repository.find_all()]
 
     async def toggle_complete(self, todo_id: str) -> Todo:
         doc = await self._repository.find_by_id(todo_id)
+        if doc is None:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND")
         doc.completed = not doc.completed
-        saved = await self._repository.save(doc)
-        return Todo(id=str(saved.id), title=saved.title, description=saved.description, completed=saved.completed)
+        return self._to_domain(await self._repository.save(doc))
 
     async def delete(self, todo_id: str) -> None:
         await self._repository.delete(todo_id)
 {% else %}
 
-    def __init__(self, repository: InMemoryTodoRepository) -> None:
+    def __init__(self, repository: TodoRepositoryPort) -> None:
         self._repository = repository
 
-    def create(self, title: str, description: str) -> Todo:
+    async def create(self, title: str, description: str) -> Todo:
         todo = Todo(title=title, description=description)
-        self._repository.save(todo)
+        await self._repository.save(todo)
         return todo
 
-    def get(self, todo_id: str) -> Todo:
-        return self._repository.find_by_id(todo_id)
+    async def get(self, todo_id: str) -> Todo:
+        todo = await self._repository.find_by_id(todo_id)
+        if todo is None:
+            raise ResourceNotFoundException(f"Todo '{todo_id}' not found", code="TODO_NOT_FOUND")
+        return todo
 
-    def list_all(self) -> list[Todo]:
-        return self._repository.find_all()
+    async def list_all(self) -> list[Todo]:
+        return await self._repository.find_all()
 
-    def toggle_complete(self, todo_id: str) -> Todo:
-        todo = self._repository.find_by_id(todo_id)
+    async def toggle_complete(self, todo_id: str) -> Todo:
+        todo = await self.get(todo_id)
         todo.completed = not todo.completed
-        self._repository.save(todo)
+        await self._repository.save(todo)
         return todo
 
-    def delete(self, todo_id: str) -> None:
-        self._repository.delete(todo_id)
+    async def delete(self, todo_id: str) -> None:
+        await self._repository.delete(todo_id)
 {% endif %}

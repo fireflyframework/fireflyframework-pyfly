@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.16 (2026-06-05)
+
+### Fixed
+
+- **The `hexagonal` archetype now actually wires its ports.** The generated app
+  defined inbound (use-case) and outbound (repository) ports that **nothing
+  implemented** — `resolve(TodoRepositoryPort)` raised `NoSuchBeanError`, the
+  ports were dead code, and `TodoService`'s docstring "Implements the inbound
+  ports" was false (the DI scanner binds ports by MRO, so an adapter must inherit
+  the port). Now the application service implements the four inbound use-case
+  ports and the in-memory adapter implements the outbound repository port, so both
+  resolve and the architecture is genuinely hexagonal. The use-case boundary is
+  async across all variants (in-memory / relational / document) for consistency.
+- **Generated hexagonal code is `mypy --strict`-clean and handles not-found.** The
+  data-relational / data-document variants dereferenced `find_by_id()`'s
+  `T | None` result without a check (a `mypy` error and a latent `AttributeError`
+  on a missing id); they now raise `ResourceNotFoundException` (→ 404).
+- **DTO id type fixed.** `TodoResponseDTO.id` was `int` in the relational variant
+  while the domain `Todo.id` is always `str`; it is now `str` in every variant.
+
+These surfaced in an audit while validating the `implement-hexagonal-adapter` skill
+(which validated clean — DI resolves a Protocol/ABC outbound port to its adapter,
+the keystone capability for the pattern; zero/multiple-implementation cases raise
+clear `NoSuchBeanError` / `NoUniqueBeanError`).
+
+---
+
 ## v26.06.15 (2026-06-05)
 
 ### Fixed
