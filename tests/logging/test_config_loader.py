@@ -41,3 +41,33 @@ def test_apply_missing_returns_false():
 
 def test_apply_empty_path_returns_false():
     assert apply_external_config("") is False
+
+
+def test_apply_fileconfig_ini(tmp_path: pathlib.Path):
+    """An ``.ini`` file in ``logging.config.fileConfig`` format is applied and returns True."""
+    ini = tmp_path / "logging.ini"
+    ini.write_text(
+        "[loggers]\n"
+        "keys=root\n"
+        "\n"
+        "[handlers]\n"
+        "keys=console\n"
+        "\n"
+        "[formatters]\n"
+        "keys=simple\n"
+        "\n"
+        "[logger_root]\n"
+        "level=DEBUG\n"
+        "handlers=console\n"
+        "\n"
+        "[handler_console]\n"
+        "class=StreamHandler\n"
+        "level=DEBUG\n"
+        "formatter=simple\n"
+        "args=(sys.stderr,)\n"
+        "\n"
+        "[formatter_simple]\n"
+        "format=%%(asctime)s %%(name)s %%(levelname)s %%(message)s\n"
+    )
+    assert apply_external_config(str(ini)) is True
+    assert logging.getLogger().level == logging.DEBUG

@@ -31,3 +31,10 @@ def test_aliases_and_truncation():
 def test_unknown_tokens_pass_through():
     fmt, _ = compile_pattern("LIT %m DONE")
     assert fmt == "LIT %(message)s DONE"
+
+
+def test_bare_date_token_no_braces():
+    """Bare ``%d`` (without a ``{format}`` suffix) maps to ``%(asctime)s`` with datefmt=None."""
+    fmt, datefmt = compile_pattern("%d %p - %m")
+    assert fmt == "%(asctime)s %(levelname)s - %(message)s"
+    assert datefmt is None
