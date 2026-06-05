@@ -73,7 +73,7 @@ class IdpController:
 
     @post_mapping("/login")
     async def login(self, body: Valid[Body[LoginBody]]) -> dict[str, Any]:
-        req = cast(LoginBody, body)
+        req = body
         result = await self._idp.login(
             LoginRequest(username=req.username, password=req.password, mfa_code=req.mfa_code)
         )
@@ -81,24 +81,24 @@ class IdpController:
 
     @post_mapping("/refresh")
     async def refresh(self, body: Valid[Body[TokenBody]]) -> dict[str, Any]:
-        result = await self._idp.refresh(cast(TokenBody, body).token)
+        result = await self._idp.refresh(body.token)
         return cast(dict[str, Any], _to_dict(result))
 
     @post_mapping("/logout")
     async def logout(self, body: Valid[Body[TokenBody]]) -> dict[str, bool]:
-        ok = await self._idp.logout(cast(TokenBody, body).token)
+        ok = await self._idp.logout(body.token)
         return {"success": ok}
 
     @post_mapping("/introspect")
     async def introspect(self, body: Valid[Body[TokenBody]]) -> dict[str, Any]:
-        result = await self._idp.introspect(cast(TokenBody, body).token)
+        result = await self._idp.introspect(body.token)
         return cast(dict[str, Any], _to_dict(result))
 
     # -- Admin: users -------------------------------------------------------
 
     @post_mapping("/admin/users")
     async def create_user(self, body: Valid[Body[CreateUserBody]]) -> dict[str, Any]:
-        req = cast(CreateUserBody, body)
+        req = body
         user = IdpUser(
             username=req.username,
             email=req.email,
@@ -111,29 +111,29 @@ class IdpController:
 
     @get_mapping("/admin/users/{user_id}")
     async def get_user(self, user_id: PathVar[str]) -> dict[str, Any] | None:
-        user = await self._idp.get_user(cast(str, user_id))
+        user = await self._idp.get_user(user_id)
         return _to_dict(user) if user is not None else None
 
     @get_mapping("/admin/users")
-    async def list_users(self, limit: QueryParam[int] = 100) -> list[dict[str, Any]]:  # type: ignore[assignment]
-        users = await self._idp.list_users(limit=int(cast(int, limit)))
+    async def list_users(self, limit: QueryParam[int] = 100) -> list[dict[str, Any]]:
+        users = await self._idp.list_users(limit=int(limit))
         return [cast(dict[str, Any], _to_dict(u)) for u in users]
 
     @delete_mapping("/admin/users/{user_id}")
     async def delete_user(self, user_id: PathVar[str]) -> dict[str, bool]:
-        ok = await self._idp.delete_user(cast(str, user_id))
+        ok = await self._idp.delete_user(user_id)
         return {"success": ok}
 
     # -- Admin: roles -------------------------------------------------------
 
     @post_mapping("/admin/users/{user_id}/roles/{role}")
     async def assign_role(self, user_id: PathVar[str], role: PathVar[str]) -> dict[str, bool]:
-        ok = await self._idp.assign_role(cast(str, user_id), cast(str, role))
+        ok = await self._idp.assign_role(user_id, role)
         return {"success": ok}
 
     @delete_mapping("/admin/users/{user_id}/roles/{role}")
     async def revoke_role(self, user_id: PathVar[str], role: PathVar[str]) -> dict[str, bool]:
-        ok = await self._idp.revoke_role(cast(str, user_id), cast(str, role))
+        ok = await self._idp.revoke_role(user_id, role)
         return {"success": ok}
 
     @get_mapping("/admin/roles")
