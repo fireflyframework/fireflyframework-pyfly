@@ -94,6 +94,13 @@ class PyFlyApplication:
         self._description: str = getattr(app_class, "__pyfly_app_description__", "")
         self._scan_packages: list[str] = getattr(app_class, "__pyfly_scan_packages__", [])
         self._startup_time: float = 0.0
+        # Web runtime info, populated by the ASGI lifespan in a generated main.py.
+        # Declared here (typed) so a scaffolded entry point that assigns them stays
+        # ``mypy --strict`` clean; empty defaults fall back to config when unset.
+        self._route_metadata: list[Any] = []
+        self._docs_enabled: bool = False
+        self._host: str = ""
+        self._port: int = 0
 
         # 1a. Compute starter property defaults from any @enable_*_stack
         #     decorators on the application class. These flow into the
@@ -314,10 +321,10 @@ class PyFlyApplication:
 
     def _log_routes_and_docs(self) -> None:
         """Log mapped endpoints and documentation URLs (Spring Boot style)."""
-        route_metadata = getattr(self, "_route_metadata", [])
-        docs_enabled = getattr(self, "_docs_enabled", False)
-        host = getattr(self, "_host", None) or str(self.config.get("pyfly.web.host", "0.0.0.0"))
-        port = getattr(self, "_port", None) or int(self.config.get("pyfly.web.port", 8080))
+        route_metadata = self._route_metadata
+        docs_enabled = self._docs_enabled
+        host = self._host or str(self.config.get("pyfly.web.host", "0.0.0.0"))
+        port = self._port or int(self.config.get("pyfly.web.port", 8080))
 
         if route_metadata:
             self._logger.info("mapped_endpoints", count=len(route_metadata))

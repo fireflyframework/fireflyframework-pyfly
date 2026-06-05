@@ -1,8 +1,10 @@
 """ASGI entry point — bootstraps PyFly and creates the web server."""
 
-from pathlib import Path
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from starlette.applications import Starlette
 from starlette.staticfiles import StaticFiles
 
 from pyfly.core import PyFlyApplication
@@ -16,7 +18,7 @@ _static_dir = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
-async def _lifespan(app):
+async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
     _pyfly._route_metadata = getattr(app.state, "pyfly_route_metadata", [])
     _pyfly._docs_enabled = getattr(app.state, "pyfly_docs_enabled", False)
