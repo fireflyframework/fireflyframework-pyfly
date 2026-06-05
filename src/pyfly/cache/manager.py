@@ -75,3 +75,51 @@ class CacheManager:
             logger.warning("Primary cache failed for CLEAR")
 
         await self._fallback.clear()
+
+    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
+        """Store only if absent; mirror to both caches."""
+        result = False
+        try:
+            result = await self._primary.put_if_absent(key, value, ttl=ttl)
+        except Exception:
+            logger.warning("Primary cache failed for PUT_IF_ABSENT '%s', using fallback only", key)
+
+        fallback_result = await self._fallback.put_if_absent(key, value, ttl=ttl)
+        return result or fallback_result
+
+    async def evict_by_prefix(self, prefix: str) -> int:
+        """Evict matching keys from both caches; return the total removed."""
+        primary_count = 0
+        try:
+            primary_count = await self._primary.evict_by_prefix(prefix)
+        except Exception:
+            logger.warning("Primary cache failed for EVICT_BY_PREFIX '%s'", prefix)
+
+        fallback_count = await self._fallback.evict_by_prefix(prefix)
+        return primary_count + fallback_count
+
+    async def exists(self, key: str) -> bool:
+        """True if either cache holds the key."""
+        try:
+            if await self._primary.exists(key):
+                return True
+        except Exception:
+            logger.warning("Primary cache failed for EXISTS '%s', falling back", key)
+
+        return await self._fallback.exists(key)
+
+    async def start(self) -> None:
+        """Start both cache adapters."""
+        for adapter in (self._primary, self._fallback):
+            try:
+                await adapter.start()
+            except Exception:
+                logger.warning("A cache adapter failed to start")
+
+    async def stop(self) -> None:
+        """Stop both cache adapters."""
+        for adapter in (self._primary, self._fallback):
+            try:
+                await adapter.stop()
+            except Exception:
+                logger.warning("A cache adapter failed to stop")

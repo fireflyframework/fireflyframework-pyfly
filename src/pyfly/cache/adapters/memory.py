@@ -16,19 +16,26 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from datetime import timedelta
 from typing import Any
 
 
 class InMemoryCache:
-    """In-memory cache with optional TTL support.
+    """In-memory cache with optional TTL and LRU bounding.
 
     Suitable for development, testing, and single-process applications.
     Also serves as the default fallback in CacheManager.
+
+    Args:
+        max_size: When set, the cache holds at most this many entries and evicts
+            the least-recently-used entry on overflow. ``None`` (default) leaves
+            the cache unbounded — rely on TTLs to bound memory.
     """
 
-    def __init__(self) -> None:
-        self._store: dict[str, tuple[Any, float | None]] = {}
+    def __init__(self, max_size: int | None = None) -> None:
+        self._store: OrderedDict[str, tuple[Any, float | None]] = OrderedDict()
+        self._max_size = max_size
         self._hits = 0
         self._misses = 0
         self._evictions = 0
@@ -46,15 +53,21 @@ class InMemoryCache:
             self._misses += 1
             return None
 
+        self._store.move_to_end(key)  # mark most-recently-used (LRU)
         self._hits += 1
         return value
 
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
-        """Store a value with optional TTL."""
+        """Store a value with optional TTL, evicting the LRU entry when full."""
         expires_at = None
         if ttl is not None:
             expires_at = time.monotonic() + ttl.total_seconds()
         self._store[key] = (value, expires_at)
+        self._store.move_to_end(key)
+        if self._max_size is not None:
+            while len(self._store) > self._max_size:
+                self._store.popitem(last=False)  # evict least-recently-used
+                self._evictions += 1
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
         """Store *value* only if *key* is absent — atomic under asyncio (audit #75)."""
@@ -98,7 +111,7 @@ class InMemoryCache:
         return {
             "size": active,
             "type": "memory",
-            "max_size": None,
+            "max_size": self._max_size,
             "requests": requests,
             "hits": self._hits,
             "misses": self._misses,

@@ -26,6 +26,39 @@ from pyfly.cache.ports.outbound import CacheAdapter
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+def _require_async(func: Callable[..., Any], decorator_name: str) -> None:
+    """Reject a sync target with a clear error at decoration time.
+
+    Cache adapters are async, so the wrappers must ``await`` the backend; a sync
+    target would otherwise fail with a cryptic ``await`` ``TypeError`` at call
+    time. Make a synchronous function an explicit, immediate error instead.
+    """
+    if not inspect.iscoroutinefunction(func):
+        raise TypeError(
+            f"{decorator_name} requires an async function; "
+            f"'{func.__qualname__}' is synchronous (cache adapters are async-only)."
+        )
+
+
+def _resolve_key(func: Callable[..., Any], key: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Resolve a ``{param}`` key template against the call's bound arguments.
+
+    The cache key must uniquely identify the value *within its backend*: the
+    backend instance plus this key form the cache namespace. Reuse the same
+    template across methods only when they refer to the same logical entry — that
+    is what lets a ``@cache_evict`` invalidate a ``@cacheable`` entry; two
+    unrelated methods sharing one backend must use distinct templates.
+    """
+    bound = inspect.signature(func).bind(*args, **kwargs)
+    bound.apply_defaults()
+    try:
+        return key.format(**bound.arguments)
+    except (KeyError, IndexError) as exc:
+        raise ValueError(
+            f"Cache key template {key!r} for '{func.__qualname__}' references unknown parameter {exc}."
+        ) from exc
+
+
 def cache(
     backend: CacheAdapter,
     key: str,
@@ -44,13 +77,11 @@ def cache(
     """
 
     def decorator(func: F) -> F:
+        _require_async(func, "@cache/@cacheable")
+
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # Resolve the cache key from function arguments
-            sig = inspect.signature(func)
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            resolved_key = key.format(**bound.arguments)
+            resolved_key = _resolve_key(func, key, args, kwargs)
 
             # Check cache. A present-but-None entry is a hit (null caching /
             # cache-penetration protection), distinguished via exists (audit #80).
@@ -101,17 +132,15 @@ def cache_evict(
     """
 
     def decorator(func: F) -> F:
+        _require_async(func, "@cache_evict")
+
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             result = await func(*args, **kwargs)
             if all_entries:
                 await backend.clear()
             else:
-                sig = inspect.signature(func)
-                bound = sig.bind(*args, **kwargs)
-                bound.apply_defaults()
-                resolved_key = key.format(**bound.arguments)
-                await backend.evict(resolved_key)
+                await backend.evict(_resolve_key(func, key, args, kwargs))
             return result
 
         return wrapper  # type: ignore[return-value]
@@ -137,14 +166,12 @@ def cache_put(
     """
 
     def decorator(func: F) -> F:
+        _require_async(func, "@cache_put")
+
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             result = await func(*args, **kwargs)
-            sig = inspect.signature(func)
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            resolved_key = key.format(**bound.arguments)
-            await backend.put(resolved_key, result, ttl=ttl)
+            await backend.put(_resolve_key(func, key, args, kwargs), result, ttl=ttl)
             return result
 
         return wrapper  # type: ignore[return-value]
