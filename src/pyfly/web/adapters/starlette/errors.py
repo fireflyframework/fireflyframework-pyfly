@@ -51,6 +51,24 @@ from pyfly.kernel.exceptions import (
     ValidationException,
 )
 
+
+def _json_safe(value: Any) -> Any:
+    """Coerce *value* into a JSON-serializable form, stringifying anything
+    ``json.dumps`` cannot handle.
+
+    Pydantic validation errors embed non-serializable members in ``ctx`` (e.g.
+    the ``ValueError`` raised by a custom field validator); without this the
+    error envelope would crash to a bare 500 instead of rendering the 422.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 # Exception -> HTTP status code mapping (most specific first)
 _STATUS_MAP: dict[type, int] = {
     # Business
@@ -139,7 +157,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             }
         }
         if exc.context:
-            body["error"]["context"] = exc.context
+            body["error"]["context"] = _json_safe(exc.context)
     else:
         status = 500
         body = {

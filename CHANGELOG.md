@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.14 (2026-06-05)
+
+### Fixed
+
+- **Validator-raised errors now return 422, not a bare 500.** When a Pydantic
+  `field_validator`/`model_validator` raised `ValueError` — which is exactly how
+  the framework's own `valid_iban` / `valid_currency_code` markers work — Pydantic
+  embedded the raw `ValueError` in the error `ctx`. The global handler dumped the
+  exception context verbatim and `json.dumps` crashed, so the client got an empty
+  500 instead of the structured 422. The error envelope now coerces the context to
+  a JSON-safe form (stringifying anything non-serializable), so it always renders.
+- **`is_valid_amount` no longer crashes on non-finite floats.** `inf` / `-inf` /
+  `NaN` raised `OverflowError`/`ValueError` (surfacing as a 500 inside a validator);
+  they are now rejected as invalid.
+- **`@validator` / `@validate_input` work on sync functions.** Both unconditionally
+  `await`-ed the target, so decorating a synchronous function raised
+  `TypeError: object ... can't be used in 'await' expression`. They now adapt to the
+  target (sync stays sync, async stays async).
+- **`@validate_input` no longer silently skips non-dict input.** A value that was
+  neither a `dict` nor a model instance passed through unvalidated; it is now
+  rejected with a `ValidationException`.
+- **Visa card pattern tightened** to valid lengths (13/16/19 digits) instead of
+  also accepting 14/17.
+
+These surfaced in an audit while validating the `implement-validation` skill (which
+itself validated clean — invalid input is genuinely rejected). The IBAN mod-97 and
+Luhn algorithms were confirmed correct.
+
+---
+
 ## v26.06.13 (2026-06-05)
 
 ### Security
