@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.06 (2026-06-05)
+
+### Fixed
+
+- **Web services boot without the `security` extra.** Both web adapters
+  (`pyfly.web.adapters.starlette` and `pyfly.web.adapters.fastapi`) collected
+  OAuth2 login routes during `create_app()` via an **unconditional**
+  `from pyfly.security.oauth2.login import OAuth2LoginHandler`. That module imports
+  `pyjwt` at load time, so a `pyfly[web]`-only install (no `pyfly[security]`) —
+  exactly what `pyfly new --archetype web-api` / `fastapi-api` produces — crashed
+  at app-build time with `ModuleNotFoundError: No module named 'jwt'`. The import is
+  now lazy and guarded (`try/except ImportError`): a web-only service boots cleanly,
+  and OAuth2 login routes still mount when `pyfly[security]` is installed and an
+  `OAuth2LoginHandler` bean is registered. Regression test:
+  `tests/web/test_web_only_boot.py`.
+
+---
+
 ## v26.06.05 (2026-06-05)
 
 ### Fixed
