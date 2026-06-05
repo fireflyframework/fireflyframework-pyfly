@@ -18,7 +18,7 @@ from __future__ import annotations
 import inspect
 import typing
 from dataclasses import dataclass, field
-from typing import Any, get_args, get_origin
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -26,9 +26,8 @@ from starlette.routing import Route
 
 from pyfly.web.adapters.starlette.resolver import ParameterResolver
 from pyfly.web.adapters.starlette.response import handle_return_value
-from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam, Valid
+from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam, inspect_binding
 
-_BINDING_TYPES = {PathVar, QueryParam, Body, Header, Cookie}
 _MISSING = object()
 
 
@@ -224,32 +223,13 @@ class ControllerRegistrar:
             if hint is None:
                 continue
 
-            origin = get_origin(hint)
-
-            # Unwrap Valid[T] for OpenAPI metadata extraction
-            if origin is Valid:
-                inner_args = get_args(hint)
-                if not inner_args:
-                    continue
-                inner_hint = inner_args[0]
-                inner_origin = get_origin(inner_hint)
-                if inner_origin in _BINDING_TYPES:
-                    origin = inner_origin
-                    hint = inner_hint
-                else:
-                    # Valid[T] standalone → Body[T]
-                    origin = Body
-                    hint = Body[inner_hint]  # type: ignore[valid-type]
-
-            if origin not in _BINDING_TYPES:
+            binding, inner_type, _validate = inspect_binding(hint)
+            if binding is None:
                 continue
-
-            args = get_args(hint)
-            inner_type = args[0] if args else str
 
             default = param.default if param.default is not inspect.Parameter.empty else _MISSING
 
-            if origin is PathVar:
+            if binding is PathVar:
                 params.append(
                     {
                         "name": name,
@@ -258,7 +238,7 @@ class ControllerRegistrar:
                         "schema": {"type": _py_type_to_openapi(inner_type)},
                     }
                 )
-            elif origin is QueryParam:
+            elif binding is QueryParam:
                 p: dict[str, Any] = {
                     "name": name,
                     "in": "query",
@@ -268,7 +248,7 @@ class ControllerRegistrar:
                 if default is not _MISSING:
                     p["schema"]["default"] = default
                 params.append(p)
-            elif origin is Header:
+            elif binding is Header:
                 params.append(
                     {
                         "name": name.replace("_", "-"),
@@ -277,7 +257,7 @@ class ControllerRegistrar:
                         "schema": {"type": _py_type_to_openapi(inner_type)},
                     }
                 )
-            elif origin is Cookie:
+            elif binding is Cookie:
                 params.append(
                     {
                         "name": name,
@@ -286,7 +266,7 @@ class ControllerRegistrar:
                         "schema": {"type": _py_type_to_openapi(inner_type)},
                     }
                 )
-            elif origin is Body and isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
+            elif binding is Body and isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
                 body_model = inner_type
 
         return params, body_model

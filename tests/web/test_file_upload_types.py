@@ -5,7 +5,7 @@ from typing import get_args, get_origin
 
 import pytest
 
-from pyfly.web.params import File, UploadedFile
+from pyfly.web.params import File, UploadedFile, inspect_binding
 
 
 class TestUploadedFile:
@@ -49,13 +49,13 @@ class TestFileGeneric:
     def test_file_is_generic(self):
         """File[UploadedFile] should be introspectable."""
         hint = File[UploadedFile]
-        assert get_origin(hint) is File
+        assert inspect_binding(hint)[0] is File
         args = get_args(hint)
         assert args[0] is UploadedFile
 
     def test_file_list(self):
         """File[list[UploadedFile]] for multi-file upload."""
         hint = File[list[UploadedFile]]
-        assert get_origin(hint) is File
+        assert inspect_binding(hint)[0] is File
         inner = get_args(hint)[0]
         assert get_origin(inner) is list

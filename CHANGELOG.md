@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.07 (2026-06-05)
+
+### Fixed
+
+- **Web request-binding markers are now type-checker transparent.** `PathVar`,
+  `QueryParam`, `Body`, `Header`, `Cookie`, `File`, and `Valid` (in
+  `pyfly.web.params`) were plain `Generic[T]` classes, so `mypy --strict` saw a
+  handler parameter `order_id: PathVar[str]` as a `PathVar[str]` object rather
+  than `str` — meaning user controllers written exactly as the docs show could
+  not pass strict type-checking without `# type: ignore`/`cast`. The markers are
+  now `Annotated[T, <sentinel>]` aliases, so a type checker sees `PathVar[str]`
+  as `str` and `Valid[Body[Order]]` as `Order`, while the binder recovers the
+  source from the annotation metadata at runtime via the new
+  `pyfly.web.params.inspect_binding`. Runtime binding semantics are unchanged
+  (path/query/body/header/cookie/file resolution, `Valid[...]` validation, and
+  the `Valid[Model]` → validated-body shorthand all behave identically).
+  Internally removed the now-redundant `cast(...)`/`# type: ignore` workarounds
+  in `idp/web.py` and `transactional/rest/controllers.py`. The whole tree
+  (`mypy src/pyfly`, 607 files) and the full suite stay green.
+
+---
+
 ## v26.06.06 (2026-06-05)
 
 ### Fixed

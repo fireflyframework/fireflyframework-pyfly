@@ -24,7 +24,7 @@ discovered and mounted by the ``ControllerRegistrar``.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -100,7 +100,7 @@ class OrchestrationController:
 
     @get_mapping("/executions")
     async def list_executions(self, status: QueryParam[str | None]) -> list[dict[str, Any]]:
-        status_str = cast("str | None", status)
+        status_str = status
         if status_str:
             states = await self._persistence.find_all(status=ExecutionStatus(status_str))
         else:
@@ -111,7 +111,7 @@ class OrchestrationController:
 
     @get_mapping("/executions/{correlation_id}")
     async def get_execution(self, correlation_id: PathVar[str]) -> dict[str, Any] | None:
-        cid = cast(str, correlation_id)
+        cid = correlation_id
         state = await self._persistence.find(cid)
         return _state_to_dict(state) if state is not None else None
 
@@ -132,8 +132,8 @@ class DeadLetterController:
         execution_name: QueryParam[str | None],
         correlation_id: QueryParam[str | None],
     ) -> list[dict[str, Any]]:
-        name = cast("str | None", execution_name)
-        cid = cast("str | None", correlation_id)
+        name = execution_name
+        cid = correlation_id
         entries = await self._dlq.list(execution_name=name, correlation_id=cid)
         return [_dlq_to_dict(e) for e in entries]
 
@@ -144,19 +144,19 @@ class DeadLetterController:
 
     @get_mapping("/{entry_id}")
     async def get(self, entry_id: PathVar[str]) -> dict[str, Any] | None:
-        eid = cast(str, entry_id)
+        eid = entry_id
         entry = await self._dlq.get(eid)
         return _dlq_to_dict(entry) if entry is not None else None
 
     @post_mapping("/{entry_id}/retry")
     async def retry(self, entry_id: PathVar[str]) -> dict[str, Any]:
-        eid = cast(str, entry_id)
+        eid = entry_id
         ok = await self._dlq.mark_retried(eid)
         return {"retried": ok}
 
     @delete_mapping("/{entry_id}")
     async def delete(self, entry_id: PathVar[str]) -> dict[str, Any]:
-        eid = cast(str, entry_id)
+        eid = entry_id
         ok = await self._dlq.delete(eid)
         return {"deleted": ok}
 
@@ -173,7 +173,7 @@ class WorkflowController:
 
     @post_mapping("/start")
     async def start(self, body: Valid[Body[StartRequest]]) -> dict[str, Any]:
-        req = cast(StartRequest, body)
+        req = body
         result = await self._engine.start(req.workflow_id, req.input)
         return {
             "workflow_id": result.workflow_id,
@@ -188,7 +188,7 @@ class WorkflowController:
 
     @post_mapping("/signal")
     async def signal(self, body: Valid[Body[SignalRequest]]) -> dict[str, Any]:
-        req = cast(SignalRequest, body)
+        req = body
         ok = await self._engine.deliver_signal(req.correlation_id, req.signal, req.payload)
         return {"delivered": ok}
 

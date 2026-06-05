@@ -25,9 +25,8 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from pyfly.kernel.exceptions import InvalidRequestException
-from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, UploadedFile, Valid
+from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, UploadedFile, inspect_binding
 
-_BINDING_TYPES = {PathVar, QueryParam, Body, Header, Cookie, File}
 _MISSING = object()
 
 
@@ -45,8 +44,8 @@ class ResolvedParam:
     """Metadata for a single resolved parameter."""
 
     name: str
-    binding_type: type
-    inner_type: type
+    binding_type: Any
+    inner_type: Any
     default: Any = _MISSING
     validate: bool = False
     required: bool = True
@@ -80,32 +79,13 @@ class ParameterResolver:
                 params.append(ResolvedParam(name=name, binding_type=Request, inner_type=Request))
                 continue
 
-            origin = get_origin(hint)
-            validate = False
-
-            # Unwrap Valid[T]: peel the Valid layer to find the inner binding type
-            if origin is Valid:
-                validate = True
-                inner_args = get_args(hint)
-                if not inner_args:
-                    continue
-                inner_hint = inner_args[0]
-                inner_origin = get_origin(inner_hint)
-
-                if inner_origin in _BINDING_TYPES:
-                    # Valid[Body[T]], Valid[QueryParam[T]], etc.
-                    origin = inner_origin
-                    hint = inner_hint
-                else:
-                    # Valid[T] standalone → implies Body[T]
-                    origin = Body
-                    hint = Body[inner_hint]  # type: ignore[valid-type]
-
-            if origin not in _BINDING_TYPES:
+            # Recover the binding marker from the annotation metadata.
+            # ``inspect_binding`` peels ``Valid`` and any binding alias, handling
+            # the flattened ``Valid[Body[T]]`` -> ``Annotated[T, _BODY, _VALID]`` form.
+            binding, inner_type, validate = inspect_binding(hint)
+            if binding is None:
                 continue
 
-            args = get_args(hint)
-            inner_type = args[0] if args else str
             default = param.default if param.default is not inspect.Parameter.empty else _MISSING
             # A param is required when it has no Python default and its type does not admit None.
             # Body is validated/handled separately, so only scalar bindings enforce presence here.
@@ -114,7 +94,7 @@ class ParameterResolver:
             params.append(
                 ResolvedParam(
                     name=name,
-                    binding_type=origin,
+                    binding_type=binding,
                     inner_type=inner_type,
                     default=default,
                     validate=validate,
@@ -194,7 +174,7 @@ class ParameterResolver:
                         context={"errors": errors},
                     ) from exc
             return param.inner_type.model_validate_json(body_bytes)
-        return param.inner_type(body_bytes.decode())  # type: ignore[call-arg]
+        return param.inner_type(body_bytes.decode())
 
     def _resolve_header(self, request: Request, param: ResolvedParam) -> Any:
         header_name = param.name.replace("_", "-")

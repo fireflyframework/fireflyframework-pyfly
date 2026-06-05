@@ -11,59 +11,95 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for request binding types."""
+"""Tests for request binding types.
 
-from typing import get_args, get_origin
+The markers are ``Annotated`` aliases (mypy-transparent: a type checker sees
+``PathVar[str]`` as ``str``); the binding source is recovered at runtime from the
+annotation metadata via :func:`inspect_binding`.
+"""
 
-from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam
+from typing import get_args
 
+from pydantic import BaseModel
 
-class TestPathVar:
-    def test_generic_type(self):
-        hint = PathVar[str]
-        assert get_origin(hint) is PathVar
-        assert get_args(hint) == (str,)
-
-    def test_int_type(self):
-        hint = PathVar[int]
-        assert get_origin(hint) is PathVar
-        assert get_args(hint) == (int,)
+from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, Valid, inspect_binding
 
 
-class TestQueryParam:
-    def test_generic_type(self):
-        hint = QueryParam[int]
-        assert get_origin(hint) is QueryParam
-        assert get_args(hint) == (int,)
-
-    def test_optional_type(self):
-        hint = QueryParam[str | None]
-        assert get_origin(hint) is QueryParam
-        args = get_args(hint)
-        assert len(args) == 1
+class _Model(BaseModel):
+    name: str
 
 
-class TestBody:
-    def test_generic_type(self):
-        from pydantic import BaseModel
+class TestUnderlyingType:
+    """The underlying (mypy-visible) type is the first ``Annotated`` arg."""
 
-        class MyModel(BaseModel):
-            name: str
+    def test_pathvar_str(self):
+        assert get_args(PathVar[str])[0] is str
 
-        hint = Body[MyModel]
-        assert get_origin(hint) is Body
-        assert get_args(hint) == (MyModel,)
+    def test_pathvar_int(self):
+        assert get_args(PathVar[int])[0] is int
 
-
-class TestHeader:
-    def test_generic_type(self):
-        hint = Header[str]
-        assert get_origin(hint) is Header
-        assert get_args(hint) == (str,)
+    def test_query_optional(self):
+        # QueryParam[str | None] keeps the union as the underlying type.
+        assert get_args(QueryParam[str | None])[0] == (str | None)
 
 
-class TestCookie:
-    def test_generic_type(self):
-        hint = Cookie[str]
-        assert get_origin(hint) is Cookie
-        assert get_args(hint) == (str,)
+class TestInspectBinding:
+    """inspect_binding(hint) -> (binding_alias | None, inner_type, validate)."""
+
+    def test_pathvar(self):
+        binding, inner, validate = inspect_binding(PathVar[str])
+        assert binding is PathVar
+        assert inner is str
+        assert validate is False
+
+    def test_queryparam(self):
+        binding, inner, validate = inspect_binding(QueryParam[int])
+        assert binding is QueryParam
+        assert inner is int
+        assert validate is False
+
+    def test_body(self):
+        binding, inner, validate = inspect_binding(Body[_Model])
+        assert binding is Body
+        assert inner is _Model
+        assert validate is False
+
+    def test_header(self):
+        binding, inner, _ = inspect_binding(Header[str])
+        assert binding is Header
+        assert inner is str
+
+    def test_cookie(self):
+        binding, inner, _ = inspect_binding(Cookie[str])
+        assert binding is Cookie
+        assert inner is str
+
+    def test_file(self):
+        binding, _inner, validate = inspect_binding(File[str])
+        assert binding is File
+        assert validate is False
+
+    def test_valid_wrapping_body(self):
+        binding, inner, validate = inspect_binding(Valid[Body[_Model]])
+        assert binding is Body
+        assert inner is _Model
+        assert validate is True
+
+    def test_valid_wrapping_queryparam(self):
+        binding, inner, validate = inspect_binding(Valid[QueryParam[int]])
+        assert binding is QueryParam
+        assert inner is int
+        assert validate is True
+
+    def test_valid_standalone_implies_body(self):
+        # Valid[Model] with no binding marker resolves to a validated body.
+        binding, inner, validate = inspect_binding(Valid[_Model])
+        assert binding is Body
+        assert inner is _Model
+        assert validate is True
+
+    def test_plain_type_has_no_binding(self):
+        binding, inner, validate = inspect_binding(str)
+        assert binding is None
+        assert inner is str
+        assert validate is False
