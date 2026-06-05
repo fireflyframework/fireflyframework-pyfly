@@ -68,7 +68,7 @@ class SessionFilter(OncePerRequestFilter):
                 key=self._cookie_name,
                 value=session.id,
                 httponly=True,
-                secure=self._secure,
+                secure=self._secure or self._is_secure_request(request),
                 samesite="lax",
                 max_age=self._ttl,
             )
@@ -93,7 +93,28 @@ class SessionFilter(OncePerRequestFilter):
 
     async def _persist_session(self, session: HttpSession) -> None:
         """Save or delete the session in the store based on its state."""
+        # If the id was rotated (e.g. on login), drop the pre-rotation entry so a
+        # fixed/stale id can no longer resolve to this session (anti-fixation).
+        if session.previous_id is not None and session.previous_id != session.id:
+            await self._store.delete(session.previous_id)
+
         if session.invalidated:
             await self._store.delete(session.id)
         elif session.modified:
             await self._store.save(session.id, session.get_data(), self._ttl)
+
+    @staticmethod
+    def _is_secure_request(request: Any) -> bool:
+        """Whether the request arrived over HTTPS (honoring ``X-Forwarded-Proto``).
+
+        Sets the cookie ``Secure`` attribute automatically in production (HTTPS)
+        without breaking plain-HTTP local development.
+        """
+        headers = getattr(request, "headers", None)
+        forwarded = ""
+        if headers is not None and hasattr(headers, "get"):
+            forwarded = headers.get("x-forwarded-proto", "")
+        if forwarded:
+            return str(forwarded).split(",")[0].strip().lower() == "https"
+        url = getattr(request, "url", None)
+        return url is not None and getattr(url, "scheme", "") == "https"

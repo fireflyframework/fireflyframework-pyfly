@@ -26,6 +26,22 @@ _logger = logging.getLogger(__name__)
 _KEY_PREFIX = "pyfly:session:"
 _TYPE_KEY = "__pyfly_type__"
 
+# Tagged dataclass types allowed to be reconstructed from session JSON on read.
+# Restricting this prevents an arbitrary-object instantiation gadget if the
+# session store is ever attacker-writable. Framework types are pre-registered;
+# applications opt their own session-stored dataclasses in via allow_session_type.
+_ALLOWED_TYPE_TAGS: set[str] = {"pyfly.security.context:SecurityContext"}
+
+
+def allow_session_type(cls: type) -> None:
+    """Allow *cls* (a dataclass) to be rehydrated from the Redis session store.
+
+    Only allowlisted tagged types are reconstructed on read; any other tagged
+    value is returned as a plain dict. Call this once at startup for a custom
+    dataclass an application stores in the session.
+    """
+    _ALLOWED_TYPE_TAGS.add(f"{cls.__module__}:{cls.__qualname__}")
+
 
 def _json_default(obj: Any) -> Any:
     """Encode dataclass session attributes (e.g. SecurityContext) with a type tag.
@@ -41,12 +57,20 @@ def _json_default(obj: Any) -> Any:
 
 
 def _json_object_hook(d: dict[str, Any]) -> Any:
-    """Rehydrate a tagged dataclass dict back into its original type on read."""
+    """Rehydrate an allowlisted tagged dataclass dict into its original type.
+
+    A tag that is not on the allowlist is NOT imported or instantiated — the
+    plain dict is returned instead — to avoid an arbitrary-object instantiation
+    gadget from session data.
+    """
     tag = d.get(_TYPE_KEY)
     if not tag:
         return d
-    module_name, _, qualname = tag.partition(":")
     payload = {k: v for k, v in d.items() if k != _TYPE_KEY}
+    if tag not in _ALLOWED_TYPE_TAGS:
+        _logger.warning("Refusing to rehydrate non-allowlisted session type %r", tag)
+        return payload
+    module_name, _, qualname = tag.partition(":")
     try:
         obj: Any = importlib.import_module(module_name)
         for part in qualname.split("."):
