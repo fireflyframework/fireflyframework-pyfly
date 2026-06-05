@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -30,23 +31,44 @@ F = TypeVar("F", bound=Callable[..., Any])
 def validate_input(model: type[BaseModel], param: str) -> Callable[[F], F]:
     """Decorator that validates a keyword argument against a Pydantic model.
 
-    If the argument is a dict, it's validated and replaced with the model instance.
-    If it's already an instance of the model, it passes through.
+    A ``dict`` is validated and replaced with the model instance; a value that is
+    already an instance of *model* passes through; any other non-``None`` value is
+    rejected with a :class:`ValidationException` (rather than silently passing
+    through unvalidated). Works on both sync and async target functions.
 
     Args:
         model: Pydantic model class to validate against.
         param: Name of the keyword argument to validate.
     """
 
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            value = kwargs.get(param)
-            if value is not None and isinstance(value, dict):
-                kwargs[param] = validate_model(model, value)
-            return await func(*args, **kwargs)
+    def _coerce(kwargs: dict[str, Any]) -> None:
+        value = kwargs.get(param)
+        if value is None or isinstance(value, model):
+            return
+        if isinstance(value, dict):
+            kwargs[param] = validate_model(model, value)
+            return
+        raise ValidationException(
+            f"Invalid value for '{param}': expected {model.__name__} or a dict",
+            code="VALIDATION_ERROR",
+        )
 
-        return wrapper  # type: ignore[return-value]
+    def decorator(func: F) -> F:
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                _coerce(kwargs)
+                return await func(*args, **kwargs)
+
+            return async_wrapper  # type: ignore[return-value]
+
+        @functools.wraps(func)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            _coerce(kwargs)
+            return func(*args, **kwargs)
+
+        return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -57,8 +79,9 @@ def validator(
 ) -> Callable[[F], F]:
     """Decorator that validates function arguments with a predicate.
 
-    The predicate receives the same positional arguments as the decorated
-    function. If it returns False, a ValidationException is raised.
+    The predicate receives the same arguments as the decorated function. If it
+    returns ``False`` a :class:`ValidationException` is raised. Works on both sync
+    and async target functions.
 
     Args:
         predicate: Function that returns True if valid.
@@ -66,12 +89,22 @@ def validator(
     """
 
     def decorator(func: F) -> F:
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                if not predicate(*args, **kwargs):
+                    raise ValidationException(message, code="VALIDATION_ERROR")
+                return await func(*args, **kwargs)
+
+            return async_wrapper  # type: ignore[return-value]
+
         @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             if not predicate(*args, **kwargs):
                 raise ValidationException(message, code="VALIDATION_ERROR")
-            return await func(*args, **kwargs)
+            return func(*args, **kwargs)
 
-        return wrapper  # type: ignore[return-value]
+        return sync_wrapper  # type: ignore[return-value]
 
     return decorator

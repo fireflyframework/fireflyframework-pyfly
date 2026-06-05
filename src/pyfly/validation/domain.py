@@ -9,6 +9,7 @@ when the input is valid.  Callable shortcuts let you build pydantic
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 
@@ -111,7 +112,7 @@ _ISO_4217 = frozenset(_ISO_4217_CODES.split())
 
 # Card-scheme prefix patterns (audit #192).
 _CARD_SCHEMES = (
-    re.compile(r"^4\d{12}(\d{3})?(\d)?$"),  # Visa
+    re.compile(r"^4(\d{12}|\d{15}|\d{18})$"),  # Visa (13, 16, or 19 digits)
     re.compile(r"^(5[1-5]\d{14}|2(2[2-9]\d{12}|[3-6]\d{13}|7[01]\d{12}|720\d{12}))$"),  # Mastercard
     re.compile(r"^3[47]\d{13}$"),  # Amex
     re.compile(r"^(6011\d{12}|65\d{14}|64[4-9]\d{13})$"),  # Discover
@@ -184,6 +185,8 @@ def is_valid_amount(value: object, *, allow_zero: bool = False, max_digits: int 
     try:
         decimal_value = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
+        return False
+    if not math.isfinite(decimal_value):  # reject inf / -inf / NaN, never crash
         return False
     if decimal_value < 0:
         return False
