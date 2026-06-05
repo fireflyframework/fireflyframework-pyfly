@@ -57,6 +57,11 @@ class RedactionFilter(logging.Filter):
         super().__init__()
         self._redactor = redactor
         self._deny = set(deny_fields)
+        # ``allow_fields`` is accepted for call-site symmetry with
+        # ``make_structlog_redactor`` but is intentionally unused: this filter
+        # redacts the fully-rendered message string, where per-field scoping has
+        # no meaning. Field-level allow-listing applies only on the structlog path.
+        _ = allow_fields
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:

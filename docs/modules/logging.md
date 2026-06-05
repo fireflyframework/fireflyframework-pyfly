@@ -125,7 +125,7 @@ Full key reference for `pyfly.logging.*` (values shown are defaults):
 | `file.path` | string | `""` | Directory for the file appender (created if absent) |
 | `rolling.max-size` | string | `10MB` | Max size per file before rotation (`KB`/`MB`/`GB`) |
 | `rolling.max-history` | integer | `7` | Number of rotated files to keep |
-| `rolling.total-size-cap` | string | `""` | Total cap for all rotated files (optional) |
+| `rolling.total-size-cap` | string | `""` | Reserved for forward-compatibility; **accepted but not yet enforced** (Python's `RotatingFileHandler` has no total-size cap — use `max-history` to bound retention) |
 | `config` | string | `""` | Path to an external `dictConfig` YAML/JSON or `fileConfig` INI |
 
 Example YAML:
@@ -169,8 +169,11 @@ Set `pyfly.logging.config` to a path to delegate entirely to an external file:
 - **INI** — loaded via `logging.config.fileConfig` (standard `[loggers]`/`[handlers]`/`[formatters]` sections)
 
 If the file is missing or fails to parse, the adapter logs a warning and falls
-back to its inline configuration. PyFly continues to attach the PII redaction
-filter even when an external config is used.
+back to its inline configuration. PyFly attaches the PII redaction filter to
+whatever handlers the external config installs. If the external config installs
+**no** handlers on the root logger, PyFly does not add any — this is intentional
+"you took full control" behavior (per-logger `level.*` overrides are still
+applied, but redaction only covers handlers that exist).
 
 The admin dashboard's **Loggers** view and the `/actuator/loggers` endpoint let
 you inspect and change levels at runtime.
@@ -200,7 +203,9 @@ message for sensitive entities before writing to any output.
 Default entities detected by the regex engine:
 
 `EMAIL`, `CREDIT_CARD` (Luhn-validated), `IBAN`, `US_SSN`, `JWT`,
-`BEARER_TOKEN`, `URL_CREDENTIALS`, `PHONE`, `IPV4`.
+`BEARER_TOKEN`, `URL_CREDENTIALS`, `PHONE`. (`IPV4` and `IPV6` patterns also
+ship but are **off by default** — IP addresses are common in logs and redacting
+them is often undesirable; enable them via `redaction.entities` if you need them.)
 
 ### Upgrading to Presidio (NER-based redaction)
 
