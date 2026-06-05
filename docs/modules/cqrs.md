@@ -131,7 +131,7 @@ class GetOrderQuery(Query[dict | None]):
 | `get_timestamp()` | `datetime` | UTC creation time. |
 | `get_metadata()` | `dict[str, Any]` | Arbitrary metadata. |
 | `is_cacheable()` / `set_cacheable(bool)` | `bool` | Whether results can be cached (default `True`). |
-| `get_cache_key()` | `str \| None` | Cache key (defaults to class name). |
+| `get_cache_key()` | `str \| None` | Cache key. For dataclass subclasses: `ClassName:sha256_hex16(fields)` — a stable SHA-256 digest so the same query maps to the same key across processes. For non-dataclass subclasses: the class name. Override to provide a fully custom key. |
 
 Queries share the same `validate()`, `authorize()`, and `authorize_with_context(ctx)` hooks as commands.
 
@@ -471,8 +471,10 @@ from pyfly.cqrs.tracing.correlation import CorrelationContext
 | `extract_context_from_headers(headers)` | Restore from inbound headers. |
 | `clear()` | Reset all context vars. |
 
-> **Key Point:** Both buses automatically set the correlation ID at the
-> start of every pipeline execution.
+> **Key Point:** Both buses set the correlation ID at the start of every
+> pipeline execution and restore the prior correlation ID in a `finally`
+> block, so an outer (e.g. per-request) correlation ID is never clobbered
+> by nested command dispatches.
 
 ---
 
@@ -623,6 +625,10 @@ these beans into the DI container:
 | `command_bus` | `DefaultCommandBus` |
 | `query_cache_adapter` | `QueryCacheAdapter` |
 | `query_bus` | `DefaultQueryBus` |
+
+`cqrs_metrics_service` optionally injects a `MetricsRegistry` bean from the
+observability module; when no registry is present all recording methods are
+silent no-ops.
 
 > **Key Point:** Inject `CommandBus` or `QueryBus` by type. The DI
 > container resolves all dependencies automatically.

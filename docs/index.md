@@ -266,6 +266,8 @@ PyFly is organized into four layers:
 | **Kernel** | Exception hierarchy, structured error types | [Error Handling](modules/error-handling.md) |
 | **Container** | Dependency injection, stereotypes, bean factories | [Dependency Injection](modules/dependency-injection.md) |
 | **Context** | ApplicationContext, events, lifecycle hooks, conditions | [Dependency Injection](modules/dependency-injection.md) |
+| **Config Server** | Centralized config server + client, Spring-Cloud-Config-compatible | [Config Server](modules/config-server.md) |
+| **Starters** | Layered bundles (`enable_core_stack`, `enable_web_stack`, `enable_domain_stack`, …) | [Starters](modules/starters.md) |
 
 ### Application Layer
 
@@ -273,6 +275,8 @@ PyFly is organized into four layers:
 |--------|-------------|-------|
 | **Web** | HTTP routing, controllers, middleware, OpenAPI | [Web Layer](modules/web.md) |
 | **WebSocket** | Real-time bidirectional endpoints with `@websocket_mapping` | [WebSocket](modules/websocket.md) |
+| **WebFilters** | Request/response filter chain, built-in security and logging filters | [WebFilters](modules/web-filters.md) |
+| **Server** | Pluggable ASGI servers (Granian, Uvicorn, Hypercorn) and event loops | [Server](modules/server.md) |
 | **i18n** | Internationalisation, message bundles, locale resolution | [Internationalisation](modules/i18n.md) |
 | **Data** | Repository ports, derived queries, pagination, sorting, entity mapping | [Data Commons](modules/data.md) |
 | **Data Relational** | SQLAlchemy adapter — specifications, transactions, custom queries | [Data Relational](modules/data-relational.md) |
@@ -285,12 +289,29 @@ PyFly is organized into four layers:
 | Module | Description | Guide |
 |--------|-------------|-------|
 | **Security** | JWT, password encoding, authorization | [Security](modules/security.md) |
+| **Session** | Server-side session management, pluggable stores | [Session](modules/session.md) |
 | **Messaging** | Kafka, RabbitMQ, in-memory broker | [Messaging](modules/messaging.md) |
 | **EDA** | Event-driven architecture, event bus | [Events](modules/events.md) |
 | **Cache** | Caching decorators, Redis adapter | [Caching](modules/caching.md) |
 | **Client** | HTTP client, circuit breaker, retry | [HTTP Client](modules/client.md) |
 | **Scheduling** | Cron jobs, fixed-rate tasks | [Scheduling](modules/scheduling.md) |
 | **Resilience** | Rate limiter, bulkhead, timeout, fallback | [Resilience](modules/resilience.md) |
+| **Shell** | CLI commands, interactive REPL, `CommandLineRunner`, Click adapter | [Shell](modules/shell.md) |
+| **Transactional** | Saga, Workflow, TCC distributed transaction patterns | [Transactional Engine](modules/transactional.md) |
+| **Event Sourcing** | AggregateRoot, EventStore, snapshots, transactional outbox, projections | [Event Sourcing](modules/eventsourcing.md) |
+| **Domain (DDD)** | Entity, ValueObject, AggregateRoot, DomainEvent, Specification, DomainRepository | [Domain (DDD)](modules/domain.md) |
+| **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | [Plugins](modules/plugins.md) |
+| **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | [Rule Engine](modules/rule-engine.md) |
+
+### Integration Layer
+
+| Module | Description | Guide |
+|--------|-------------|-------|
+| **IDP** | Identity-provider port + Keycloak / AWS Cognito / Azure AD / internal-DB adapters | [IDP](modules/idp.md) |
+| **ECM** | Document storage, metadata, folders, e-signature ports + adapters | [ECM](modules/ecm.md) |
+| **Notifications** | Email / SMS / push ports + SendGrid / Twilio / Firebase / SMTP adapters | [Notifications](modules/notifications.md) |
+| **Callbacks** | Outbound webhook dispatcher with HMAC signing, retries, execution tracking | [Callbacks](modules/callbacks.md) |
+| **Webhooks** | Inbound webhook ingestion with signature validation, idempotency, listener pattern | [Webhooks](modules/webhooks.md) |
 
 ### Cross-Cutting Layer
 
@@ -298,7 +319,7 @@ PyFly is organized into four layers:
 |--------|-------------|-------|
 | **AOP** | Aspect-oriented programming | [AOP](modules/aop.md) |
 | **Observability** | Prometheus metrics, OpenTelemetry tracing | [Observability](modules/observability.md) |
-| **Logging** | Structured logging with structlog | [Observability](modules/observability.md) |
+| **Logging** | Unified structured logging, Spring-style config, PII redaction | [Logging](modules/logging.md) |
 | **Actuator** | Health checks, monitoring endpoints | [Actuator](modules/actuator.md) |
 | **Admin** | Embedded management dashboard, real-time monitoring | [Admin Dashboard](modules/admin.md) |
 | **Testing** | Test fixtures and assertions | [Testing](modules/testing.md) |
@@ -319,11 +340,16 @@ PyFly is organized into four layers:
 - [Core & Lifecycle](modules/core.md) — Application bootstrap, configuration, profiles, banner
 - [Dependency Injection](modules/dependency-injection.md) — Container, stereotypes, scopes, bean factories
 - [Configuration](modules/configuration.md) — YAML config, profiles, property binding, environment variables
+- [Config Server](modules/config-server.md) — Centralized config server, Spring-Cloud-Config-compatible client
+- [Starters](modules/starters.md) — Layered bundles, per-tier module activation, imperative API
 - [Error Handling](modules/error-handling.md) — Exception hierarchy, structured error responses
 - [Web Layer](modules/web.md) — Controllers, routing, parameter binding, middleware, CORS, OpenAPI
 - [WebSocket](modules/websocket.md) — `@websocket_mapping`, `WebSocketSession`, lifecycle hooks, route discovery
+- [WebFilters](modules/web-filters.md) — Request/response filter chain, built-in security and logging filters
+- [Server](modules/server.md) — Pluggable ASGI servers (Granian, Uvicorn, Hypercorn), event loops
 - [Internationalisation (i18n)](modules/i18n.md) — Message bundles, locale fallback, `MessageFormat` placeholders, locale resolvers
 - [Actuator](modules/actuator.md) — Health checks, beans, environment, info endpoints
+- [Custom Actuator Endpoints](modules/custom-actuator-endpoints.md) — Build your own actuator endpoints
 - [Admin Dashboard](modules/admin.md) — Embedded management dashboard, real-time monitoring, server mode
 - [Data Commons](modules/data.md) — Repository ports, derived queries, pagination, sorting, entity mapping
 - [Data Relational](modules/data-relational.md) — SQLAlchemy adapter: specifications, transactions, custom queries
@@ -331,14 +357,27 @@ PyFly is organized into four layers:
 - [Events](modules/events.md) — Event-driven architecture, domain events, application events
 - [CQRS](modules/cqrs.md) — Command/Query separation, CommandBus/QueryBus pipeline
 - [Security](modules/security.md) — JWT authentication, password encoding, authorization
+- [Session](modules/session.md) — Server-side sessions, pluggable stores (in-memory, Redis), OAuth2 integration
 - [Resilience](modules/resilience.md) — Rate limiting, bulkhead, timeout, fallback
 - [HTTP Client](modules/client.md) — Service client, circuit breaker, retry
 - [Caching](modules/caching.md) — Cache decorators, Redis adapter
+- [Shell](modules/shell.md) — CLI commands, `CommandLineRunner`, Click adapter
 - [Observability](modules/observability.md) — Metrics, tracing, health checks
+- [Logging](modules/logging.md) — Unified structured logging, Spring-style config, PII redaction
 - [Scheduling](modules/scheduling.md) — Cron jobs, fixed-rate/delay tasks
 - [AOP](modules/aop.md) — Aspect-oriented programming, pointcuts, advice
 - [Validation](modules/validation.md) — Input validation with Pydantic
 - [Testing](modules/testing.md) — Test fixtures, assertions, mock containers
+- [Transactional Engine](modules/transactional.md) — Saga, Workflow, TCC distributed transaction patterns
+- [Event Sourcing](modules/eventsourcing.md) — AggregateRoot, EventStore, snapshots, outbox, projections
+- [Domain (DDD primitives)](modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification
+- [Plugins](modules/plugins.md) — Plugin SPI, extension points, lifecycle
+- [Rule Engine](modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
+- [Callbacks (outbound)](modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
+- [Webhooks (inbound)](modules/webhooks.md) — Receive, verify, dedupe, dispatch
+- [Notifications](modules/notifications.md) — Email / SMS / push abstractions
+- [IDP (Identity Provider)](modules/idp.md) — Keycloak / AWS Cognito / Azure AD / internal-DB adapters
+- [ECM (Content Management)](modules/ecm.md) — Documents, folders, e-signature workflows
 
 ### Reference
 

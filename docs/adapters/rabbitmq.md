@@ -31,9 +31,9 @@ pyfly:
 ```python
 from pyfly.messaging import message_listener
 
-@message_listener(topic="orders", group_id="order-service")
-async def handle_order(self, event: dict) -> None:
-    print(f"Received order: {event}")
+@message_listener(topic="orders", group="order-service")
+async def handle_order(msg: Message) -> None:
+    print(f"Received order: {msg.value}")
 ```
 
 ---
@@ -46,6 +46,8 @@ async def handle_order(self, event: dict) -> None:
 | `pyfly.messaging.rabbitmq.url` | `str` | `"amqp://guest:guest@localhost/"` | RabbitMQ connection URL (AMQP) |
 
 When `provider` is `"auto"`, PyFly selects the adapter based on which library is installed. If `aio-pika` is found, the RabbitMQ adapter is used.
+
+> **Note:** The exchange name defaults to `"pyfly"` and is not configurable via `pyfly.yaml` in the auto-configured adapter. To customise it, construct `RabbitMQAdapter(url=..., exchange_name=...)` manually as a `@bean`.
 
 ---
 
@@ -62,7 +64,7 @@ Implements `MessageBrokerPort` using `aio_pika.connect_robust()`.
 
 ### Consumer Groups
 
-Consumer groups are mapped to RabbitMQ queues. Multiple instances with the same `group_id` share the queue for competing-consumer load balancing.
+Consumer groups are mapped to RabbitMQ queues. Multiple instances with the same `group` share the queue for competing-consumer load balancing.
 
 ### Lifecycle
 

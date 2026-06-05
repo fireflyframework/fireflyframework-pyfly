@@ -51,7 +51,12 @@ class OrderRepository(Repository[OrderEntity, int]):
 | `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter |
 | `pyfly.data.relational.url` | `str` | `"sqlite+aiosqlite:///pyfly.db"` | Database connection URL |
 | `pyfly.data.relational.echo` | `bool` | `false` | Log all SQL statements |
-| `pyfly.data.relational.pool_size` | `int` | `5` | Connection pool size |
+| `pyfly.data.relational.ddl-auto` | `str` | `"create"` | DDL strategy: `create`, `create-drop`, or `none` |
+| `pyfly.data.relational.pool.size` | `int` | *(driver default)* | Connection pool size (`pool_size`) |
+| `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
+| `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
+| `pyfly.data.relational.pool.recycle` | `int` | *(driver default)* | Seconds before a connection is recycled |
+| `pyfly.data.relational.pool.pre-ping` | `bool` | *(driver default)* | Issue a `SELECT 1` ping before each checkout |
 
 ### Database URLs by Driver
 

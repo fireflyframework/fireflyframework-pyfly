@@ -1197,8 +1197,10 @@ pyfly:
 | `pyfly.transactional.backpressure.success_threshold` | `int` | `2` | Successes before circuit closes. |
 | `pyfly.transactional.backpressure.wait_duration_ms` | `int` | `60000` | Wait before half-open probe. |
 
-Properties are bound via `@config_properties` to `SagaEngineProperties`,
-`TccEngineProperties`, and `BackpressureProperties`.
+`SagaEngineProperties` is bound via
+`@config_properties(prefix="pyfly.transactional.saga")`. `TccEngineProperties`
+and `BackpressureProperties` are plain dataclasses populated directly by
+auto-configuration.
 
 ---
 

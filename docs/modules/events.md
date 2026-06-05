@@ -283,11 +283,15 @@ async def create_order(customer_id: str, items: list[dict]) -> dict:
 
 #### Timing Behavior
 
-| Timing   | Publish point |
-|----------|---------------|
-| `BEFORE` | The event is published **before** the method body executes. |
-| `AFTER`  | The event is published **after** the method body returns. |
-| `BOTH`   | The event is published **twice** -- once before and once after. |
+| Timing   | Publish point | Payload |
+|----------|---------------|---------|
+| `BEFORE` | Published **before** the method body executes. | Bound method arguments. |
+| `AFTER`  | Published **after** the method body returns. | Bound arguments **plus** `{"result": <return value>}`. |
+| `BOTH`   | Published **twice** — once before and once after. | Before: arguments. After: arguments + `{"result": <return value>}`. |
+
+For `AFTER` and `BOTH`, the post-call publish augments the pre-call
+argument payload with the method's return value under the key `"result"`,
+rather than re-publishing the arguments alone.
 
 The payload is built by inspecting the method signature and serializing the
 bound arguments into a dictionary. Objects with a `__dict__` attribute are
@@ -343,13 +347,27 @@ async def update_order(order_id: str, data: dict) -> dict:
 
 ### @event_listener
 
-Registers a function as a subscriber for one or more event types. The
-subscription is established **immediately** when the decorator executes (at
-import/definition time).
+Registers a function as a subscriber for one or more event type patterns.
+The decorator supports two usage forms:
+
+**Context-driven (recommended):** Pass only the patterns. The decorator
+stamps the function with discovery metadata and the `ApplicationContext`
+auto-subscribes it to the `EventPublisher` bean during startup. No bus
+reference is needed at decoration time.
 
 ```python
 from pyfly.eda import event_listener, EventEnvelope
 
+@event_listener(["order.created", "order.updated"])
+async def handle_order_changes(envelope: EventEnvelope) -> None:
+    print(f"Event: {envelope.event_type}, Data: {envelope.payload}")
+```
+
+**Hand-wired (back-compat):** Pass a bus instance explicitly. The
+subscription is established immediately when the decorator executes (at
+import/definition time), in addition to stamping the discovery metadata.
+
+```python
 @event_listener(bus, event_types=["order.created", "order.updated"])
 async def handle_order_changes(envelope: EventEnvelope) -> None:
     print(f"Event: {envelope.event_type}, Data: {envelope.payload}")
@@ -357,20 +375,23 @@ async def handle_order_changes(envelope: EventEnvelope) -> None:
 
 #### Parameters
 
-| Parameter     | Type               | Description |
-|---------------|--------------------|-------------|
-| `bus`         | `InMemoryEventBus` | The event bus instance. |
-| `event_types` | `list[str]`        | A list of event type patterns to subscribe to. Each pattern supports glob wildcards. |
+| Parameter     | Type                           | Description |
+|---------------|--------------------------------|-------------|
+| `bus`         | `EventPublisher \| list[str]`  | The event bus instance, **or** the list of patterns when used positionally (context-driven form). |
+| `event_types` | `list[str] \| None`            | A list of event type patterns to subscribe to. Each pattern supports glob wildcards. Required when `bus` is a bus instance. |
+
+In the context-driven form, `bus` receives the pattern list as a positional
+argument (e.g. `@event_listener(["order.*"])`) and no bus reference is stored.
 
 #### Wildcard Subscriptions
 
 ```python
-@event_listener(bus, event_types=["order.*"])
+@event_listener(["order.*"])
 async def on_any_order_event(envelope: EventEnvelope) -> None:
     # Matches order.created, order.shipped, order.cancelled, etc.
     pass
 
-@event_listener(bus, event_types=["*"])
+@event_listener(["*"])
 async def on_everything(envelope: EventEnvelope) -> None:
     # Receives every event published on the bus
     pass

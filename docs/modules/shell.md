@@ -26,6 +26,7 @@ interfaces.
 5. [Explicit Overrides: @shell_option and @shell_argument](#explicit-overrides-shell_option-and-shell_argument)
    - [@shell_option](#shell_option)
    - [@shell_argument](#shell_argument)
+   - [@shell_method_availability](#shell_method_availability)
    - [Override Merge Behavior](#override-merge-behavior)
 6. [Data Models](#data-models)
    - [ShellParam](#shellparam)
@@ -308,6 +309,37 @@ def deploy(service: str) -> str:
 | `default` | `Any` | `None` | Default value when the argument is not supplied. |
 
 The decorator stores metadata in a list at `func.__pyfly_shell_arguments__`.
+
+### @shell_method_availability
+
+Link a shell command to a conditional availability checker:
+
+```python
+from pyfly.shell import shell_component, shell_method, shell_method_availability
+
+@shell_component
+class AdminCommands:
+    def __init__(self, security: SecurityContext) -> None:
+        self._security = security
+
+    def admin_available(self) -> str:
+        """Return '' if available, or a reason string if not."""
+        if self._security.has_role("ADMIN"):
+            return ""
+        return "Requires ADMIN role"
+
+    @shell_method(key="reset-db", help="Reset the database")
+    @shell_method_availability("admin_available")
+    async def reset_db(self) -> str:
+        return "Database reset!"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `checker` | `str` | Name of a method on the same `@shell_component` that returns `""` (available) or a non-empty reason string (unavailable). |
+
+When unavailable, the command is hidden from help output and blocked from
+execution. The checker name is stored at `func.__pyfly_shell_availability__`.
 
 ### Override Merge Behavior
 
@@ -965,7 +997,7 @@ async def test_shell_disabled_by_default():
 | `@ShellComponent` | `@shell_component` |
 | `@ShellMethod` | `@shell_method` |
 | `@ShellOption` | `@shell_option` |
-| `@ShellMethodAvailability` | *(not yet implemented)* |
+| `@ShellMethodAvailability` | `@shell_method_availability(checker)` |
 | `CommandLineRunner` | `CommandLineRunner` protocol |
 | `ApplicationRunner` | `ApplicationRunner` protocol |
 | `ApplicationArguments` | `ApplicationArguments` dataclass |

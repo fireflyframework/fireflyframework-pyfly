@@ -46,11 +46,12 @@ automatically discovered from the DI container.
     - [GET /actuator/loggers](#get-actuatorloggers)
     - [POST /actuator/loggers/{name}](#post-actuatorloggersname)
 17. [Metrics Endpoint](#metrics-endpoint)
-18. [Custom Actuator Endpoints](#custom-actuator-endpoints)
-19. [make_starlette_actuator_routes()](#make_starlette_actuator_routes)
-20. [Auto-Configuration](#auto-configuration)
-21. [Configuration](#configuration)
-22. [Complete Example](#complete-example)
+18. [Thread Dump Endpoint](#thread-dump-endpoint)
+19. [Custom Actuator Endpoints](#custom-actuator-endpoints)
+20. [make_starlette_actuator_routes()](#make_starlette_actuator_routes)
+21. [Auto-Configuration](#auto-configuration)
+22. [Configuration](#configuration)
+23. [Complete Example](#complete-example)
 
 ---
 
@@ -71,11 +72,15 @@ The actuator module answers all of these through standard HTTP endpoints:
 |-------------------------|-----------|---------------------------------|
 | `GET /actuator`          | GET       | HAL-style index of all enabled endpoints |
 | `GET /actuator/health`   | GET       | Aggregated application health status |
+| `GET /actuator/health/liveness` | GET | Liveness probe (indicators in liveness group) |
+| `GET /actuator/health/readiness` | GET | Readiness probe (indicators in readiness group) |
 | `GET /actuator/beans`    | GET       | Registered bean information     |
 | `GET /actuator/env`      | GET       | Active profiles                 |
 | `GET /actuator/info`     | GET       | Application metadata            |
 | `/actuator/loggers`      | GET, POST | Logger configuration and runtime level changes |
-| `GET /actuator/metrics`  | GET       | Metrics stub (disabled by default) |
+| `GET /actuator/metrics`  | GET       | Prometheus-backed metrics (enabled when `prometheus_client` is installed) |
+| `GET /actuator/prometheus` | GET     | Prometheus scrape target (text exposition format; enabled when `prometheus_client` is installed) |
+| `GET /actuator/threaddump` | GET     | Snapshot of all live threads with stack traces |
 
 ```python
 from pyfly.actuator import (
@@ -139,14 +144,18 @@ The framework default (from `pyfly-defaults.yaml`) is `enabled: false`.
 
 ## Built-in Endpoints Summary
 
-| Endpoint  | Path                | Methods   | Default State | Description                              |
-|-----------|---------------------|-----------|---------------|------------------------------------------|
-| health    | `/actuator/health`  | GET       | enabled       | Aggregated health status from all indicators |
-| beans     | `/actuator/beans`   | GET       | enabled       | Registered bean information from DI container |
-| env       | `/actuator/env`     | GET       | enabled       | Active configuration profiles            |
-| info      | `/actuator/info`    | GET       | enabled       | Application name, version, description   |
-| loggers   | `/actuator/loggers` | GET, POST | enabled       | Logger configuration and runtime level changes |
-| metrics   | `/actuator/metrics` | GET       | **disabled**  | Metrics stub for future Prometheus/OpenTelemetry integration |
+| Endpoint    | Path                     | Methods   | Default State | Description                              |
+|-------------|--------------------------|-----------|---------------|------------------------------------------|
+| health      | `/actuator/health`       | GET       | enabled       | Aggregated health status from all indicators (200 UP / 503 DOWN) |
+| health      | `/actuator/health/liveness` | GET    | enabled       | Liveness probe sub-path (Kubernetes integration) |
+| health      | `/actuator/health/readiness` | GET   | enabled       | Readiness probe sub-path (Kubernetes integration) |
+| beans       | `/actuator/beans`        | GET       | enabled       | Registered bean information from DI container |
+| env         | `/actuator/env`          | GET       | enabled       | Active configuration profiles            |
+| info        | `/actuator/info`         | GET       | enabled       | Application name, version, description   |
+| loggers     | `/actuator/loggers`      | GET, POST | enabled       | Logger configuration and runtime level changes |
+| metrics     | `/actuator/metrics`      | GET       | enabled when `prometheus_client` installed | Prometheus metrics in Micrometer JSON shape |
+| prometheus  | `/actuator/prometheus`   | GET       | enabled when `prometheus_client` installed | Prometheus text exposition scrape target |
+| threaddump  | `/actuator/threaddump`   | GET       | enabled       | Snapshot of all live threads and their stack traces |
 
 Any endpoint can be enabled or disabled individually via configuration. See
 [Per-endpoint Configuration](#per-endpoint-configuration).
@@ -258,7 +267,7 @@ pyfly:
   actuator:
     endpoints:
       metrics:
-        enabled: true     # Enable the metrics stub (disabled by default)
+        enabled: true     # Auto-enabled when prometheus_client is installed
       beans:
         enabled: false    # Disable the beans endpoint
       loggers:
@@ -419,13 +428,13 @@ from pyfly.actuator import HealthStatus
 
 @dataclass
 class HealthStatus:
-    status: str                            # "UP", "DOWN", or "DEGRADED"
+    status: str                            # "UP", "DOWN", "OUT_OF_SERVICE", or "UNKNOWN"
     details: dict[str, Any] = field(default_factory=dict)
 ```
 
 | Field     | Type              | Description                                   |
 |-----------|-------------------|-----------------------------------------------|
-| `status`  | `str`             | Health state: `"UP"`, `"DOWN"`, or `"DEGRADED"` |
+| `status`  | `str`             | Health state: `"UP"`, `"DOWN"`, `"OUT_OF_SERVICE"`, or `"UNKNOWN"` |
 | `details` | `dict[str, Any]`  | Additional information (version, type, error, etc.) |
 
 **Usage:**
@@ -437,8 +446,8 @@ HealthStatus(status="UP", details={"type": "postgresql", "version": "16.1"})
 # Unhealthy component
 HealthStatus(status="DOWN", details={"error": "Connection timed out"})
 
-# Degraded component
-HealthStatus(status="DEGRADED", details={"active_connections": 95, "max": 100})
+# Out of service (maintenance mode)
+HealthStatus(status="OUT_OF_SERVICE", details={"reason": "Scheduled maintenance"})
 ```
 
 ---
@@ -487,28 +496,16 @@ print(result.components)  # {"database": HealthStatus(...), "redis": HealthStatu
 
 The aggregator follows these rules:
 
-1. **All UP:** If every indicator reports `"UP"`, the overall status is `"UP"`.
-2. **Any DOWN:** If any indicator reports `"DOWN"`, the overall status is `"DOWN"`.
-3. **Exception:** If an indicator's `health()` method raises an exception, that
+1. **Severity order:** Overall status is the most-severe status among all indicators,
+   ranked as `DOWN > OUT_OF_SERVICE > UP > UNKNOWN`. Non-canonical statuses are
+   treated as `DOWN`.
+2. **Exception:** If an indicator's `health()` method raises an exception, that
    indicator is treated as `"DOWN"` with `details={"error": "check failed"}`.
    The exception is logged but does not crash the health check.
-4. **No indicators:** If no indicators are registered, the overall status is `"UP"`.
+3. **No indicators:** If no indicators are registered, the overall status is `"UP"`.
 
-```python
-if not self._indicators:
-    return HealthResult(status="UP")
-
-for name, indicator in self._indicators.items():
-    try:
-        status = await indicator.health()
-        components[name] = status
-        if status.status == "DOWN":
-            overall = "DOWN"
-    except Exception:
-        logger.exception("Health indicator '%s' raised an exception", name)
-        components[name] = HealthStatus(status="DOWN", details={"error": "check failed"})
-        overall = "DOWN"
-```
+Aggregation is performed by an internal `aggregate_status()` helper that returns
+the worst-ranked status present across all components.
 
 **Source:** `src/pyfly/actuator/health.py`
 
@@ -673,21 +670,26 @@ Returns information about all beans registered in the DI container.
 
 ```json
 {
-    "beans": {
-        "OrderService": {
-            "type": "order_service.services.OrderService",
-            "scope": "SINGLETON",
-            "stereotype": "service"
-        },
-        "OrderRepository": {
-            "type": "order_service.repositories.OrderRepository",
-            "scope": "SINGLETON",
-            "stereotype": "repository"
-        },
-        "OrderController": {
-            "type": "order_service.controllers.OrderController",
-            "scope": "SINGLETON",
-            "stereotype": "rest_controller"
+    "contexts": {
+        "application": {
+            "beans": {
+                "OrderService": {
+                    "type": "order_service.services.OrderService",
+                    "scope": "singleton",
+                    "stereotype": "service",
+                    "aliases": [],
+                    "resource": "order_service.services",
+                    "dependencies": ["OrderRepository"]
+                },
+                "OrderRepository": {
+                    "type": "order_service.repositories.OrderRepository",
+                    "scope": "singleton",
+                    "stereotype": "repository",
+                    "aliases": [],
+                    "resource": "order_service.repositories",
+                    "dependencies": []
+                }
+            }
         }
     }
 }
@@ -695,11 +697,14 @@ Returns information about all beans registered in the DI container.
 
 Each bean entry contains:
 
-| Field        | Description                                           |
-|-------------|-------------------------------------------------------|
-| `type`      | Fully qualified class name (`module.ClassName`)        |
-| `scope`     | Lifecycle scope: `SINGLETON`, `TRANSIENT`, or `REQUEST` |
-| `stereotype` | Stereotype: `component`, `service`, `repository`, `controller`, `rest_controller`, `configuration`, or `none` |
+| Field          | Description                                           |
+|---------------|-------------------------------------------------------|
+| `type`        | Fully qualified class name (`module.ClassName`)        |
+| `scope`       | Lifecycle scope: `singleton`, `transient`, or `request` (lowercase) |
+| `stereotype`  | Stereotype: `component`, `service`, `repository`, `controller`, `rest_controller`, `configuration`, or `none` |
+| `aliases`     | List of registered aliases (empty list when none)     |
+| `resource`    | Module where the bean class is defined                |
+| `dependencies`| List of bean names resolved from the constructor's type hints |
 
 **Source:** `src/pyfly/actuator/endpoints/beans_endpoint.py`
 
@@ -901,33 +906,90 @@ curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
 
 ## Metrics Endpoint
 
-**Endpoint:** `GET /actuator/metrics`
+**Endpoint:** `GET /actuator/metrics` and `GET /actuator/metrics/{name}`
 
-The metrics endpoint is a stub for future Prometheus and OpenTelemetry integration.
-It is **disabled by default** and must be explicitly enabled via configuration:
+The metrics endpoint exposes Prometheus registry data in a Micrometer-compatible
+JSON shape. It is **auto-configured** and enabled when `prometheus_client` is
+installed (via `MetricsActuatorAutoConfiguration`). No manual configuration is
+required to activate it.
 
-```yaml
-pyfly:
-  actuator:
-    endpoints:
-      metrics:
-        enabled: true
-```
-
-**Response format (when enabled):**
+**`GET /actuator/metrics` response format:**
 
 ```json
 {
-    "names": [],
-    "message": "Metrics endpoint stub. Configure a metrics backend to populate."
+    "names": ["http.server.requests", "jvm.memory.used", "process.cpu.usage"]
 }
 ```
 
-Once a metrics backend is integrated, this endpoint will expose application metrics
-such as request counts, response times, JVM-like runtime statistics, and custom
-counters/gauges.
+Metric names use Micrometer's dot-case convention (Prometheus stores them with
+underscores; the endpoint converts automatically).
 
-**Source:** `src/pyfly/actuator/endpoints/metrics_endpoint.py`
+**`GET /actuator/metrics/{name}` response format:**
+
+```json
+{
+    "name": "http.server.requests",
+    "baseUnit": "seconds",
+    "measurements": [
+        {"statistic": "COUNT", "value": 150.0},
+        {"statistic": "TOTAL_TIME", "value": 3.75}
+    ],
+    "availableTags": [
+        {"tag": "method", "values": ["GET", "POST"]},
+        {"tag": "status", "values": ["200", "404"]}
+    ]
+}
+```
+
+You can filter by tag using the `?tag=key:value` query parameter, e.g.
+`/actuator/metrics/http.server.requests?tag=method:GET`.
+
+The companion `/actuator/prometheus` endpoint serves the same data in the
+standard Prometheus text exposition format (`text/plain; version=0.0.4`) that
+Prometheus scrapers expect directly.
+
+**Source:** `src/pyfly/actuator/endpoints/metrics_endpoint.py`,
+`src/pyfly/actuator/endpoints/prometheus_endpoint.py`
+
+---
+
+## Thread Dump Endpoint
+
+**Endpoint:** `GET /actuator/threaddump`
+
+Returns a snapshot of all live threads and their current stack traces. Always
+enabled — requires no additional dependencies.
+
+**Response format:**
+
+```json
+{
+    "threads": [
+        {
+            "threadName": "MainThread",
+            "threadId": 140234567890,
+            "daemon": false,
+            "threadState": "RUNNABLE",
+            "stackTrace": [
+                {
+                    "className": "order_service.services",
+                    "methodName": "OrderService.process_order",
+                    "fileName": "/app/order_service/services.py",
+                    "lineNumber": 42
+                }
+            ]
+        }
+    ]
+}
+```
+
+`className` is the module's `__name__` (the closest Python analogue to a Java
+class name). `methodName` is the fully qualified function name from
+`co_qualname` (Python 3.11+) which includes the enclosing class, falling back
+to the bare `co_name` on older Python versions. Stack frames are listed oldest
+first, matching `traceback.extract_stack()` order.
+
+**Source:** `src/pyfly/actuator/endpoints/threaddump_endpoint.py`
 
 ---
 
@@ -1142,8 +1204,12 @@ pyfly:
         enabled: true                  # Enabled by default
       loggers:
         enabled: true                  # Enabled by default
+      threaddump:
+        enabled: true                  # Enabled by default
       metrics:
-        enabled: false                 # Disabled by default (stub)
+        enabled: true                  # Enabled by default when prometheus_client installed
+      prometheus:
+        enabled: true                  # Enabled by default when prometheus_client installed
 ```
 
 The framework defaults (from `pyfly-defaults.yaml`):
@@ -1345,7 +1411,7 @@ pyfly:
   actuator:
     endpoints:
       metrics:
-        enabled: true    # Opt in to the metrics stub
+        enabled: true    # Auto-enabled when prometheus_client is installed
 ```
 
 **Testing the actuator endpoints with `curl`:**
@@ -1385,12 +1451,14 @@ curl http://localhost:8080/actuator/health
 # Bean registry
 curl http://localhost:8080/actuator/beans
 # {
-#   "beans": {
-#     "DatabaseHealthIndicator": {"type": "...", "scope": "SINGLETON", "stereotype": "component"},
-#     "PaymentServiceHealthIndicator": {"type": "...", "scope": "SINGLETON", "stereotype": "component"},
-#     "GitInfoEndpoint": {"type": "...", "scope": "SINGLETON", "stereotype": "component"},
-#     "OrderService": {"type": "...", "scope": "SINGLETON", "stereotype": "service"},
-#     "OrderController": {"type": "...", "scope": "SINGLETON", "stereotype": "rest_controller"}
+#   "contexts": {
+#     "application": {
+#       "beans": {
+#         "DatabaseHealthIndicator": {"type": "...", "scope": "singleton", "stereotype": "component", "aliases": [], "resource": "...", "dependencies": []},
+#         "OrderService": {"type": "...", "scope": "singleton", "stereotype": "service", ...},
+#         "OrderController": {"type": "...", "scope": "singleton", "stereotype": "rest_controller", ...}
+#       }
+#     }
 #   }
 # }
 
@@ -1424,9 +1492,19 @@ curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
 curl http://localhost:8080/actuator/git
 # {"branch": "main", "commit": {"id": "5c6f83b", "time": "..."}, "build": {...}}
 
-# Metrics stub (only available if enabled in config)
+# Metrics (available when prometheus_client is installed)
 curl http://localhost:8080/actuator/metrics
-# {"names": [], "message": "Metrics endpoint stub. Configure a metrics backend to populate."}
+# {"names": ["http.server.requests", "process.cpu.usage", ...]}
+
+# Prometheus scrape target (text/plain exposition format)
+curl http://localhost:8080/actuator/prometheus
+# # HELP http_server_requests_seconds ...
+# # TYPE http_server_requests_seconds histogram
+# http_server_requests_seconds_bucket{...} 1.0 ...
+
+# Thread dump
+curl http://localhost:8080/actuator/threaddump
+# {"threads": [{"threadName": "MainThread", "threadId": ..., "threadState": "RUNNABLE", "stackTrace": [...]}]}
 ```
 
 **Kubernetes liveness and readiness probes:**
@@ -1440,13 +1518,13 @@ spec:
       image: order-service:1.0.0
       livenessProbe:
         httpGet:
-          path: /actuator/health
+          path: /actuator/health/liveness    # dedicated liveness sub-path
           port: 8080
         initialDelaySeconds: 10
         periodSeconds: 30
       readinessProbe:
         httpGet:
-          path: /actuator/health
+          path: /actuator/health/readiness   # dedicated readiness sub-path
           port: 8080
         initialDelaySeconds: 5
         periodSeconds: 10

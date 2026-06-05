@@ -187,14 +187,17 @@ FastAPI generates OpenAPI schemas from its own route definitions, which means th
 
 ## Middleware and Filters
 
-The FastAPI adapter reuses the same `WebFilterChainMiddleware` and built-in filters as the Starlette adapter:
+The FastAPI adapter reuses the same `WebFilterChainMiddleware` and built-in filters as the Starlette adapter. Always-active filters:
 
 | Filter | Purpose |
 |--------|---------|
-| `TransactionIdFilter` | Generates `X-Transaction-ID` for request tracing |
+| `RequestContextFilter` | Initializes request-scoped context (runs first) |
+| `CorrelationFilter` | Stamps W3C trace context and correlation headers |
+| `TransactionIdFilter` | Propagates or generates `X-Transaction-Id` |
 | `RequestLoggingFilter` | Logs request method, path, status, and duration |
 | `SecurityHeadersFilter` | Adds OWASP security headers |
-| `SecurityFilter` | JWT authentication and authorization |
+
+Opt-in filters (registered as beans) such as `SecurityFilter`, `HttpSecurityFilter`, and `CsrfFilter` are auto-discovered and added to the chain when present.
 
 Custom `WebFilter` beans registered in the DI container are auto-discovered and added to the chain, exactly as they are with the Starlette adapter.
 

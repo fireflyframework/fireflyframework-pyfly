@@ -88,7 +88,7 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
 
 PyFly's web layer is organized into three tiers:
 
-1. **Framework-agnostic core** (`pyfly.web`): Decorators (`@get_mapping`, `@post_mapping`, etc.), parameter binding types (`PathVar`, `QueryParam`, `Body`, `Header`, `Cookie`), the validation marker type (`Valid`), the `WebFilter` protocol, the `OncePerRequestFilter` base class, configuration dataclasses (`CORSConfig`, `SecurityHeadersConfig`), and the `@exception_handler` decorator. These contain no HTTP-framework-specific code and could be backed by any ASGI or WSGI framework.
+1. **Framework-agnostic core** (`pyfly.web`): Decorators (`@get_mapping`, `@post_mapping`, etc.), parameter binding types (`PathVar`, `QueryParam`, `Body`, `Header`, `Cookie`, `File`), the validation marker type (`Valid`), file upload types (`File`, `UploadedFile`), the `WebFilter` protocol, the `OncePerRequestFilter` base class, configuration dataclasses (`CORSConfig`, `SecurityHeadersConfig`), and the `@exception_handler` decorator. These contain no HTTP-framework-specific code and could be backed by any ASGI or WSGI framework.
 
 2. **Port interfaces** (`pyfly.web.ports`): The `WebServerPort` protocol defines the contract that any web server adapter must implement, and the `WebFilter` protocol defines the contract for request/response filters. These ensure that the application layer never depends directly on Starlette, Flask, or any other framework.
 
@@ -99,18 +99,24 @@ For convenience, the top-level `pyfly.web` package re-exports both the core type
 ```python
 from pyfly.web import (
     # Decorators
-    create_app, get_mapping, post_mapping, put_mapping, patch_mapping,
+    get_mapping, post_mapping, put_mapping, patch_mapping,
     delete_mapping, request_mapping, exception_handler,
     # Parameter binding types
-    Body, PathVar, QueryParam, Header, Cookie, Valid,
+    Body, PathVar, QueryParam, Header, Cookie, Valid, File, UploadedFile,
     # Filter system
     WebFilter, OncePerRequestFilter,
     # Configuration
     CORSConfig, SecurityHeadersConfig,
-    # Starlette adapter utilities
-    ControllerRegistrar, RequestLoggingMiddleware,
-    SecurityHeadersMiddleware, handle_return_value,
+    # SSE
+    sse_mapping,
+    # Controller advice
+    controller_advice,
 )
+
+# Starlette adapter utilities (imported from adapter package directly)
+from pyfly.web.adapters.starlette import create_app
+from pyfly.web.adapters.starlette.controller import ControllerRegistrar
+from pyfly.web.adapters.starlette.response import handle_return_value
 ```
 
 Source files:
@@ -655,7 +661,7 @@ The `ResolvedParam` dataclass carries the `validate` flag:
 @dataclass
 class ResolvedParam:
     name: str
-    binding_type: type       # PathVar, QueryParam, Body, Header, or Cookie
+    binding_type: type       # PathVar, QueryParam, Body, Header, Cookie, or File
     inner_type: type         # The type argument T
     default: Any = _MISSING
     validate: bool = False   # True when wrapped in Valid[...]
@@ -705,10 +711,10 @@ async def get_order(self, id: PathVar[str]) -> OrderResponse:
 
 ### handle_return_value()
 
-The `handle_return_value(result, status_code=200)` function is the core of response conversion. It is called by the `ControllerRegistrar` after each handler invocation:
+The `handle_return_value(result, status_code=200, accept=None)` function is the core of response conversion. It is called by the `ControllerRegistrar` after each handler invocation. The optional `accept` parameter allows content negotiation — when `accept` contains `"application/xml"`, the result is serialized as XML instead of JSON.
 
 ```python
-from pyfly.web.adapters.starlette import handle_return_value
+from pyfly.web.adapters.starlette.response import handle_return_value
 
 response = handle_return_value({"key": "value"}, status_code=200)
 # -> JSONResponse({"key": "value"}, status_code=200)
@@ -717,7 +723,10 @@ response = handle_return_value(None)
 # -> Response(status_code=204)
 
 response = handle_return_value(None, status_code=200)
-# -> Response(status_code=204) -- None always yields 204 unless explicitly overridden
+# -> Response(status_code=204) -- when status_code is 200, None produces 204
+
+response = handle_return_value(None, status_code=201)
+# -> Response(status_code=201) -- non-200 status_code is preserved even for None
 ```
 
 Source file: `src/pyfly/web/adapters/starlette/response.py`
@@ -806,7 +815,7 @@ The global handler maps `PyFlyException` subclasses to HTTP status codes:
 | `PayloadTooLargeException`    | 413         |
 | `UnauthorizedException`       | 401         |
 | `ForbiddenException`          | 403         |
-| `SecurityException`           | 401         |
+| `SecurityException`           | 403         |
 | `QuotaExceededException`      | 429         |
 | `RateLimitException`          | 429         |
 | `CircuitBreakerException`     | 503         |
@@ -939,13 +948,13 @@ Source file: `src/pyfly/web/filters.py`
 
 ### Built-in Filters
 
-PyFly ships with four built-in filter implementations in `src/pyfly/web/adapters/starlette/filters/`. Three of them (`TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter`) are automatically included in every application created by `create_app()`. The fourth (`SecurityFilter`) is opt-in and must be registered as a bean in the DI container.
+PyFly ships with several built-in filter implementations in `src/pyfly/web/adapters/starlette/filters/`. Five of them (`RequestContextFilter`, `CorrelationFilter`, `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter`) are automatically included in every application created by `create_app()`. The `SecurityFilter` and `HttpSecurityFilter` are opt-in and must be registered as beans in the DI container.
 
 #### TransactionIdFilter
 
 Ensures every request/response pair carries a unique transaction ID for distributed tracing.
 
-**Order:** `HIGHEST_PRECEDENCE + 100` (runs first among built-in filters)
+**Order:** `HIGHEST_PRECEDENCE + 100` (runs after `RequestContextFilter` and `CorrelationFilter`)
 
 **Behavior:**
 1. Checks for an incoming `X-Transaction-Id` header.
@@ -1057,19 +1066,24 @@ Source file: `src/pyfly/web/adapters/starlette/filters/security_filter.py`
 
 ### WebFilterChainMiddleware
 
-The `WebFilterChainMiddleware` (`src/pyfly/web/adapters/starlette/filter_chain.py`) is a single Starlette `BaseHTTPMiddleware` that wraps all `WebFilter` instances into a chain:
+The `WebFilterChainMiddleware` (`src/pyfly/web/adapters/starlette/filter_chain.py`) is a pure ASGI middleware (not Starlette's `BaseHTTPMiddleware`) that wraps all `WebFilter` instances into a chain. Using raw ASGI avoids the `anyio` dependency that caused `ModuleNotFoundError` with servers like Granian that do not register with sniffio.
 
 ```python
-class WebFilterChainMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, filters: Sequence[WebFilter] = ()) -> None:
-        super().__init__(app)
-        self._filters = list(filters)
+class WebFilterChainMiddleware:
+    def __init__(self, app: ASGIApp, filters: Sequence[WebFilter] = ()) -> None:
+        self.app = app
+        self._filters = filters if isinstance(filters, list) else list(filters)
 
-    async def dispatch(self, request, call_next) -> Response:
-        chain = call_next
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive, send)
+        chain = _call_app  # terminal: runs the downstream ASGI app
         for f in reversed(self._filters):
             chain = _wrap(f, chain)
-        return await chain(request)
+        response = await chain(request)
+        await response(scope, receive, send)
 ```
 
 The chain is built from right to left: the last filter in the list wraps `call_next` (the route handler), the second-to-last wraps that, and so on. The first filter in the list is the outermost wrapper, meaning it executes first.
@@ -1095,17 +1109,24 @@ Filters are sorted by priority using the `@order` decorator from `pyfly.containe
 from pyfly.container.ordering import order, HIGHEST_PRECEDENCE, LOWEST_PRECEDENCE
 
 
+class RequestContextFilter(OncePerRequestFilter):
+    __pyfly_order__ = HIGHEST_PRECEDENCE  # Runs first: order = -2147483648
+
+@order(HIGHEST_PRECEDENCE + 50)
+class CorrelationFilter(OncePerRequestFilter):
+    ...  # Runs second: order = -2147483598
+
 @order(HIGHEST_PRECEDENCE + 100)
 class TransactionIdFilter(OncePerRequestFilter):
-    ...  # Runs first: order = -2147483548
+    ...  # Runs third: order = -2147483548
 
 @order(HIGHEST_PRECEDENCE + 200)
 class RequestLoggingFilter(OncePerRequestFilter):
-    ...  # Runs second: order = -2147483448
+    ...  # Runs fourth: order = -2147483448
 
 @order(HIGHEST_PRECEDENCE + 300)
 class SecurityHeadersFilter(OncePerRequestFilter):
-    ...  # Runs third: order = -2147483348
+    ...  # Runs fifth: order = -2147483348
 ```
 
 | Constant             | Value          | Description                         |
@@ -1146,23 +1167,31 @@ When `create_app()` is called with an `ApplicationContext`, it automatically dis
 ```python
 # In create_app():
 filters: list[WebFilter] = [
+    RequestContextFilter(),
+    CorrelationFilter(),
     TransactionIdFilter(),
     RequestLoggingFilter(),
     SecurityHeadersFilter(),
 ]
 
+builtin_filter_types = (
+    RequestContextFilter,
+    CorrelationFilter,
+    TransactionIdFilter,
+    RequestLoggingFilter,
+    SecurityHeadersFilter,
+)
+
 # Auto-discover user WebFilter beans from context
 if context is not None:
     for _cls, reg in context.container._registrations.items():
+        inst = reg.instance
         if (
-            reg.instance is not None
-            and isinstance(reg.instance, WebFilter)
-            and not isinstance(
-                reg.instance,
-                (TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter),
-            )
+            inst is not None
+            and isinstance(inst, WebFilter)
+            and not isinstance(inst, builtin_filter_types)
         ):
-            filters.append(reg.instance)
+            filters.append(inst)
 
 # Sort all filters by @order
 filters.sort(key=lambda f: get_order(type(f)))
@@ -1689,7 +1718,7 @@ app = create_app(
 
 ### What create_app() Does
 
-1. **Builds the WebFilter chain.** Creates instances of `TransactionIdFilter`, `RequestLoggingFilter`, and `SecurityHeadersFilter`. Auto-discovers any additional user `WebFilter` beans from the `ApplicationContext`. Sorts all filters by `@order` value. Wraps them in a single `WebFilterChainMiddleware`.
+1. **Builds the WebFilter chain.** Creates instances of `RequestContextFilter`, `CorrelationFilter`, `TransactionIdFilter`, `RequestLoggingFilter`, and `SecurityHeadersFilter` (in `@order` priority). Also conditionally adds `MetricsFilter` (when observability is enabled) and `TraceCollectorFilter` (when the admin dashboard is enabled). Auto-discovers any additional user `WebFilter` beans from the `ApplicationContext`. Sorts all filters by `@order` value. Wraps them in a single `WebFilterChainMiddleware`.
 2. Adds `CORSMiddleware` if a `CORSConfig` is provided, or auto-builds one from `pyfly.web.cors.*` (when a `context` is present and CORS is enabled in config).
 3. Uses `ControllerRegistrar.collect_routes(context)` to discover all `@rest_controller` beans and build Starlette `Route` objects.
 4. Appends any `extra_routes`.
@@ -1823,13 +1852,22 @@ The `pyfly.web` package (`src/pyfly/web/__init__.py`) re-exports the following s
 
 ### Starlette Adapter Exports
 
+These symbols are **not** in `pyfly.web` — import them directly from the adapter package:
+
 | Symbol                     | Source Module                                          | Description                        |
 |----------------------------|--------------------------------------------------------|------------------------------------|
 | `create_app`               | `pyfly.web.adapters.starlette.app`                     | Application factory function       |
 | `ControllerRegistrar`      | `pyfly.web.adapters.starlette.controller`              | Route collection engine            |
 | `handle_return_value`      | `pyfly.web.adapters.starlette.response`                | Return value to Response converter |
-| `RequestLoggingMiddleware` | `pyfly.web.adapters.starlette.request_logger`          | Legacy middleware (still exported) |
-| `SecurityHeadersMiddleware`| `pyfly.web.adapters.starlette.security_headers`        | Legacy middleware (still exported) |
+
+### Additional pyfly.web Exports
+
+| Symbol             | Source Module                   | Description                    |
+|--------------------|---------------------------------|--------------------------------|
+| `File`             | `pyfly.web.params`              | File upload binding type       |
+| `UploadedFile`     | `pyfly.web.params`              | Uploaded file wrapper          |
+| `sse_mapping`      | `pyfly.web.sse`                 | SSE endpoint decorator         |
+| `controller_advice`| `pyfly.container.stereotypes`   | Controller advice stereotype   |
 
 ---
 
@@ -2044,11 +2082,13 @@ This will expose:
 - `GET    /openapi.json`               -- OpenAPI 3.1 spec
 
 The WebFilter chain executes in this order for every request:
-1. `TransactionIdFilter` (order: `HIGHEST_PRECEDENCE + 100`) -- injects/propagates transaction ID
-2. `RequestLoggingFilter` (order: `HIGHEST_PRECEDENCE + 200`) -- logs request/response
-3. `SecurityHeadersFilter` (order: `HIGHEST_PRECEDENCE + 300`) -- adds security headers
-4. `ApiKeyFilter` (order: `10`) -- validates API key (custom, only for `/api/*`)
-5. Route handler -- the controller method
+1. `RequestContextFilter` (order: `HIGHEST_PRECEDENCE`) -- initializes request-scoped context
+2. `CorrelationFilter` (order: `HIGHEST_PRECEDENCE + 50`) -- stamps W3C/correlation headers
+3. `TransactionIdFilter` (order: `HIGHEST_PRECEDENCE + 100`) -- injects/propagates transaction ID
+4. `RequestLoggingFilter` (order: `HIGHEST_PRECEDENCE + 200`) -- logs request/response
+5. `SecurityHeadersFilter` (order: `HIGHEST_PRECEDENCE + 300`) -- adds security headers
+6. `ApiKeyFilter` (order: `10`) -- validates API key (custom, only for `/api/*`)
+7. Route handler -- the controller method
 
 ---
 

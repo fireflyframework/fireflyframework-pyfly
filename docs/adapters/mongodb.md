@@ -65,7 +65,7 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
 
 ### Beanie Initialization
 
-The adapter calls `initialize_beanie()` at startup to register all document models with the Motor client. Document discovery is automatic via the DI container.
+The adapter calls `init_beanie()` at startup to register all document models with the Motor client. Document discovery is automatic via the DI container.
 
 ### MongoQueryMethodCompiler
 
@@ -77,11 +77,17 @@ Wires compiled query methods onto `MongoRepository` subclasses at startup — id
 
 ### Transactions
 
-Use `@mongo_transactional` for multi-document transactions:
+Use `@mongo_transactional` for multi-document transactions. The decorator
+requires a `Motor` client (injected from the auto-configured bean):
 
 ```python
-@mongo_transactional
-async def transfer(self, from_id: str, to_id: str, amount: float) -> None:
+from pyfly.data.document.mongodb import mongo_transactional
+from motor.motor_asyncio import AsyncIOMotorClient
+
+client: AsyncIOMotorClient = ...  # injected by DI
+
+@mongo_transactional(client)
+async def transfer(from_id: str, to_id: str, amount: float) -> None:
     ...
 ```
 

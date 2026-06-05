@@ -31,9 +31,9 @@ pyfly:
 ```python
 from pyfly.messaging import message_listener
 
-@message_listener(topic="orders", group_id="order-service")
-async def handle_order(self, event: dict) -> None:
-    print(f"Received order: {event}")
+@message_listener(topic="orders", group="order-service")
+async def handle_order(msg: Message) -> None:
+    print(f"Received order: {msg.value}")
 ```
 
 ---
@@ -61,7 +61,7 @@ Implements `MessageBrokerPort` using `AIOKafkaProducer` and `AIOKafkaConsumer`.
 
 ### Consumer Groups
 
-The `group_id` parameter on `@message_listener` maps directly to Kafka consumer groups for load-balanced consumption across instances.
+The `group` parameter on `@message_listener` maps directly to Kafka consumer groups for load-balanced consumption across instances.
 
 ### Lifecycle
 

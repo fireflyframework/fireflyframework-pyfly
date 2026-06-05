@@ -44,17 +44,24 @@ pyfly.server/
     __init__.py              # Public API exports
     ports/
         __init__.py
-        outbound.py          # ApplicationServerPort, EventLoopPort protocols
+        outbound.py          # ApplicationServerPort protocol
+        event_loop.py        # EventLoopPort protocol
     adapters/
-        granian.py           # GranianServerAdapter (ApplicationServerPort impl)
-        uvicorn.py           # UvicornServerAdapter (ApplicationServerPort impl)
-        hypercorn.py         # HypercornServerAdapter (ApplicationServerPort impl)
-        uvloop.py            # UvloopEventLoopAdapter (EventLoopPort impl)
-        winloop.py           # WinloopEventLoopAdapter (EventLoopPort impl)
-        asyncio.py           # AsyncioEventLoopAdapter (EventLoopPort impl)
+        granian/
+            adapter.py       # GranianServerAdapter (ApplicationServerPort impl)
+        uvicorn/
+            adapter.py       # UvicornServerAdapter (ApplicationServerPort impl)
+        hypercorn/
+            adapter.py       # HypercornServerAdapter (ApplicationServerPort impl)
+        event_loop/
+            uvloop_adapter.py    # UvloopEventLoopAdapter (EventLoopPort impl)
+            winloop_adapter.py   # WinloopEventLoopAdapter (EventLoopPort impl)
+            asyncio_adapter.py   # AsyncioEventLoopAdapter (EventLoopPort impl)
     auto_configuration.py    # ServerAutoConfiguration, EventLoopAutoConfiguration
-    properties.py            # ServerProperties dataclass
+    types.py                 # ServerInfo dataclass
 ```
+
+**Note:** `ServerProperties` is defined in `src/pyfly/config/properties/server.py`, not inside `pyfly.server`.
 
 The relationship between the web and server modules:
 
@@ -181,26 +188,41 @@ Because auto-configuration classes are processed in entry-point order, and each 
 
 ### ServerAutoConfiguration
 
+The three server adapters are registered as `@bean` methods on a single `ServerAutoConfiguration` class. Each method is guarded independently so the first matching one wins:
+
 ```python
 @auto_configuration
-@conditional_on_class("granian")
 @conditional_on_missing_bean(ApplicationServerPort)
-class GranianServerAutoConfiguration:
-    """Auto-configures Granian when available."""
+class ServerAutoConfiguration:
+    """Auto-configures the best available ASGI server."""
 
     @bean
-    def application_server(self, config: Config) -> ApplicationServerPort:
-        from pyfly.server.adapters.granian import GranianServerAdapter
-        return GranianServerAdapter(config)
+    @conditional_on_class("granian")
+    @conditional_on_missing_bean(ApplicationServerPort)
+    def granian_server(self) -> ApplicationServerPort:
+        from pyfly.server.adapters.granian.adapter import GranianServerAdapter
+        return GranianServerAdapter()
+
+    @bean
+    @conditional_on_class("uvicorn")
+    @conditional_on_missing_bean(ApplicationServerPort)
+    def uvicorn_server(self) -> ApplicationServerPort:
+        from pyfly.server.adapters.uvicorn.adapter import UvicornServerAdapter
+        return UvicornServerAdapter()
+
+    @bean
+    @conditional_on_class("hypercorn")
+    @conditional_on_missing_bean(ApplicationServerPort)
+    def hypercorn_server(self) -> ApplicationServerPort:
+        from pyfly.server.adapters.hypercorn.adapter import HypercornServerAdapter
+        return HypercornServerAdapter()
 ```
 
-Each server auto-configuration class follows this pattern. The three classes are registered as separate entry points:
+The auto-configuration class is registered as a single entry point:
 
 ```toml
 [project.entry-points."pyfly.auto_configuration"]
-server_granian  = "pyfly.server.auto_configuration:GranianServerAutoConfiguration"
-server_uvicorn  = "pyfly.server.auto_configuration:UvicornServerAutoConfiguration"
-server_hypercorn = "pyfly.server.auto_configuration:HypercornServerAutoConfiguration"
+server = "pyfly.server.auto_configuration:ServerAutoConfiguration"
 ```
 
 ### EventLoopAutoConfiguration
@@ -209,15 +231,29 @@ Event loop auto-configuration follows the same cascading pattern:
 
 ```python
 @auto_configuration
-@conditional_on_class("uvloop")
 @conditional_on_missing_bean(EventLoopPort)
-class UvloopAutoConfiguration:
-    """Auto-configures uvloop when available."""
+class EventLoopAutoConfiguration:
+    """Auto-configures the best available event loop."""
 
     @bean
-    def event_loop(self) -> EventLoopPort:
-        from pyfly.server.adapters.uvloop import UvloopEventLoopAdapter
+    @conditional_on_class("uvloop")
+    @conditional_on_missing_bean(EventLoopPort)
+    def uvloop(self) -> EventLoopPort:
+        from pyfly.server.adapters.event_loop.uvloop_adapter import UvloopEventLoopAdapter
         return UvloopEventLoopAdapter()
+
+    @bean
+    @conditional_on_class("winloop")
+    @conditional_on_missing_bean(EventLoopPort)
+    def winloop(self) -> EventLoopPort:
+        from pyfly.server.adapters.event_loop.winloop_adapter import WinloopEventLoopAdapter
+        return WinloopEventLoopAdapter()
+
+    @bean
+    @conditional_on_missing_bean(EventLoopPort)
+    def asyncio_loop(self) -> EventLoopPort:
+        from pyfly.server.adapters.event_loop.asyncio_adapter import AsyncioEventLoopAdapter
+        return AsyncioEventLoopAdapter()
 ```
 
 The event loop adapter's `configure()` method is called before the server starts, setting the asyncio event loop policy:
@@ -235,11 +271,19 @@ class UvloopEventLoopAdapter:
 
 ### ServerProperties
 
-The `ServerProperties` dataclass (`src/pyfly/server/properties.py`) captures all server configuration under the `pyfly.server.*` namespace:
+The `ServerProperties` dataclass (`src/pyfly/config/properties/server.py`) captures all server configuration under the `pyfly.server.*` namespace:
 
 ```python
 from pyfly.core.config import config_properties
 from dataclasses import dataclass, field
+
+
+@dataclass
+class GranianProperties:
+    runtime_threads: int = 1
+    runtime_mode: str = "auto"
+    backpressure: int | None = None
+    respawn_failed_workers: bool = True
 
 
 @config_properties(prefix="pyfly.server")
@@ -247,28 +291,35 @@ from dataclasses import dataclass, field
 class ServerProperties:
     type: str = "auto"
     event_loop: str = "auto"
-    workers: int = 0
+    workers: int = 1
     backlog: int = 1024
     graceful_timeout: int = 30
     http: str = "auto"
+    ssl_certfile: str | None = None
+    ssl_keyfile: str | None = None
     keep_alive_timeout: int = 5
-    granian: dict = field(default_factory=lambda: {
-        "runtime_threads": 1,
-        "runtime_mode": "auto",
-    })
+    max_concurrent_connections: int | None = None
+    max_requests_per_worker: int | None = None
+    granian: GranianProperties = field(default_factory=GranianProperties)
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `type` | `str` | `"auto"` | Server selection: `auto`, `granian`, `uvicorn`, `hypercorn` |
 | `event_loop` | `str` | `"auto"` | Event loop selection: `auto`, `uvloop`, `winloop`, `asyncio` |
-| `workers` | `int` | `0` | Worker count (`0` = `os.cpu_count()`) |
+| `workers` | `int` | `1` | Worker processes (`1` = single worker; `0` resolves to 1 in adapters) |
 | `backlog` | `int` | `1024` | TCP listen backlog |
 | `graceful_timeout` | `int` | `30` | Seconds to wait for in-flight requests during shutdown |
 | `http` | `str` | `"auto"` | HTTP version: `auto`, `1`, `2` |
+| `ssl_certfile` | `str \| None` | `None` | Path to TLS certificate file |
+| `ssl_keyfile` | `str \| None` | `None` | Path to TLS key file |
 | `keep_alive_timeout` | `int` | `5` | Keep-alive timeout in seconds |
+| `max_concurrent_connections` | `int \| None` | `None` | Maximum concurrent connections (Uvicorn `limit_concurrency`) |
+| `max_requests_per_worker` | `int \| None` | `None` | Maximum requests before worker restart (Uvicorn `limit_max_requests`) |
 | `granian.runtime_threads` | `int` | `1` | Granian runtime threads per worker |
 | `granian.runtime_mode` | `str` | `"auto"` | Granian runtime mode (`auto`, `st`, `mt`) |
+| `granian.backpressure` | `int \| None` | `None` | Granian backpressure limit (connections queued per worker) |
+| `granian.respawn_failed_workers` | `bool` | `True` | Restart workers that exit unexpectedly |
 
 ### Full YAML Reference
 
@@ -277,7 +328,7 @@ pyfly:
   server:
     type: "auto"              # auto | granian | uvicorn | hypercorn
     event-loop: "auto"        # auto | uvloop | winloop | asyncio
-    workers: 0                # 0 = cpu_count
+    workers: 1                # 1 = single worker (0 also resolves to 1)
     backlog: 1024             # TCP listen backlog
     graceful-timeout: 30      # Seconds to wait for in-flight requests
     http: "auto"              # auto | 1 | 2
@@ -287,7 +338,7 @@ pyfly:
       runtime-mode: "auto"    # auto | st (single-thread) | mt (multi-thread)
 ```
 
-**Workers:** When `workers: 0` (the default), the framework uses `os.cpu_count()` to determine the number of workers. Set to `1` for development or single-core containers.
+**Workers:** The default is `1` (single worker). Each server adapter treats `0` as "use 1 worker" rather than auto-detecting CPU count; set `workers` explicitly for multi-worker production deployments.
 
 **HTTP version:** When `http: "auto"`, the server selects the best HTTP version it supports. Granian defaults to HTTP/2; Uvicorn defaults to HTTP/1.1; Hypercorn supports HTTP/1.1, HTTP/2, and HTTP/3.
 
@@ -306,7 +357,7 @@ pyfly run [OPTIONS]
 | `--server` | From config or `auto` | Server type: `granian`, `uvicorn`, `hypercorn` |
 | `--workers` | From config or `0` | Number of worker processes |
 | `--host` | `0.0.0.0` | Bind address |
-| `--port` | From `pyfly.yaml` or `8080` | Port number |
+| `--port` | From `pyfly.yaml` or `8000` | Port number |
 | `--reload` | `false` | Enable auto-reload on code changes |
 | `--app` | Auto-discovered | Application import path |
 
@@ -396,7 +447,7 @@ PyFly's server abstraction mirrors Spring Boot's embedded server architecture:
 | Tomcat (default) | Granian (default) | Highest-priority embedded server |
 | Jetty (fallback) | Uvicorn (fallback) | Ecosystem-standard fallback |
 | Undertow (alternative) | Hypercorn (alternative) | Advanced protocol support |
-| `TomcatServletWebServerFactory` | `GranianServerAutoConfiguration` | Server-specific auto-configuration |
+| `TomcatServletWebServerFactory` | `ServerAutoConfiguration` | Server-specific auto-configuration |
 
 **Key similarities:**
 
@@ -410,15 +461,17 @@ PyFly's server abstraction mirrors Spring Boot's embedded server architecture:
 ## Source Files
 
 - `src/pyfly/server/__init__.py` -- top-level re-exports
-- `src/pyfly/server/ports/outbound.py` -- `ApplicationServerPort`, `EventLoopPort`
-- `src/pyfly/server/properties.py` -- `ServerProperties`
-- `src/pyfly/server/auto_configuration.py` -- `GranianServerAutoConfiguration`, `UvicornServerAutoConfiguration`, `HypercornServerAutoConfiguration`, `UvloopAutoConfiguration`
-- `src/pyfly/server/adapters/granian.py` -- `GranianServerAdapter`
-- `src/pyfly/server/adapters/uvicorn.py` -- `UvicornServerAdapter`
-- `src/pyfly/server/adapters/hypercorn.py` -- `HypercornServerAdapter`
-- `src/pyfly/server/adapters/uvloop.py` -- `UvloopEventLoopAdapter`
-- `src/pyfly/server/adapters/winloop.py` -- `WinloopEventLoopAdapter`
-- `src/pyfly/server/adapters/asyncio.py` -- `AsyncioEventLoopAdapter`
+- `src/pyfly/server/ports/outbound.py` -- `ApplicationServerPort`
+- `src/pyfly/server/ports/event_loop.py` -- `EventLoopPort`
+- `src/pyfly/config/properties/server.py` -- `ServerProperties`, `GranianProperties`
+- `src/pyfly/server/types.py` -- `ServerInfo`
+- `src/pyfly/server/auto_configuration.py` -- `ServerAutoConfiguration`, `EventLoopAutoConfiguration`
+- `src/pyfly/server/adapters/granian/adapter.py` -- `GranianServerAdapter`
+- `src/pyfly/server/adapters/uvicorn/adapter.py` -- `UvicornServerAdapter`
+- `src/pyfly/server/adapters/hypercorn/adapter.py` -- `HypercornServerAdapter`
+- `src/pyfly/server/adapters/event_loop/uvloop_adapter.py` -- `UvloopEventLoopAdapter`
+- `src/pyfly/server/adapters/event_loop/winloop_adapter.py` -- `WinloopEventLoopAdapter`
+- `src/pyfly/server/adapters/event_loop/asyncio_adapter.py` -- `AsyncioEventLoopAdapter`
 
 ---
 

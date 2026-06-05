@@ -5,12 +5,16 @@
 
 ## Built-in adapters
 
-| Adapter             | Channel | Notes                              |
-|---------------------|---------|------------------------------------|
-| `DummyEmailProvider`| email   | logs only — for dev/tests          |
-| `DummySmsProvider`  | sms     | logs only — for dev/tests          |
-| `DummyPushProvider` | push    | logs only — for dev/tests          |
-| `SmtpEmailProvider` | email   | uses stdlib `smtplib` from a thread |
+| Adapter               | Channel | Notes                                          |
+|-----------------------|---------|------------------------------------------------|
+| `DummyEmailProvider`  | email   | logs only — for dev/tests                      |
+| `DummySmsProvider`    | sms     | logs only — for dev/tests                      |
+| `DummyPushProvider`   | push    | logs only — for dev/tests                      |
+| `SmtpEmailProvider`   | email   | uses stdlib `smtplib` from a thread            |
+| `SendGridEmailProvider` | email | SendGrid HTTP API                              |
+| `ResendEmailProvider` | email   | Resend HTTP API                                |
+| `TwilioSmsProvider`   | sms     | Twilio Messaging API                           |
+| `FirebasePushProvider`| push    | Firebase Cloud Messaging (FCM)                 |
 
 ## Sending
 

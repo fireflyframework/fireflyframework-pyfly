@@ -11,7 +11,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-26.06.03-brightgreen" alt="Version: 26.06.03"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-26.06.04-brightgreen" alt="Version: 26.06.04"></a>
   <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -119,7 +119,7 @@ Every PyFly API is designed for `asyncio` from the ground up — no sync-to-asyn
 
 ### Production-Ready from Day One
 
-The first time you run `pyfly run`, your application already has structured logging with correlation IDs, health check endpoints, Prometheus metrics, OWASP security headers, and graceful shutdown. These aren't features you opt into — they're the baseline.
+The first time you run `pyfly run`, your application already has structured logging with correlation IDs, PII redaction, health check endpoints, Prometheus metrics, OWASP security headers, and graceful shutdown. These aren't features you opt into — they're the baseline.
 
 ---
 
@@ -998,7 +998,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 | **Container** | Dependency injection, stereotypes, bean factories | Spring DI (built-in) |
 | **Context** | ApplicationContext, events, lifecycle hooks, conditions | Spring ApplicationContext |
 | **Config** | Decentralized auto-configuration via `@auto_configuration` entry points | Spring Auto-Configuration |
-| **Logging** | Structured logging port and adapters | `fireflyframework-observability` |
+| **Logging** | Unified structured logging — intercepts all loggers (framework + third-party) through one formatter; Spring-style config (`pyfly.logging.*` — patterns, file output, rotation, external config file); PII redaction on by default (regex; optional Microsoft Presidio via `pyfly[pii]`) | `fireflyframework-observability` |
 
 ### Application Layer
 
@@ -1090,6 +1090,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [IDP (Identity Provider)](docs/modules/idp.md) — Keycloak / AWS Cognito / Azure AD / internal-DB adapters
 - [ECM (Content Management)](docs/modules/ecm.md) — Documents, folders, e-signature workflows
 - [Admin Dashboard](docs/modules/admin.md) — Embedded management dashboard, server mode, custom views
+- [Logging](docs/modules/logging.md) — Unified structured logging, Spring-style `pyfly.logging.*` config, PII redaction (`pyfly[pii]` for Presidio NER)
 
 ### Adapter Reference
 

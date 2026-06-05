@@ -732,6 +732,10 @@ class OrderRepository(SoftDeleteRepository[Order, UUID]):
 | `delete(id)` | Sets `deleted_at` (soft delete) |
 | `find_by_id(id)` | Excludes soft-deleted entities |
 | `find_all()` | Excludes soft-deleted entities |
+| `find_paginated(page, size, pageable)` | Excludes soft-deleted entities; respects pagination and sort |
+| `find_all_by_ids(ids)` | Excludes soft-deleted entities |
+| `find_all_by_spec(spec)` | Applies spec predicate AND excludes soft-deleted entities |
+| `find_all_by_spec_paged(spec, pageable)` | Applies spec predicate AND excludes soft-deleted entities |
 | `find_all_including_deleted()` | Includes soft-deleted entities |
 | `restore(id)` | Clears `deleted_at` |
 | `hard_delete(id)` | Permanently removes from DB |

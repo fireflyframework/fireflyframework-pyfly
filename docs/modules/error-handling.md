@@ -421,7 +421,7 @@ Base class for all security-related errors.
 raise SecurityException("Security violation", code="SECURITY_ERROR")
 ```
 
-**HTTP Status:** 401 (catch-all)
+**HTTP Status:** 403 (catch-all)
 
 ### UnauthorizedException
 
@@ -689,7 +689,7 @@ exceptions to HTTP status codes. The mapping uses most-specific-first ordering:
 | `PayloadTooLargeException`     | 413         | Payload Too Large          |
 | `UnauthorizedException`        | 401         | Unauthorized               |
 | `ForbiddenException`           | 403         | Forbidden                  |
-| `SecurityException`            | 401         | Unauthorized               |
+| `SecurityException`            | 403         | Forbidden                  |
 | `QuotaExceededException`       | 429         | Too Many Requests          |
 | `RateLimitException`           | 429         | Too Many Requests          |
 | `CircuitBreakerException`      | 503         | Service Unavailable        |

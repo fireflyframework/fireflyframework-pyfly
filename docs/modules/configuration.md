@@ -617,11 +617,14 @@ If the class is not decorated with `@config_properties`, `bind()` raises a `Valu
 ### How bind() Works Internally
 
 1. Read the `__pyfly_config_prefix__` attribute from the class.
-2. Call `get_section(prefix)` to get the config subtree as a dict.
-3. Get type hints from the dataclass via `get_type_hints()`.
-4. For each `dataclass.fields()` field, check if the field name exists in the section dict.
-5. If found, apply type coercion if needed.
-6. Construct the dataclass with the gathered kwargs. Fields not present in config
+2. Call `effective_section(prefix)` — a resolved copy of the subtree with `${...}`
+   placeholders expanded, environment-variable overrides applied, and env-only keys
+   injected (values that exist only as `PYFLY_*` env vars but have no file entry).
+3. For Pydantic `BaseModel` subclasses: pass the normalized section to
+   `model_validate()` for fail-fast validation and rich type coercion.
+4. For dataclasses: get type hints via `get_type_hints()`, match fields using relaxed
+   (kebab/snake interchangeable) key lookup, apply type coercion as needed.
+5. Construct the dataclass with the gathered kwargs. Fields not present in config
    use their dataclass default values.
 
 ### Type Coercion in bind()

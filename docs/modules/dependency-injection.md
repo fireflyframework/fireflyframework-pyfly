@@ -126,11 +126,22 @@ container = Container()
 The `Container` maintains three internal stores:
 
 - `_registrations: dict[type, Registration]` -- maps each class to its `Registration`
-  metadata (scope, condition, name, cached instance).
+  metadata (scope, condition, name, cached instance, optional factory).
 - `_named: dict[str, Registration]` -- maps bean names to registrations for
   name-based resolution.
 - `_bindings: dict[type, list[type]]` -- maps interfaces to their bound implementation
   types.
+
+The `Registration` dataclass has these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `impl_type` | `type` | The concrete class being registered. |
+| `scope` | `Scope` | Lifecycle scope (default `SINGLETON`). |
+| `condition` | `Callable \| None` | Optional condition callable. |
+| `instance` | `Any` | Cached singleton instance (set after first resolution). |
+| `name` | `str` | Bean name for named resolution. |
+| `factory` | `Callable \| None` | Optional factory closure (set by `@bean` methods). When present, the factory is called instead of `impl_type.__init__` on every resolution — preserving `TRANSIENT` `@bean` semantics. |
 
 ### register()
 
@@ -182,7 +193,7 @@ Resolves an instance of the given type. The resolution order is:
 1. **Direct registration** -- if `cls` is registered, resolve it.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
 3. **Multiple bindings** -- pick the implementation marked `@primary`.
-4. **Error** -- `KeyError` if nothing matches or multiple candidates exist without a `@primary`.
+4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if multiple candidates exist without a `@primary`.
 
 Constructor parameters are resolved recursively via type hints. If a parameter uses
 `Annotated[T, Qualifier("name")]`, the container resolves by name instead of type.
@@ -519,11 +530,11 @@ class SmsSender:
 When `container.resolve(NotificationSender)` is called and both `EmailSender` and
 `SmsSender` are bound, `SmsSender` is returned because it is `@primary`.
 
-Without `@primary`, the container raises a `KeyError` listing the ambiguous candidates:
+Without `@primary`, the container raises a `NoUniqueBeanError` listing the ambiguous candidates:
 
 ```
-KeyError: Multiple implementations for NotificationSender but none marked @primary:
-['EmailSender', 'SmsSender']
+NoUniqueBeanError: Multiple beans of type 'NotificationSender' found but none is marked @primary
+  Candidates: ['EmailSender', 'SmsSender']
 ```
 
 The `@primary` decorator simply sets `__pyfly_primary__ = True` on the class.
@@ -725,10 +736,10 @@ If no implementations are bound, an empty list is injected.
 ## Circular Dependency Detection
 
 The container detects circular dependencies during resolution and raises a clear
-`CircularDependencyError` instead of entering infinite recursion:
+`BeanCurrentlyInCreationError` instead of entering infinite recursion:
 
 ```python
-from pyfly.container import CircularDependencyError
+from pyfly.container import BeanCurrentlyInCreationError
 
 class A:
     def __init__(self, b: B) -> None: ...
@@ -736,11 +747,11 @@ class A:
 class B:
     def __init__(self, a: A) -> None: ...
 
-# Raises: CircularDependencyError: Circular dependency: A -> B -> A
+# Raises: BeanCurrentlyInCreationError: Circular dependency: A -> B -> A
 container.resolve(A)
 ```
 
-The container tracks types currently being resolved in a `_resolving` set. When a type
+The container tracks types currently being resolved in a `_resolving` dict. When a type
 is encountered that is already being resolved, the cycle is detected and a descriptive
 error message shows the full dependency chain.
 
@@ -956,10 +967,12 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
     after user beans are visible. Each auto-configuration class uses `@conditional_on_class`,
     `@conditional_on_property`, and `@conditional_on_missing_bean` to guard its beans,
     so user-provided beans always take precedence.
-2d. **Start infrastructure** -- starts any bean that implements `start()`/`stop()` lifecycle
+2c. **Start infrastructure** -- starts any bean that implements `start()`/`stop()` lifecycle
     methods (e.g., cache adapters, message brokers, HTTP clients). Failures here raise
     `BeanCreationException` for fast feedback.
 3. **Auto-discover `BeanPostProcessor` implementations** from registered beans.
+3b. **Bind `@config_properties` beans** -- sets a factory on each `@config_properties`
+    registration so instances are produced by `Config.bind()` and injectable by type.
 4. **Eagerly resolve all singletons** -- sorted by `@order` value.
 5. **Run post-processors and lifecycle hooks** -- for each resolved bean:
    - `BeanPostProcessor.before_init()`
@@ -1192,6 +1205,31 @@ class CacheAutoConfiguration:
 - Have `__pyfly_auto_configuration__ = True`, `__pyfly_injectable__ = True`, and
   `__pyfly_stereotype__ = "configuration"` set automatically (so you do not need to also
   add `@configuration`).
+
+### @config_properties Beans as Injectable Dependencies
+
+Classes decorated with `@config_properties` are also injectable by type. The decorator
+sets `__pyfly_injectable__ = True`, so the component scanner registers them as container
+beans (with stereotype `"config_properties"`). Any bean can declare a
+`@config_properties` class as a constructor parameter and receive the bound instance:
+
+```python
+@config_properties(prefix="pyfly.data")
+@dataclass
+class DataConfig:
+    url: str = "sqlite+aiosqlite:///pyfly.db"
+    pool_size: int = 5
+
+@service
+class OrderRepository:
+    def __init__(self, data_config: DataConfig) -> None:
+        self.url = data_config.url  # injected automatically
+```
+
+The `DataConfig` instance is bound from `Config.effective_section("pyfly.data")` (with
+placeholders resolved and env overrides applied) before being registered in the container.
+
+---
 
 ### Two-Pass Evaluation
 

@@ -161,8 +161,10 @@ class SecurityAspect:
             raise PermissionError(f"User cannot call {jp.method_name}")
 ```
 
-`@before` advice cannot modify the arguments or prevent execution (unless it
-raises an exception). It is ideal for validation, logging, and security checks.
+`@before` advice handlers must be **synchronous** — the weaver calls them
+without `await`. They cannot modify the arguments or prevent execution (unless
+the handler raises an exception). They are ideal for validation, logging, and
+security checks.
 
 ### @after_returning
 
@@ -181,7 +183,7 @@ class AuditAspect:
 ```
 
 This advice runs only when the method succeeds. If the method raises an
-exception, `@after_returning` is skipped.
+exception, `@after_returning` is skipped. Handlers must be **synchronous**.
 
 ### @after_throwing
 
@@ -202,7 +204,7 @@ class ErrorTrackingAspect:
 ```
 
 The original exception is always re-raised after the advice runs. You cannot
-suppress it from `@after_throwing`.
+suppress it from `@after_throwing`. Handlers must be **synchronous**.
 
 ### @after
 
@@ -219,7 +221,7 @@ class ResourceCleanupAspect:
 
 `@after` always runs, even if `@after_returning` or `@after_throwing` advice
 also executed. You can inspect both `jp.return_value` and `jp.exception` to
-determine the outcome.
+determine the outcome. Handlers must be **synchronous**.
 
 ### @around
 
@@ -247,18 +249,19 @@ class TimingAspect:
 
 Key rules for `@around` advice:
 
-- You **must** call `await jp.proceed()` to execute the target method (or the
-  next around advice in the chain). If you do not call `proceed()`, the target
-  method never runs.
+- You **must** call `jp.proceed()` to execute the target method (or the next
+  around advice in the chain). If you do not call `proceed()`, the target method
+  never runs.
 - You **must** return the result from `proceed()` (or a substitute value).
-- `@around` is supported only for **async methods**. Sync methods do not
-  support `@around` advice (the around bindings are simply not collected when
-  building sync wrappers).
+- `@around` is supported for **both async and sync methods**. For async methods,
+  `jp.proceed` is an async callable and you must `await` it. For sync methods,
+  `jp.proceed` is a sync callable — do not `await` it.
 - If there are multiple `@around` advices, they chain: the first around's
   `proceed()` calls the second around, whose `proceed()` calls the third, and
   so on until the original method is reached.
-- Around advice handlers can be either sync or async -- if the handler returns
-  an awaitable, the weaver awaits it.
+- Around advice handlers on async joinpoints can be either sync or async — if
+  the handler returns an awaitable, the weaver awaits it. On sync joinpoints the
+  handler must be synchronous.
 
 ---
 
@@ -297,11 +300,13 @@ class JoinPoint:
 
 ### Using proceed() in @around Advice
 
-In `@around` advice, `jp.proceed()` is an async callable that takes no
-arguments. It invokes either the next `@around` advice in the chain or the
-original method (if this is the innermost around). You must `await` it:
+In `@around` advice, `jp.proceed()` is a callable that takes no arguments. It
+invokes either the next `@around` advice in the chain or the original method
+(if this is the innermost around). For **async** joinpoints, `proceed` is async
+and must be `await`ed; for **sync** joinpoints it is a plain callable:
 
 ```python
+# Async method joinpoint — must await proceed()
 @around("service.*.*")
 async def my_around(self, jp: JoinPoint):
     # Pre-processing
@@ -314,6 +319,12 @@ async def my_around(self, jp: JoinPoint):
     print(f"After {jp.method_name}, got: {result}")
 
     return result  # Must return the result to the caller
+
+# Sync method joinpoint — call proceed() without await
+@around("repository.*.*")
+def my_sync_around(self, jp: JoinPoint):
+    result = jp.proceed()
+    return result
 ```
 
 You can also modify the result:
@@ -570,10 +581,11 @@ For async (coroutine) methods, the wrapper:
 
 ### Sync Methods
 
-For sync methods, the wrapper follows the same pattern but without `@around`
-support. The `@before`, `@after_returning`, `@after_throwing`, and `@after`
-advice types all work identically. The `@around` bindings are not collected
-when building sync wrappers, so around advice has no effect on sync methods.
+For sync methods, the wrapper follows the same pattern as async methods and
+supports all five advice types, including `@around`. The `@before`,
+`@after_returning`, `@after_throwing`, and `@after` advice work identically.
+For `@around` on sync methods, `jp.proceed` is a plain synchronous callable
+(not async) — call it as `result = jp.proceed()` without `await`.
 
 ### The Advice Chain
 

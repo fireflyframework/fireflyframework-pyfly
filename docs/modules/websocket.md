@@ -159,8 +159,7 @@ async def feed(self, session: WebSocketSession) -> None:
 ## The WebSocketHandler Protocol
 
 `WebSocketHandler` is an optional `@runtime_checkable` protocol describing
-lifecycle hooks. All methods are optional — unimplemented hooks are simply
-skipped.
+lifecycle hooks.
 
 ```python
 from typing import Protocol, runtime_checkable
@@ -169,17 +168,24 @@ from typing import Protocol, runtime_checkable
 @runtime_checkable
 class WebSocketHandler(Protocol):
     async def on_connect(self, session: WebSocketSession) -> None:
-        """A client initiated a connection (not yet accepted)."""
+        """Called when a client initiates a connection (not yet accepted)."""
 
     async def on_message(self, session: WebSocketSession, data: str) -> None:
-        """A text message was received from the client."""
+        """Called when a text message is received from the client."""
 
     async def on_disconnect(self, session: WebSocketSession) -> None:
-        """The WebSocket connection was closed."""
+        """Called when the WebSocket connection is closed."""
 ```
 
 In `on_connect` the handshake is **not** yet accepted — call
 `await session.accept()` to complete it.
+
+**Automatic invocation:** Of these three hooks, only `on_disconnect` is
+automatically invoked by the Starlette adapter's registrar (in a `finally`
+block after the handler returns or raises). `on_connect` and `on_message` are
+part of the protocol for structural typing purposes and must be called
+explicitly from within the `@websocket_mapping` handler method if your
+controller uses them.
 
 ---
 

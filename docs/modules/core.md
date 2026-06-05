@@ -47,7 +47,7 @@ The `pyfly.core` module provides three concerns that every application needs:
 | Concern | Classes / Functions | Purpose |
 |---|---|---|
 | **Bootstrap** | `@pyfly_application`, `PyFlyApplication` | Mark an entry-point class and orchestrate the startup/shutdown lifecycle. |
-| **Configuration** | `Config`, `@config_properties` | Load, layer, and access configuration from YAML/TOML files, profiles, and environment variables. |
+| **Configuration** | `Config`, `@config_properties`, `Value` | Load, layer, and access configuration from YAML/TOML files, profiles, and environment variables. |
 | **Banner** | `BannerMode`, `BannerPrinter` | Render a startup banner to stdout (ASCII art, minimal one-liner, or off). |
 | **Lifecycle** | `Lifecycle` protocol | Unified `start()`/`stop()` contract for all infrastructure adapters. |
 | **Logging Fallback** | `StdlibLoggingAdapter` | Zero-dependency fallback when `structlog` is not installed. Wraps stdlib `logging` with structlog-style key-value API. |
@@ -62,6 +62,7 @@ from pyfly.core import (
     config_properties,
     BannerMode,
     BannerPrinter,
+    Value,
 )
 from pyfly.kernel import Lifecycle
 ```
@@ -367,9 +368,10 @@ config.get_section("pyfly.web")
 def bind(self, config_cls: type[T]) -> T:
 ```
 
-Binds configuration values to a `@config_properties` dataclass. It reads the prefix
-from the decorator, fetches the matching config section, and constructs the dataclass
-with type coercion for `int`, `float`, and `bool` fields.
+Binds configuration values to a `@config_properties` dataclass or Pydantic `BaseModel`.
+It reads the prefix from the decorator, fetches the effective config section (with
+`${...}` placeholders resolved, env overrides applied, and env-only keys injected),
+and constructs the dataclass with relaxed key matching and type coercion.
 
 ---
 

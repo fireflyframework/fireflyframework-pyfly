@@ -14,11 +14,18 @@ For the shared port APIs (`RepositoryPort`, `Page`, `Pageable`, `QueryMethodPars
 | [SQLAlchemy](sqlalchemy.md) | Data Relational | PostgreSQL, MySQL, SQLite | [Module Guide](../modules/data-relational.md) |
 | [MongoDB](mongodb.md) | Data Document | MongoDB (Beanie ODM) | [Module Guide](../modules/data-document.md) |
 
-## Web Adapter
+## Web Adapters
 
 | Adapter | Module | Backend | Guide |
 |---------|--------|---------|-------|
 | [Starlette](starlette.md) | Web | Starlette / Uvicorn | [Module Guide](../modules/web.md) |
+| [FastAPI](fastapi.md) | Web | FastAPI + Uvicorn / Granian | [Module Guide](../modules/web.md) |
+
+## Server Adapter
+
+| Adapter | Module | Backend | Guide |
+|---------|--------|---------|-------|
+| [Granian](granian.md) | Server | Granian (Rust/tokio ASGI server) | [Module Guide](../modules/server.md) |
 
 ## Messaging Adapters
 

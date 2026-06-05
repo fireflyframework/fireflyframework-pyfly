@@ -2,7 +2,8 @@
 
 PyFly's actuator module is fully extensible. You can create custom management
 endpoints that are auto-discovered from the DI container and exposed alongside the
-built-in health, beans, env, info, loggers, and metrics endpoints.
+built-in health, beans, env, info, loggers, metrics, prometheus, and threaddump
+endpoints.
 
 ---
 
@@ -20,6 +21,8 @@ built-in health, beans, env, info, loggers, and metrics endpoints.
    - [Info](#info)
    - [Loggers](#loggers)
    - [Metrics](#metrics)
+   - [Prometheus](#prometheus)
+   - [Thread Dump](#thread-dump)
 7. [Index Endpoint](#index-endpoint)
 8. [Complete Example](#complete-example)
 
@@ -136,7 +139,7 @@ pyfly:
       git:
         enabled: true       # Enable custom git endpoint
       metrics:
-        enabled: true       # Override default (disabled) for metrics stub
+        enabled: true       # Auto-enabled when prometheus_client is installed
 ```
 
 The config key pattern is: `pyfly.actuator.endpoints.{endpoint_id}.enabled`
@@ -262,14 +265,42 @@ curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
 
 | Property | Value |
 |---|---|
-| Path | `/actuator/metrics` |
+| Path | `/actuator/metrics` and `/actuator/metrics/{name}` |
 | Methods | GET |
-| Default | **Disabled** |
+| Default | Enabled when `prometheus_client` installed |
 
-Stub endpoint for future Prometheus/OpenTelemetry integration. Returns basic metadata
-when enabled.
+Exposes Prometheus registry data in Micrometer-compatible JSON (dot-case names,
+`COUNT`/`TOTAL_TIME`/`MAX`/`VALUE` statistics). Auto-configured by
+`MetricsActuatorAutoConfiguration` when `prometheus_client` is importable.
 
 **Source:** `src/pyfly/actuator/endpoints/metrics_endpoint.py`
+
+### Prometheus
+
+| Property | Value |
+|---|---|
+| Path | `/actuator/prometheus` |
+| Methods | GET |
+| Default | Enabled when `prometheus_client` installed |
+
+Prometheus text exposition format (`text/plain; version=0.0.4`) scrape target.
+Auto-configured alongside the metrics endpoint.
+
+**Source:** `src/pyfly/actuator/endpoints/prometheus_endpoint.py`
+
+### Thread Dump
+
+| Property | Value |
+|---|---|
+| Path | `/actuator/threaddump` |
+| Methods | GET |
+| Default | Enabled |
+
+Returns all live threads with their stack traces. `className` is the Python module
+name; `methodName` uses `co_qualname` (Python 3.11+) to include the enclosing
+class, falling back to `co_name`.
+
+**Source:** `src/pyfly/actuator/endpoints/threaddump_endpoint.py`
 
 ---
 
