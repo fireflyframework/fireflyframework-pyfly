@@ -18,6 +18,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+# Spring-style levels Python's logging module has no direct constant for.
+# TRACE maps below DEBUG (most verbose); OFF disables the logger entirely.
+_EXTRA_LEVELS: dict[str, int] = {
+    "TRACE": 5,
+    "OFF": logging.CRITICAL + 1,
+}
+
 _LOGGER_DESCRIPTIONS: dict[str, str] = {
     "pyfly.core": "Framework core (bootstrap, lifecycle)",
     "pyfly.web": "Web layer (HTTP, routing, filters)",
@@ -89,8 +96,13 @@ class LoggersProvider:
 
     async def set_level(self, logger_name: str, level: str) -> dict[str, str]:
         target = logging.getLogger() if logger_name == "ROOT" else logging.getLogger(logger_name)
-        numeric = getattr(logging, level.upper(), None)
+        level_name = level.upper()
+        # TRACE/OFF are advertised as valid levels but have no logging.<NAME>
+        # constant, so resolve them explicitly before falling back (audit #69).
+        numeric = _EXTRA_LEVELS.get(level_name)
+        if numeric is None:
+            numeric = getattr(logging, level_name, None)
         if numeric is None:
             return {"error": f"Unknown level: {level}"}
         target.setLevel(numeric)
-        return {"logger": logger_name, "configuredLevel": level.upper()}
+        return {"logger": logger_name, "configuredLevel": level_name}
