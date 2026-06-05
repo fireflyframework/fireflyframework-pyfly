@@ -9,8 +9,7 @@ class TodoCreateRequest(BaseModel):
 
 
 class TodoResponseDTO(BaseModel):
-    id: {% if has_data %}int{% else %}str{% endif %}
-
+    id: str
     title: str
     description: str = ""
     completed: bool = False

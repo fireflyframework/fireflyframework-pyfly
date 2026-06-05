@@ -1,4 +1,4 @@
-"""REST controllers — API layer."""
+"""REST controllers — inbound (driving) adapter for the API layer."""
 
 from pyfly.container import rest_controller
 from pyfly.web import PathVar, Valid, delete_mapping, get_mapping, post_mapping, put_mapping, request_mapping
@@ -25,44 +25,24 @@ class TodoController:
 
     @get_mapping("/")
     async def list_todos(self) -> list[TodoResponseDTO]:
-{% if has_data or has_mongodb %}
         todos = await self._service.list_all()
-{% else %}
-        todos = self._service.list_all()
-{% endif %}
         return [TodoResponseDTO(id=t.id, title=t.title, description=t.description, completed=t.completed) for t in todos]
 
     @get_mapping("/{todo_id}")
-    async def get_todo(self, todo_id: PathVar[{% if has_data %}int{% else %}str{% endif %}]) -> TodoResponseDTO:
-{% if has_data or has_mongodb %}
+    async def get_todo(self, todo_id: PathVar[str]) -> TodoResponseDTO:
         todo = await self._service.get(todo_id)
-{% else %}
-        todo = self._service.get(todo_id)
-{% endif %}
         return TodoResponseDTO(id=todo.id, title=todo.title, description=todo.description, completed=todo.completed)
 
     @post_mapping("/", status_code=201)
     async def create_todo(self, body: Valid[TodoCreateRequest]) -> TodoResponseDTO:
-{% if has_data or has_mongodb %}
         todo = await self._service.create(title=body.title, description=body.description)
-{% else %}
-        todo = self._service.create(title=body.title, description=body.description)
-{% endif %}
         return TodoResponseDTO(id=todo.id, title=todo.title, description=todo.description, completed=todo.completed)
 
     @put_mapping("/{todo_id}")
-    async def update_todo(self, todo_id: PathVar[{% if has_data %}int{% else %}str{% endif %}]) -> TodoResponseDTO:
-{% if has_data or has_mongodb %}
+    async def update_todo(self, todo_id: PathVar[str]) -> TodoResponseDTO:
         todo = await self._service.toggle_complete(todo_id)
-{% else %}
-        todo = self._service.toggle_complete(todo_id)
-{% endif %}
         return TodoResponseDTO(id=todo.id, title=todo.title, description=todo.description, completed=todo.completed)
 
     @delete_mapping("/{todo_id}", status_code=204)
-    async def delete_todo(self, todo_id: PathVar[{% if has_data %}int{% else %}str{% endif %}]) -> None:
-{% if has_data or has_mongodb %}
+    async def delete_todo(self, todo_id: PathVar[str]) -> None:
         await self._service.delete(todo_id)
-{% else %}
-        self._service.delete(todo_id)
-{% endif %}
