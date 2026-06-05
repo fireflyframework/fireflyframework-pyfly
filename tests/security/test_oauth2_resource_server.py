@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import jwt
@@ -34,7 +35,9 @@ _public_key = _private_key.public_key()
 
 
 def _create_test_token(payload: dict, kid: str = "test-kid") -> str:
-    """Create an RS256-signed JWT for testing."""
+    """Create an RS256-signed JWT for testing (adds an ``exp`` claim by default)."""
+    if "exp" not in payload:
+        payload = {**payload, "exp": int(time.time()) + 3600}
     private_pem = _private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,

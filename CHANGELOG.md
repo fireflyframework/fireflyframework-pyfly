@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.12 (2026-06-05)
+
+### Security
+
+- **JWT now requires `exp`.** `JWTService.decode` (and the JWKS resource-server
+  validator) verified `exp` only when present, so a token minted with **no `exp`**
+  was accepted and never expired. `decode` now requires `exp`
+  (`options={"require": ["exp"]}`), and `JWTService.encode` auto-adds an `exp`
+  (now + `expiration_seconds`, default 3600) when the payload omits one — so every
+  issued token expires.
+- **OAuth2 client secret compared in constant time.** `AuthorizationServer`
+  compared the client secret with `!=` (a timing side-channel); it now uses
+  `secrets.compare_digest`.
+- **OAuth2 grant-type confusion fixed.** The token endpoint ignored the client's
+  registered `authorization_grant_type`, so a client registered for
+  `authorization_code` could mint `client_credentials` tokens. The
+  `client_credentials` grant now requires the client to be registered for it
+  (otherwise `UNAUTHORIZED_CLIENT`); server-unsupported grants still return
+  `UNSUPPORTED_GRANT_TYPE`.
+- **`HttpSecurity` footgun warning.** `build()` now logs a warning when
+  authorization rules are configured without a terminal `any_request()` rule
+  (paths matching no rule fall through allowed) — recommending
+  `.any_request().deny_all()` / `.authenticated()`.
+
+These surfaced in an adversarial security audit while validating the
+`implement-security` skill (which itself validated clean — enforcement proven,
+no silent auth bypass). Session-subsystem hardening (session-fixation id
+rotation, `secure` cookie default, Redis-deserialization allowlisting) plus a
+dedicated `tests/session` suite are tracked as a focused follow-up.
+
+---
+
 ## v26.06.11 (2026-06-05)
 
 ### Fixed

@@ -70,6 +70,7 @@ class JWKSTokenValidator:
                 algorithms=self._algorithms,
                 issuer=self._issuer,
                 audience=self._audience,
+                options={"require": ["exp"]},
             )
             return payload
         except jwt.PyJWTError as exc:

@@ -39,6 +39,7 @@ def client_repo() -> InMemoryClientRegistrationRepository:
         registration_id="test-client",
         client_id="test-client",
         client_secret="test-secret",
+        authorization_grant_type="client_credentials",
         scopes=["read", "write"],
     )
     return InMemoryClientRegistrationRepository(reg)
