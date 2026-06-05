@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.10 (2026-06-05)
+
+### Fixed
+
+- **`SqlAlchemyEventStore` optimistic-concurrency hole.** `append()` read the
+  current version via `latest_version()` on a **separate connection before** the
+  write transaction, so two concurrent writers could both pass the
+  `expected_version` check; the loser then violated `UNIQUE(aggregate_id,
+  sequence)` and surfaced a **raw `IntegrityError`** — never the documented
+  `ConcurrencyError` — so retry-on-`ConcurrencyError` callers missed the
+  collision. The version check now runs **inside** the write transaction, and a
+  `UNIQUE` violation is translated to `ConcurrencyError`. (`InMemoryEventStore`
+  was already correct — atomic under its lock.)
+- **`EventUpcaster` was dead code.** `EventUpcaster`/`NoOpUpcaster` were exported
+  and documented but **never invoked** by any read path. Both event stores now
+  accept `upcasters=...` and apply them in `load()` and `stream_all()`, so stored
+  events are upcast to the current schema on read (default: no upcasters → identity).
+
+### Changed
+
+- **`EventHandlerException` is now exported from `pyfly.eventsourcing`** (it was
+  only reachable via the private `pyfly.eventsourcing.aggregate` submodule, unlike
+  its sibling `ConcurrencyError`). Users can now `from pyfly.eventsourcing import
+  EventHandlerException` to catch missing-handler failures.
+- **`TransactionalOutbox.dead_letters()`** added — surfaces records that exhausted
+  `max_attempts` (retained, but excluded from `pending()`) for inspection / manual
+  retry.
+
+---
+
 ## v26.06.09 (2026-06-05)
 
 ### Fixed

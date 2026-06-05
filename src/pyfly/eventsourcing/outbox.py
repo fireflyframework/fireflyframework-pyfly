@@ -90,6 +90,16 @@ class TransactionalOutbox:
         async with self._lock:
             return [r for r in self._records.values() if not r.delivered and r.attempts < self._max_attempts]
 
+    async def dead_letters(self) -> list[OutboxRecord]:
+        """Records that exhausted ``max_attempts`` without being delivered.
+
+        Retained for inspection / manual retry — at-least-once delivery holds up
+        to ``max_attempts``; ``pending()`` deliberately excludes these so the
+        publish loop stops re-attempting them.
+        """
+        async with self._lock:
+            return [r for r in self._records.values() if not r.delivered and r.attempts >= self._max_attempts]
+
     async def _loop(self) -> None:
         while not self._stop.is_set():
             try:

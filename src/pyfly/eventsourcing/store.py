@@ -16,13 +16,27 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
+from pyfly.eventsourcing.upcaster import EventUpcaster
 
 
 class ConcurrencyError(Exception):
     """Optimistic-locking failure: expected version did not match the store's."""
+
+
+def _apply_upcasters(envelope: StoredEventEnvelope, upcasters: Sequence[EventUpcaster]) -> StoredEventEnvelope:
+    """Apply each registered upcaster (in order) that handles this envelope.
+
+    Read paths (``load`` / ``stream_all``) run stored events through the
+    configured upcasters so consumers always see current-schema events.
+    """
+    for upcaster in upcasters:
+        if upcaster.applies_to(envelope):
+            envelope = upcaster.upcast(envelope)
+    return envelope
 
 
 @runtime_checkable
@@ -48,10 +62,11 @@ class EventStore(Protocol):
 class InMemoryEventStore:
     """Default zero-dep adapter: list per aggregate, global event log."""
 
-    def __init__(self) -> None:
+    def __init__(self, upcasters: Sequence[EventUpcaster] = ()) -> None:
         self._by_aggregate: dict[str, list[StoredEventEnvelope]] = {}
         self._all: list[StoredEventEnvelope] = []
         self._lock = asyncio.Lock()
+        self._upcasters: tuple[EventUpcaster, ...] = tuple(upcasters)
 
     async def append(
         self,
@@ -77,16 +92,19 @@ class InMemoryEventStore:
     async def load(self, aggregate_id: str, *, after_sequence: int = 0) -> list[StoredEventEnvelope]:
         async with self._lock:
             events = self._by_aggregate.get(aggregate_id, [])
-            return [e for e in events if e.sequence > after_sequence]
+            return [_apply_upcasters(e, self._upcasters) for e in events if e.sequence > after_sequence]
 
     async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]:
         async with self._lock:
             if after_event_id is None:
-                return list(self._all[:limit])
-            for idx, evt in enumerate(self._all):
-                if evt.event_id == after_event_id:
-                    return list(self._all[idx + 1 : idx + 1 + limit])
-            return []
+                raw = list(self._all[:limit])
+            else:
+                raw = []
+                for idx, evt in enumerate(self._all):
+                    if evt.event_id == after_event_id:
+                        raw = list(self._all[idx + 1 : idx + 1 + limit])
+                        break
+        return [_apply_upcasters(e, self._upcasters) for e in raw]
 
     async def latest_version(self, aggregate_id: str) -> int:
         async with self._lock:
@@ -116,8 +134,9 @@ class SqlAlchemyEventStore:
     )
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Any, upcasters: Sequence[EventUpcaster] = ()) -> None:
         self._engine = engine
+        self._upcasters: tuple[EventUpcaster, ...] = tuple(upcasters)
 
     async def initialize(self) -> None:
         from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
@@ -134,38 +153,54 @@ class SqlAlchemyEventStore:
         expected_version: int,
     ) -> None:
         from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
+        from sqlalchemy.exc import IntegrityError  # type: ignore[import-not-found, unused-ignore]
 
-        latest = await self.latest_version(aggregate_id)
-        if latest != expected_version:
-            msg = f"expected version {expected_version}, found {latest}"
-            raise ConcurrencyError(msg)
-        async with self._engine.begin() as conn:
-            for i, evt in enumerate(events, start=1):
-                evt.aggregate_id = aggregate_id
-                evt.aggregate_type = aggregate_type
-                evt.sequence = expected_version + i
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO pyfly_event_store
-                            (event_id, aggregate_id, aggregate_type, sequence,
-                             event_type, payload, metadata, occurred_at, version, tenant_id)
-                        VALUES (:eid, :aid, :atype, :seq, :etype, :payload, :meta, :occurred, :ver, :tenant)
-                        """
-                    ),
-                    {
-                        "eid": evt.event_id,
-                        "aid": evt.aggregate_id,
-                        "atype": evt.aggregate_type,
-                        "seq": evt.sequence,
-                        "etype": evt.event_type,
-                        "payload": evt.to_json(),
-                        "meta": "{}",
-                        "occurred": evt.occurred_at,
-                        "ver": evt.version,
-                        "tenant": evt.tenant_id,
-                    },
+        try:
+            async with self._engine.begin() as conn:
+                # Read the current version INSIDE the write transaction (same
+                # connection) so the check-then-insert is not a TOCTOU race.
+                result = await conn.execute(
+                    text("SELECT COALESCE(MAX(sequence), 0) FROM pyfly_event_store WHERE aggregate_id = :aid"),
+                    {"aid": aggregate_id},
                 )
+                latest = int(result.scalar() or 0)
+                if latest != expected_version:
+                    msg = f"expected version {expected_version}, found {latest}"
+                    raise ConcurrencyError(msg)
+                for i, evt in enumerate(events, start=1):
+                    evt.aggregate_id = aggregate_id
+                    evt.aggregate_type = aggregate_type
+                    evt.sequence = expected_version + i
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO pyfly_event_store
+                                (event_id, aggregate_id, aggregate_type, sequence,
+                                 event_type, payload, metadata, occurred_at, version, tenant_id)
+                            VALUES (:eid, :aid, :atype, :seq, :etype, :payload, :meta, :occurred, :ver, :tenant)
+                            """
+                        ),
+                        {
+                            "eid": evt.event_id,
+                            "aid": evt.aggregate_id,
+                            "atype": evt.aggregate_type,
+                            "seq": evt.sequence,
+                            "etype": evt.event_type,
+                            "payload": evt.to_json(),
+                            "meta": "{}",
+                            "occurred": evt.occurred_at,
+                            "ver": evt.version,
+                            "tenant": evt.tenant_id,
+                        },
+                    )
+        except IntegrityError as exc:
+            # A concurrent writer committed the same (aggregate_id, sequence)
+            # between our in-transaction check and insert; the UNIQUE constraint
+            # is the backstop. Surface as the documented optimistic-lock failure
+            # so retry-on-ConcurrencyError callers see it.
+            raise ConcurrencyError(
+                f"concurrent append for aggregate {aggregate_id!r} at version {expected_version}"
+            ) from exc
 
     async def load(self, aggregate_id: str, *, after_sequence: int = 0) -> list[StoredEventEnvelope]:
         from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
@@ -181,7 +216,7 @@ class SqlAlchemyEventStore:
                     {"aid": aggregate_id, "after": after_sequence},
                 )
             ).fetchall()
-        return [StoredEventEnvelope.from_json(r[0]) for r in rows]
+        return [_apply_upcasters(StoredEventEnvelope.from_json(r[0]), self._upcasters) for r in rows]
 
     async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]:
         from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
@@ -207,7 +242,7 @@ class SqlAlchemyEventStore:
                         {"eid": after_event_id, "limit": limit},
                     )
                 ).fetchall()
-        return [StoredEventEnvelope.from_json(r[0]) for r in rows]
+        return [_apply_upcasters(StoredEventEnvelope.from_json(r[0]), self._upcasters) for r in rows]
 
     async def latest_version(self, aggregate_id: str) -> int:
         from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]

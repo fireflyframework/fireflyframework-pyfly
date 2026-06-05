@@ -27,7 +27,7 @@ Mirrors ``org.fireflyframework.eventsourcing``:
 
 from __future__ import annotations
 
-from pyfly.eventsourcing.aggregate import AggregateRoot
+from pyfly.eventsourcing.aggregate import AggregateRoot, EventHandlerException
 from pyfly.eventsourcing.event import DomainEvent, StoredEventEnvelope, domain_event
 from pyfly.eventsourcing.outbox import OutboxRecord, TransactionalOutbox
 from pyfly.eventsourcing.projection import Projection, ProjectionRunner
@@ -48,6 +48,7 @@ __all__ = [
     "AggregateRoot",
     "ConcurrencyError",
     "DomainEvent",
+    "EventHandlerException",
     "EventStore",
     "EventUpcaster",
     "InMemoryEventStore",
