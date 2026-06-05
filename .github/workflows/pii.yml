@@ -37,8 +37,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      # Base deps + the pii extra (presidio); dev group for pytest.
-      - run: uv sync --extra pii --group dev
+      # All extras (incl. pii=presidio and cli=click, which spaCy's CLI needs) + dev.
+      # This is the dedicated heavy job, so the full install is acceptable here.
+      - run: uv sync --all-extras --group dev
       # Tiny spaCy model so the run stays fast; PresidioProperties.model selects it.
       - run: uv run python -m spacy download en_core_web_sm
       # Exercise the real Presidio NER path end-to-end + the engine fallback logic.
