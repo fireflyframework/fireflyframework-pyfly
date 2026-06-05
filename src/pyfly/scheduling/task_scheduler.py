@@ -204,13 +204,21 @@ class TaskScheduler:
     async def _invoke(bean: Any, method: Callable[..., Any]) -> None:
         """Invoke a scheduled method, handling both sync and async methods.
 
+        An async method is awaited on the event loop; a **synchronous** method is
+        offloaded to a worker thread (``asyncio.to_thread``) so a blocking body
+        (I/O, ``time.sleep``) does not stall the loop — and therefore the whole
+        application — for the duration of the task.
+
         Exceptions are logged (not propagated) so a failing iteration of a
         cron / fixed-rate job — whose task is not awaited by the loop — is still
         reported through the framework logger instead of vanishing (audit #186).
         """
         try:
-            result = method()
-            if inspect.isawaitable(result):
-                await result
+            if inspect.iscoroutinefunction(method):
+                await method()
+            else:
+                result = await asyncio.to_thread(method)
+                if inspect.isawaitable(result):  # rare: sync method returning an awaitable
+                    await result
         except Exception:
             logger.exception("scheduled task '%s' failed", getattr(method, "__name__", method))
