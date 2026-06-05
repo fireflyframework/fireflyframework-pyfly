@@ -122,6 +122,30 @@ class TestMessageListenerWiring:
         assert ctx.wiring_counts.get("message_listeners", 0) == 0
 
 
+# --- Test: EDA @event_listener wiring ---
+
+
+class TestEdaEventListenerWiring:
+    @pytest.mark.asyncio
+    async def test_eda_event_listener_count_tracked(self):
+        """Context-driven @event_listener beans are subscribed and counted under event_listeners_eda."""
+        from pyfly.eda.decorators import event_listener
+
+        @service
+        class OrderEvents:
+            @event_listener(["order.placed"])
+            async def on_placed(self, envelope) -> None:
+                pass
+
+        ctx = ApplicationContext(Config({"pyfly": {"eda": {"provider": "memory"}}}))
+        ctx.register_bean(OrderEvents)
+        await ctx.start()
+        try:
+            assert ctx.wiring_counts.get("event_listeners_eda", 0) >= 1
+        finally:
+            await ctx.stop()
+
+
 # --- Test: @command_handler / @query_handler wiring ---
 
 

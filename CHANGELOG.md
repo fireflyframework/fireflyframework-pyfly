@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.09 (2026-06-05)
+
+### Fixed
+
+- **Startup `wiring_summary` now reports EDA event listeners.** The bean/wiring
+  summary logged at startup surfaced `event_listeners` (`@app_event_listener`),
+  `message_listeners`, `cqrs_handlers`, `scheduled_tasks`, `async_methods`, and
+  `post_processors` — but **omitted EDA `@event_listener` subscriptions**
+  (tracked under `event_listeners_eda`). So a service that wired EDA listeners saw
+  them reported as absent in the summary, which is misleading when using the
+  summary to diagnose noop-wiring (as `debugging-async-services` recommends). The
+  EDA listeners were correctly subscribed and dispatched — only the summary line
+  under-reported them. The summary now includes `event_listeners_eda`; the field
+  assembly was extracted to a testable `pyfly.core.application._wiring_summary_fields`
+  helper with regression tests. No behavioural change to event subscription or
+  dispatch. Found while validating the `implement-eda` skill (the skill and the
+  eda/messaging runtime were already correct).
+
+---
+
 ## v26.06.08 (2026-06-05)
 
 ### Fixed
