@@ -60,4 +60,5 @@ class SessionFilterAutoConfiguration:
     def session_filter(self, config: Config, session_store: SessionStore) -> SessionFilter:
         cookie_name = str(config.get("pyfly.session.cookie-name", "PYFLY_SESSION"))
         ttl = int(config.get("pyfly.session.ttl", 1800))
-        return SessionFilter(store=session_store, cookie_name=cookie_name, ttl=ttl)
+        secure = str(config.get("pyfly.session.cookie.secure", "false")).lower() in ("true", "1", "yes")
+        return SessionFilter(store=session_store, cookie_name=cookie_name, ttl=ttl, secure=secure)

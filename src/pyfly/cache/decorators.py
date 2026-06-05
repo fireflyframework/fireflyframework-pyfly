@@ -52,10 +52,13 @@ def cache(
             bound.apply_defaults()
             resolved_key = key.format(**bound.arguments)
 
-            # Check cache
+            # Check cache. A present-but-None entry is a hit (null caching /
+            # cache-penetration protection), distinguished via exists (audit #80).
             cached = await backend.get(resolved_key)
             if cached is not None:
                 return cached
+            if await backend.exists(resolved_key):
+                return None
 
             # Execute and cache
             result = await func(*args, **kwargs)

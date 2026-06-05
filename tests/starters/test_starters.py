@@ -59,8 +59,8 @@ def test_data_stack_marks_relational_and_document() -> None:
     @enable_data_stack
     class App: ...
 
-    assert App.__pyfly_starter_data__["pyfly.relational.enabled"] == "true"
-    assert App.__pyfly_starter_data__["pyfly.document.enabled"] == "true"
+    assert App.__pyfly_starter_data__["pyfly.data.relational.enabled"] == "true"
+    assert App.__pyfly_starter_data__["pyfly.data.document.enabled"] == "true"
     assert App.__pyfly_starter_data__["pyfly.client.enabled"] == "true"
 
 
@@ -211,10 +211,10 @@ def test_starter_decorator_actually_injects_properties_into_config() -> None:
     # through Config.get() — proving the decorator did more than set
     # an attribute.
     assert app.config.get("pyfly.cqrs.enabled") == "true"
-    assert app.config.get("pyfly.eda.enabled") == "true"
+    assert app.config.get("pyfly.eda.provider") == "auto"
     assert app.config.get("pyfly.cache.enabled") == "true"
     assert app.config.get("pyfly.observability.enabled") == "true"
-    assert app.config.get("pyfly.actuator.enabled") == "true"
+    assert app.config.get("pyfly.web.actuator.enabled") == "true"
     assert app.config.get("pyfly.aop.enabled") == "true"
 
 
@@ -239,7 +239,7 @@ def test_web_decorator_injects_web_and_server() -> None:
     app = PyFlyApplication(App)
     assert app.config.get("pyfly.web.enabled") == "true"
     assert app.config.get("pyfly.server.enabled") == "true"
-    assert app.config.get("pyfly.actuator.enabled") == "true"
+    assert app.config.get("pyfly.web.actuator.enabled") == "true"
 
 
 def test_register_core_stack_imperative_api() -> None:
@@ -251,7 +251,7 @@ def test_register_core_stack_imperative_api() -> None:
     assert app.config.get("pyfly.cqrs.enabled") is None
     register_core_stack(app)
     assert app.config.get("pyfly.cqrs.enabled") == "true"
-    assert app.config.get("pyfly.eda.enabled") == "true"
+    assert app.config.get("pyfly.eda.provider") == "auto"
 
 
 def test_register_web_stack_imperative_api() -> None:
@@ -272,7 +272,7 @@ def test_register_application_stack_imperative_api() -> None:
     app = PyFlyApplication(App)
     register_application_stack(app)
     assert app.config.get("pyfly.transactional.enabled") == "true"
-    assert app.config.get("pyfly.security-jwt.enabled") == "true"
+    assert app.config.get("pyfly.security.enabled") == "true"
     assert app.config.get("pyfly.plugins.enabled") == "true"
 
 
@@ -282,8 +282,8 @@ def test_register_data_stack_imperative_api() -> None:
 
     app = PyFlyApplication(App)
     register_data_stack(app)
-    assert app.config.get("pyfly.relational.enabled") == "true"
-    assert app.config.get("pyfly.document.enabled") == "true"
+    assert app.config.get("pyfly.data.relational.enabled") == "true"
+    assert app.config.get("pyfly.data.document.enabled") == "true"
 
 
 def test_register_domain_stack_imperative_api() -> None:

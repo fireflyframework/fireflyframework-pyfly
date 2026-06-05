@@ -17,6 +17,7 @@
 # must resolve return types at runtime for @bean method registration.
 
 import logging
+from typing import Any
 
 try:
     from sqlalchemy.ext.asyncio import (
@@ -101,7 +102,25 @@ class RelationalAutoConfiguration:
     def async_engine(self, config: Config) -> AsyncEngine:
         url = str(config.get("pyfly.data.relational.url", "sqlite+aiosqlite:///./app.db"))
         echo = bool(config.get("pyfly.data.relational.echo", False))
-        return create_async_engine(url, echo=echo)
+
+        # Forward connection-pool tuning to create_async_engine (audit #107) —
+        # only the keys that were explicitly configured (SQLite's default pool
+        # rejects sizing kwargs).
+        pool_kwargs: dict[str, Any] = {}
+        for key, engine_arg, caster in (
+            ("pool.size", "pool_size", int),
+            ("pool.max-overflow", "max_overflow", int),
+            ("pool.timeout", "pool_timeout", float),
+            ("pool.recycle", "pool_recycle", int),
+        ):
+            value = config.get(f"pyfly.data.relational.{key}")
+            if value is not None:
+                pool_kwargs[engine_arg] = caster(value)
+        pre_ping = config.get("pyfly.data.relational.pool.pre-ping")
+        if pre_ping is not None:
+            pool_kwargs["pool_pre_ping"] = str(pre_ping).lower() in ("true", "1", "yes")
+
+        return create_async_engine(url, echo=echo, **pool_kwargs)
 
     @bean
     def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

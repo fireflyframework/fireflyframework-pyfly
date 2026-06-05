@@ -16,7 +16,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -110,65 +111,95 @@ class AdminRouteBuilder:
         self._server = server
         self._instance_registry = instance_registry
 
+    def _auth_failure(self) -> JSONResponse | None:
+        """Return a 401/403 response when require_auth is on and the caller lacks
+        an allowed role; None when access is permitted (audit #66).
+
+        Reads the request-scoped SecurityContext (populated by the security
+        WebFilter chain). A no-op when pyfly.admin.require-auth is false.
+        """
+        if not self._props.require_auth:
+            return None
+        from pyfly.context.request_context import RequestContext
+
+        rc = RequestContext.current()
+        sec = rc.security_context if rc is not None else None
+        if sec is None or not sec.is_authenticated:
+            return JSONResponse({"error": "Authentication required"}, status_code=401)
+        if self._props.allowed_roles and not sec.has_any_role(self._props.allowed_roles):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return None
+
+    def _guarded(self, handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
+        """Wrap an admin API handler so it enforces require_auth before running."""
+
+        async def _wrapped(request: Request) -> Response:
+            denied = self._auth_failure()
+            if denied is not None:
+                return denied
+            return await handler(request)
+
+        return _wrapped
+
     def build_routes(self) -> list[Route | Mount]:
-        """Build all admin routes."""
+        """Build all admin routes.
+
+        Every ``{base}/api/*`` route (data, mutation, SSE, instance registry) is
+        wrapped with the auth guard; the SPA shell + static assets stay public so
+        the dashboard can boot and then surface 401s from the API (audit #66).
+        """
         base = self._props.path.rstrip("/")
         api = f"{base}/api"
 
         routes: list[Route | Mount] = []
 
-        # --- API routes ---
-        routes.extend(
-            [
-                Route(f"{api}/overview", self._handle_overview, methods=["GET"]),
-                Route(f"{api}/beans", self._handle_beans, methods=["GET"]),
-                Route(f"{api}/beans/graph", self._handle_bean_graph, methods=["GET"]),
-                Route(f"{api}/beans/{{name}}", self._handle_bean_detail, methods=["GET"]),
-                Route(f"{api}/health", self._handle_health, methods=["GET"]),
-                Route(f"{api}/env", self._handle_env, methods=["GET"]),
-                Route(f"{api}/config", self._handle_config, methods=["GET"]),
-                Route(f"{api}/loggers", self._handle_loggers, methods=["GET"]),
-                Route(f"{api}/loggers/{{name:path}}", self._handle_set_logger, methods=["POST"]),
-                Route(f"{api}/metrics", self._handle_metrics, methods=["GET"]),
-                Route(f"{api}/metrics/{{name:path}}", self._handle_metric_detail, methods=["GET"]),
-                Route(f"{api}/scheduled", self._handle_scheduled, methods=["GET"]),
-                Route(f"{api}/mappings", self._handle_mappings, methods=["GET"]),
-                Route(f"{api}/caches", self._handle_caches, methods=["GET"]),
-                Route(f"{api}/caches/keys", self._handle_cache_keys, methods=["GET"]),
-                Route(f"{api}/caches/{{name}}/evict", self._handle_cache_evict, methods=["POST"]),
-                Route(f"{api}/cqrs", self._handle_cqrs, methods=["GET"]),
-                Route(f"{api}/transactions", self._handle_transactions, methods=["GET"]),
-                Route(f"{api}/traces", self._handle_traces, methods=["GET"]),
-                Route(f"{api}/logfile", self._handle_logfile, methods=["GET"]),
-                Route(f"{api}/logfile/clear", self._handle_logfile_clear, methods=["POST"]),
-                Route(f"{api}/runtime", self._handle_runtime, methods=["GET"]),
-                Route(f"{api}/server", self._handle_server, methods=["GET"]),
-                Route(f"{api}/views", self._handle_views, methods=["GET"]),
-                Route(f"{api}/settings", self._handle_settings, methods=["GET"]),
-            ]
-        )
-
-        # --- SSE routes ---
-        routes.extend(
-            [
-                Route(f"{api}/sse/health", self._handle_sse_health, methods=["GET"]),
-                Route(f"{api}/sse/metrics", self._handle_sse_metrics, methods=["GET"]),
-                Route(f"{api}/sse/traces", self._handle_sse_traces, methods=["GET"]),
-                Route(f"{api}/sse/logfile", self._handle_sse_logfile, methods=["GET"]),
-                Route(f"{api}/sse/runtime", self._handle_sse_runtime, methods=["GET"]),
-                Route(f"{api}/sse/server", self._handle_sse_server, methods=["GET"]),
-            ]
-        )
+        # (path, handler, methods) for every guarded API + SSE route.
+        guarded_specs: list[tuple[str, Any, list[str]]] = [
+            (f"{api}/overview", self._handle_overview, ["GET"]),
+            (f"{api}/beans", self._handle_beans, ["GET"]),
+            (f"{api}/beans/graph", self._handle_bean_graph, ["GET"]),
+            (f"{api}/beans/{{name}}", self._handle_bean_detail, ["GET"]),
+            (f"{api}/health", self._handle_health, ["GET"]),
+            (f"{api}/env", self._handle_env, ["GET"]),
+            (f"{api}/config", self._handle_config, ["GET"]),
+            (f"{api}/loggers", self._handle_loggers, ["GET"]),
+            (f"{api}/loggers/{{name:path}}", self._handle_set_logger, ["POST"]),
+            (f"{api}/metrics", self._handle_metrics, ["GET"]),
+            (f"{api}/metrics/{{name:path}}", self._handle_metric_detail, ["GET"]),
+            (f"{api}/scheduled", self._handle_scheduled, ["GET"]),
+            (f"{api}/mappings", self._handle_mappings, ["GET"]),
+            (f"{api}/caches", self._handle_caches, ["GET"]),
+            (f"{api}/caches/keys", self._handle_cache_keys, ["GET"]),
+            (f"{api}/caches/{{name}}/evict", self._handle_cache_evict, ["POST"]),
+            (f"{api}/cqrs", self._handle_cqrs, ["GET"]),
+            (f"{api}/transactions", self._handle_transactions, ["GET"]),
+            (f"{api}/traces", self._handle_traces, ["GET"]),
+            (f"{api}/logfile", self._handle_logfile, ["GET"]),
+            (f"{api}/logfile/clear", self._handle_logfile_clear, ["POST"]),
+            (f"{api}/runtime", self._handle_runtime, ["GET"]),
+            (f"{api}/server", self._handle_server, ["GET"]),
+            (f"{api}/views", self._handle_views, ["GET"]),
+            (f"{api}/settings", self._handle_settings, ["GET"]),
+            (f"{api}/sse/health", self._handle_sse_health, ["GET"]),
+            (f"{api}/sse/metrics", self._handle_sse_metrics, ["GET"]),
+            (f"{api}/sse/traces", self._handle_sse_traces, ["GET"]),
+            (f"{api}/sse/logfile", self._handle_sse_logfile, ["GET"]),
+            (f"{api}/sse/runtime", self._handle_sse_runtime, ["GET"]),
+            (f"{api}/sse/server", self._handle_sse_server, ["GET"]),
+            (f"{api}/sse/beans", self._handle_sse_beans, ["GET"]),
+        ]
 
         # --- Instance registry routes (server mode) ---
         if self._instance_registry is not None:
-            routes.extend(
+            guarded_specs.extend(
                 [
-                    Route(f"{api}/instances", self._handle_instances_list, methods=["GET"]),
-                    Route(f"{api}/instances", self._handle_instances_register, methods=["POST"]),
-                    Route(f"{api}/instances/{{name}}", self._handle_instances_deregister, methods=["DELETE"]),
+                    (f"{api}/instances", self._handle_instances_list, ["GET"]),
+                    (f"{api}/instances", self._handle_instances_register, ["POST"]),
+                    (f"{api}/instances/{{name}}", self._handle_instances_deregister, ["DELETE"]),
                 ]
             )
+
+        routes.extend(Route(path, self._guarded(handler), methods=methods) for path, handler, methods in guarded_specs)
 
         # --- Static files ---
         routes.append(
@@ -388,6 +419,12 @@ class AdminRouteBuilder:
             return JSONResponse({"available": False})
         interval = self._props.refresh_interval / 1000
         return make_sse_response(server_stream(self._server, interval))
+
+    async def _handle_sse_beans(self, request: Request) -> Response:
+        from pyfly.admin.api.sse import beans_stream, make_sse_response
+
+        interval = self._props.refresh_interval / 1000
+        return make_sse_response(beans_stream(self._beans, interval))
 
     async def _handle_spa(self, request: Request) -> Response:
         """Serve index.html for SPA client-side routing."""

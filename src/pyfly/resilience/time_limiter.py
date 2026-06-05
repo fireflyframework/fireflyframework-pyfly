@@ -43,18 +43,19 @@ def time_limiter(
 
             @functools.wraps(func)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                import signal
+                # Run in a worker thread and wait with a fractional timeout.
+                # SIGALRM (the old approach) truncated sub-second timeouts to
+                # whole seconds and crashed off the main thread (audit #184).
+                import concurrent.futures
 
-                def _handler(signum: int, frame: Any) -> None:
-                    raise OperationTimeoutException(f"{func.__name__} exceeded timeout of {timeout_seconds}s")
-
-                old = signal.signal(signal.SIGALRM, _handler)
-                signal.alarm(int(timeout_seconds) or 1)
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(func, *args, **kwargs)
+                    try:
+                        return future.result(timeout=timeout_seconds)
+                    except concurrent.futures.TimeoutError as exc:
+                        raise OperationTimeoutException(
+                            f"{func.__name__} exceeded timeout of {timeout_seconds}s"
+                        ) from exc
 
             return sync_wrapper
 

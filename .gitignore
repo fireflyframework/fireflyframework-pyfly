@@ -21,3 +21,4 @@ docs/plans/
 
 # Playwright MCP verification artifacts
 .playwright-mcp/
+.audit/

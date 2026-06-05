@@ -104,12 +104,14 @@ class WaitForTimer:
 class WaitForAll:
     signals: tuple[str, ...] = ()
     timeout_ms: int = 0
+    timers: tuple[int, ...] = ()  # timer delays (ms) that participate in the gate
 
 
 @dataclass(frozen=True)
 class WaitForAny:
     signals: tuple[str, ...] = ()
     timeout_ms: int = 0
+    timers: tuple[int, ...] = ()  # timer delays (ms) that participate in the gate
 
 
 @dataclass(frozen=True)
@@ -131,7 +133,12 @@ class OnWorkflowComplete:
 
 @dataclass(frozen=True)
 class OnWorkflowError:
-    pass
+    # When suppress_error is True the workflow ends COMPLETED instead of FAILED.
+    # error_types / step_ids optionally restrict which failures the handler
+    # matches (by exception class name and failed step id).
+    suppress_error: bool = False
+    error_types: tuple[str, ...] = ()
+    step_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -248,17 +255,25 @@ def wait_for_timer(*, delay_ms: int, timer_id: str = "") -> Callable[[Callable[.
     return decorator
 
 
-def wait_for_all(*signals: str, timeout_ms: int = 0) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def wait_for_all(
+    *signals: str, timeout_ms: int = 0, timers: tuple[int, ...] = ()
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        fn.__pyfly_workflow_wait_all__ = WaitForAll(signals=signals, timeout_ms=timeout_ms)  # type: ignore[attr-defined]
+        fn.__pyfly_workflow_wait_all__ = WaitForAll(  # type: ignore[attr-defined]
+            signals=signals, timeout_ms=timeout_ms, timers=tuple(timers)
+        )
         return fn
 
     return decorator
 
 
-def wait_for_any(*signals: str, timeout_ms: int = 0) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def wait_for_any(
+    *signals: str, timeout_ms: int = 0, timers: tuple[int, ...] = ()
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        fn.__pyfly_workflow_wait_any__ = WaitForAny(signals=signals, timeout_ms=timeout_ms)  # type: ignore[attr-defined]
+        fn.__pyfly_workflow_wait_any__ = WaitForAny(  # type: ignore[attr-defined]
+            signals=signals, timeout_ms=timeout_ms, timers=tuple(timers)
+        )
         return fn
 
     return decorator
@@ -291,9 +306,30 @@ def on_workflow_complete(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-def on_workflow_error(fn: Callable[..., Any]) -> Callable[..., Any]:
-    fn.__pyfly_workflow_on_error__ = OnWorkflowError()  # type: ignore[attr-defined]
-    return fn
+def on_workflow_error(
+    fn: Callable[..., Any] | None = None,
+    *,
+    suppress_error: bool = False,
+    error_types: tuple[str, ...] = (),
+    step_ids: tuple[str, ...] = (),
+) -> Any:
+    """Mark a workflow error callback.
+
+    Usable bare (``@on_workflow_error``) or with options
+    (``@on_workflow_error(suppress_error=True, error_types=("ValueError",))``).
+    """
+
+    def decorator(target: Callable[..., Any]) -> Callable[..., Any]:
+        target.__pyfly_workflow_on_error__ = OnWorkflowError(  # type: ignore[attr-defined]
+            suppress_error=suppress_error,
+            error_types=tuple(error_types),
+            step_ids=tuple(step_ids),
+        )
+        return target
+
+    if fn is not None:
+        return decorator(fn)
+    return decorator
 
 
 def on_step_complete(*, step_id: str = "") -> Callable[[Callable[..., Any]], Callable[..., Any]]:

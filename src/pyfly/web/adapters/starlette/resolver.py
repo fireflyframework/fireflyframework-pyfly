@@ -24,10 +24,20 @@ from typing import Any, Union, get_args, get_origin
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from pyfly.kernel.exceptions import InvalidRequestException
 from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, UploadedFile, Valid
 
 _BINDING_TYPES = {PathVar, QueryParam, Body, Header, Cookie, File}
 _MISSING = object()
+
+
+def _permits_none(tp: Any) -> bool:
+    """True if the type annotation explicitly allows None (Optional[T] / T | None / NoneType)."""
+    if tp is type(None):
+        return True
+    if get_origin(tp) is Union or isinstance(tp, types.UnionType):
+        return any(a is type(None) for a in get_args(tp))
+    return False
 
 
 @dataclass
@@ -39,6 +49,7 @@ class ResolvedParam:
     inner_type: type
     default: Any = _MISSING
     validate: bool = False
+    required: bool = True
 
 
 class ParameterResolver:
@@ -96,6 +107,9 @@ class ParameterResolver:
             args = get_args(hint)
             inner_type = args[0] if args else str
             default = param.default if param.default is not inspect.Parameter.empty else _MISSING
+            # A param is required when it has no Python default and its type does not admit None.
+            # Body is validated/handled separately, so only scalar bindings enforce presence here.
+            required = default is _MISSING and not _permits_none(inner_type)
 
             params.append(
                 ResolvedParam(
@@ -104,6 +118,7 @@ class ParameterResolver:
                     inner_type=inner_type,
                     default=default,
                     validate=validate,
+                    required=required,
                 )
             )
 
@@ -150,6 +165,12 @@ class ParameterResolver:
         if raw is None:
             if param.default is not _MISSING:
                 return param.default
+            if param.required:
+                raise InvalidRequestException(
+                    f"Missing required query parameter: {param.name}",
+                    code="MISSING_PARAMETER",
+                    context={"parameter": param.name, "location": "query"},
+                )
             return None
         return self._coerce(raw, param.inner_type)
 
@@ -181,6 +202,12 @@ class ParameterResolver:
         if raw is None:
             if param.default is not _MISSING:
                 return param.default
+            if param.required:
+                raise InvalidRequestException(
+                    f"Missing required header: {header_name}",
+                    code="MISSING_PARAMETER",
+                    context={"parameter": header_name, "location": "header"},
+                )
             return None
         return self._coerce(raw, param.inner_type)
 
@@ -189,6 +216,12 @@ class ParameterResolver:
         if raw is None:
             if param.default is not _MISSING:
                 return param.default
+            if param.required:
+                raise InvalidRequestException(
+                    f"Missing required cookie: {param.name}",
+                    code="MISSING_PARAMETER",
+                    context={"parameter": param.name, "location": "cookie"},
+                )
             return None
         return self._coerce(raw, param.inner_type)
 
@@ -232,8 +265,6 @@ class ParameterResolver:
             return actual_type(value)
         except (ValueError, TypeError) as exc:
             type_name = getattr(actual_type, "__name__", repr(actual_type))
-            from pyfly.kernel.exceptions import InvalidRequestException
-
             raise InvalidRequestException(
                 f"Cannot convert '{value}' to {type_name}",
                 code="TYPE_CONVERSION_ERROR",

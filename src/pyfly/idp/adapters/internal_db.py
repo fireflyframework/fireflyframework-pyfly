@@ -142,7 +142,19 @@ class InternalDbIdpAdapter:
                 return False
             if role not in user.roles:
                 user.roles.append(role)
+            # Populate the role catalogue so list_roles reflects assigned roles
+            # (audit #29) — previously self._roles was never written.
+            self._roles.setdefault(role, IdpRole(name=role))
         return True
+
+    async def create_roles(self, *roles: str) -> list[IdpRole]:
+        """Create named roles in the catalogue (audit #29)."""
+        async with self._lock:
+            created = []
+            for role in roles:
+                idp_role = self._roles.setdefault(role, IdpRole(name=role))
+                created.append(idp_role)
+            return created
 
     async def revoke_role(self, user_id: str, role: str) -> bool:
         async with self._lock:

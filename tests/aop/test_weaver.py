@@ -287,6 +287,27 @@ class TestAroundAdvice:
         result = await svc.greet("x")
         assert result == "HELLO X"
 
+    def test_around_wraps_sync_method(self) -> None:
+        """@around must apply to synchronous joinpoints too (audit #114)."""
+        calls: list[str] = []
+
+        @aspect
+        class SyncAroundAspect:
+            @around("service.MyService.*")
+            def wrap(self, jp):
+                calls.append("around:before")
+                result = jp.proceed(*jp.args, **jp.kwargs)
+                calls.append("around:after")
+                return result.upper()
+
+        svc = MyService()
+        registry = _make_registry(SyncAroundAspect())
+        weave_bean(svc, "service.MyService", registry)
+
+        result = svc.sync_greet("x")
+        assert result == "HI X"  # @around modified the return value
+        assert calls == ["around:before", "around:after"]
+
 
 # ---------------------------------------------------------------------------
 # Multiple aspects — ordering

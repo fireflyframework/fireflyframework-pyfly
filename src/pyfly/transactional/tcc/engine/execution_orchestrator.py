@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from pyfly.transactional.tcc.core.context import TccContext
@@ -80,11 +81,13 @@ class TccExecutionOrchestrator:
                     ctx,
                     input_data,
                     phase_attr="__pyfly_try_method__",
+                    tcc_def=tcc_def,
                 )
                 ctx.set_try_result(p_def.id, result)
                 ctx.set_participant_status(p_def.id, TccPhase.TRY)
                 tried_ids.append(p_def.id)
             except Exception as exc:
+                ctx.record_participant_error(p_def.id, TccPhase.TRY, exc)
                 if p_def.optional:
                     logger.debug(
                         "Optional participant '%s' TRY failed (skipped): %s",
@@ -120,9 +123,11 @@ class TccExecutionOrchestrator:
                     ctx,
                     None,
                     phase_attr="__pyfly_confirm_method__",
+                    tcc_def=tcc_def,
                 )
                 ctx.set_participant_status(p_def.id, TccPhase.CONFIRM)
             except Exception as exc:
+                ctx.record_participant_error(p_def.id, TccPhase.CONFIRM, exc)
                 logger.debug(
                     "Participant '%s' CONFIRM failed: %s",
                     p_def.id,
@@ -163,9 +168,11 @@ class TccExecutionOrchestrator:
                     ctx,
                     None,
                     phase_attr="__pyfly_cancel_method__",
+                    tcc_def=tcc_def,
                 )
                 ctx.set_participant_status(pid, TccPhase.CANCEL)
             except Exception as exc:
+                ctx.record_participant_error(pid, TccPhase.CANCEL, exc)
                 logger.warning(
                     "Participant '%s' CANCEL failed: %s",
                     pid,
@@ -181,39 +188,54 @@ class TccExecutionOrchestrator:
         input_data: Any,
         *,
         phase_attr: str,
+        tcc_def: TccDefinition | None = None,
     ) -> Any:
         """Invoke a participant phase method with retry and timeout.
 
-        Reads retry and timeout from the method's ``__pyfly_*_method__``
-        metadata.
+        Reads retry/timeout/backoff from the method's ``__pyfly_*_method__``
+        metadata, falling back to the class-level ``@tcc`` config when a method
+        declares none. ``retry=N`` means N retries → N+1 total attempts, matching
+        the Java engine (audit #56). Accumulates phase latency onto the context
+        for result reporting (audit #57).
         """
         method = self._get_phase_method(p_def, phase_attr)
         meta = getattr(method, phase_attr, {}) if method is not None else {}
-        max_retries = max(meta.get("retry", 0), 1)
+
+        method_retry = int(meta.get("retry", 0) or 0)
+        if method_retry <= 0 and tcc_def is not None and getattr(tcc_def, "retry_enabled", False):
+            method_retry = getattr(tcc_def, "max_retries", 0)
+        total_attempts = method_retry + 1  # retry=N → N+1 attempts
+
         timeout_ms = meta.get("timeout_ms", 0) or p_def.timeout_ms
-        backoff_ms = float(meta.get("backoff_ms", 0))
+        if not timeout_ms and tcc_def is not None:
+            timeout_ms = getattr(tcc_def, "timeout_ms", 0)
+        backoff_ms = float(meta.get("backoff_ms", 0) or (getattr(tcc_def, "backoff_ms", 0) if tcc_def else 0))
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                coro = self._build_coro(invoke_fn, p_def, bean, ctx, input_data)
+        started = time.perf_counter()
+        try:
+            for attempt in range(1, total_attempts + 1):
+                try:
+                    coro = self._build_coro(invoke_fn, p_def, bean, ctx, input_data)
 
-                if timeout_ms > 0:
-                    return await asyncio.wait_for(
-                        coro,
-                        timeout=timeout_ms / 1000.0,
-                    )
-                return await coro
+                    if timeout_ms > 0:
+                        return await asyncio.wait_for(
+                            coro,
+                            timeout=timeout_ms / 1000.0,
+                        )
+                    return await coro
 
-            except Exception:
-                if attempt < max_retries:
-                    if backoff_ms > 0:
-                        await asyncio.sleep(backoff_ms / 1000.0)
-                    backoff_ms *= 2
-                else:
-                    raise
+                except Exception:
+                    if attempt < total_attempts:
+                        if backoff_ms > 0:
+                            await asyncio.sleep(backoff_ms / 1000.0)
+                        backoff_ms *= 2
+                    else:
+                        raise
 
-        # Should never reach here, but satisfy type checker.
-        raise RuntimeError("Unreachable")  # pragma: no cover
+            # Should never reach here, but satisfy type checker.
+            raise RuntimeError("Unreachable")  # pragma: no cover
+        finally:
+            ctx.add_participant_latency(p_def.id, (time.perf_counter() - started) * 1000.0)
 
     @staticmethod
     def _get_phase_method(

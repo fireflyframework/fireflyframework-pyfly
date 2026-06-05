@@ -31,3 +31,7 @@ class Registration:
     condition: Callable[..., bool] | None = None
     instance: Any = field(default=None, repr=False)
     name: str = ""
+    # Optional factory (e.g. a @bean method closure). When set it takes
+    # precedence over ``impl_type.__init__`` so TRANSIENT @bean factory logic is
+    # preserved on every resolution instead of being reconstructed via __init__.
+    factory: Callable[[], Any] | None = field(default=None, repr=False)

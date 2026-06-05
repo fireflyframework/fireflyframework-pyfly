@@ -66,6 +66,14 @@ class FastAPIControllerRegistrar:
         the application factory using :class:`pyfly.web.openapi.OpenAPIGenerator`
         together with :meth:`collect_route_metadata`.
         """
+        # Idempotent: skip (path, method) pairs already registered so a
+        # post-start rescan only mounts @bean-produced controllers that were
+        # not yet discoverable at create_app time (audit #163).
+        existing: set[tuple[str, str]] = set()
+        for route in getattr(app, "routes", []):
+            for m in getattr(route, "methods", None) or ():
+                existing.add((getattr(route, "path", ""), m))
+
         for cls, _reg in ctx.container._registrations.items():
             if getattr(cls, "__pyfly_stereotype__", "") not in self._CONTROLLER_STEREOTYPES:
                 continue
@@ -84,6 +92,10 @@ class FastAPIControllerRegistrar:
                 full_path = base_path + mapping["path"]
                 http_method = mapping["method"]
                 status_code = mapping.get("status_code", 200)
+
+                if (full_path, http_method) in existing:
+                    continue
+                existing.add((full_path, http_method))
 
                 handler = self._make_lazy_handler(ctx, cls, attr_name, status_code)
                 app.add_api_route(

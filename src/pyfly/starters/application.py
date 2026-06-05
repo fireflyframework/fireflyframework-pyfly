@@ -62,12 +62,13 @@ APPLICATION_STACK_PROPERTIES: dict[str, str] = {
     **CORE_STACK_PROPERTIES,
     # Plugin SPI (extension points / extensions / dependency-ordered lifecycle)
     "pyfly.plugins.enabled": "true",
-    # Security — JWT issuance / validation, password encoder, OAuth2 filters
-    "pyfly.security-jwt.enabled": "true",
-    "pyfly.security-password.enabled": "true",
+    # Security — JWT service + password encoder beans (JwtAutoConfiguration /
+    # PasswordEncoderAutoConfiguration gate on pyfly.security.enabled). The auth
+    # WebFilter stays opt-in via pyfly.security.jwt.filter.enabled (secure-by-
+    # default: the services are wired, request enforcement is opted into).
+    "pyfly.security.enabled": "true",
     # Sessions
     "pyfly.session.enabled": "true",
-    "pyfly.session-filter.enabled": "true",
     # i18n — locale resolver + message source
     "pyfly.i18n.enabled": "true",
     # Scheduling — cron + fixed-rate

@@ -103,6 +103,11 @@ class PyFlyApplication:
                 sources.append("starter defaults (@enable_*_stack)")
             self.config._loaded_sources = sources
 
+        # 1c. Import remote configuration from a config server, if one is
+        #     configured (Spring Cloud Config parity). Runs before logging /
+        #     context so remote values participate in everything downstream.
+        self._import_remote_config(active_profiles)
+
         # 2. Configure logging
         self._logging = _DefaultLoggingAdapter()
         self._logging.configure(self.config)
@@ -332,6 +337,27 @@ class PyFlyApplication:
             admin_path = str(self.config.get("pyfly.admin.path", "/admin"))
             self._logger.info("admin_dashboard", url=f"{base_url}{admin_path}")
 
+    async def run(self, args: list[str] | None = None) -> int:
+        """Start the app, dispatch the shell, then shut down (CLI entry point).
+
+        Resolves the :class:`ShellRunnerPort` (populated with ``@shell_command``
+        handlers during startup) and runs the given args — or ``sys.argv[1:]`` —
+        falling back to an interactive REPL when no command is supplied. This is
+        what the generated ``cli`` archetype's ``main()`` awaits (audit #1).
+        """
+        from pyfly.shell.ports.outbound import ShellRunnerPort
+
+        await self.startup()
+        try:
+            runner = self._context.get_bean(ShellRunnerPort)  # type: ignore[type-abstract]
+            argv = sys.argv[1:] if args is None else args
+            if argv:
+                return await runner.run(argv)
+            await runner.run_interactive()
+            return 0
+        finally:
+            await self.shutdown()
+
     async def shutdown(self) -> None:
         """Shutdown the application — stop the ApplicationContext."""
         self._logger.info("shutting_down", app=self._name)
@@ -368,6 +394,63 @@ class PyFlyApplication:
                 cursor[part] = existing
             cursor = existing
         cursor[parts[-1]] = value
+
+    def _import_remote_config(self, active_profiles: list[str]) -> None:
+        """Fetch config from a remote config server and merge it as a
+        high-precedence source (audit #84).
+
+        Active when ``pyfly.cloud.config.uri`` (or ``pyfly.config.import``) is set
+        and ``pyfly.cloud.config.enabled`` is not false. Non-fatal by default —
+        an unreachable server or missing httpx logs a warning and falls back to
+        local config — unless ``pyfly.cloud.config.fail-fast`` is true. Runs in
+        ``__init__`` before the logging adapter exists, so it uses a stdlib logger.
+        """
+        import asyncio
+        import logging
+
+        uri = self.config.get("pyfly.cloud.config.uri") or self.config.get("pyfly.config.import")
+        if not uri:
+            return
+        if str(self.config.get("pyfly.cloud.config.enabled", "true")).lower() not in ("true", "1", "yes"):
+            return
+
+        log = logging.getLogger("pyfly.config")
+
+        # __init__ is synchronous; if an event loop is already running we cannot
+        # asyncio.run() — skip rather than deadlock.
+        try:
+            asyncio.get_running_loop()
+            log.warning("Skipping remote config import: an event loop is already running.")
+            return
+        except RuntimeError:
+            pass
+
+        fail_fast = str(self.config.get("pyfly.cloud.config.fail-fast", "false")).lower() in ("true", "1", "yes")
+        try:
+            from pyfly.config_server.client import ConfigClient
+
+            client = ConfigClient(
+                url=str(uri),
+                application=str(self.config.get("pyfly.app.name", self._name)),
+                profile=",".join(active_profiles) if active_profiles else "default",
+                label=str(self.config.get("pyfly.cloud.config.label", "main")),
+                username=self.config.get("pyfly.cloud.config.username"),
+                password=self.config.get("pyfly.cloud.config.password"),
+            )
+            remote = asyncio.run(client.fetch())
+        except Exception as exc:  # noqa: BLE001 — must not crash startup unless fail-fast
+            if fail_fast:
+                raise
+            log.warning("Remote config import from %s failed (%s); using local config only.", uri, exc)
+            return
+
+        if not remote:
+            return
+        nested: dict[str, Any] = {}
+        for dotted_key, value in remote.items():
+            self._merge_dotted(nested, dotted_key, value)
+        self.config._data = Config._deep_merge(self.config._data, nested)
+        self.config._loaded_sources.append(f"config-server ({uri})")
 
     def _find_config_dir(self, config_path: str | Path | None) -> Path | None:
         """Find the project directory containing config files."""

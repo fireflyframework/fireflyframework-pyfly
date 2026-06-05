@@ -167,11 +167,11 @@ class TccEngine:
             participant_results[pid] = ParticipantResult(
                 participant_id=pid,
                 try_result=ctx.try_results.get(pid),
-                try_error=None,
-                confirm_error=None,
-                cancel_error=None,
+                try_error=ctx.get_participant_error(pid, TccPhase.TRY),
+                confirm_error=ctx.get_participant_error(pid, TccPhase.CONFIRM),
+                cancel_error=ctx.get_participant_error(pid, TccPhase.CANCEL),
                 final_phase=ctx.participant_statuses.get(pid, TccPhase.TRY),
-                latency_ms=0.0,
+                latency_ms=ctx.participant_latency.get(pid, 0.0),
             )
 
         return TccResult(

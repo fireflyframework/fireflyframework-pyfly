@@ -95,10 +95,36 @@ def _get_status_code(exc: Exception) -> int:
     return 500
 
 
+def _try_convert(request: Request, exc: Exception) -> PyFlyException | None:
+    """Translate a non-PyFly exception via the registered converter chain.
+
+    Reads the per-app ``ExceptionConverterService`` stashed on ``app.state`` by
+    ``create_app``, falling back to the built-in default chain. Returns the
+    converted PyFly exception, or ``None`` when no converter matches (audit #202).
+    """
+    service = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(service, "pyfly_exception_converter_service", None)
+    if service is None:
+        from pyfly.web.converters import build_exception_converter_service
+
+        service = build_exception_converter_service()
+    try:
+        return service.convert(exc)
+    except Exception:  # noqa: BLE001 — a converter must never mask the original error
+        return None
+
+
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle all exceptions with structured JSON responses."""
     transaction_id = getattr(request.state, "transaction_id", str(uuid.uuid4()))
     timestamp = datetime.now(UTC).isoformat()
+
+    # Translate known library exceptions (Pydantic, JSON, timeout, user-registered)
+    # into the appropriate PyFly exception before deciding the status (audit #202).
+    if not isinstance(exc, PyFlyException):
+        converted = _try_convert(request, exc)
+        if converted is not None:
+            exc = converted
 
     if isinstance(exc, PyFlyException):
         status = _get_status_code(exc)

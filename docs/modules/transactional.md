@@ -1740,9 +1740,30 @@ the configured `ExecutionPersistenceProvider` (in-memory, Redis,
 SQLAlchemy or cache). The REST controllers expose:
 
 ```
-POST /api/orchestration/workflow/{workflow_id}/start
-POST /api/orchestration/workflow/{correlation_id}/signal/{signal}
-GET  /api/orchestration/workflow/{correlation_id}/query/{name}
-GET  /api/orchestration/executions
-GET  /api/orchestration/dlq
+POST   /api/orchestration/workflow/start                 # body: {workflow_id, input}
+POST   /api/orchestration/workflow/signal                # body: {correlation_id, signal, payload}
+
+GET    /api/orchestration/executions                     # in-flight only by default; ?status=<S> filters exactly
+GET    /api/orchestration/executions/{correlation_id}
+
+GET    /api/orchestration/dlq                             # ?execution_name=… &correlation_id=… filter
+GET    /api/orchestration/dlq/count                       # {"count": <int>}
+GET    /api/orchestration/dlq/{entry_id}
+POST   /api/orchestration/dlq/{entry_id}/retry
+DELETE /api/orchestration/dlq/{entry_id}
 ```
+
+### Execution listing semantics
+
+`GET /api/orchestration/executions` with **no** `status` query parameter
+returns only **in-flight** (non-terminal) executions — it no longer surfaces
+the whole store including terminal history (Java parity). Supplying an explicit
+`?status=<STATUS>` filters the store to exactly that status.
+
+### Dead-letter queue
+
+`GET /api/orchestration/dlq/count` returns `{"count": <int>}` — the cardinality
+of dead-lettered runs, backed by `DeadLetterService.count()` — for ops
+dashboards. The `dlq` collection also supports listing (optionally filtered by
+`execution_name` / `correlation_id`), fetching a single entry, marking an entry
+retried, and deleting an entry.

@@ -31,6 +31,7 @@ The building blocks that every PyFly application relies on.
 | [Configuration](configuration.md) | YAML/TOML config files, `Config` class, profile-specific overlays, `@config_properties` binding, environment variable overrides |
 | [Config Server](config-server.md) | Centralized config server (`ConfigServer`, `ConfigClient`), `ConfigBackend` SPI, in-memory & filesystem backends, Spring-Cloud-Config-compatible responses |
 | [Error Handling](error-handling.md) | 25+ exception types, `ErrorResponse`, `ErrorCategory`, `ErrorSeverity`, HTTP status mapping, structured error responses, `@exception_handler` |
+| [Starters](starters.md) | Layered bundles — `enable_core_stack`, `enable_web_stack`, `enable_application_stack`, `enable_data_stack`, `enable_domain_stack`, per-tier module activation |
 
 ---
 
@@ -43,6 +44,8 @@ Build REST APIs with automatic OpenAPI documentation, validation, security heade
 | [Web Layer](web.md) | `@rest_controller`, `@get_mapping` / `@post_mapping` / `@put_mapping` / `@delete_mapping`, parameter binding (`Body`, `PathVar`, `QueryParam`, `Header`, `Cookie`), CORS configuration, OpenAPI 3.1 auto-generation, Swagger UI, ReDoc |
 | [Validation](validation.md) | `Valid[T]` annotation for explicit request validation, structured 422 error responses with field-level errors, `Valid[Body[T]]`, `Valid[QueryParam[T]]`, Pydantic `Field()` constraints, custom validators |
 | [WebFilters](web-filters.md) | `WebFilterChainMiddleware`, `OncePerRequestFilter` base class, URL pattern matching, built-in filters: `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter`, `SecurityFilter`, custom filter creation |
+| [WebSocket](websocket.md) | `@websocket_mapping`, `WebSocketSession` (accept/send/receive/close), `WebSocketHandler` lifecycle protocol, `on_disconnect` hook, Starlette `WebSocketRegistrar` route discovery, disconnect & exception handling |
+| [Server Module](server.md) | `ApplicationServerPort`, `EventLoopPort`, Granian / Uvicorn / Hypercorn adapters, uvloop / winloop / asyncio selection, cascading auto-configuration, `ServerProperties`, `pyfly run` |
 | [Actuator](actuator.md) | `/actuator/health`, `/actuator/beans`, `/actuator/env`, `/actuator/info`, `/actuator/loggers` (GET/POST), `/actuator/metrics`, HAL-style `_links` index, `ActuatorRegistry`, per-endpoint enable/disable |
 | [Custom Actuator Endpoints](custom-actuator-endpoints.md) | `ActuatorEndpoint` protocol, building custom endpoints, auto-discovery from DI container, configuration-driven enable/disable |
 
@@ -119,6 +122,7 @@ Bridge to the rest of your stack — outbound webhooks, inbound webhooks, identi
 | [Callbacks (outbound webhooks)](callbacks.md) | Subscriptions, HMAC signing, retry, execution tracking |
 | [Webhooks (inbound)](webhooks.md) | Signature validation, idempotency, listener pattern |
 | [Notifications](notifications.md) | Email / SMS / push ports, dummy + SMTP adapters |
+| [Internationalisation (i18n)](i18n.md) | `MessageSource` port, `ResourceBundleMessageSource` (YAML/JSON bundles), locale fallback, `MessageFormat`-style placeholders, `AcceptHeaderLocaleResolver` / `FixedLocaleResolver`, `I18nAutoConfiguration` |
 | [IDP (Identity Provider)](idp.md) | `IdpAdapter` port + internal-DB reference adapter, login, MFA, roles |
 | [ECM (Content Management)](ecm.md) | Document storage, metadata, folders, e-signature ports + adapters |
 | [Plugins](plugins.md) | `@plugin`, `@extension`, `@extension_point`, `PluginManager`, dependency resolution |

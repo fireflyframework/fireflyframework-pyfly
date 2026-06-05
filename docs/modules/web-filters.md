@@ -246,7 +246,7 @@ class OAuth2SessionSecurityFilter(OncePerRequestFilter):
         return await call_next(request)
 ```
 
-- Runs at `HIGHEST_PRECEDENCE + 225`, **before** the JWT `SecurityFilter` (at +250).
+- Runs at `HIGHEST_PRECEDENCE + 225`, **after** the JWT `SecurityFilter` (at +220) but before the `OAuth2ResourceServerFilter` (at +250).
 - Reads the `SECURITY_CONTEXT` attribute from the HTTP session (stored by `OAuth2LoginHandler` during login).
 - If a valid authenticated context is found, sets it on `request.state.security_context`.
 - Otherwise, sets an anonymous context so downstream filters always have a context available.
@@ -333,8 +333,8 @@ from pyfly.container.ordering import order, HIGHEST_PRECEDENCE
 # Built-in order values:
 # TransactionIdFilter:           HIGHEST_PRECEDENCE + 100
 # RequestLoggingFilter:          HIGHEST_PRECEDENCE + 200
+# SecurityFilter:                HIGHEST_PRECEDENCE + 220   (opt-in, JWT authentication)
 # OAuth2SessionSecurityFilter:   HIGHEST_PRECEDENCE + 225
-# SecurityFilter:                (opt-in, authentication)
 # SecurityHeadersFilter:         HIGHEST_PRECEDENCE + 300
 # HttpSecurityFilter:            HIGHEST_PRECEDENCE + 350
 

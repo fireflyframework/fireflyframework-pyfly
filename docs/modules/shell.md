@@ -280,8 +280,13 @@ def deploy(verbose: bool = False, env: str = "staging") -> str:
 | `is_flag` | `bool` | `False` | If `True`, the option is a boolean flag (no value expected). |
 | `help` | `str` | `""` | Help text for this option. |
 | `default` | `Any` | `None` | Default value when the option is not supplied. |
+| `choices` | `list[str] \| None` | `None` | Restrict accepted values to a fixed set. Flows through to the resolved `ShellParam.choices`. |
 
 The decorator stores metadata in a list at `func.__pyfly_shell_options__`.
+
+Both `type` and `choices` are honored by `infer_params()`: an explicit `type=`
+overrides the type inferred from the signature, and `choices=` is carried onto
+the resulting `ShellParam`.
 
 ### @shell_argument
 
@@ -313,11 +318,17 @@ When `infer_params()` processes a method, it:
 2. Builds a separate lookup from `@shell_argument` entries.
 3. For each function parameter, checks for an explicit override first.
 4. If found, the override's `help`, `default`, `is_flag`, and `choices` values
-   take precedence over the inferred defaults.
+   take precedence over the inferred defaults. An explicit `type=` on the
+   override is honored too: `param_type` becomes the override's `type` when set,
+   otherwise it falls back to the type inferred from the function signature. This
+   applies to both `@shell_option` and `@shell_argument` (note that
+   `@shell_argument` carries no `is_flag` / `choices`, so only its `help`,
+   `default`, and `type` flow onto the resolved `ShellParam`).
 5. If no override exists, the standard inference rules apply.
 
 This means you only need `@shell_option` / `@shell_argument` when the inference
-defaults are insufficient — typically to add help text or constrain choices.
+defaults are insufficient — typically to add help text, override the value type,
+or constrain choices.
 
 ---
 

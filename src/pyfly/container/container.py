@@ -211,6 +211,17 @@ class Container:
         try:
             start = time.perf_counter_ns()
 
+            # A registration backed by a factory (e.g. a @bean method) must be
+            # built through that factory so its construction logic is preserved
+            # on every resolution (notably TRANSIENT @bean beans).
+            if reg.factory is not None:
+                instance = reg.factory()
+                self._inject_autowired_fields(instance)
+                metrics = self._ensure_metrics(reg.impl_type)
+                metrics.creation_time_ns = time.perf_counter_ns() - start
+                metrics.created_at = time.time()
+                return instance
+
             init = reg.impl_type.__init__  # type: ignore[misc]
             if init is object.__init__:
                 instance = reg.impl_type()

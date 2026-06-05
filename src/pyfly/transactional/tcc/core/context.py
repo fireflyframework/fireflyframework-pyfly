@@ -39,6 +39,10 @@ class TccContext:
     try_results: dict[str, Any] = field(default_factory=dict)
     current_phase: TccPhase = TccPhase.TRY
     participant_statuses: dict[str, TccPhase] = field(default_factory=dict)
+    # Per-participant phase errors and accumulated latency, so TccResult can
+    # report which participant failed and how long each phase took (audit #57).
+    participant_errors: dict[str, dict[TccPhase, Exception]] = field(default_factory=dict)
+    participant_latency: dict[str, float] = field(default_factory=dict)
 
     # ── try-result helpers ────────────────────────────────────
 
@@ -61,3 +65,17 @@ class TccContext:
     def set_participant_status(self, participant_id: str, phase: TccPhase) -> None:
         """Record the phase that *participant_id* has reached."""
         self.participant_statuses[participant_id] = phase
+
+    # ── error / latency helpers ───────────────────────────────
+
+    def record_participant_error(self, participant_id: str, phase: TccPhase, error: Exception) -> None:
+        """Record the exception *participant_id* raised during *phase*."""
+        self.participant_errors.setdefault(participant_id, {})[phase] = error
+
+    def add_participant_latency(self, participant_id: str, latency_ms: float) -> None:
+        """Accumulate elapsed time spent invoking *participant_id*'s phases."""
+        self.participant_latency[participant_id] = self.participant_latency.get(participant_id, 0.0) + latency_ms
+
+    def get_participant_error(self, participant_id: str, phase: TccPhase) -> Exception | None:
+        """Return the exception *participant_id* raised during *phase*, if any."""
+        return self.participant_errors.get(participant_id, {}).get(phase)

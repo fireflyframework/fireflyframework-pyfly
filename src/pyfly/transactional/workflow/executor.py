@@ -37,6 +37,7 @@ from pyfly.transactional.core.exceptions import StepFailedError
 from pyfly.transactional.core.step_invoker import StepInvoker
 from pyfly.transactional.core.topology import TopologyBuilder
 from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
+from pyfly.transactional.workflow.condition import ConditionError, evaluate_condition
 from pyfly.transactional.workflow.definition import (
     WorkflowDefinition,
     WorkflowStepDefinition,
@@ -71,6 +72,9 @@ class WorkflowExecutor:
         self._children = child_service or ChildWorkflowService()
         self._events = events or LoggerOrchestrationEvents()
         self._backpressure = backpressure or AdaptiveBackpressureStrategy()
+        # Strong references to fire-and-forget @workflow_step(async_=True) tasks
+        # so the event loop does not GC-cancel them mid-flight (audit #60/#62).
+        self._async_step_tasks: set[asyncio.Task[Any]] = set()
 
     async def execute(self, definition: WorkflowDefinition, ctx: ExecutionContext) -> None:
         """Run all steps respecting their dependency graph.
@@ -169,13 +173,21 @@ class WorkflowExecutor:
     ) -> None:
         await self._events.on_step_started(name=definition.id, correlation_id=ctx.correlation_id, step_id=step.id)
 
+        # Evaluate the step condition (SpEL substitute). A condition that
+        # resolves to False skips the step entirely (audit #59).
+        if step.condition and not self._evaluate_condition(step.condition, ctx):
+            await ctx.record_step_skipped(step.id)
+            await self._events.on_step_skipped(name=definition.id, correlation_id=ctx.correlation_id, step_id=step.id)
+            return
+
         # Handle pre-step waits and child invocations.
         if step.wait_for_timer_ms > 0:
+            timer_id = step.wait_for_timer_id or step.id
             await self._events.on_workflow_suspended(
-                name=definition.id, correlation_id=ctx.correlation_id, reason=f"timer:{step.id}"
+                name=definition.id, correlation_id=ctx.correlation_id, reason=f"timer:{timer_id}"
             )
             await self._timers.sleep_ms(step.wait_for_timer_ms)
-            await self._events.on_timer_fired(name=definition.id, correlation_id=ctx.correlation_id, timer_id=step.id)
+            await self._events.on_timer_fired(name=definition.id, correlation_id=ctx.correlation_id, timer_id=timer_id)
             await self._events.on_workflow_resumed(name=definition.id, correlation_id=ctx.correlation_id)
 
         if step.wait_for_signal:
@@ -189,18 +201,36 @@ class WorkflowExecutor:
             )
             await self._events.on_workflow_resumed(name=definition.id, correlation_id=ctx.correlation_id)
 
-        if step.wait_for_all:
-            for sig in step.wait_for_all:
-                await ctx.wait_for_signal(sig, step.wait_for_all_timeout_ms)
+        if step.wait_for_all or step.wait_for_all_timers:
+            # Wait for every signal AND every timer to complete.
+            awaitables = [ctx.wait_for_signal(sig, step.wait_for_all_timeout_ms) for sig in step.wait_for_all]
+            awaitables += [self._timers.sleep_ms(delay) for delay in step.wait_for_all_timers]
+            if awaitables:
+                await asyncio.gather(*awaitables)
 
-        if step.wait_for_any:
+        if step.wait_for_any or step.wait_for_any_timers:
+            signal_names = list(step.wait_for_any)
             tasks = [
-                asyncio.create_task(ctx.wait_for_signal(sig, step.wait_for_any_timeout_ms)) for sig in step.wait_for_any
+                asyncio.create_task(ctx.wait_for_signal(sig, step.wait_for_any_timeout_ms)) for sig in signal_names
             ]
+            # Timers race alongside signals; whichever fires first wins.
+            tasks += [asyncio.create_task(self._timers.sleep_ms(delay)) for delay in step.wait_for_any_timers]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+            # Retrieve the winning future: a TimeoutError must surface (not be
+            # swallowed). When a signal wins its payload is captured as a
+            # variable; when a timer wins there is nothing to record (audit
+            # #55/#63).
+            winner = next(iter(done))
+            winner_idx = tasks.index(winner)
+            payload = winner.result()  # re-raises asyncio.TimeoutError on timeout
+            if winner_idx < len(signal_names):
+                await ctx.set_variable(f"signal:{signal_names[winner_idx]}", payload)
+                await self._events.on_signal_delivered(
+                    name=definition.id, correlation_id=ctx.correlation_id, signal=signal_names[winner_idx]
+                )
 
         if step.child_workflow_id:
             await self._events.on_child_workflow_started(
@@ -234,6 +264,22 @@ class WorkflowExecutor:
             await ctx.record_step_success(step.id, child_result, latency_ms=0.0)
             return
 
+        # Async steps fire-and-forget: schedule the invocation and let the
+        # workflow proceed without blocking the layer (audit #60).
+        if step.async_:
+            task = asyncio.create_task(self._run_step_body(definition, ctx, step))
+            self._async_step_tasks.add(task)
+            task.add_done_callback(self._async_step_tasks.discard)
+            return
+
+        await self._run_step_body(definition, ctx, step)
+
+    async def _run_step_body(
+        self,
+        definition: WorkflowDefinition,
+        ctx: ExecutionContext,
+        step: WorkflowStepDefinition,
+    ) -> None:
         # Regular method invocation.
         started = time.perf_counter()
         try:
@@ -269,3 +315,25 @@ class WorkflowExecutor:
                 latency_ms=elapsed,
             )
             raise
+
+    @staticmethod
+    def _evaluate_condition(expression: str, ctx: ExecutionContext) -> bool:
+        """Evaluate a step condition against the workflow facts.
+
+        A malformed/unknown-name condition fails closed (treated as False, the
+        step is skipped) rather than aborting the workflow.
+        """
+        namespace = {
+            "results": {sid: rec.result for sid, rec in ctx.get_all_steps().items()},
+            "variables": ctx.get_all_variables(),
+            "headers": dict(ctx.headers),
+            "input": ctx.input,
+        }
+        try:
+            return evaluate_condition(expression, namespace)
+        except ConditionError:
+            _logger.warning(
+                "workflow_step_condition_invalid",
+                extra={"correlation_id": ctx.correlation_id, "condition": expression},
+            )
+            return False

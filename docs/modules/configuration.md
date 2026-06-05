@@ -27,6 +27,7 @@ and the full reference of framework defaults.
    - [Layer 3: Profile Overlays](#layer-3-profile-overlays)
    - [Layer 4: Environment Variables](#layer-4-environment-variables)
    - [Deep Merge Behavior](#deep-merge-behavior)
+   - [Remote Config Import (Config Server)](#remote-config-import-config-server)
 7. [Environment Variable Overrides](#environment-variable-overrides)
    - [Naming Convention](#naming-convention)
    - [Type Coercion](#type-coercion)
@@ -165,6 +166,14 @@ Returns `default` if the key is not found.
 ```python
 port = config.get("pyfly.web.port", 8080)  # int 8080 from YAML, or str from env var
 ```
+
+**Relaxed segment matching:** the dictionary walk in `get()` / `_raw_get()` is *relaxed*
+(Spring Boot style): each path segment is matched with kebab/snake-case treated as
+interchangeable. So `config.get("pyfly.data.pool-size")` finds a value stored under
+`pool_size`, and `config.get("my_prop.sub_key")` finds one stored under `my-prop.sub-key`.
+An exact match is tried first (hot path); only when absent does it fall back to comparing
+the `_relaxed()` form (`-`/whitespace -> `_`, lower-cased) of each key. This is implemented
+by `_dict_get_relaxed()` in `core/config.py`.
 
 ### get_section()
 
@@ -466,6 +475,43 @@ pyfly:
 
 ---
 
+## Remote Config Import (Config Server)
+
+PyFly can import configuration from a remote [config server](config-server.md) at
+bootstrap. When `pyfly.cloud.config.uri` (or the alias `pyfly.config.import`) is set
+and `pyfly.cloud.config.enabled` is not `false`, `PyFlyApplication._import_remote_config()`
+fetches the remote bundle during construction and **deep-merges it as a high-precedence
+source** on top of the locally loaded config.
+
+```yaml
+pyfly:
+  cloud:
+    config:
+      uri: "http://config:8888"   # remote config server base URL
+      enabled: true               # default true; set false to disable import
+      label: "main"               # optional, defaults to "main"
+      fail-fast: false            # default false; see below
+      username: "configuser"      # optional HTTP basic auth
+      password: "s3cret"          # optional HTTP basic auth
+```
+
+Behavior:
+
+- The application name (`pyfly.app.name`, falling back to the app's own name) and
+  the comma-joined active profiles are sent to the server's
+  `/{application}/{profile}/{label}` endpoint via `ConfigClient`.
+- The returned `propertySources` are flattened and merged into the live `Config`, and a
+  `config-server (<uri>)` entry is appended to `loaded_sources`.
+- The import is **non-fatal by default**: an unreachable server, a missing `httpx`
+  dependency, or a non-200 response logs a warning and the app falls back to local config
+  only. Set `pyfly.cloud.config.fail-fast: true` to make any import failure abort startup.
+- Because the import runs in the synchronous `__init__`, it is skipped (with a warning) if
+  an event loop is already running.
+
+See the [Config Server guide](config-server.md) for the server side.
+
+---
+
 ## Environment Variable Overrides
 
 ### Naming Convention
@@ -592,6 +638,25 @@ string data (e.g., from environment variable injection), `bind()` coerces:
 
 Fields not present in the config section use the dataclass default values.
 
+### Env-Only Keys (No File Leaf)
+
+`bind()` resolves its section via `effective_section()`, which not only resolves
+`${...}` placeholders and overlays env-var overrides, but also **injects env-only
+keys** that have no corresponding leaf in any config file. A `PYFLY_<PREFIX>_*`
+variable whose key does not exist in the loaded YAML/TOML is added to the bound section
+so that `bind()` sees the same value `get()` would.
+
+For example, with no `pyfly.data.replica-url` key anywhere in your files:
+
+```bash
+PYFLY_DATA_REPLICA_URL="postgresql+asyncpg://replica:5432/orders"
+```
+
+binds to a `replica_url` field on a `@config_properties(prefix="pyfly.data")` class.
+The env suffix is split on `_` (treated Spring-style as path separators relative to the
+prefix); only *absent* leaves are added, and existing file/overlay values are never
+overwritten. This is implemented by `_inject_env_only()` in `core/config.py`.
+
 ---
 
 ## @Value (Field-Level Config Injection)
@@ -613,6 +678,13 @@ from pyfly.core.value import Value
 | `literal` | Return the string as-is (no `${}` wrapper) | `Value("hello")` |
 
 The key uses dot-notation to navigate the Config hierarchy (e.g., `pyfly.data.mongodb.uri` resolves to `config["pyfly"]["data"]["mongodb"]["uri"]`).
+
+Placeholder config-references use the same **relaxed** segment matching as `get()`:
+kebab/snake-case segments are interchangeable. So `${my-prop.sub-key}` resolves a value
+stored under `my_prop.sub_key` (and vice versa). Each `${...}` reference is also checked
+against environment variables first — both its literal dotted name and the `PYFLY_*`
+relaxed mapping (so `${app.name}` honors `PYFLY_APP_NAME`) — before falling back to the
+config tree and finally the inline `:default`.
 
 ### Usage in Beans
 

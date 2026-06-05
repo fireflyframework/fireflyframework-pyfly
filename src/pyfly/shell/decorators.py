@@ -60,6 +60,7 @@ def shell_option(
     is_flag: bool = False,
     help: str = "",
     default: Any = None,
+    choices: list[str] | None = None,
 ) -> Callable[[F], F]:
     """Attach option metadata to a shell command method.
 
@@ -75,6 +76,8 @@ def shell_option(
         Help text for this option.
     default:
         Default value when the option is not supplied.
+    choices:
+        Allowed values; surfaced on the resolved :class:`ShellParam`.
     """
 
     def decorator(func: F) -> F:
@@ -86,6 +89,7 @@ def shell_option(
                 "is_flag": is_flag,
                 "help": help,
                 "default": default,
+                "choices": choices,
             }
         )
         func.__pyfly_shell_options__ = options  # type: ignore[attr-defined]

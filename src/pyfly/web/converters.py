@@ -24,17 +24,22 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ValidationError
 
 from pyfly.kernel.exceptions import (
     InvalidRequestException,
+    OperationTimeoutException,
     PyFlyException,
     ValidationException,
 )
 
+if TYPE_CHECKING:
+    from pyfly.context.application_context import ApplicationContext
 
+
+@runtime_checkable
 class ExceptionConverter(Protocol):
     """Converts external exceptions to PyFly exceptions."""
 
@@ -90,6 +95,53 @@ class JSONExceptionConverter:
             code="INVALID_JSON",
             context={"position": exc.pos},
         )
+
+
+class TimeoutExceptionConverter:
+    """Converts ``TimeoutError`` (and ``asyncio.TimeoutError``) to a 504-mapped exception."""
+
+    def can_handle(self, exc: Exception) -> bool:
+        return isinstance(exc, TimeoutError)
+
+    def convert(self, exc: Exception) -> PyFlyException:
+        return OperationTimeoutException(
+            "Operation timed out",
+            code="OPERATION_TIMEOUT",
+        )
+
+
+def default_exception_converters() -> list[ExceptionConverter]:
+    """The built-in converter chain consulted for non-PyFly exceptions.
+
+    Mirrors Spring's registered ``*ExceptionConverter`` chain (validation, JSON,
+    timeout). Users can contribute additional converters as beans implementing
+    :class:`ExceptionConverter`; they are appended via
+    :func:`build_exception_converter_service`.
+    """
+    return [
+        PydanticExceptionConverter(),
+        JSONExceptionConverter(),
+        TimeoutExceptionConverter(),
+    ]
+
+
+def build_exception_converter_service(
+    context: ApplicationContext | None = None,
+) -> ExceptionConverterService:
+    """Build the global :class:`ExceptionConverterService`.
+
+    Combines the built-in converter chain with any user-provided
+    :class:`ExceptionConverter` beans discovered in the application context, so
+    arbitrary library exceptions are translated to the correct HTTP status
+    before the global handler responds (audit #202).
+    """
+    converters = default_exception_converters()
+    if context is not None:
+        for reg in context.container._registrations.values():
+            inst = reg.instance
+            if inst is not None and isinstance(inst, ExceptionConverter) and not isinstance(inst, type):
+                converters.append(inst)
+    return ExceptionConverterService(converters)
 
 
 # ---------------------------------------------------------------------------

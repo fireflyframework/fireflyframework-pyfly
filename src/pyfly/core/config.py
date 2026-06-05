@@ -76,6 +76,21 @@ def _relaxed(name: str) -> str:
     return name.replace("-", "_").replace(" ", "_").lower()
 
 
+def _dict_get_relaxed(data: dict[str, Any], part: str) -> Any:
+    """Look up *part* in *data*, falling back to relaxed (kebab/snake) matching.
+
+    Exact match is tried first (hot path); only when absent does it scan for a
+    key whose :func:`_relaxed` form equals ``_relaxed(part)`` — so ``a-b`` resolves
+    a value stored under ``a_b`` and vice versa (audit #92)."""
+    if part in data:
+        return data[part]
+    target = _relaxed(part)
+    for key, value in data.items():
+        if _relaxed(key) == target:
+            return value
+    return None
+
+
 def _coerce_like(raw: str, reference: Any) -> Any:
     """Coerce a raw string to the type of *reference* (relaxed-binding style).
 
@@ -121,6 +136,12 @@ def config_properties(prefix: str) -> Callable[[type[T]], type[T]]:
 
     def decorator(cls: type[T]) -> type[T]:
         setattr(cls, _CONFIG_PROPERTIES_ATTR, prefix)
+        # Make the class an injectable bean (Spring @EnableConfigurationProperties
+        # equivalent) so the scanner registers it and the context binds it from
+        # config, making it constructor-injectable by type (audit #118).
+        cls.__pyfly_injectable__ = True  # type: ignore[attr-defined]
+        if not hasattr(cls, "__pyfly_stereotype__"):
+            cls.__pyfly_stereotype__ = "config_properties"  # type: ignore[attr-defined]
         return cls
 
     return decorator
@@ -400,11 +421,14 @@ class Config:
         return "PYFLY_" + env_base.upper().replace(".", "_").replace("-", "_")
 
     def _raw_get(self, key: str) -> Any:
-        """Walk the merged file data for *key* without env/placeholder handling."""
+        """Walk the merged file data for *key* without env/placeholder handling.
+
+        Segment lookups are relaxed (kebab/snake interchangeable) so ``_raw_get``
+        and ``get()`` match ``bind()``'s relaxed semantics (audit #92)."""
         current: Any = self._data
         for part in key.split("."):
             if isinstance(current, dict):
-                current = current.get(part)
+                current = _dict_get_relaxed(current, part)
                 if current is None:
                     return None
             else:
@@ -431,17 +455,23 @@ class Config:
             else:
                 ref_key, default_val = inner, None
 
-            # Try environment variable first
+            # Try environment variable first — both the literal dotted name and
+            # the PYFLY_* relaxed mapping, so ${app.name} honors PYFLY_APP_NAME
+            # and env overrides win over raw file data (audit #87/#89).
             env_val = os.environ.get(ref_key)
+            if env_val is None:
+                env_val = os.environ.get(self._env_key(ref_key))
             if env_val is not None:
                 return env_val
 
-            # Try config reference (raw, without placeholder resolution)
+            # Try config reference (raw, without placeholder resolution). Relaxed
+            # segment matching so ${a-b.c} resolves a value stored under a_b.c
+            # and vice versa (audit #92).
             parts = ref_key.split(".")
             current: Any = self._data
             for part in parts:
                 if isinstance(current, dict):
-                    current = current.get(part)
+                    current = _dict_get_relaxed(current, part)
                     if current is None:
                         break
                 else:
@@ -479,6 +509,7 @@ class Config:
         section = self._resolve_tree(self.get_section(prefix))
         if isinstance(section, dict):
             self._apply_env_overrides(prefix, section)
+            self._inject_env_only(prefix, section)
         return section if isinstance(section, dict) else {}
 
     def bind(self, config_cls: type[T]) -> T:
@@ -526,6 +557,42 @@ class Config:
                 env_val = os.environ.get(self._env_key(dotted))
                 if env_val is not None:
                     node[key] = _coerce_like(env_val, value)
+
+    def _inject_env_only(self, prefix: str, node: dict[str, Any]) -> None:
+        """Inject env-only keys (``PYFLY_<PREFIX>_*`` with no existing leaf) into
+        *node*, so relaxed binding / :meth:`effective_section` see what
+        :meth:`get` already honors (audit #90).
+
+        Env vars are scanned relative to *prefix* (its pyfly-stripped, upper-cased
+        form), so the suffix is the sub-path under the section. Underscore/dot
+        ambiguity is resolved Spring-style by treating each ``_`` as a path
+        separator; only ADDS absent leaves and never overwrites the first-pass
+        overlays. A rootless ('') prefix is skipped (the env→path mapping is
+        ambiguous without a section anchor)."""
+        if not prefix:
+            return
+        base = "" if prefix == "pyfly" else prefix.removeprefix("pyfly.")
+        env_prefix = "PYFLY_" + (base.upper().replace(".", "_").replace("-", "_") + "_" if base else "")
+
+        for env_name, env_val in os.environ.items():
+            if not env_name.startswith(env_prefix):
+                continue
+            segments = [s.lower() for s in env_name[len(env_prefix) :].split("_") if s]
+            if not segments:
+                continue
+            cursor: Any = node
+            for seg in segments[:-1]:
+                child = _dict_get_relaxed(cursor, seg) if isinstance(cursor, dict) else None
+                if child is None:
+                    child = {}
+                    cursor[seg] = child
+                elif not isinstance(child, dict):
+                    cursor = None
+                    break
+                cursor = child
+            leaf = segments[-1]
+            if isinstance(cursor, dict) and _dict_get_relaxed(cursor, leaf) is None:
+                cursor[leaf] = env_val
 
     @staticmethod
     def _normalize_keys(value: Any) -> Any:

@@ -21,6 +21,7 @@ import inspect
 import logging
 import typing
 from collections import deque
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 from pyfly.container.container import Container
@@ -30,6 +31,7 @@ from pyfly.container.exceptions import (
     NoUniqueBeanError,
 )
 from pyfly.container.ordering import get_order
+from pyfly.container.registry import Registration
 from pyfly.container.types import Scope
 from pyfly.context.condition_evaluator import ConditionEvaluator
 from pyfly.context.environment import Environment
@@ -185,6 +187,9 @@ class ApplicationContext:
         # 3. Auto-discover BeanPostProcessors from registered beans
         self._discover_post_processors()
 
+        # 3b. Bind @config_properties beans from config (audit #118)
+        self._bind_config_properties()
+
         # 4. Eagerly resolve all singletons (sorted by @order)
         sorted_entries = sorted(
             self._container._registrations.items(),
@@ -207,24 +212,50 @@ class ApplicationContext:
         # registrations also avoids "dict changed size during iteration" if a hook
         # lazily creates another bean.
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
-        live_regs = [reg for reg in self._container._registrations.values() if reg.instance is not None]
+
+        # An interface-typed @bean is registered under both its concrete and
+        # return type, so the same instance appears in two Registration entries.
+        # Group registrations by instance identity and process each unique
+        # instance exactly once, propagating the (possibly AOP-wrapped) result
+        # back to every alias — otherwise @post_construct/BeanPostProcessors run
+        # twice and one alias keeps the un-woven object (audit #113).
+        instance_groups: list[list[Registration]] = []
+        groups_by_id: dict[int, list[Registration]] = {}
+        for reg in self._container._registrations.values():
+            if reg.instance is None:
+                continue
+            grp = groups_by_id.get(id(reg.instance))
+            if grp is None:
+                grp = []
+                groups_by_id[id(reg.instance)] = grp
+                instance_groups.append(grp)
+            grp.append(reg)
 
         # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
-        for reg in live_regs:
-            bean_name = reg.name or reg.impl_type.__name__
+        for group in instance_groups:
+            rep = group[0]
+            bean_name = rep.name or rep.impl_type.__name__
+            inst = rep.instance
             for pp in sorted_pps:
-                reg.instance = pp.before_init(reg.instance, bean_name)
+                inst = pp.before_init(inst, bean_name)
+            for member in group:
+                member.instance = inst
 
         # Pass 2: @post_construct then after_init (weaving now sees every aspect)
-        for reg in live_regs:
-            bean_name = reg.name or reg.impl_type.__name__
-            await self._call_post_construct(reg.instance)
+        for group in instance_groups:
+            rep = group[0]
+            bean_name = rep.name or rep.impl_type.__name__
+            await self._call_post_construct(rep.instance)
+            inst = rep.instance
             for pp in sorted_pps:
-                reg.instance = pp.after_init(reg.instance, bean_name)
+                inst = pp.after_init(inst, bean_name)
+            for member in group:
+                member.instance = inst
 
         # 6. Wire decorator-based beans to their targets
         self._wire_app_event_listeners()
         self._wire_message_listeners()
+        self._wire_event_listeners()
         self._wire_cqrs_handlers()
         self._wire_scheduled()
         self._wire_async_methods()
@@ -277,9 +308,13 @@ class ApplicationContext:
                 except Exception:
                     logger.debug("adapter_stop_failed", extra={"adapter": adapter_name}, exc_info=True)
 
-        # Call @pre_destroy on all resolved beans (reverse order)
+        # Call @pre_destroy on all resolved beans (reverse order), de-duplicated
+        # by instance identity so an interface-typed @bean alias is not
+        # destroyed twice (audit #113).
+        seen_destroy: set[int] = set()
         for reg in reversed(list(self._container._registrations.values())):
-            if reg.instance is not None:
+            if reg.instance is not None and id(reg.instance) not in seen_destroy:
+                seen_destroy.add(id(reg.instance))
                 try:
                     await asyncio.wait_for(
                         self._call_pre_destroy(reg.instance),
@@ -426,22 +461,36 @@ class ApplicationContext:
                 bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
 
                 # Register bean: use the concrete type so multiple beans
-                # returning the same interface type don't overwrite each other
+                # returning the same interface type don't overwrite each other.
+                # A factory closure is stored so TRANSIENT beans rebuild through
+                # the @bean method (not __init__) on each resolution.
                 impl_type = type(result)
+                factory = self._bean_factory(config_instance, method)
                 self._container.register(impl_type, scope=bean_scope, name=bean_name)
+                impl_reg = self._container._registrations[impl_type]
+                impl_reg.factory = factory
                 if bean_scope == Scope.SINGLETON:
-                    self._container._registrations[impl_type].instance = result
+                    impl_reg.instance = result
 
                 # Bind return type → concrete type for list[T] resolution
                 if return_type is not impl_type:
                     self._container.bind(return_type, impl_type)
 
                 # Also keep a direct registration for the return type
-                # (for single-bean resolution) unless it already exists
+                # (for single-bean resolution) unless it already exists. It
+                # shares the same instance/factory; the startup lifecycle and
+                # wiring passes de-duplicate by instance identity so the bean is
+                # never post-processed or subscribed twice (audit #113).
                 if return_type not in self._container._registrations:
                     self._container.register(return_type, scope=bean_scope)
+                    return_reg = self._container._registrations[return_type]
+                    return_reg.factory = factory
                     if bean_scope == Scope.SINGLETON:
-                        self._container._registrations[return_type].instance = result
+                        return_reg.instance = result
+
+    def _bean_factory(self, config_instance: Any, method: Any) -> Callable[[], Any]:
+        """Return a zero-arg closure that invokes a @bean method with injection."""
+        return lambda: self._call_bean_method(config_instance, method)
 
     def _call_bean_method(self, config_instance: Any, method: Any) -> Any:
         """Call a @bean method, injecting its parameters from the container."""
@@ -553,6 +602,22 @@ class ApplicationContext:
         if count:
             logger.debug("Discovered %d BeanPostProcessor(s)", count)
 
+    def _bind_config_properties(self) -> None:
+        """Bind @config_properties beans from config so they inject by type.
+
+        Each registered class carrying ``__pyfly_config_prefix__`` gets a factory
+        that produces an instance bound from the active Config (audit #118).
+        """
+        count = 0
+        for cls, reg in self._container._registrations.items():
+            if not hasattr(cls, "__pyfly_config_prefix__") or reg.instance is not None or reg.factory is not None:
+                continue
+            reg.factory = lambda c=cls: self._config.bind(c)
+            count += 1
+        self._wiring_counts["config_properties"] = count
+        if count:
+            logger.debug("Bound %d @config_properties bean(s)", count)
+
     @staticmethod
     def _safe_members(instance: Any, *, skip_private: bool = True) -> list[tuple[str, Any]]:
         """Return ``(name, member)`` for an instance's attributes, skipping
@@ -578,17 +643,32 @@ class ApplicationContext:
             members.append((attr_name, member))
         return members
 
+    def _unique_live_instances(self) -> list[Registration]:
+        """Registrations with a resolved instance, de-duplicated by identity.
+
+        An interface-typed @bean is registered under two keys sharing one
+        instance; wiring passes must visit each instance once (audit #113).
+        """
+        seen: set[int] = set()
+        out: list[Registration] = []
+        for reg in self._container._registrations.values():
+            if reg.instance is None or id(reg.instance) in seen:
+                continue
+            seen.add(id(reg.instance))
+            out.append(reg)
+        return out
+
     def _wire_app_event_listeners(self) -> None:
         """Scan singleton beans for @app_event_listener methods and subscribe to event bus."""
         count = 0
-        for reg in self._container._registrations.values():
-            if reg.instance is None:
-                continue
+        for reg in self._unique_live_instances():
             for _attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_app_event_listener__", False):
                     continue
-                # Infer event type from the method's type hints
+                # Infer event type from the method's parameter hints only — the
+                # return annotation must not be mistaken for the event (audit #119).
                 hints = typing.get_type_hints(method)
+                hints.pop("return", None)
                 event_type: type[ApplicationEvent] | None = None
                 for param_type in hints.values():
                     if isinstance(param_type, type) and issubclass(param_type, ApplicationEvent):
@@ -606,9 +686,7 @@ class ApplicationContext:
         """Scan beans for @message_listener methods and register with MessageBrokerPort."""
         count = 0
         broker: Any | None = None
-        for reg in self._container._registrations.values():
-            if reg.instance is None:
-                continue
+        for reg in self._unique_live_instances():
             for _attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_message_listener__", False):
                     continue
@@ -631,6 +709,34 @@ class ApplicationContext:
         self._wiring_counts["message_listeners"] = count
         if count:
             logger.debug("Wired %d @message_listener method(s)", count)
+
+    def _wire_event_listeners(self) -> None:
+        """Scan beans for @event_listener methods and subscribe to the EventPublisher.
+
+        Mirrors @message_listener discovery so context-driven @event_listener
+        beans are auto-subscribed without a hand-wired bus (audit #134).
+        """
+        count = 0
+        publisher: Any | None = None
+        for reg in self._unique_live_instances():
+            for _attr_name, method in self._safe_members(reg.instance):
+                if not getattr(method, "__pyfly_event_listener__", False):
+                    continue
+                if publisher is None:
+                    try:
+                        from pyfly.eda.ports.outbound import EventPublisher
+
+                        publisher = self._container.resolve(EventPublisher)  # type: ignore[type-abstract]
+                    except BeanCreationException:
+                        logger.debug("No EventPublisher registered; skipping @event_listener wiring")
+                        self._wiring_counts["event_listeners_eda"] = 0
+                        return
+                for pattern in getattr(method, "__pyfly_event_patterns__", ()):
+                    publisher.subscribe(pattern, method)
+                    count += 1
+        self._wiring_counts["event_listeners_eda"] = count
+        if count:
+            logger.debug("Wired %d @event_listener subscription(s)", count)
 
     def _wire_cqrs_handlers(self) -> None:
         """Scan beans for @command_handler / @query_handler and register with HandlerRegistry."""
@@ -656,7 +762,7 @@ class ApplicationContext:
             self._wiring_counts["cqrs_handlers"] = 0
             return
 
-        beans = [reg.instance for reg in self._container._registrations.values() if reg.instance is not None]
+        beans = [reg.instance for reg in self._unique_live_instances()]
         registry.discover_from_beans(beans)
         count = registry.command_handler_count + registry.query_handler_count
         self._wiring_counts["cqrs_handlers"] = count

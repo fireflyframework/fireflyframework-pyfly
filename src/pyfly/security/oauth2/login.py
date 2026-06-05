@@ -31,6 +31,7 @@ from pyfly.session.session import HttpSession
 logger = logging.getLogger(__name__)
 
 _OAUTH2_STATE_KEY = "oauth2_state"
+_OAUTH2_NONCE_KEY = "oauth2_nonce"
 _SECURITY_CONTEXT_KEY = "SECURITY_CONTEXT"
 _REDIRECT_URI_KEY = "oauth2_redirect_uri"
 
@@ -81,6 +82,8 @@ class OAuth2LoginHandler:
         session: HttpSession = request.state.session
         state = secrets.token_urlsafe(32)
         session.set_attribute(_OAUTH2_STATE_KEY, state)
+        nonce = secrets.token_urlsafe(32)
+        session.set_attribute(_OAUTH2_NONCE_KEY, nonce)
 
         params = {
             "response_type": "code",
@@ -88,6 +91,7 @@ class OAuth2LoginHandler:
             "redirect_uri": registration.redirect_uri,
             "scope": " ".join(registration.scopes),
             "state": state,
+            "nonce": nonce,
         }
         authorization_url = f"{registration.authorization_uri}?{urlencode(params)}"
 
@@ -152,11 +156,35 @@ class OAuth2LoginHandler:
                 status_code=502,
             )
 
-        # Fetch user info from provider
-        user_info = await self._fetch_user_info(registration, access_token)
+        # Prefer verified OIDC ID-token claims when present; the id_token is
+        # signature/issuer/audience/nonce validated against the provider JWKS
+        # before any claim is trusted (audit #48).
+        nonce = session.get_attribute(_OAUTH2_NONCE_KEY)
+        session.remove_attribute(_OAUTH2_NONCE_KEY)
+        security_context: SecurityContext | None = None
+        id_token = token_response.get("id_token")
+        if id_token and getattr(registration, "jwks_uri", ""):
+            security_context = self._validate_id_token(registration, id_token, nonce)
+            if security_context is None:
+                return JSONResponse(
+                    {"error": "invalid_id_token", "message": "ID token validation failed"},
+                    status_code=401,
+                )
 
-        # Build SecurityContext from user info
-        security_context = self._build_security_context(user_info)
+        # Otherwise build identity from the userinfo endpoint.
+        if security_context is None:
+            user_info = await self._fetch_user_info(registration, access_token)
+            security_context = self._build_security_context(user_info)
+
+        # A configured userinfo/OIDC flow that yields no principal is a hard
+        # failure, not a silently-stored anonymous session (audit #49).
+        if security_context.user_id is None:
+            logger.warning("OAuth2 login produced no authenticated principal for %s", registration_id)
+            return JSONResponse(
+                {"error": "login_failed", "message": "Could not determine the authenticated user"},
+                status_code=401,
+            )
+
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
 
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
@@ -191,12 +219,16 @@ class OAuth2LoginHandler:
 
         import httpx
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                registration.token_uri,
-                data=data,
-                headers={"Accept": "application/json"},
-            )
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    registration.token_uri,
+                    data=data,
+                    headers={"Accept": "application/json"},
+                )
+        except httpx.HTTPError as exc:
+            logger.error("Token exchange transport error: %s", exc)
+            return {}
 
         if response.status_code != 200:
             logger.error(
@@ -208,6 +240,32 @@ class OAuth2LoginHandler:
 
         return response.json()  # type: ignore[no-any-return]
 
+    def _validate_id_token(self, registration: Any, id_token: str, nonce: str | None) -> SecurityContext | None:
+        """Validate an OIDC ID token against the provider JWKS and nonce.
+
+        Returns the SecurityContext built from verified claims, or ``None`` when
+        validation fails (bad signature/issuer/audience/nonce).
+        """
+        from pyfly.kernel.exceptions import SecurityException
+        from pyfly.security.oauth2.resource_server import JWKSTokenValidator
+
+        validator = JWKSTokenValidator(
+            jwks_uri=registration.jwks_uri,
+            issuer=getattr(registration, "issuer_uri", "") or None,
+            audience=registration.client_id,
+        )
+        try:
+            claims = validator.validate(id_token)
+        except SecurityException as exc:
+            logger.warning("OIDC id_token validation failed: %s", exc)
+            return None
+
+        if nonce is not None and claims.get("nonce") != nonce:
+            logger.warning("OIDC id_token nonce mismatch")
+            return None
+
+        return validator.to_security_context(id_token)
+
     async def _fetch_user_info(self, registration: Any, access_token: str) -> dict[str, Any]:
         """Fetch user info from the OAuth2 provider's userinfo endpoint."""
         if not registration.user_info_uri:
@@ -216,14 +274,18 @@ class OAuth2LoginHandler:
 
         import httpx
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                registration.user_info_uri,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                },
-            )
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    registration.user_info_uri,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("User info fetch transport error: %s", exc)
+            return {}
 
         if response.status_code != 200:
             logger.warning(

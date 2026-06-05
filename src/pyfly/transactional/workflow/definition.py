@@ -43,8 +43,11 @@ class WorkflowStepDefinition:
     wait_for_timer_ms: int = 0
     wait_for_all: tuple[str, ...] = ()
     wait_for_all_timeout_ms: int = 0
+    wait_for_all_timers: tuple[int, ...] = ()
     wait_for_any: tuple[str, ...] = ()
     wait_for_any_timeout_ms: int = 0
+    wait_for_any_timers: tuple[int, ...] = ()
+    wait_for_timer_id: str = ""
     child_workflow_id: str | None = None
     child_wait_for_completion: bool = True
     child_timeout_ms: int = 0
@@ -71,9 +74,16 @@ class WorkflowDefinition:
     timeout_ms: int = 0
     publish_events: bool = True
     layer_concurrency: int = 0
+    # Workflow-level retry policy; steps with no explicit retry fall back to it.
+    max_retries: int = 0
+    retry_delay_ms: int = 0
     steps: dict[str, WorkflowStepDefinition] = field(default_factory=dict)
     on_complete: Callable[..., Any] | None = None
     on_error: Callable[..., Any] | None = None
+    # @on_workflow_error suppression config (suppress_error/error_types/step_ids).
+    on_error_suppress: bool = False
+    on_error_types: tuple[str, ...] = ()
+    on_error_step_ids: tuple[str, ...] = ()
     on_step_callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     queries: dict[str, Callable[..., Any]] = field(default_factory=dict)
 

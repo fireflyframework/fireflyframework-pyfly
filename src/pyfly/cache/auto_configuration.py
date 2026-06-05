@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
@@ -56,3 +58,11 @@ class CacheAutoConfiguration:
         from pyfly.cache.adapters.memory import InMemoryCache
 
         return InMemoryCache()
+
+    @bean
+    @conditional_on_property("pyfly.observability.health.enabled", having_value="true", match_if_missing=True)
+    def cache_health_indicator(self, cache_adapter: CacheAdapter) -> Any:
+        # Registered so /actuator/health reports cache status (audit #74).
+        from pyfly.cache.health import CacheHealthIndicator
+
+        return CacheHealthIndicator(adapter=cache_adapter)

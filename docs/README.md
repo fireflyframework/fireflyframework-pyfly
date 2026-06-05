@@ -43,6 +43,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | [Web Layer](modules/web.md) | REST controllers, routing, parameter binding, middleware, CORS, OpenAPI |
 | [Validation](modules/validation.md) | `Valid[T]` annotation, Pydantic model validation, structured 422 errors |
 | [WebFilters](modules/web-filters.md) | Request/response filter chain — `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter` |
+| [WebSocket](modules/websocket.md) | `@websocket_mapping`, `WebSocketSession`, `WebSocketHandler` lifecycle, `on_disconnect` hook, route discovery |
 | [Actuator](modules/actuator.md) | Health checks, beans endpoint, environment info, loggers, metrics |
 | [Custom Actuator Endpoints](modules/custom-actuator-endpoints.md) | Build your own actuator endpoints with the `ActuatorEndpoint` protocol |
 

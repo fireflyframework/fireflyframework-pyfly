@@ -33,17 +33,16 @@ class UvicornServerAdapter:
         self._server: Any = None
         self._info: ServerInfo | None = None
 
-    def serve(self, app: str | Any, config: Any) -> None:
-        """Start Uvicorn (blocking)."""
-        workers = config.workers if config.workers > 0 else 1
-        host = getattr(config, "host", None) or "0.0.0.0"
-        port = getattr(config, "port", None) or 8000
-        loop = config.event_loop if config.event_loop != "auto" else "auto"
+    @staticmethod
+    def _build_kwargs(host: str, port: int, loop: str, config: Any) -> dict[str, Any]:
+        """Build the uvicorn keyword args common to serve() and serve_async().
 
+        Shared so the async path honors the same SSL / keep-alive / backlog /
+        graceful-shutdown / concurrency settings as the blocking path (#226).
+        """
         kwargs: dict[str, Any] = {
             "host": host,
             "port": port,
-            "workers": workers,
             "loop": loop,
             "http": "auto",
             "log_level": "warning",
@@ -60,6 +59,17 @@ class UvicornServerAdapter:
             kwargs["limit_concurrency"] = config.max_concurrent_connections
         if config.max_requests_per_worker:
             kwargs["limit_max_requests"] = config.max_requests_per_worker
+        return kwargs
+
+    def serve(self, app: str | Any, config: Any) -> None:
+        """Start Uvicorn (blocking)."""
+        workers = config.workers if config.workers > 0 else 1
+        host = getattr(config, "host", None) or "0.0.0.0"
+        port = getattr(config, "port", None) or 8000
+        loop = config.event_loop if config.event_loop != "auto" else "auto"
+
+        kwargs = self._build_kwargs(host, port, loop, config)
+        kwargs["workers"] = workers
 
         self._info = ServerInfo(
             name="uvicorn",
@@ -78,14 +88,9 @@ class UvicornServerAdapter:
         workers = config.workers if config.workers > 0 else 1
         host = getattr(config, "host", None) or "0.0.0.0"
         port = getattr(config, "port", None) or 8000
+        loop = config.event_loop if config.event_loop != "auto" else "auto"
 
-        uvi_config = uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            loop=config.event_loop if config.event_loop != "auto" else "auto",
-            log_level="warning",
-        )
+        uvi_config = uvicorn.Config(app, **self._build_kwargs(host, port, loop, config))
         server = uvicorn.Server(uvi_config)
         self._server = server
         self._info = ServerInfo(

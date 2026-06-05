@@ -39,6 +39,8 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
 # must resolve return types at runtime for @bean method registration.
 
+from typing import Any
+
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.context.conditions import (
@@ -78,6 +80,8 @@ class EdaAutoConfiguration:
         destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()]
         group = str(config.get("pyfly.eda.group", "pyfly-default"))
 
+        serializer = self._make_serializer(config)
+
         if provider == "kafka":
             from pyfly.eda.adapters.kafka import KafkaEventBus
 
@@ -86,16 +90,20 @@ class EdaAutoConfiguration:
                 bootstrap_servers=servers,
                 topics=destinations,
                 group=group,
+                serializer=serializer,
             )
 
         if provider == "redis":
             from pyfly.eda.adapters.redis import RedisStreamsEventBus
 
             url = str(config.get("pyfly.eda.redis.url", "redis://localhost:6379/0"))
+            consumer_id = config.get("pyfly.eda.redis.consumer-id")
             return RedisStreamsEventBus(
                 url=url,
                 streams=destinations,
                 group=group,
+                consumer_id=str(consumer_id) if consumer_id else None,
+                serializer=serializer,
             )
 
         if provider == "postgres":
@@ -119,6 +127,26 @@ class EdaAutoConfiguration:
         from pyfly.eda.adapters.memory import InMemoryEventBus
 
         return InMemoryEventBus()
+
+    @staticmethod
+    def _make_serializer(config: Config) -> Any:
+        """Select the event serializer from pyfly.eda.serialization-format (#138).
+
+        json (default) | avro | protobuf — Avro/Protobuf remain opt-in stubs
+        ('bring your own' schema), but the selection is now reachable.
+        """
+        fmt = str(config.get("pyfly.eda.serialization-format", "json")).lower()
+        if fmt == "avro":
+            from pyfly.eda.serializers import AvroEventSerializer
+
+            return AvroEventSerializer()
+        if fmt in ("protobuf", "proto"):
+            from pyfly.eda.serializers import ProtobufEventSerializer
+
+            return ProtobufEventSerializer()
+        from pyfly.eda.serializers import JsonEventSerializer
+
+        return JsonEventSerializer()
 
 
 @auto_configuration

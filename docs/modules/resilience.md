@@ -14,7 +14,7 @@ fallback strategies using the PyFly resilience module.
    - [@rate_limiter Decorator](#rate_limiter-decorator)
 3. [Bulkhead](#bulkhead)
    - [Bulkhead Class](#bulkhead-class)
-   - [Semaphore-Based Concurrency Limiting](#semaphore-based-concurrency-limiting)
+   - [Permit-Counter Concurrency Limiting](#permit-counter-concurrency-limiting)
    - [@bulkhead Decorator](#bulkhead-decorator)
 4. [Time Limiter](#time-limiter)
    - [@time_limiter Decorator](#time_limiter-decorator)
@@ -221,12 +221,16 @@ except BulkheadException:
     return {"error": "Service at capacity, try again later"}
 ```
 
-### Semaphore-Based Concurrency Limiting
+### Permit-Counter Concurrency Limiting
 
-Internally, `Bulkhead` uses an `asyncio.Semaphore`. The critical design choice
-is that `acquire()` is **non-blocking**: it checks the semaphore's internal
-value *before* attempting to acquire. If the value is zero (all slots taken), it
-raises `BulkheadException` immediately rather than queueing the caller.
+Internally, `Bulkhead` uses a single lock-guarded permit counter (`active`
+count protected by a `threading.Lock`) as the *sole* source of truth. The same
+primitive is shared by both sync- and async-decorated calls, so a single
+`Bulkhead` instance can decorate a mix of sync and async functions without the
+two paths ever desynchronising. The critical design choice is that `acquire()`
+is **non-blocking**: it checks the active count *before* incrementing it. If
+all slots are taken, it raises `BulkheadException` immediately rather than
+queueing the caller -- matching Resilience4j's zero-wait semaphore bulkhead.
 
 This fail-fast behavior is intentional. In a microservice context, it is better
 to reject a request quickly and let the caller retry or use a fallback than to

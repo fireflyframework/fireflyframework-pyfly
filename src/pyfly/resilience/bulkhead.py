@@ -15,9 +15,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -27,9 +27,11 @@ from pyfly.kernel.exceptions import BulkheadException
 class Bulkhead:
     """Limits concurrent execution of a resource.
 
-    Uses an asyncio.Semaphore internally. When max_concurrent calls are
-    already in-flight, new calls raise BulkheadException immediately
-    (no waiting/queueing).
+    A single lock-guarded permit counter is the sole source of truth, shared by
+    both sync and async decorated calls, so the accounting can never desynchronise
+    when one Bulkhead instance decorates both (audit #189). When max_concurrent
+    calls are already in-flight, new calls raise BulkheadException immediately
+    (no waiting/queueing), matching Resilience4j's zero-wait semaphore bulkhead.
 
     Args:
         max_concurrent: Maximum number of concurrent calls allowed.
@@ -37,20 +39,29 @@ class Bulkhead:
 
     def __init__(self, max_concurrent: int = 10) -> None:
         self._max_concurrent = max_concurrent
-        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active = 0
+        self._lock = threading.Lock()
+
+    def _acquire_slot(self) -> None:
+        """Atomically reserve a permit or raise if at capacity."""
+        with self._lock:
+            if self._active >= self._max_concurrent:
+                raise BulkheadException(f"Bulkhead at capacity ({self._max_concurrent} concurrent calls)")
+            self._active += 1
+
+    def _release_slot(self) -> None:
+        """Atomically return a permit."""
+        with self._lock:
+            if self._active > 0:
+                self._active -= 1
 
     async def acquire(self) -> None:
         """Try to acquire a slot. Raises BulkheadException if at capacity."""
-        if self._active >= self._max_concurrent:
-            raise BulkheadException(f"Bulkhead at capacity ({self._max_concurrent} concurrent calls)")
-        await self._semaphore.acquire()
-        self._active += 1
+        self._acquire_slot()
 
     def release(self) -> None:
         """Release a slot."""
-        self._active -= 1
-        self._semaphore.release()
+        self._release_slot()
 
     @property
     def available_slots(self) -> int:
@@ -77,13 +88,13 @@ def bulkhead(
 
             @functools.wraps(func)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if bh._active >= bh._max_concurrent:
-                    raise BulkheadException(f"Bulkhead at capacity ({bh._max_concurrent} concurrent calls)")
-                bh._active += 1
+                # Same permit primitive as the async path so a Bulkhead shared
+                # across sync + async never desynchronises (audit #189).
+                bh._acquire_slot()
                 try:
                     return func(*args, **kwargs)
                 finally:
-                    bh._active -= 1
+                    bh._release_slot()
 
             return sync_wrapper
 

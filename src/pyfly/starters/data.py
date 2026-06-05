@@ -57,9 +57,9 @@ if TYPE_CHECKING:
 DATA_STACK_PROPERTIES: dict[str, str] = {
     **CORE_STACK_PROPERTIES,
     # Relational data — SQLAlchemy adapter, repositories, transactions
-    "pyfly.relational.enabled": "true",
+    "pyfly.data.relational.enabled": "true",
     # Document data — MongoDB / Beanie ODM
-    "pyfly.document.enabled": "true",
+    "pyfly.data.document.enabled": "true",
     # Outbound HTTP client — for fetching from upstream feeds
     "pyfly.client.enabled": "true",
     # Scheduling — cron / fixed-rate jobs

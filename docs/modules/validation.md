@@ -33,7 +33,8 @@ error responses, and their integration with the web layer.
    - [Body\[T\] Automatic Validation](#bodyt-automatic-validation)
    - [Valid\[T\] Explicit Validation](#validt-explicit-validation)
    - [Automatic 422 Responses](#automatic-422-responses)
-8. [Complete Example](#complete-example)
+8. [Domain Validators](#domain-validators)
+9. [Complete Example](#complete-example)
 
 ---
 
@@ -775,6 +776,52 @@ _STATUS_MAP: dict[type, int] = {
 
 The same 422 response is produced whether the validation failure comes from
 `Valid[T]`, `Body[T]`, `validate_model()`, `@validate_input`, or `@validator`.
+
+---
+
+## Domain Validators
+
+Beyond the Pydantic helpers, `pyfly.validation` ships a set of domain-specific
+validators (a port of `org.fireflyframework.validators`) for common financial
+and identity data. Each `is_valid_*` function returns `True`/`False`; each
+`valid_*` factory returns the value on success and raises `ValueError` on
+failure, so it plugs straight into a Pydantic `field_validator`.
+
+```python
+from pyfly.validation import is_valid_iban, is_valid_currency_code, valid_credit_card
+from pydantic import BaseModel, field_validator
+
+is_valid_iban("DE89 3704 0044 0532 0130 00")   # True (format + length + mod-97)
+is_valid_currency_code("USD")                   # True (active ISO 4217 code)
+is_valid_currency_code("XYZ")                   # False
+
+class Payment(BaseModel):
+    card_number: str
+    _check_card = field_validator("card_number")(valid_credit_card)
+```
+
+| Function | Checks |
+|----------|--------|
+| `is_valid_iban` | Format, **country-specific total length** (ISO 13616), and mod-97 checksum. |
+| `is_valid_bic` | SWIFT/BIC format (8 or 11 chars). |
+| `is_valid_currency_code` | Membership in the active **ISO 4217** code set (e.g. `XYZ` rejected). |
+| `is_valid_credit_card` | Length 12–19, a **recognised card scheme** (Visa, Mastercard, Amex, Discover, Diners, JCB), *and* Luhn checksum. |
+| `is_valid_cvv` | 3–4 digits. |
+| `is_valid_phone_number` | E.164 format. |
+| `is_valid_amount` | Non-negative number with bounded precision (`allow_zero`, `max_digits`). |
+| `is_valid_account_number` | Alphanumeric, 6–34 chars. |
+| `is_valid_tax_id` / `is_valid_national_id` | Generic alphanumeric formats. |
+| `is_valid_pin` | All digits, configurable `length` (default 4). |
+| `is_strong_password` | Lower + upper + digit + symbol, configurable `min_length`. |
+| `is_valid_date` / `is_valid_datetime` | ISO-8601 date / datetime (datetime accepts trailing `Z`). |
+| `is_valid_sort_code` | UK sort code (6 digits, optional `-`). |
+| `is_valid_interest_rate` | Percentage within `[min_pct, max_pct]` (default 0–100). |
+
+A matching `valid_*` factory exists for each (e.g. `valid_iban`,
+`valid_currency_code`, `valid_credit_card`), each raising `ValueError` with a
+descriptive message on invalid input.
+
+**Source:** `src/pyfly/validation/domain.py`
 
 ---
 

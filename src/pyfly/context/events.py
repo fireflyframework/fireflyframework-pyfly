@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -72,8 +73,15 @@ class ApplicationEventBus:
         self._listeners[event_type].sort(key=lambda e: get_order(e[1]) if e[1] else 0)
 
     async def publish(self, event: ApplicationEvent) -> None:
-        """Publish an event to all matching listeners (pre-sorted by @order)."""
+        """Publish an event to all matching listeners (pre-sorted by @order).
+
+        Listeners may be synchronous (``void``) or coroutine functions; the
+        result is awaited only when awaitable, so a plain ``def`` listener does
+        not crash startup (audit #115).
+        """
         for event_type, entries in self._listeners.items():
             if isinstance(event, event_type):
                 for listener, _owner in entries:
-                    await listener(event)
+                    result = listener(event)
+                    if inspect.isawaitable(result):
+                        await result

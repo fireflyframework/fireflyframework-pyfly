@@ -41,6 +41,7 @@ from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.validation.processor import AutoValidationProcessor
 from pyfly.eda.ports.outbound import EventPublisher
+from pyfly.observability.metrics import MetricsRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -84,9 +85,10 @@ class CqrsAutoConfiguration:
         return CommandValidationService(processor)
 
     @bean
-    def cqrs_metrics_service(self) -> CqrsMetricsService:
-        # Metrics registry injected via container if available
-        return CqrsMetricsService()
+    def cqrs_metrics_service(self, registry: MetricsRegistry | None = None) -> CqrsMetricsService:
+        # Optional injection: the observability MetricsRegistry is wired when
+        # present so CQRS metrics are actually recorded (audit #94).
+        return CqrsMetricsService(registry)
 
     @bean
     def authorization_service(self, props: CqrsProperties) -> AuthorizationService:

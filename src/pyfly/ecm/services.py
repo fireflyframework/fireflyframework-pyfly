@@ -69,8 +69,12 @@ class DocumentService:
         document = await self._metadata.get(document_id)
         if document is None:
             return False
-        await self._storage.delete(document)
-        return await self._metadata.delete(document_id)
+        # Honor the storage delete result — a failed blob delete must not be
+        # silently swallowed (audit #125). Metadata is still removed so the
+        # logical record is gone, but the caller learns the delete was partial.
+        storage_ok = await self._storage.delete(document)
+        metadata_ok = await self._metadata.delete(document_id)
+        return storage_ok and metadata_ok
 
     async def create_folder(self, folder: Folder) -> Folder:
         if self._folders is None:

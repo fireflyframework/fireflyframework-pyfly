@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Generic, TypeVar
 
-from pyfly.eventsourcing.aggregate import AggregateRoot
+from pyfly.eventsourcing.aggregate import AggregateRoot, EventHandlerException
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.snapshot import Snapshot, SnapshotStore
 from pyfly.eventsourcing.store import EventStore
@@ -56,7 +56,16 @@ class EventSourcedRepository(Generic[A]):
         events = await self._store.load(aggregate_id, after_sequence=starting_seq)
         if not events and starting_seq == 0:
             return None
+        aggregate_type = type(aggregate).__name__
         for envelope in events:
+            # Replayed events must belong to this aggregate (audit #150) —
+            # a mismatch means a store bug or cross-aggregate corruption.
+            if envelope.aggregate_id != aggregate_id:
+                raise EventHandlerException(
+                    f"event aggregate_id {envelope.aggregate_id!r} != loaded aggregate {aggregate_id!r}"
+                )
+            if envelope.aggregate_type and envelope.aggregate_type != aggregate_type:
+                raise EventHandlerException(f"event aggregate_type {envelope.aggregate_type!r} != {aggregate_type!r}")
             payload_event = self._envelope_to_event(envelope)
             aggregate.replay(envelope.event_type, payload_event)
         return aggregate
@@ -79,7 +88,11 @@ class EventSourcedRepository(Generic[A]):
         await self._store.append(aggregate.id, aggregate_type, envelopes, expected_version=expected)
         aggregate.mark_committed()
 
-        if self._snapshots is not None and aggregate.version % self._snapshot_interval == 0:
+        # Snapshot when this batch CROSSED a multiple of the interval — exact
+        # divisibility ('version % interval == 0') is missed when a batch
+        # straddles the threshold (audit #151).
+        crossed_interval = (aggregate.version // self._snapshot_interval) > (expected // self._snapshot_interval)
+        if self._snapshots is not None and crossed_interval:
             await self._snapshots.save(
                 Snapshot(
                     aggregate_id=aggregate.id,

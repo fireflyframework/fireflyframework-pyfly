@@ -18,19 +18,35 @@ class ConfigServer:
         self._backend = backend
 
     async def fetch(self, application: str, profile: str = "default", label: str = "main") -> dict[str, Any] | None:
-        source = await self._backend.fetch(application, profile, label)
-        if source is None:
+        # Emit the full Spring-Cloud-Config overlay set, highest priority first:
+        # the requested app+profile, then the app's default bundle, then the
+        # shared ``application`` config for the profile and its default. A client
+        # merges these with the first winning (audit #85). Returns None only when
+        # every overlay is absent.
+        candidates = [
+            (application, profile),
+            (application, "default"),
+            ("application", profile),
+            ("application", "default"),
+        ]
+        seen: set[tuple[str, str]] = set()
+        sources: list[ConfigSource] = []
+        for app_name, prof in candidates:
+            key = (app_name, prof)
+            if key in seen:
+                continue
+            seen.add(key)
+            source = await self._backend.fetch(app_name, prof, label)
+            if source is not None:
+                sources.append(source)
+
+        if not sources:
             return None
         return {
-            "name": source.application,
-            "profiles": [source.profile],
-            "label": source.label,
-            "propertySources": [
-                {
-                    "name": f"{source.application}-{source.profile}",
-                    "source": source.properties,
-                }
-            ],
+            "name": application,
+            "profiles": [profile],
+            "label": label,
+            "propertySources": [{"name": f"{s.application}-{s.profile}", "source": s.properties} for s in sources],
         }
 
     async def save(

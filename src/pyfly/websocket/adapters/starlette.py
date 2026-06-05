@@ -22,12 +22,16 @@ following the same lazy-resolution pattern used by
 from __future__ import annotations
 
 import contextlib
+import inspect
+import logging
 from typing import Any
 
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from pyfly.websocket.handler import WebSocketSession
+
+_logger = logging.getLogger(__name__)
 
 _CONTROLLER_STEREOTYPES = ("rest_controller", "controller")
 
@@ -81,7 +85,22 @@ class WebSocketRegistrar:
                 _cache["method"] = getattr(_cache["instance"], method_name)
 
             session = WebSocketSession(websocket)
-            with contextlib.suppress(WebSocketDisconnect):
+            try:
                 await _cache["method"](session)
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                # Unexpected handler failures are logged rather than swallowed
+                # silently (audit #232).
+                _logger.warning("websocket handler '%s' raised", method_name, exc_info=True)
+            finally:
+                # Invoke an on_disconnect lifecycle hook if the controller
+                # defines one, so handlers can clean up (audit #232).
+                on_disconnect = getattr(_cache["instance"], "on_disconnect", None)
+                if callable(on_disconnect):
+                    with contextlib.suppress(Exception):
+                        result = on_disconnect(session)
+                        if inspect.isawaitable(result):
+                            await result
 
         return lazy_ws_endpoint

@@ -44,7 +44,7 @@ automatically discovered from the DI container.
 15. [Info Endpoint](#info-endpoint)
 16. [Loggers Endpoint](#loggers-endpoint)
     - [GET /actuator/loggers](#get-actuatorloggers)
-    - [POST /actuator/loggers](#post-actuatorloggers)
+    - [POST /actuator/loggers/{name}](#post-actuatorloggersname)
 17. [Metrics Endpoint](#metrics-endpoint)
 18. [Custom Actuator Endpoints](#custom-actuator-endpoints)
 19. [make_starlette_actuator_routes()](#make_starlette_actuator_routes)
@@ -809,9 +809,18 @@ Lists all registered loggers with their configured and effective levels.
             "effectiveLevel": "INFO"
         }
     },
-    "levels": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF"]
+    "levels": ["OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+    "groups": {
+        "web": {"configuredLevel": null, "members": ["pyfly.web", "uvicorn", "starlette"]},
+        "sql": {"configuredLevel": null, "members": ["sqlalchemy", "pyfly.data"]}
+    }
 }
 ```
+
+The endpoint uses Spring Boot's level vocabulary (`OFF`, `ERROR`, `WARN`,
+`INFO`, `DEBUG`, `TRACE`) rather than Python's, so the response is drop-in
+compatible with Spring Boot tooling. Python's `CRITICAL` collapses to `ERROR`;
+`TRACE` maps to numeric level 5 and `OFF` to a disabled logger.
 
 | Field                | Description                                           |
 |---------------------|-------------------------------------------------------|
@@ -819,27 +828,33 @@ Lists all registered loggers with their configured and effective levels.
 | `configuredLevel`   | Explicitly set level, or `null` if inheriting from parent |
 | `effectiveLevel`    | Actual level in effect (may be inherited)             |
 | `levels`            | List of all recognized level names                    |
+| `groups`            | Built-in logger groups (`web`, `sql`) and their members |
 
-### POST /actuator/loggers
+### POST /actuator/loggers/{name}
 
-Changes a logger's level at runtime. Send a JSON body with the logger name and the
-desired level:
+Changes a logger's level at runtime. The logger name is a **path parameter**;
+send a JSON body with the desired `configuredLevel`:
+
+```
+POST /actuator/loggers/pyfly.web
+```
 
 **Request body:**
 
 ```json
 {
-    "logger": "pyfly.web",
-    "level": "DEBUG"
+    "configuredLevel": "DEBUG"
 }
 ```
 
-**Success response (200):**
+**Success response:** `204 No Content` (empty body).
+
+To **reset** a logger to inherit from its parent (NOTSET), send `null` (or omit
+the field):
 
 ```json
 {
-    "logger": "pyfly.web",
-    "configuredLevel": "DEBUG"
+    "configuredLevel": null
 }
 ```
 
@@ -847,18 +862,18 @@ desired level:
 
 ```json
 {
-    "error": "Unknown level: INVALID"
+    "error": "Unknown level: INVALID. Valid levels: OFF, ERROR, WARN, INFO, DEBUG, TRACE"
 }
 ```
 
-Use `"ROOT"` as the logger name to change the root logger level:
+Use `ROOT` as the logger name to change the root logger level:
 
-```json
-{
-    "logger": "ROOT",
-    "level": "WARN"
-}
 ```
+POST /actuator/loggers/ROOT
+```
+
+A single logger's levels can also be inspected with
+`GET /actuator/loggers/{name}`, which returns `{configuredLevel, effectiveLevel}`.
 
 **Example with curl:**
 
@@ -867,14 +882,19 @@ Use `"ROOT"` as the logger name to change the root logger level:
 curl http://localhost:8080/actuator/loggers
 
 # Change pyfly.web logger to DEBUG
-curl -X POST http://localhost:8080/actuator/loggers \
+curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
   -H "Content-Type: application/json" \
-  -d '{"logger": "pyfly.web", "level": "DEBUG"}'
+  -d '{"configuredLevel": "DEBUG"}'
 
 # Change root logger to WARN
-curl -X POST http://localhost:8080/actuator/loggers \
+curl -X POST http://localhost:8080/actuator/loggers/ROOT \
   -H "Content-Type: application/json" \
-  -d '{"logger": "ROOT", "level": "WARN"}'
+  -d '{"configuredLevel": "WARN"}'
+
+# Reset pyfly.web to inherit from its parent
+curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
+  -H "Content-Type: application/json" \
+  -d '{"configuredLevel": null}'
 ```
 
 ---
@@ -1298,9 +1318,9 @@ async def main():
     # GET  /actuator/beans    -- all registered beans
     # GET  /actuator/env      -- active profiles
     # GET  /actuator/info     -- app name, version, description
-    # GET  /actuator/loggers  -- list all loggers and their levels
-    # POST /actuator/loggers  -- change a logger's level at runtime
-    # GET  /actuator/git      -- custom endpoint: git/build info
+    # GET  /actuator/loggers         -- list all loggers and their levels
+    # POST /actuator/loggers/{name}  -- change a logger's level at runtime
+    # GET  /actuator/git             -- custom endpoint: git/build info
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
@@ -1390,14 +1410,15 @@ curl http://localhost:8080/actuator/loggers
 #     "pyfly.web": {"configuredLevel": null, "effectiveLevel": "INFO"},
 #     ...
 #   },
-#   "levels": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF"]
+#   "levels": ["OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+#   "groups": {"web": {...}, "sql": {...}}
 # }
 
-# Change a logger's level at runtime
-curl -X POST http://localhost:8080/actuator/loggers \
+# Change a logger's level at runtime (logger name is a path parameter)
+curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
   -H "Content-Type: application/json" \
-  -d '{"logger": "pyfly.web", "level": "DEBUG"}'
-# {"logger": "pyfly.web", "configuredLevel": "DEBUG"}
+  -d '{"configuredLevel": "DEBUG"}'
+# (204 No Content)
 
 # Custom git info endpoint
 curl http://localhost:8080/actuator/git

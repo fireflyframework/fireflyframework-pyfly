@@ -53,7 +53,10 @@ class ConfigClient:
                 )
                 return {}
             data = resp.json()
+        # Spring orders propertySources HIGHEST priority first, so apply them
+        # in reverse (lowest first) and let higher-priority sources overwrite —
+        # the forward order let the lowest-priority source win (audit #86).
         merged: dict[str, Any] = {}
-        for source in data.get("propertySources", []):
+        for source in reversed(data.get("propertySources", [])):
             merged.update(source.get("source") or {})
         return merged

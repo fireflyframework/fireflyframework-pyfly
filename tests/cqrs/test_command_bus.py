@@ -180,8 +180,11 @@ class TestDefaultCommandBus:
         cmd.set_correlation_id("my-corr-id")
         await bus.send(cmd)
 
+        # The command retains its correlation id; the context-var is restored to
+        # its prior (None) value afterwards so it does not leak into the next
+        # command on the same task (audit #98).
         assert cmd.get_correlation_id() == "my-corr-id"
-        assert CorrelationContext.get_correlation_id() == "my-corr-id"
+        assert CorrelationContext.get_correlation_id() is None
 
     async def test_correlation_id_auto_generated_when_missing(
         self, bus: DefaultCommandBus, registry: HandlerRegistry
