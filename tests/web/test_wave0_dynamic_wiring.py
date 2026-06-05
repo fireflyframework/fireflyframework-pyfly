@@ -32,8 +32,8 @@ from pyfly.container.bean import bean
 from pyfly.container.stereotypes import configuration
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
-from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.adapters.starlette.app import create_app
+from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.mappings import get_mapping, request_mapping
 
 

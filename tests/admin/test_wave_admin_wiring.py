@@ -31,7 +31,6 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.web.adapters.starlette.app import create_app
 
-
 # ---------------------------------------------------------------------------
 # #67 — server mode instance registry
 # ---------------------------------------------------------------------------

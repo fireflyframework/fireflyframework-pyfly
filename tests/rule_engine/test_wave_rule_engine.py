@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pyfly.rule_engine.dsl import Action, Condition, Rule
 from pyfly.rule_engine.evaluator import RuleEvaluator
 
