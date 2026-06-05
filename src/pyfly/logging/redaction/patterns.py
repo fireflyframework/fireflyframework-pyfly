@@ -40,7 +40,7 @@ def luhn_valid(value: str) -> bool:
 # Compiled built-in PII patterns, keyed by entity name.
 BUILTIN_PATTERNS: dict[str, re.Pattern[str]] = {
     "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
+    "CREDIT_CARD": re.compile(r"\b\d(?:[ -]?\d){12,18}\b"),
     "IBAN": re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"),
     "US_SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),

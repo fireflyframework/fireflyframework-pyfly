@@ -38,11 +38,8 @@ class Redactor(Protocol):
 
 def _mask(value: str, entity: str, style: str) -> str:
     if style == "partial":
-        stripped = value.rstrip()
-        suffix = value[len(stripped) :]
-        keep = stripped[-4:] if len(stripped) > 4 else stripped
-        stars = max(0, len(stripped) - len(keep))
-        return f"{'*' * stars}{keep}{suffix}"
+        keep = value[-4:] if len(value) > 4 else ""
+        return f"{'*' * max(0, len(value) - len(keep))}{keep}"
     if style == "hash":
         digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:8]
         return f"<{entity}:{digest}>"
