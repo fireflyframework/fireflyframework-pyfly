@@ -69,7 +69,7 @@ Key characteristics:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `pyfly.server.type` | `str` | `"auto"` | Set to `"granian"` to force Granian |
-| `pyfly.server.workers` | `int` | `0` | Worker processes (`0` = `cpu_count`) |
+| `pyfly.server.workers` | `int` | `1` | Worker processes (`0` also resolves to 1) |
 | `pyfly.server.backlog` | `int` | `1024` | TCP listen backlog |
 | `pyfly.server.graceful-timeout` | `int` | `30` | Graceful shutdown timeout in seconds |
 | `pyfly.server.http` | `str` | `"auto"` | HTTP version (`auto`, `1`, `2`) |
@@ -99,9 +99,9 @@ pyfly:
 
 Granian is auto-selected when installed because it has the highest priority in the server auto-configuration cascade:
 
-1. `GranianServerAutoConfiguration` -- `@conditional_on_class("granian")` + `@conditional_on_missing_bean(ApplicationServerPort)`
-2. `UvicornServerAutoConfiguration` -- only activated if Granian is not installed
-3. `HypercornServerAutoConfiguration` -- only activated if neither Granian nor Uvicorn is installed
+1. `ServerAutoConfiguration.granian_server` bean -- `@conditional_on_class("granian")` + `@conditional_on_missing_bean(ApplicationServerPort)`
+2. `ServerAutoConfiguration.uvicorn_server` bean -- only activated if Granian is not installed
+3. `ServerAutoConfiguration.hypercorn_server` bean -- only activated if neither Granian nor Uvicorn is installed
 
 To force Granian explicitly (even when other servers are installed):
 

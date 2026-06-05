@@ -21,15 +21,13 @@ logging -- along with a health check system for readiness and liveness probes.
    - [Error Recording](#error-recording)
    - [OpenTelemetry Integration](#opentelemetry-integration)
 4. [Logging](#logging)
-   - [Quick Start with configure_logging and get_logger](#quick-start-with-configure_logging-and-get_logger)
+   - [Quick Start with get_logger](#quick-start-with-get_logger)
    - [LoggingPort Protocol](#loggingport-protocol)
    - [StructlogAdapter](#structlogadapter)
    - [Structured Logging with Key-Value Pairs](#structured-logging-with-key-value-pairs)
    - [Correlation IDs](#correlation-ids)
 5. [Health Checks](#health-checks)
-   - [HealthChecker](#healthchecker)
-   - [HealthStatus Enum](#healthstatus-enum)
-   - [HealthResult Dataclass](#healthresult-dataclass)
+   - [HealthAggregator](#healthaggregator)
 6. [Auto-Configuration](#auto-configuration)
 7. [Configuration](#configuration)
    - [Logging Settings](#logging-settings)
@@ -51,14 +49,21 @@ Observability answers three fundamental questions about a running system:
 PyFly also provides **health checks** (`pyfly.actuator.health`) so orchestrators
 like Kubernetes can determine whether a service is ready to receive traffic.
 
-All observability utilities are importable from a single package:
+The core observability utilities come from two packages:
 
 ```python
+# Metrics and tracing
 from pyfly.observability import (
-    MetricsRegistry, timed, counted,   # Metrics
-    span,                               # Tracing
-    configure_logging, get_logger,      # Logging
-    HealthChecker, HealthResult, HealthStatus,  # Health
+    MetricsRegistry, timed, counted,   # Metrics (requires pyfly[observability])
+    span,                               # Tracing (requires opentelemetry)
+)
+
+# Structured logging
+from pyfly.logging import get_logger
+
+# Health checks (production-grade, with HealthAggregator)
+from pyfly.actuator import (
+    HealthIndicator, HealthStatus, HealthResult, HealthAggregator,
 )
 ```
 
@@ -80,11 +85,12 @@ from pyfly.observability import MetricsRegistry
 registry = MetricsRegistry()
 ```
 
-Internally the registry maintains two dictionaries:
+Internally the registry maintains three dictionaries:
 
 ```python
 self._counters: dict[str, Counter] = {}
 self._histograms: dict[str, Histogram] = {}
+self._gauges: dict[str, Gauge] = {}
 ```
 
 **Source:** `src/pyfly/observability/metrics.py`
@@ -152,16 +158,16 @@ The returned object is a standard `prometheus_client.Histogram`.
 
 ### @timed Decorator
 
-The `@timed` decorator records the execution duration of an **async** function as a
-histogram observation. It wraps the function with `time.perf_counter()` calls and
-records the elapsed time even when the function raises an exception.
+The `@timed` decorator records the execution duration of an **async or sync** function
+as a histogram observation. It uses Micrometer-style dot.case names and automatically
+tags each observation with `class`, `method`, and `exception` labels.
 
 ```python
 from pyfly.observability import MetricsRegistry, timed
 
 registry = MetricsRegistry()
 
-@timed(registry, "order_processing_seconds", "Time to process an order")
+@timed(registry, "orders.process", "Time to process an order")
 async def process_order(order_id: str) -> dict:
     # ... business logic ...
     return {"order_id": order_id, "status": "processed"}
@@ -169,42 +175,35 @@ async def process_order(order_id: str) -> dict:
 
 **How it works internally:**
 
-1. Before calling the decorated function, records `start = time.perf_counter()`.
-2. Awaits the decorated function inside a `try/finally` block.
-3. In the `finally` clause, observes `time.perf_counter() - start` on the histogram.
+1. Records `start = time.perf_counter()`.
+2. Calls the decorated function inside a `try/except/finally` block.
+3. In the `finally` clause, observes the elapsed time on a labeled histogram —
+   the `exception` label is `"none"` on success or the exception type name on failure.
 
-This means the duration is recorded regardless of whether the function succeeds or
-raises an exception. The actual source implementation:
-
-```python
-@functools.wraps(func)
-async def wrapper(*args: Any, **kwargs: Any) -> Any:
-    start = time.perf_counter()
-    try:
-        return await func(*args, **kwargs)
-    finally:
-        histogram.observe(time.perf_counter() - start)
-```
+The duration is recorded regardless of success or failure. The histogram name uses
+Micrometer dot.case convention and gets a `_seconds` suffix if not already present
+(e.g. `"orders.process"` → Prometheus name `orders_process_seconds`).
 
 **Parameters:**
 
-| Parameter     | Type              | Description                               |
-|---------------|-------------------|-------------------------------------------|
-| `registry`    | `MetricsRegistry` | The registry that owns the histogram      |
-| `name`        | `str`             | Histogram metric name                     |
-| `description` | `str`             | Human-readable description                |
+| Parameter     | Type              | Default | Description                               |
+|---------------|-------------------|---------|-------------------------------------------|
+| `registry`    | `MetricsRegistry` | required | The registry that owns the histogram     |
+| `name`        | `str`             | `"method.timed"` | Micrometer dot.case meter name  |
+| `description` | `str`             | `"Timed method execution"` | Human-readable description |
+| `extra_tags`  | `dict[str, str] \| None` | `None` | Additional Prometheus labels      |
 
 ### @counted Decorator
 
-The `@counted` decorator increments a counter each time an **async** function is
-invoked.
+The `@counted` decorator increments a counter each time an **async or sync** function
+completes (success or failure).
 
 ```python
 from pyfly.observability import MetricsRegistry, counted
 
 registry = MetricsRegistry()
 
-@counted(registry, "orders_created_total", "Total orders created")
+@counted(registry, "orders.created", "Total orders created")
 async def create_order(data: dict) -> dict:
     # ... business logic ...
     return {"id": "ord-123", **data}
@@ -212,40 +211,36 @@ async def create_order(data: dict) -> dict:
 
 **How it works internally:**
 
-1. Before calling the decorated function, increments the counter with `counter.inc()`.
-2. Awaits the decorated function normally.
+1. Calls the decorated function.
+2. On success, increments the counter with labels `result="success"`, `exception="none"`.
+3. On failure, increments with `result="failure"`, `exception=<ExceptionTypeName>` and
+   re-raises.
 
-The counter increments before the function executes, so the count increases even if
-the function subsequently raises an exception.
-
-```python
-@functools.wraps(func)
-async def wrapper(*args: Any, **kwargs: Any) -> Any:
-    counter.inc()
-    return await func(*args, **kwargs)
-```
+The counter is labeled with `class`, `method`, `result`, and `exception` and uses
+Micrometer dot.case naming (prometheus_client appends `_total` automatically).
 
 **Parameters:**
 
-| Parameter     | Type              | Description                               |
-|---------------|-------------------|-------------------------------------------|
-| `registry`    | `MetricsRegistry` | The registry that owns the counter        |
-| `name`        | `str`             | Counter metric name                       |
-| `description` | `str`             | Human-readable description                |
+| Parameter     | Type              | Default | Description                               |
+|---------------|-------------------|---------|-------------------------------------------|
+| `registry`    | `MetricsRegistry` | required | The registry that owns the counter       |
+| `name`        | `str`             | `"method.counted"` | Micrometer dot.case meter name |
+| `description` | `str`             | `"Counted method invocations"` | Human-readable description |
+| `extra_tags`  | `dict[str, str] \| None` | `None` | Additional Prometheus labels      |
 
 ### Combining @timed and @counted
 
 You can stack both decorators on the same function:
 
 ```python
-@timed(registry, "order_duration_seconds", "Order processing time")
-@counted(registry, "orders_total", "Total orders processed")
+@timed(registry, "orders.duration", "Order processing time")
+@counted(registry, "orders.processed", "Orders processed")
 async def process_order(order_id: str) -> dict:
     ...
 ```
 
-The decorators execute from bottom to top: `@counted` runs first (increments the
-counter), then `@timed` wraps the whole call (records the duration).
+Both decorators support async and sync functions. Stacking them means each
+invocation produces both a timer observation and a counter increment.
 
 ### Prometheus Integration
 
@@ -276,7 +271,7 @@ work without modification.
 
 ### @span Decorator
 
-The `@span` decorator wraps an **async** function in an OpenTelemetry span. This
+The `@span` decorator wraps an **async or sync** function in an OpenTelemetry span. This
 enables distributed tracing across service boundaries -- each span records the
 function's name, timing, and any errors that occur.
 
@@ -287,6 +282,11 @@ from pyfly.observability import span
 async def fetch_inventory(sku: str) -> dict:
     # ... call inventory service ...
     return {"sku": sku, "quantity": 42}
+
+# Sync functions are also supported
+@span("validate-input")
+def validate_input(data: dict) -> bool:
+    return bool(data.get("id"))
 ```
 
 **Parameters:**
@@ -324,15 +324,14 @@ async def risky_operation() -> None:
 # - exception type, message, and traceback
 ```
 
-The full wrapper implementation:
+The wrapper implementation (async path shown; sync path is identical without `await`):
 
 ```python
 @functools.wraps(func)
 async def wrapper(*args: Any, **kwargs: Any) -> Any:
     with _tracer.start_as_current_span(name) as current_span:
         try:
-            result = await func(*args, **kwargs)
-            return result
+            return await func(*args, **kwargs)
         except Exception as exc:
             current_span.set_status(
                 trace.Status(trace.StatusCode.ERROR, str(exc))
@@ -422,26 +421,20 @@ process-order [200ms]
 
 ## Logging
 
-PyFly provides two complementary logging APIs:
-
-1. **`pyfly.logging`** -- hexagonal architecture with `LoggingPort` (protocol) and
-   `StructlogAdapter` (default implementation) for framework-level integration.
-
+PyFly provides structured logging through the `pyfly.logging` hexagonal port
+with `LoggingPort` (protocol) and `StructlogAdapter` (default implementation).
 Both are backed by [structlog](https://www.structlog.org/) for structured, key-value
 logging.
 
-### Quick Start with configure_logging and get_logger
+### Quick Start with get_logger
 
-For simple applications, call `configure_logging()` once at startup and use
-`get_logger()` to obtain named loggers:
+Use `get_logger()` from `pyfly.logging` to obtain a named structured logger anywhere
+in your code. The logging system is configured automatically during application
+bootstrap; no manual setup call is needed:
 
 ```python
-from pyfly.observability import configure_logging, get_logger
+from pyfly.logging import get_logger
 
-# Configure once at startup
-configure_logging(level="DEBUG", json_output=False)
-
-# Get a named logger anywhere in your code
 logger = get_logger("order_service")
 
 logger.info("order_created", order_id="ord-123", customer="acme")
@@ -449,34 +442,16 @@ logger.warning("inventory_low", sku="WIDGET-42", remaining=3)
 logger.error("payment_failed", order_id="ord-123", reason="declined")
 ```
 
-**`configure_logging()` Parameters:**
-
-| Parameter    | Type   | Default  | Description                                   |
-|-------------|--------|----------|-----------------------------------------------|
-| `level`     | `str`  | `"INFO"` | Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `json_output` | `bool` | `False` | `True` for JSON lines (production), `False` for colored console (development) |
-
-**Processors configured automatically:**
-
-| Processor                            | Purpose                                    |
-|--------------------------------------|--------------------------------------------|
-| `merge_contextvars`                  | Merges context variables (correlation IDs)  |
-| `add_logger_name`                    | Adds the logger name to each event          |
-| `add_log_level`                      | Adds the log level                          |
-| `TimeStamper(fmt="iso")`             | ISO 8601 timestamps                         |
-| `StackInfoRenderer`                  | Includes stack traces on errors             |
-| `UnicodeDecoder`                     | Decodes byte strings                        |
-| `ConsoleRenderer` or `JSONRenderer`  | Based on `json_output` flag                 |
-
 **`get_logger()` Parameters:**
 
 | Parameter | Type  | Description              |
 |-----------|-------|--------------------------|
 | `name`    | `str` | The logger name          |
 
-Returns a `structlog.stdlib.BoundLogger`.
+Returns a `structlog.stdlib.BoundLogger` when structlog is installed, or a lightweight
+stdlib-backed shim otherwise. Both accept the same `(event, **kwargs)` call signature.
 
-**Source:** `src/pyfly/observability/logging.py`
+**Source:** `src/pyfly/logging/__init__.py`
 
 ### LoggingPort Protocol
 
@@ -538,15 +513,15 @@ adapter.set_level("sqlalchemy.engine", "WARNING")
 |-------------------------------|------------------------------------|------------|
 | `pyfly.logging.level.root`    | Root log level                     | `"INFO"`   |
 | `pyfly.logging.level.<module>` | Per-module log level override     | (inherits root) |
-| `pyfly.logging.format`        | Output format: `"console"` or `"json"` | `"console"` |
+| `pyfly.logging.format`        | Output format: `"console"`, `"json"`, or `"logfmt"` | `"console"` |
 
 When `configure()` is called, the adapter performs these steps:
 
 1. Reads the `pyfly.logging.level` section from config.
 2. Extracts the `root` level and collects per-module overrides.
-3. Reads `pyfly.logging.format` to determine the output renderer.
-4. Configures structlog processors (same set as `configure_logging()`).
-5. Sets up `logging.basicConfig` with the root level and `force=True`.
+3. Reads `pyfly.logging.format` to determine the output renderer (`console`, `json`, or `logfmt`).
+4. Configures structlog processors with a `ProcessorFormatter` and `foreign_pre_chain` for unified formatting of all loggers (framework, application, and third-party).
+5. Sets up the root logger's level and handlers.
 6. Applies per-module levels via `logging.getLogger(module).setLevel()`.
 
 **Source:** `src/pyfly/logging/structlog_adapter.py`
@@ -614,95 +589,40 @@ that request's lifecycle.
 
 ## Health Checks
 
-### HealthChecker
+PyFly's production health check system lives in `pyfly.actuator`. See the
+[Actuator Guide](actuator.md) for the full reference (`HealthAggregator`,
+`HealthIndicator`, `HealthStatus`, `HealthResult`). Below is a quick overview.
 
-`HealthChecker` aggregates health checks from multiple components (database, cache,
-message broker, external services). Register async check functions that return
-`True` (healthy) or `False` (unhealthy), then call `check()` to get an aggregated
-result.
+### HealthAggregator
 
-```python
-from pyfly.observability import HealthChecker
-
-checker = HealthChecker()
-
-# Register health checks -- each is an async function returning bool
-async def db_health() -> bool:
-    try:
-        await database.execute("SELECT 1")
-        return True
-    except Exception:
-        return False
-
-async def redis_health() -> bool:
-    try:
-        return await redis_client.ping()
-    except Exception:
-        return False
-
-checker.add_check("database", db_health)
-checker.add_check("redis", redis_health)
-
-# Run all checks
-result = await checker.check()
-print(result.status)   # HealthStatus.UP or HealthStatus.DOWN
-print(result.checks)   # {"database": HealthStatus.UP, "redis": HealthStatus.DOWN}
-```
-
-**`add_check()` Parameters:**
-
-| Parameter | Type                              | Description                          |
-|-----------|-----------------------------------|--------------------------------------|
-| `name`    | `str`                             | Identifier for this health check     |
-| `check`   | `Callable[[], Awaitable[bool]]`   | Async function returning True/False  |
-
-**`check()` Return:**
-
-Returns a `HealthResult` dataclass. The overall status is `UP` only when **all**
-individual checks pass. If any check returns `False` or raises an exception, the
-overall status is `DOWN`.
-
-**Exception handling:** If a check function raises an exception instead of returning
-`False`, the `HealthChecker` catches it and treats that component as `DOWN`. This
-prevents a single broken check from crashing the entire health check system.
-
-**Source:** `src/pyfly/observability/health.py`
-
-### HealthStatus Enum
+`HealthAggregator` collects `HealthIndicator` beans and runs them to produce an
+aggregated result. It is typically set up automatically by actuator auto-configuration.
 
 ```python
-from pyfly.observability import HealthStatus
+from pyfly.actuator import HealthAggregator, HealthStatus, HealthIndicator
+from pyfly.container import component
 
-class HealthStatus(Enum):
-    UP = "UP"
-    DOWN = "DOWN"
+@component
+class DatabaseHealthIndicator:
+    async def health(self) -> HealthStatus:
+        try:
+            await database.execute("SELECT 1")
+            return HealthStatus(status="UP", details={"type": "postgresql"})
+        except Exception as e:
+            return HealthStatus(status="DOWN", details={"error": str(e)})
+
+# Use aggregator directly
+aggregator = HealthAggregator()
+aggregator.add_indicator("database", DatabaseHealthIndicator())
+
+result = await aggregator.check()
+print(result.status)      # "UP" or "DOWN"
+print(result.components)  # {"database": HealthStatus(status="UP", ...)}
 ```
 
-| Value  | Meaning                              |
-|--------|--------------------------------------|
-| `UP`   | Component is healthy and operational |
-| `DOWN` | Component is unhealthy or unreachable |
+`HealthStatus` values are: `"UP"`, `"DOWN"`, `"OUT_OF_SERVICE"`, `"UNKNOWN"`.
 
-### HealthResult Dataclass
-
-```python
-from pyfly.observability import HealthResult
-
-@dataclass
-class HealthResult:
-    status: HealthStatus
-    checks: dict[str, HealthStatus] = field(default_factory=dict)
-```
-
-| Field    | Type                          | Description                          |
-|----------|-------------------------------|--------------------------------------|
-| `status` | `HealthStatus`                | Overall aggregated health status     |
-| `checks` | `dict[str, HealthStatus]`     | Per-component health status map      |
-
-Note that this is the observability module's `HealthResult`. The actuator module has
-its own `HealthResult` with additional fields like `components` and a `to_dict()`
-method. See the [Actuator Guide](actuator.md) for the production-oriented health
-check system.
+**Source:** `src/pyfly/actuator/health.py`
 
 ---
 
@@ -848,29 +768,26 @@ This registers the `/actuator/health`, `/actuator/beans`, `/actuator/env`, and
 
 ## Complete Example
 
-The following example demonstrates all four observability pillars working together
-in a single service.
+The following example demonstrates the three observability pillars — metrics, tracing,
+and logging — working together in a single service, plus a custom health indicator.
 
 ```python
 """order_service/app.py -- Full observability example."""
 
 from pyfly.core import pyfly_application, PyFlyApplication
-from pyfly.container import service, rest_controller
-from pyfly.web import request_mapping, post_mapping, get_mapping, Body
+from pyfly.container import service, component, rest_controller
+from pyfly.web import request_mapping, post_mapping, Body
 from pyfly.web.adapters.starlette import create_app
-from pyfly.observability import (
-    MetricsRegistry, timed, counted, span,
-    configure_logging, get_logger,
-    HealthChecker,
-)
+from pyfly.observability import MetricsRegistry, timed, counted, span
+from pyfly.logging import get_logger
+from pyfly.actuator import HealthStatus
 from pydantic import BaseModel
 
 
 # =========================================================================
-# 1. Logging -- configure once at startup
+# 1. Logging -- get a logger (configured automatically by the framework)
 # =========================================================================
 
-configure_logging(level="INFO", json_output=False)
 logger = get_logger("order_service")
 
 
@@ -881,42 +798,24 @@ logger = get_logger("order_service")
 registry = MetricsRegistry()
 
 orders_counter = registry.counter(
-    "orders_total",
+    "orders.created",
     "Total orders processed",
     labels=["status"],
 )
 
-order_duration = registry.histogram(
-    "order_processing_seconds",
-    "Time to process an order",
-    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 5.0),
-)
-
 
 # =========================================================================
-# 3. Health Checks -- register component checks
+# 3. Health Indicator -- contributes to /actuator/health
 # =========================================================================
 
-checker = HealthChecker()
-
-async def db_health() -> bool:
-    """Check database connectivity."""
-    try:
-        # Replace with your actual database ping
-        return True
-    except Exception:
-        return False
-
-async def payment_gateway_health() -> bool:
-    """Check payment gateway reachability."""
-    try:
-        # Replace with an actual HTTP ping
-        return True
-    except Exception:
-        return False
-
-checker.add_check("database", db_health)
-checker.add_check("payment_gateway", payment_gateway_health)
+@component
+class DatabaseHealthIndicator:
+    async def health(self) -> HealthStatus:
+        try:
+            # Replace with your actual database ping
+            return HealthStatus(status="UP", details={"type": "postgresql"})
+        except Exception as e:
+            return HealthStatus(status="DOWN", details={"error": str(e)})
 
 
 # =========================================================================
@@ -935,8 +834,8 @@ class CreateOrderRequest(BaseModel):
 @service
 class OrderService:
 
-    @timed(registry, "create_order_seconds", "Time to create an order")
-    @counted(registry, "create_order_total", "Orders created")
+    @timed(registry, "orders.process", "Time to process an order")
+    @counted(registry, "orders.processed", "Orders processed")
     @span("create-order")
     async def create_order(self, customer_id: str, items: list[dict]) -> dict:
         logger.info("creating_order",
@@ -1004,26 +903,10 @@ async def main():
         actuator_enabled=True,
     )
 
-    # Programmatic health check
-    result = await checker.check()
-    logger.info("health_check_result",
-        status=result.status.value,
-        checks={name: s.value for name, s in result.checks.items()},
-    )
-
     await pyfly_app.shutdown()
 ```
 
-**Console output** when running this example:
-
-```
-2026-01-15T10:30:00.000Z [info    ] starting_application   app=order-service version=1.0.0
-2026-01-15T10:30:00.002Z [info    ] active_profiles        profiles=[]
-2026-01-15T10:30:00.010Z [info    ] application_started    app=order-service startup_time_s=0.01 beans_initialized=2
-2026-01-15T10:30:00.015Z [info    ] health_check_result    status=UP checks={'database': 'UP', 'payment_gateway': 'UP'}
-```
-
-**JSON output** (in production with `json_output=True`):
+**JSON output** (in production with `pyfly.logging.format: json`):
 
 ```json
 {"event": "creating_order", "customer_id": "cust-42", "item_count": 2, "timestamp": "2026-01-15T10:30:00Z", "level": "info", "logger": "order_service"}

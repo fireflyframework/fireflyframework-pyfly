@@ -314,6 +314,7 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `cache` | redis[hiredis] | Caching with Redis backend |
 | `client` | httpx | Resilient HTTP client with retry and circuit breaker |
 | `observability` | prometheus-client, opentelemetry-api, opentelemetry-sdk, structlog | Metrics, distributed tracing, structured logging |
+| `pii` | presidio-analyzer, presidio-anonymizer | Microsoft Presidio NER-based PII redaction (upgrades the default regex redactor in `pyfly.logging`) |
 | `security` | pyjwt[crypto], bcrypt, cryptography | JWT token generation/verification, password hashing |
 | `scheduling` | croniter | Cron expression parsing for scheduled tasks |
 | `cli` | click, rich, jinja2, questionary | CLI tools (pyfly new, run, info, doctor, db) |

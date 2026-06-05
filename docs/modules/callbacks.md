@@ -7,7 +7,8 @@ when domain events fire — the symmetric pair to `pyfly.webhooks`.
 
 ```python
 from pyfly.callbacks import (
-    CallbackConfig, CallbackSubscription, InMemoryCallbackConfigRepository,
+    CallbackConfig, CallbackSubscription,
+    InMemoryCallbackConfigRepository, InMemoryCallbackExecutionRepository,
 )
 
 config = CallbackConfig(

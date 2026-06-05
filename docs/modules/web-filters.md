@@ -41,13 +41,15 @@ Request
    v
 WebFilterChainMiddleware (pure ASGI middleware)
    |
+   +-- RequestContextFilter          (__pyfly_order__ = HIGHEST_PRECEDENCE)
+   +-- CorrelationFilter             (@order HIGHEST_PRECEDENCE + 50)
    +-- TransactionIdFilter           (@order HIGHEST_PRECEDENCE + 100)
    +-- RequestLoggingFilter          (@order HIGHEST_PRECEDENCE + 200)
+   +-- SecurityFilter                (@order HIGHEST_PRECEDENCE + 220, opt-in JWT auth)
+   +-- OAuth2SessionSecurityFilter   (@order HIGHEST_PRECEDENCE + 225, opt-in)
    +-- SecurityHeadersFilter         (@order HIGHEST_PRECEDENCE + 300)
-   +-- CsrfFilter                    (__pyfly_order__ = -50)
-   +-- OAuth2SessionSecurityFilter   (__pyfly_order__ = HIGHEST_PRECEDENCE + 225)
-   +-- SecurityFilter                (authentication — JWT Bearer token)
-   +-- HttpSecurityFilter            (@order HIGHEST_PRECEDENCE + 350)
+   +-- HttpSecurityFilter            (@order HIGHEST_PRECEDENCE + 350, opt-in)
+   +-- CsrfFilter                    (__pyfly_order__ = -50, opt-in)
    +-- [User WebFilter beans, sorted by @order]
    |
    v
@@ -331,12 +333,15 @@ Filters execute in `@order` value order (lower = runs first). Built-in filters u
 from pyfly.container.ordering import order, HIGHEST_PRECEDENCE
 
 # Built-in order values:
+# RequestContextFilter:          HIGHEST_PRECEDENCE         (request-scoped context)
+# CorrelationFilter:             HIGHEST_PRECEDENCE + 50    (W3C/correlation headers)
 # TransactionIdFilter:           HIGHEST_PRECEDENCE + 100
 # RequestLoggingFilter:          HIGHEST_PRECEDENCE + 200
 # SecurityFilter:                HIGHEST_PRECEDENCE + 220   (opt-in, JWT authentication)
-# OAuth2SessionSecurityFilter:   HIGHEST_PRECEDENCE + 225
+# OAuth2SessionSecurityFilter:   HIGHEST_PRECEDENCE + 225   (opt-in)
 # SecurityHeadersFilter:         HIGHEST_PRECEDENCE + 300
-# HttpSecurityFilter:            HIGHEST_PRECEDENCE + 350
+# HttpSecurityFilter:            HIGHEST_PRECEDENCE + 350   (opt-in)
+# CsrfFilter:                    -50                        (opt-in)
 
 # User filters default to order 0 (run after built-ins)
 
@@ -435,11 +440,17 @@ discovers any beans implementing the `WebFilter` protocol:
 
 ```python
 # In create_app():
-for cls, reg in context.container._registrations.items():
-    if reg.instance is not None and isinstance(reg.instance, WebFilter):
-        filters.append(reg.instance)
+builtin_filter_types = (
+    RequestContextFilter, CorrelationFilter,
+    TransactionIdFilter, RequestLoggingFilter, SecurityHeadersFilter,
+)
+for _cls, reg in context.container._registrations.items():
+    inst = reg.instance
+    if inst is not None and isinstance(inst, WebFilter) and not isinstance(inst, builtin_filter_types):
+        filters.append(inst)
 
-# Sort all filters (built-in + user) by @order
+# Sort all filters (built-in + user) by @order; done in-place so the live list
+# (shared with WebFilterChainMiddleware) stays ordered.
 filters.sort(key=lambda f: get_order(type(f)))
 ```
 
@@ -550,12 +561,15 @@ class RequestTimingFilter(OncePerRequestFilter):
 With these beans registered, `create_app()` produces this filter chain:
 
 ```
+RequestContextFilter          (HIGHEST_PRECEDENCE)
+CorrelationFilter             (HIGHEST_PRECEDENCE + 50)
 TransactionIdFilter           (HIGHEST_PRECEDENCE + 100)
 RequestLoggingFilter          (HIGHEST_PRECEDENCE + 200)
+SecurityFilter                (HIGHEST_PRECEDENCE + 220)   [if registered]
 OAuth2SessionSecurityFilter   (HIGHEST_PRECEDENCE + 225)   [if registered]
 SecurityHeadersFilter         (HIGHEST_PRECEDENCE + 300)
 HttpSecurityFilter            (HIGHEST_PRECEDENCE + 350)   [if registered]
-CsrfFilter                    (-50)
+CsrfFilter                    (-50)                        [if registered]
 TenantFilter                  (10)
 RequestTimingFilter           (50)
 ```

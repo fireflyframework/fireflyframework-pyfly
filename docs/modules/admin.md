@@ -576,9 +576,13 @@ admin = "pyfly.admin.auto_configuration:AdminAutoConfiguration"
 |------|------|-------------|
 | `admin_properties` | `AdminProperties` | Bound configuration dataclass. |
 | `admin_view_registry` | `AdminViewRegistry` | Collects built-in and custom view extensions. |
-| `admin_trace_collector` | `TraceCollectorFilter` | HTTP trace collection filter (ring buffer of 500). Excludes `/admin/*` and `/actuator/*` paths. |
+| `runtime_provider` | `RuntimeProvider` | Provides runtime metrics (CPU, memory, uptime) for the admin dashboard. |
 | `admin_log_handler` | `AdminLogHandler` | In-memory log handler attached to the root logger (ring buffer of 2000). Parses structlog output and strips ANSI codes. |
 | `admin_client_registration` | `AdminClientRegistration` | Created only when `pyfly.admin.client.url` is set. |
+
+> **Note:** `TraceCollectorFilter` is **not** a DI bean. It is wired directly into
+> the ASGI middleware chain by `create_app()` — this must happen before beans are
+> instantiated, so registering it as a bean would not reach the request path.
 
 ### Packaging
 

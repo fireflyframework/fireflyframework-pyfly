@@ -384,7 +384,6 @@ pyfly:
 
     rabbitmq:
       url: amqp://guest:guest@localhost/
-      exchange-name: pyfly
 ```
 
 | Property                              | Default                            | Description |
@@ -392,7 +391,8 @@ pyfly:
 | `pyfly.messaging.provider`            | `"memory"`                         | Which adapter to use: `"kafka"`, `"rabbitmq"`, or `"memory"`. |
 | `pyfly.messaging.kafka.bootstrap-servers` | `"localhost:9092"`            | Kafka bootstrap servers (comma-separated). |
 | `pyfly.messaging.rabbitmq.url`        | `"amqp://guest:guest@localhost/"`  | AMQP connection URL for RabbitMQ. |
-| `pyfly.messaging.rabbitmq.exchange-name` | `"pyfly"`                      | RabbitMQ exchange name. |
+
+> **Note:** The `RabbitMQAdapter` exchange name is fixed at `"pyfly"` when auto-configured. To use a different exchange name, construct the `RabbitMQAdapter` manually and register it as a bean.
 
 ---
 

@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.04 (2026-06-05)
+
+### Documentation accuracy pass
+
+A comprehensive sweep of the docs against the current codebase — no functional
+changes.
+
+- **New guide:** `docs/modules/session.md` (HTTP session store, `SessionFilter`,
+  in-memory/Redis stores, `pyfly.session.*`) — previously only mentioned inside
+  the security guide.
+- **README** now advertises the unified structured logging, Spring-style logging
+  configuration, and on-by-default **PII redaction** (with the optional
+  `pyfly[pii]` / Presidio upgrade); the `pii` extra is listed in the installation
+  guide.
+- **Indexes refreshed** (`docs/index.md`, `docs/README.md`,
+  `docs/modules/README.md`, `docs/adapters/README.md`) so every module/adapter
+  guide is linked; fixed the Logging link (was pointing at the observability
+  guide).
+- **Corrected factual drift across ~37 guides** to match the code, e.g.: the five
+  always-active web filters and their ordering; `SecurityException` → HTTP 403;
+  relational pool keys (`pool.size`/`max-overflow`/…); `@message_listener`
+  `group=`; actuator `beans` `contexts` envelope and the `threaddump`/`prometheus`
+  endpoints; health statuses (`UP`/`UNKNOWN`/`OUT_OF_SERVICE`/`DOWN`); `@timed`/
+  `@counted`/`@span` work on sync and async; AOP advice sync/async semantics;
+  DI error types (`NoSuchBeanError`/`NoUniqueBeanError`/`BeanCurrentlyInCreationError`)
+  and the `Registration.factory` field; `Query.get_cache_key` SHA-256; the IDP
+  provider/route surface; notification provider adapters; and more.
+
+---
+
 ## v26.06.03 (2026-06-05)
 
 ### Presidio PII path — now functional + CI-covered

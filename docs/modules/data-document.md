@@ -501,10 +501,10 @@ Source file: `src/pyfly/data/document/mongodb/query_compiler.py`
 For queries that cannot be expressed through method naming conventions, the `@query` decorator lets you write MongoDB filter documents or aggregation pipelines directly as JSON strings with named parameter substitution.
 
 ```python
-from pyfly.data.relational.sqlalchemy import query  # shared @query decorator
+from pyfly.data.query import query  # backend-neutral @query decorator
 ```
 
-The `@query` decorator is shared between the relational and document adapters. For MongoDB, the `MongoQueryExecutor` compiles the decorated methods into async callables that execute against Beanie document models.
+The `@query` decorator is backend-neutral and lives in `pyfly.data.query`. It is shared between the relational and document adapters. For MongoDB, the `MongoQueryExecutor` compiles the decorated methods into async callables that execute against Beanie document models.
 
 ### Find Filter Queries
 

@@ -78,14 +78,23 @@ Implements `WebServerPort`. Creates a Starlette `Application` with routes, middl
 
 ### WebFilter Chain
 
-`WebFilterChainMiddleware` runs an ordered chain of filters on every request. Built-in filters:
+`WebFilterChainMiddleware` runs an ordered chain of filters on every request. Always-active built-in filters:
 
 | Filter | Purpose |
 |--------|---------|
-| `TransactionIdFilter` | Generates `X-Transaction-ID` for request tracing |
+| `RequestContextFilter` | Initializes request-scoped context (runs first) |
+| `CorrelationFilter` | Stamps W3C trace context and correlation headers |
+| `TransactionIdFilter` | Propagates or generates `X-Transaction-Id` |
 | `RequestLoggingFilter` | Logs request method, path, status, and duration |
 | `SecurityHeadersFilter` | Adds OWASP security headers |
-| `SecurityFilter` | JWT authentication and authorization |
+
+Opt-in filters (registered as beans):
+
+| Filter | Purpose |
+|--------|---------|
+| `SecurityFilter` | JWT Bearer token authentication |
+| `HttpSecurityFilter` | URL-pattern authorization rules |
+| `CsrfFilter` | Double-submit cookie CSRF protection |
 
 ### OpenAPI & Documentation
 

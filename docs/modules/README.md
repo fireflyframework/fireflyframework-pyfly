@@ -86,6 +86,7 @@ Protect your application with JWT authentication, password encoding, and role-ba
 | Guide | What You'll Learn |
 |-------|-------------------|
 | [Security](security.md) | `JWTService`, `BcryptPasswordEncoder`, `SecurityContext`, `@secure` decorator, `SecurityMiddleware`, role-based access control, protected endpoints, token refresh |
+| [Session](session.md) | `HttpSession`, `SessionStore`, `InMemorySessionStore`, `RedisSessionStore`, `SessionFilter`, cookie management, TTL, OAuth2 session integration |
 
 ---
 
@@ -157,7 +158,7 @@ Monitor, schedule, and observe your applications in production.
 | Guide | What You'll Learn |
 |-------|-------------------|
 | [Observability](observability.md) | `@timed`, `@counted`, `@span`, `MetricsRegistry`, `HealthChecker`, Prometheus metrics export, OpenTelemetry tracing, structured logging with correlation IDs |
-| [Logging](logging.md) | `get_logger`, `LoggingPort`, structlog & stdlib adapters, structured `event + key=value` logging, runtime level control |
+| [Logging](logging.md) | `get_logger`, `LoggingPort`, structlog & stdlib adapters, unified interception of all loggers (framework + third-party), Spring-style `pyfly.logging.*` config (patterns, file output, rotation, external config file), PII redaction on by default (regex; Microsoft Presidio NER via `pyfly[pii]`), runtime level control |
 | [Scheduling](scheduling.md) | `@scheduled`, `@async_method`, `CronExpression`, `TaskScheduler`, fixed-rate tasks, fixed-delay tasks, asyncio and thread pool executors |
 
 ---
@@ -192,6 +193,7 @@ pyfly/
 │   └── ports/            RepositoryPort, QueryMethodCompilerPort
 ├── validation/      Valid[T], Pydantic validation
 ├── security/        JWT, password encoding, authorization
+├── session/         Server-side session management, pluggable stores
 ├── messaging/       Kafka, RabbitMQ, in-memory broker
 ├── eda/             Event-driven architecture, event bus
 ├── cqrs/            Command/Query segregation, CommandBus/QueryBus

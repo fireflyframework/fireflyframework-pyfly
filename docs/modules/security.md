@@ -652,7 +652,7 @@ from pyfly.web.adapters.starlette.filters.csrf_filter import CsrfFilter
 
 | Property | Value | Description |
 |---|---|---|
-| `__pyfly_order__` | `-50` | Runs after RequestContext but before SecurityFilter |
+| `__pyfly_order__` | `HIGHEST_PRECEDENCE + 210` | Runs before the JWT `SecurityFilter` (HP+220) |
 | `exclude_patterns` | `["/actuator/*", "/health", "/ready"]` | Paths excluded from CSRF |
 
 **Bearer bypass:** Requests with an `Authorization: Bearer ...` header skip CSRF validation entirely. JWT-based API clients are already immune to CSRF attacks because tokens are not sent automatically by browsers.
@@ -742,7 +742,7 @@ Rules are evaluated **in declaration order** -- first match wins. If no rule mat
 
 ### HttpSecurityFilter
 
-The `HttpSecurityFilter` is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 350`. It runs **after** authentication filters (SecurityFilter at +250, OAuth2SessionSecurityFilter at +225) and **before** the route handler. This means the `SecurityContext` is already populated on `request.state` when the rules are evaluated.
+The `HttpSecurityFilter` is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 350`. It runs **after** authentication filters (SecurityFilter at +220, OAuth2SessionSecurityFilter at +225) and **before** the route handler. This means the `SecurityContext` is already populated on `request.state` when the rules are evaluated.
 
 ```python
 from pyfly.web.adapters.starlette.filters.http_security_filter import HttpSecurityFilter
@@ -1170,7 +1170,7 @@ oauth2_routes = login_handler.routes()
 
 #### OAuth2SessionSecurityFilter
 
-The `OAuth2SessionSecurityFilter` is a `OncePerRequestFilter` that restores the `SecurityContext` from the HTTP session on every request. It runs at `HIGHEST_PRECEDENCE + 225`, which is **before** the JWT-based `SecurityFilter` (at +250), ensuring session-based authentication takes priority over token-based authentication.
+The `OAuth2SessionSecurityFilter` is a `OncePerRequestFilter` that restores the `SecurityContext` from the HTTP session on every request. It runs at `HIGHEST_PRECEDENCE + 225`, which is **after** the JWT-based `SecurityFilter` (at +220), so a session-established context overwrites a token-established one — session-based authentication takes priority over symmetric-token auth.
 
 ```python
 from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
@@ -1187,7 +1187,8 @@ This filter is complementary to the JWT `SecurityFilter`. In applications that u
 | Property | Value |
 |---|---|
 | `__pyfly_order__` | `HIGHEST_PRECEDENCE + 225` |
-| Runs before | `SecurityFilter` (HP+250), `HttpSecurityFilter` (HP+350) |
+| Runs after | `SecurityFilter` (HP+220) |
+| Runs before | `HttpSecurityFilter` (HP+350) |
 
 **Source:** `src/pyfly/security/oauth2/session_security_filter.py`
 
@@ -1282,8 +1283,9 @@ When `pyfly.security.enabled` is set to `true` in your configuration, PyFly auto
 | Bean | Type | Config Keys |
 |------|------|-------------|
 | `jwt_service` | `JWTService` | `pyfly.security.jwt.secret`, `pyfly.security.jwt.algorithm` |
+| `security_filter` | `WebFilter` (opt-in) | `pyfly.security.jwt.filter.enabled=true`, `pyfly.security.jwt.exclude-patterns` |
 
-The auto-configured `JWTService` reads its secret and algorithm from the configuration:
+The auto-configured `JWTService` reads its secret and algorithm from the configuration. The `SecurityFilter` bean is opt-in — it is only created when `pyfly.security.jwt.filter.enabled=true` (and `starlette` is installed), allowing the filter to be auto-discovered by `create_app()` without manual registration:
 
 ```yaml
 pyfly:
@@ -1292,6 +1294,9 @@ pyfly:
     jwt:
       secret: "my-production-secret"   # REQUIRED: change from default
       algorithm: "HS256"               # Default: HS256
+      filter:
+        enabled: true                  # Opt-in: register SecurityFilter bean
+        exclude-patterns: "/docs,/openapi.json,/actuator/health"
 ```
 
 ### PasswordEncoderAutoConfiguration

@@ -34,6 +34,8 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | [Core & Lifecycle](modules/core.md) | Application bootstrap, startup sequence, configuration, profiles, banner |
 | [Dependency Injection](modules/dependency-injection.md) | Container, stereotypes, scopes, bean factories, conditional beans, lifecycle hooks |
 | [Configuration](modules/configuration.md) | YAML/TOML config, profiles, property binding, environment variables |
+| [Config Server](modules/config-server.md) | Centralized config server (`ConfigServer`, `ConfigClient`), Spring-Cloud-Config-compatible responses, filesystem/in-memory backends |
+| [Starters](modules/starters.md) | Layered bundles — `enable_core_stack`, `enable_web_stack`, `enable_application_stack`, `enable_data_stack`, `enable_domain_stack`, per-tier module activation |
 | [Error Handling](modules/error-handling.md) | Exception hierarchy, HTTP status mapping, structured error responses |
 
 ### Web Development
@@ -44,6 +46,8 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | [Validation](modules/validation.md) | `Valid[T]` annotation, Pydantic model validation, structured 422 errors |
 | [WebFilters](modules/web-filters.md) | Request/response filter chain — `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter` |
 | [WebSocket](modules/websocket.md) | `@websocket_mapping`, `WebSocketSession`, `WebSocketHandler` lifecycle, `on_disconnect` hook, route discovery |
+| [Server Module](modules/server.md) | `ApplicationServerPort`, Granian / Uvicorn / Hypercorn adapters, uvloop / asyncio selection, `ServerProperties`, `pyfly run` |
+| [Internationalisation (i18n)](modules/i18n.md) | `MessageSource` port, `ResourceBundleMessageSource` (YAML/JSON bundles), locale fallback, `MessageFormat`-style placeholders |
 | [Actuator](modules/actuator.md) | Health checks, beans endpoint, environment info, loggers, metrics |
 | [Custom Actuator Endpoints](modules/custom-actuator-endpoints.md) | Build your own actuator endpoints with the `ActuatorEndpoint` protocol |
 
@@ -67,13 +71,16 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 
 | Guide | Description |
 |-------|-------------|
-| [Transactional Engine](modules/transactional.md) | SAGA and TCC distributed transaction patterns, compensation, recovery, saga composition |
+| [Transactional Engine](modules/transactional.md) | Saga (`@saga`, `@saga_step`), Workflow (`@workflow`, `@wait_for_signal`, `@wait_for_timer`), TCC (`@tcc`, `@tcc_participant`), DAG execution, compensation, DLQ, recovery |
+| [Event Sourcing](modules/eventsourcing.md) | `AggregateRoot`, `EventStore` (in-memory + SQLAlchemy), `SnapshotStore`, `TransactionalOutbox`, `Projection` / `ProjectionRunner`, `EventUpcaster` |
+| [Domain (DDD primitives)](modules/domain.md) | `Entity[TID]`, `ValueObject`, `AggregateRoot[TID]`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation`, `enable_domain_stack` |
 
 ### Security
 
 | Guide | Description |
 |-------|-------------|
 | [Security](modules/security.md) | JWT authentication, password encoding, authorization, protected endpoints |
+| [Session](modules/session.md) | Server-side session management, pluggable stores (in-memory, Redis), OAuth2 integration |
 
 ### Resilience & Performance
 
@@ -100,7 +107,20 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | Guide | Description |
 |-------|-------------|
 | [Observability](modules/observability.md) | Prometheus metrics, OpenTelemetry tracing, structured logging, health checks |
+| [Logging](modules/logging.md) | `get_logger`, unified structured logging (intercepts all loggers), Spring-style `pyfly.logging.*` config, PII redaction (regex default; Presidio NER via `pyfly[pii]`) |
 | [Scheduling](modules/scheduling.md) | Cron jobs, fixed-rate tasks, fixed-delay tasks, async execution |
+
+### Integration
+
+| Guide | Description |
+|-------|-------------|
+| [Callbacks (outbound webhooks)](modules/callbacks.md) | Subscriptions, HMAC signing, retry, execution tracking |
+| [Webhooks (inbound)](modules/webhooks.md) | Signature validation, idempotency, listener pattern |
+| [Notifications](modules/notifications.md) | Email / SMS / push ports, SendGrid / Twilio / Firebase / SMTP / dummy adapters |
+| [IDP (Identity Provider)](modules/idp.md) | `IdpAdapter` port + Keycloak / AWS Cognito / Azure AD / internal-DB adapters, login, MFA, roles |
+| [ECM (Content Management)](modules/ecm.md) | Document storage, metadata, folders, e-signature ports + AWS S3 / Azure Blob / DocuSign / Logalty adapters |
+| [Plugins](modules/plugins.md) | `@plugin`, `@extension`, `@extension_point`, `PluginManager`, dependency resolution |
+| [Rule Engine](modules/rule-engine.md) | YAML DSL, AST evaluator, batch evaluation, repository |
 
 ### Advanced
 
@@ -122,6 +142,8 @@ Browse the full [Adapter Catalog](adapters/README.md), or jump directly:
 | [SQLAlchemy](adapters/sqlalchemy.md) | PostgreSQL, MySQL, SQLite | Data Relational |
 | [MongoDB](adapters/mongodb.md) | MongoDB (Beanie ODM) | Data Document |
 | [Starlette](adapters/starlette.md) | Starlette / Uvicorn | Web |
+| [FastAPI](adapters/fastapi.md) | FastAPI + Uvicorn / Granian | Web |
+| [Granian](adapters/granian.md) | Granian (Rust/tokio ASGI server) | Server |
 | [Kafka](adapters/kafka.md) | Apache Kafka (aiokafka) | Messaging |
 | [RabbitMQ](adapters/rabbitmq.md) | RabbitMQ (aio-pika) | Messaging |
 | [Redis](adapters/redis.md) | Redis (async) | Caching |
