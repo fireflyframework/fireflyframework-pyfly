@@ -115,13 +115,16 @@ def build_redactor(props: RedactionProperties) -> Redactor | None:
     if not props.enabled:
         return None
     engine = props.engine.lower().strip()
-    if engine == "presidio":
-        return PresidioRedactor(props)
-    if engine == "auto":
+    if engine in ("presidio", "auto"):
+        # Construction fails with ImportError when presidio isn't installed, or
+        # e.g. OSError when it's installed but its NLP model isn't downloaded.
+        # Either way, fall back to the regex engine — a logging misconfiguration
+        # must never crash the application (audit-grade robustness).
         try:
-            import presidio_analyzer  # type: ignore[import-not-found, unused-ignore] # noqa: F401
-
             return PresidioRedactor(props)
-        except ImportError:
-            _logger.info("presidio not installed; using regex PII redaction (install pyfly[pii] to upgrade)")
+        except Exception as exc:  # noqa: BLE001 — any presidio failure -> regex fallback
+            if engine == "presidio":
+                _logger.warning("presidio PII engine unavailable (%s); falling back to regex redaction", exc)
+            else:
+                _logger.info("presidio not available (%s); using regex PII redaction (install pyfly[pii])", exc)
     return RegexRedactor(props.entities, props.mask, props.extra_patterns)
