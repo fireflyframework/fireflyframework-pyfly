@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 
@@ -39,6 +40,7 @@ class HttpSession:
         self._is_new = is_new
         self._invalidated = False
         self._modified = is_new
+        self._previous_id: str | None = None
 
         now = time.time()
         if "_created_at" not in self._data:
@@ -48,6 +50,11 @@ class HttpSession:
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def previous_id(self) -> str | None:
+        """The id this session was rotated away from (set by :meth:`rotate_id`)."""
+        return self._previous_id
 
     @property
     def is_new(self) -> bool:
@@ -87,6 +94,20 @@ class HttpSession:
     def get_attribute_names(self) -> list[str]:
         """Return all attribute names, excluding internal metadata keys."""
         return [k for k in self._data if not k.startswith("_")]
+
+    def rotate_id(self) -> None:
+        """Assign a fresh session id, preserving all data.
+
+        Call on authentication / privilege elevation to prevent session-fixation
+        attacks: an attacker who fixed the victim's pre-auth session id cannot
+        ride the authenticated session. The store entry and cookie are migrated
+        to the new id when the session is persisted by the ``SessionFilter``.
+        """
+        if self._invalidated:
+            return
+        self._previous_id = self._id
+        self._id = uuid.uuid4().hex
+        self._modified = True
 
     def invalidate(self) -> None:
         """Mark the session for deletion."""

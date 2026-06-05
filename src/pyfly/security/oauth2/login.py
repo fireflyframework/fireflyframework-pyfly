@@ -185,6 +185,9 @@ class OAuth2LoginHandler:
                 status_code=401,
             )
 
+        # Rotate the session id on successful authentication to prevent session
+        # fixation — the pre-auth id (which an attacker may have fixed) is dropped.
+        session.rotate_id()
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
 
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)

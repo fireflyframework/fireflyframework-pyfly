@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.13 (2026-06-05)
+
+### Security
+
+- **Session fixation fixed.** Authentication now rotates the session id, so an
+  attacker who fixed a victim's pre-auth `PYFLY_SESSION` id cannot ride the
+  authenticated session. New `HttpSession.rotate_id()` (preserves data, records
+  `previous_id`); `SessionFilter` migrates the store entry and re-issues the
+  cookie under the new id; the OAuth2 login flow calls it on successful login.
+- **Session cookie `Secure` auto-set over HTTPS.** `SessionFilter` now marks the
+  cookie `Secure` when the request arrives over HTTPS (honoring
+  `X-Forwarded-Proto`) even if not explicitly configured — hardening production
+  without breaking plain-HTTP local development.
+- **Redis session deserialization hardened.** `RedisSessionStore` rehydrated
+  *any* tagged type via `importlib` + `obj(**payload)` — an arbitrary-object
+  instantiation gadget if the store were ever attacker-writable. Rehydration is
+  now restricted to an allowlist (`SecurityContext` pre-registered); other tagged
+  values return a plain dict. Apps opt custom dataclasses in via
+  `allow_session_type()`.
+
+### Added
+
+- **`tests/session/` suite (16 tests)** — the session subsystem was previously
+  untested. Covers `HttpSession` (incl. rotation), `InMemorySessionStore`
+  (incl. TTL expiry), `SessionFilter` (new/existing/invalidate/rotation/secure
+  auto-detect), and `RedisSessionStore` (SecurityContext round-trip + the
+  allowlist gadget guard).
+
+Completes the session-hardening follow-up deferred from v26.06.12.
+
+---
+
 ## v26.06.12 (2026-06-05)
 
 ### Security
