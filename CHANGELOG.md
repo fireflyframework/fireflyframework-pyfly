@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.15 (2026-06-05)
+
+### Fixed
+
+- **`CacheManager` now satisfies the `CacheAdapter` protocol.** It implemented
+  only `get`/`put`/`evict`/`clear`, so `isinstance(mgr, CacheAdapter)` was `False`
+  and passing one as a `@cacheable` backend raised `AttributeError: 'CacheManager'
+  object has no attribute 'exists'` on the first null-cached hit. Added the
+  missing `exists` / `put_if_absent` / `evict_by_prefix` / `start` / `stop`
+  (mirrored to both primary and fallback).
+- **Cache decorators reject a sync target with a clear error.** `@cacheable` /
+  `@cache_evict` / `@cache_put` await an async backend, so decorating a sync
+  function used to fail with a cryptic `await` `TypeError` at call time; it now
+  raises a clear `TypeError` at decoration time (cache adapters are async-only).
+- **Bad key templates raise a clear `ValueError`.** A `{param}` template
+  referencing a name not in the function signature raised a bare `KeyError` at
+  call time; it now names the unknown parameter.
+
+### Added
+
+- **`InMemoryCache(max_size=...)` with LRU eviction.** The in-memory adapter was
+  unbounded (the advertised `max_size` stat was always `None`). It now accepts an
+  optional `max_size` (wired from `pyfly.cache.max-size`) and evicts the
+  least-recently-used entry on overflow; the default remains unbounded.
+
+### Notes
+
+- Documented two by-design properties surfaced by the audit: cache **keys are
+  namespaced by the backend instance + key template** (reuse the same template
+  across methods only for the same logical entry — that is what lets
+  `@cache_evict` invalidate a `@cacheable` entry), and the **Redis JSON
+  round-trip is lossy** (a cached Pydantic model returns as a `dict` on a Redis
+  hit, unlike the in-memory adapter).
+
+These surfaced in an edge-case audit while validating the `implement-cache-strategy`
+skill (which validated clean — cache hits skip the source and evict invalidates).
+
+---
+
 ## v26.06.14 (2026-06-05)
 
 ### Fixed

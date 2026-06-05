@@ -15,8 +15,15 @@
 
 Plain ``json.dumps`` raises ``TypeError`` on datetime/Decimal/UUID/set/Pydantic
 values — extremely common in this Pydantic-heavy framework — which previously
-crashed the cache write path (audit #72). This encoder converts those to a
-JSON-safe form so a cache put never raises.
+crashed the cache write path (audit #72). This encoder converts the common
+framework types to a JSON-safe form; a value that is still not serializable
+raises ``TypeError`` on write.
+
+Note: the round-trip is lossy because storage is JSON. A Redis cache hit returns
+JSON types — a cached Pydantic model comes back as a ``dict``, and
+``Decimal``/``UUID``/``datetime`` as strings — unlike the in-memory adapter,
+which stores the live object by reference. Reconstruct from the declared type if
+you need the original object on a Redis-backed cache.
 """
 
 from __future__ import annotations
@@ -52,7 +59,11 @@ def cache_dumps(value: Any) -> bytes:
 
 
 def cache_loads(raw: Any) -> Any:
-    """Deserialize cached JSON bytes/str back to a Python object."""
+    """Deserialize cached JSON bytes/str back to a Python object.
+
+    Returns plain JSON types (dict/list/str/int/float/bool/None); typed values
+    such as Pydantic models are not reconstructed (see the module docstring).
+    """
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     return json.loads(raw)

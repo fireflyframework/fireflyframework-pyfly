@@ -57,7 +57,9 @@ class CacheAutoConfiguration:
 
         from pyfly.cache.adapters.memory import InMemoryCache
 
-        return InMemoryCache()
+        raw_max_size = config.get("pyfly.cache.max-size", None)
+        max_size = int(raw_max_size) if raw_max_size is not None else None
+        return InMemoryCache(max_size=max_size)
 
     @bean
     @conditional_on_property("pyfly.observability.health.enabled", having_value="true", match_if_missing=True)
