@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.02 (2026-06-05)
+
+### Unified logging, Spring-style configuration & PII redaction
+
+A logging overhaul that intercepts and uniformly formats **every** logger, adds
+Spring-style file-based configuration, and redacts PII by default.
+
+- **Unified interception & formatting.** All loggers — framework, third-party
+  libraries (uvicorn, sqlalchemy, kafka, httpx…), and anything on stdlib
+  `logging` — now render through a single formatter, so output shares one
+  timestamp/level/structure. The `StructlogAdapter` uses structlog's
+  `ProcessorFormatter` + `foreign_pre_chain`; the stdlib fallback uses a matching
+  `Formatter`. Previously third-party logs bypassed the framework format
+  (bare `%(message)s`).
+- **Spring-style configuration.** New `pyfly.logging.*` keys: `format`
+  (`console`|`json`|`logfmt`), `pattern.console`/`pattern.file` (logback-style
+  layout tokens), `file.name`/`file.path` (file appender), `rolling.*`
+  (size-based rotation), and `config` — an external `logging.yaml` (dictConfig)
+  or `logging.ini` (fileConfig) escape hatch. Existing `pyfly.logging.level.*` /
+  `format` keys are unchanged.
+- **PII redaction.** PII is masked in every log record by default via a fast
+  built-in regex engine (email, credit-card [Luhn-validated], IBAN, US SSN, JWT,
+  bearer tokens, URL credentials, phone; IPv4/IPv6 available but off by default).
+  Configurable via `pyfly.logging.redaction.*` (`enabled`, `engine`
+  `regex`|`presidio`|`auto`, `entities`, `mask` `placeholder`|`partial`|`hash`,
+  `deny-fields`/`allow-fields`, `extra-patterns`). Installing the new
+  **`pyfly[pii]`** extra auto-upgrades detection to Microsoft Presidio
+  (`engine: auto`); any Presidio failure falls back to regex so a logging
+  misconfiguration never crashes the app. An opt-in `redaction.streams.enabled`
+  wraps `stdout`/`stderr` to mask raw `print()`/direct writes (the rich CLI
+  console is bypassed).
+
+### Docs
+
+- Rewrote the logging guide for the above. Design spec + implementation plan
+  added under `docs/superpowers/`.
+
+---
+
 ## v26.06.01 (2026-06-05)
 
 ### Full-framework parity & wiring remediation

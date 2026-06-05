@@ -31,28 +31,58 @@ class TestStructlogAdapterConfigure:
         adapter.configure(config)
 
     def test_configure_reads_root_level(self):
+        # Observable behaviour: the stdlib root logger level is set accordingly.
+        import logging
+
         adapter = StructlogAdapter()
         config = Config({"pyfly": {"logging": {"level": {"root": "DEBUG"}}}})
         adapter.configure(config)
-        assert adapter._root_level == "DEBUG"
+        assert logging.getLogger().level == logging.DEBUG
 
-    def test_configure_reads_format(self):
+    def test_configure_reads_format(self, capsys):
+        # Observable behaviour: JSON format produces JSON-parseable output.
+        import json
+        import logging
+
         adapter = StructlogAdapter()
         config = Config({"pyfly": {"logging": {"format": "json"}}})
         adapter.configure(config)
-        assert adapter._format == "json"
+        logging.getLogger("_test_fmt_json").warning("probe_json")
+        cap = capsys.readouterr()
+        out = (cap.out + cap.err).strip()
+        # The last non-empty line should be valid JSON.
+        last_line = [line for line in out.splitlines() if line.strip()][-1]
+        parsed = json.loads(last_line)
+        assert "probe_json" in str(parsed)
 
-    def test_configure_defaults_console_format(self):
+    def test_configure_defaults_console_format(self, capsys):
+        # Observable behaviour: default (console) format does NOT produce JSON.
+        import json
+        import logging
+
         adapter = StructlogAdapter()
         config = Config({})
         adapter.configure(config)
-        assert adapter._format == "console"
+        logging.getLogger("_test_fmt_console").warning("probe_console")
+        cap = capsys.readouterr()
+        out = (cap.out + cap.err).strip()
+        last_line = [line for line in out.splitlines() if line.strip() and "probe_console" in line]
+        assert last_line, "Expected a log line containing 'probe_console'"
+        try:
+            json.loads(last_line[-1])
+            is_json = True
+        except (json.JSONDecodeError, ValueError):
+            is_json = False
+        assert not is_json, "Default format should not be JSON"
 
     def test_configure_reads_per_module_levels(self):
+        # Observable behaviour: the named stdlib logger gets its level applied.
+        import logging
+
         adapter = StructlogAdapter()
         config = Config({"pyfly": {"logging": {"level": {"root": "INFO", "myapp.services": "DEBUG"}}}})
         adapter.configure(config)
-        assert adapter._module_levels == {"myapp.services": "DEBUG"}
+        assert logging.getLogger("myapp.services").level == logging.DEBUG
 
 
 class TestStructlogAdapterGetLogger:

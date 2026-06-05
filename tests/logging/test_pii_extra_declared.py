@@ -11,6 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyFly — Enterprise Python Framework."""
+from __future__ import annotations
 
-__version__ = "26.06.02"
+import pathlib
+import tomllib
+
+
+def test_pii_extra_declared():
+    data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert "pii" in extras
+    joined = " ".join(extras["pii"]).lower()
+    assert "presidio-analyzer" in joined
+    assert "presidio-anonymizer" in joined
