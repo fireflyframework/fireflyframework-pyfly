@@ -87,8 +87,10 @@ class PresidioRedactor:
     """Microsoft Presidio (NER) redactor — used when the pyfly[pii] extra is installed."""
 
     def __init__(self, props: RedactionProperties) -> None:
-        from presidio_analyzer import AnalyzerEngine  # type: ignore[import-not-found, unused-ignore]
-        from presidio_anonymizer import AnonymizerEngine  # type: ignore[import-not-found, unused-ignore]
+        from presidio_analyzer import AnalyzerEngine  # type: ignore[import-not-found, import-untyped, unused-ignore]
+        from presidio_anonymizer import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+            AnonymizerEngine,
+        )
 
         self._analyzer = AnalyzerEngine()
         self._anonymizer = AnonymizerEngine()
