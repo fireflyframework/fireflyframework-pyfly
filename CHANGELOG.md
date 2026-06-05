@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.08 (2026-06-05)
+
+### Fixed
+
+- **Data-backed scaffolds now ship passing tests.** `pyfly new <name> --features
+  data-relational` (or `data-document`) generated an **async, DB-backed**
+  `TodoService`/`TodoRepository`, but the CLI's `test_todo_service.py.j2` template
+  emitted only **synchronous** tests that called those async methods without
+  `await` (and constructed the repository with no session) — so a freshly
+  scaffolded data project failed `pytest` out of the box with 5 errors
+  (`coroutine object has no attribute …` / `object of type coroutine has no
+  len()`). The test template now branches on the selected feature: a real
+  in-memory SQLite async test for `data-relational`, a fast async test with a
+  mocked repository for `data-document`, and the original synchronous in-memory
+  test otherwise. Added regression tests (`tests/cli/test_scaffold_todo_tests.py`)
+  asserting data-backed scaffolds emit async tests and the plain scaffold stays
+  synchronous; verified end-to-end that a freshly generated `data-relational` and
+  `data-document` project each pass `pytest` (5 passed) out of the box. The
+  `data` runtime, the data adapters, and the `implement-data-repository` skill
+  were already correct — this was purely a scaffold-generator (CLI template) bug.
+
+---
+
 ## v26.06.07 (2026-06-05)
 
 ### Fixed
