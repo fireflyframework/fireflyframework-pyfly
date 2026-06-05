@@ -15,9 +15,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -41,15 +41,24 @@ class RateLimiter:
         self._refill_rate = refill_rate
         self._tokens = float(max_tokens)
         self._last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
+        # A threading.Lock (not asyncio.Lock) so the token bucket is guarded
+        # consistently for BOTH async tasks and sync/threaded callers — the sync
+        # decorator path previously mutated the bucket with no lock, letting
+        # concurrent threads over-consume tokens. Held only for the brief
+        # refill+check+decrement, so it never blocks the event loop meaningfully.
+        self._lock = threading.Lock()
 
-    async def acquire(self) -> None:
-        """Acquire a token. Raises RateLimitException if none available."""
-        async with self._lock:
+    def _try_acquire(self) -> None:
+        """Atomically refill and consume one token, or raise RateLimitException."""
+        with self._lock:
             self._refill()
             if self._tokens < 1.0:
                 raise RateLimitException("Rate limit exceeded")
             self._tokens -= 1.0
+
+    async def acquire(self) -> None:
+        """Acquire a token. Raises RateLimitException if none available."""
+        self._try_acquire()
 
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
@@ -80,10 +89,9 @@ def rate_limiter(
 
             @functools.wraps(func)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                limiter._refill()
-                if limiter._tokens < 1.0:
-                    raise RateLimitException("Rate limit exceeded")
-                limiter._tokens -= 1.0
+                # Same lock-guarded acquire as the async path, so a limiter shared
+                # across sync (threaded) and async callers can't desynchronise.
+                limiter._try_acquire()
                 return func(*args, **kwargs)
 
             return sync_wrapper
