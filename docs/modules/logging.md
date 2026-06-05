@@ -199,6 +199,7 @@ message for sensitive entities before writing to any output.
 | `redaction.streams.enabled` | bool | `false` | Opt-in: wrap `sys.stdout`/`sys.stderr` with the redactor |
 | `redaction.presidio.languages` | list[string] | `["en"]` | Languages passed to Presidio's `AnalyzerEngine` |
 | `redaction.presidio.score-threshold` | float | `0.5` | Minimum Presidio confidence score to trigger redaction |
+| `redaction.presidio.model` | string | `en_core_web_lg` | spaCy model Presidio's NLP engine loads (download it with `python -m spacy download <model>`; use a smaller model like `en_core_web_sm` for lighter footprints) |
 
 Default entities detected by the regex engine:
 
@@ -217,9 +218,18 @@ pip install "pyfly[pii]"
 uv add "pyfly[pii]"
 ```
 
-Then set `engine: auto` (default) or `engine: presidio`. Presidio uses
-named-entity recognition models and catches PII that regex cannot, such as
-free-text names and addresses.
+You also need a spaCy model (Presidio defaults to `en_core_web_lg`):
+
+```bash
+python -m spacy download en_core_web_lg   # or en_core_web_sm for a lighter footprint
+```
+
+Then set `engine: auto` (default) or `engine: presidio`. Presidio detects with its
+full recognizer set (named-entity recognition), catching PII that regex cannot —
+free-text **names**, locations, etc. — and pyfly then runs the regex pass over the
+result so token-types Presidio has no recognizer for (JWT, bearer tokens, URL
+credentials) are still masked. If the model isn't installed, redaction falls back
+to the regex engine rather than failing.
 
 ```yaml
 pyfly:

@@ -59,6 +59,7 @@ class PresidioProperties:
 
     languages: list[str] = field(default_factory=lambda: ["en"])
     score_threshold: float = 0.5
+    model: str = "en_core_web_lg"  # spaCy model Presidio's NLP engine loads
 
 
 @dataclass

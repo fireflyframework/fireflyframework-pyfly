@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.03 (2026-06-05)
+
+### Presidio PII path — now functional + CI-covered
+
+- **`PresidioRedactor` now actually uses Presidio.** It previously passed pyfly's
+  regex-oriented entity names (`EMAIL`, `IBAN`, `PHONE`…) to Presidio, whose
+  recognizers use different names (`EMAIL_ADDRESS`, `IBAN_CODE`, `PHONE_NUMBER`…),
+  so detection found almost nothing and always fell back to regex. It now detects
+  with Presidio's **full recognizer set** (including NER for free-text **names**,
+  locations, etc.) and then runs the regex pass over the result, so token-types
+  Presidio has no recognizer for (JWT, bearer tokens, URL credentials) are still
+  masked.
+- **Configurable spaCy model** — new `pyfly.logging.redaction.presidio.model`
+  (default `en_core_web_lg`). Set a lighter model (e.g. `en_core_web_sm`) where the
+  full model is too heavy. If the model isn't installed, redaction falls back to
+  regex rather than failing.
+- **Opt-in CI job** (`.github/workflows/pii.yml`, `PII / Presidio`) installs
+  `pyfly[pii]` + a small spaCy model and exercises the Presidio NER path
+  end-to-end. It runs on manual dispatch and automatically only when the redaction
+  code changes — the main CI stays fast (it excludes the heavy `pii` extra).
+
+---
+
 ## v26.06.02 (2026-06-05)
 
 ### Unified logging, Spring-style configuration & PII redaction

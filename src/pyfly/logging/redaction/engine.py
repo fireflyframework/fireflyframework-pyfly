@@ -88,32 +88,49 @@ class PresidioRedactor:
 
     def __init__(self, props: RedactionProperties) -> None:
         from presidio_analyzer import AnalyzerEngine  # type: ignore[import-not-found, import-untyped, unused-ignore]
+        from presidio_analyzer.nlp_engine import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+            NlpEngineProvider,
+        )
         from presidio_anonymizer import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
             AnonymizerEngine,
         )
 
-        # Typed as Any so the redact() body is checked independently of presidio's
-        # own type surface (its two packages even use different RecognizerResult
-        # classes); the no-untyped-call ignore covers presidio's untyped __init__,
-        # and unused-ignore covers the env where presidio isn't installed (Any).
-        self._analyzer: Any = AnalyzerEngine()  # type: ignore[no-untyped-call, unused-ignore]
+        language = (props.presidio.languages or ["en"])[0]
+        # Build the NLP engine for the configured spaCy model (default
+        # en_core_web_lg) so the model is explicit and swappable (e.g. CI uses the
+        # tiny en_core_web_sm). Typed as Any so redact() type-checks independently
+        # of presidio's own type surface; the no-untyped-call ignores cover
+        # presidio's untyped constructors, unused-ignore covers the not-installed
+        # env (where the imported names are Any).
+        nlp_engine: Any = NlpEngineProvider(  # type: ignore[no-untyped-call, unused-ignore]
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": language, "model_name": props.presidio.model}],
+            }
+        ).create_engine()
+        self._analyzer: Any = AnalyzerEngine(nlp_engine=nlp_engine)  # type: ignore[no-untyped-call, unused-ignore]
         self._anonymizer: Any = AnonymizerEngine()  # type: ignore[no-untyped-call, unused-ignore]
-        self._language = (props.presidio.languages or ["en"])[0]
+        self._language = language
         self._threshold = props.presidio.score_threshold
-        self._entities = props.entities or None
+        # Regex pass runs after presidio to also mask token-types presidio has no
+        # recognizer for (JWT, bearer tokens, URL credentials).
         self._fallback = RegexRedactor(props.entities, props.mask, props.extra_patterns)
 
     def redact(self, text: Any) -> Any:
         if not isinstance(text, str) or not text:
             return text
+        result = text
         try:
-            results = self._analyzer.analyze(text=text, language=self._language, entities=self._entities)
-            results = [r for r in results if r.score >= self._threshold]
-            if not results:
-                return self._fallback.redact(text)
-            return self._anonymizer.anonymize(text=text, analyzer_results=results).text
+            # Detect with presidio's full recognizer set (its entity names differ
+            # from the regex engine's, so we do NOT restrict to props.entities).
+            findings = self._analyzer.analyze(text=result, language=self._language)
+            findings = [r for r in findings if r.score >= self._threshold]
+            if findings:
+                result = self._anonymizer.anonymize(text=result, analyzer_results=findings).text
         except Exception:  # noqa: BLE001 — never let redaction crash logging
-            return self._fallback.redact(text)
+            pass
+        # Always run the regex pass too, for the token-types presidio misses.
+        return self._fallback.redact(result)
 
 
 def build_redactor(props: RedactionProperties) -> Redactor | None:
