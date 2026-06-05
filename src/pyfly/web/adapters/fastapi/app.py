@@ -251,12 +251,23 @@ def create_app(
         _add(WebSocketRegistrar().collect_routes(context))
         _add(SSERegistrar().collect_routes(context))
 
-        from pyfly.security.oauth2.login import OAuth2LoginHandler
+        # OAuth2 login routes exist only when the security extra (pyjwt) is
+        # installed and an OAuth2LoginHandler bean is registered. Import lazily and
+        # tolerate its absence so a web-only install (pyfly[web], no pyfly[security])
+        # still boots — otherwise create_app() crashes on `import jwt`.
+        oauth2_login_cls: type | None
+        try:
+            from pyfly.security.oauth2.login import OAuth2LoginHandler
 
-        for _cls, reg in context.container._registrations.items():
-            if reg.instance is not None and isinstance(reg.instance, OAuth2LoginHandler):
-                _add(reg.instance.routes())
-                break
+            oauth2_login_cls = OAuth2LoginHandler
+        except ImportError:
+            oauth2_login_cls = None
+
+        if oauth2_login_cls is not None:
+            for _cls, reg in context.container._registrations.items():
+                if reg.instance is not None and isinstance(reg.instance, oauth2_login_cls):
+                    _add(reg.instance.routes())
+                    break
 
         # Mount config-server routes once its ConfigServer bean exists (#83).
         from pyfly.config_server.wiring import build_config_server_routes
