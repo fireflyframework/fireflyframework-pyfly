@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.11 (2026-06-05)
+
+### Fixed
+
+- **Scaffolded web entry points are now `mypy --strict`-clean.** A generated
+  `main.py` (web-api / SSR web archetypes) had an **untyped** lifespan
+  (`async def _lifespan(app):`) and assigned to **undeclared private**
+  `PyFlyApplication` attributes (`_route_metadata`, `_docs_enabled`, `_host`,
+  `_port`), so a scaffolded project that enabled `mypy --strict` — which PyFly's
+  conventions mandate — failed type-checking on code it never wrote. The lifespan
+  is now fully annotated (`app: Starlette) -> AsyncIterator[None]`) in both entry
+  templates, and those four web-runtime fields are declared (typed) on
+  `PyFlyApplication`. A freshly scaffolded web project now passes `mypy --strict`
+  on `main.py`. (The `implement-web-controller` skill itself validated clean,
+  including confirming the v26.06.07 Annotated request-binding markers keep user
+  controllers strict-clean.)
+
+---
+
 ## v26.06.10 (2026-06-05)
 
 ### Fixed
