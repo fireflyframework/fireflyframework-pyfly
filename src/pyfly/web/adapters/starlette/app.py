@@ -307,7 +307,7 @@ def create_app(
     # Mount admin dashboard when enabled (admin_enabled computed above)
     if admin_enabled and context is not None:
         from pyfly.admin.adapters.starlette import AdminRouteBuilder
-        from pyfly.admin.config import AdminProperties
+        from pyfly.admin.config import AdminProperties, AdminServerProperties
         from pyfly.admin.providers.beans_provider import BeansProvider
         from pyfly.admin.providers.cache_provider import CacheProvider
         from pyfly.admin.providers.config_provider import ConfigProvider
@@ -330,6 +330,21 @@ def create_app(
         with contextlib.suppress(Exception):
             admin_props = context.config.bind(AdminProperties)
 
+        # Server mode: build the instance registry and seed it from statically
+        # configured instances so the /api/instances routes are mounted and
+        # serverMode reports true (audit #67). Background health pollers are not
+        # wired here (deferred).
+        admin_instance_registry = None
+        server_props = AdminServerProperties()
+        with contextlib.suppress(Exception):
+            server_props = context.config.bind(AdminServerProperties)
+        if server_props.enabled:
+            from pyfly.admin.server.discovery import StaticDiscovery
+            from pyfly.admin.server.instance_registry import InstanceRegistry
+
+            admin_instance_registry = InstanceRegistry()
+            StaticDiscovery(server_props.instances, admin_instance_registry).discover()
+
         # Use the trace collector that was created above and wired into the
         # filter chain — it is the live instance recording HTTP traffic.
         trace_collector = admin_trace_collector
@@ -348,10 +363,23 @@ def create_app(
             from pyfly.actuator.health import HealthAggregator, HealthIndicator
 
             health_agg = HealthAggregator()
-            for cls, reg in context.container._registrations.items():
-                if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
-                    indicator_name = reg.name or cls.__name__
-                    health_agg.add_indicator(indicator_name, reg.instance)
+
+            def _install_admin_indicators(_agg: HealthAggregator = health_agg) -> None:
+                # HealthIndicator beans are only instantiated during start();
+                # rescan post-start so the admin health view isn't a frozen empty
+                # pre-startup snapshot when the actuator is disabled (audit #70).
+                if context is None:
+                    return
+                seen = set(_agg._indicators.keys())  # noqa: SLF001
+                for cls, reg in context.container._registrations.items():
+                    if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
+                        name = reg.name or cls.__name__
+                        if name not in seen:
+                            _agg.add_indicator(name, reg.instance)
+                            seen.add(name)
+
+            _install_admin_indicators()
+            _extra_post_start.append(_install_admin_indicators)
 
         admin_builder = AdminRouteBuilder(
             properties=admin_props,
@@ -373,6 +401,7 @@ def create_app(
             logfile=LogfileProvider(context),
             runtime=RuntimeProvider(),
             server=ServerProvider(context=context),
+            instance_registry=admin_instance_registry,
         )
         routes.extend(admin_builder.build_routes())  # type: ignore[arg-type]
 

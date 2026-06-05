@@ -130,9 +130,7 @@ class AdminRouteBuilder:
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         return None
 
-    def _guarded(
-        self, handler: Callable[[Request], Awaitable[Response]]
-    ) -> Callable[[Request], Awaitable[Response]]:
+    def _guarded(self, handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
         """Wrap an admin API handler so it enforces require_auth before running."""
 
         async def _wrapped(request: Request) -> Response:

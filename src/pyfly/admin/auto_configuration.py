@@ -75,4 +75,5 @@ class AdminAutoConfiguration:
             admin_server_url=client_props.url,
             app_name=app_name,
             app_url=app_url,
+            auto_register=client_props.auto_register,
         )

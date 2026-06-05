@@ -27,10 +27,28 @@ class AdminClientRegistration:
     :mod:`urllib.request` (blocking, run in the default executor).
     """
 
-    def __init__(self, admin_server_url: str, app_name: str, app_url: str) -> None:
+    def __init__(self, admin_server_url: str, app_name: str, app_url: str, *, auto_register: bool = False) -> None:
         self._server_url = admin_server_url.rstrip("/")
         self._app_name = app_name
         self._app_url = app_url
+        self._auto_register = auto_register
+
+    # -- Lifecycle (driven by ApplicationContext start/stop) ---------------
+
+    async def start(self) -> None:
+        """Self-register with the admin server on startup when auto_register is on.
+
+        Invoked by ApplicationContext's infrastructure lifecycle (audit #68).
+        register() swallows its own errors, so a down admin server never aborts
+        application startup.
+        """
+        if self._auto_register:
+            await self.register()
+
+    async def stop(self) -> None:
+        """Deregister from the admin server on shutdown when auto_register is on."""
+        if self._auto_register:
+            await self.deregister()
 
     # -- Public API -------------------------------------------------------
 
