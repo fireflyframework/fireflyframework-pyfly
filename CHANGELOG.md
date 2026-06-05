@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.17 (2026-06-06)
+
+### Fixed
+
+- **A synchronous `@scheduled` task no longer blocks the event loop.**
+  `TaskScheduler._invoke` ran the scheduled method inline on the loop, so a sync
+  task with a blocking body (I/O, `time.sleep`, a blocking DB/HTTP call) stalled
+  the entire application for its duration — every request and every other task.
+  Sync methods are now offloaded to a worker thread via `asyncio.to_thread`;
+  async methods are still awaited on the loop. (Confirmed: a sync task with
+  `time.sleep(0.4)` previously froze a 20 ms heartbeat to a single tick over
+  0.2 s; it now keeps ticking.)
+
+This surfaced in an audit while validating the `implement-scheduling` skill (which
+validated clean — tasks fire repeatedly, errors are isolated, shutdown is
+graceful, and the cron next-run is correct via croniter).
+
+---
+
 ## v26.06.16 (2026-06-05)
 
 ### Fixed
