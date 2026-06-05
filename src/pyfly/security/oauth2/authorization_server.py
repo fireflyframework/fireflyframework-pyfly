@@ -116,12 +116,23 @@ class AuthorizationServer:
         Raises:
             SecurityException: If authentication fails or grant type is unsupported.
         """
-        # Authenticate client
+        # Authenticate client (constant-time secret comparison to avoid a timing
+        # side-channel that could leak the client secret).
         registration = self._client_repository.find_by_registration_id(client_id)
-        if registration is None or registration.client_secret != client_secret:
+        if registration is None or not secrets.compare_digest(
+            registration.client_secret.encode("utf-8"), client_secret.encode("utf-8")
+        ):
             raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
 
         if grant_type == "client_credentials":
+            # The client must be registered for the client_credentials grant to
+            # mint a client_credentials token — prevents grant-type confusion (a
+            # client registered only for authorization_code must not use it).
+            if registration.authorization_grant_type != "client_credentials":
+                raise SecurityException(
+                    f"Client '{client_id}' is not authorized for grant type 'client_credentials'",
+                    code="UNAUTHORIZED_CLIENT",
+                )
             return await self._handle_client_credentials(registration, scope)
         elif grant_type == "refresh_token":
             if refresh_token is None:

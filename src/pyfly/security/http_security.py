@@ -31,12 +31,15 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pyfly.web.adapters.starlette.filters.http_security_filter import HttpSecurityFilter
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -196,4 +199,15 @@ class HttpSecurity:
         """
         from pyfly.web.adapters.starlette.filters.http_security_filter import HttpSecurityFilter
 
+        # Footgun guard: without a terminal any_request() rule (patterns == []), a
+        # path matching no rule falls through ALLOWED. Warn so an operator adds an
+        # explicit terminal — e.g. .any_request().deny_all() / .authenticated() —
+        # as the class docstring demonstrates.
+        if self._rules and not any(not rule.patterns for rule in self._rules):
+            _logger.warning(
+                "HttpSecurity has %d authorization rule(s) but no terminal any_request() rule; "
+                "requests matching no rule are ALLOWED through. Add .any_request().deny_all() "
+                "(or .authenticated()) to deny unmatched paths.",
+                len(self._rules),
+            )
         return HttpSecurityFilter(rules=list(self._rules))

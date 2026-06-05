@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import jwt
@@ -29,24 +30,42 @@ class JWTService:
     Args:
         secret: Secret key for HMAC-based signing.
         algorithm: JWT algorithm (default: HS256).
+        expiration_seconds: Default token lifetime; an ``exp`` claim is added on
+            :meth:`encode` when the payload does not already carry one.
     """
 
-    def __init__(self, secret: str, algorithm: str = "HS256") -> None:
+    def __init__(self, secret: str, algorithm: str = "HS256", expiration_seconds: int = 3600) -> None:
         self._secret = secret
         self._algorithm = algorithm
+        self._expiration_seconds = expiration_seconds
 
     def encode(self, payload: dict[str, Any]) -> str:
-        """Encode a payload into a JWT token."""
+        """Encode a payload into a JWT token.
+
+        Adds an ``exp`` claim (now + ``expiration_seconds``) when the payload does
+        not already specify one, so every issued token expires — :meth:`decode`
+        requires ``exp``.
+        """
+        if "exp" not in payload:
+            payload = {**payload, "exp": int(time.time()) + self._expiration_seconds}
         return jwt.encode(payload, self._secret, algorithm=self._algorithm)
 
     def decode(self, token: str) -> dict[str, Any]:
         """Decode and validate a JWT token.
 
+        Requires a valid signature **and** an ``exp`` claim — a token minted
+        without ``exp`` (which would never expire) is rejected.
+
         Raises:
-            SecurityException: If the token is invalid or expired.
+            SecurityException: If the token is invalid, expired, or lacks ``exp``.
         """
         try:
-            return jwt.decode(token, self._secret, algorithms=[self._algorithm])
+            return jwt.decode(
+                token,
+                self._secret,
+                algorithms=[self._algorithm],
+                options={"require": ["exp"]},
+            )
         except jwt.PyJWTError as exc:
             raise SecurityException(
                 f"Invalid token: {exc}",
