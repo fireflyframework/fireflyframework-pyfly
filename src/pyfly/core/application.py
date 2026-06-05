@@ -54,6 +54,24 @@ def pyfly_application(
     return decorator
 
 
+def _wiring_summary_fields(wiring: dict[str, int]) -> dict[str, int]:
+    """Build the fields shown in the startup ``wiring_summary`` log line.
+
+    Surfaces every decorator-wiring count — including EDA ``@event_listener``
+    subscriptions (``event_listeners_eda``), which were previously omitted so the
+    summary under-reported wired EDA listeners as absent.
+    """
+    return {
+        "event_listeners": wiring.get("event_listeners", 0),
+        "event_listeners_eda": wiring.get("event_listeners_eda", 0),
+        "message_listeners": wiring.get("message_listeners", 0),
+        "cqrs_handlers": wiring.get("cqrs_handlers", 0),
+        "scheduled_tasks": wiring.get("scheduled", 0),
+        "async_methods": wiring.get("async_methods", 0),
+        "post_processors": wiring.get("post_processors", 0),
+    }
+
+
 class PyFlyApplication:
     """Main application class that bootstraps the framework.
 
@@ -244,15 +262,7 @@ class PyFlyApplication:
         # Decorator wiring counts
         wiring = self._context.wiring_counts
         if any(wiring.values()):
-            self._logger.info(
-                "wiring_summary",
-                event_listeners=wiring.get("event_listeners", 0),
-                message_listeners=wiring.get("message_listeners", 0),
-                cqrs_handlers=wiring.get("cqrs_handlers", 0),
-                scheduled_tasks=wiring.get("scheduled", 0),
-                async_methods=wiring.get("async_methods", 0),
-                post_processors=wiring.get("post_processors", 0),
-            )
+            self._logger.info("wiring_summary", **_wiring_summary_fields(wiring))
 
     def _log_server_info(self) -> None:
         """Log server configuration — like Spring Boot's 'Netty started on port 8080'."""
