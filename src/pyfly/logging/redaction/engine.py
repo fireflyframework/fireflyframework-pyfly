@@ -92,8 +92,12 @@ class PresidioRedactor:
             AnonymizerEngine,
         )
 
-        self._analyzer = AnalyzerEngine()
-        self._anonymizer = AnonymizerEngine()
+        # Typed as Any so the redact() body is checked independently of presidio's
+        # own type surface (its two packages even use different RecognizerResult
+        # classes); the no-untyped-call ignore covers presidio's untyped __init__,
+        # and unused-ignore covers the env where presidio isn't installed (Any).
+        self._analyzer: Any = AnalyzerEngine()  # type: ignore[no-untyped-call, unused-ignore]
+        self._anonymizer: Any = AnonymizerEngine()  # type: ignore[no-untyped-call, unused-ignore]
         self._language = (props.presidio.languages or ["en"])[0]
         self._threshold = props.presidio.score_threshold
         self._entities = props.entities or None
