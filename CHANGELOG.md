@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.05 (2026-06-05)
+
+### Fixed
+
+- **`RateLimiter` sync path is now thread-safe.** The token bucket was guarded by
+  an `asyncio.Lock`, but the `@rate_limiter` **sync** decorator mutated the bucket
+  with no lock at all, so concurrent threaded calls could over-consume tokens
+  (race on the read-modify-write of `_tokens`). The bucket now uses a
+  `threading.Lock`, and both the async (`acquire`) and sync decorator paths go
+  through one locked `_try_acquire()`, so a limiter shared across async tasks and
+  sync/threaded callers stays consistent. Same class of fix as the v26.06.01
+  Bulkhead change.
+
+---
+
 ## v26.06.04 (2026-06-05)
 
 ### Documentation accuracy pass

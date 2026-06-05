@@ -132,3 +132,52 @@ async def test_burst_and_refill() -> None:
     # But a third should fail (only 2 max).
     with pytest.raises(RateLimitException):
         await limiter.acquire()
+
+
+# ---------------------------------------------------------------------------
+# Sync-path thread safety (audit follow-up: sync_wrapper bypassed the lock)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_is_thread_safe_not_asyncio() -> None:
+    """The bucket lock must work across OS threads, not just within an event loop."""
+    limiter = RateLimiter(max_tokens=3, refill_rate=0.0)
+    assert not isinstance(limiter._lock, asyncio.Lock)
+
+
+def test_concurrent_sync_calls_do_not_overspend_tokens() -> None:
+    """Concurrent threaded calls through the sync decorator must not over-consume.
+
+    With ``max_tokens=5`` and no refill, exactly 5 of N concurrent threaded calls
+    may succeed — never more. The old ``sync_wrapper`` mutated the token bucket
+    without any lock, so racing threads could decrement past zero.
+    """
+    import threading
+
+    limiter = RateLimiter(max_tokens=5, refill_rate=0.0)
+
+    @rate_limiter(limiter)
+    def op() -> str:
+        return "ok"
+
+    successes = 0
+    count_lock = threading.Lock()
+    start = threading.Barrier(64)
+
+    def run() -> None:
+        nonlocal successes
+        start.wait()  # maximize contention — all threads hit the bucket together
+        try:
+            op()
+        except RateLimitException:
+            return
+        with count_lock:
+            successes += 1
+
+    threads = [threading.Thread(target=run) for _ in range(64)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert successes == 5
