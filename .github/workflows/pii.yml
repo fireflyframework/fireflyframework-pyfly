@@ -1,0 +1,45 @@
+name: PII / Presidio
+
+# Opt-in job for the heavy Presidio PII path: it installs presidio + spaCy, which
+# is minutes-long, so it is kept OUT of the main CI (which excludes the pii extra
+# and exercises the regex engine + fallback). It runs on manual dispatch and
+# automatically only when the redaction code or this workflow changes.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/pyfly/logging/redaction/**"
+      - "src/pyfly/config/properties/logging.py"
+      - "tests/logging/test_redaction_presidio.py"
+      - ".github/workflows/pii.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/pyfly/logging/redaction/**"
+      - "src/pyfly/config/properties/logging.py"
+      - "tests/logging/test_redaction_presidio.py"
+      - ".github/workflows/pii.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  presidio:
+    name: Presidio redaction (end-to-end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      # Base deps + the pii extra (presidio); dev group for pytest.
+      - run: uv sync --extra pii --group dev
+      # Tiny spaCy model so the run stays fast; PresidioProperties.model selects it.
+      - run: uv run python -m spacy download en_core_web_sm
+      # Exercise the real Presidio NER path end-to-end + the engine fallback logic.
+      - run: uv run pytest tests/logging/test_redaction_presidio.py tests/logging/test_redaction_engine.py tests/logging/test_redaction_patterns.py -q
