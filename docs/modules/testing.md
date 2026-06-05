@@ -119,6 +119,7 @@ each test and `teardown()` at the end to ensure clean state between tests.
 | `setup()`   | 1. Creates an `ApplicationContext` with an empty `Config({})`.   |
 |             | 2. Creates a fresh `InMemoryEventBus` instance.                  |
 |             | 3. Calls `await context.start()` to initialize the context.     |
+|             | 4. Registers every `mock_bean(...)` descriptor's `AsyncMock` into the context's container (keyed on its bean type), so DI-resolved collaborators receive the mock. |
 | `teardown()` | 1. Calls `await context.stop()` to clean up resources.         |
 
 The internal implementation:
@@ -132,10 +133,27 @@ class PyFlyTestCase:
         self.context = ApplicationContext(Config({}))
         self.event_bus = InMemoryEventBus()
         await self.context.start()
+        self._install_mock_beans()
+
+    def _install_mock_beans(self) -> None:
+        """Register each mock_bean descriptor's AsyncMock into the container."""
+        container = self.context.container
+        for klass in type(self).__mro__:
+            for attr_name, attr in list(vars(klass).items()):
+                if isinstance(attr, MockBeanDescriptor):
+                    mock_instance = getattr(self, attr_name)
+                    container.register(attr.bean_type)
+                    container._registrations[attr.bean_type].instance = mock_instance
 
     async def teardown(self) -> None:
         await self.context.stop()
 ```
+
+Because `_install_mock_beans()` walks the full MRO, `mock_bean(...)` class
+attributes declared on a `PyFlyTestCase` (or any base class) are wired into the
+test context. A subsequent `self.context.get_bean(BeanType)` — and any
+DI-resolved collaborator that depends on `BeanType` — receives the same
+per-instance `AsyncMock` you configured in the test.
 
 ### Available Fixtures
 
@@ -417,7 +435,39 @@ class TestOrderService(PyFlyTestCase):
 TestOrderService.order_repo.bean_type  # OrderRepository
 ```
 
-**Source:** `src/pyfly/testing/mock.py`
+### Wiring into the ApplicationContext
+
+When a `mock_bean(...)` descriptor is declared on a `PyFlyTestCase` subclass,
+`setup()`'s `_install_mock_beans()` step registers the materialized `AsyncMock`
+into the test context's container, keyed on the descriptor's `bean_type`. This
+means the mock is not just a convenient attribute — it is the bean the context
+resolves:
+
+```python
+from pyfly.testing import mock_bean, PyFlyTestCase
+
+
+class TestOrderWorkflow(PyFlyTestCase):
+    order_repo = mock_bean(OrderRepository)
+
+    async def test_context_resolves_the_mock(self):
+        await self.setup()
+
+        self.order_repo.find_by_id.return_value = {"id": "1"}
+
+        # The context returns the same mock you configured above,
+        # and any bean that depends on OrderRepository receives it.
+        resolved = self.context.get_bean(OrderRepository)
+        assert resolved is self.order_repo
+
+        await self.teardown()
+```
+
+Earlier releases created the mock but never wired it into the context, so
+`context.get_bean(...)` and DI-resolved collaborators could not see it. That gap
+is now closed: the per-instance `AsyncMock` is registered during `setup()`.
+
+**Source:** `src/pyfly/testing/mock.py`, `src/pyfly/testing/fixtures.py`
 
 ---
 

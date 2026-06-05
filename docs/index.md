@@ -272,6 +272,8 @@ PyFly is organized into four layers:
 | Module | Description | Guide |
 |--------|-------------|-------|
 | **Web** | HTTP routing, controllers, middleware, OpenAPI | [Web Layer](modules/web.md) |
+| **WebSocket** | Real-time bidirectional endpoints with `@websocket_mapping` | [WebSocket](modules/websocket.md) |
+| **i18n** | Internationalisation, message bundles, locale resolution | [Internationalisation](modules/i18n.md) |
 | **Data** | Repository ports, derived queries, pagination, sorting, entity mapping | [Data Commons](modules/data.md) |
 | **Data Relational** | SQLAlchemy adapter — specifications, transactions, custom queries | [Data Relational](modules/data-relational.md) |
 | **Data Document** | MongoDB adapter — Beanie ODM, document repositories | [Data Document](modules/data-document.md) |
@@ -319,6 +321,8 @@ PyFly is organized into four layers:
 - [Configuration](modules/configuration.md) — YAML config, profiles, property binding, environment variables
 - [Error Handling](modules/error-handling.md) — Exception hierarchy, structured error responses
 - [Web Layer](modules/web.md) — Controllers, routing, parameter binding, middleware, CORS, OpenAPI
+- [WebSocket](modules/websocket.md) — `@websocket_mapping`, `WebSocketSession`, lifecycle hooks, route discovery
+- [Internationalisation (i18n)](modules/i18n.md) — Message bundles, locale fallback, `MessageFormat` placeholders, locale resolvers
 - [Actuator](modules/actuator.md) — Health checks, beans, environment, info endpoints
 - [Admin Dashboard](modules/admin.md) — Embedded management dashboard, real-time monitoring, server mode
 - [Data Commons](modules/data.md) — Repository ports, derived queries, pagination, sorting, entity mapping

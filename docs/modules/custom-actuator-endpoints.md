@@ -228,7 +228,8 @@ Returns application metadata from `pyfly.app.*` config.
 | Methods | GET, POST |
 | Default | Enabled |
 
-**GET:** Lists all loggers with configured and effective levels.
+**GET:** Lists all loggers with configured and effective levels, plus built-in
+logger groups. Levels use Spring Boot's vocabulary.
 
 ```json
 {
@@ -236,17 +237,23 @@ Returns application metadata from `pyfly.app.*` config.
         "ROOT": {"configuredLevel": "INFO", "effectiveLevel": "INFO"},
         "pyfly.web": {"configuredLevel": null, "effectiveLevel": "INFO"}
     },
-    "levels": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF"]
+    "levels": ["OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+    "groups": {
+        "web": {"configuredLevel": null, "members": ["pyfly.web", "uvicorn", "starlette"]},
+        "sql": {"configuredLevel": null, "members": ["sqlalchemy", "pyfly.data"]}
+    }
 }
 ```
 
-**POST:** Changes a logger's level at runtime.
+**POST `/actuator/loggers/{name}`:** Changes a logger's level at runtime. The
+logger name is a path parameter; the body carries `configuredLevel` (send `null`
+to reset to inherited). Returns `204 No Content` on success.
 
 ```bash
-curl -X POST http://localhost:8080/actuator/loggers \
+curl -X POST http://localhost:8080/actuator/loggers/pyfly.web \
   -H "Content-Type: application/json" \
-  -d '{"logger": "pyfly.web", "level": "DEBUG"}'
-# {"logger": "pyfly.web", "configuredLevel": "DEBUG"}
+  -d '{"configuredLevel": "DEBUG"}'
+# (204 No Content)
 ```
 
 **Source:** `src/pyfly/actuator/endpoints/loggers_endpoint.py`

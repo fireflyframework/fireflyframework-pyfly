@@ -6,6 +6,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.01 (2026-06-05)
+
+### Full-framework parity & wiring remediation
+
+A framework-wide audit against the Java Firefly Framework surfaced ~130 verified
+issues — mostly *noop-wiring* (a capability was built but never connected) and
+parity gaps. This release fixes them. Most changes are bug fixes or new
+auto-wiring; behavior changes that could affect existing apps are called out as
+**[behavior]**.
+
+**Web**
+
+- **[behavior]** A missing **required** `QueryParam`/`Header`/`Cookie` (no default
+  and a non-`Optional` type) now returns **HTTP 400** (`MISSING_PARAMETER`) instead
+  of silently binding `None`. Make a parameter optional with a default or an
+  `X | None` type.
+- **CORS** is now auto-configured from `pyfly.web.cors.*` (`enabled`,
+  `allowed-origins`, `allowed-methods`, `allowed-headers`, `allow-credentials`,
+  `exposed-headers`, `max-age`) — secure-by-default disabled, like Spring's
+  `CorsAutoConfiguration`. No more hand-passing a `CORSConfig` to `create_app`.
+- The `ExceptionConverterService` is now wired into the global error handler:
+  non-PyFly exceptions (Pydantic, JSON, `TimeoutError`, plus user `@bean`
+  converters) are translated to the right HTTP status before responding.
+
+**Configuration & config-server**
+
+- `get()` and `${...}` placeholder references now use **relaxed** kebab/snake
+  matching (`${my-prop.sub-key}` resolves a value stored under `my_prop.sub_key`),
+  consistent with `bind()`.
+- An **env-only** `PYFLY_<PREFIX>_*` variable with no file entry now binds to a
+  `@config_properties` field.
+- **Remote config import**: when `pyfly.cloud.config.uri` (or
+  `pyfly.config.import`) is set, the app fetches config from a config server at
+  startup and merges it at high precedence (non-fatal unless
+  `pyfly.cloud.config.fail-fast=true`).
+- The **config server now serves HTTP**: `GET/POST /{application}/{profile}[/{label}]`
+  and `GET /_list` are mounted when `pyfly.config-server.enabled=true`; `fetch`
+  returns the full Spring-Cloud-Config overlay set (app/profile → app/default →
+  application/profile → application/default); the filesystem backend root is
+  configurable and persistent via `pyfly.config-server.backend.root`.
+
+**Admin dashboard**
+
+- **[behavior]** `pyfly.admin.require-auth` is now **enforced** on every
+  `/admin/api/*` route (401 unauthenticated, 403 missing every role in
+  `pyfly.admin.allowed-roles`); the SPA shell and static assets stay public.
+- **Server mode** (`pyfly.admin.server.enabled`) wires an instance registry,
+  mounts `/admin/api/instances`, and reports `serverMode=true`.
+- **Client self-registration**: with `pyfly.admin.client.url` +
+  `auto-register=true`, the app registers with a remote admin server at startup
+  and deregisters at shutdown.
+- Selecting the `TRACE` or `OFF` logger level now applies instead of silently
+  failing; a beans SSE stream is served at `/admin/api/sse/beans`.
+
+**Observability & actuator**
+
+- Distributed tracing now **exports** spans (the `TracerProvider` previously had
+  no span processor, so every `@span` was discarded). Configure via
+  `pyfly.observability.tracing.exporter` (`otlp`|`console`|`none`) or the standard
+  `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- `/actuator/threaddump` reports the correct `className` (module) / `methodName`;
+  `/actuator/prometheus` degrades gracefully (503) when `prometheus_client` is
+  absent instead of raising.
+
+**Starters**
+
+- Fixed the property keys the `@enable_*_stack` bundles set so the bundled
+  adapters actually activate: `pyfly.data.relational.enabled` /
+  `pyfly.data.document.enabled`, `pyfly.eda.provider=auto`,
+  `pyfly.security.enabled`, and `pyfly.web.actuator.enabled` (the previous keys
+  were read by nothing).
+
+**ECM**
+
+- Storage and e-signature adapters are now selected from config
+  (`pyfly.ecm.storage.provider` = `local`|`s3`/`aws`|`azure`;
+  `pyfly.ecm.esignature.provider` = `noop`|`docusign`|`adobe`|`logalty`) — only
+  local + noop were ever wired before. `DocumentService.delete` now reports
+  storage-delete failures.
+
+**Plugins**
+
+- Extension points are now registered and type-validated
+  (`register_extension_point`/`has_extension_point`; extensions are checked against
+  their declared `@extension_point` class). Unloading a plugin
+  (`PluginManager.remove`/`unload_all`) now unregisters its extensions.
+
+**Orchestration / resilience / i18n / shell / testing / CLI**
+
+- Orchestration REST: added `GET /api/orchestration/dlq/count`; **[behavior]**
+  `GET /api/orchestration/executions` with no `status` now returns in-flight
+  executions only.
+- `Bulkhead` now uses a single lock-guarded permit counter shared by sync and
+  async calls, so a shared bulkhead can no longer desynchronise.
+- i18n message substitution now honors `java.text.MessageFormat` quoting
+  (`''` → `'`, single-quoted text is literal).
+- `@shell_option(type=…, choices=…)` / `@shell_argument(type=…)` overrides are now
+  honored by parameter inference.
+- `mock_bean(...)` descriptors are now injected into the test `ApplicationContext`,
+  so DI-resolved collaborators receive the mock.
+- `pyfly new` now honors the package name entered in the interactive wizard.
+
+### Docs
+
+- New module guides for **i18n** and **WebSocket**; updated guides for web,
+  configuration, config-server, admin, observability, actuator, ECM, plugins,
+  resilience, transactional, validation, shell, testing, and CLI to match the
+  changes above; doc indexes refreshed.
+
+---
+
 ## v26.06.00 (2026-06-04)
 
 ### Spring Boot parity — observability, actuator & configuration

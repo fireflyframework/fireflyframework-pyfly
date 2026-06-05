@@ -122,7 +122,7 @@ pyfly new [OPTIONS]           # Interactive mode (prompts for all options)
 |----------|----------|-------------|
 | `name` | No | Project name. Omit to enter interactive mode. |
 
-The project name is converted to a valid Python package name: `my-service` becomes `my_service` for the package directory.
+The project name is converted to a valid Python package name: `my-service` becomes `my_service` for the package directory. In interactive mode the wizard also prompts for a **Package name** (pre-filled with that derived value); if you change it, the custom package name is honored and used for the `src/<package>/` layout and all template imports.
 
 ### Options
 
@@ -412,6 +412,10 @@ $ pyfly new
 **Features:**
 - Arrow-key navigation for archetype selection (single-select)
 - Space-bar toggling for feature selection (multi-select with checkbox)
+- A dedicated **Package name** prompt — defaults to the package name derived from
+  the project name, but any custom value you enter is passed through to
+  `generate_project(..., package_name=...)` and used as the actual package
+  directory and import root
 - Confirmation summary with Rich-styled panel before creation
 - Graceful handling of Ctrl+C (exits cleanly without traceback)
 

@@ -704,8 +704,18 @@ exceptions to HTTP status codes. The mapping uses most-specific-first ordering:
 | `InfrastructureException` (catch-all) | 502  | Bad Gateway                |
 | Non-`PyFlyException`          | 500         | Internal Server Error      |
 
-For non-`PyFlyException` errors, the handler returns a generic `500` response
-without leaking internal details.
+For non-`PyFlyException` errors, the global handler **first runs the
+`ExceptionConverterService`** (`pyfly.web.converters`) to translate known library
+exceptions into PyFly exceptions before deciding the status:
+
+| Library Exception                       | Converted To                | HTTP |
+|-----------------------------------------|-----------------------------|------|
+| `pydantic.ValidationError`              | `ValidationException`       | 422  |
+| `json.JSONDecodeError`                  | `InvalidRequestException`   | 400  |
+| `TimeoutError` / `asyncio.TimeoutError` | `OperationTimeoutException` | 504  |
+
+User-registered `ExceptionConverter` beans are appended to this chain. If no converter
+matches, the handler returns a generic `500` response without leaking internal details.
 
 ---
 

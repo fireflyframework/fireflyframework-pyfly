@@ -230,7 +230,7 @@ stream for live updates.
 | **Beans** | `beans` | Lists all registered DI beans with stereotype, scope, class name, and inferred category. Beans without an explicit stereotype are classified by class name suffix (e.g., Adapter, Provider, Filter) instead of "none". Click a bean for dependency detail. |
 | **Environment** | `env` | Active profiles, system properties, and environment variables (sensitive values masked). |
 | **Configuration** | `config` | Resolved configuration tree for all namespaces (not just `pyfly.*`) with source tracking. User-defined config namespaces are included. |
-| **Loggers** | `loggers` | Lists all loggers with current log levels and inferred descriptions. Allows runtime log level changes via POST with re-fetch verification. Reset button returns loggers to NOTSET (inherit from parent). |
+| **Loggers** | `loggers` | Lists all loggers with current log levels and inferred descriptions. Allows runtime log level changes via POST with re-fetch verification. Accepts `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, and `OFF`; `TRACE` maps to numeric level 5 and `OFF` disables the logger (both now apply rather than silently failing). Reset button returns loggers to NOTSET (inherit from parent). |
 
 ### Monitoring
 
@@ -260,8 +260,8 @@ stream for live updates.
 
 ## Real-Time Updates (SSE)
 
-The admin dashboard uses Server-Sent Events for live data streaming. Four SSE
-endpoints are available:
+The admin dashboard uses Server-Sent Events for live data streaming. The
+following SSE endpoints are available:
 
 | Endpoint | Event Name | Behavior |
 |----------|-----------|----------|
@@ -269,6 +269,7 @@ endpoints are available:
 | `GET /admin/api/sse/metrics` | `metrics` | Emits the full list of metric names at each interval. |
 | `GET /admin/api/sse/traces` | `trace` | Emits individual new HTTP trace events as they are captured by the `TraceCollectorFilter`. Polled every 2 seconds. |
 | `GET /admin/api/sse/logfile` | `log` | Emits new log records captured by the `AdminLogHandler`. Uses incremental polling (records with id > last seen) every 1 second. Each event contains `id`, `timestamp`, `level`, `logger`, `message`, `context`, and `thread`. |
+| `GET /admin/api/sse/beans` | `beans` | Emits the bean registry snapshot at each interval (poll interval is `refresh_interval / 1000` seconds) so the Beans view stays live. |
 
 Each SSE stream sends JSON payloads in the standard `data:` format with
 appropriate `Cache-Control: no-cache` and `X-Accel-Buffering: no` headers for
@@ -302,7 +303,7 @@ All API endpoints return JSON responses. The base path defaults to `/admin/api`
 | `GET` | `/admin/api/env` | Environment and profiles. |
 | `GET` | `/admin/api/config` | Resolved configuration tree. |
 | `GET` | `/admin/api/loggers` | List all loggers with levels. |
-| `POST` | `/admin/api/loggers/{name}` | Set logger level. Body: `{"level": "DEBUG"}`. |
+| `POST` | `/admin/api/loggers/{name}` | Set logger level. Body: `{"level": "DEBUG"}`. Valid levels: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, `OFF` (an unknown level returns HTTP 400). `TRACE` and `OFF` are applied as numeric level 5 and a disabled logger respectively. |
 | `GET` | `/admin/api/metrics` | List metric names. |
 | `GET` | `/admin/api/metrics/{name}` | Metric detail by name. |
 | `GET` | `/admin/api/scheduled` | List scheduled tasks. |
@@ -326,6 +327,7 @@ All API endpoints return JSON responses. The base path defaults to `/admin/api`
 | `GET` | `/admin/api/sse/metrics` | Real-time metrics stream. |
 | `GET` | `/admin/api/sse/traces` | Real-time HTTP trace stream. |
 | `GET` | `/admin/api/sse/logfile` | Real-time log record stream. |
+| `GET` | `/admin/api/sse/beans` | Real-time bean registry stream. |
 
 ### Instance Registry Endpoints (Server Mode)
 
@@ -491,10 +493,15 @@ pyfly:
 When `pyfly.admin.client.url` is set, the `AdminAutoConfiguration` creates an
 `AdminClientRegistration` bean. This bean provides `register()` and
 `deregister()` async methods that POST/DELETE to the admin server's
-`/admin/api/instances` endpoint.
+`/admin/api/instances` endpoint, plus `start()`/`stop()` lifecycle hooks driven
+by the `ApplicationContext`.
 
 ### How It Works
 
+- When `auto_register` is `true`, the `ApplicationContext` calls `start()` on
+  startup (which registers the app) and `stop()` on shutdown (which deregisters
+  it). `register()` swallows its own errors, so an unreachable admin server
+  never aborts application startup.
 - `register()` sends a POST with `{"name": "<app-name>", "url": "<app-url>"}`
   to the admin server. The application name and URL are read from
   `pyfly.app.name` and `pyfly.app.url` configuration.
@@ -515,9 +522,19 @@ properties:
 | `pyfly.admin.require_auth` | `bool` | `false` | When `true`, the dashboard and all API endpoints require an authenticated user. |
 | `pyfly.admin.allowed_roles` | `list[str]` | `["ADMIN"]` | Roles that are permitted to access the admin dashboard. Only evaluated when `require_auth` is enabled. |
 
-When authentication is enabled, the admin dashboard integrates with PyFly's
-`SecurityFilter` in the web filter chain. Unauthenticated requests receive a
-401 response; authenticated users without a permitted role receive 403.
+When `require_auth` is `true`, the guard is enforced on **every**
+`{base}/api/*` route — data, mutation, SSE, and instance-registry endpoints
+alike. The guard reads the request-scoped `SecurityContext` (populated by the
+security `WebFilter` chain via `RequestContext`):
+
+- Unauthenticated requests receive a `401` with `{"error": "Authentication required"}`.
+- Authenticated users missing **every** role in `allowed_roles` receive a `403`
+  with `{"error": "Forbidden"}`.
+
+The SPA shell (`index.html`) and static assets stay public so the dashboard can
+still boot and then surface the API's `401`/`403` responses in the UI. When
+`require_auth` is `false` (the default) the guard is a no-op and all API routes
+are open.
 
 ### Example: Restrict to OPS and ADMIN Roles
 

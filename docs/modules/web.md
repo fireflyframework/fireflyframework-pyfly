@@ -421,8 +421,17 @@ async def list_orders(
 ```
 
 - If the query parameter is not present and a default is provided, the default is used.
-- If the query parameter is not present and no default is provided, `None` is returned.
+- If the query parameter is not present, has no default, and its type is **optional**
+  (e.g. `QueryParam[str | None]`), `None` is returned.
+- If the query parameter is not present, has no default, and is a **required**
+  (non-`Optional`) type, the resolver raises `InvalidRequestException`
+  (`code="MISSING_PARAMETER"`), which maps to **HTTP 400** — it no longer silently binds
+  `None`. To make a parameter optional, give it a default (`status: QueryParam[str] = None`)
+  or annotate it `QueryParam[str | None]`.
 - The raw string value is automatically coerced to the annotated type `T`.
+
+> **Note:** a parameter is treated as *required* when it has no Python default **and** its
+> type does not admit `None`. The same rule applies to `Header[T]` and `Cookie[T]` below.
 
 ### Body[T] -- Request Body
 
@@ -459,7 +468,10 @@ async def list_orders(self, x_api_key: Header[str]) -> dict:
     return await self._service.find_all_for_key(x_api_key)
 ```
 
-- Missing headers return `None` if no default is set, or the default value.
+- A missing header with a default returns the default; a missing **optional** header
+  (`Header[str | None]`) returns `None`.
+- A missing **required** header (no default, non-`Optional` type) raises
+  `InvalidRequestException` (`code="MISSING_PARAMETER"`) — **HTTP 400**.
 - Supports type coercion just like other parameter types.
 
 ### Cookie[T] -- Cookies
@@ -472,6 +484,10 @@ async def get_current_user(self, session_id: Cookie[str]) -> dict:
     # Reads the "session_id" cookie
     return await self._service.get_by_session(session_id)
 ```
+
+Like `QueryParam` and `Header`, a missing **required** cookie (no default, non-`Optional`
+type) raises `InvalidRequestException` (`code="MISSING_PARAMETER"`) — **HTTP 400**. Use a
+default or `Cookie[str | None]` to make it optional.
 
 ### Type Coercion
 
@@ -643,7 +659,13 @@ class ResolvedParam:
     inner_type: type         # The type argument T
     default: Any = _MISSING
     validate: bool = False   # True when wrapped in Valid[...]
+    required: bool = True    # default is _MISSING and type does not admit None
 ```
+
+The `required` flag is computed at inspection time as `default is _MISSING and not
+_permits_none(inner_type)`. When a required scalar binding (`QueryParam`, `Header`,
+`Cookie`) is absent at request time, the resolver raises `InvalidRequestException`
+(`code="MISSING_PARAMETER"`, HTTP 400).
 
 Source files:
 - `src/pyfly/web/params.py` -- `Valid` class definition
@@ -801,12 +823,17 @@ The global handler maps `PyFlyException` subclasses to HTTP status codes:
 
 ### Exception Converters
 
-PyFly includes a chain-of-responsibility exception converter system (`pyfly.web.converters`) that translates common library exceptions into PyFly exceptions before the global handler processes them:
+PyFly includes a chain-of-responsibility exception converter system (`pyfly.web.converters`) that translates common library exceptions into PyFly exceptions before the global handler responds. When the global handler catches a **non-`PyFlyException`**, it first runs the per-app `ExceptionConverterService` (stashed on `app.state.pyfly_exception_converter_service`); if a converter matches, the converted PyFly exception is mapped to its proper status code instead of a generic 500.
 
-| Library Exception           | PyFly Exception           |
-|-----------------------------|---------------------------|
-| `pydantic.ValidationError`  | `ValidationException`     |
-| `json.JSONDecodeError`      | `InvalidRequestException` |
+The built-in chain (`default_exception_converters()`) is:
+
+| Library Exception                              | PyFly Exception             | HTTP |
+|------------------------------------------------|-----------------------------|------|
+| `pydantic.ValidationError`                     | `ValidationException`       | 422  |
+| `json.JSONDecodeError`                         | `InvalidRequestException`   | 400  |
+| `TimeoutError` / `asyncio.TimeoutError`        | `OperationTimeoutException` | 504  |
+
+User-provided `ExceptionConverter` beans discovered in the `ApplicationContext` are appended to this chain by `build_exception_converter_service()`.
 
 You can register custom converters by implementing the `ExceptionConverter` protocol:
 
@@ -1449,6 +1476,41 @@ app = create_app(title="My API", context=ctx, cors=cors)
 
 `CORSConfig` is a frozen dataclass. When passed to `create_app()`, it is translated into Starlette's built-in `CORSMiddleware`.
 
+### Auto-Configuration from `pyfly.web.cors.*`
+
+You usually do not need to construct `CORSConfig` by hand. When no explicit `cors=` is
+passed to `create_app()` and an `ApplicationContext` is available, the framework calls
+`CORSConfig.from_config(context.config)` to build CORS from configuration:
+
+```yaml
+pyfly:
+  web:
+    cors:
+      enabled: true                       # secure-by-default: CORS is OFF unless set
+      allowed-origins: ["https://app.example.com"]
+      allowed-methods: ["GET", "POST"]
+      allowed-headers: ["*"]
+      allow-credentials: false
+      exposed-headers: ["X-Transaction-Id"]
+      max-age: 600
+```
+
+| Config key (`pyfly.web.cors.*`) | Maps to | Default when CORS enabled |
+|---|---|---|
+| `enabled` | (gate) | `false` — when falsey, `from_config()` returns `None` and **no** CORS middleware is added |
+| `allowed-origins` | `allowed_origins` | `["*"]` |
+| `allowed-methods` | `allowed_methods` | `["GET", "HEAD", "POST"]` (Spring permit-default set) |
+| `allowed-headers` | `allowed_headers` | `["*"]` |
+| `allow-credentials` | `allow_credentials` | `false` |
+| `exposed-headers` | `exposed_headers` | `[]` |
+| `max-age` | `max_age` | `600` |
+
+Both kebab-case (`allowed-origins`) and snake_case (`allowed_origins`) keys are accepted,
+and list values may be given as a YAML list or a comma-separated string. CORS is
+**secure-by-default**: it is disabled unless `pyfly.web.cors.enabled` is truthy. Note that
+the auto-config default method set is `["GET", "HEAD", "POST"]`, which differs from the
+`CORSConfig` dataclass field default of `["GET"]` used when you construct it directly.
+
 Source file: `src/pyfly/web/cors.py`
 
 ---
@@ -1622,13 +1684,13 @@ app = create_app(
 | `docs_enabled`     | `bool`                       | `True`     | Mount OpenAPI spec, Swagger UI, and ReDoc                 |
 | `extra_routes`     | `list[Route] \| None`        | `None`     | Additional Starlette routes to mount                      |
 | `actuator_enabled` | `bool`                       | `False`    | Mount actuator health/info endpoints                      |
-| `cors`             | `CORSConfig \| None`         | `None`     | CORS configuration (None = no CORS middleware)             |
+| `cors`             | `CORSConfig \| None`         | `None`     | CORS configuration. When `None` and a `context` is given, it is auto-built from `pyfly.web.cors.*` (disabled unless `pyfly.web.cors.enabled` is true) |
 | `lifespan`         | `object \| None`             | `None`     | ASGI lifespan handler for startup/shutdown hooks           |
 
 ### What create_app() Does
 
 1. **Builds the WebFilter chain.** Creates instances of `TransactionIdFilter`, `RequestLoggingFilter`, and `SecurityHeadersFilter`. Auto-discovers any additional user `WebFilter` beans from the `ApplicationContext`. Sorts all filters by `@order` value. Wraps them in a single `WebFilterChainMiddleware`.
-2. Adds `CORSMiddleware` if a `CORSConfig` is provided.
+2. Adds `CORSMiddleware` if a `CORSConfig` is provided, or auto-builds one from `pyfly.web.cors.*` (when a `context` is present and CORS is enabled in config).
 3. Uses `ControllerRegistrar.collect_routes(context)` to discover all `@rest_controller` beans and build Starlette `Route` objects.
 4. Appends any `extra_routes`.
 5. Mounts actuator endpoints if `actuator_enabled=True` (health, info, beans, env, loggers, metrics, plus custom actuator endpoint beans).

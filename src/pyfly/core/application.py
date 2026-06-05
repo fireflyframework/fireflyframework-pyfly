@@ -431,7 +431,7 @@ class PyFlyApplication:
 
             client = ConfigClient(
                 url=str(uri),
-                application=str(self.config.get("pyfly.application.name", self._name)),
+                application=str(self.config.get("pyfly.app.name", self._name)),
                 profile=",".join(active_profiles) if active_profiles else "default",
                 label=str(self.config.get("pyfly.cloud.config.label", "main")),
                 username=self.config.get("pyfly.cloud.config.username"),

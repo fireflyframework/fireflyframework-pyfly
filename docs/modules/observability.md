@@ -343,8 +343,37 @@ async def wrapper(*args: Any, **kwargs: Any) -> Any:
 
 ### OpenTelemetry Integration
 
-To export traces to a backend (Jaeger, Zipkin, OTLP), configure the OpenTelemetry
-SDK in your application startup:
+When the `opentelemetry` libraries are installed, `TracingAutoConfiguration`
+builds the global `TracerProvider` **and** attaches a `BatchSpanProcessor` with
+an exporter for you, so `@span` traces are actually exported. (Previously the
+auto-configured provider had no span processor, so every span was recorded and
+immediately discarded.)
+
+Select the exporter through configuration:
+
+```yaml
+pyfly:
+  observability:
+    tracing:
+      exporter: otlp          # otlp | console | none
+      otlp:
+        endpoint: "http://localhost:4318"   # OTLP/HTTP endpoint
+```
+
+Exporter selection rules (see `TracingAutoConfiguration._install_span_processor`):
+
+- `pyfly.observability.tracing.exporter` chooses `otlp`, `console`, or `none`
+  explicitly.
+- When `exporter` is unset, OTLP is auto-selected **iff** an endpoint is
+  configured — either `pyfly.observability.tracing.otlp.endpoint` or the
+  standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable. Otherwise no
+  exporter is wired and a single info line is logged so the drop is not silent.
+- `console` uses the OpenTelemetry `ConsoleSpanExporter`.
+- `otlp` requires `opentelemetry-exporter-otlp` (OTLP/HTTP); if it is not
+  installed a warning is logged and spans are dropped.
+
+You can still configure the SDK yourself instead — for example to use a gRPC
+exporter — by registering your own `TracerProvider`:
 
 ```python
 from opentelemetry import trace
@@ -711,7 +740,7 @@ class OrderService:
 
 | Bean | Type | Config Keys |
 |------|------|-------------|
-| `tracer_provider` | `TracerProvider` | `pyfly.observability.tracing.service-name` |
+| `tracer_provider` | `TracerProvider` | `pyfly.observability.tracing.service-name`, `pyfly.observability.tracing.exporter`, `pyfly.observability.tracing.otlp.endpoint` |
 
 ```yaml
 pyfly:
@@ -719,9 +748,12 @@ pyfly:
     tracing:
       enabled: true                        # Default: true
       service-name: "${pyfly.app.name}"    # Inherits app name by default
+      exporter: otlp                       # otlp | console | none
+      otlp:
+        endpoint: "http://localhost:4318"  # OTLP/HTTP exporter endpoint
 ```
 
-The auto-configured `TracerProvider` creates an OpenTelemetry `TracerProvider` with a `Resource` containing the service name, and sets it as the global tracer provider.
+The auto-configured `TracerProvider` creates an OpenTelemetry `TracerProvider` with a `Resource` containing the service name, attaches a `BatchSpanProcessor` with the configured exporter (so spans are actually exported), and sets it as the global tracer provider. See [OpenTelemetry Integration](#opentelemetry-integration) for exporter selection rules, including the `OTEL_EXPORTER_OTLP_ENDPOINT` auto-detection.
 
 ### Overriding Auto-Configured Beans
 
