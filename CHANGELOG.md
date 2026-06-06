@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.18 (2026-06-06)
+
+### Tests
+
+- **Expanded `rule_engine` evaluator coverage** (8 → 44 tests). Validating the
+  `implement-rule-engine` skill found **no bug** — the evaluator is correct — but
+  the module had only ~8 tests for 361 lines, with many paths unexercised. Added
+  `tests/rule_engine/test_evaluator_coverage.py` locking in: every leaf operator
+  (`eq/ne/gt/ge/lt/le/in/not_in/regex`) including None/missing-field safety and a
+  type-mismatch surfacing, composite `and`/`or`/`not` (+ `not`-arity), `then` vs
+  `otherwise`, `set`/`increment`/nested-write/unsupported-action isolation, the
+  loud unknown-operator error, the disabled-rule skip, and `RuleSet` priority
+  ordering + cross-rule error isolation. No framework behavior changed.
+
+---
+
 ## v26.06.17 (2026-06-06)
 
 ### Fixed
