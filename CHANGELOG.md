@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.20 (2026-06-07)
+
+### Fixed
+
+- **`pyfly.testing` is now importable without `jsonpath-ng`.** `pyfly.testing`
+  unconditionally imported `client.py`, which imported `jsonpath_ng` at module
+  load — but `jsonpath-ng` was only a dev dependency, so any consumer that
+  followed a `testing-*` skill (`from pyfly.testing import ...`) without it hit
+  `ModuleNotFoundError`. The import is now lazy (only `TestResponse.assert_json_path`
+  needs it, with a clear "install `pyfly[testing]`" error), and **a `testing`
+  optional-dependency extra** provides `jsonpath-ng`.
+- **Scaffolded `todo_service` guards a missing id.** The generated service
+  dereferenced `find_by_id` without a None check — a latent `AttributeError` on a
+  missing id and a `mypy --strict` `union-attr` error in the data-relational /
+  data-document variants. All variants now raise `ResourceNotFoundException`
+  (→ 404), and the in-memory repository's `find_by_id` returns `Optional`.
+
+### Added
+
+- **`pyfly[testing]` extra** (`jsonpath-ng`).
+- Regression tests: `tests/testing/test_import_without_jsonpath.py` and
+  `tests/cli/test_scaffold_todo_service_guard.py`.
+
+These surfaced validating the `testing-async-services`, `testing-cqrs-handlers`,
+`testing-sagas`, and `debugging-async-services` skills — all of which validated
+faithful (a fresh agent proved saga compensation-on-failure and diagnosed a planted
+contextvars bug; every referenced `pyfly.testing` utility exists and works).
+
+---
+
 ## v26.06.19 (2026-06-06)
 
 ### Fixed

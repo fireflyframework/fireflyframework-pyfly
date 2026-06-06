@@ -18,8 +18,6 @@ from __future__ import annotations
 import json as json_lib
 from typing import Any
 
-from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import-untyped]
-
 
 class TestResponse:
     """Wraps an HTTP response with fluent assertion methods.
@@ -47,7 +45,17 @@ class TestResponse:
         return self
 
     def assert_json_path(self, path: str, *, value: Any = ..., exists: bool = True) -> TestResponse:
-        """Assert a JSON path exists (or not) and optionally matches a value."""
+        """Assert a JSON path exists (or not) and optionally matches a value.
+
+        ``jsonpath-ng`` is imported lazily (install ``pyfly[testing]``) so the rest
+        of ``pyfly.testing`` stays importable without it.
+        """
+        try:
+            from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import-untyped]
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "assert_json_path requires jsonpath-ng; install it with `pip install pyfly[testing]`."
+            ) from exc
         expr = jsonpath_parse(path)
         matches = expr.find(self.json())
         if exists:

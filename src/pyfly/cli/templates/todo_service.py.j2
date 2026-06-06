@@ -5,6 +5,7 @@ import uuid
 {% endif %}
 
 from pyfly.container import service
+from pyfly.kernel.exceptions import ResourceNotFoundException
 
 from {{ package_name }}.models.todo import TodoCreate, TodoResponse
 {% if has_data %}
@@ -35,6 +36,8 @@ class TodoService:
 
     async def get(self, todo_id: int) -> TodoResponse:
         entity = await self._repository.find_by_id(todo_id)
+        if entity is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         return TodoResponse(
             id=entity.id, title=entity.title,
             description=entity.description, completed=entity.completed,
@@ -52,6 +55,8 @@ class TodoService:
 
     async def toggle_complete(self, todo_id: int) -> TodoResponse:
         entity = await self._repository.find_by_id(todo_id)
+        if entity is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         entity.completed = not entity.completed
         saved = await self._repository.save(entity)
         return TodoResponse(
@@ -76,6 +81,8 @@ class TodoService:
 
     async def get(self, todo_id: str) -> TodoResponse:
         doc = await self._repository.find_by_id(todo_id)
+        if doc is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         return TodoResponse(
             id=str(doc.id), title=doc.title,
             description=doc.description, completed=doc.completed,
@@ -93,6 +100,8 @@ class TodoService:
 
     async def toggle_complete(self, todo_id: str) -> TodoResponse:
         doc = await self._repository.find_by_id(todo_id)
+        if doc is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         doc.completed = not doc.completed
         saved = await self._repository.save(doc)
         return TodoResponse(
@@ -117,13 +126,18 @@ class TodoService:
         return todo
 
     def get(self, todo_id: str) -> TodoResponse:
-        return self._repository.find_by_id(todo_id)
+        todo = self._repository.find_by_id(todo_id)
+        if todo is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
+        return todo
 
     def list_all(self) -> list[TodoResponse]:
         return self._repository.find_all()
 
     def toggle_complete(self, todo_id: str) -> TodoResponse:
         todo = self._repository.find_by_id(todo_id)
+        if todo is None:
+            raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         updated = todo.model_copy(update={"completed": not todo.completed})
         self._repository.save(todo_id, updated)
         return updated

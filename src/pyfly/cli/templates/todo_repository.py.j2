@@ -44,8 +44,8 @@ class TodoRepository:
     def save(self, todo_id: str, todo: TodoResponse) -> None:
         self._store[todo_id] = todo
 
-    def find_by_id(self, todo_id: str) -> TodoResponse:
-        return self._store[todo_id]
+    def find_by_id(self, todo_id: str) -> TodoResponse | None:
+        return self._store.get(todo_id)
 
     def find_all(self) -> list[TodoResponse]:
         return list(self._store.values())
