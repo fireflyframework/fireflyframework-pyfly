@@ -21,7 +21,6 @@ following the same lazy-resolution pattern used by
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import logging
 from typing import Any
@@ -94,13 +93,18 @@ class WebSocketRegistrar:
                 # silently (audit #232).
                 _logger.warning("websocket handler '%s' raised", method_name, exc_info=True)
             finally:
-                # Invoke an on_disconnect lifecycle hook if the controller
-                # defines one, so handlers can clean up (audit #232).
+                # Invoke on_disconnect for cleanup — but only when the connection
+                # was actually accepted, so a handler that errored before accept()
+                # does not get a spurious disconnect for a never-completed
+                # handshake. Log (not silently swallow) cleanup failures so leaked
+                # resources surface (audit #232).
                 on_disconnect = getattr(_cache["instance"], "on_disconnect", None)
-                if callable(on_disconnect):
-                    with contextlib.suppress(Exception):
+                if session.accepted and callable(on_disconnect):
+                    try:
                         result = on_disconnect(session)
                         if inspect.isawaitable(result):
                             await result
+                    except Exception:
+                        _logger.warning("websocket on_disconnect for '%s' raised", method_name, exc_info=True)
 
         return lazy_ws_endpoint

@@ -25,27 +25,29 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class WebSocketHandler(Protocol):
-    """Protocol for WebSocket handler lifecycle methods.
+    """Optional lifecycle hooks a WebSocket controller may define.
 
-    Implement any combination of these methods on a controller to handle
-    WebSocket events.  All methods are optional — unimplemented hooks are
-    simply skipped.
+    Only :meth:`on_disconnect` is invoked **automatically** by the framework —
+    after the ``@websocket_mapping`` handler returns or the socket closes, and
+    only if the connection was accepted. ``on_connect`` and ``on_message`` are
+    **not** dispatched by the framework: the ``@websocket_mapping`` method owns
+    the full lifecycle (accept + receive loop). The two are convenience
+    signatures you may implement and call yourself from that method.
     """
 
     async def on_connect(self, session: WebSocketSession) -> None:
-        """Called when a client initiates a WebSocket connection.
-
-        The connection is *not* yet accepted — call ``await session.accept()``
-        to complete the handshake.
-        """
+        """Convenience hook — **not** auto-called. Invoke it yourself from your
+        ``@websocket_mapping`` method (e.g. around ``await session.accept()``)."""
         ...
 
     async def on_message(self, session: WebSocketSession, data: str) -> None:
-        """Called when a text message is received from the client."""
+        """Convenience hook — **not** auto-called. The framework does not dispatch
+        incoming messages; run your own receive loop and call this if you want."""
         ...
 
     async def on_disconnect(self, session: WebSocketSession) -> None:
-        """Called when the WebSocket connection is closed."""
+        """Called automatically by the registrar when the handler returns or the
+        connection closes — only if the connection was accepted."""
         ...
 
 
@@ -59,6 +61,12 @@ class WebSocketSession:
 
     def __init__(self, raw: Any) -> None:
         self._ws = raw
+        self._accepted = False
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the handshake has been accepted (``accept()`` was called)."""
+        return self._accepted
 
     @property
     def path_params(self) -> dict[str, Any]:
@@ -78,6 +86,7 @@ class WebSocketSession:
     async def accept(self, subprotocol: str | None = None) -> None:
         """Accept the WebSocket connection handshake."""
         await self._ws.accept(subprotocol=subprotocol)
+        self._accepted = True
 
     async def send_text(self, data: str) -> None:
         """Send a text message to the client."""
