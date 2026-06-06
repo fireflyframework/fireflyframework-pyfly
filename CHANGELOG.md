@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.21 (2026-06-07)
+
+### Changed (security — behavior change)
+
+- **`HttpSecurity` now denies unmatched requests by default (fail-closed).**
+  Previously a request matching none of the configured rules was **allowed
+  through** (open-by-default, mitigated only by a build-time warning in
+  v26.06.12). It is now **denied with 403**, matching Spring Security 6: once you
+  declare authorization rules, undeclared paths are denied unless you explicitly
+  permit them. This closes a footgun where a forgotten terminal rule silently left
+  paths open.
+
+  **Migration:** add an explicit catch-all or list your public paths —
+  `.any_request().permit_all()` to restore the previous open behavior, or
+  `.request_matchers("/health", "/docs").permit_all()` for specific public paths.
+  An `HttpSecurity` built with **no rules at all remains a no-op** (never a blanket
+  lockout). The build-time "no terminal rule" warning is removed (the secure
+  default makes it unnecessary).
+
+These surfaced in the `implement-security` audit (v26.06.12), where the open
+default was flagged as a Spring-6 deviation; deferred then, now adopted.
+
+---
+
 ## v26.06.20 (2026-06-07)
 
 ### Fixed
