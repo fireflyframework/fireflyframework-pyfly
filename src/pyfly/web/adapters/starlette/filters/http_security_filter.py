@@ -70,7 +70,10 @@ class HttpSecurityFilter(OncePerRequestFilter):
     """Filter that enforces URL-pattern authorization rules.
 
     Rules are evaluated in declaration order; **first match wins**.
-    If no rule matches, the request is allowed through (open by default).
+    If no rule matches and any rules are configured, the request is DENIED
+    (deny-by-default / fail-closed, mirroring Spring Security 6) — add
+    ``.any_request().permit_all()`` or list the public paths to allow them. An
+    ``HttpSecurity`` with no rules at all is a no-op (never a blanket lockout).
 
     Constructed via :meth:`HttpSecurity.build` rather than directly.
     """
@@ -169,5 +172,14 @@ class HttpSecurityFilter(OncePerRequestFilter):
                     )
                 return cast(Response, await call_next(request))
 
-        # No rule matched — allow through (open by default)
+        # No rule matched. Deny by default when rules are configured (fail-closed,
+        # Spring Security 6 parity); an empty HttpSecurity (no rules) is a no-op.
+        if self._rules:
+            logger.debug("No matching security rule for path %s — denied (deny by default)", path)
+            return _problem_response(
+                status=403,
+                title="Forbidden",
+                detail="Access to this resource is denied (no matching security rule).",
+                path=path,
+            )
         return cast(Response, await call_next(request))

@@ -24,13 +24,16 @@
 
 from __future__ import annotations
 
-import logging
 import time
+from typing import Any
 
 import jwt
 import pytest
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
 
 from pyfly.kernel.exceptions import SecurityException
+from pyfly.security.context import SecurityContext
 from pyfly.security.http_security import HttpSecurity
 from pyfly.security.jwt import JWTService
 from pyfly.security.oauth2.authorization_server import AuthorizationServer, InMemoryTokenStore
@@ -98,19 +101,47 @@ class TestOAuth2GrantTypeEnforcement:
             )
 
 
-class TestHttpSecurityTerminalWarning:
-    def test_warns_without_any_request_rule(self, caplog: pytest.LogCaptureFixture) -> None:
-        sec = HttpSecurity()
-        sec.authorize_requests().request_matchers("/api/**").authenticated()
-        with caplog.at_level(logging.WARNING, logger="pyfly.security.http_security"):
-            sec.build()
-        assert any("no terminal any_request" in r.getMessage() for r in caplog.records)
+class TestHttpSecurityDenyByDefault:
+    """v26.06.21: a request matching no configured rule is denied (fail-closed,
+    Spring Security 6 parity); an empty HttpSecurity stays a no-op."""
 
-    def test_no_warning_with_any_request_terminal(self, caplog: pytest.LogCaptureFixture) -> None:
+    @staticmethod
+    def _request(path: str, ctx: SecurityContext | None = None) -> Request:
+        scope: dict[str, Any] = {"type": "http", "method": "GET", "path": path, "headers": [], "query_string": b""}
+        request = Request(scope)
+        request.state.security_context = ctx or SecurityContext.anonymous()
+        return request
+
+    @staticmethod
+    async def _call_next(request: Request) -> Response:
+        return PlainTextResponse("ok")
+
+    @pytest.mark.asyncio
+    async def test_unmatched_path_is_denied_when_rules_present(self) -> None:
+        sec = HttpSecurity()
+        sec.authorize_requests().request_matchers("/admin/**").has_role("ADMIN")
+        response = await sec.build().do_filter(self._request("/public/x"), self._call_next)
+        assert response.status_code == 403  # deny-by-default
+
+    @pytest.mark.asyncio
+    async def test_explicitly_permitted_path_is_allowed(self) -> None:
         sec = HttpSecurity()
         builder = sec.authorize_requests()
-        builder.request_matchers("/api/**").authenticated()
-        builder.any_request().deny_all()
-        with caplog.at_level(logging.WARNING, logger="pyfly.security.http_security"):
-            sec.build()
-        assert not any("no terminal any_request" in r.getMessage() for r in caplog.records)
+        builder.request_matchers("/public/**").permit_all()
+        builder.request_matchers("/admin/**").has_role("ADMIN")
+        response = await sec.build().do_filter(self._request("/public/x"), self._call_next)
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_any_request_permit_all_restores_open_behavior(self) -> None:
+        sec = HttpSecurity()
+        builder = sec.authorize_requests()
+        builder.request_matchers("/admin/**").has_role("ADMIN")
+        builder.any_request().permit_all()
+        response = await sec.build().do_filter(self._request("/anything"), self._call_next)
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_empty_httpsecurity_is_a_noop(self) -> None:
+        response = await HttpSecurity().build().do_filter(self._request("/anything"), self._call_next)
+        assert response.status_code == 200
