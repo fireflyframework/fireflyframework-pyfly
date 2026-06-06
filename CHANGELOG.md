@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.19 (2026-06-06)
+
+### Fixed
+
+- **WebSocket `on_disconnect` failures are no longer silently swallowed.** The
+  Starlette adapter wrapped the `on_disconnect` cleanup hook in
+  `contextlib.suppress(Exception)`, so a failing cleanup (leaked resource, lock)
+  vanished without a trace. Failures are now logged (`warning` + traceback),
+  matching the handler-error path.
+- **`on_disconnect` runs only when the connection was accepted.** It previously
+  fired unconditionally in `finally`, so a handler that raised before
+  `session.accept()` got a spurious disconnect for a never-completed handshake.
+  `WebSocketSession` now tracks `accepted`, and the adapter gates the hook on it.
+- **`WebSocketHandler` protocol docstrings corrected.** They implied `on_connect`
+  and `on_message` were auto-dispatched by the framework; they are **not** (only
+  `on_disconnect` is). The `@websocket_mapping` method owns the full lifecycle
+  (accept + receive loop). Implementing `on_connect`/`on_message` and expecting
+  the framework to call them was a silent no-op; the docstrings now state they are
+  caller-invoked. (The `implement-websocket` skill already documented this
+  correctly.)
+
+### Added
+
+- **`WebSocketSession.accepted`** property.
+- **`tests/websocket/` suite (5 tests)** — the module was previously untested.
+  Covers message flow, disconnect cleanup, the accept-gating + error-logging
+  fixes, the `accepted` flag, and the on_message-not-auto-dispatched contract.
+
+### Notes
+
+- Documented that the WebSocket controller instance is a **singleton shared
+  across all connections** — keep per-connection state on the `WebSocketSession`,
+  never on `self`.
+
+These surfaced in an audit while validating the `implement-websocket` skill (which
+validated clean — messages flow, broadcast, and disconnect cleanup all proven).
+
+---
+
 ## v26.06.18 (2026-06-06)
 
 ### Tests

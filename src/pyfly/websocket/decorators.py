@@ -32,6 +32,10 @@ def websocket_mapping(path: str = "") -> Callable[[F], F]:
     The decorated method must accept a single ``WebSocketSession`` argument
     and manage the full connection lifecycle (accept, message loop, close).
 
+    The controller instance is a process-wide singleton shared across **all**
+    connections — keep per-connection state in local variables or on the
+    ``WebSocketSession``, never on ``self`` (it would leak/race across clients).
+
     Usage::
 
         @rest_controller
