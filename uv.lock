@@ -1967,7 +1967,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.6.19"
+version = "26.6.20"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -2074,6 +2074,9 @@ security = [
 shell = [
     { name = "click" },
 ]
+testing = [
+    { name = "jsonpath-ng" },
+]
 web = [
     { name = "python-multipart" },
     { name = "starlette" },
@@ -2124,6 +2127,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'client'", specifier = ">=0.28.1" },
     { name = "hypercorn", marker = "extra == 'hypercorn'", specifier = ">=0.18.0" },
     { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1.6" },
+    { name = "jsonpath-ng", marker = "extra == 'testing'", specifier = ">=1.8.0" },
     { name = "motor", marker = "extra == 'data-document'", specifier = ">=3.7.1" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.41.1" },
     { name = "opentelemetry-instrumentation-starlette", marker = "extra == 'observability'", specifier = ">=0.62b1" },
@@ -2149,7 +2153,7 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fast'", specifier = ">=0.22.1" },
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fastapi'", specifier = ">=0.22.1" },
 ]
-provides-extras = ["web", "data-relational", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "observability", "scheduling", "pii", "security", "cli", "shell", "web-fast", "web-fastapi", "full"]
+provides-extras = ["web", "data-relational", "testing", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "observability", "scheduling", "pii", "security", "cli", "shell", "web-fast", "web-fastapi", "full"]
 
 [package.metadata.requires-dev]
 dev = [
