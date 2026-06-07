@@ -15,7 +15,7 @@ import uuid
 from typing import Protocol, runtime_checkable
 
 from lumen.models.entities.v1.wallet_entity import Wallet
-from pyfly.container import repository
+from pyfly.container import primary, repository
 
 
 @runtime_checkable
@@ -26,6 +26,7 @@ class WalletRepository(Protocol):
     async def next_id(self) -> str: ...
 
 
+@primary
 @repository
 class InMemoryWalletRepository(WalletRepository):
     """Concurrent in-memory store keyed by wallet id.
@@ -33,6 +34,11 @@ class InMemoryWalletRepository(WalletRepository):
     Explicitly implements the :class:`WalletRepository` port so the DI
     container auto-binds the port to this adapter — inject the port
     anywhere and you get this implementation.
+
+    Marked ``@primary`` so it stays the default the application boots on
+    even when a second adapter (the SQLAlchemy/SQLite
+    :class:`~lumen.models.repositories.sql_wallet_repository.SqlAlchemyWalletRepository`)
+    is also registered against the same port.
     """
 
     def __init__(self) -> None:

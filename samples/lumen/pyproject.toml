@@ -9,9 +9,12 @@ authors = [{ name = "Firefly Software Foundation" }]
 dependencies = [
     # Sample uses the local checkout via uv's [tool.uv.sources] table below.
     # `cli` brings in the `pyfly run` command line; `web` brings in the
-    # ASGI server. CQRS / transactional / event-sourcing live in the base
-    # package (no extra deps), so naming them is optional.
-    "pyfly[cli,web]",
+    # ASGI server; `data-relational` brings in SQLAlchemy 2 (async) +
+    # aiosqlite so the SQLite WalletRepository adapter runs with no
+    # external infra. CQRS / transactional / event-sourcing / in-memory
+    # EDA live in the base package (no extra deps), so naming them is
+    # optional.
+    "pyfly[cli,web,data-relational]",
     "httpx>=0.27",
     "pydantic>=2.5",
 ]

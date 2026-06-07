@@ -21,3 +21,18 @@ pyfly:
     enabled: true
   cache:
     provider: in-memory
+  # Event-Driven Architecture: the in-memory bus (no broker needed).
+  # Setting the provider registers the EventPublisher bean that the
+  # wallet command handlers publish domain events through and that the
+  # @event_listener audit projection auto-subscribes to.
+  eda:
+    provider: memory
+  # Relational data layer (SQLAlchemy + SQLite via aiosqlite). The
+  # framework creates the schema on startup (ddl-auto=create). This backs
+  # the selectable SqlAlchemyWalletRepository adapter; the app still boots
+  # on the @primary in-memory repository.
+  data:
+    relational:
+      enabled: true
+      url: "sqlite+aiosqlite:///./lumen.db"
+      ddl-auto: create

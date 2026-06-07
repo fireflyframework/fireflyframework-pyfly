@@ -25,6 +25,7 @@ _HERE = Path(__file__).resolve().parent
 _SRC = _HERE.parent / "src"
 sys.path.insert(0, str(_SRC))
 
+from lumen.core.services.listeners import WalletAuditListener  # noqa: E402
 from lumen.core.services.wallets import (  # noqa: E402
     DepositFundsHandler,
     GetBalanceHandler,
@@ -39,6 +40,7 @@ from pyfly.cqrs import (  # noqa: E402
     DefaultQueryBus,
     HandlerRegistry,
 )
+from pyfly.eda.adapters.memory import InMemoryEventBus  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -47,11 +49,38 @@ async def repository() -> AsyncIterator[InMemoryWalletRepository]:
 
 
 @pytest_asyncio.fixture
-async def command_bus(repository: InMemoryWalletRepository) -> AsyncIterator[DefaultCommandBus]:
+async def event_bus() -> AsyncIterator[InMemoryEventBus]:
+    """A real in-memory EDA bus — the same EventPublisher used in production."""
+    yield InMemoryEventBus()
+
+
+@pytest_asyncio.fixture
+async def audit_listener(event_bus: InMemoryEventBus) -> AsyncIterator[WalletAuditListener]:
+    """The wallet audit projection, subscribed to the bus exactly as the
+    ApplicationContext would auto-wire it at startup."""
+    listener = WalletAuditListener()
+    # Mirror the context's @event_listener discovery: subscribe the stamped
+    # method to each of its declared event-type patterns.
+    method = listener.on_wallet_event
+    for pattern in method.__pyfly_event_patterns__:
+        event_bus.subscribe(pattern, method)
+    yield listener
+
+
+@pytest_asyncio.fixture
+async def command_bus(
+    repository: InMemoryWalletRepository, event_bus: InMemoryEventBus
+) -> AsyncIterator[DefaultCommandBus]:
     registry = HandlerRegistry()
-    registry.register_command_handler(OpenWalletHandler(repository=repository))
-    registry.register_command_handler(DepositFundsHandler(repository=repository))
-    registry.register_command_handler(WithdrawFundsHandler(repository=repository))
+    registry.register_command_handler(
+        OpenWalletHandler(repository=repository, events=event_bus)
+    )
+    registry.register_command_handler(
+        DepositFundsHandler(repository=repository, events=event_bus)
+    )
+    registry.register_command_handler(
+        WithdrawFundsHandler(repository=repository, events=event_bus)
+    )
     yield DefaultCommandBus(registry=registry)
 
 
