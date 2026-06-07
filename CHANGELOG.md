@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.26 (2026-06-07)
+
+### Added (DI — generics-aware injection)
+
+- **Generics-aware injection.** A constructor/field parameter typed as a
+  parametrized generic — e.g. `Repository[User, UUID]` — now resolves to the
+  registered implementation whose generic bases carry the requested concrete type
+  arguments (`class UserRepository(Repository[User, UUID])`). Among a family of
+  implementations of the same generic interface, the one matching the type args
+  wins; `@primary` breaks ties; a request with no matching parametrization raises
+  `NoSuchBeanError`. This supersedes the v26.06.23 note that the parametrized form
+  was not auto-matched — it now is, mirroring Spring's `Repository<T, ID>` injection.
+
+---
+
 ## v26.06.25 (2026-06-07)
 
 ### Added (web — RFC 7807 Problem Details)

@@ -67,6 +67,30 @@ def _coerce_value(resolved: Any, base_type: Any) -> Any:
     return resolved
 
 
+def _safe_issubclass(impl: Any, origin: Any) -> bool:
+    """``issubclass`` that returns ``False`` instead of raising for non-class args."""
+    try:
+        return isinstance(impl, type) and issubclass(impl, origin)
+    except TypeError:
+        return False
+
+
+def _collect_generic_args(cls: Any) -> set[type]:
+    """Concrete (non-TypeVar) type arguments from a class's generic bases, recursively.
+
+    e.g. ``class UserRepository(Repository[User, UUID])`` -> ``{User, UUID}``.
+    """
+    found: set[type] = set()
+    for base in getattr(cls, "__orig_bases__", ()):
+        for arg in get_args(base):
+            if isinstance(arg, type):
+                found.add(arg)
+        base_origin = get_origin(base)
+        if base_origin is not None and base_origin is not cls and hasattr(base_origin, "__orig_bases__"):
+            found |= _collect_generic_args(base_origin)
+    return found
+
+
 class Container:
     """Dependency injection container.
 
@@ -221,6 +245,35 @@ class Container:
             if _assignable(instance, value_type):
                 result[name] = instance
         return result
+
+    def _resolve_generic(self, origin: type, type_args: tuple[Any, ...]) -> Any | None:
+        """Resolve a parametrized generic, e.g. ``Repository[User]`` (Spring generic-aware injection).
+
+        Matches a registered subclass of *origin* whose generic bases carry all the
+        requested concrete type args. Returns ``None`` when *origin* has no
+        registered subclasses (so the caller resolves *origin* normally); raises
+        ``NoSuchBeanError`` when the family exists but nothing matches the args.
+        """
+        wanted = [a for a in type_args if isinstance(a, type)]
+        family = [impl for impl in self._registrations if impl is not origin and _safe_issubclass(impl, origin)]
+        if not family:
+            return None
+        matches = [impl for impl in family if wanted and all(w in _collect_generic_args(impl) for w in wanted)]
+        if len(matches) == 1:
+            return self._resolve_registration(self._registrations[matches[0]])
+        if len(matches) > 1:
+            for impl in matches:
+                reg = self._registrations.get(impl)
+                if getattr(impl, "__pyfly_primary__", False) or (reg is not None and reg.primary):
+                    return self._resolve_registration(self._registrations[impl])
+            raise NoUniqueBeanError(bean_type=origin, candidates=matches)
+        raise NoSuchBeanError(
+            bean_type=origin,
+            suggestions=[
+                f"no {getattr(origin, '__name__', origin)} implementation parametrized with "
+                f"{[getattr(w, '__name__', w) for w in wanted]}"
+            ],
+        )
 
     def _get_config(self) -> Any:
         """The Config bean instance — required to resolve @Value placeholders."""
@@ -391,6 +444,16 @@ class Container:
             raise NoSuchBeanError(
                 bean_type=param_type if isinstance(param_type, type) else None,
             )
+
+        # Handle a parametrized generic interface, e.g. Repository[User] -> an impl
+        # parametrized with User (Spring's generic-aware injection). Falls back to
+        # resolving the bare origin when there is no generic family to match against.
+        origin = get_origin(param_type)
+        if isinstance(origin, type) and origin not in (list, set, frozenset, tuple, dict):
+            resolved = self._resolve_generic(origin, get_args(param_type))
+            if resolved is not None:
+                return resolved
+            return self.resolve(origin)
 
         return self.resolve(param_type)
 
