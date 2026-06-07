@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.32 (2026-06-07)
+
+### Fixed (DI — two regressions found by the final parity audit)
+
+- **`@bean(primary=True)` now wins when multiple `@bean` methods share a return
+  type.** The direct return-type registration used for single-bean resolution was
+  created only for the first-processed `@bean` and never updated, so
+  `ctx.get_bean(Interface)` could return a non-primary implementation. A later
+  `@bean(primary=True)` for the same return type now overwrites it. (The class-level
+  `@primary` path was already correct.)
+- **`@lazy` beans now run the full init pipeline on first resolution.** A lazily
+  created singleton (built post-startup) previously got constructor + field injection
+  only — it **skipped `@post_construct`, BeanPostProcessors, and AOP weaving**, so
+  `@lazy` beans were never advised by aspects. The container now invokes a
+  post-create hook (installed by the `ApplicationContext` after startup) that runs
+  BeanPostProcessors + `@post_construct` on lazily-created singletons. (Async
+  `@post_construct` on a `@lazy` bean is unsupported in the sync resolution path and
+  logs a warning — use an eager bean for async init.)
+
+---
+
 ## v26.06.31 (2026-06-07)
 
 ### Added (testing — Testcontainers integration)

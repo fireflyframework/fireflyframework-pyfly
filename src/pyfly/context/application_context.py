@@ -267,6 +267,10 @@ class ApplicationContext:
         await self._event_bus.publish(ApplicationReadyEvent())
         await self._invoke_runners()
         self._started = True
+        # Lazily-created singletons (built post-startup on first resolve) must still
+        # run the full init pipeline. Installed now so the batched startup passes
+        # above handled the eager beans without double-initialization.
+        self._container._post_create_hook = self._post_init_lazy_bean
 
     async def stop(self) -> None:
         """Stop the context: call @pre_destroy, publish ContextClosedEvent.
@@ -491,6 +495,15 @@ class ApplicationContext:
                     self._container.register(return_type, scope=bean_scope)
                     return_reg = self._container._registrations[return_type]
                     return_reg.factory = factory
+                    if bean_scope == Scope.SINGLETON:
+                        return_reg.instance = result
+                elif getattr(method, "__pyfly_bean_primary__", False):
+                    # A later @bean(primary=True) for the same return type must win the
+                    # single-bean direct resolution (the @Bean @Primary semantics) —
+                    # otherwise resolve() returns whichever @bean was processed first.
+                    return_reg = self._container._registrations[return_type]
+                    return_reg.factory = factory
+                    return_reg.primary = True
                     if bean_scope == Scope.SINGLETON:
                         return_reg.instance = result
 
@@ -934,6 +947,48 @@ class ApplicationContext:
             stereotype = getattr(cls, "__pyfly_stereotype__", "other")
             counts[stereotype] = counts.get(stereotype, 0) + 1
         return counts
+
+    def _post_init_lazy_bean(self, instance: Any, reg: Registration) -> Any:
+        """Run the full init pipeline on a lazily-created singleton (post-startup):
+        BeanPostProcessors (incl. AOP weaving) then @post_construct, mirroring the
+        batched startup passes for a single bean. Aspects are already collected
+        during startup, so a single bean weaves correctly here.
+        """
+        bean_name = reg.name or reg.impl_type.__name__
+        sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
+        for pp in sorted_pps:
+            instance = pp.before_init(instance, bean_name)
+        self._call_post_construct_sync(instance)
+        for pp in sorted_pps:
+            instance = pp.after_init(instance, bean_name)
+        return instance
+
+    def _call_post_construct_sync(self, instance: Any) -> None:
+        """Synchronous @post_construct for lazily-created beans. Async @post_construct
+        cannot be awaited in the sync resolution path, so it is skipped with a warning
+        (use an eager bean if you need an async @post_construct)."""
+        for attr_name, method in self._safe_members(instance, skip_private=False):
+            if not getattr(method, "__pyfly_post_construct__", False):
+                continue
+            if inspect.iscoroutinefunction(method):
+                logger.warning(
+                    "async_post_construct_skipped_on_lazy_bean",
+                    extra={"bean": type(instance).__qualname__, "method": attr_name},
+                )
+                continue
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    logger.warning(
+                        "async_post_construct_skipped_on_lazy_bean",
+                        extra={"bean": type(instance).__qualname__, "method": attr_name},
+                    )
+            except Exception as exc:
+                raise BeanCreationException(
+                    subsystem="lifecycle",
+                    provider=type(instance).__qualname__,
+                    reason=f"@post_construct method '{attr_name}' failed: {exc}",
+                ) from exc
 
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""
