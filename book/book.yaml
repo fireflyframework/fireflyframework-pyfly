@@ -32,4 +32,9 @@ parts:
       - {id: ch08, file: 08-eda.md, num: 8, title: "Domain Events & Event-Driven Architecture", opener: art/openers/ch08.svg}
       - {id: ch09, file: 09-event-sourcing.md, num: 9, title: "Event Sourcing the Ledger", opener: art/openers/ch09.svg}
       - {id: ch10, file: 10-messaging.md, num: 10, title: "Messaging with Kafka & RabbitMQ", opener: art/openers/ch10.svg}
+  - title: "Part IV — Into Microservices"
+    chapters:
+      - {id: ch11, file: 11-http-clients.md, num: 11, title: "Splitting the Monolith: HTTP Clients & the BFF", opener: art/openers/ch11.svg}
+      - {id: ch12, file: 12-sagas.md, num: 12, title: "Distributed Transactions: Sagas, Workflows & TCC", opener: art/openers/ch12.svg}
+      - {id: ch13, file: 13-caching-resilience.md, num: 13, title: "Caching & Resilience", opener: art/openers/ch13.svg}
 back: []
