@@ -88,6 +88,8 @@ class ConditionEvaluator:
             result = self._eval_on_property(cond)
         elif cond_type == "on_class":
             result = cond["check"]()
+        elif cond_type == "on_expression":
+            result = self._eval_on_expression(cond)
         elif cond_type == "on_missing_bean":
             result = self._eval_on_missing_bean(cond, declaring_cls)
         elif cond_type == "on_bean":
@@ -119,6 +121,11 @@ class ConditionEvaluator:
             return cast(bool, str(value).lower() == cond["having_value"].lower())
         # No specific value required: present and not explicitly "false".
         return str(value).strip().lower() != "false"
+
+    def _eval_on_expression(self, cond: dict[str, Any]) -> bool:
+        from pyfly.core.expression import evaluate
+
+        return bool(evaluate(cond["expression"], self._config))
 
     def _eval_on_missing_bean(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
         return not self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)

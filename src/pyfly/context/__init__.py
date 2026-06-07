@@ -18,6 +18,7 @@ from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_bean,
     conditional_on_class,
+    conditional_on_expression,
     conditional_on_missing_bean,
     conditional_on_property,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "conditional_on_bean",
     "conditional_on_class",
     "conditional_on_missing_bean",
+    "conditional_on_expression",
     "conditional_on_property",
     "post_construct",
     "pre_destroy",
