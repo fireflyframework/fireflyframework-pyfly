@@ -22,4 +22,9 @@ parts:
       - {id: ch02, file: 02-dependency-injection.md, num: 2, title: "Dependency Injection & the Application Context", opener: art/openers/ch02.svg}
       - {id: ch03, file: 03-configuration.md, num: 3, title: "Configuration, Profiles & Secrets", opener: art/openers/ch03.svg}
       - {id: ch04, file: 04-first-http-api.md, num: 4, title: "Your First HTTP API", opener: art/openers/ch04.svg}
+  - title: "Part II — Modeling & Persisting the Domain"
+    chapters:
+      - {id: ch05, file: 05-persistence.md, num: 5, title: "Persistence & the Repository Pattern", opener: art/openers/ch05.svg}
+      - {id: ch06, file: 06-domain-driven-design.md, num: 6, title: "Domain-Driven Design", opener: art/openers/ch06.svg}
+      - {id: ch07, file: 07-cqrs.md, num: 7, title: "CQRS: Commands & Queries", opener: art/openers/ch07.svg}
 back: []
