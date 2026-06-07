@@ -76,10 +76,10 @@ pyfly new                              # interactive mode (questionary TUI)
 
 ::: listing terminal | Listing D.1 — pyfly new examples
 # Minimal core service
-pyfly new order-service
+pyfly new wallet-service
 
 # REST API with SQL data layer
-pyfly new order-api --archetype web-api --features web,data-relational
+pyfly new lumen --archetype web-api --features web,data-relational
 
 # Hexagonal service with cache and security
 pyfly new payment-svc --archetype hexagonal \
@@ -265,10 +265,10 @@ pyfly sbom --json
 pyfly doctor
 
 # Scaffold the project
-pyfly new order-service --archetype web-api \
+pyfly new lumen --archetype web-api \
     --features web,data-relational,security
 
-cd order-service
+cd lumen
 
 # Check what was installed
 pyfly info

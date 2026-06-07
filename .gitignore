@@ -31,3 +31,7 @@ docs/plans/
 !book/build/
 !book/build/**
 book/build/**/__pycache__/
+
+# Internal Claude / superpowers design docs + session files — kept local, never committed
+.claude/
+docs/superpowers/

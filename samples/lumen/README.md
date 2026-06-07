@@ -31,8 +31,8 @@ samples/lumen/
 └── pyfly.yaml              # Framework configuration
 ```
 
-The split mirrors the `order_service` sample and every domain
-microservice in the Firefly ecosystem: `interfaces` is the public
+The split mirrors every domain microservice in the Firefly
+ecosystem: `interfaces` is the public
 boundary, `models` holds the domain model and repositories, `core` holds
 the business logic, `web` exposes HTTP endpoints, and `sdk` is what other
 services import to call this one.

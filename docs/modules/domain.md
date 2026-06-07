@@ -236,6 +236,6 @@ from pyfly.starters.domain import (
 ```
 
 See the
-[`samples/order_service/`](../../samples/order_service/README.md)
+[`samples/lumen/`](../../samples/lumen/README.md)
 directory for an end-to-end DDD service that uses every primitive on
 this page.

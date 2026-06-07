@@ -50,7 +50,7 @@ Phases 1, 2, and 3 of the original roadmap landed in `v26.05.01`. The **DDD star
 
 | Module | Description | Java Source | Status |
 |--------|-------------|-------------|--------|
-| **Domain (DDD starters)** | `Entity[TID]`, `ValueObject`, `AggregateRoot[TID]`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation`, `AggregateNotFound`, plus the `enable_domain_stack` decorator. Pure-Python primitives with zero runtime dependencies. Includes a complete OrderService sample under `samples/order_service/`. | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) | Done in v26.05.02 |
+| **Domain (DDD starters)** | `Entity[TID]`, `ValueObject`, `AggregateRoot[TID]`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation`, `AggregateNotFound`, plus the `enable_domain_stack` decorator. Pure-Python primitives with zero runtime dependencies. Includes a complete DDD sample under `samples/lumen/` (the book's Lumen wallet & ledger service). | [`fireflyframework-starter-domain`](https://github.com/fireflyframework/fireflyframework-starter-domain) | Done in v26.05.02 |
 | **Backoffice** | Admin/backoffice layer with impersonation and enhanced audit | [`fireflyframework-backoffice`](https://github.com/fireflyframework/fireflyframework-backoffice) | Planned |
 | **Utils** | Shared utility library — template rendering, filtering, common helpers | [`fireflyframework-utils`](https://github.com/fireflyframework/fireflyframework-utils) | Planned |
 
