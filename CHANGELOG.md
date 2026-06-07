@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.41 (2026-06-07)
+
+### Added (context — injectable ApplicationEventPublisher + arbitrary domain events)
+
+- **`ApplicationEventPublisher`** is now an injectable singleton bean (Spring's
+  `ApplicationEventPublisher`): inject it into any bean and `await publisher.publish(event)`
+  to fire events into the context event bus.
+- **Arbitrary domain events** — the event bus and `@app_event_listener` no longer require
+  events to subclass `ApplicationEvent`; any object can be published, and a listener whose
+  parameter type matches (by `isinstance`) receives it (an untyped/`Any` parameter still
+  falls back to the catch-all `ApplicationEvent`).
+
+`ApplicationEventPublisher` is exported from `pyfly.context`.
+
 ## v26.06.40 (2026-06-07)
 
 ### Added (context — more @ConditionalOn* conditions)
