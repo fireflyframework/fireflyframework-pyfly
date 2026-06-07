@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pyfly.client.pooled import PooledHttpClient
 from pyfly.notifications.models import EmailStatus, NotificationResult, PushMessage
 
 
@@ -22,14 +23,17 @@ class FirebasePushProvider:
     def __init__(self, *, project_id: str, access_token: str) -> None:
         self._project_id = project_id
         self._access_token = access_token
+        self._http: Any = None
 
     async def _client(self) -> Any:
-        try:
-            import httpx  # type: ignore[import-not-found, unused-ignore]
-        except ImportError as exc:  # noqa: BLE001
-            msg = "FirebasePushProvider requires httpx — `pip install pyfly[client]`"
-            raise ImportError(msg) from exc
-        return httpx.AsyncClient(timeout=30.0)
+        if self._http is None:
+            try:
+                import httpx  # type: ignore[import-not-found, unused-ignore]
+            except ImportError as exc:  # noqa: BLE001
+                msg = "FirebasePushProvider requires httpx — `pip install pyfly[client]`"
+                raise ImportError(msg) from exc
+            self._http = httpx.AsyncClient(timeout=30.0)
+        return PooledHttpClient(self._http)
 
     async def send(self, message: PushMessage) -> NotificationResult:
         async with await self._client() as client:
@@ -62,3 +66,12 @@ class FirebasePushProvider:
                 error="; ".join(errors) or None,
                 provider_id=";".join(sent_ids) or None,
             )
+
+    async def start(self) -> None:
+        """No-op — the pooled HTTP client is created lazily on first use."""
+
+    async def stop(self) -> None:
+        """Close the pooled HTTP client on shutdown."""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None

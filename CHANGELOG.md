@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.70 (2026-06-07)
+
+### Performance (notifications/ECM — pooled outbound HTTP clients)
+
+The SendGrid/Resend/Twilio/Firebase notification providers and the DocuSign/Adobe Sign/Logalty
+e-signature adapters built a **new `httpx.AsyncClient` per call** (no connection reuse). They now
+keep one long-lived, lazily-created client (connection pool reused across calls) and close it on
+shutdown via new `start()`/`stop()` lifecycle methods. A shared `PooledHttpClient` async-context
+wrapper keeps the existing `async with await self._client()` call sites unchanged while reusing
+the pooled client (it does not close on exit). Found by the ports/adapters audit.
+
 ## v26.06.69 (2026-06-07)
 
 ### Added (OAuth2 — persistent token stores; fixes a multi-instance production blocker)

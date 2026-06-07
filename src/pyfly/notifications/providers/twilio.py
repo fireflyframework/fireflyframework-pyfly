@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pyfly.client.pooled import PooledHttpClient
 from pyfly.notifications.models import EmailStatus, NotificationResult, SmsMessage
 
 
@@ -18,14 +19,17 @@ class TwilioSmsProvider:
         self._sid = account_sid
         self._token = auth_token
         self._from = from_number
+        self._http: Any = None
 
     async def _client(self) -> Any:
-        try:
-            import httpx  # type: ignore[import-not-found, unused-ignore]
-        except ImportError as exc:  # noqa: BLE001
-            msg = "TwilioSmsProvider requires httpx — `pip install pyfly[client]`"
-            raise ImportError(msg) from exc
-        return httpx.AsyncClient(timeout=30.0)
+        if self._http is None:
+            try:
+                import httpx  # type: ignore[import-not-found, unused-ignore]
+            except ImportError as exc:  # noqa: BLE001
+                msg = "TwilioSmsProvider requires httpx — `pip install pyfly[client]`"
+                raise ImportError(msg) from exc
+            self._http = httpx.AsyncClient(timeout=30.0)
+        return PooledHttpClient(self._http)
 
     async def send(self, message: SmsMessage) -> NotificationResult:
         async with await self._client() as client:
@@ -49,3 +53,12 @@ class TwilioSmsProvider:
                 status=EmailStatus.FAILED,
                 error=f"http {resp.status_code}: {resp.text}",
             )
+
+    async def start(self) -> None:
+        """No-op — the pooled HTTP client is created lazily on first use."""
+
+    async def stop(self) -> None:
+        """Close the pooled HTTP client on shutdown."""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
