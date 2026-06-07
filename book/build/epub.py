@@ -100,7 +100,9 @@ class EpubBuilder:
         for i in range(len(self.css)):
             man.append(f'<item id="css{i}" href="style{i}.css" media-type="text/css"/>')
         for d in self.docs:
-            man.append(f'<item id="{d.id}" href="{d.id}.xhtml" media-type="application/xhtml+xml"/>')
+            props = ' properties="svg"' if "<svg" in d.xhtml_body else ""
+            man.append(f'<item id="{d.id}" href="{d.id}.xhtml" '
+                       f'media-type="application/xhtml+xml"{props}/>')
         for a in self.assets:
             props = f' properties="{a.properties}"' if a.properties else ""
             man.append(f'<item id="{a.id}" href="{a.href}" media-type="{a.media_type}"{props}/>')

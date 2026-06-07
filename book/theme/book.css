@@ -1,5 +1,6 @@
-@import "tokens.css";
-@import "pygments.css";
+/* tokens.css + pygments.css are loaded alongside this file by the build
+   (the EPUB links all three stylesheets; the PDF passes them to WeasyPrint),
+   so no @import is needed here — and @import breaks strict EPUB validation. */
 
 /* ============ base ============ */
 html{ -webkit-text-size-adjust:100%; }

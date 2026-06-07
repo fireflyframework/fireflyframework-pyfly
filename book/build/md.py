@@ -39,15 +39,16 @@ class _Directives(Preprocessor):
         while i < len(lines):
             mf, ml = self.FIG.match(lines[i]), self.LST.match(lines[i])
             if mf:
-                out.append(self.md.htmlStash.store(self._figure(mf["src"], mf["cap"])))
+                # surround with blank lines so the block HTML never lands inside a <p>
+                out.extend(["", self.md.htmlStash.store(self._figure(mf["src"], mf["cap"])), ""])
                 i += 1
             elif ml:
                 body, i = [], i + 1
                 while i < len(lines) and lines[i].strip() != ":::":
                     body.append(lines[i]); i += 1
                 i += 1
-                out.append(self.md.htmlStash.store(
-                    self._listing(ml["file"].strip(), ml["cap"], "\n".join(body))))
+                out.extend(["", self.md.htmlStash.store(
+                    self._listing(ml["file"].strip(), ml["cap"], "\n".join(body))), ""])
             else:
                 out.append(lines[i]); i += 1
         return out
@@ -77,19 +78,19 @@ class _Directives(Preprocessor):
 
 # Professional inline SVG icons injected into callout titles (no emoji).
 _ADM_ICON = {
-    "note": '<svg class="adm-ico" viewBox="0 0 20 20" aria-hidden="true">'
+    "note": '<svg class="adm-ico" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" aria-hidden="true">'
             '<circle cx="10" cy="10" r="8.3" fill="none" stroke="#1f6fd6" stroke-width="1.6"/>'
             '<circle cx="10" cy="6.1" r="1.25" fill="#1f6fd6"/>'
             '<rect x="9.1" y="8.7" width="1.8" height="5.6" rx="0.9" fill="#1f6fd6"/></svg>',
-    "tip": '<svg class="adm-ico" viewBox="0 0 20 20" aria-hidden="true">'
+    "tip": '<svg class="adm-ico" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" aria-hidden="true">'
            '<path d="M10 2.4a5.6 5.6 0 0 0-3.3 10.1c.45.33.72.8.78 1.32l.09.78h4.86l.09-.78'
            'c.06-.52.33-.99.78-1.32A5.6 5.6 0 0 0 10 2.4z" fill="none" stroke="#2f8f3f" stroke-width="1.5"/>'
            '<path d="M8 17.2h4M8.7 18.7h2.6" stroke="#2f8f3f" stroke-width="1.4" stroke-linecap="round"/></svg>',
-    "warning": '<svg class="adm-ico" viewBox="0 0 20 20" aria-hidden="true">'
+    "warning": '<svg class="adm-ico" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" aria-hidden="true">'
                '<path d="M10 3l7.3 12.6H2.7L10 3z" fill="none" stroke="#c2410c" stroke-width="1.6" stroke-linejoin="round"/>'
                '<rect x="9.1" y="8.2" width="1.8" height="4.4" rx="0.9" fill="#c2410c"/>'
                '<circle cx="10" cy="13.9" r="1.05" fill="#c2410c"/></svg>',
-    "spring": '<svg class="adm-ico" viewBox="0 0 20 20" aria-hidden="true">'
+    "spring": '<svg class="adm-ico" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" aria-hidden="true">'
               '<path d="M4.5 15.5c0-5.5 4-9.5 11-9.5-.5 5.5-4.5 9.5-11 9.5z" fill="none" '
               'stroke="#43b02a" stroke-width="1.5" stroke-linejoin="round"/>'
               '<path d="M6 14.2c2.6-3.2 5.4-5.2 8.4-6.1" stroke="#43b02a" stroke-width="1.3" '
@@ -126,7 +127,7 @@ def _to_xml_entities(s: str) -> str:
 
 def render_markdown(text: str, base: Path) -> str:
     md = markdown.Markdown(
-        extensions=["extra", "admonition", "toc", "sane_lists", "codehilite",
+        extensions=["extra", "admonition", "sane_lists", "codehilite",
                     PyflyExtension(base)],
         extension_configs={"codehilite": {"css_class": "code", "guess_lang": False}},
         output_format="xhtml",
