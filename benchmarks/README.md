@@ -31,5 +31,19 @@ Notes:
   per parameter, bringing it to ~2.92µs (~342K ops/s) — a **~5.3x** speedup. The residual cost
   is the actual per-resolve dependency resolution + object construction, which is irreducible
   for a transient bean.
-- The PyFly filter chain (request context, correlation, tracing, logging, security headers)
-  adds ~27% over a bare Starlette route — the cost of the enterprise middleware.
+- The PyFly filter chain adds ~22% over a bare Starlette route — the cost of the enterprise
+  middleware. The chain *machinery itself is free* (the filter-chain middleware with **zero**
+  filters measures within noise of bare Starlette); the overhead is entirely the per-filter
+  features. Decomposition (µs/req added vs bare ~436µs):
+
+  | filter | +µs/req | notes |
+  |--------|--------:|-------|
+  | RequestContextFilter   | ~11 | request id + contextvar (needed for REQUEST scope / method security) |
+  | CorrelationFilter      | ~17 | correlation id |
+  | TracingFilter          | ~13 | opens a server span (only when OpenTelemetry is installed) |
+  | TransactionIdFilter    | ~10 | transaction id |
+  | RequestLoggingFilter   | ~38 | **biggest** — structured access log per request |
+  | SecurityHeadersFilter  | ~10 | OWASP headers (precomputed + bulk-appended since v26.06.64) |
+
+  The access log is the single biggest cost, so it is opt-out: set
+  `pyfly.web.request-logging.enabled=false` to drop ~38µs/req (overhead ~22% → ~13%).
