@@ -18,6 +18,7 @@ from pyfly.web.adapters.starlette.filters.http_security_filter import HttpSecuri
 from pyfly.web.adapters.starlette.filters.request_context_filter import RequestContextFilter
 from pyfly.web.adapters.starlette.filters.request_logging_filter import RequestLoggingFilter
 from pyfly.web.adapters.starlette.filters.security_headers_filter import SecurityHeadersFilter
+from pyfly.web.adapters.starlette.filters.tracing_filter import TracingFilter
 from pyfly.web.adapters.starlette.filters.transaction_id_filter import TransactionIdFilter
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "RequestContextFilter",
     "RequestLoggingFilter",
     "SecurityHeadersFilter",
+    "TracingFilter",
     "TransactionIdFilter",
 ]
 

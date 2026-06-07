@@ -37,6 +37,12 @@ class HttpxClientAdapter:
         )
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        # Propagate the current trace context downstream (W3C traceparent etc.).
+        from pyfly.observability.propagation import inject_headers
+
+        headers = dict(kwargs.get("headers") or {})
+        inject_headers(headers)
+        kwargs["headers"] = headers
         return await self._client.request(method, url, **kwargs)
 
     async def start(self) -> None:

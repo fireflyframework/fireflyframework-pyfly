@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.38 (2026-06-07)
+
+### Added (observability — OpenTelemetry distributed-trace propagation)
+
+Tracing previously never propagated context: inbound `traceparent` was ignored (so
+`@span` started a new root trace), nothing was injected outbound, and logs had no
+trace/span IDs. Now a trace flows across service boundaries (no-op without the
+observability extra):
+
+- **Inbound**: a new `TracingFilter` (wired into both the Starlette and FastAPI filter
+  chains) extracts the W3C trace context from request headers and opens a SERVER span as
+  its child — so every span and log line during the request joins the upstream trace.
+- **Outbound**: the httpx client injects the current trace context (`traceparent`) into
+  outgoing request headers.
+- **Logs**: structlog records now carry `trace_id` / `span_id` of the active span (the
+  SLF4J MDC equivalent), for both structlog-native and foreign stdlib records.
+- New `pyfly.observability.propagation` helpers: `extract_context`, `inject_headers`,
+  `current_trace_ids`.
+
+---
+
 ## v26.06.37 (2026-06-07)
 
 ### Added (security — full method-security SpEL)

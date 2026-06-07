@@ -37,6 +37,7 @@ from pyfly.web.adapters.starlette.filters import (
     RequestContextFilter,
     RequestLoggingFilter,
     SecurityHeadersFilter,
+    TracingFilter,
     TransactionIdFilter,
 )
 from pyfly.web.openapi import OpenAPIGenerator
@@ -143,6 +144,7 @@ def create_app(
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
+        TracingFilter(),
         TransactionIdFilter(),
         RequestLoggingFilter(),
         SecurityHeadersFilter(),
@@ -157,6 +159,7 @@ def create_app(
     builtin_filter_types = (
         RequestContextFilter,
         CorrelationFilter,
+        TracingFilter,
         TransactionIdFilter,
         RequestLoggingFilter,
         SecurityHeadersFilter,
