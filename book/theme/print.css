@@ -1,0 +1,14 @@
+@page{
+  size: 7.5in 9.25in;
+  margin: 0.85in 0.8in 0.9in;
+  @bottom-center{ content: counter(page); font-family:-apple-system,sans-serif;
+    font-size:9px; color:#9aa6a0; }
+  @top-center{ content: string(runhead); font-family:-apple-system,sans-serif;
+    font-size:8.5px; letter-spacing:1.5px; text-transform:uppercase; color:#a7b0a0; }
+}
+@page :first{ @top-center{ content: none; } @bottom-center{ content: none; } }
+h1.chtitle{ string-set: runhead content(text); break-before: page; }
+.cover-page{ break-after: page; text-align:center; }
+.cover-page img{ width:100%; height:auto; }
+.listing,figure.fig,.admonition{ break-inside: avoid; }
+h2,h3{ break-after: avoid; }

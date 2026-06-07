@@ -1,0 +1,7 @@
+:root{
+  --green:#43b02a; --green-bright:#5fd13a; --lime:#86dd4c; --lime-soft:#a7e76a;
+  --green-deep:#2c8a1c; --green-ink:#1f5e16; --amber:#ffc24b; --amber-soft:#ffd86b;
+  --ink:#1c2420; --ink-soft:#33402e; --muted:#7a8472; --page:#fffef9;
+  --code-bg:#f7faf3; --code-border:#dde6d3; --rule:#e7ece1;
+  --note:#1f6fd6; --note-bg:#eef6ff; --tip:#2f8f3f; --warn:#c2410c; --warn-bg:#fff4ec;
+}

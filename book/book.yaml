@@ -1,0 +1,22 @@
+title: "PyFly by Example"
+subtitle: "Event-Driven Python Microservices with the Firefly Framework"
+author: "Firefly Software Foundation"
+publisher: "Firefly Software Foundation"
+language: "en"
+identifier: "urn:uuid:7c1b1f2e-0a9e-4e3a-9d2a-pyfly000book"
+rights: "Copyright (c) 2026 Firefly Software Foundation. Licensed under Apache-2.0."
+cover_svg: "art/cover.svg"
+cover_png: "art/cover.png"
+trim_width: "7.5in"
+trim_height: "9.25in"
+front:
+  - {id: title,       file: 00-front/00-title.md,       nav: false}
+  - {id: copyright,   file: 00-front/00-copyright.md,   nav: false}
+  - {id: preface,     file: 00-front/00-preface.md,     title: "Preface"}
+  - {id: conventions, file: 00-front/00-conventions.md, title: "Conventions"}
+  - {id: sparky,      file: 00-front/00-meet-sparky.md, title: "Meet Sparky"}
+parts:
+  - title: "Part I — Foundations"
+    chapters:
+      - {id: ch01, file: 01-why-pyfly.md, num: 1, title: "Why PyFly?", opener: art/openers/ch01.svg}
+back: []

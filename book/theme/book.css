@@ -1,0 +1,46 @@
+@import "tokens.css";
+@import "pygments.css";
+body{ color:var(--ink); background:var(--page);
+  font-family:-apple-system,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  font-size:1rem; line-height:1.72; margin:0; }
+.chapter{ padding:0 0 2rem; }
+h1,h2,h3{ color:var(--ink); line-height:1.25; font-weight:800; }
+h1.chtitle{ font-size:2rem; margin:.2rem 0 1rem; color:#15351a; }
+h2{ font-size:1.25rem; font-weight:700; margin:1.6rem 0 .5rem; }
+h3{ font-size:1.05rem; font-weight:700; margin:1.2rem 0 .4rem; }
+p{ margin:0 0 .8rem; }
+a{ color:var(--green-deep); }
+code{ background:#eef3e8; color:var(--green-deep); padding:1px 5px; border-radius:4px;
+  font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-size:.86em; }
+.eyebrow{ color:var(--green); font-weight:700; letter-spacing:2px; font-size:.72rem;
+  text-transform:uppercase; }
+.opener{ display:flex; align-items:center; gap:1rem; margin:.4rem 0 1rem; }
+.opener .badge{ flex:none; width:64px; height:64px; }
+.opener-illus{ width:100%; height:auto; margin:.6rem 0 1.2rem; }
+.listing{ margin:1rem 0; }
+.filetab{ display:inline-block; background:#eef3e8; color:#3f6b34;
+  font:600 .72rem/1 "SF Mono",Menlo,monospace; padding:.4rem .6rem;
+  border:1px solid var(--code-border); border-bottom:none; border-radius:7px 7px 0 0; }
+pre.code{ margin:0; background:var(--code-bg); border:1px solid var(--code-border);
+  border-radius:0 7px 7px 7px; padding:.8rem .9rem; overflow-x:auto;
+  font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-size:.8rem; line-height:1.6; }
+.lcap{ font-size:.74rem; color:var(--muted); margin-top:.4rem; font-style:italic; }
+figure.fig{ margin:1.2rem 0; text-align:center; }
+figure.fig svg{ max-width:100%; height:auto; }
+figcaption{ font-size:.76rem; color:var(--muted); margin-top:.5rem; }
+figcaption b{ color:#3f6b34; }
+.admonition{ border-radius:11px; padding:.7rem .9rem; margin:1rem 0; font-size:.92rem;
+  border:1px solid var(--rule); background:#f6f8f1; }
+.admonition-title{ font-weight:700; font-size:.72rem; letter-spacing:1px; text-transform:uppercase;
+  margin:0 0 .3rem; }
+.admonition.note{ background:var(--note-bg); border-color:#cfe3fb; }
+.admonition.note>.admonition-title{ color:var(--note); }
+.admonition.tip{ background:#f0faef; border-color:#cdeccd; }
+.admonition.tip>.admonition-title{ color:var(--tip); }
+.admonition.warning{ background:var(--warn-bg); border-color:#fcd9c2; }
+.admonition.warning>.admonition-title{ color:var(--warn); }
+.admonition.spring{ background:#f3fae9; border-color:#d4e9bd; }
+.admonition.spring>.admonition-title{ color:var(--green-deep); }
+.admonition.spring>.admonition-title::before{ content:"\1F33F  "; }
+.recap{ background:#f3fae9; border:1px solid #d4e9bd; border-radius:11px; padding:.9rem 1rem; margin:1.4rem 0; }
+.recap h3,.exercises h3{ margin-top:0; color:var(--green-deep); }
