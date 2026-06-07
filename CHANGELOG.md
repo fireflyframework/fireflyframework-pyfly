@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.27 (2026-06-07)
+
+### Added (web — central JSON serialization, the ObjectMapper equivalent)
+
+Spring-parity work, wave 4 (Jackson centralization). Pydantic remains the per-model
+engine; this adds what Spring centralizes and pyfly lacked — without cloning Jackson
+(no `@JsonView`, no Modules SPI, no `ObjectMapper` god-object, no codegen):
+
+- **Global JSON config** under `pyfly.web.json.*`, applied at one serialization
+  boundary: `property-naming-strategy` (`as-is`/`camelCase`), `by-alias`,
+  `exclude-none`, `exclude-defaults`, and `fail-on-unknown-properties`. Bound into a
+  `JsonProperties` bean.
+- **`JsonSerializers` registry** — register an encoder for a **non-Pydantic** arbitrary
+  type (e.g. a `Money` value object) so it serializes consistently everywhere
+  (provide a `JsonSerializers` bean to customize). The thing Pydantic can't express
+  per-model because the type isn't a model.
+- **Opt-in `CamelModel`** base — camelCase JSON I/O (accepts snake_case input). No
+  global `alias_generator` is injected into user models (that would break validation
+  aliases); use this base or the `by-alias` flag.
+- **`PyFlyJsonSerializer`** threads through the response path; `JsonProperties`,
+  `JsonSerializers`, `PyFlyJsonSerializer`, `CamelModel` are exported from `pyfly.web`.
+
+### Fixed
+
+- **Response serialization of nested/mixed structures.** `_to_json_data` only
+  normalized a single `BaseModel` or a list whose *first* element was one — a list of
+  dicts, a mixed/heterogeneous list, or a dict containing models/datetimes/UUIDs fell
+  through to `json.dumps` and could raise `TypeError`. The serializer now normalizes
+  recursively (models, dicts, lists, and common stdlib types).
+
+---
+
 ## v26.06.26 (2026-06-07)
 
 ### Added (DI — generics-aware injection)

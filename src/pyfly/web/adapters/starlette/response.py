@@ -17,10 +17,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
 from starlette.responses import JSONResponse, Response
 
 from pyfly.web.converters import dict_to_xml
+from pyfly.web.json import PyFlyJsonSerializer
+
+# Module-level default (as-is config). create_app stashes a config-driven serializer
+# on app.state and threads it in; this default applies when none is provided.
+_DEFAULT_SERIALIZER = PyFlyJsonSerializer()
 
 
 class XMLResponse(Response):
@@ -36,19 +40,22 @@ def _wants_xml(accept: str | None) -> bool:
     return "application/xml" in accept
 
 
-def _to_json_data(result: Any) -> Any:
-    """Normalize a handler result into a JSON-serializable value."""
-    if isinstance(result, BaseModel):
-        return result.model_dump(mode="json")
-    if isinstance(result, list) and result and isinstance(result[0], BaseModel):
-        return [item.model_dump(mode="json") for item in result]
-    return result
+def _to_json_data(result: Any, serializer: PyFlyJsonSerializer | None = None) -> Any:
+    """Normalize a handler result into a JSON-serializable value via the serializer.
+
+    Recursive normalization means a list of dicts, a mixed/heterogeneous list, or a
+    dict containing models/datetimes is handled — previously only a single model, or a
+    list whose first element was a model, was normalized; everything else hit
+    ``json.dumps`` and could raise ``TypeError``.
+    """
+    return (serializer or _DEFAULT_SERIALIZER).to_response_data(result)
 
 
 def handle_return_value(
     result: Any,
     status_code: int = 200,
     accept: str | None = None,
+    serializer: PyFlyJsonSerializer | None = None,
 ) -> Response:
     """Convert a handler's return value into a Starlette Response.
 
@@ -56,6 +63,9 @@ def handle_return_value(
     - ``Response`` -> passed through unchanged
     - ``BaseModel`` -> JSON (or XML when *accept* contains ``application/xml``)
     - ``dict``, ``list``, ``str``, etc. -> JSON (or XML)
+
+    *serializer* applies global ``pyfly.web.json.*`` config (camelCase / exclude-none /
+    custom type encoders); when omitted an as-is default is used.
     """
     if result is None:
         actual_status = status_code if status_code != 200 else 204
@@ -68,4 +78,4 @@ def handle_return_value(
         xml_body = dict_to_xml(result)
         return XMLResponse(content=xml_body, status_code=status_code)
 
-    return JSONResponse(_to_json_data(result), status_code=status_code)
+    return JSONResponse(_to_json_data(result, serializer), status_code=status_code)

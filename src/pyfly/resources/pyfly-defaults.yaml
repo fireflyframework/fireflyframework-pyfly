@@ -18,6 +18,17 @@ pyfly:
     debug: false
     docs:
       enabled: true
+    # Global JSON (de)serialization config — the ObjectMapper-equivalent.
+    # Per-model behavior stays with Pydantic; these are app-wide toggles.
+    json:
+      property-naming-strategy: as-is   # as-is | camelCase (camelCase implies by-alias on output)
+      by-alias: false
+      exclude-none: false
+      exclude-defaults: false
+      fail-on-unknown-properties: false
+    # RFC 7807 application/problem+json error responses (opt-in; Spring Boot 3 parity).
+    problem-details:
+      enabled: false
     actuator:
       # Legacy alias retained for back-compat; see pyfly.management.* below.
       enabled: true

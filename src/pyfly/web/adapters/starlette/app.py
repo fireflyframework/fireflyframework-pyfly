@@ -514,4 +514,17 @@ def create_app(
     )
     app.add_exception_handler(Exception, global_exception_handler)
 
+    # Central JSON serializer (the ObjectMapper-equivalent): global pyfly.web.json.*
+    # config + an optional user-provided JsonSerializers registry bean for custom types.
+    from pyfly.web.json import JsonSerializers, PyFlyJsonSerializer, json_properties_from_config
+
+    json_props = json_properties_from_config(context.config) if context is not None else None
+    json_registry = JsonSerializers()
+    if context is not None:
+        try:
+            json_registry = context.get_bean(JsonSerializers)
+        except Exception:  # noqa: BLE001 - registry bean is optional; default when absent
+            json_registry = JsonSerializers()
+    app.state.pyfly_json_serializer = PyFlyJsonSerializer(json_props, json_registry)
+
     return app

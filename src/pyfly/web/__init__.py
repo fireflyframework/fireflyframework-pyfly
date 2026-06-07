@@ -24,6 +24,7 @@ from pyfly.container.stereotypes import controller_advice
 from pyfly.web.cors import CORSConfig
 from pyfly.web.exception_handler import exception_handler
 from pyfly.web.filters import OncePerRequestFilter
+from pyfly.web.json import CamelModel, JsonProperties, JsonSerializers, PyFlyJsonSerializer
 from pyfly.web.mappings import (
     delete_mapping,
     get_mapping,
@@ -40,6 +41,10 @@ from pyfly.web.sse import sse_mapping
 __all__ = [
     "Body",
     "CORSConfig",
+    "CamelModel",
+    "JsonProperties",
+    "JsonSerializers",
+    "PyFlyJsonSerializer",
     "controller_advice",
     "Cookie",
     "File",
