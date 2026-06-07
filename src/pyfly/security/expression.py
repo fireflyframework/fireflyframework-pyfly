@@ -36,9 +36,38 @@ from typing import Any
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
+from pyfly.security.role_hierarchy import RoleHierarchy
 
 _PARAM_RE = re.compile(r"#(\w+)")
 _PARAM_PREFIX = "_pyfly_arg_"
+
+# Process-wide role hierarchy consulted by hasRole/hasAnyRole/hasAuthority (Spring's
+# RoleHierarchy bean). Configure once at startup via set_role_hierarchy().
+_active_hierarchy: RoleHierarchy | None = None
+
+
+def set_role_hierarchy(hierarchy: RoleHierarchy | None) -> None:
+    """Install the role hierarchy used by method-security role checks (``None`` disables)."""
+    global _active_hierarchy
+    _active_hierarchy = hierarchy
+
+
+def get_role_hierarchy() -> RoleHierarchy | None:
+    """Return the currently installed role hierarchy, if any."""
+    return _active_hierarchy
+
+
+def _effective_roles(ctx: SecurityContext) -> set[str]:
+    """The principal's roles, expanded through the active hierarchy when one is set."""
+    if _active_hierarchy is None:
+        return set(ctx.roles)
+    return _active_hierarchy.expand(ctx.roles)
+
+
+def _has_role(ctx: SecurityContext, role: Any) -> bool:
+    name = str(role)
+    return ctx.has_role(name) if _active_hierarchy is None else name in _effective_roles(ctx)
+
 
 _CMP_OPS: dict[type, Callable[[Any, Any], bool]] = {
     ast.Eq: operator.eq,
@@ -70,7 +99,7 @@ class _BoolFn:
 
 def _has_authority(ctx: SecurityContext, authority: Any) -> bool:
     name = str(authority)
-    return ctx.has_role(name) or ctx.has_permission(name)
+    return _has_role(ctx, name) or ctx.has_permission(name)
 
 
 def _build_namespace(ctx: SecurityContext, args: dict[str, Any] | None, return_object: Any) -> dict[str, Any]:
@@ -87,8 +116,8 @@ def _build_namespace(ctx: SecurityContext, args: dict[str, Any] | None, return_o
         "denyAll": _BoolFn(lambda: False),
         "isAuthenticated": _BoolFn(lambda: ctx.is_authenticated),
         "isAnonymous": _BoolFn(lambda: not ctx.is_authenticated),
-        "hasRole": _BoolFn(lambda role: ctx.has_role(str(role))),
-        "hasAnyRole": _BoolFn(lambda *roles: ctx.has_any_role([str(r) for r in roles])),
+        "hasRole": _BoolFn(lambda role: _has_role(ctx, role)),
+        "hasAnyRole": _BoolFn(lambda *roles: any(_has_role(ctx, r) for r in roles)),
         "hasAuthority": _BoolFn(lambda authority: _has_authority(ctx, authority)),
         "hasAnyAuthority": _BoolFn(lambda *auths: any(_has_authority(ctx, a) for a in auths)),
         # 1-arg hasPermission(perm) or 2-arg hasPermission(target, perm) — the last

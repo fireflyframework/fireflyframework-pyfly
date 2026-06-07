@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.45 (2026-06-07)
+
+### Added (security — role hierarchy)
+
+- **`RoleHierarchy`** (`pyfly.security`) — declare `ADMIN > MANAGER`, `MANAGER > USER` so a
+  higher role implies every authority of the lower ones (Spring Security's `RoleHierarchy`).
+  `RoleHierarchy.from_string(...)` parses `HIGHER > LOWER` rules; `.expand(roles)` returns the
+  transitive closure.
+- **`set_role_hierarchy(...)` / `get_role_hierarchy()`** install the process-wide hierarchy
+  consulted by `hasRole` / `hasAnyRole` / `hasAuthority` in all method-security expressions
+  (`@pre_authorize` / `@post_authorize` / `@secure`). With no hierarchy set, behavior is
+  unchanged (no implicit roles).
+
 ## v26.06.44 (2026-06-07)
 
 ### Added (scheduling — @scheduled time zones)
