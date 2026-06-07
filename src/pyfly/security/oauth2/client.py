@@ -39,6 +39,9 @@ class ClientRegistration:
     jwks_uri: str = ""
     issuer_uri: str = ""
     provider_name: str = ""
+    # Enable PKCE (RFC 7636, S256) on the authorization_code flow. Recommended for public
+    # clients (no client_secret); harmless and more secure for confidential clients too.
+    use_pkce: bool = False
 
 
 # ---------------------------------------------------------------------------

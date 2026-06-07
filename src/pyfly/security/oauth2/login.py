@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import secrets
 from typing import Any
@@ -32,8 +34,17 @@ logger = logging.getLogger(__name__)
 
 _OAUTH2_STATE_KEY = "oauth2_state"
 _OAUTH2_NONCE_KEY = "oauth2_nonce"
+_OAUTH2_PKCE_VERIFIER_KEY = "oauth2_pkce_verifier"
 _SECURITY_CONTEXT_KEY = "SECURITY_CONTEXT"
 _REDIRECT_URI_KEY = "oauth2_redirect_uri"
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """Return a (code_verifier, code_challenge) pair for PKCE S256 (RFC 7636)."""
+    verifier = secrets.token_urlsafe(64)  # 43–128 unreserved chars
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 class OAuth2LoginHandler:
@@ -93,6 +104,12 @@ class OAuth2LoginHandler:
             "state": state,
             "nonce": nonce,
         }
+        # PKCE (RFC 7636): stash the verifier in the session, send only the S256 challenge.
+        if getattr(registration, "use_pkce", False):
+            verifier, challenge = _generate_pkce()
+            session.set_attribute(_OAUTH2_PKCE_VERIFIER_KEY, verifier)
+            params["code_challenge"] = challenge
+            params["code_challenge_method"] = "S256"
         authorization_url = f"{registration.authorization_uri}?{urlencode(params)}"
 
         logger.debug("Redirecting to OAuth2 provider: %s", registration.provider_name or registration_id)
@@ -146,8 +163,14 @@ class OAuth2LoginHandler:
                 status_code=400,
             )
 
+        # PKCE: retrieve and consume the one-time verifier stashed at authorization time.
+        code_verifier = None
+        if getattr(registration, "use_pkce", False):
+            code_verifier = session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+            session.remove_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+
         # Exchange authorization code for tokens
-        token_response = await self._exchange_code(registration, code)
+        token_response = await self._exchange_code(registration, code, code_verifier)
         access_token = token_response.get("access_token")
         if not access_token:
             logger.error("Token exchange did not return an access_token for %s", registration_id)
@@ -210,7 +233,7 @@ class OAuth2LoginHandler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _exchange_code(self, registration: Any, code: str) -> dict[str, Any]:
+    async def _exchange_code(self, registration: Any, code: str, code_verifier: str | None = None) -> dict[str, Any]:
         """Exchange an authorization code for tokens via the token endpoint."""
         data = {
             "grant_type": "authorization_code",
@@ -219,6 +242,8 @@ class OAuth2LoginHandler:
             "client_id": registration.client_id,
             "client_secret": registration.client_secret,
         }
+        if code_verifier:  # PKCE proof of possession
+            data["code_verifier"] = code_verifier
 
         import httpx
 
