@@ -172,6 +172,43 @@ class Container:
         if bean_name:
             self._named[bean_name] = reg
 
+    # ------------------------------------------------------------------
+    # Public introspection / registration SPI
+    # ------------------------------------------------------------------
+
+    def register_instance(self, cls: type, instance: Any, *, name: str = "") -> None:
+        """Register an already-constructed object as a SINGLETON bean.
+
+        The supported way to install a pre-built instance (Spring's
+        ``registerSingleton``) — preferred over mutating registration internals.
+        """
+        self.register(cls, scope=Scope.SINGLETON, name=name)
+        self._registrations[cls].instance = instance
+
+    def contains_type(self, cls: type) -> bool:
+        """Whether a bean registered under exactly *cls* exists."""
+        return cls in self._registrations
+
+    def get_registration(self, cls: type) -> Registration | None:
+        """Return the :class:`Registration` for *cls*, or ``None`` if unregistered."""
+        return self._registrations.get(cls)
+
+    def registered_types(self) -> list[type]:
+        """Snapshot of all registered bean types."""
+        return list(self._registrations)
+
+    def reset_instance(self, cls: type) -> Any | None:
+        """Drop the cached SINGLETON instance of *cls* so it is rebuilt on next resolve.
+
+        Returns the evicted instance (or ``None``). Used by refresh/config-reload to force
+        re-creation without reaching into registration internals.
+        """
+        reg = self._registrations.get(cls)
+        if reg is None:
+            return None
+        previous, reg.instance = reg.instance, None
+        return previous
+
     def bind(self, interface: type, implementation: type) -> None:
         """Bind an interface/base class to a concrete implementation."""
         if interface not in self._bindings:

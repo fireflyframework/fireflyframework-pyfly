@@ -48,8 +48,9 @@ class ContextRefresher:
         # Reset @config_properties singletons so they re-bind from the live Config on next
         # resolution (their factory is ``lambda: config.bind(cls)`` — see
         # ApplicationContext._bind_config_properties).
-        for cls, reg in list(self._container._registrations.items()):
-            if hasattr(cls, "__pyfly_config_prefix__") and reg.factory is not None:
-                reg.instance = None
+        for cls in self._container.registered_types():
+            reg = self._container.get_registration(cls)
+            if reg is not None and hasattr(cls, "__pyfly_config_prefix__") and reg.factory is not None:
+                self._container.reset_instance(cls)
         await self._event_bus.publish(RefreshScopeRefreshedEvent(evicted))
         return evicted

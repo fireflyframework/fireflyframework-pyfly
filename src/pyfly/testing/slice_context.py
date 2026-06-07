@@ -57,8 +57,7 @@ async def _build_slice(
                 context.container.bind(interface, impl)
         else:
             # A pre-built instance / mock: install it directly under the interface.
-            context.container.register(interface, scope=Scope.SINGLETON)
-            context.container._registrations[interface].instance = impl
+            context.container.register_instance(interface, impl)
     await context.start()
     # Fail fast: resolve each slice bean now so a missing collaborator surfaces at build
     # time (matching Spring slice startup) rather than silently on first use.
