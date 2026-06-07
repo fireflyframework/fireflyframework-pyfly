@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 13 opener: Caching and resilience — Sparky beside a Cache chip in front of a Service box plus a small shield icon for resilience"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <!-- ── Sparky (left) ── -->
+  <ellipse cx="160" cy="242" rx="52" ry="10" fill="#b8d9a0" opacity="0.6"/>
+
+  <path d="M170 230 C 90 220 95 160 130 148 C 165 136 168 100 148 78"
+        fill="none" stroke="#5fd13a" stroke-width="22" stroke-linecap="round"/>
+  <path d="M168 232 C 185 238 200 228 190 218"
+        fill="none" stroke="#5fd13a" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <ellipse cx="148" cy="68" rx="28" ry="24" fill="#67d642" stroke="#2f7d1c" stroke-width="3"/>
+  <circle cx="138" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="158" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="139.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="159.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="140.5" cy="59.5" r="1" fill="#fff"/>
+  <circle cx="160.5" cy="59.5" r="1" fill="#fff"/>
+  <path d="M140 76 Q 148 83 156 76" stroke="#1c5512" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M148 80 L 148 86 M 145 86 L 148 86 L 151 86"
+        stroke="#e8334a" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+  <!-- Divider -->
+  <line x1="300" y1="30" x2="300" y2="250" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,6"/>
+
+  <!-- ── Cache + resilience diagram ── -->
+  <defs>
+    <filter id="ch13-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch13-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Cache chip (pill, fast lane) -->
+  <rect x="340" y="112" width="90" height="48" rx="24" ry="24"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch13-shadow)"/>
+  <text x="385" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="12" font-weight="700">Cache</text>
+  <text x="385" y="148" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">fast lane</text>
+
+  <!-- Arrow: Cache → Service -->
+  <line x1="430" y1="136" x2="486" y2="136"
+        stroke="#43b02a" stroke-width="2"
+        marker-end="url(#ch13-arrow)"/>
+
+  <!-- Service box -->
+  <rect x="488" y="110" width="110" height="52" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch13-shadow)"/>
+  <rect x="488" y="110" width="110" height="22" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="488" y="122" width="110" height="10" fill="#43b02a"/>
+  <text x="543" y="121" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">Service</text>
+  <text x="543" y="148" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">business logic</text>
+
+  <!-- Shield icon (resilience) -->
+  <!-- Shield body -->
+  <path d="M636 100 C 636 100 624 104 624 116 C 624 128 632 136 636 138 C 640 136 648 128 648 116 C 648 104 636 100 636 100 Z"
+        fill="#ffc24b" stroke="#e0a030" stroke-width="1.5"/>
+  <!-- Shield check mark -->
+  <polyline points="630,117 634,121 642,112"
+            fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Shield label -->
+  <text x="636" y="150" text-anchor="middle"
+        fill="#23402a" font-size="9" font-weight="600">resilience</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(680, 90)">
+    <path d="M0,-7 L1.7,-1.7 L7,0 L1.7,1.7 L0,7 L-1.7,1.7 L-7,0 L-1.7,-1.7 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>

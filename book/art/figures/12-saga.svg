@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 340"
+     role="img" aria-label="Saga orchestrator figure: forward flow Debit Wallet to Capture Payment to Notify (green), failure at Capture Payment (red X), compensation flow Refund Wallet arrow pointing left (amber/red dashed)"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="340" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="saga-shadow" x="-10%" y="-10%" width="126%" height="126%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="saga-arrow-forward" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <marker id="saga-arrow-comp" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d9534f"/>
+    </marker>
+    <marker id="saga-arrow-comp-left" markerWidth="10" markerHeight="7"
+            refX="1" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#d9534f"/>
+    </marker>
+  </defs>
+
+  <!-- Lane labels -->
+  <text x="14" y="28" dominant-baseline="middle"
+        fill="#43b02a" font-size="12" font-weight="700">forward</text>
+  <text x="14" y="242" dominant-baseline="middle"
+        fill="#d9534f" font-size="12" font-weight="700">compensation (undo)</text>
+
+  <!-- Lane separator -->
+  <line x1="0" y1="200" x2="720" y2="200" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="8,5"/>
+
+  <!-- ── Orchestrator box (left, spans both lanes) ── -->
+  <rect x="28" y="90" width="120" height="60" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#saga-shadow)"/>
+  <rect x="28" y="90" width="120" height="24" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="28" y="102" width="120" height="12" fill="#43b02a"/>
+  <text x="88" y="102" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="12" font-weight="700">Orchestrator</text>
+  <text x="88" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">saga engine</text>
+
+  <!-- Orchestrator → Step 1 -->
+  <line x1="148" y1="120" x2="190" y2="120"
+        stroke="#43b02a" stroke-width="2"
+        marker-end="url(#saga-arrow-forward)"/>
+
+  <!-- ── Step 1: Debit Wallet ── -->
+  <rect x="192" y="92" width="130" height="56" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#saga-shadow)"/>
+  <rect x="192" y="92" width="130" height="22" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="192" y="104" width="130" height="10" fill="#43b02a"/>
+  <text x="257" y="103" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">Debit Wallet</text>
+  <text x="257" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">reserve funds</text>
+
+  <!-- Step 1 → Step 2 -->
+  <line x1="322" y1="120" x2="362" y2="120"
+        stroke="#43b02a" stroke-width="2"
+        marker-end="url(#saga-arrow-forward)"/>
+
+  <!-- ── Step 2: Capture Payment (with failure X) ── -->
+  <rect x="364" y="92" width="130" height="56" rx="10" ry="10"
+        fill="#ffffff" stroke="#d9534f" stroke-width="2.5" filter="url(#saga-shadow)"/>
+  <rect x="364" y="92" width="130" height="22" rx="10" ry="10" fill="#d9534f"/>
+  <rect x="364" y="104" width="130" height="10" fill="#d9534f"/>
+  <text x="429" y="103" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">Capture Payment</text>
+  <text x="429" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">payment gateway</text>
+
+  <!-- Red X failure mark -->
+  <circle cx="429" cy="70" r="14" fill="#d9534f" opacity="0.15"/>
+  <line x1="421" y1="62" x2="437" y2="78" stroke="#d9534f" stroke-width="3" stroke-linecap="round"/>
+  <line x1="437" y1="62" x2="421" y2="78" stroke="#d9534f" stroke-width="3" stroke-linecap="round"/>
+  <text x="429" y="54" text-anchor="middle"
+        fill="#d9534f" font-size="9" font-weight="700">FAIL</text>
+
+  <!-- Step 2 → Step 3 (greyed out — not reached) -->
+  <line x1="494" y1="120" x2="534" y2="120"
+        stroke="#b8d9a0" stroke-width="2" stroke-dasharray="5,4"/>
+
+  <!-- ── Step 3: Notify (not reached) ── -->
+  <rect x="536" y="92" width="120" height="56" rx="10" ry="10"
+        fill="#f5f5f5" stroke="#b8d9a0" stroke-width="2"/>
+  <rect x="536" y="92" width="120" height="22" rx="10" ry="10" fill="#b8d9a0"/>
+  <rect x="536" y="104" width="120" height="10" fill="#b8d9a0"/>
+  <text x="596" y="103" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">Notify</text>
+  <text x="596" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">not reached</text>
+
+  <!-- ── Compensation lane ── -->
+  <!-- Vertical drop from Capture Payment to comp lane -->
+  <line x1="429" y1="148" x2="429" y2="218"
+        stroke="#d9534f" stroke-width="2" stroke-dasharray="5,4"/>
+
+  <!-- Compensation arrow: right-to-left -->
+  <line x1="428" y1="258" x2="258" y2="258"
+        stroke="#d9534f" stroke-width="2.5" stroke-dasharray="7,4"
+        marker-end="url(#saga-arrow-comp-left)"/>
+
+  <!-- ── Refund Wallet (compensation step) ── -->
+  <rect x="192" y="232" width="130" height="52" rx="10" ry="10"
+        fill="#fff5f5" stroke="#d9534f" stroke-width="2.5" filter="url(#saga-shadow)"/>
+  <rect x="192" y="232" width="130" height="22" rx="10" ry="10" fill="#d9534f"/>
+  <rect x="192" y="244" width="130" height="10" fill="#d9534f"/>
+  <text x="257" y="243" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">Refund Wallet</text>
+  <text x="257" y="269" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">release reserved funds</text>
+
+  <!-- Refund Wallet → Orchestrator (back) -->
+  <line x1="192" y1="258" x2="148" y2="150"
+        stroke="#d9534f" stroke-width="1.8" stroke-dasharray="5,4"
+        marker-end="url(#saga-arrow-comp)"/>
+
+  <!-- Comp label on the line between comp boxes -->
+  <text x="390" y="248" text-anchor="middle"
+        fill="#d9534f" font-size="9.5" font-style="italic">← compensate</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(680, 50)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>
