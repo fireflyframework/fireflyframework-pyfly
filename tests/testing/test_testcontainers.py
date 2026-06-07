@@ -23,9 +23,9 @@ from __future__ import annotations
 import pytest
 
 from pyfly.testing.testcontainers import (
+    _load,
     _nest,
     is_docker_available,
-    postgres_container,
     pyfly_config,
     pyfly_config_for,
     requires_docker,
@@ -101,13 +101,19 @@ def test_is_docker_available_returns_bool() -> None:
     assert isinstance(is_docker_available(), bool)
 
 
-def test_factory_without_extra_raises_clear_error() -> None:
-    # The testcontainers extra is not a dev dependency, so this surfaces the install hint.
+def test_load_missing_module_raises_clear_install_hint() -> None:
+    # _load surfaces the extra/install hint when a backing module is unavailable —
+    # independent of whether the testcontainers extra happens to be installed.
     with pytest.raises(RuntimeError, match=r"pyfly\[testcontainers\]"):
-        postgres_container()
+        _load("testcontainers._pyfly_nonexistent_module", "Nope")
 
 
-@requires_docker
-def test_skipped_cleanly_without_docker() -> None:
-    # Proves @requires_docker skips when Docker is unavailable (this body must not run then).
-    raise AssertionError("this test should be skipped when Docker is unavailable")
+def test_requires_docker_applies_skipif_mark() -> None:
+    # Robust across environments (Docker present or not): the decorator must attach a
+    # skipif mark so the test skips wherever Docker is unavailable.
+    @requires_docker
+    def dummy() -> None:
+        pass
+
+    marks = getattr(dummy, "pytestmark", [])
+    assert any(getattr(mark, "name", "") == "skipif" for mark in marks)
