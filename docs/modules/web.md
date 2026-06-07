@@ -696,8 +696,8 @@ PyFly automatically converts handler return values into HTTP responses using the
 |-------------------------|-------------------------------------------------|
 | `None`                  | 204 No Content (unless `status_code` explicitly set) |
 | `Response` (Starlette)  | Passed through unchanged                        |
-| `BaseModel` (Pydantic)  | JSON via `model_dump(mode="json")`               |
-| `dict`, `list`, `str`   | JSON response                                   |
+| `BaseModel` (Pydantic)  | JSON (or XML via `Accept`) through the message-converter chain |
+| `dict`, `list`, `str`   | JSON (or XML via `Accept`)                      |
 
 Examples:
 
@@ -718,13 +718,16 @@ async def get_order(self, id: PathVar[str]) -> OrderResponse:
 
 ### handle_return_value()
 
-The `handle_return_value(result, status_code=200, accept=None)` function is the core of response conversion. It is called by the `ControllerRegistrar` after each handler invocation. The optional `accept` parameter allows content negotiation — when `accept` contains `"application/xml"`, the result is serialized as XML instead of JSON.
+The `handle_return_value(result, status_code=200, accept=None, converters=None)` function is the core of response conversion, called per request after each handler invocation. Content negotiation runs through the message-converter chain (see [HttpMessageConverter Chain](#httpmessageconverter-chain)): the `accept` header selects the converter (q-value ordered — JSON or XML by default), and `converters` is the app's `MessageConverterRegistry` (carrying the global `pyfly.web.json.*` config and any custom converters). When omitted, a default JSON+XML registry is used.
 
 ```python
 from pyfly.web.adapters.starlette.response import handle_return_value
 
-response = handle_return_value({"key": "value"}, status_code=200)
-# -> JSONResponse({"key": "value"}, status_code=200)
+response = handle_return_value({"key": "value"})
+# -> Response(b'{"key": "value"}', media_type="application/json")
+
+response = handle_return_value(order, accept="application/xml")
+# -> Response(b"<response>...</response>", media_type="application/xml")
 
 response = handle_return_value(None)
 # -> Response(status_code=204)
