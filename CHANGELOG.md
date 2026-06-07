@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.29 (2026-06-07)
+
+### Added (data — read/write datasource routing)
+
+Wave 4 — the Spring `AbstractRoutingDataSource` equivalent.
+
+- **`RoutingSessionFactory`** (`pyfly.data.relational`) routes to a read-replica
+  inside a `read_only()` block and to the primary otherwise — selecting by a context
+  "lookup key" (the `read_only` contextvar), like `@Transactional(readOnly = true)`.
+- **Opt-in via config**: set `pyfly.data.relational.read-replica.url` to enable a
+  replica; with none configured the factory always uses the primary (no behavior
+  change). Wired as the `routing_session_factory` bean in `RelationalAutoConfiguration`.
+- `read_only()` (context manager, nestable), `is_read_only()`, and
+  `RoutingSessionFactory` (`.primary()` / `.replica()` explicit accessors) exported
+  from `pyfly.data.relational`.
+
+---
+
 ## v26.06.28 (2026-06-07)
 
 ### Added (web — HTTP message converters / content negotiation, the `HttpMessageConverter` chain)
