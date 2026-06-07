@@ -1981,7 +1981,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.6.42"
+version = "26.6.43"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
