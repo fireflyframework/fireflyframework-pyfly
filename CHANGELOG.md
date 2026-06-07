@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.49 (2026-06-07)
+
+### Added (context — @ConditionalOnSingleCandidate)
+
+- **`@conditional_on_single_candidate(bean_type)`** — register the bean only when exactly one
+  candidate assignable to *bean_type* exists, or when several exist but exactly one is
+  `@primary` (Spring Boot's `@ConditionalOnSingleCandidate`). Evaluated in pass 2 and purely
+  type/registration-based (never resolves or instantiates a bean). Interface-alias
+  registrations are deduped so one implementation of an interface counts once, not twice.
+
 ## v26.06.48 (2026-06-07)
 
 ### Added (data — multiple named datasources)

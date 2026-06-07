@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Condition types that depend on the bean registry (must be evaluated in pass 2).
-_BEAN_DEPENDENT_TYPES = frozenset({"on_bean", "on_missing_bean"})
+_BEAN_DEPENDENT_TYPES = frozenset({"on_bean", "on_missing_bean", "on_single_candidate"})
 
 
 class ConditionEvaluator:
@@ -100,6 +100,8 @@ class ConditionEvaluator:
             result = self._eval_on_missing_bean(cond, declaring_cls)
         elif cond_type == "on_bean":
             result = self._eval_on_bean(cond, declaring_cls)
+        elif cond_type == "on_single_candidate":
+            result = self._eval_on_single_candidate(cond, declaring_cls)
         else:
             logger.warning(
                 "unknown_condition_type",
@@ -160,3 +162,59 @@ class ConditionEvaluator:
                 # support issubclass().  Fall back to identity check only.
                 pass
         return False
+
+    def _eval_on_single_candidate(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
+        """Spring @ConditionalOnSingleCandidate: match on exactly one candidate, or on a
+        unique @primary among several."""
+        groups = self._candidate_bean_groups(cond["bean_type"], exclude=declaring_cls)
+        if len(groups) == 1:
+            return True
+        if len(groups) > 1:
+            primary_groups = sum(1 for regs in groups.values() if any(self._is_primary(cls, reg) for cls, reg in regs))
+            return primary_groups == 1
+        return False
+
+    def _candidate_bean_groups(self, bean_type: type, *, exclude: type | None = None) -> dict[Any, list[Any]]:
+        """Group registrations assignable to *bean_type* by distinct bean identity.
+
+        Type-only (never resolves instances). Registrations are keyed by their shared
+        factory/instance, so an ``@bean``'s interface-alias registration collapses onto its
+        concrete one (one impl of an interface counts ONCE). Genuinely distinct beans — e.g.
+        a concrete base class AND a registered subclass, where the base is also a ``_bindings``
+        key — each retain their own identity and count separately.
+        """
+        container = self._container
+        groups: dict[Any, list[Any]] = {}
+        seen: set[type] = set()
+
+        def _consider(cls: type) -> None:
+            if cls is exclude or cls in seen:
+                return
+            reg = container._registrations.get(cls)
+            if reg is None:
+                return
+            seen.add(cls)
+            if reg.factory is not None:
+                key: Any = ("factory", id(reg.factory))
+            elif reg.instance is not None:
+                key = ("instance", id(reg.instance))
+            else:
+                key = ("type", cls)
+            groups.setdefault(key, []).append((cls, reg))
+
+        for impl in container._bindings.get(bean_type, []):
+            _consider(impl)
+        for cls in list(container._registrations):
+            if cls is exclude:
+                continue
+            try:
+                if cls is bean_type or issubclass(cls, bean_type):
+                    _consider(cls)
+            except TypeError:
+                # Protocol with non-method members: rely on explicit bindings only.
+                pass
+        return groups
+
+    def _is_primary(self, cls: type, reg: Any) -> bool:
+        """Whether this candidate is primary (class @primary or @bean(primary=True))."""
+        return bool(getattr(cls, "__pyfly_primary__", False) or reg.primary)
