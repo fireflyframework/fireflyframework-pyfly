@@ -30,12 +30,18 @@ event-driven tests for PyFly applications.
 7. [PyFlyTestClient](#pyflytestclient)
    - [TestResponse](#testresponse)
    - [Fluent Assertion Methods](#fluent-assertion-methods)
-8. [Testing Patterns](#testing-patterns)
+8. [Testcontainers (Docker-backed integration tests)](#testcontainers-docker-backed-integration-tests)
+   - [Installation](#installation)
+   - [Container Factories](#container-factories)
+   - [Wiring Connections into Config](#wiring-connections-into-config)
+   - [Graceful Skip Without Docker](#graceful-skip-without-docker)
+   - [Runnable Example](#runnable-example)
+9. [Testing Patterns](#testing-patterns)
    - [Unit Testing Services](#unit-testing-services)
    - [Integration Testing with In-Memory Adapters](#integration-testing-with-in-memory-adapters)
    - [Testing Controllers](#testing-controllers)
    - [Testing Event Handlers](#testing-event-handlers)
-9. [Complete Example](#complete-example)
+10. [Complete Example](#complete-example)
 
 ---
 
@@ -718,6 +724,172 @@ class TestItemsAPI:
 ```
 
 **Source:** `src/pyfly/testing/client.py`
+
+---
+
+## Testcontainers (Docker-backed integration tests)
+
+When in-memory adapters are not enough, PyFly's Testcontainers helpers spin up a **real**
+Postgres, MySQL, Redis, MongoDB, or Kafka in Docker for the duration of a test, then wire
+the container's connection details straight into pyfly config keys. This is the equivalent
+of Spring Boot's `@Testcontainers` plus `@ServiceConnection`.
+
+```python
+from pyfly.testing import (
+    postgres_container, mysql_container, redis_container,
+    mongodb_container, kafka_container,
+    pyfly_config, pyfly_config_for,
+    is_docker_available, requires_docker,
+)
+```
+
+### Installation
+
+The helpers require the optional `testcontainers` extra and a running Docker daemon:
+
+```bash
+pip install 'pyfly[testcontainers]'
+```
+
+The extra pulls in `testcontainers>=4.0.0`. The container factories also need the backing
+`testcontainers` submodule for the engine you use (e.g. `testcontainers.postgres`); if a
+factory is called without it installed, it raises a `RuntimeError` whose message points you
+back at `pip install 'pyfly[testcontainers]'`.
+
+### Container Factories
+
+Each factory returns an unstarted `testcontainers` container — start it with a `with`
+block (it is stopped automatically on exit). Pass a custom image as the first argument and
+any extra keyword arguments through to the underlying container.
+
+| Factory | Default image | Returns |
+|---|---|---|
+| `postgres_container(image="postgres:16-alpine", **kwargs)` | `postgres:16-alpine` | `PostgresContainer` |
+| `mysql_container(image="mysql:8", **kwargs)` | `mysql:8` | `MySqlContainer` |
+| `redis_container(image="redis:7-alpine", **kwargs)` | `redis:7-alpine` | `RedisContainer` |
+| `mongodb_container(image="mongo:7", **kwargs)` | `mongo:7` | `MongoDbContainer` |
+| `kafka_container(image="confluentinc/cp-kafka:7.6.0", **kwargs)` | `confluentinc/cp-kafka:7.6.0` | `KafkaContainer` |
+
+```python
+with postgres_container() as pg:
+    ...  # pg is started here; stopped when the block exits
+```
+
+### Wiring Connections into Config
+
+Once a container is started, map it to pyfly config without copying URLs by hand — the
+`@ServiceConnection`-style helpers do it for you.
+
+**`pyfly_config_for(container)`** returns a flat dict of dotted config overrides for a
+single started container, and raises `ValueError` for an unmapped container type:
+
+| Container | Config keys produced |
+|---|---|
+| Postgres | `pyfly.data.relational.url` (rewritten to the `postgresql+asyncpg://` async driver) |
+| MySQL | `pyfly.data.relational.url` (rewritten to the `mysql+aiomysql://` async driver) |
+| Redis | `pyfly.cache.redis.url` **and** `pyfly.session.redis.url` (both `redis://host:port/0`) |
+| MongoDB | `pyfly.data.document.uri` |
+| Kafka | `pyfly.eda.kafka.bootstrap-servers` |
+
+The Postgres/MySQL mappings deliberately swap the container's sync driver URL for pyfly's
+async driver, so the resulting URL is ready to hand to the reactive data layer.
+
+**`pyfly_config(*containers, base=None)`** is the one-call setup for an integration
+`ApplicationContext`: it merges `pyfly_config_for(...)` for every started container (plus an
+optional `base` dict of flat overrides) and returns a nested `Config`:
+
+```python
+from pyfly.testing import pyfly_config
+
+with postgres_container() as pg, redis_container() as redis:
+    config = pyfly_config(
+        pg,
+        redis,
+        base={"pyfly.data.enabled": True},
+    )
+    config.get("pyfly.data.relational.url")  # postgresql+asyncpg://...
+    config.get("pyfly.cache.redis.url")      # redis://127.0.0.1:.../0
+```
+
+### Graceful Skip Without Docker
+
+So a test suite stays green on machines without Docker (e.g. some CI runners), guard the
+integration tests:
+
+- **`is_docker_available() -> bool`** — `True` only when the `docker` package is importable
+  *and* a daemon answers `ping()`. Any connectivity failure returns `False`.
+- **`@requires_docker`** — a `pytest` decorator that attaches a `skipif` mark; the test is
+  skipped (not failed) wherever Docker is unavailable.
+
+```python
+from pyfly.testing import is_docker_available, requires_docker
+
+# Decorator form — skips cleanly when Docker is down or the extra is missing
+@requires_docker
+def test_against_real_postgres():
+    ...
+
+# Programmatic form — branch on availability yourself
+if is_docker_available():
+    ...
+```
+
+### Runnable Example
+
+A complete integration test: start Postgres and Redis, build the pyfly `Config` from them,
+boot an `ApplicationContext`, and exercise the wired beans — skipped automatically when
+Docker is not present.
+
+```python
+"""tests/integration/test_orders_integration.py"""
+
+from pyfly.context import ApplicationContext
+from pyfly.testing import (
+    postgres_container,
+    redis_container,
+    pyfly_config,
+    requires_docker,
+)
+
+
+@requires_docker
+async def test_orders_persist_against_real_infra():
+    # Spin up real Docker-backed services for the test's lifetime.
+    with postgres_container() as pg, redis_container() as redis:
+        # Wire their connection details straight into pyfly config keys.
+        config = pyfly_config(
+            pg,
+            redis,
+            base={
+                "pyfly.data.enabled": True,
+                "pyfly.cache.enabled": True,
+                "pyfly.cache.provider": "redis",
+            },
+        )
+
+        # The async Postgres URL and Redis URL are now in the config.
+        assert config.get("pyfly.data.relational.url").startswith(
+            "postgresql+asyncpg://"
+        )
+        assert config.get("pyfly.cache.redis.url").startswith("redis://")
+
+        # Boot an ApplicationContext bound to the real infrastructure.
+        context = ApplicationContext(config)
+        await context.start()
+        try:
+            # ... resolve repositories/services and assert real round-trips ...
+            ...
+        finally:
+            await context.stop()
+```
+
+Run only the Docker-backed tests (and let them skip if Docker is absent):
+
+```bash
+pytest tests/integration -v
+```
+
+**Source:** `src/pyfly/testing/testcontainers.py`
 
 ---
 

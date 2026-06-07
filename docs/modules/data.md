@@ -39,6 +39,8 @@
   - [Transformers](#transformers)
   - [Excluding Fields](#excluding-fields)
   - [Mapping Lists](#mapping-lists)
+  - [Nested Models & Collections](#nested-models--collections)
+  - [Declarative Mapping with @mapping](#declarative-mapping-with-mapping)
   - [add\_mapping() Reference](#add_mapping-reference)
 - [Projections](#projections)
   - [@projection Decorator](#projection-decorator)
@@ -530,7 +532,11 @@ Source files:
 
 ## Entity Mapping
 
-The `Mapper` class provides type-to-type mapping between entities and DTOs, inspired by MapStruct. It automatically matches fields by name and supports custom renaming, transformers, and exclusion.
+The `Mapper` class provides runtime, reflection-based type-to-type mapping between entities and DTOs, inspired by MapStruct. It automatically matches fields by name and supports custom renaming, transformers, and exclusion. Unlike a flat field copy, it also **recurses into nested models and collections of models** and is **Pydantic-aware**.
+
+This is the *runtime* equivalent of MapStruct — there is intentionally no compile-time codegen, no generated `*Impl` classes, and no string expression DSL.
+
+`Mapper` works with both **dataclasses** and **Pydantic v2 `BaseModel`** types, in any combination (dataclass → Pydantic, Pydantic → dataclass, etc.). A type is "mappable" when it is a dataclass or a Pydantic v2 model (it has `model_fields` and `model_validate`).
 
 ### Basic Mapping
 
@@ -549,6 +555,26 @@ class OrderDTO:
 mapper = Mapper()
 dto = mapper.map(order_entity, OrderDTO)
 # Matches fields by name: id, status, total
+```
+
+Pydantic models work the same way — `map()` constructs the destination through its normal constructor, so a Pydantic destination is fully validated:
+
+```python
+from pydantic import BaseModel
+
+
+class UserEntity(BaseModel):
+    username: str
+    email: str
+
+
+class UserDTO(BaseModel):
+    username: str
+    email: str
+
+
+dto = Mapper().map(UserEntity(username="ada", email="ada@example.com"), UserDTO)
+# UserDTO(username='ada', email='ada@example.com') — validated by Pydantic
 ```
 
 ### Custom Field Mapping
@@ -601,6 +627,110 @@ dtos = mapper.map_list(orders, OrderDTO)
 # Equivalent to [mapper.map(o, OrderDTO) for o in orders]
 ```
 
+### Nested Models & Collections
+
+`map()` does not just copy top-level fields — when a destination field's declared type is itself mappable, the mapper **recurses** into it. This works for a nested model field and for a collection (`list`, `set`, `frozenset`, `tuple`) of mappable elements. `Optional[X]` / `X | None` is unwrapped to its single non-`None` arg before recursing.
+
+```python
+from pydantic import BaseModel
+from pyfly.data import Mapper
+
+
+class AddressEntity(BaseModel):
+    street: str
+    city: str
+
+
+class UserEntity(BaseModel):
+    username: str
+    address: AddressEntity
+    tags: list[str] = []
+
+
+class AddressDTO(BaseModel):
+    street: str
+    city: str
+
+
+class UserDTO(BaseModel):
+    username: str
+    address: AddressDTO
+    tags: list[str] = []
+
+
+src = UserEntity(username="ada", address=AddressEntity(street="1 Main", city="London"), tags=["x"])
+dto = Mapper().map(src, UserDTO)
+
+isinstance(dto.address, AddressDTO)   # True — recursed, not left as AddressEntity or a dict
+dto.address.city                       # "London"
+dto.tags                               # ["x"] — a plain (non-mappable) list is copied as-is
+```
+
+Recursion also descends into collections of models, including models nested *within* collection elements:
+
+```python
+class TeamEntity(BaseModel):
+    name: str
+    members: list[UserEntity] = []
+
+
+class TeamDTO(BaseModel):
+    name: str
+    members: list[UserDTO] = []
+
+
+team = TeamEntity(name="A", members=[UserEntity(username="ada", address=AddressEntity(street="s", city="c"))])
+dto = Mapper().map(team, TeamDTO)
+
+isinstance(dto.members[0], UserDTO)            # True — each list element is mapped
+isinstance(dto.members[0].address, AddressDTO) # True — nested-within-collection also recursed
+```
+
+Recursion notes:
+
+- **Pydantic-aware extraction.** Field extraction is *shallow* — nested models stay as live instances rather than being flattened to dicts (a deep `dataclasses.asdict()` would break nested-destination recursion).
+- **Already-correct types are left alone.** If a value is already an instance of the destination field's type, or is a primitive, or the destination type is not mappable, the value passes through unchanged.
+- **Transformers take precedence.** A field with an explicit `transformers` entry is transformed by that callable; recursion only applies to fields without one.
+
+### Declarative Mapping with @mapping
+
+Instead of imperative `add_mapping()` calls, the `@mapping` class decorator lets a mapping's configuration live next to the involved types. It registers the mapping on a shared module-level `default_mapper` instance:
+
+```python
+from pyfly.data import default_mapper, mapping
+from pydantic import BaseModel
+
+
+class UserEntity(BaseModel):
+    username: str
+    email: str
+
+
+class UserResponse(BaseModel):
+    name: str
+    email: str
+
+
+@mapping(UserEntity, UserResponse, rename={"username": "name"}, transform={"email": str.lower})
+class UserMapper:
+    pass
+
+
+resp = default_mapper.map(UserEntity(username="Ada", email="A@B.COM"), UserResponse)
+resp.name    # "Ada"  (renamed from username)
+resp.email   # "a@b.com"  (lower-cased by the transform)
+```
+
+The decorator keyword arguments map onto `add_mapping()` parameters:
+
+| `@mapping` argument | `add_mapping()` parameter | Format |
+|---------------------|---------------------------|--------|
+| `rename` | `field_map` | `{source_field: dest_field}` |
+| `transform` | `transformers` | `{dest_field: transform_fn}` |
+| `exclude` | `exclude` | `set[str]` of destination fields to skip |
+
+The decorated class is returned unchanged with a `__pyfly_mapping__ = (source_type, dest_type)` marker attribute attached, and the registration is added to `default_mapper` as an import side effect — so importing the module containing the decorated class is enough to register the mapping. Use `default_mapper.map(...)` / `default_mapper.map_list(...)` to apply it. For mappings scoped to one component, prefer a local `Mapper()` with explicit `add_mapping()` calls instead.
+
 ### add_mapping() Reference
 
 | Parameter      | Type                               | Description                                    |
@@ -611,7 +741,7 @@ dtos = mapper.map_list(orders, OrderDTO)
 | `transformers` | `dict[str, Callable] \| None`      | `{dest_field: transform_fn}` value transformers |
 | `exclude`      | `set[str] \| None`                 | Destination fields to skip                      |
 
-The mapper supports both dataclasses and plain objects. Source field extraction uses `dataclasses.asdict()` for dataclasses and `vars()` for other objects. Destination field discovery uses `dataclasses.fields()` or `get_type_hints()`.
+The mapper supports dataclasses, Pydantic v2 models, and plain objects. Source field extraction is *shallow* (it keeps nested models as live instances): `dataclasses.fields()` for dataclasses, `model_fields` for Pydantic models, and `vars()` for other objects. Destination field discovery uses `dataclasses.fields()`, `model_fields`, or `get_type_hints()`, and the destination's declared field types drive nested-model recursion.
 
 Source file: `src/pyfly/data/mapper.py`
 

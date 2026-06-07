@@ -60,7 +60,16 @@ a multi-layer application where every component is managed, wired, and lifecycle
     - [@app_event_listener](#app_event_listener)
     - [ApplicationEventBus](#applicationeventbus)
 19. [Environment](#environment)
-20. [Complete Example](#complete-example)
+20. [Spring-parity DI features (v26.06.22+)](#spring-parity-di-features-v260622)
+    - [Constructor-parameter @Value](#constructor-parameter-value)
+    - [@Value SpEL expressions](#value-spel-expressions)
+    - [Provider[T] — deferred resolution](#providert--deferred-resolution)
+    - [Map injection — dict[str, T]](#map-injection--dictstr-t)
+    - [@lazy beans](#lazy-beans)
+    - [Generics-aware injection](#generics-aware-injection)
+    - [@bean(primary=..., profile=...)](#beanprimary-profile)
+    - [@Qualifier type verification](#qualifier-type-verification)
+21. [Complete Example](#complete-example)
 
 ---
 
@@ -617,9 +626,10 @@ class ReportService:
 ### How It Works
 
 When the container encounters an `Annotated[T, Qualifier("name")]` type hint during
-constructor resolution, it calls `resolve_by_name("name")` instead of `resolve(T)`.
-This is handled in the `Container._resolve_param()` method, which inspects the
-`Annotated` args for any `Qualifier` metadata.
+constructor resolution, it calls `resolve_by_name("name", expected_type=T)` instead of
+`resolve(T)`. This is handled in the `Container._resolve_param()` method, which inspects
+the `Annotated` args for any `Qualifier` metadata. The named bean must be assignable to
+`T` — see [@Qualifier type verification](#qualifier-type-verification) below.
 
 ### Qualifier Class
 
@@ -1340,6 +1350,267 @@ env = ctx.environment
 
 1. `PYFLY_PROFILES_ACTIVE` environment variable (comma-separated).
 2. `pyfly.profiles.active` config key.
+
+---
+
+## Spring-parity DI features (v26.06.22+)
+
+This release wave brought the container much closer to Spring's injection model. Every
+feature below is resolved by the same `Container._resolve_param()` machinery used for
+ordinary constructor injection, so they compose freely with `Optional[T]`, `list[T]`,
+`@primary`, and qualifiers.
+
+### Constructor-parameter @Value
+
+Beyond field injection (`field: int = Value("${key}")`), you can now inject configuration
+directly into **constructor parameters** by annotating the parameter type with `Value`.
+The value is resolved from the application `Config` and **coerced to the declared type**.
+
+```python
+from typing import Annotated
+from pyfly.container import service
+from pyfly.core.value import Value
+
+@service
+class HttpServer:
+    def __init__(
+        self,
+        port: Annotated[int, Value("${app.port:8080}")],
+        name: Annotated[str, Value("${app.name}")],
+    ) -> None:
+        self.port = port   # int, coerced from config (or the "8080" default)
+        self.name = name
+```
+
+`Value` lives in `pyfly.core.value` (not `pyfly.container`). The expression forms are:
+
+| Form | Meaning |
+|---|---|
+| `${key}` | Resolve from `Config`; raise `KeyError` if missing and no default. |
+| `${key:default}` | Resolve from `Config`; use `default` if the key is absent. |
+| `#{ ... }` | Evaluate a SpEL-lite expression (see below). |
+| `literal` | Return the string as-is when there is no `${}`/`#{}` wrapper. |
+
+**Type coercion** is best-effort and driven by the parameter's base type: `bool` accepts
+`true/1/yes/on` (case-insensitive); `int`, `float`, and `str` are constructed from the
+resolved value; everything else is passed through unchanged. So a `${missing.port:8080}`
+default (a string) injected into an `Annotated[int, ...]` parameter arrives as the integer
+`8080`.
+
+> `@Value` requires the `Config` bean to be registered. `ApplicationContext` registers
+> `Config` automatically during construction, so this is the normal case.
+
+### @Value SpEL expressions
+
+The `#{ ... }` form evaluates a small, **safe** subset of Spring's SpEL — arithmetic,
+comparison, boolean (`and`/`or`/`not`), the ternary (`a if c else b`), literals,
+lists/tuples, `${key:default}` placeholder substitution, and an `env` mapping for
+environment variables. It is parsed with `ast` and evaluated against a node whitelist, so
+it can never execute arbitrary code (`eval` is never used). There is no attribute access,
+no method calls, and no object navigation.
+
+```python
+from typing import Annotated
+from pyfly.container import service
+from pyfly.core.value import Value
+
+@service
+class PoolConfig:
+    def __init__(
+        self,
+        # arithmetic over a config placeholder
+        max_conns: Annotated[int, Value("#{ ${app.workers:4} * 8 }")],
+        # ternary + comparison
+        verbose: Annotated[bool, Value("#{ ${app.level:info} == 'debug' }")],
+        # environment lookup via the `env` mapping
+        home: Annotated[str, Value("#{ env['HOME'] }")],
+    ) -> None:
+        self.max_conns = max_conns
+        self.verbose = verbose
+        self.home = home
+```
+
+The SpEL evaluator is in `pyfly.core.expression` (`evaluate()` / `is_expression()`); both
+the field-level and constructor-parameter `@Value` paths route through it when the
+expression starts with `#{` and ends with `}`.
+
+### Provider[T] — deferred resolution
+
+Inject `Provider[T]` instead of `T` to **defer** resolution. Each `.get()` call resolves a
+fresh bean from the container, so a singleton can obtain new `TRANSIENT` instances, and
+expensive or construction-time-cyclic beans can be deferred until first use. This is the
+Spring `ObjectFactory` / `Provider` equivalent.
+
+```python
+from pyfly.container import Provider, service, component, Scope
+
+@component(scope=Scope.TRANSIENT)
+class Job:
+    ...
+
+@service
+class Worker:
+    def __init__(self, jobs: Provider[Job]) -> None:
+        self._jobs = jobs
+
+    def run(self) -> None:
+        job = self._jobs.get()   # a fresh Job each call (Job is TRANSIENT)
+        same = self._jobs()      # __call__ is shorthand for .get()
+```
+
+`Provider` is exported from `pyfly.container`. It exposes `.get()` and is also callable
+(`provider()` is equivalent to `provider.get()`).
+
+### Map injection — dict[str, T]
+
+Declare a parameter as `dict[str, T]` to receive a `{bean-name: bean}` mapping of every
+**named** bean assignable to `T` — Spring's `Map<String, T>` injection.
+
+```python
+from pyfly.container import service
+
+@service
+class Dispatcher:
+    def __init__(self, handlers: dict[str, MessageHandler]) -> None:
+        self.handlers = handlers   # {"email": EmailHandler(), "sms": SmsHandler(), ...}
+
+    def dispatch(self, channel: str, msg: str) -> None:
+        self.handlers[channel].handle(msg)
+```
+
+The map keys are the registered bean **names**, so only beans that were registered with a
+name (e.g. via a stereotype `name=`, `@bean(name=...)`, or `container.register(..., name=...)`)
+participate. Assignability is checked with a tolerant `isinstance` that accepts
+non-runtime-checkable protocols and subscripted generics.
+
+### @lazy beans
+
+`@lazy` marks a bean so it is **not** eagerly created during `ApplicationContext.start()`;
+it is constructed on first resolution instead. Useful for expensive beans that may never be
+used, or to avoid heavy work at boot. This is the Spring `@Lazy` equivalent.
+
+```python
+from pyfly.container import lazy, service
+
+@lazy
+@service
+class ReportGenerator:
+    def __init__(self) -> None:
+        # expensive setup that runs only when first resolved, not at startup
+        self._templates = load_all_report_templates()
+```
+
+`@lazy` is exported from `pyfly.container` and simply sets `__pyfly_lazy__ = True` on the
+class. The bean is still a normal singleton (or whatever its scope is) once resolved — only
+its *creation* is deferred.
+
+### Generics-aware injection
+
+When you depend on a parametrized generic interface such as `Repository[User, UUID]`, the
+container resolves it to the registered implementation whose generic bases carry the
+matching concrete type arguments — Spring's generic-aware injection.
+
+```python
+from typing import Generic, TypeVar
+from uuid import UUID
+from pyfly.container import repository, service
+
+T = TypeVar("T")
+ID = TypeVar("ID")
+
+class Repository(Generic[T, ID]):
+    ...
+
+@repository
+class UserRepository(Repository[User, UUID]):
+    ...
+
+@repository
+class OrderRepository(Repository[Order, UUID]):
+    ...
+
+@service
+class UserService:
+    def __init__(self, repo: Repository[User, UUID]) -> None:
+        self.repo = repo   # the UserRepository, not OrderRepository
+```
+
+Resolution rules for a parametrized generic `Origin[A, B]`:
+
+1. The container collects every registered subclass of `Origin` (the "family"). If there
+   are none, it falls back to resolving the bare `Origin` normally.
+2. From the family, it keeps the impls whose generic bases include **all** the requested
+   concrete type args.
+3. Exactly one match → that bean. Multiple matches → the `@primary` one (or
+   `NoUniqueBeanError`). No match (but the family is non-empty) → `NoSuchBeanError`.
+
+### @bean(primary=..., profile=...)
+
+`@bean` factory methods now accept `primary` and `profile`, mirroring `@Bean @Primary` and
+`@Bean @Profile`.
+
+```python
+from pyfly.container import bean, configuration
+
+@configuration
+class GreetingConfig:
+
+    @bean(primary=True)
+    def english(self) -> Greeter:
+        return EnglishGreeter()
+
+    @bean
+    def french(self) -> Greeter:
+        return FrenchGreeter()
+
+    @bean(profile="prod")
+    def metrics(self) -> MetricsSink:
+        return PrometheusSink()
+```
+
+- `primary=True` makes that factory the chosen candidate when several beans satisfy the
+  same interface — so `get_bean(Greeter)` returns the `EnglishGreeter` above. (At the
+  registration level this sets `Registration.primary`; class-level `@primary` instead sets
+  `__pyfly_primary__`. Both are honored during interface resolution.)
+- `profile="prod"` only creates the bean when the `prod` profile is active; otherwise the
+  bean is skipped and resolving it raises `NoSuchBeanError`. The expression supports the
+  same negation/comma syntax as stereotype `profile=`.
+
+The full `@bean` signature is now:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | `""` | Bean name (defaults to the method name). |
+| `scope` | `Scope` | `Scope.SINGLETON` | Lifecycle scope of the produced bean. |
+| `primary` | `bool` | `False` | Mark this the primary candidate for its interface. |
+| `profile` | `str` | `""` | Only create the bean when the profile expression matches. |
+
+### @Qualifier type verification
+
+`@Qualifier` now verifies that the named bean is **assignable to the declared type** before
+injecting it. A mistyped qualifier name that points at an incompatible bean raises
+`NoSuchBeanError` instead of silently injecting the wrong object.
+
+```python
+from typing import Annotated
+from pyfly.container import Qualifier, service
+
+@service
+class ReportService:
+    def __init__(
+        self,
+        # if the bean named "analytics_db" is not a DataSource, this raises
+        db: Annotated[DataSource, Qualifier("analytics_db")],
+    ) -> None:
+        self.db = db
+```
+
+Internally, qualified resolution calls `resolve_by_name(name, expected_type=base_type)`.
+When the named bean is not assignable to `base_type`, a `NoSuchBeanError` is raised whose
+message explains the actual vs. expected type. Protocols and subscripted generics that
+cannot be `isinstance`-checked are accepted (treated as assignable), so this never breaks
+legitimate protocol-typed qualifiers. The same check guards `Autowired(qualifier="...")`
+field injection.
 
 ---
 
