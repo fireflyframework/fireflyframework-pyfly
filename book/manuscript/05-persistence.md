@@ -4,482 +4,467 @@
 
 ::: figure art/openers/ch05.svg | &nbsp;
 
-Lumen has a wallet API that works — but every wallet disappears the moment you restart the process. The `InMemoryWalletRepository` you introduced in Chapter 2 was the right design for getting something running quickly: it let `WalletService` depend on a clean port, not an implementation, so you could focus on wiring and HTTP before thinking about databases.
+Lumen has a wallet API that works — but every wallet disappears the moment you restart the process. The `InMemoryWalletRepository` you met in Chapter 2 was the right design for getting something running quickly: it let the command handlers depend on a clean **port**, not an implementation, so you could focus on wiring and HTTP before thinking about databases.
 
-That investment pays off now. The port is the contract, and the contract has not changed — so swapping the in-memory store for PostgreSQL is purely additive. This chapter makes that swap. You will map a `WalletEntity` to a database table with SQLAlchemy, build a real `WalletRepository` with typed CRUD methods, derived queries, and pagination, and then evolve the schema safely with a versioned Alembic migration. The controller and service from Chapters 2–4 stay exactly as they are.
+That investment pays off now. The port is the contract, and the contract has not changed — so adding a second adapter that persists to SQLite is purely additive. This chapter shows exactly how Lumen does it. You will read the real port definition, the in-memory adapter that ships as the default, the SQLAlchemy/SQLite adapter as a swappable alternative, and the framework configuration that ties everything together. The command handlers from Chapters 2–4 stay exactly as they are.
 
 ---
 
-## Entities: mapping your data
+## Ports and adapters: the hexagonal approach
 
-Before you can read or write a row, you need to tell SQLAlchemy what that row looks like. In PyFly, that description is a plain Python class — the **entity** — that extends `BaseEntity` from `pyfly.data.relational.sqlalchemy`. The entity is the bridge between your Python objects and a relational table, and `BaseEntity` does the repetitive parts for you.
+PyFly's DI container binds types by their Python Protocol ports. Every injectable dependency has a **port** (a `@runtime_checkable` Protocol) and one or more **adapters** (concrete classes that explicitly inherit the port). The container scans for adapters at startup, resolves port-typed constructor parameters to the matching adapter, and never exposes the concrete type to the caller.
 
-Specifically, `BaseEntity` is an abstract SQLAlchemy `DeclarativeBase` that provides five audit columns you would otherwise copy-paste onto every table:
+For the wallet repository that design looks like this:
 
-| Field | Column type | Description |
-|---|---|---|
-| `id` | Primary key (`UUID`) | Auto-generated UUID v4 |
-| `created_at` | `DateTime(tz=True)` | Set automatically on insert |
-| `updated_at` | `DateTime(tz=True)` | Set on insert, updated on every save |
-| `created_by` | `String(255)` | Creator identifier (from `SecurityContext`, nullable) |
-| `updated_by` | `String(255)` | Updater identifier (nullable) |
+::: figure art/figures/05-repository.svg | Figure 5.1 — Command handlers depend on the WalletRepository port; both adapters implement it.
 
-`BaseEntity` is abstract — no table is created for it. Your entity inherits those five columns and adds only the business-specific ones:
+The key rule is that **a `@repository` adapter must explicitly inherit its Protocol port** — duck-typing alone is not enough. If you omit the inheritance, the container cannot match the adapter to the port and raises `NoSuchBeanError` at startup. The `class Foo(MyProtocol):` line is not boilerplate; it is the registration contract.
 
-::: listing lumen/wallet_entity.py | Listing 5.1 — WalletEntity: mapping the wallets table
-from sqlalchemy import String, Numeric
-from sqlalchemy.orm import Mapped, mapped_column
+---
 
-from pyfly.data.relational.sqlalchemy import BaseEntity
+## The repository port
+
+The port is a `@runtime_checkable` Protocol that describes the four operations the core needs:
+
+::: listing lumen/models/repositories/wallet_repository.py | Listing 5.1 — WalletRepository: the hexagonal port
+from __future__ import annotations
+
+import asyncio
+import uuid
+from typing import Protocol, runtime_checkable
+
+from lumen.models.entities.v1.wallet_entity import Wallet
+from pyfly.container import primary, repository
 
 
-class WalletEntity(BaseEntity):
-    __tablename__ = "wallets"
-
-    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    balance: Mapped[float] = mapped_column(Numeric(precision=18, scale=6), default=0.0)
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+@runtime_checkable
+class WalletRepository(Protocol):
+    async def add(self, wallet: Wallet) -> Wallet: ...
+    async def find(self, id: str) -> Wallet | None: ...
+    async def remove(self, wallet: Wallet) -> None: ...
+    async def next_id(self) -> str: ...
 :::
 
-Three things to notice here. First, `WalletEntity` inherits `id`, `created_at`, `updated_at`, `created_by`, and `updated_by` without writing a single column definition — those five lines are invisible but present on every entity in the codebase. Second, the business columns use SQLAlchemy's `Mapped[T]` annotation syntax: the type hint drives both the Python attribute type and the generated DDL, so there is a single source of truth. Third, `owner_id` carries `index=True` — a deliberate choice because "find all wallets for this owner" is the most common query, and the index makes it fast regardless of table size.
+Four async methods — nothing more. No SQLAlchemy, no session, no import from `pyfly.data`. A command handler that receives a `WalletRepository` can call `add`, `find`, `remove`, and `next_id` without knowing whether it is talking to a dict or a database. That boundary is worth preserving: swap the adapter and nothing in the core changes.
 
-SQLAlchemy's async engine, session factory, and audit listener (which populates `created_by` / `updated_by` from the security context) are all wired by auto-configuration. You declare the entity; the framework handles the plumbing.
+`@runtime_checkable` makes the Protocol usable with `isinstance` checks at runtime, which is what PyFly's container uses to verify that an adapter truly satisfies the port before registering the binding.
 
-To enable the SQLAlchemy adapter, add two keys to `pyfly.yaml`:
+---
 
-::: listing pyfly.yaml | Listing 5.2 — Enabling the relational adapter in pyfly.yaml
+## The in-memory adapter
+
+The first adapter is a concurrent dictionary that lives in RAM. It is marked `@primary` so the application boots on it by default — no database required:
+
+::: listing lumen/models/repositories/wallet_repository.py | Listing 5.2 — InMemoryWalletRepository: the default @primary adapter
+@primary
+@repository
+class InMemoryWalletRepository(WalletRepository):
+    """Concurrent in-memory store keyed by wallet id.
+
+    Marked @primary so it is the boot default even when a second
+    adapter (SqlAlchemyWalletRepository) is also registered against
+    the same port.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, Wallet] = {}
+        self._lock = asyncio.Lock()
+
+    async def add(self, wallet: Wallet) -> Wallet:
+        async with self._lock:
+            assert wallet.id is not None
+            self._store[wallet.id] = wallet
+            return wallet
+
+    async def find(self, id: str) -> Wallet | None:
+        async with self._lock:
+            return self._store.get(id)
+
+    async def remove(self, wallet: Wallet) -> None:
+        async with self._lock:
+            if wallet.id is not None:
+                self._store.pop(wallet.id, None)
+
+    async def next_id(self) -> str:
+        return f"wlt-{uuid.uuid4()}"
+:::
+
+Three things to notice. First, `InMemoryWalletRepository` **explicitly inherits `WalletRepository`** — that single `(WalletRepository)` in the class signature is what tells the container to bind this adapter to the port. Drop it and the container has no binding, the handlers fail at startup. Second, `@primary` wins over any other adapter registered against the same port. Third, the `asyncio.Lock` makes concurrent `add` and `remove` calls safe — important even in the in-memory case because ASGI servers handle requests concurrently.
+
+!!! tip "Port-first, adapter-later"
+    Starting with an in-memory adapter is the recommended PyFly workflow. Write the port, wire the handlers against the port, and build the full feature. When you need real persistence, add the SQL adapter as a second concrete class — no handler changes required.
+
+---
+
+## The SQLAlchemy/SQLite adapter
+
+The second adapter persists wallets to a relational database through PyFly's SQLAlchemy data layer. It consists of two parts: a **row class** that maps the aggregate to a table, and a **repository class** that implements the port by reading and writing those rows.
+
+### The persistence row
+
+`WalletRow` is the on-disk shape of a wallet — one row per aggregate:
+
+::: listing lumen/models/repositories/sql_wallet_repository.py | Listing 5.3 — WalletRow: the SQLAlchemy mapping
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import String, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
+
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+from lumen.models.entities.v1.wallet_entity import Wallet
+from lumen.models.repositories.wallet_repository import WalletRepository
+from pyfly.container import repository
+from pyfly.data.relational.sqlalchemy import Base
+
+
+class WalletRow(Base):
+    """The on-disk shape of a wallet — one row per aggregate.
+
+    Inherits PyFly's Base declarative base, so the table is part of
+    Base.metadata and the framework creates it on startup
+    (ddl-auto=create). The primary key is the aggregate's own string
+    id (wlt-...) rather than a surrogate, keeping the row and the
+    aggregate in lock-step.
+    """
+
+    __tablename__ = "wallets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC)
+    )
+:::
+
+`WalletRow` inherits `Base` — **not** `BaseEntity`. `Base` is PyFly's declarative base for domain-owned tables; it leaves the primary key entirely up to you. Here the PK is the aggregate's string id (`wlt-…`), which keeps the row and the object in natural sync. `BaseEntity` forces a UUID primary key plus audit columns — useful in some services, wrong here because the `Wallet` aggregate owns its own id.
+
+The `Mapped[T]` / `mapped_column` syntax is SQLAlchemy 2.0 style: the type annotation drives both the Python attribute type and the generated DDL column type, so there is a single source of truth.
+
+Amounts are stored as `balance_minor` — integer minor units (cents). Floating-point columns lose precision over millions of transactions; integer arithmetic is exact. A `Money(2500, Currency.USD)` value is stored as `2500` and means $25.00.
+
+### The repository adapter
+
+The adapter explicitly inherits the port and takes an `AsyncSession` in its constructor:
+
+::: listing lumen/models/repositories/sql_wallet_repository.py | Listing 5.4 — SqlAlchemyWalletRepository: the relational adapter
+@repository
+class SqlAlchemyWalletRepository(WalletRepository):
+    """Relational adapter backed by SQLAlchemy 2.0 + SQLite (async).
+
+    Explicitly implements the WalletRepository port so the DI container
+    binds the port to it. Not marked @primary — InMemoryWalletRepository
+    keeps that role — so the app boots on the in-memory store while this
+    adapter remains selectable.
+
+    The AsyncSession is injected by the framework's relational
+    auto-configuration (pyfly.data.relational.enabled=true).
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, wallet: Wallet) -> Wallet:
+        """Upsert the aggregate, then commit the unit of work."""
+        assert wallet.id is not None
+        row = await self._session.get(WalletRow, wallet.id)
+        if row is None:
+            row = WalletRow(
+                id=wallet.id,
+                owner_id=wallet.owner_id,
+                currency=wallet.currency.value,
+                balance_minor=wallet.balance.amount,
+                created_at=wallet.created_at,
+            )
+            self._session.add(row)
+        else:
+            row.owner_id = wallet.owner_id
+            row.currency = wallet.currency.value
+            row.balance_minor = wallet.balance.amount
+        await self._session.commit()
+        return wallet
+
+    async def find(self, id: str) -> Wallet | None:
+        """Load a wallet by id, rehydrating the aggregate from its row."""
+        row = await self._session.get(WalletRow, id)
+        return self._to_aggregate(row) if row is not None else None
+
+    async def remove(self, wallet: Wallet) -> None:
+        """Delete the wallet's row, then commit."""
+        if wallet.id is None:
+            return
+        row = await self._session.get(WalletRow, wallet.id)
+        if row is not None:
+            await self._session.delete(row)
+            await self._session.commit()
+
+    async def next_id(self) -> str:
+        return f"wlt-{uuid.uuid4()}"
+
+    @staticmethod
+    def _to_aggregate(row: WalletRow) -> Wallet:
+        """Rehydrate a Wallet aggregate from a persistence row."""
+        currency = Currency(row.currency)
+        return Wallet(
+            id=row.id,
+            owner_id=row.owner_id,
+            balance=Money(amount=row.balance_minor, currency=currency),
+            created_at=row.created_at,
+        )
+
+    async def all_ids(self) -> list[str]:
+        """List every persisted wallet id (for tests and diagnostics)."""
+        result = await self._session.execute(select(WalletRow.id))
+        return list(result.scalars().all())
+:::
+
+Walk through `add`. It calls `session.get` to check whether the row already exists. If not, it constructs a fresh `WalletRow` and hands it to the session with `session.add`. If the row is there, it updates the mutable columns in-place. Either way, `await session.commit()` flushes the change to the database. The `find` path runs the reverse mapping through `_to_aggregate`, reconstructing a fully functional `Wallet` aggregate from the stored columns.
+
+Notice that `SqlAlchemyWalletRepository` is not marked `@primary`. Both adapters satisfy the same `WalletRepository` port, but `InMemoryWalletRepository` wins the default binding because it carries `@primary`. The SQL adapter is registered and resolvable; it just does not win the default race. To make the SQL adapter the boot default, move `@primary` from the in-memory class to this one.
+
+!!! spring "Spring parity"
+    This two-adapter design maps directly to Spring Data JPA's port/implementation split. The `WalletRepository` Protocol is the equivalent of a `JpaRepository<Wallet, String>` interface; `InMemoryWalletRepository` is the test-double / fake; `SqlAlchemyWalletRepository` is the JPA implementation. `@primary` maps to `@Primary` in Spring — exactly the same semantics: mark one bean to win when multiple beans satisfy the same dependency.
+
+---
+
+## Rehydration: aggregate from row
+
+The `_to_aggregate` mapping deserves a closer look. The `Wallet` aggregate enforces invariants — `balance >= 0`, currency consistency — through its constructor and methods. Those checks must not re-fire when loading an already-valid wallet from the database: the database row reflects a state the aggregate already accepted.
+
+PyFly's standard approach is to call the aggregate's constructor directly rather than going through the factory method (`Wallet.open`). The constructor sets fields without raising domain events or checking business rules beyond basic type safety. The factory method `Wallet.open` is for *new* wallets; the constructor is for rehydration:
+
+```python
+return Wallet(
+    id=row.id,
+    owner_id=row.owner_id,
+    balance=Money(amount=row.balance_minor, currency=currency),
+    created_at=row.created_at,
+)
+```
+
+The resulting `Wallet` is indistinguishable from one that was just created in memory — same `balance`, same `currency`, same `owner_id` — but no `WalletOpened` event was raised, because opening already happened in the past.
+
+---
+
+## Enabling the relational stack
+
+Two configuration changes activate the SQLAlchemy adapter.
+
+### pyproject.toml — add the data-relational extra
+
+::: listing pyproject.toml | Listing 5.5 — Adding pyfly[data-relational] to project dependencies
+[project]
+dependencies = [
+    # data-relational ships SQLAlchemy 2 (async) + aiosqlite
+    "pyfly[cli,web,data-relational]",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+]
+:::
+
+`pyfly[data-relational]` pulls in `sqlalchemy[asyncio]` and `aiosqlite`. Those two packages are the entire dependency footprint for SQLite persistence — no database server, no separate driver install. The lumen sample runs with zero external infrastructure for exactly this reason.
+
+### pyfly.yaml — configure the relational layer
+
+::: listing pyfly.yaml | Listing 5.6 — Relational data layer configuration in pyfly.yaml
 pyfly:
   data:
     relational:
       enabled: true
-      url: "postgresql+asyncpg://lumen:secret@localhost:5432/lumen"
-      echo: false
-      ddl-auto: "none"
+      url: "sqlite+aiosqlite:///./lumen.db"
+      ddl-auto: create
 :::
 
-`ddl-auto: none` tells PyFly not to touch the schema at startup — you want full control through migrations, which you will write at the end of this chapter. During very early development, `ddl-auto: create` is a faster alternative that creates (or drops and recreates) tables on every boot. Switch it back to `none` before you write your first migration.
+`enabled: true` activates PyFly's `EngineLifecycle` bean, which builds the async SQLAlchemy engine and session factory on startup. `url` is the standard SQLAlchemy connection string — SQLite with aiosqlite for development, a PostgreSQL URL (`postgresql+asyncpg://…`) for production. `ddl-auto: create` tells the framework to call `Base.metadata.create_all` on startup, creating any missing tables automatically. The `WalletRow` table is discovered because `WalletRow` inherits `Base` — no further registration needed.
 
-!!! tip "SQLite for development"
-    Replace the `url` with `sqlite+aiosqlite:///lumen.db` for a zero-dependency local setup. SQLite works with every feature in this chapter; just swap back to PostgreSQL before staging.
+!!! tip "Schema lifecycle"
+    `ddl-auto: create` is appropriate for development and for sample applications like Lumen. It creates the schema if it does not exist and leaves existing tables untouched. For production services you would set `ddl-auto: none` and manage the schema with a migration tool such as Alembic, which generates versioned scripts from the difference between `Base.metadata` and the live schema.
+
+The full `pyfly.yaml` for Lumen also configures CQRS, EDA, event sourcing, and observability — the relational block is only one section among several. Here is the complete file for reference:
+
+::: listing pyfly.yaml | Listing 5.7 — Complete pyfly.yaml for the Lumen sample
+pyfly:
+  application:
+    name: lumen
+    version: 1.0.0
+  banner:
+    mode: console
+  web:
+    port: 8080
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: false
+  cqrs:
+    enabled: true
+  transactional:
+    enabled: true
+    persistence:
+      provider: in-memory
+  eventsourcing:
+    enabled: true
+  cache:
+    provider: in-memory
+  eda:
+    provider: memory
+  data:
+    relational:
+      enabled: true
+      url: "sqlite+aiosqlite:///./lumen.db"
+      ddl-auto: create
+:::
 
 ---
 
-## Repositories
+## Two adapters, one port: what the container does
 
-The service layer should not know whether wallets live in PostgreSQL, MongoDB, or a spreadsheet. That is not a platitude — it is a practical guarantee: if `WalletService` depends on the database directly, you cannot test it without a database, and you cannot change the database without touching the service.
+When the application starts, PyFly's container scans all packages declared in `pyfly.yaml`. It finds two classes annotated with `@repository` that both inherit `WalletRepository`:
 
-A **repository** is the pattern that enforces this separation. It is the sole gateway between your service layer and the database: the service calls methods like `save`, `find_by_id`, and `find_paginated`; the repository translates those calls into SQL and back. In PyFly's hexagonal design your service declares its dependency as the *port* (`RepositoryPort[T, ID]`), and the SQLAlchemy adapter fulfils the port. The two never meet directly.
+1. `InMemoryWalletRepository(WalletRepository)` — marked `@primary`
+2. `SqlAlchemyWalletRepository(WalletRepository)` — not marked `@primary`
 
-### The Repository[T, ID] class
+Both are registered. When a command handler requests a `WalletRepository` in its constructor, the container resolves the `@primary` adapter — `InMemoryWalletRepository` — because there are two candidates and primary wins ties. The `SqlAlchemyWalletRepository` is registered and available by name or type for explicit resolution; it simply does not win the default binding.
 
-`Repository[T, ID]` from `pyfly.data.relational.sqlalchemy` is the concrete SQLAlchemy implementation. Subclass it with your entity and ID types and annotate the subclass with `@repository`. The framework resolves the entity type from the generic parameters at class-definition time and injects an async `AsyncSession` from the session factory automatically:
-
-::: listing lumen/wallet_repository.py | Listing 5.3 — WalletRepository: the SQLAlchemy-backed concrete repository
-from pyfly.container import repository
-from pyfly.data.relational.sqlalchemy import Repository
-
-from lumen.wallet_entity import WalletEntity
-
-
-@repository
-class WalletRepository(Repository[WalletEntity, str]):
-    pass
-:::
-
-Three lines. No `__init__`, no session wiring, no SQL. The base class provides everything from the `RepositoryPort[T, ID]` protocol out of the box:
-
-| Method | Return type | Description |
-|---|---|---|
-| `save(entity)` | `T` | Insert or update; flushes and refreshes |
-| `find_by_id(id)` | `T \| None` | Find by primary key |
-| `find_all(**filters)` | `list[T]` | Find all, optionally filtered by column values |
-| `delete(id)` | `None` | Delete by primary key; no-op if not found |
-| `count()` | `int` | Count all rows |
-| `exists(id)` | `bool` | Check whether a row with this ID exists |
-| `find_paginated(page, size, pageable)` | `Page[T]` | Paginated query with optional sorting |
-| `find_all_by_spec(spec)` | `list[T]` | Find all matching a Specification |
-| `find_all_by_spec_paged(spec, pageable)` | `Page[T]` | Paginated query with Specification + sorting |
-
-### The port keeps your service clean
-
-`WalletRepository(Repository[WalletEntity, str])` satisfies `RepositoryPort[WalletEntity, str]`. That means `WalletService` can declare its dependency as the port and receive the concrete repository through constructor injection — without importing SQLAlchemy:
-
-::: figure art/figures/05-repository.svg | Figure 5.1 — Your code depends on the repository port; the SQLAlchemy adapter fulfils it.
+The command handlers never change. `OpenWalletHandler`, `DepositFundsHandler`, `WithdrawFundsHandler` all receive a `WalletRepository` in their constructors:
 
 ```python
-from pyfly.data import RepositoryPort
-
-
-class WalletService:
-    def __init__(self, repo: RepositoryPort[WalletEntity, str]) -> None:
-        self._repo = repo
-```
-
-`WalletService` written this way is completely database-agnostic. Swap `WalletRepository` for a MongoDB adapter, a test-double, or any future storage technology, and the service needs no changes — not even a recompile.
-
-!!! spring "Spring parity"
-    `Repository[T, ID]` maps directly to Spring Data JPA's `JpaRepository<T, ID>`, which itself extends `CrudRepository<T, ID>` and `PagingAndSortingRepository<T, ID>`. The same pattern applies: subclass the generic base with your entity and key types, annotate with `@repository` (≈ `@Repository` in Spring), and let the container wire everything. The method names — `save`, `findById`, `findAll`, `delete`, `count`, `existsById` — map one-to-one (camelCase vs snake_case aside).
-
----
-
-## Derived queries
-
-Once you have a working repository, patterns emerge quickly. You find yourself writing `SELECT * FROM wallets WHERE owner_id = ?` in one place, `SELECT COUNT(*) FROM wallets WHERE owner_id = ?` in another, and a handful of similar one-liners throughout the codebase. They are not complex — they are just noise that obscures what the code is actually doing.
-
-PyFly generates those query bodies from the method name itself, following the same naming convention as Spring Data. You declare a **stub method** on your repository. The `RepositoryBeanPostProcessor` inspects the class after initialization, detects the stub (a method whose body is only `...` or `pass`), parses the name through `QueryMethodParser`, compiles it into a SQLAlchemy expression, and patches the method before any code calls it. By the time your service makes the first call, the real implementation is already in place — with no runtime reflection overhead per invocation.
-
-The naming grammar is:
-
-```
-<prefix>_<field>[_<operator>][_<connector>_<field>...][_order_by_<field>_<direction>...]
-```
-
-Four prefixes are supported: `find_by_` (returns `list[T]`), `count_by_` (returns `int`), `exists_by_` (returns `bool`), and `delete_by_` (returns the row count as `int`).
-
-Here are the derived queries useful for Lumen, plus a `@query`-decorated custom query for a more complex lookup:
-
-::: listing lumen/wallet_repository.py | Listing 5.4 — Derived queries and a custom @query on WalletRepository
-from pyfly.container import repository
-from pyfly.data.relational.sqlalchemy import Repository, query
-
-from lumen.wallet_entity import WalletEntity
-
-
-@repository
-class WalletRepository(Repository[WalletEntity, str]):
-
-    # All wallets belonging to an owner (equality operator, default)
-    async def find_by_owner_id(self, owner_id: str) -> list[WalletEntity]: ...
-
-    # Find by owner and currency together
-    async def find_by_owner_id_and_currency(
-        self, owner_id: str, currency: str
-    ) -> list[WalletEntity]: ...
-
-    # Wallets with a balance above a threshold, newest first
-    async def find_by_balance_greater_than_order_by_created_at_desc(
-        self, min_balance: float
-    ) -> list[WalletEntity]: ...
-
-    # How many wallets exist for an owner
-    async def count_by_owner_id(self, owner_id: str) -> int: ...
-
-    # Does a wallet exist for this owner/currency pair?
-    async def exists_by_owner_id_and_currency(
-        self, owner_id: str, currency: str
-    ) -> bool: ...
-
-    # Custom query for wallets above a balance floor, sorted by balance
-    @query(
-        "SELECT w FROM WalletEntity w"
-        " WHERE w.owner_id = :owner_id AND w.balance >= :min_balance"
-        " ORDER BY w.balance DESC"
-    )
-    async def find_rich_wallets(
-        self, owner_id: str, min_balance: float
-    ) -> list[WalletEntity]: ...
-:::
-
-Walk through what the parser does with each stub. `find_by_owner_id` decomposes to: prefix `find_by_`, field `owner_id`, operator implicit equality — the generated WHERE clause is `WHERE wallets.owner_id = :owner_id`. `find_by_balance_greater_than_order_by_created_at_desc` is longer but still mechanical: field `balance`, operator `greater_than` (mapped to `>`), then an ORDER BY clause on `created_at` descending. The method signature must supply one positional argument for each extracted field — the parser validates arity at class-load time, not at call time.
-
-For anything the naming grammar cannot express, `@query` accepts a JPQL-like string (`FROM WalletEntity w WHERE w.field = :param`) or raw SQL when `native=True` is passed. Named parameters in the query string (`:owner_id`, `:min_balance`) are bound from the method's keyword arguments in order.
-
-Every stub body is `...`. That is all the compiler needs — the rest is handled before the first call.
-
-!!! tip "Longest-match operator parsing"
-    The parser matches operators longest-first, so `balance_greater_than_equal` is recognised as `>=` before falling back to `>`. Append `_order_by_<field>_asc` or `_order_by_<field>_desc` to any derived query to control result ordering — the clause is parsed after the predicates and applied at the end of the SELECT.
-
----
-
-## Pagination & sorting
-
-Returning an unbounded `list` from a repository is fine for small, bounded data sets. For anything user-facing — a wallet list, a transaction history, a search result page — you cannot afford to pull every row into memory just to show the first twenty. Your API needs to accept `page` and `size` parameters and return a `Page[T]`: a frozen snapshot that carries the current-page items, the total row count, and enough metadata to drive client-side navigation controls.
-
-The pagination vocabulary lives in `pyfly.data`:
-
-- `Pageable` — encapsulates `page` (1-based), `size`, and a `Sort`; created with `Pageable.of(page, size, sort=...)`.
-- `Sort` — an ordered list of `Order` objects; created with `Sort.by("field")` or `Sort.by("field").descending()`.
-- `Page[T]` — the result type returned by `find_paginated` and `find_all_by_spec_paged`.
-
-`Page[T]` exposes: `items` (the current-page list), `total` (rows across all pages), `page`, `size`, `total_pages`, `has_next`, `has_previous`. Call `page.map(fn)` to transform items — converting `WalletEntity` to `WalletSummary`, for example — while preserving all pagination metadata automatically.
-
-Here is how to wire pagination into the wallet list endpoint. The controller already accepts `page` and `size` as query parameters from Chapter 4; only the service method changes:
-
-::: listing lumen/wallet_service.py | Listing 5.5 — Paginated wallet list in WalletService
-from dataclasses import dataclass
-
-from pyfly.container import service
-from pyfly.data import Page, Pageable, Sort
-
-from lumen.wallet_entity import WalletEntity
-from lumen.wallet_repository import WalletRepository
-
-
-@dataclass
-class WalletSummary:
-    id: str
-    owner_id: str
-    balance: float
-    currency: str
-
-
-@service
-class WalletService:
-    def __init__(self, repo: WalletRepository) -> None:
-        self._repo = repo
-
-    async def list_wallets(
-        self,
-        owner_id: str | None = None,
-        page: int = 1,
-        size: int = 20,
-    ) -> Page[WalletSummary]:
-        pageable = Pageable.of(
-            page=page,
-            size=size,
-            sort=Sort.by("created_at").descending(),
-        )
-        if owner_id:
-            from pyfly.data.relational.sqlalchemy import FilterOperator
-            spec = FilterOperator.eq("owner_id", owner_id)
-            raw: Page[WalletEntity] = await self._repo.find_all_by_spec_paged(
-                spec, pageable
-            )
-        else:
-            raw = await self._repo.find_paginated(pageable=pageable)
-
-        return raw.map(
-            lambda w: WalletSummary(
-                id=str(w.id),
-                owner_id=w.owner_id,
-                balance=float(w.balance),
-                currency=w.currency,
-            )
-        )
-:::
-
-Here is what each piece of this method does. `Pageable.of` bundles the page number, page size, and sort order into a single value object that the repository understands. `Sort.by("created_at").descending()` means the newest wallets always appear first — a sensible default for a financial product. The `if owner_id` branch uses a `FilterOperator.eq` specification (you will read about Specifications in the next section) to scope the query to a single owner; the `else` branch queries across all owners. Either way, `raw.map(...)` converts each `WalletEntity` to the lighter `WalletSummary` dataclass, carrying forward the total count and page metadata untouched. The controller receives a fully populated `Page[WalletSummary]` without knowing anything about how the data was fetched.
-
-!!! note "Note"
-    `Pageable` validates its arguments: `page < 1` or `size < 1` raises `ValueError`. For an ad-hoc "fetch everything" query, use `Pageable.unpaged()` — the repository skips the `OFFSET` / `LIMIT` clauses and counts all matching rows.
-
----
-
-## Specifications
-
-Derived queries cover equality and simple comparisons, and they shine when the filter conditions are fixed. When you need to compose conditions *dynamically* — adding a currency filter only when the caller supplies it, combining three optional search fields from a form submission — method names become unwieldy and the combinatorial explosion of stubs is unmanageable.
-
-`Specification` solves this by treating each predicate as a first-class value you can compose at runtime. A `Specification[T]` is a callable predicate: it receives the entity class and a SQLAlchemy `Select` statement, applies a `WHERE` clause, and returns the modified statement. You create one from a lambda or use `FilterOperator`'s factory methods, then compose with `&` (AND), `|` (OR), and `~` (NOT) — the same way you compose boolean expressions, but lazily:
-
-::: listing lumen/wallet_service.py | Listing 5.6 — Composable Specifications for dynamic wallet search
-from pyfly.data.relational.sqlalchemy import FilterOperator, Specification
-
-from lumen.wallet_entity import WalletEntity
-
-
-async def search_wallets(
-    repo,
-    owner_id: str | None = None,
-    currency: str | None = None,
-    min_balance: float | None = None,
-) -> list[WalletEntity]:
-    # Start with a match-everything predicate
-    spec: Specification = FilterOperator.eq("currency", "USD") | (
-        ~FilterOperator.eq("currency", "USD")
-    )
-
-    if owner_id:
-        spec = spec & FilterOperator.eq("owner_id", owner_id)
-
-    if currency:
-        spec = spec & FilterOperator.eq("currency", currency)
-
-    if min_balance is not None:
-        spec = spec & FilterOperator.gte("balance", min_balance)
-
-    return await repo.find_all_by_spec(spec)
-:::
-
-The pattern reads naturally: you start with a predicate that matches everything (the tautology `USD OR NOT USD`), then narrow it with `&` for each filter the caller actually provided. If `owner_id` is `None`, the owner clause is never added — not added as `WHERE owner_id IS NULL`, simply not added at all. The final `spec` is whatever combination of clauses was built, and a single `find_all_by_spec` call executes it.
-
-`FilterOperator` covers the full set of common predicates — `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `contains`, `in_list`, `is_null`, `is_not_null`, `between` — so most search forms need no hand-written lambdas. Combine the result with `find_all_by_spec` for a simple list or `find_all_by_spec_paged` when you also need pagination.
-
-!!! tip "Inline Specification"
-    When `FilterOperator` does not cover your case, write a one-liner: `Specification(lambda root, q: q.where(root.balance > 0))`. The `root` is the SQLAlchemy mapped class; `q` is the current `Select`; return the modified statement. Composition with `&` / `|` / `~` works exactly the same way.
-
----
-
-## Transactions
-
-Every `save` and `delete` on `Repository` is already wrapped in a single flush — adequate for isolated, single-row operations. Multi-step writes are a different matter. Crediting one wallet while debiting another must either both succeed or both fail. If the credit completes and the debit then raises an exception, you have created money from nothing. If the debit completes and the credit fails, you have destroyed it. Either outcome is wrong, and neither is acceptable in a financial service.
-
-This all-or-nothing guarantee is what a database **transaction** provides. PyFly's `@transactional` decorator handles it declaratively, so you express the intent without writing session management code. Decorate the service method, and the framework opens a session, begins a transaction, commits on success, and rolls back on any exception — including exceptions raised deep inside called methods:
-
-::: listing lumen/wallet_service.py | Listing 5.7 — Atomic fund transfer with @transactional
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
-from pyfly.container import service
-from pyfly.data.relational.sqlalchemy import transactional
-
-from lumen.wallet_entity import WalletEntity
-from lumen.wallet_repository import WalletRepository
-
-
-@service
-class TransferService:
+class OpenWalletHandler(CommandHandler[OpenWallet, str]):
     def __init__(
-        self,
-        repo: WalletRepository,
-        session_factory: async_sessionmaker,
+        self, repository: WalletRepository, events: EventPublisher
     ) -> None:
-        self._repo = repo
-        self._session_factory = session_factory
+        super().__init__()
+        self._repository = repository
+        self._events = events
+```
 
-    @transactional()
-    async def transfer(
-        self,
-        from_wallet_id: str,
-        to_wallet_id: str,
-        amount: float,
-    ) -> None:
-        source = await self._repo.find_by_id(from_wallet_id)
-        target = await self._repo.find_by_id(to_wallet_id)
-
-        if source is None or target is None:
-            raise ValueError("Wallet not found")
-        if source.balance < amount:
-            raise ValueError("Insufficient funds")
-
-        source.balance -= amount
-        target.balance += amount
-
-        await self._repo.save(source)
-        await self._repo.save(target)
-        # Both saves committed atomically; any exception rolls back both
-:::
-
-Walk through the method. The two `find_by_id` calls load both wallets within the same transaction-scoped session — important, because a concurrent transfer to the same wallet must wait at the database level rather than racing in Python. The guard clauses raise `ValueError` before any mutation if either wallet is missing or the balance is insufficient; `@transactional` catches those exceptions and rolls back immediately. The two `save` calls then modify both entities; because they share the same session, they share the same transaction. Both writes commit together when the method returns normally, or both roll back if anything goes wrong after the first save.
-
-`@transactional()` resolves `async_sessionmaker` from `self._session_factory` and automatically patches the repository instances on the service with the transaction-scoped session, so both `save` calls share the same transaction without any wiring in your code.
-
-The decorator accepts optional `propagation` and `isolation` arguments. The default propagation is `REQUIRED`: join an existing transaction if one is active, otherwise open a new one. Use `Propagation.REQUIRES_NEW` for operations that must commit independently of the caller (audit logs, outbox events). Use `Isolation.SERIALIZABLE` for reports or transfer checks where phantom reads must be impossible.
-
-!!! warning "All-or-nothing is the goal, not the default"
-    Without `@transactional`, two `save` calls in the same method run in separate sessions. If the second save raises after the first commits, the database is left in a partial state. Wrap every multi-step write in `@transactional()` — the cost is negligible and the correctness guarantee is absolute.
+That single `WalletRepository` annotation is the entire persistence contract from the handler's perspective. Whether it resolves to a dictionary or a database file is decided at startup by `@primary` — not by the handler.
 
 ---
 
-## Evolving the schema: migrations
+## Testing the SQL adapter directly
 
-`ddl-auto: create` is convenient in the first hours of development, when the schema is still in flux and losing data between restarts is acceptable. It is never acceptable in staging or production, because it **drops and recreates tables on every startup**, taking all existing data with it.
+Because the SQL adapter satisfies the same port, you can test it in isolation without starting the full application. The test creates a temporary SQLite database, builds `Base.metadata`, and exercises the adapter's full lifecycle:
 
-The safe alternative is **migrations**: versioned scripts that describe each incremental change to the schema and can be applied forward or, when necessary, reversed. A migration knows what the schema looked like before it ran and what it should look like after. Applied in order, they bring any database — brand-new or months old — to exactly the version the code expects.
+::: listing lumen/tests/test_sql_wallet_repository.py | Listing 5.8 — SQLite adapter test: open, deposit, withdraw, prove persistence
+from __future__ import annotations
 
-PyFly's migration support is powered by [Alembic](https://alembic.sqlalchemy.org/). The `pyfly db` commands wrap Alembic with framework-aware defaults so you rarely need to touch `alembic.ini` or `env.py` directly.
+from collections.abc import AsyncIterator
+from pathlib import Path
 
-### Initialising the migration environment
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-Run this once in your project root:
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+from lumen.models.entities.v1.wallet_entity import Wallet
+from lumen.models.repositories.sql_wallet_repository import (
+    SqlAlchemyWalletRepository,
+)
+from pyfly.data.relational.sqlalchemy import Base
 
-::: listing terminal | Listing 5.8 — Initialising Alembic for Lumen
-pyfly db init
+
+@pytest_asyncio.fixture
+async def sqlite_session(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], str]]:
+    """Temp-file SQLite engine + session factory, schema created.
+
+    Mirrors what PyFly's EngineLifecycle does at startup: build the
+    async engine and run Base.metadata.create_all. Yields the session
+    factory and the database URL so the test can reconnect later.
+    """
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'wallets.db'}"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory, db_url
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_full_flow_persists_through_sqlite_adapter(
+    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, db_url = sqlite_session
+
+    async with factory() as session:
+        repo = SqlAlchemyWalletRepository(session=session)
+
+        wallet_id = await repo.next_id()
+        wallet = Wallet.open(
+            wallet_id, owner_id="owner-42", currency=Currency.USD
+        )
+        await repo.add(wallet)
+
+        loaded = await repo.find(wallet_id)
+        assert loaded is not None
+        loaded.deposit(Money(2500, Currency.USD))
+        await repo.add(loaded)
+
+        loaded = await repo.find(wallet_id)
+        assert loaded is not None
+        loaded.withdraw(Money(1000, Currency.USD))
+        await repo.add(loaded)
+
+        got = await repo.find(wallet_id)
+        assert got is not None
+        assert got.owner_id == "owner-42"
+        assert got.currency is Currency.USD
+        assert got.balance == Money(1500, Currency.USD)
+
+    # Prove persistence: reconnect with a brand-new engine/session
+    fresh_engine = create_async_engine(db_url)
+    fresh_factory = async_sessionmaker(fresh_engine, expire_on_commit=False)
+    try:
+        async with fresh_factory() as fresh_session:
+            fresh_repo = SqlAlchemyWalletRepository(session=fresh_session)
+            persisted = await fresh_repo.find(wallet_id)
+            assert persisted is not None
+            assert persisted.balance == Money(1500, Currency.USD)
+            assert persisted.owner_id == "owner-42"
+            assert await fresh_repo.all_ids() == [wallet_id]
+    finally:
+        await fresh_engine.dispose()
 :::
 
-This creates an `alembic/` directory with Alembic's standard structure and writes a PyFly-customised `env.py` that already imports `Base.metadata` from `pyfly.data.relational.sqlalchemy`, wires `async_engine_from_config` for async database drivers (asyncpg, aiosqlite), and supports both online (live connection) and offline (SQL-script) migration modes. You do not need to configure any of this by hand.
+The test proves two things. Within the first session it exercises the full lifecycle — open, deposit, withdraw, read back — verifying that `add` behaves as an upsert and that `find` returns a properly rehydrated aggregate with the expected balance. Then it opens a completely independent engine with a fresh session and loads the same wallet again. If the data survived the reconnect, the adapter is actually writing to disk and the rehydration logic is correct.
 
-### Generating the first migration
-
-With `WalletEntity` defined, generate the initial migration:
-
-::: listing terminal | Listing 5.9 — Auto-generating the wallets table migration
-pyfly db migrate -m "create wallets table"
-:::
-
-Alembic compares `Base.metadata` — every entity you have defined, including all inherited `BaseEntity` columns — against the current database state and writes `upgrade` and `downgrade` functions in a new file under `alembic/versions/`. Open the file and review it before applying: Alembic is accurate for columns and primary keys, but it does not detect every naming convention for constraints and indexes. This is a five-minute habit that prevents surprises in production.
-
-A generated migration file for the wallets table looks like this:
-
-::: listing alembic/versions/0001_create_wallets_table.py | Listing 5.10 — Generated migration: create the wallets table
-"""create wallets table
-
-Revision ID: a1b2c3d4e5f6
-Revises:
-Create Date: 2026-06-07 10:00:00.000000
-"""
-from alembic import op
-import sqlalchemy as sa
-
-revision = "a1b2c3d4e5f6"
-down_revision = None
-branch_labels = None
-depends_on = None
-
-
-def upgrade() -> None:
-    op.create_table(
-        "wallets",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("owner_id", sa.String(255), nullable=False),
-        sa.Column("balance", sa.Numeric(precision=18, scale=6), nullable=True),
-        sa.Column("currency", sa.String(3), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-        ),
-        sa.Column("created_by", sa.String(255), nullable=True),
-        sa.Column("updated_by", sa.String(255), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_wallets_owner_id", "wallets", ["owner_id"])
-
-
-def downgrade() -> None:
-    op.drop_index("ix_wallets_owner_id", table_name="wallets")
-    op.drop_table("wallets")
-:::
-
-Notice how the migration faithfully reflects what `WalletEntity` declared: the three business columns (`owner_id`, `balance`, `currency`), the five audit columns from `BaseEntity`, the primary key, and the index on `owner_id` that you requested with `index=True`. The `downgrade` function is the exact inverse — drop the index first, then the table — so rolling back this migration leaves the database in the state it was in before `upgrade` ran.
-
-### Applying migrations
-
-Apply all pending migrations to bring the database to `head`:
-
-::: listing terminal | Listing 5.11 — Applying migrations
-pyfly db upgrade
-:::
-
-To apply up to a specific revision: `pyfly db upgrade abc123`. To roll back one step: `pyfly db downgrade -1`. To revert everything: `pyfly db downgrade base`.
-
-Once the migration is applied, switch `ddl-auto` back to `none` in `pyfly.yaml` — the schema is now managed exclusively by Alembic.
-
-!!! note "Note"
-    Every time you add a column, rename a table, or introduce an index, run `pyfly db migrate -m "description"` followed by `pyfly db upgrade`. Commit the generated file in `alembic/versions/` alongside your entity changes — both go in the same pull request so the schema is never out of step with the code that reads it.
+The fixture mirrors exactly what PyFly's `EngineLifecycle` does at application startup: it creates the engine, runs `Base.metadata.create_all` inside a `begin()` context (so the DDL is committed), and hands back a session factory. Your tests therefore exercise the same table structure the application creates in production.
 
 !!! spring "Spring parity"
-    Alembic with `pyfly db` is the Python equivalent of Flyway or Liquibase wired into a Spring Boot application. `pyfly db migrate` generates versioned scripts the way Flyway discovers `V1__create_orders_table.sql` files — except Alembic's autogenerate derives the diff from your SQLAlchemy models rather than requiring you to write the SQL by hand. `ddl-auto: none` maps to `spring.jpa.hibernate.ddl-auto=validate` or `=none`; `ddl-auto: create` maps to `=create`.
+    `Base.metadata.create_all` is the Python equivalent of `spring.jpa.hibernate.ddl-auto=create`. The test fixture pattern — build a real in-process database and test the repository directly — maps to Spring's `@DataJpaTest` slice, which spins up an H2 in-memory database and the JPA layer in isolation. Both approaches verify the adapter without starting the full application context.
 
 ---
 
 ## What you built {.recap}
 
-Part II is off to a solid start.
+Lumen now has two repository adapters behind a single port.
 
-Lumen now writes to a real database without a single line of business logic changing. You defined `WalletEntity` by extending `BaseEntity` — five audit columns for free, four business columns for the domain — and enabled the SQLAlchemy adapter with two lines in `pyfly.yaml`. `WalletRepository` subclasses `Repository[WalletEntity, str]` and provides typed CRUD, derived query methods compiled from method names at class-load time, and both list and paginated retrieval. `WalletService` depends on the repository through the `RepositoryPort` protocol and remains unaware of the database engine underneath. Multi-step writes are wrapped in `@transactional()` to guarantee atomicity: both saves commit together or neither does. The schema is versioned with Alembic migrations generated by `pyfly db migrate` — no hand-written SQL, no `ddl-auto: create` in production.
+The port (`WalletRepository`) is a `@runtime_checkable` Protocol — four async method signatures, nothing else. The first adapter (`InMemoryWalletRepository`) is a concurrent dictionary, marked `@primary` so the application boots on it with zero external infrastructure. The second adapter (`SqlAlchemyWalletRepository`) maps the `Wallet` aggregate onto a `WalletRow(Base)` table using SQLAlchemy 2.0 `Mapped`/`mapped_column` syntax, stores amounts as integer minor units, and commits after every write. Both adapters explicitly inherit `WalletRepository` — the registration contract that lets the container bind them to the port. `ddl-auto: create` in `pyfly.yaml` tells the framework to create the schema from `Base.metadata` on startup; no migration tool is needed for a sample that starts fresh.
 
-The controller and service code from Chapters 2–4 are untouched. That is the hexagonal payoff.
+The command handlers never changed. That is the hexagonal payoff.
 
 ---
 
 ## Try it yourself {.exercises}
 
-1. **Add a derived query for currency search.** Add `find_by_currency` to `WalletRepository` as a stub method that returns `list[WalletEntity]`. Then expose it in `WalletService.list_wallets` as an additional optional filter. Add `currency: QueryParam[str] = None` to the `list_wallets` handler in `WalletController` and verify that `GET /wallets?currency=EUR` returns only EUR wallets while `GET /wallets` still returns all wallets.
+1. **Swap to the SQL adapter.** Move `@primary` from `InMemoryWalletRepository` to `SqlAlchemyWalletRepository`. Start the application with `pyfly run` and open a wallet with a `POST /wallets` request. Stop and restart the process, then call `GET /wallets/{id}` — the wallet should still exist because it was written to `lumen.db`. Move `@primary` back when you are done.
 
-2. **Add a paged `/wallets/{owner_id}/wallets` endpoint.** Add a `GET /owners/{owner_id}/wallets` route to `WalletController` that accepts `page` and `size` query parameters and returns the `Page[WalletSummary]` from `WalletService.list_wallets`. Serialize `items`, `total`, `page`, `size`, `total_pages`, `has_next`, and `has_previous` in the response body. Verify with `GET /owners/alice/wallets?page=1&size=2` that the pagination metadata is correct when Alice has more than two wallets.
+2. **Add a `find_by_owner` method to the port.** Add `async def find_by_owner(self, owner_id: str) -> list[Wallet]: ...` to the `WalletRepository` Protocol. Implement it in `InMemoryWalletRepository` by filtering `self._store.values()`. Implement it in `SqlAlchemyWalletRepository` using `select(WalletRow).where(WalletRow.owner_id == owner_id)`. Write a test that opens two wallets with the same owner and one with a different owner, then asserts that `find_by_owner` returns exactly the two.
 
-3. **Write a migration that adds a `status` column.** Add a `status: Mapped[str] = mapped_column(String(20), default="ACTIVE")` field to `WalletEntity`. Run `pyfly db migrate -m "add wallet status"` and inspect the generated file in `alembic/versions/`. Apply it with `pyfly db upgrade`. Then add a `find_by_status` derived query stub to `WalletRepository`, verify it compiles at startup, and call it from a new `WalletService.find_active_wallets` method that filters by `"ACTIVE"`.
+3. **Verify integer minor units.** Open a wallet and deposit `Money(1050, Currency.EUR)` (€10.50) through the in-memory adapter. Check `wallet.balance.amount == 1050` and `wallet.balance.major_units == 10.5`. Then repeat through `SqlAlchemyWalletRepository` against a real SQLite file: after a deposit of `1050` and a withdrawal of `50`, assert `balance.amount == 1000` and that the value survives a reconnect.

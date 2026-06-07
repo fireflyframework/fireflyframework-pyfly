@@ -9,41 +9,53 @@ bus, and the saga coordinator rolls back cleanly on failure. What you do not yet
 have is **confidence** that it will keep working after the next refactor. That
 confidence comes from tests — tests that run in milliseconds, tests that prove
 the domain model enforces its invariants, tests that verify the CQRS pipeline
-dispatches correctly, and tests that start a real Postgres container and prove
-the repository round-trips data exactly as expected.
+dispatches correctly, and tests that exercise the repository against a real
+SQLite database file without any external infrastructure.
 
 PyFly treats testing as a first-class concern. The `pyfly.testing` module ships
-a base test case class, a DI container factory for overrides, event assertion
-helpers, test-slice decorators that mirror Spring Boot's `@WebMvcTest` and
-`@DataJpaTest`, and Testcontainers wiring that boots real Docker-backed
-infrastructure with one helper call. You do not build boilerplate; you write
-behavior.
+higher-level helpers — `PyFlyTestCase`, `create_test_container`,
+`assert_event_published`, Testcontainers wiring — that you can reach for when
+you need them. Lumen's own test suite does not use them: it wires the
+real components directly from `conftest.py`, uses standard pytest fixtures, and
+proves every layer of the pyramid with no boilerplate whatsoever. That is the
+approach this chapter teaches.
 
 This chapter works through the full testing pyramid for Lumen.
 
-::: figure art/figures/16-testing.svg | Figure 16.1 — PyFly's testing pyramid. Fast unit tests form the wide base; integration tests sit in the middle; Docker-backed Testcontainers tests crown the top and run only when Docker is available.
+::: figure art/figures/16-testing.svg | Figure 16.1 — PyFly's testing pyramid. Fast unit tests form the wide base; integration tests sit in the middle; real-DB adapter tests crown the top.
 
 The pyramid has three levels. **Unit tests** sit at the base — many of them,
-running in milliseconds, mocking every external dependency. **Integration tests**
-occupy the middle tier — fewer, using in-memory adapters or `create_test_container`
-with fakes to exercise multiple classes together. **Docker-backed tests** crown the
-pyramid — a small number that spin up a real Postgres or Redis via Testcontainers
-to prove the persistence and cache layers against real infrastructure. The higher
-you climb, the slower, costlier, and fewer the tests.
+running in milliseconds, exercising the domain model with no dependencies at
+all. **CQRS flow tests** occupy the middle tier — the full open/deposit/
+withdraw/query cycle routed through the real bus and the in-memory repository,
+all wired in `conftest.py`. **SQLite adapter tests** crown the pyramid — a
+small number that exercise the SQLAlchemy/aiosqlite repository against a
+temporary file database, with no Docker required.
 
-| Level       | Dependencies          | Speed  | PyFly tools                                  |
-|-------------|----------------------|--------|----------------------------------------------|
-| Unit        | Mocked               | Fast   | `unittest.mock`, `mock_bean`                 |
-| Integration | In-memory / fakes    | Medium | `create_test_container`, `PyFlyTestCase`     |
-| Docker      | Real Postgres/Redis  | Slow   | `postgres_container`, `pyfly_config`         |
+| Level            | Dependencies                  | Speed  | Lumen approach                    |
+|------------------|------------------------------|--------|-----------------------------------|
+| Unit             | None                         | Fast   | plain pytest, no fixtures         |
+| CQRS flow        | In-memory bus + repository   | Fast   | conftest.py fixtures              |
+| Repository/DB    | SQLite + aiosqlite           | Fast   | `tmp_path` + SQLAlchemy async     |
 
-The project already uses pytest with `pytest-asyncio`. Enable auto-mode once in
-`pyproject.toml` and every `async def test_*` function runs without a decorator:
+The project uses pytest with `pytest-asyncio` in **auto mode**. Enable it once
+in `pyproject.toml` and every `async def test_*` function is picked up:
 
 ```ini
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
 ```
+
+Install dev dependencies and run the suite:
+
+```bash
+uv run --extra dev pytest -q
+```
+
+The bare `uv sync` (without `--extra dev`) drops the dev group, so pytest is
+not installed. Always pass `--extra dev` when running tests.
 
 ---
 
@@ -52,993 +64,784 @@ asyncio_mode = "auto"
 The domain model — `Money` and `Wallet` — has no framework dependencies. It
 never touches a database, a message bus, or an HTTP client. That makes it the
 ideal subject for pure, fast unit tests: construct objects, call methods, assert
-outcomes. No mocks required.
+outcomes. No mocks, no fixtures, no `async`.
 
 ### Testing Money
 
 `Money` is a frozen dataclass. Every operation either succeeds and returns a
-new `Money` or raises `ValueError`. Tests are three-liners.
+new `Money` or raises `BusinessRuleViolation`. Each violation carries a `.rule`
+string that names the violated invariant — useful for asserting the exact rule
+in tests.
 
-::: listing tests/domain/test_money.py | Listing 16.1 — Pure unit tests for the Money value object
+::: listing tests/test_money.py | Listing 16.1 — Pure unit tests for the Money value object
+from __future__ import annotations
+
 import pytest
-from lumen.domain.money import Money
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+
+from pyfly.domain import BusinessRuleViolation
 
 
-class TestMoneyArithmetic:
+def test_value_equality_is_structural() -> None:
+    assert Money(1050, Currency.EUR) == Money(1050, Currency.EUR)
+    assert Money(1050, Currency.EUR) != Money(1050, Currency.USD)
+    assert Money(1050, Currency.EUR) != Money(999, Currency.EUR)
 
-    def test_add_same_currency(self):
-        a = Money(amount=1000, currency="EUR")
-        b = Money(amount=500, currency="EUR")
-        result = a.add(b)
-        assert result.amount == 1500
-        assert result.currency == "EUR"
 
-    def test_add_returns_new_instance(self):
-        a = Money(amount=1000, currency="EUR")
-        b = Money(amount=200, currency="EUR")
-        result = a.add(b)
-        assert result is not a  # immutable: always a fresh object
+def test_money_is_immutable() -> None:
+    money = Money(1050, Currency.EUR)
+    with pytest.raises(Exception):  # frozen dataclass -> FrozenInstanceError
+        money.amount = 0  # type: ignore[misc]
 
-    def test_subtract_same_currency(self):
-        a = Money(amount=1000, currency="EUR")
-        b = Money(amount=300, currency="EUR")
-        result = a.subtract(b)
-        assert result.amount == 700
 
-    def test_add_currency_mismatch_raises(self):
-        a = Money(amount=1000, currency="EUR")
-        b = Money(amount=500, currency="USD")
-        with pytest.raises(ValueError, match="Cannot add EUR and USD"):
-            a.add(b)
+def test_add_and_subtract_same_currency() -> None:
+    a = Money(1050, Currency.EUR)
+    b = Money(450, Currency.EUR)
+    assert a.add(b) == Money(1500, Currency.EUR)
+    assert a.subtract(b) == Money(600, Currency.EUR)
 
-    def test_subtract_currency_mismatch_raises(self):
-        a = Money(amount=1000, currency="EUR")
-        b = Money(amount=200, currency="USD")
-        with pytest.raises(ValueError, match="Cannot subtract USD from EUR"):
-            a.subtract(b)
 
-    def test_is_negative(self):
-        assert Money(amount=-1, currency="EUR").is_negative() is True
-        assert Money(amount=0, currency="EUR").is_negative() is False
-        assert Money(amount=1, currency="EUR").is_negative() is False
+def test_zero_factory_and_major_units() -> None:
+    assert Money.zero(Currency.USD) == Money(0, Currency.USD)
+    assert Money(1050, Currency.EUR).major_units == 10.5
+    assert str(Money(1050, Currency.EUR)) == "10.50 EUR"
 
-    def test_is_zero(self):
-        assert Money(amount=0, currency="EUR").is_zero() is True
-        assert Money(amount=1, currency="EUR").is_zero() is False
 
-    def test_str_formatting(self):
-        m = Money(amount=10050, currency="EUR")
-        assert str(m) == "100.50 EUR"
+def test_currency_mismatch_is_rejected() -> None:
+    with pytest.raises(BusinessRuleViolation) as exc:
+        Money(100, Currency.EUR).add(Money(100, Currency.USD))
+    assert exc.value.rule == "money-currency-mismatch"
+
+
+def test_non_integer_amount_is_rejected() -> None:
+    with pytest.raises(BusinessRuleViolation) as exc:
+        Money(10.5, Currency.EUR)  # type: ignore[arg-type]
+    assert exc.value.rule == "money-amount-integer"
 :::
 
-Every test is synchronous — no `async`, no `await`, no DI container. The test
-class is a plain Python class with no base class; pytest collects it automatically.
+Every test is synchronous — no `async`, no `await`, no fixtures. Pytest collects
+the module-level functions automatically. `Currency.EUR` is an enum value, not
+a plain string, matching the domain model's type contract exactly.
 
 !!! tip "Minor-unit arithmetic"
-    `Money` stores amounts in minor units (integer cents). The tests above use
-    raw integers deliberately. When asserting formatted output with `str()`,
-    remember `10050` renders as `"100.50 EUR"`, not `"10050.00 EUR"`. Keep that
-    mental model consistent with Chapter 6.
+    `Money` stores amounts in **minor units** (integer cents). `Money(1050,
+    Currency.EUR)` represents €10.50 — verified by `major_units == 10.5` and
+    `str(...) == "10.50 EUR"`. The `Money.zero(currency)` factory returns a
+    `Money(0, currency)`, useful for initialising wallet balances.
 
 ### Testing the Wallet aggregate
 
-`Wallet` enforces three invariants: deposits must be positive, withdrawals must
-not overdraft, and amounts must match the wallet's currency. These rules live in
-`Wallet.deposit` and `Wallet.withdraw`. Unit tests drive the wallet directly —
-no bus, no repository, no persistence.
+`Wallet` enforces several invariants: the owner must be a non-blank string,
+deposits must be positive, withdrawals must not overdraw, and amounts must
+match the wallet's currency. Each rule violation carries a `.rule` attribute
+for precise assertion.
 
-::: listing tests/domain/test_wallet.py | Listing 16.2 — Unit tests for the Wallet aggregate root
+::: listing tests/test_wallet_aggregate.py | Listing 16.2 — Unit tests for the Wallet aggregate root
+from __future__ import annotations
+
 import pytest
-from pyfly.domain import BusinessRuleViolation
-
-from lumen.domain.money import Money
-from lumen.domain.wallet import (
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+from lumen.models.entities.v1.wallet_entity import (
     FundsDeposited,
     FundsWithdrawn,
     Wallet,
     WalletOpened,
 )
 
-
-class TestWalletOpen:
-
-    def test_open_creates_zero_balance(self):
-        wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        assert wallet.balance.amount == 0
-        assert wallet.balance.currency == "EUR"
-
-    def test_open_queues_wallet_opened_event(self):
-        wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        events = wallet.clear_events()
-        assert len(events) == 1
-        assert isinstance(events[0], WalletOpened)
-        assert events[0].owner_id == "user-1"
-        assert events[0].currency == "EUR"
-
-    def test_open_generates_non_empty_id(self):
-        wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        assert wallet.id and len(wallet.id) > 0
+from pyfly.domain import BusinessRuleViolation
 
 
-class TestWalletDeposit:
-
-    def setup_method(self):
-        self.wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        self.wallet.clear_events()  # discard the WalletOpened event
-
-    def test_deposit_increases_balance(self):
-        self.wallet.deposit(Money(amount=5000, currency="EUR"))
-        assert self.wallet.balance.amount == 5000
-
-    def test_deposit_queues_funds_deposited_event(self):
-        self.wallet.deposit(Money(amount=5000, currency="EUR"))
-        events = self.wallet.clear_events()
-        assert len(events) == 1
-        assert isinstance(events[0], FundsDeposited)
-        assert events[0].amount == 5000
-        assert events[0].new_balance == 5000
-
-    def test_deposit_zero_raises(self):
-        with pytest.raises(BusinessRuleViolation, match="greater than zero"):
-            self.wallet.deposit(Money(amount=0, currency="EUR"))
-
-    def test_deposit_negative_raises(self):
-        with pytest.raises(BusinessRuleViolation):
-            self.wallet.deposit(Money(amount=-100, currency="EUR"))
-
-    def test_deposit_currency_mismatch_raises(self):
-        with pytest.raises(BusinessRuleViolation, match="currency"):
-            self.wallet.deposit(Money(amount=1000, currency="USD"))
-
-    def test_clear_events_drains_buffer(self):
-        self.wallet.deposit(Money(amount=1000, currency="EUR"))
-        first = self.wallet.clear_events()
-        second = self.wallet.clear_events()
-        assert len(first) == 1
-        assert len(second) == 0  # drained on first call
+def test_open_creates_empty_wallet() -> None:
+    wallet = Wallet.open("wlt-1", "owner-1", Currency.EUR)
+    assert wallet.owner_id == "owner-1"
+    assert wallet.currency is Currency.EUR
+    assert wallet.balance == Money.zero(Currency.EUR)
+    [event] = wallet.pending_events()
+    assert isinstance(event, WalletOpened)
+    assert event.wallet_id == "wlt-1"
+    assert event.currency == "EUR"
 
 
-class TestWalletWithdraw:
+def test_open_requires_owner() -> None:
+    with pytest.raises(BusinessRuleViolation) as exc:
+        Wallet.open("wlt-x", "   ", Currency.EUR)
+    assert exc.value.rule == "wallet-owner-required"
 
-    def setup_method(self):
-        self.wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        self.wallet.deposit(Money(amount=10000, currency="EUR"))
-        self.wallet.clear_events()
 
-    def test_withdraw_decreases_balance(self):
-        self.wallet.withdraw(Money(amount=3000, currency="EUR"))
-        assert self.wallet.balance.amount == 7000
+def test_deposit_then_withdraw_happy_path() -> None:
+    wallet = Wallet.open("wlt-2", "owner-2", Currency.EUR)
+    wallet.clear_events()
 
-    def test_withdraw_queues_funds_withdrawn_event(self):
-        self.wallet.withdraw(Money(amount=3000, currency="EUR"))
-        events = self.wallet.clear_events()
-        assert len(events) == 1
-        assert isinstance(events[0], FundsWithdrawn)
-        assert events[0].amount == 3000
-        assert events[0].new_balance == 7000
+    wallet.deposit(Money(1000, Currency.EUR))
+    assert wallet.balance == Money(1000, Currency.EUR)
+    [event] = wallet.clear_events()
+    assert isinstance(event, FundsDeposited)
+    assert event.amount == 1000
+    assert event.balance == 1000
 
-    def test_overdraft_raises(self):
-        with pytest.raises(BusinessRuleViolation, match="overdraft"):
-            self.wallet.withdraw(Money(amount=20000, currency="EUR"))
+    wallet.withdraw(Money(400, Currency.EUR))
+    assert wallet.balance == Money(600, Currency.EUR)
+    [event] = wallet.clear_events()
+    assert isinstance(event, FundsWithdrawn)
+    assert event.amount == 400
+    assert event.balance == 600
 
-    def test_withdraw_currency_mismatch_raises(self):
-        with pytest.raises(BusinessRuleViolation, match="currency"):
-            self.wallet.withdraw(Money(amount=1000, currency="USD"))
+
+def test_withdraw_cannot_overdraw() -> None:
+    wallet = Wallet.open("wlt-3", "owner-3", Currency.EUR)
+    wallet.deposit(Money(500, Currency.EUR))
+    wallet.clear_events()
+    with pytest.raises(BusinessRuleViolation) as exc:
+        wallet.withdraw(Money(501, Currency.EUR))
+    assert exc.value.rule == "wallet-insufficient-funds"
+    # invariant held: balance unchanged, no event raised
+    assert wallet.balance == Money(500, Currency.EUR)
+    assert wallet.pending_events() == []
+
+
+def test_deposit_must_be_positive() -> None:
+    wallet = Wallet.open("wlt-4", "owner-4", Currency.EUR)
+    with pytest.raises(BusinessRuleViolation) as exc:
+        wallet.deposit(Money(0, Currency.EUR))
+    assert exc.value.rule == "wallet-deposit-positive"
+
+
+def test_currency_mismatch_is_rejected() -> None:
+    wallet = Wallet.open("wlt-5", "owner-5", Currency.EUR)
+    with pytest.raises(BusinessRuleViolation) as exc:
+        wallet.deposit(Money(100, Currency.USD))
+    assert exc.value.rule == "wallet-currency-mismatch"
 :::
 
-Notice how clean the tests are: create a wallet, call a method, assert the
-balance or the event buffer. `setup_method` is pytest's equivalent of `setUp`
-in `unittest` — it runs before every test method in the class. The
-`self.wallet.clear_events()` call in `setup_method` of `TestWalletWithdraw`
-is deliberate: it drains the events queued by `Wallet.open` and `deposit`
-before each withdrawal test, so the event-assertion tests only see events from
-the operation under test.
+Three details deserve attention. First, `Wallet.open` takes three positional
+arguments: a pre-generated `wallet_id`, an `owner_id`, and a `Currency` enum
+value — the aggregate does not generate its own ID. Second, `pending_events()`
+returns the events buffered so far without draining the buffer; `clear_events()`
+returns and drains it. The `test_deposit_then_withdraw_happy_path` test calls
+`clear_events()` after opening so the deposit and withdrawal assertions each
+see exactly one event. Third, `FundsDeposited` and `FundsWithdrawn` carry an
+`amount` field (the operation amount in minor units) and a `balance` field (the
+post-operation running balance) — not `new_balance`. Always check the real
+event dataclass fields before asserting them.
 
 !!! spring "Spring parity"
     Testing a DDD aggregate in isolation is the same discipline in any stack. In
-    Spring / jMolecules you would test the aggregate by calling its methods
-    directly and checking `aggregate.domainEvents()` (provided by
-    `AbstractAggregateRoot`) before calling `afterDomainEventPublication()`.
-    PyFly's `clear_events()` plays the same role as `@AfterDomainEventPublication`
-    — drain the buffer, assert what was there, and move on.
+    Spring / jMolecules you would call the aggregate's methods directly and
+    check `aggregate.domainEvents()` (provided by `AbstractAggregateRoot`)
+    before calling `afterDomainEventPublication()` to drain the buffer. PyFly's
+    `clear_events()` plays the same role — drain, assert, move on.
 
 ---
 
-## Testing services and CQRS handlers
+## Wiring the test stack with conftest.py
 
-Service-layer tests need more infrastructure than domain tests: the service
-depends on a repository, the CQRS handler depends on a command bus, and
-the event publisher needs somewhere to send events. PyFly provides two
-complementary tools: `create_test_container` for lightweight DI wiring with
-fake implementations, and `PyFlyTestCase` for tests that need the full
-`ApplicationContext` lifecycle.
+The CQRS and event-listener tests need real infrastructure: a repository, an
+event bus, command and query handlers, and a running bus. Rather than
+re-creating this in every test module, Lumen declares the wiring once in
+`tests/conftest.py`. Pytest discovers the file automatically and makes the
+fixtures available to every test in the package.
 
-### Wiring fakes with create_test_container
+::: listing tests/conftest.py | Listing 16.3 — conftest.py: real components wired with no mocks
+from __future__ import annotations
 
-`create_test_container` builds a `Container` pre-configured with your
-`overrides` mapping. For each `(interface, impl)` pair it registers the
-implementation as a `SINGLETON` and binds the interface to it, so
-`container.resolve(interface)` returns the test double. You then register
-the class under test and resolve it — its dependencies arrive already injected.
+import sys
+from collections.abc import AsyncIterator
+from pathlib import Path
 
-::: listing tests/services/test_wallet_service.py | Listing 16.3 — WalletApplicationService with a fake repository injected via create_test_container
-import pytest
-from pyfly.container import Scope
-from pyfly.domain import BusinessRuleViolation
-from pyfly.testing import create_test_container
+import pytest_asyncio
 
-from lumen.domain.money import Money
-from lumen.domain.wallet import Wallet
-from lumen.domain.wallet_repository import WalletDomainRepository
-from lumen.services.wallet_application_service import WalletApplicationService
+# Make the sample's `src/` importable
+_HERE = Path(__file__).resolve().parent
+_SRC = _HERE.parent / "src"
+sys.path.insert(0, str(_SRC))
 
+from lumen.core.services.listeners import WalletAuditListener
+from lumen.core.services.wallets import (
+    DepositFundsHandler,
+    GetBalanceHandler,
+    GetWalletHandler,
+    OpenWalletHandler,
+    WithdrawFundsHandler,
+)
+from lumen.models.repositories import InMemoryWalletRepository
 
-class FakeWalletRepository:
-    """In-memory repository. No DB, no migrations, no network."""
-
-    def __init__(self):
-        self._store: dict[str, Wallet] = {}
-
-    async def save(self, wallet: Wallet) -> None:
-        self._store[wallet.id] = wallet
-
-    async def find_by_id(self, wallet_id: str) -> Wallet | None:
-        return self._store.get(wallet_id)
+from pyfly.cqrs import (
+    DefaultCommandBus,
+    DefaultQueryBus,
+    HandlerRegistry,
+)
+from pyfly.eda.adapters.memory import InMemoryEventBus
 
 
-class TestWalletApplicationService:
+@pytest_asyncio.fixture
+async def repository() -> AsyncIterator[InMemoryWalletRepository]:
+    yield InMemoryWalletRepository()
 
-    @pytest.fixture
-    def container(self):
-        c = create_test_container(
-            overrides={WalletDomainRepository: FakeWalletRepository}
-        )
-        c.register(WalletApplicationService, scope=Scope.SINGLETON)
-        return c
 
-    @pytest.fixture
-    def service(self, container) -> WalletApplicationService:
-        return container.resolve(WalletApplicationService)
+@pytest_asyncio.fixture
+async def event_bus() -> AsyncIterator[InMemoryEventBus]:
+    """A real in-memory EDA bus — same EventPublisher as production."""
+    yield InMemoryEventBus()
 
-    @pytest.fixture
-    def repo(self, container) -> FakeWalletRepository:
-        return container.resolve(WalletDomainRepository)
 
-    async def test_open_wallet_persists(self, service, repo):
-        wallet_id = await service.open_wallet(
-            owner_id="user-42", currency="EUR"
-        )
-        assert wallet_id
-        assert wallet_id in {w.id for w in repo._store.values()}
+@pytest_asyncio.fixture
+async def audit_listener(
+    event_bus: InMemoryEventBus,
+) -> AsyncIterator[WalletAuditListener]:
+    """The wallet audit projection, subscribed to the bus exactly
+    as ApplicationContext auto-wires it at startup."""
+    listener = WalletAuditListener()
+    method = listener.on_wallet_event
+    for pattern in method.__pyfly_event_patterns__:
+        event_bus.subscribe(pattern, method)
+    yield listener
 
-    async def test_deposit_increases_stored_balance(self, service, repo):
-        wallet_id = await service.open_wallet(
-            owner_id="user-42", currency="EUR"
-        )
-        await service.deposit(
-            wallet_id=wallet_id,
-            amount=Money(amount=5000, currency="EUR"),
-        )
-        wallet = await repo.find_by_id(wallet_id)
-        assert wallet is not None
-        assert wallet.balance.amount == 5000
 
-    async def test_overdraft_does_not_persist(self, service, repo):
-        wallet_id = await service.open_wallet(
-            owner_id="user-42", currency="EUR"
-        )
-        with pytest.raises(BusinessRuleViolation):
-            await service.deposit(
-                wallet_id=wallet_id,
-                amount=Money(amount=-1000, currency="EUR"),
-            )
-        wallet = await repo.find_by_id(wallet_id)
-        assert wallet is not None
-        assert wallet.balance.amount == 0  # unchanged
+@pytest_asyncio.fixture
+async def command_bus(
+    repository: InMemoryWalletRepository,
+    event_bus: InMemoryEventBus,
+) -> AsyncIterator[DefaultCommandBus]:
+    registry = HandlerRegistry()
+    registry.register_command_handler(
+        OpenWalletHandler(repository=repository, events=event_bus)
+    )
+    registry.register_command_handler(
+        DepositFundsHandler(repository=repository, events=event_bus)
+    )
+    registry.register_command_handler(
+        WithdrawFundsHandler(repository=repository, events=event_bus)
+    )
+    yield DefaultCommandBus(registry=registry)
+
+
+@pytest_asyncio.fixture
+async def query_bus(
+    repository: InMemoryWalletRepository,
+) -> AsyncIterator[DefaultQueryBus]:
+    registry = HandlerRegistry()
+    registry.register_query_handler(GetWalletHandler(repository=repository))
+    registry.register_query_handler(GetBalanceHandler(repository=repository))
+    yield DefaultQueryBus(registry=registry)
 :::
 
-The fixture chain is clean: `container` builds the wired graph once; `service`
-and `repo` resolve from it. Because both resolve from the same container
-singleton, the `repo` fixture gives you a direct reference to the *same* fake
-that the service writes to — so you can assert internal state without reaching
-through HTTP.
+Each fixture is declared with `@pytest_asyncio.fixture` (not the bare
+`@pytest.fixture`) so pytest-asyncio manages the async iterator lifecycle.
+`asyncio_mode = "auto"` in `pyproject.toml` makes async fixtures and tests
+work without any per-function decorator — but the fixture decorator still has
+to be `pytest_asyncio.fixture`.
 
-!!! tip "Singleton scope matters here"
-    `create_test_container` registers overrides with `Scope.SINGLETON`. That
-    means `container.resolve(WalletDomainRepository)` always returns the same
-    `FakeWalletRepository` instance — the same one injected into
-    `WalletApplicationService`. If you used `Scope.TRANSIENT` you would get a
-    fresh empty fake every time, and cross-fixture assertions would fail.
+The `audit_listener` fixture wires itself to the **same** `event_bus` that the
+`command_bus` handlers publish to. Both fixtures receive the same instance
+because pytest resolves fixtures by name within a test's dependency graph:
+`command_bus` depends on `event_bus`, and so does `audit_listener` — pytest
+instantiates `event_bus` once per test and shares it between them.
 
-### Testing CQRS handlers with mock_bean
-
-CQRS command handlers are the most focused objects in the service layer: each
-handler implements one operation and depends on one (or a few) domain
-repositories. `PyFlyTestCase` + `mock_bean` give you a test class where every
-`mock_bean(...)` attribute is automatically wired into the test context — the
-same `AsyncMock` the service layer resolves.
-
-::: listing tests/cqrs/test_deposit_funds_handler.py | Listing 16.4 — DepositFundsHandler tested with mock_bean — the mock is wired into the ApplicationContext
-import pytest
-from unittest.mock import AsyncMock
-from pyfly.testing import PyFlyTestCase, mock_bean
-
-from lumen.cqrs.commands import DepositFunds
-from lumen.cqrs.handlers.deposit_funds_handler import DepositFundsHandler
-from lumen.domain.money import Money
-from lumen.domain.wallet import Wallet
-from lumen.domain.wallet_repository import WalletDomainRepository
-
-
-class TestDepositFundsHandler(PyFlyTestCase):
-    repo = mock_bean(WalletDomainRepository)
-
-    async def test_deposit_calls_save(self):
-        await self.setup()
-
-        # Arrange: the repo returns a real Wallet aggregate
-        wallet = Wallet.open(owner_id="user-1", currency="EUR")
-        self.repo.find_by_id.return_value = wallet
-        self.repo.save.return_value = None
-
-        handler = DepositFundsHandler(wallet_repository=self.repo)
-        cmd = DepositFunds(
-            wallet_id=wallet.id,
-            amount_cents=3000,
-            currency="EUR",
-        )
-
-        # Act
-        await handler.do_handle(cmd)
-
-        # Assert: wallet was saved after deposit
-        self.repo.save.assert_called_once_with(wallet)
-        assert wallet.balance.amount == 3000
-
-        await self.teardown()
-
-    async def test_mock_wired_into_context(self):
-        """The context resolves the same mock that mock_bean provides."""
-        await self.setup()
-
-        resolved = self.context.get_bean(WalletDomainRepository)
-        assert resolved is self.repo
-
-        await self.teardown()
-:::
-
-**How `mock_bean` works.** `mock_bean(WalletDomainRepository)` returns a
-`MockBeanDescriptor` — a Python descriptor that lazily creates an
-`AsyncMock(spec=WalletDomainRepository)` per test instance. Accessing
-`self.repo` the first time materializes the mock. When you call `setup()`,
-`_install_mock_beans` walks the class MRO, finds every descriptor, and
-installs the materialized mock into the context's container keyed on
-`WalletDomainRepository`. From that point on, `self.context.get_bean(
-WalletDomainRepository)` and any DI-resolved collaborator that depends on
-`WalletDomainRepository` both receive the same `AsyncMock` you configured
-in the test.
-
-!!! spring "Spring parity"
-    `mock_bean(T)` is PyFly's counterpart of Spring's `@MockBean` annotation.
-    Like `@MockBean`, it declares that a particular bean type should be replaced
-    by a mock in the test context, and that mock is injected into any
-    collaborator that depends on the type. The per-instance fresh-mock behavior
-    mirrors Spring's `@MockBean` reset that Mockito performs between tests with
-    `MockitoAnnotations.initMocks(this)`.
-
-### Using test slices
-
-Test slices let you declare the *intent* of a test class — web layer, service
-layer, or data layer — without wiring the full application stack. The three
-decorators `@WebTest`, `@ServiceTest`, and `@DataTest` mark the class; the
-functional helpers `web_slice`, `service_slice`, and `data_slice` build a
-minimal, started `ApplicationContext` containing only the beans you specify.
-
-::: listing tests/slices/test_wallet_service_slice.py | Listing 16.5 — ServiceTest slice: a focused context with only the service and its fake collaborator
-from pyfly.testing import ServiceTest, service_slice
-
-from lumen.domain.wallet_repository import WalletDomainRepository
-from lumen.services.wallet_application_service import WalletApplicationService
-
-
-class FakeWalletRepository:
-    def __init__(self):
-        self._store: dict = {}
-
-    async def save(self, wallet) -> None:
-        self._store[wallet.id] = wallet
-
-    async def find_by_id(self, wallet_id: str):
-        return self._store.get(wallet_id)
-
-
-@ServiceTest
-class TestWalletServiceSlice:
-    """Only WalletApplicationService + FakeWalletRepository are in the context."""
-
-    async def test_open_wallet(self):
-        async with await service_slice(
-            WalletApplicationService,
-            overrides={WalletDomainRepository: FakeWalletRepository},
-        ) as ctx:
-            service = ctx.get_bean(WalletApplicationService)
-            wallet_id = await service.open_wallet(
-                owner_id="user-99", currency="EUR"
-            )
-            assert wallet_id
-:::
-
-`service_slice` is an alias for `slice_context`. It registers only the beans
-you pass (and overrides), starts the context, fails fast if a collaborator is
-missing, and stops the context when the `async with` block exits. The
-`@ServiceTest` decorator is a marker — it sets `__pyfly_test_slice__ = "service"`
-on the class, which tooling and reporting can use to filter by layer.
-
-| Slice helper    | Yields                   | Use for                              |
-|----------------|--------------------------|--------------------------------------|
-| `web_slice`    | `(context, client)` pair | Controllers + `PyFlyTestClient`      |
-| `service_slice` | `context`               | Services and business logic          |
-| `data_slice`   | `context`                | Repositories and queries             |
+!!! tip "No mocks anywhere"
+    Every component in `conftest.py` is the real production implementation.
+    `InMemoryWalletRepository` is the adapter used in development; the
+    `InMemoryEventBus` is the same bus the application uses in non-Kafka
+    deployments. The goal is to test the real code paths, not the wiring.
 
 ---
 
-## Asserting events
+## Testing the CQRS flow end to end
 
-Domain events are the proof that the aggregate changed state. After calling a
-service method or a command handler, you need to verify that the right event
-was published. PyFly provides two assertion helpers that work against a list
-of `EventEnvelope` objects captured from an `InMemoryEventBus`.
+With the fixtures from `conftest.py`, exercising the full command/query cycle
+is a matter of calling `command_bus.send(...)` and `query_bus.query(...)`.
+No handler is instantiated in the test body — the bus dispatches to the handler
+registered in the fixture.
 
-### Capturing events with InMemoryEventBus
+::: listing tests/test_cqrs_flow.py | Listing 16.4 — End-to-end CQRS tests through the real bus
+from __future__ import annotations
 
-`PyFlyTestCase` gives you `self.event_bus` — an `InMemoryEventBus` ready to
-use. Subscribe a capture list to the bus, trigger the operation, then assert:
-
-::: listing tests/events/test_wallet_events.py | Listing 16.6 — Subscribing to the InMemoryEventBus and asserting published events
 import pytest
-from pyfly.eda.types import EventEnvelope
-from pyfly.testing import (
-    PyFlyTestCase,
-    assert_event_published,
-    assert_no_events_published,
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.get_balance_query import GetBalance
+from lumen.core.services.wallets.get_wallet_query import GetWallet
+from lumen.core.services.wallets.open_wallet_command import OpenWallet
+from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
+from lumen.interfaces.enums.v1.currency import Currency
+
+from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
+
+
+@pytest.mark.asyncio
+async def test_full_wallet_lifecycle(
+    command_bus: DefaultCommandBus,
+    query_bus: DefaultQueryBus,
+) -> None:
+    wallet_id = await command_bus.send(
+        OpenWallet(owner_id="u-1", currency=Currency.EUR)
+    )
+    assert isinstance(wallet_id, str) and wallet_id.startswith("wlt-")
+
+    balance = await command_bus.send(
+        DepositFunds(wallet_id=wallet_id, amount=1500)
+    )
+    assert balance == 1500
+
+    balance = await command_bus.send(
+        WithdrawFunds(wallet_id=wallet_id, amount=500)
+    )
+    assert balance == 1000
+
+    wallet = await query_bus.query(GetWallet(wallet_id=wallet_id))
+    assert wallet is not None
+    assert wallet.id == wallet_id
+    assert wallet.owner_id == "u-1"
+    assert wallet.currency is Currency.EUR
+    assert wallet.balance_minor == 1000
+    assert wallet.balance == 10.0
+
+    balance_dto = await query_bus.query(GetBalance(wallet_id=wallet_id))
+    assert balance_dto is not None
+    assert balance_dto.balance_minor == 1000
+    assert balance_dto.balance == 10.0
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_returns_none_for_unknown_id(
+    query_bus: DefaultQueryBus,
+) -> None:
+    assert await query_bus.query(
+        GetWallet(wallet_id="wlt-does-not-exist")
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_overdraw_is_rejected_through_the_bus(
+    command_bus: DefaultCommandBus,
+) -> None:
+    from pyfly.cqrs.exceptions import CommandProcessingException
+
+    wallet_id = await command_bus.send(
+        OpenWallet(owner_id="u-2", currency=Currency.EUR)
+    )
+    await command_bus.send(DepositFunds(wallet_id=wallet_id, amount=100))
+
+    with pytest.raises(CommandProcessingException):
+        await command_bus.send(
+            WithdrawFunds(wallet_id=wallet_id, amount=999)
+        )
+
+
+@pytest.mark.asyncio
+async def test_validation_rejects_non_positive_deposit(
+    command_bus: DefaultCommandBus,
+) -> None:
+    from pyfly.cqrs.exceptions import CommandProcessingException
+
+    wallet_id = await command_bus.send(
+        OpenWallet(owner_id="u-3", currency=Currency.EUR)
+    )
+    with pytest.raises(CommandProcessingException):
+        await command_bus.send(DepositFunds(wallet_id=wallet_id, amount=0))
+
+
+@pytest.mark.asyncio
+async def test_deposit_to_unknown_wallet_is_rejected(
+    command_bus: DefaultCommandBus,
+) -> None:
+    from pyfly.cqrs.exceptions import CommandProcessingException
+
+    with pytest.raises(CommandProcessingException):
+        await command_bus.send(
+            DepositFunds(wallet_id="wlt-nope", amount=100)
+        )
+:::
+
+`test_full_wallet_lifecycle` is the primary smoke test: it sends every command
+in the natural order and then queries both the full wallet DTO and the balance
+DTO. The wallet DTO exposes `balance_minor` (integer minor units) and `balance`
+(major units as a float). Both views derive from the same `Money` object stored
+in the repository.
+
+The error-path tests verify that the bus surfaces domain violations correctly.
+`CommandProcessingException` is the bus's wrapper for any exception raised
+inside a handler — including `BusinessRuleViolation` from the aggregate. The
+calling code never sees the raw domain exception; it always sees the bus
+wrapper.
+
+!!! note "asyncio_mode = \"auto\" and @pytest.mark.asyncio"
+    With `asyncio_mode = "auto"` every async test is collected and run
+    automatically. The `@pytest.mark.asyncio` decorator is **not required** but
+    is harmless and makes the async intent explicit at a glance. Lumen keeps it
+    for clarity.
+
+---
+
+## Testing the SQLite repository adapter
+
+The in-memory repository proves the domain logic; the SQLAlchemy adapter test
+proves the persistence layer. Lumen uses SQLite + `aiosqlite` — no Docker, no
+external process, no network. The `tmp_path` fixture from pytest provides a
+temporary directory that is cleaned up after each test.
+
+::: listing tests/test_sql_wallet_repository.py | Listing 16.5 — SQLite adapter tests with a temporary file database
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
 )
 
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+from lumen.models.entities.v1.wallet_entity import Wallet
+from lumen.models.repositories.sql_wallet_repository import (
+    SqlAlchemyWalletRepository,
+)
+from pyfly.data.relational.sqlalchemy import Base
 
-class TestWalletEvents(PyFlyTestCase):
 
-    async def test_deposit_publishes_funds_deposited(self):
-        await self.setup()
+@pytest_asyncio.fixture
+async def sqlite_session(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], str]]:
+    """Temp-file SQLite engine + session factory, schema created.
 
-        captured: list[EventEnvelope] = []
+    Mirrors what PyFly's EngineLifecycle does at startup: build the
+    async engine and run Base.metadata.create_all. Yields the session
+    factory and the database URL so the test can reconnect later.
+    """
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'wallets.db'}"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory, db_url
+    finally:
+        await engine.dispose()
 
-        async def capture(envelope: EventEnvelope) -> None:
-            captured.append(envelope)
 
-        # Wildcard pattern: matches "wallet.deposited", "wallet.opened", etc.
-        self.event_bus.subscribe("wallet.*", capture)
+@pytest.mark.asyncio
+async def test_full_flow_persists_through_sqlite_adapter(
+    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, db_url = sqlite_session
 
-        await self.event_bus.publish(
-            destination="wallets",
-            event_type="wallet.deposited",
-            payload={
-                "wallet_id": "w-001",
-                "amount": 5000,
-                "currency": "EUR",
-                "new_balance": 5000,
-            },
+    # open -> deposit -> withdraw through the SQLite adapter
+    async with factory() as session:
+        repo = SqlAlchemyWalletRepository(session=session)
+
+        wallet_id = await repo.next_id()
+        wallet = Wallet.open(wallet_id, owner_id="owner-42", currency=Currency.USD)
+        await repo.add(wallet)
+
+        loaded = await repo.find(wallet_id)
+        assert loaded is not None
+        loaded.deposit(Money(2500, Currency.USD))
+        await repo.add(loaded)
+
+        loaded = await repo.find(wallet_id)
+        assert loaded is not None
+        loaded.withdraw(Money(1000, Currency.USD))
+        await repo.add(loaded)
+
+        got = await repo.find(wallet_id)
+        assert got is not None
+        assert got.owner_id == "owner-42"
+        assert got.currency is Currency.USD
+        assert got.balance == Money(1500, Currency.USD)
+
+    # prove persistence: reconnect with a brand-new engine/session
+    fresh_engine = create_async_engine(db_url)
+    fresh_factory = async_sessionmaker(fresh_engine, expire_on_commit=False)
+    try:
+        async with fresh_factory() as fresh_session:
+            fresh_repo = SqlAlchemyWalletRepository(session=fresh_session)
+            persisted = await fresh_repo.find(wallet_id)
+            assert persisted is not None, "wallet should survive a reconnect"
+            assert persisted.balance == Money(1500, Currency.USD)
+            assert persisted.owner_id == "owner-42"
+            assert await fresh_repo.all_ids() == [wallet_id]
+    finally:
+        await fresh_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_find_unknown_returns_none(
+    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_session
+    async with factory() as session:
+        repo = SqlAlchemyWalletRepository(session=session)
+        assert await repo.find("wlt-nope") is None
+
+
+@pytest.mark.asyncio
+async def test_remove_deletes_the_row(
+    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_session
+    async with factory() as session:
+        repo = SqlAlchemyWalletRepository(session=session)
+        wallet = Wallet.open(
+            await repo.next_id(), owner_id="o", currency=Currency.EUR
         )
+        await repo.add(wallet)
+        assert await repo.find(wallet.id) is not None  # type: ignore[arg-type]
 
-        event = assert_event_published(
-            captured,
-            "wallet.deposited",
-            payload_contains={"wallet_id": "w-001", "amount": 5000},
-        )
-        assert event.payload["new_balance"] == 5000
-        assert event.destination == "wallets"
-
-        await self.teardown()
-
-    async def test_failed_deposit_publishes_no_events(self):
-        await self.setup()
-
-        captured: list[EventEnvelope] = []
-
-        async def capture(envelope: EventEnvelope) -> None:
-            captured.append(envelope)
-
-        self.event_bus.subscribe("wallet.*", capture)
-
-        # No publish call was made — validation rejected the operation
-        assert_no_events_published(captured)
-
-        await self.teardown()
-
-    async def test_wildcard_pattern_matches_multiple_types(self):
-        await self.setup()
-
-        captured: list[EventEnvelope] = []
-
-        async def capture(envelope: EventEnvelope) -> None:
-            captured.append(envelope)
-
-        self.event_bus.subscribe("wallet.*", capture)
-
-        await self.event_bus.publish(
-            "wallets", "wallet.opened",
-            {"wallet_id": "w-001"},
-        )
-        await self.event_bus.publish(
-            "wallets", "wallet.deposited",
-            {"wallet_id": "w-001"},
-        )
-        await self.event_bus.publish(
-            "accounts", "account.created",
-            {"account_id": "a-001"},
-        )
-
-        # account.created does not match "wallet.*"
-        assert len(captured) == 2
-        assert_event_published(captured, "wallet.opened")
-        assert_event_published(captured, "wallet.deposited")
-
-        await self.teardown()
+        await repo.remove(wallet)
+        assert await repo.find(wallet.id) is None  # type: ignore[arg-type]
+        assert await repo.all_ids() == []
 :::
 
-### assert_event_published in depth
+`test_full_flow_persists_through_sqlite_adapter` is the key test: it opens a
+wallet, deposits, withdraws — each operation flushes through `repo.add` — then
+creates a **new** engine from the same file URL and verifies that a fresh
+repository instance reads back the expected balance. This two-engine pattern
+proves that data is actually committed, not just cached in memory.
 
-`assert_event_published(events, event_type, payload_contains=None)` scans the
-list for the first envelope whose `event_type` matches, then optionally checks
-that the payload contains every key-value pair in `payload_contains`. It
-returns the matching `EventEnvelope` so you can make additional assertions on
-it.
+`Base.metadata.create_all` runs the full DDL (the same `CREATE TABLE`
+statements that `alembic upgrade head` applies in production) so the schema is
+always in sync with the SQLAlchemy models.
 
-```
-AssertionError: Expected event 'wallet.deposited' to be published.
-Published events: ['wallet.opened']
-```
-
-If the event is found but a payload value does not match:
-
-```
-AssertionError: Expected payload['amount'] == 5000, got 3000
-```
-
-`assert_no_events_published(events)` fails with a list of all published types
-if the list is non-empty — the right assertion after a rejected operation that
-must not produce side effects.
-
-!!! note "First match wins"
-    When multiple envelopes share the same `event_type`,
-    `assert_event_published` returns the **first** one. If you need to verify
-    all occurrences, iterate `[e for e in events if e.event_type == t]`
-    directly.
+!!! spring "Spring parity"
+    This test is the Python equivalent of `@DataJpaTest` with an embedded H2
+    database in Spring Boot. `@DataJpaTest` loads only the JPA layer (entities,
+    repositories, Flyway) and wires a fresh in-memory H2 for every test class.
+    The `sqlite_session` fixture does the same: create the schema, run the test,
+    dispose the engine. No Docker, no external process.
 
 ---
 
-## Integration tests with Testcontainers
+## Testing the event listener
 
-In-memory fakes are fast but not faithful. A fake repository never surfaces
-a missing index, a constraint violation, or a connection-pool exhaustion. To
-prove those paths you need real infrastructure — a real Postgres, a real Redis.
-PyFly's Testcontainers helpers spin up Docker-backed containers for the
-duration of a test and wire their connection details straight into a PyFly
-`Config` with one call.
+The `WalletAuditListener` listens for domain events published by the command
+handlers. Testing it end to end — command runs on the bus, handler publishes
+events, listener receives them — requires all three components to share the
+same `InMemoryEventBus`. The `conftest.py` fixtures already arrange this: both
+`command_bus` and `audit_listener` accept an `event_bus` argument, and pytest
+injects the same instance into both.
 
-!!! spring "Spring parity"
-    PyFly's Testcontainers integration mirrors Spring Boot's `@Testcontainers`
-    annotation combined with `@ServiceConnection`. In Spring you declare a
-    `@Container static PostgreSQLContainer<?> postgres = new
-    PostgreSQLContainer<>("postgres:16-alpine")` and annotate it with
-    `@ServiceConnection`; Spring autoconfigures the datasource URL from the
-    running container. PyFly's `pyfly_config(postgres_container())` does the
-    same: start the container, call the helper, get a `Config` whose
-    `pyfly.data.relational.url` is the `postgresql+asyncpg://` URL pointing at
-    that container.
+::: listing tests/test_event_listener.py | Listing 16.6 — Event listener tests: command publishes, listener observes
+from __future__ import annotations
 
-### Installing Testcontainers support
+import pytest
+from lumen.core.services.listeners import WalletAuditListener
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.open_wallet_command import OpenWallet
+from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
+from lumen.interfaces.enums.v1.currency import Currency
+
+from pyfly.cqrs import DefaultCommandBus
+
+
+@pytest.mark.asyncio
+async def test_listener_observes_wallet_events(
+    command_bus: DefaultCommandBus,
+    audit_listener: WalletAuditListener,
+) -> None:
+    wallet_id = await command_bus.send(
+        OpenWallet(owner_id="u-1", currency=Currency.EUR)
+    )
+    await command_bus.send(DepositFunds(wallet_id=wallet_id, amount=1500))
+    await command_bus.send(WithdrawFunds(wallet_id=wallet_id, amount=400))
+
+    entries = audit_listener.entries_for(wallet_id)
+    assert [e.event_type for e in entries] == [
+        "WalletOpened",
+        "FundsDeposited",
+        "FundsWithdrawn",
+    ]
+
+    # The payload carried the real domain-event fields.
+    deposited = entries[1]
+    assert deposited.payload["amount"] == 1500
+    assert deposited.payload["currency"] == "EUR"
+    assert deposited.payload["balance"] == 1500
+    assert deposited.event_id  # the aggregate's DomainEvent.event_id
+
+    # The running-total projection reflects deposit − withdrawal.
+    assert audit_listener.running_total(wallet_id) == 1100
+
+
+@pytest.mark.asyncio
+async def test_listener_records_nothing_before_any_command(
+    audit_listener: WalletAuditListener,
+) -> None:
+    assert audit_listener.entries == []
+    assert audit_listener.running_total("anything") == 0
+
+
+@pytest.mark.asyncio
+async def test_event_type_matches_domain_event_class_names(
+    command_bus: DefaultCommandBus,
+    audit_listener: WalletAuditListener,
+) -> None:
+    # A rejected withdrawal raises no event — it must not appear in the log.
+    wallet_id = await command_bus.send(
+        OpenWallet(owner_id="u-2", currency=Currency.USD)
+    )
+    await command_bus.send(DepositFunds(wallet_id=wallet_id, amount=100))
+
+    from pyfly.cqrs.exceptions import CommandProcessingException
+
+    with pytest.raises(CommandProcessingException):
+        await command_bus.send(
+            WithdrawFunds(wallet_id=wallet_id, amount=9999)
+        )
+
+    types = [e.event_type for e in audit_listener.entries_for(wallet_id)]
+    assert types == ["WalletOpened", "FundsDeposited"]
+    assert audit_listener.running_total(wallet_id) == 100
+:::
+
+`test_listener_observes_wallet_events` is the core integration proof: three
+commands produce three events, the listener's log records all three in order,
+the payload fields match the aggregate's domain event dataclass fields, and the
+`running_total` projection (deposit amount minus withdrawal amount) equals the
+arithmetic result. No bus mock, no event capture list — the production listener
+runs on the production bus.
+
+`test_event_type_matches_domain_event_class_names` proves a domain invariant:
+a rejected command (overdraw) raises no event. The audit log must never record
+a side effect from a failed operation.
+
+!!! tip "event_type is the class name"
+    PyFly's event publisher sets `event_type` to the domain event class name:
+    `"WalletOpened"`, `"FundsDeposited"`, `"FundsWithdrawn"`. The
+    `@event_listener(pattern)` decorator on `WalletAuditListener.on_wallet_event`
+    uses a glob pattern (`"Wallet*"`, `"Funds*"`) to subscribe to all three.
+    The test asserts the string class names directly.
+
+---
+
+## Framework testing helpers
+
+The tests above cover Lumen's full pyramid with nothing but standard pytest
+primitives and PyFly's real production components. For larger applications or
+teams that prefer more structure, `pyfly.testing` ships higher-level helpers
+that mirror Spring Boot's testing annotations:
+
+**`PyFlyTestCase` + `mock_bean(T)`** work like `@MockBean` in Spring Boot's
+`@SpringBootTest`. Declare `repo = mock_bean(WalletDomainRepository)` on the
+class body; `setup()` installs an `AsyncMock(spec=T)` for that type into the
+application context and wires it into any collaborator that depends on it.
+
+**`create_test_container(overrides={Interface: Implementation})`** builds a
+dependency-injection container with fakes registered for specific interfaces.
+Resolve the class under test from it and its dependencies are already injected.
+
+**`assert_event_published(events, event_type, payload_contains=...)`** scans
+a captured `EventEnvelope` list for the first envelope with the given type,
+optionally checks payload keys, and returns the envelope for further assertions.
+`assert_no_events_published(events)` fails if the list is non-empty.
+
+**Testcontainers integration** (`postgres_container()`, `redis_container()`,
+`pyfly_config(container, base={...})`) is PyFly's equivalent of Spring Boot's
+`@Testcontainers` + `@ServiceConnection`. Start a real Postgres container;
+`pyfly_config` rewrites the sync `psycopg2://` URL to `postgresql+asyncpg://`
+and merges it into a `Config` ready to boot an `ApplicationContext`. Install
+support with:
 
 ```bash
 pip install 'pyfly[testcontainers]'
 ```
 
-This pulls in `testcontainers>=4.0.0` and the individual submodules
-(`testcontainers.postgres`, `testcontainers.redis`, and so on). A running
-Docker daemon is also required. If Docker is not available on the machine, the
-`@requires_docker` decorator skips the test rather than failing it — so the
-suite stays green on a machine that has no Docker installed.
+Guard every Testcontainers test with `@requires_docker` so it skips cleanly on
+machines without Docker and runs on CI runners that do:
 
-### Container factories
-
-Each factory returns an unstarted container. Start it with a `with` block; it
-is stopped automatically on exit.
-
-| Factory | Default image |
-|---------|--------------|
-| `postgres_container(image="postgres:16-alpine")` | `postgres:16-alpine` |
-| `mysql_container(image="mysql:8")` | `mysql:8` |
-| `redis_container(image="redis:7-alpine")` | `redis:7-alpine` |
-| `mongodb_container(image="mongo:7")` | `mongo:7` |
-| `kafka_container(image="confluentinc/cp-kafka:7.6.0")` | `confluentinc/cp-kafka:7.6.0` |
-
-### Wiring containers into PyFly config
-
-`pyfly_config_for(container)` maps a started container to a flat dict of
-dotted config keys. `pyfly_config(*containers, base=None)` merges all of them
-(plus an optional `base` dict) into a nested `Config` ready to pass to
-`ApplicationContext`.
-
-| Container | Config keys produced |
-|-----------|---------------------|
-| Postgres | `pyfly.data.relational.url` — rewritten to `postgresql+asyncpg://` |
-| Redis | `pyfly.cache.redis.url` and `pyfly.session.redis.url` |
-| Kafka | `pyfly.eda.kafka.bootstrap-servers` |
-
-The Postgres driver URL is deliberately rewritten from the sync
-`psycopg2://` scheme to the async `asyncpg://` scheme — the reactive data
-layer requires it and the rewrite happens automatically.
-
-### A real Postgres repository test
-
-::: listing tests/integration/test_wallet_repository_postgres.py | Listing 16.7 — Integration test against a real Postgres container via Testcontainers
-from pyfly.context import ApplicationContext
-from pyfly.testing import (
-    postgres_container,
-    pyfly_config,
-    requires_docker,
-)
-
-from lumen.domain.money import Money
-from lumen.domain.wallet import Wallet
-
+```python
+from pyfly.testing import postgres_container, pyfly_config, requires_docker
 
 @requires_docker
 async def test_wallet_round_trip_against_real_postgres():
     with postgres_container() as pg:
-        # Wire the container URL into PyFly config automatically.
-        config = pyfly_config(
-            pg,
-            base={
-                "pyfly.data.enabled": True,
-            },
-        )
-
+        config = pyfly_config(pg, base={"pyfly.data.enabled": True})
         assert config.get("pyfly.data.relational.url").startswith(
             "postgresql+asyncpg://"
         )
+        ...
+```
 
-        context = ApplicationContext(config)
-        await context.start()
-        try:
-            # Resolve the real repository (backed by the running Postgres).
-            from lumen.domain.wallet_repository import WalletDomainRepository
-            repo = context.get_bean(WalletDomainRepository)
-
-            # Save a wallet.
-            wallet = Wallet.open(owner_id="user-1", currency="EUR")
-            wallet.deposit(Money(amount=7500, currency="EUR"))
-            wallet.clear_events()
-            await repo.save(wallet)
-
-            # Retrieve it — proves the round-trip.
-            loaded = await repo.find_by_id(wallet.id)
-            assert loaded is not None
-            assert loaded.balance.amount == 7500
-            assert loaded.balance.currency == "EUR"
-        finally:
-            await context.stop()
-:::
-
-The `@requires_docker` decorator attaches a `pytest.mark.skipif` that evaluates
-`is_docker_available()` at collection time. On a machine without Docker the test
-is skipped, not failed. On CI pipelines that do have Docker it runs against a
-fresh Postgres instance every time.
-
-### A real Redis + Postgres test
-
-When Lumen caches balance queries in Redis, you want to prove that a fresh
-context hydrates the cache from the database. Here is how you start both
-containers and merge their config in one call:
-
-::: listing tests/integration/test_wallet_cache_integration.py | Listing 16.8 — Combining Postgres and Redis containers with pyfly_config
-from pyfly.context import ApplicationContext
-from pyfly.testing import (
-    postgres_container,
-    redis_container,
-    pyfly_config,
-    requires_docker,
-)
-
-
-@requires_docker
-async def test_balance_cache_backed_by_real_redis():
-    with postgres_container() as pg, redis_container() as redis:
-        config = pyfly_config(
-            pg,
-            redis,
-            base={
-                "pyfly.data.enabled": True,
-                "pyfly.cache.enabled": True,
-                "pyfly.cache.provider": "redis",
-            },
-        )
-
-        # Both URLs are present and correct.
-        assert config.get("pyfly.data.relational.url").startswith(
-            "postgresql+asyncpg://"
-        )
-        assert config.get("pyfly.cache.redis.url").startswith("redis://")
-
-        context = ApplicationContext(config)
-        await context.start()
-        try:
-            # ... resolve service, exercise cache-hit path, assert DB not called
-            ...
-        finally:
-            await context.stop()
-:::
-
-`pyfly_config` handles the driver-URL rewriting and nesting automatically.
-You never copy-paste a `JDBC_URL` or fiddle with `get_exposed_port` manually —
-the `@ServiceConnection`-style mapping does it for you.
-
-!!! tip "Skipping gracefully without Docker"
-    Guard every Testcontainers test with `@requires_docker`. On a developer
-    machine without Docker the tests skip cleanly; on a CI runner that spins
-    up a Docker daemon (GitHub Actions `ubuntu-latest` does by default) they
-    run. Do not use `@pytest.mark.skip` — that would permanently silence the
-    test even on machines that do have Docker.
-
----
-
-## Testing the web layer
-
-The web layer test verifies that an HTTP endpoint returns the right status code,
-the right JSON shape, and the right headers — without touching the database.
-PyFly gives you two options: `PyFlyTestClient` wrapping a Starlette application
-for synchronous-style assertions, and `web_slice` for a fully wired context
-that mimics production routing.
-
-### PyFlyTestClient and fluent assertions
-
-`PyFlyTestClient` wraps Starlette's `TestClient` (which runs an in-process ASGI
-server) with fluent `TestResponse` assertion methods. All assert methods return
-`self` so you can chain them.
-
-::: listing tests/web/test_wallet_controller_client.py | Listing 16.9 — WalletController tested with PyFlyTestClient and fluent assertions
-import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.responses import JSONResponse
-
-from pyfly.testing import PyFlyTestClient
-
-
-def get_wallet(request):
-    wallet_id = request.path_params["wallet_id"]
-    if wallet_id == "missing":
-        return JSONResponse(
-            {"error": {"code": "WALLET_NOT_FOUND"}}, status_code=404
-        )
-    return JSONResponse(
-        {
-            "wallet_id": wallet_id,
-            "owner_id": "user-1",
-            "balance_cents": 5000,
-            "currency": "EUR",
-        }
-    )
-
-
-def deposit(request):
-    return JSONResponse({"status": "ok"})
-
-
-app = Starlette(
-    routes=[
-        Route("/wallets/{wallet_id}", get_wallet, methods=["GET"]),
-        Route("/wallets/{wallet_id}/deposit", deposit, methods=["PATCH"]),
-    ]
-)
-
-
-class TestWalletControllerClient:
-
-    @pytest.fixture(autouse=True)
-    def client(self):
-        self.client = PyFlyTestClient(app)
-
-    def test_get_wallet_returns_200(self):
-        self.client.get("/wallets/w-001") \
-            .assert_status(200) \
-            .assert_json_path("$.wallet_id", value="w-001") \
-            .assert_json_path("$.balance_cents", value=5000) \
-            .assert_json_path("$.currency", value="EUR")
-
-    def test_get_wallet_not_found_returns_404(self):
-        self.client.get("/wallets/missing") \
-            .assert_status(404) \
-            .assert_json_path("$.error.code", value="WALLET_NOT_FOUND")
-
-    def test_deposit_returns_200(self):
-        self.client.patch(
-            "/wallets/w-001/deposit",
-            json={"amount_cents": 3000, "currency": "EUR"},
-        ).assert_status(200)
-
-    def test_response_body_inspection(self):
-        response = self.client.get("/wallets/w-001")
-        data = response.json()
-        assert data["currency"] == "EUR"
-        assert data["balance_cents"] == 5000
-:::
-
-`TestResponse` exposes four assertion methods:
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `assert_status` | `(expected: int)` | Status code must match |
-| `assert_json_path` | `(path, *, value=..., exists=True)` | JSONPath must exist / match |
-| `assert_header` | `(name, *, value=None, exists=True)` | Header must exist / match |
-| `assert_body_contains` | `(text: str)` | Body must contain substring |
-
-`assert_json_path` uses `jsonpath-ng` syntax. `$.wallet_id` selects the top-
-level key; `$[0].name` selects the `name` field of the first array element;
-`$.error.code` drills into nested objects. Set `exists=False` to assert that a
-path is absent — useful for verifying a `deleted_at` field is not leaked.
-
-### Wiring a real controller with web_slice
-
-`web_slice` builds a minimal `ApplicationContext` containing the controllers
-you pass, wraps it with `create_app(context=...)` so routing, filters, and
-error handlers are wired exactly as in production, and returns a
-`PyFlyTestClient` alongside the context:
-
-::: listing tests/web/test_wallet_controller_slice.py | Listing 16.10 — WalletController tested with web_slice: a production-like context with a faked service
-from pyfly.testing import WebTest, web_slice, mock_bean
-
-from lumen.controllers.wallet_controller import WalletController
-from lumen.services.wallet_application_service import WalletApplicationService
-
-
-class FakeWalletService:
-    async def open_wallet(self, owner_id: str, currency: str) -> str:
-        return "w-fake-001"
-
-    async def get_wallet(self, wallet_id: str):
-        if wallet_id == "missing":
-            return None
-        return {
-            "wallet_id": wallet_id,
-            "owner_id": "user-1",
-            "balance_cents": 9900,
-            "currency": "EUR",
-        }
-
-
-@WebTest
-class TestWalletControllerSlice:
-
-    async def test_open_wallet_returns_201(self):
-        async with await web_slice(
-            WalletController,
-            overrides={WalletApplicationService: FakeWalletService()},
-        ) as (ctx, client):
-            client.post(
-                "/wallets",
-                json={"owner_id": "user-1", "currency": "EUR"},
-            ).assert_status(201) \
-             .assert_json_path("$.wallet_id", value="w-fake-001")
-
-    async def test_get_wallet_returns_200(self):
-        async with await web_slice(
-            WalletController,
-            overrides={WalletApplicationService: FakeWalletService()},
-        ) as (_ctx, client):
-            client.get("/wallets/w-001") \
-                .assert_status(200) \
-                .assert_json_path("$.balance_cents", value=9900)
-
-    async def test_get_missing_wallet_returns_404(self):
-        async with await web_slice(
-            WalletController,
-            overrides={WalletApplicationService: FakeWalletService()},
-        ) as (_ctx, client):
-            client.get("/wallets/missing").assert_status(404)
-:::
-
-`web_slice` accepts either a **class** or a **pre-built instance** as an
-override value. Passing `FakeWalletService()` (an instance) installs it
-directly under the `WalletApplicationService` key in the container — no
-registration step needed. Passing `FakeWalletService` (the class) would
-register and bind it as a singleton instead.
-
-!!! spring "Spring parity"
-    `@WebTest` + `web_slice` mirror `@WebMvcTest` in Spring Boot. `@WebMvcTest`
-    loads only the web layer — controllers, filters, `@ControllerAdvice` — and
-    replaces the service layer with mocks via `@MockBean`. `web_slice` does the
-    same: only the controllers you name are in the context; the service is
-    replaced by whatever you put in `overrides`. The `PyFlyTestClient` plays the
-    role of `MockMvc` — the synchronous-style ASGI driver that runs the full
-    request pipeline in-process.
+Lumen does not use these helpers — it has no need for them. SQLite covers the
+persistence layer without Docker; the in-memory bus covers event routing. Use
+the helpers when your project has infrastructure that cannot be reproduced
+without a real daemon.
 
 ---
 
 ## What you built {.recap}
 
-The Lumen project now has a complete test pyramid.
+Lumen now has 23 passing tests across four files, exercising every layer of
+the pyramid.
 
-At the base, `TestMoneyArithmetic` and `TestWalletWithdraw` prove the domain
-model's arithmetic and invariant rules without any framework overhead — fast,
-synchronous, pure Python. `setup_method` and `clear_events()` keep each test's
-event buffer clean.
+At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain
+model's arithmetic, immutability, and invariant rules. All tests are
+synchronous, pure Python functions — no fixtures, no DI, no `async`. The
+`BusinessRuleViolation.rule` attribute makes each assertion specific to the
+exact invariant that was violated.
 
-In the middle tier, `create_test_container` with `FakeWalletRepository` gives
-`TestWalletApplicationService` a fully wired service that persists to an
-in-memory dict. `PyFlyTestCase` + `mock_bean(WalletDomainRepository)` give
-`TestDepositFundsHandler` an `AsyncMock` that is automatically installed into
-the `ApplicationContext` — the same mock the handler's DI-injected dependencies
-see. `assert_event_published` and `assert_no_events_published` verify that the
-right events flow through `InMemoryEventBus` and that failed operations produce
-no side effects.
+In the middle, `conftest.py` wires the real components — `InMemoryWalletRepository`,
+`InMemoryEventBus`, all five command and query handlers, `WalletAuditListener`
+— into reusable async fixtures that pytest shares automatically across modules.
+`test_cqrs_flow.py` dispatches commands and queries through the real bus and
+checks every field of the query DTOs. `test_event_listener.py` proves that the
+audit listener observes exactly the events produced by successful commands and
+nothing from rejected ones.
 
-At the peak, `@requires_docker` guards Testcontainers tests so they skip on
-machines without Docker and run on CI. `postgres_container()` spins up a real
-Postgres 16; `pyfly_config(pg, redis, base={...})` rewrites the sync driver
-URL to `postgresql+asyncpg://` and wires both containers' connection details
-into a `Config` that boots a full `ApplicationContext`. The real repository
-round-trip proves that schema migrations, serialization, and query execution
-all work against live infrastructure.
-
-For the web layer, `PyFlyTestClient` drives the ASGI application synchronously
-with fluent `assert_status`, `assert_json_path`, `assert_header`, and
-`assert_body_contains` methods. `web_slice(WalletController, overrides={...})`
-builds a production-like routing context with the service layer replaced by a
-fake — the Spring `@WebMvcTest` equivalent in PyFly.
+At the peak, `test_sql_wallet_repository.py` exercises the SQLAlchemy adapter
+against a temporary SQLite file, applying the full schema with
+`Base.metadata.create_all`, then reconnecting with a fresh engine to prove true
+persistence.
 
 Concretely, you learned:
 
-- **`create_test_container(overrides=...)`** — build a DI container with
-  interface-to-fake mappings; resolve services that get their dependencies
-  injected automatically.
-- **`PyFlyTestCase` + `mock_bean(T)`** — declare `AsyncMock` attributes that
-  are wired into the test `ApplicationContext`; configure return values and
-  assert call counts without boilerplate setup.
-- **`assert_event_published` / `assert_no_events_published`** — verify that
-  `EventEnvelope` lists contain exactly the events you expect, with payload
-  matching.
-- **`@WebTest`, `@ServiceTest`, `@DataTest`** — intent markers; pair with
-  `web_slice`, `service_slice`, `data_slice` for focused, started contexts.
-- **`postgres_container()`, `redis_container()`, `pyfly_config(...)`** —
-  Docker-backed integration tests that wire real infrastructure into PyFly
-  config automatically, skipped cleanly when Docker is absent.
-- **`PyFlyTestClient` + `TestResponse`** — synchronous ASGI test driver with
-  JSONPath assertions and fluent chaining.
+- **`asyncio_mode = "auto"` + `pythonpath = ["src"]`** in `pyproject.toml` —
+  all async tests run without decorators; the `src/` layout is importable.
+- **`uv run --extra dev pytest -q`** — the bare `uv sync` drops the dev group;
+  always include `--extra dev` to get pytest.
+- **`@pytest_asyncio.fixture`** — async fixture lifecycle managed by
+  pytest-asyncio; plain `@pytest.fixture` does not handle async generators.
+- **Shared fixture instances** — when two fixtures request the same fixture
+  name (e.g., `event_bus`), pytest resolves it once per test and shares the
+  instance, making `command_bus` and `audit_listener` write and read from the
+  same bus.
+- **`pending_events()` vs `clear_events()`** — `pending_events()` reads
+  without draining; `clear_events()` drains. Always call `clear_events()` in
+  arrange steps so assertions only see events from the act step.
+- **`BusinessRuleViolation.rule`** — assert the exact rule string, not just
+  the exception class, to prove that the right invariant fired.
+- **SQLite + aiosqlite + `tmp_path`** — a real async relational test with no
+  external infrastructure; the two-engine pattern proves true durability.
+- **Framework helpers** (`PyFlyTestCase`, `mock_bean`, `create_test_container`,
+  Testcontainers) — available in `pyfly.testing` for projects that need them;
+  Lumen keeps things simple with real components.
 
 ---
 
 ## Try it yourself {.exercises}
 
-1. **Test the TransferFunds handler end-to-end.** Write a test class that
-   extends `PyFlyTestCase` and declares `repo = mock_bean(WalletDomainRepository)`.
-   In the test, configure `self.repo.find_by_id` as an `AsyncMock` that returns
-   a real `Wallet` aggregate with a 10,000-cent EUR balance (for the source) and
-   another with a 0-cent balance (for the target). Instantiate `TransferFundsHandler`
-   with the mock, call `do_handle(TransferFunds(..., amount_cents=3000,
-   currency="EUR"))`, and assert that `self.repo.save` was called twice and that
-   both wallets' balances reflect the transfer.
+1. **Add a test for zero-amount withdrawal.** In `test_wallet_aggregate.py`,
+   add `test_withdraw_zero_is_rejected`. Open a wallet, deposit 500 EUR, then
+   attempt `wallet.withdraw(Money(0, Currency.EUR))`. Assert that a
+   `BusinessRuleViolation` is raised and check its `.rule` attribute. Compare
+   the rule name with the deposit equivalent — are the rules symmetric?
 
-2. **Add a Kafka container to the integration test.** Extend Listing 16.8 to
-   include `kafka_container()` from `pyfly.testing`. Pass all three started
-   containers to `pyfly_config`. Assert that `config.get(
-   "pyfly.eda.kafka.bootstrap-servers")` is a non-empty string. Run the test
-   locally with `pytest tests/integration -v` and confirm the Kafka URL is
-   populated from the running container.
+2. **Test an unknown wallet via the CQRS bus.** In `test_cqrs_flow.py`, add
+   `test_withdraw_from_unknown_wallet_is_rejected`. Send only a
+   `WithdrawFunds(wallet_id="wlt-ghost", amount=50)` command without opening a
+   wallet first. Assert that `CommandProcessingException` is raised. Confirm
+   that the repository still holds no wallets by querying
+   `GetWallet(wallet_id="wlt-ghost")` and asserting `None`.
 
-3. **Extend the web-slice test with header assertions.** Add a custom
-   `X-Request-ID` response header to `WalletController.get_wallet` (generate a
-   UUID and set it on the response). In the web-slice test, call
-   `.assert_header("x-request-id")` (header names are lowercased by
-   `PyFlyTestClient`) and `.assert_header("x-request-id", exists=True)` to
-   verify the header is present. Then add a negative assertion:
-   `.assert_header("x-powered-by", exists=False)` to confirm that header is
-   absent from the response.
+3. **Extend the listener test with a second wallet.** In
+   `test_event_listener.py`, add a test that opens two wallets (`u-A` and
+   `u-B`), deposits different amounts into each, and then calls
+   `audit_listener.entries_for(wallet_id_A)` and
+   `audit_listener.entries_for(wallet_id_B)` separately. Assert that each
+   returns exactly two entries (`WalletOpened` + `FundsDeposited`) and that
+   the payload `amount` values differ. This proves that `entries_for` filters
+   by wallet ID, not by event type.
