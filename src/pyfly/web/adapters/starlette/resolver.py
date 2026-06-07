@@ -25,9 +25,12 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from pyfly.kernel.exceptions import InvalidRequestException
+from pyfly.web.message_converters import JsonMessageConverter, MessageConverter, MessageConverterRegistry
 from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, UploadedFile, inspect_binding
 
 _MISSING = object()
+# Fallback reader when no app-level registry is present (e.g. a unit-constructed resolver).
+_DEFAULT_READER: MessageConverter = JsonMessageConverter()
 
 
 def _permits_none(tp: Any) -> bool:
@@ -154,27 +157,42 @@ class ParameterResolver:
             return None
         return self._coerce(raw, param.inner_type)
 
+    def _select_reader(self, request: Request) -> MessageConverter:
+        """Pick a message converter for the request Content-Type (app registry or default)."""
+        try:
+            candidate = getattr(request.app.state, "pyfly_message_converters", None)
+        except (KeyError, AttributeError):
+            candidate = None
+        if isinstance(candidate, MessageConverterRegistry):
+            reader = candidate.find_reader(request.headers.get("content-type"))
+            if reader is not None:
+                return reader
+        return _DEFAULT_READER
+
     async def _resolve_body(self, request: Request, param: ResolvedParam) -> Any:
         body_bytes = await request.body()
-        if issubclass(param.inner_type, BaseModel):
-            if param.validate:
-                # Valid[Body[T]] or Valid[T]: catch Pydantic errors for structured 422
-                from pydantic import ValidationError as PydanticValidationError
+        # Scalar/str bodies are format-agnostic — keep the simple constructor path.
+        if not (isinstance(param.inner_type, type) and issubclass(param.inner_type, BaseModel)):
+            return param.inner_type(body_bytes.decode())
 
-                from pyfly.kernel.exceptions import ValidationException
+        reader = self._select_reader(request)
+        if param.validate:
+            # Valid[Body[T]] or Valid[T]: catch Pydantic errors for a structured 422
+            from pydantic import ValidationError as PydanticValidationError
 
-                try:
-                    return param.inner_type.model_validate_json(body_bytes)
-                except PydanticValidationError as exc:
-                    errors = exc.errors()
-                    detail = "; ".join(f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in errors)
-                    raise ValidationException(
-                        f"Validation failed: {detail}",
-                        code="VALIDATION_ERROR",
-                        context={"errors": errors},
-                    ) from exc
-            return param.inner_type.model_validate_json(body_bytes)
-        return param.inner_type(body_bytes.decode())
+            from pyfly.kernel.exceptions import ValidationException
+
+            try:
+                return reader.read(body_bytes, param.inner_type)
+            except PydanticValidationError as exc:
+                errors = exc.errors()
+                detail = "; ".join(f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in errors)
+                raise ValidationException(
+                    f"Validation failed: {detail}",
+                    code="VALIDATION_ERROR",
+                    context={"errors": errors},
+                ) from exc
+        return reader.read(body_bytes, param.inner_type)
 
     def _resolve_header(self, request: Request, param: ResolvedParam) -> Any:
         header_name = param.name.replace("_", "-")

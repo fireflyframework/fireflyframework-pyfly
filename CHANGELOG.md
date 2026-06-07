@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.28 (2026-06-07)
+
+### Added (web — HTTP message converters / content negotiation, the `HttpMessageConverter` chain)
+
+Completing Jackson parity: serialization is now a pluggable, ordered converter chain
+selected by media type for **both** reading and writing — Spring's
+`HttpMessageConverter` model.
+
+- **`MessageConverter`** base + **`JsonMessageConverter`** / **`XmlMessageConverter`**,
+  both backed by `PyFlyJsonSerializer` (so `pyfly.web.json.*` config applies to every
+  format). **`MessageConverterRegistry`** holds them ordered; user-added converters
+  take priority (register a `MessageConverterRegistry` bean to add e.g. CBOR or reorder).
+- **Real content negotiation**: responses pick a converter from the `Accept` header
+  with **q-value** ordering (`default_message_converters` exports JSON+XML, JSON
+  default); requests pick a reader from `Content-Type`.
+- **XML request bodies** are now deserialized into models (previously XML was
+  response-only; requests were JSON-only).
+- **`fail-on-unknown-properties`** (from `pyfly.web.json.*`) is enforced on the read
+  path via a cached `extra='forbid'` overlay (no user-model mutation).
+- All exported from `pyfly.web`. Wired through the controller response path and the
+  parameter resolver's body path; both Starlette and FastAPI adapters benefit.
+
+Per-field Jackson features remain Pydantic's domain (`Field(alias=)`,
+`@field_serializer`, discriminated unions). Not built: per-route `produces`/`consumes`
+constraints (a candidate follow-up) and binary formats beyond a user-registered converter.
+
+---
+
 ## v26.06.27 (2026-06-07)
 
 ### Added (web — central JSON serialization, the ObjectMapper equivalent)
