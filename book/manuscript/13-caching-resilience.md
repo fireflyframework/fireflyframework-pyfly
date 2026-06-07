@@ -152,7 +152,7 @@ cheap to cache, and tolerate a few seconds of staleness. The handler receives
 ::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 13.3 — @cacheable on GetBalanceHandler
 from datetime import timedelta
 
-from lumen.core.mappers.wallet_mapper import wallet_to_balance_dto
+from lumen.core.mappers.wallet_mapper import entity_to_balance_dto
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
 from lumen.models.repositories.wallet_repository import WalletRepository
@@ -183,12 +183,22 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
     async def _fetch(
         self, query: GetBalance
     ) -> BalanceDto | None:
-        wallet = await self._repository.find(query.wallet_id)
-        return wallet_to_balance_dto(wallet) if wallet else None
+        entity = await self._repository.find_by_id(query.wallet_id)
+        return entity_to_balance_dto(entity) if entity is not None else None
 :::
 
 !!! note "Key template and `self`"
-    The `key` template `"wallet:balance:{query.wallet_id}"` uses Python's `str.format` syntax. PyFly binds the actual call arguments with `inspect.signature(func).bind(*args, **kwargs)`, then calls `key.format(**bound.arguments)`. Because `do_handle` is an unbound function inside `__init__`, the first positional argument is `query` — so `{query.wallet_id}` expands to the wallet id. Calling with `GetBalance(wallet_id="wlt-001")` produces the cache key `"wallet:balance:wlt-001"`.
+    The `key` template `"wallet:balance:{query.wallet_id}"` uses Python's
+    `str.format` syntax. PyFly binds the actual call arguments with
+    `inspect.signature(func).bind(*args, **kwargs)`, then calls
+    `key.format(**bound.arguments)`. Because `_fetch` is wrapped inside
+    `__init__`, the first positional argument is `query` — so
+    `{query.wallet_id}` expands to the wallet id. Calling with
+    `GetBalance(wallet_id="wlt-001")` produces the cache key
+    `"wallet:balance:wlt-001"`. The mapper function
+    `entity_to_balance_dto` goes through `Mapper.project` against the
+    `@projection`-marked `BalanceView` interface, copying only the fields
+    the balance view declares and computing `balance` from `balance_minor`.
 
 **`ttl=timedelta(seconds=5)`** means the cache entry expires five seconds
 after it is written. After expiry, the next call re-executes the function
@@ -236,6 +246,9 @@ atomically with the write:
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 13.4 — @cache_put refreshes the cache on a deposit
 from datetime import timedelta
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
@@ -243,6 +256,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cache_put
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -257,11 +271,13 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         self,
         repository: WalletRepository,
         events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
         cache: CacheAdapter,
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
         # Wrap at construction time so `cache` is in scope.
         self.do_handle = cache_put(
             backend=cache,
@@ -269,13 +285,15 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
             ttl=timedelta(seconds=5),
         )(self._deposit)
 
+    @transactional()
     async def _deposit(self, command: DepositFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
@@ -283,9 +301,11 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 **How it works:** `@cache_put` awaits the wrapped function, then calls
 `backend.put(resolved_key, result, ttl=ttl)`. Because the function always
 runs, the cached value after a `DepositFunds` command is the freshly
-committed balance — not a stale pre-deposit snapshot. The next `@cacheable`
-read in `GetBalanceHandler` picks up this fresh value without touching the
-database.
+committed balance — not a stale pre-deposit snapshot. `_deposit` runs inside
+`@transactional()`, so the `find_by_id → to_aggregate → mutate → upsert`
+sequence is committed as one unit of work before the cache is refreshed. The
+next `@cacheable` read in `GetBalanceHandler` picks up this fresh value
+without touching the database.
 
 !!! note "Cache key must match"
     The `@cache_put` key `"wallet:balance:{command.wallet_id}"` must match the `@cacheable` key `"wallet:balance:{query.wallet_id}"` when both resolve to the same wallet id. Mismatched keys mean the deposit writes to a different cache slot than the balance read looks up — staleness returns.
@@ -302,10 +322,12 @@ entry must be removed. **`@cache_evict`** runs the function body first, then
 removes the named key — or clears the entire cache when
 `all_entries=True`.
 
-::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 13.5 — @cache_evict after removing a wallet
+::: listing lumen/core/services/wallets/close_wallet_handler.py | Listing 13.5 — @cache_evict after removing a wallet
+from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cache_evict
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 
 
 @command_handler
@@ -315,7 +337,7 @@ class CloseWalletHandler(CommandHandler["CloseWallet", None]):
 
     def __init__(
         self,
-        repository,
+        repository: WalletRepository,
         cache: CacheAdapter,
     ) -> None:
         super().__init__()
@@ -325,10 +347,11 @@ class CloseWalletHandler(CommandHandler["CloseWallet", None]):
             key="wallet:balance:{command.wallet_id}",
         )(self._close)
 
+    @transactional()
     async def _close(self, command) -> None:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is not None:
-            await self._repository.remove(wallet)
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is not None:
+            await self._repository.delete(entity)
 :::
 
 To flush every cached balance at once — useful for an administrative reset
@@ -341,11 +364,12 @@ self.do_handle = cache_evict(
 )(self._reset_all)
 ```
 
-**How it works:** The function body runs first — the wallet is removed before
-eviction, so a failure does not prematurely delete the cache entry. Then
-either `backend.evict(resolved_key)` removes one key or `backend.clear()`
-flushes everything. With `CacheManager`, the evict propagates to both
-primary and fallback caches so no stale entry lingers in either tier.
+**How it works:** The function body runs first — `repository.delete(entity)`
+removes the row before eviction, so a failure does not prematurely drop the
+cache entry. Then either `backend.evict(resolved_key)` removes one key or
+`backend.clear()` flushes everything. With `CacheManager`, the evict
+propagates to both primary and fallback caches so no stale entry lingers in
+either tier.
 
 `all_entries=True` is a blunt instrument reserved for administrative resets.
 In normal operation, prefer targeted eviction by key.
@@ -834,11 +858,15 @@ Concretely, you learned:
 
 - **`@cacheable`** short-circuits balance reads on a cache hit; the
   five-second TTL bounds staleness to an acceptable window. Applied to
-  `GetBalanceHandler` by wrapping `do_handle` at construction time with a
-  `CacheAdapter` injected through `__init__`.
+  `GetBalanceHandler` by wrapping `_fetch` at construction time — `_fetch`
+  calls `repository.find_by_id` and projects the resulting `WalletEntity`
+  onto `BalanceDto` via `entity_to_balance_dto` (`Mapper.project` + the
+  `@projection`-marked `BalanceView`).
 - **`@cache_put`** refreshes the cache as a side-effect of each
-  `DepositFunds` command, so the next read is never stale after a write.
-  The key template must match the `@cacheable` key to hit the same slot.
+  `DepositFunds` command. `_deposit` is decorated with `@transactional()`;
+  it does `find_by_id → to_aggregate → mutate → upsert` as one committed
+  unit of work, then updates the cache with the returned balance. The key
+  template must match the `@cacheable` key to hit the same slot.
 - **`@cache_evict`** removes entries on wallet closure or administrative
   resets; `all_entries=True` flushes the entire cache in a single call.
 - **`CacheManager`** mirrors writes to both Redis (primary) and

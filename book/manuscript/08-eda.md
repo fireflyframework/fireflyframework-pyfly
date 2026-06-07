@@ -185,13 +185,18 @@ async def publish_domain_events(
 
 ### Wiring the publisher into the command handlers
 
-In Chapter 7 the command handlers loaded aggregates, drove domain behaviour, and saved — leaving buffered events on the floor. Now you close that gap. Inject an `EventPublisher` alongside the repository, and after a successful save drain the aggregate's buffer and publish each event through the bridge.
+In Chapter 7 the command handlers loaded aggregates, drove domain behaviour, and saved — leaving buffered events on the floor. Now you close that gap. Inject an `EventPublisher` alongside the `WalletRepository` and an `async_sessionmaker`, decorate `do_handle` with `@transactional()`, and after `repo.upsert(...)` drain the aggregate's buffer and publish each event through the bridge.
+
+The `@transactional()` decorator (from `pyfly.data.relational.sqlalchemy`) opens a dedicated `AsyncSession` from the injected `async_sessionmaker`, binds it to the repository for the call, commits on success, and rolls back on failure. That means the load → mutate → save sequence is one committed unit of work, and no event is published unless the row actually lands in the database.
 
 Here is the updated `DepositFundsHandler`:
 
-::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 8.3 — DepositFundsHandler drains and publishes the aggregate's buffered events
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 8.3 — DepositFundsHandler: @transactional unit-of-work, then publish
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
@@ -199,6 +204,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.eda import EventPublisher
 
 
@@ -208,37 +214,49 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     """Credit funds to an existing wallet; returns the new balance."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
+    @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
 
-Two design decisions are worth noting. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus`. The DI container injects whichever implementation is registered — the handler never knows or cares which one. Second, the publish call sits *after* `self._repository.add(wallet)`. That ordering is intentional: if the save fails, no event is published, so listeners never see a fact that never persisted. If the publish fails after a successful save you have an at-least-once delivery challenge — Chapter 10 addresses that with transactional outbox patterns. For now, the in-memory bus never fails.
+Three design decisions are worth noting. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus` — the DI container injects whichever implementation is registered, so the handler never knows or cares which bus is active. Second, the publish call sits *after* `self._repository.upsert(...)` inside the `@transactional()` unit of work: if the save fails the decorator rolls back before `publish_domain_events` is reached, so listeners never see a fact that never persisted. Third, the handler works with the ORM entity directly via `to_aggregate` / `to_entity` mappers — the aggregate is rehydrated from the row, mutated, and mapped back to a row before the upsert. If the publish fails after a successful save you have an at-least-once delivery challenge — Chapter 10 addresses that with transactional outbox patterns. For now, the in-memory bus never fails.
 
 The `OpenWalletHandler` follows the same pattern:
 
-::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 8.4 — OpenWalletHandler publishes WalletOpened after saving
+::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 8.4 — OpenWalletHandler: @transactional, upsert, then publish WalletOpened
 from __future__ import annotations
 
+from uuid import uuid4
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_entity
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.core.services.wallets.open_wallet_command import OpenWallet
 from lumen.models.entities.v1.wallet_entity import Wallet
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.eda import EventPublisher
 
 
@@ -248,26 +266,32 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
     """Open a new, empty wallet."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        # @transactional resolves the unit-of-work session from here.
+        self._session_factory = session_factory
 
+    @transactional()
     async def do_handle(self, command: OpenWallet) -> str:
-        wallet_id = await self._repository.next_id()
+        wallet_id = f"wlt-{uuid4()}"
         wallet = Wallet.open(
             wallet_id=wallet_id,
             owner_id=command.owner_id,
             currency=command.currency,
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet_id
 :::
 
-`return wallet_id` comes *after* the publish call — the handler fulfils its contract only once every fact produced by the operation has been dispatched.
+`return wallet_id` comes *after* the publish call — the handler fulfils its contract only once every fact produced by the operation has been dispatched. The wallet id is generated locally with `uuid4()` rather than delegated to a repository method; `to_entity` maps the aggregate to a row before the upsert so the framework `Repository` receives the ORM model it expects.
 
 ### The @publish_result shortcut
 

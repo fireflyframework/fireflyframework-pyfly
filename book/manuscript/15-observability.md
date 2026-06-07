@@ -218,12 +218,16 @@ deposit_duration = registry.histogram(
 **`@timed`** records how long an async or sync function takes to run, using a labeled histogram. It works on any callable and automatically adds `class`, `method`, and `exception` labels:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.4 — @timed on DepositFundsHandler
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, timed
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
@@ -238,19 +242,25 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     """Credit funds to an existing wallet; returns the new balance."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
     @timed(registry, "lumen.deposit.duration", "Deposit handler latency")
+    @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
@@ -268,7 +278,7 @@ from pyfly.container import service
 from pyfly.cqrs import QueryHandler, query_handler
 from pyfly.observability import MetricsRegistry, counted
 
-from lumen.core.mappers.wallet_mapper import wallet_to_balance_dto
+from lumen.core.mappers.wallet_mapper import entity_to_balance_dto
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
 from lumen.models.repositories.wallet_repository import WalletRepository
@@ -286,8 +296,8 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
 
     @counted(registry, "lumen.balance.reads", "Balance queries served")
     async def do_handle(self, query: GetBalance) -> BalanceDto | None:
-        wallet = await self._repository.find(query.wallet_id)
-        return wallet_to_balance_dto(wallet) if wallet is not None else None
+        entity = await self._repository.find_by_id(query.wallet_id)
+        return entity_to_balance_dto(entity) if entity is not None else None
 :::
 
 On success the counter is incremented with labels `class="GetBalanceHandler"`, `method="do_handle"`, `result="success"`, and `exception="none"`. On failure it uses `result="failure"` and `exception=<TypeName>`, then re-raises the original exception. The counter name receives a `_total` suffix in Prometheus automatically, per the naming convention.
@@ -295,12 +305,16 @@ On success the counter is incremented with labels `class="GetBalanceHandler"`, `
 You can stack both decorators on the same method. The following listing shows Lumen's `WithdrawFundsHandler` timed and counted simultaneously:
 
 ::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listing 15.6 — Stacking @timed and @counted
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, counted, timed
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
 from lumen.models.entities.v1.money import Money
@@ -315,20 +329,26 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
     """Debit funds from a wallet; returns the new balance in minor units."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
     @timed(registry, "lumen.withdrawal.duration", "Withdrawal latency")
     @counted(registry, "lumen.withdrawals", "Withdrawal attempts")
+    @transactional()
     async def do_handle(self, command: WithdrawFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet = to_aggregate(entity)
         wallet.withdraw(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
@@ -547,7 +567,7 @@ When enabled, `create_app()` automatically scans the DI container for `HealthInd
 
 ### Custom HealthIndicator
 
-Any `@component` bean with an `async def health(self) -> HealthStatus` method is automatically discovered and registered as a health indicator. Lumen's `WalletRepository` is a good candidate — a lightweight `next_id()` call exercises the in-memory store or database connection without mutating any data:
+Any `@component` bean with an `async def health(self) -> HealthStatus` method is automatically discovered and registered as a health indicator. Lumen's `WalletRepository` is a good candidate — `count()` issues a lightweight `SELECT COUNT(*)` against the live database session without mutating any data:
 
 ::: listing lumen/health/indicators.py | Listing 15.9 — HealthIndicator beans
 from pyfly.actuator import HealthStatus
@@ -565,11 +585,11 @@ class WalletRepositoryHealthIndicator:
 
     async def health(self) -> HealthStatus:
         try:
-            # next_id() exercises the repository without mutating data.
-            await self._repository.next_id()
+            # count() issues SELECT COUNT(*) — fast, read-only probe.
+            total = await self._repository.count()
             return HealthStatus(
                 status="UP",
-                details={"store": "wallet-repository"},
+                details={"store": "wallet-repository", "rows": total},
             )
         except Exception as exc:
             return HealthStatus(
@@ -610,7 +630,7 @@ A healthy response looks like:
   "components": {
     "WalletRepositoryHealthIndicator": {
       "status": "UP",
-      "details": {"store": "wallet-repository"}
+      "details": {"store": "wallet-repository", "rows": 42}
     },
     "DatabaseHealthIndicator": {
       "status": "UP",
@@ -1017,13 +1037,17 @@ Every advice handler receives a `JoinPoint` dataclass:
 Lumen's deposit handler with all three observability pillars applied — zero observability code inside the business logic:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.14 — DepositFundsHandler with full observability
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.logging import get_logger
 from pyfly.observability import MetricsRegistry, counted, span, timed
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
@@ -1045,23 +1069,29 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     """
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
     @timed(registry, "lumen.wallet.deposit.duration", "Deposit latency")
     @counted(registry, "lumen.wallet.deposits", "Total deposit attempts")
     @span("wallet-deposit")
+    @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
         logger.info("deposit_started", wallet_id=command.wallet_id,
                     amount=command.amount)
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         await publish_domain_events(self._events, wallet.clear_events())
         logger.info("deposit_completed", wallet_id=command.wallet_id,
                     new_balance=wallet.balance.amount)

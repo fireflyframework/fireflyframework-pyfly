@@ -142,6 +142,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.transfers.transfer_request import TransferRequest
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
@@ -183,11 +184,16 @@ class MoneyTransferSaga:
         request: Annotated[TransferRequest, Input()],
         ctx: SagaContext,
     ) -> DebitResult:
-        wallet = await self._repository.find(request.source_wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(
+            request.source_wallet_id
+        )
+        if entity is None:
             raise AggregateNotFound("Wallet", request.source_wallet_id)
-        wallet.withdraw(Money(amount=request.amount, currency=request.currency))
-        await self._repository.add(wallet)
+        wallet = to_aggregate(entity)
+        wallet.withdraw(
+            Money(amount=request.amount, currency=request.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return DebitResult(
             wallet_id=request.source_wallet_id,
@@ -202,11 +208,14 @@ class MoneyTransferSaga:
     ) -> int:
         """Compensation: put the money back. Receives the forward step's
         result via FromStep — NOT the saga input."""
-        wallet = await self._repository.find(debit.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(debit.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", debit.wallet_id)
-        wallet.deposit(Money(amount=debit.amount, currency=debit.currency))
-        await self._repository.add(wallet)
+        wallet = to_aggregate(entity)
+        wallet.deposit(
+            Money(amount=debit.amount, currency=debit.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return wallet.balance.amount
 
@@ -218,11 +227,18 @@ class MoneyTransferSaga:
         request: Annotated[TransferRequest, Input()],
         ctx: SagaContext,
     ) -> int:
-        wallet = await self._repository.find(request.destination_wallet_id)
-        if wallet is None:
-            raise AggregateNotFound("Wallet", request.destination_wallet_id)
-        wallet.deposit(Money(amount=request.amount, currency=request.currency))
-        await self._repository.add(wallet)
+        entity = await self._repository.find_by_id(
+            request.destination_wallet_id
+        )
+        if entity is None:
+            raise AggregateNotFound(
+                "Wallet", request.destination_wallet_id
+            )
+        wallet = to_aggregate(entity)
+        wallet.deposit(
+            Money(amount=request.amount, currency=request.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return wallet.balance.amount
 :::
@@ -246,6 +262,26 @@ keeps returning `True` and the engine correctly `await`s the call. The
 class* to invoke when rolling back this step. Omitting `depends_on` (or
 passing `[]`) means the step can run as soon as the engine starts.
 
+**Repository interaction — the load-mutate-save cycle.** Each step
+follows the same three-phase pattern, using the framework
+`WalletRepository(Repository[WalletEntity, str])`:
+
+1. `find_by_id(id)` — loads the raw `WalletEntity` row from the database.
+2. `to_aggregate(entity)` — rehydrates the rich `Wallet` aggregate from
+   that row; the aggregate enforces all invariants (`balance >= 0`,
+   currency match).
+3. Mutate — call `wallet.withdraw(...)` or `wallet.deposit(...)` on the
+   aggregate, letting it raise `BusinessRuleViolation` if an invariant
+   is broken before any write occurs.
+4. `upsert(to_entity(wallet))` — flattens the mutated aggregate back to a
+   `WalletEntity` and calls `session.merge` + `flush`, so the write is
+   visible to subsequent steps in the same `AsyncSession` without
+   committing.
+
+Because saga steps share one `AsyncSession`, `upsert` flushes so each
+step sees the previous step's write; the surrounding application boundary
+owns the final commit.
+
 Parameter injection uses `typing.Annotated` with **marker instances**, not
 bare classes:
 
@@ -260,9 +296,11 @@ The resolver inspects type hints at runtime via
 
 **Compensation methods do not receive the saga input.** `recredit_source`
 takes `Annotated[DebitResult, FromStep("debit-source")]` — the value the
-forward step returned — not the `TransferRequest`. Compensations always
-read from `ctx.step_results` via `FromStep`, never from the original
-input.
+forward step returned — not the `TransferRequest`. It re-loads the entity
+via `find_by_id`, rehydrates the aggregate, deposits the original amount
+back, and upserts — the same load-mutate-save cycle as the forward steps.
+Compensations always read from `ctx.step_results` via `FromStep`, never
+from the original input.
 
 ### The step DAG
 

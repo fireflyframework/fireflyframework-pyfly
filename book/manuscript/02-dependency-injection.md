@@ -6,10 +6,11 @@
 
 In the previous chapter you gave Lumen its application entry point
 and watched the container start. Now you will declare Lumen's first
-real components — a `WalletRepository` **port** with an in-memory
-implementation, and a CQRS handler that depends on both the repository
-and an event publisher — and let PyFly wire them together from nothing
-but type hints. No factories, no manual `new`, no glue code.
+real components — a `WalletRepository` that subclasses the
+framework's Spring-Data-style `Repository`, a `WalletEntity` that
+maps the persistence row, and a CQRS handler that depends on both —
+and let PyFly wire them together from nothing but type hints.
+No factories, no manual `new`, no glue code.
 
 Before a single line of Lumen code appears, it is worth pausing on
 *why* that matters. In a conventional Python project you would write
@@ -97,6 +98,7 @@ from pyfly.starters.domain import enable_domain_stack
     scan_packages=[
         "lumen.models.repositories",
         "lumen.core.services.wallets",
+        "lumen.core.services.transfers",
         "lumen.core.services.listeners",
         "lumen.web.controllers",
     ],
@@ -121,93 +123,138 @@ data, and rule-engine auto-configurations in a single line.
     list every subpackage you want the framework to introspect, and it
     will register everything it finds.
 
-### The repository port and its adapter
+### The entity and the repository
 
-Hexagonal architecture separates the *what* (a port) from the *how*
-(an adapter). For Lumen, the first beans to declare are the
-`WalletRepository` port and its in-memory adapter:
+Lumen stores wallets in a relational database. Two classes carry this
+responsibility: `WalletEntity` (the persistence row) and
+`WalletRepository` (the data-access bean).
 
-::: listing lumen/models/repositories/wallet_repository.py | Listing 2.2 — The repository port and its in-memory adapter
+**The entity.** `WalletEntity` is a plain SQLAlchemy-mapped class that
+inherits the framework's `Base`:
+
+::: listing lumen/models/entities/v1/wallet_orm.py | Listing 2.2a — WalletEntity: the persistence row
 from __future__ import annotations
 
-import asyncio
-import uuid
-from typing import Protocol, runtime_checkable
+from datetime import UTC, datetime
 
-from lumen.models.entities.v1.wallet_entity import Wallet
-from pyfly.container import primary, repository
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-@runtime_checkable
-class WalletRepository(Protocol):
-    async def add(self, wallet: Wallet) -> Wallet: ...
-    async def find(self, id: str) -> Wallet | None: ...
-    async def remove(self, wallet: Wallet) -> None: ...
-    async def next_id(self) -> str: ...
+from pyfly.data.relational.sqlalchemy import Base
 
 
-@primary
-@repository
-class InMemoryWalletRepository(WalletRepository):
-    """Concurrent in-memory store keyed by wallet id.
+class WalletEntity(Base):
+    """One persisted wallet row, keyed by the aggregate's own id."""
 
-    Explicitly implements the WalletRepository port so the DI
-    container auto-binds the port to this adapter — inject the
-    port anywhere and you get this implementation.
+    __tablename__ = "wallets"
 
-    Marked @primary so it stays the default when a second adapter
-    (the SQLAlchemy-backed SqlAlchemyWalletRepository) is also
-    registered against the same port.
-    """
-
-    def __init__(self) -> None:
-        self._store: dict[str, Wallet] = {}
-        self._lock = asyncio.Lock()
-
-    async def add(self, wallet: Wallet) -> Wallet:
-        async with self._lock:
-            assert wallet.id is not None
-            self._store[wallet.id] = wallet
-            return wallet
-
-    async def find(self, id: str) -> Wallet | None:
-        async with self._lock:
-            return self._store.get(id)
-
-    async def remove(self, wallet: Wallet) -> None:
-        async with self._lock:
-            if wallet.id is not None:
-                self._store.pop(wallet.id, None)
-
-    async def next_id(self) -> str:
-        return f"wlt-{uuid.uuid4()}"
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    balance_minor: Mapped[int] = mapped_column(
+        nullable=False, default=0
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC)
+    )
 :::
 
-**How it works.** `WalletRepository` is a plain Python `Protocol` —
-not a PyFly construct. Marking it `@runtime_checkable` lets the
-container verify at registration time that an implementation satisfies
-the interface, rather than discovering the mismatch only at the first
-method call.
+Inheriting `Base` (PyFly's declarative base) registers the `wallets`
+table in `Base.metadata`; the framework's engine lifecycle creates it
+on startup. No further wiring is needed.
 
-`InMemoryWalletRepository` carries two decorators. `@repository` tells
-the container to manage the class; `@primary` tells it to prefer this
-class when more than one implementation of `WalletRepository` is
-registered.
+**The repository.** `WalletRepository` subclasses the framework's
+generic `Repository[WalletEntity, str]`. The two type arguments tell
+the framework the *entity type* (`WalletEntity`) and the *primary-key
+type* (`str`); from that it generates and injects a full async CRUD
+surface — `find_by_id`, `save`, `find_all`, `delete`, `count`,
+`find_paginated`, and more — backed by the transactional
+`AsyncSession` from the relational auto-configuration:
 
-There is one critical rule: **the adapter must explicitly inherit the
-port** (`class InMemoryWalletRepository(WalletRepository):`). The
-container uses `isinstance()` checks against `@runtime_checkable`
-Protocols to discover which beans satisfy a given type. An adapter that
-does *not* inherit the port will not be found when the container tries
-to inject `WalletRepository`, producing a `NoSuchBeanError` at startup.
-Writing the inheritance makes the contract explicit.
+::: listing lumen/models/repositories/wallet_repository.py | Listing 2.2b — WalletRepository: framework Repository subclass
+from __future__ import annotations
+
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from pyfly.container import repository
+from pyfly.data import Page, Pageable
+from pyfly.data.relational.sqlalchemy import (
+    Repository,
+    Specification,
+)
+
+
+def balance_at_least(min_minor: int) -> Specification[WalletEntity]:
+    """Reusable predicate: wallets with balance >= min_minor."""
+    return Specification(
+        lambda root, q: q.where(root.balance_minor >= min_minor)
+    )
+
+
+@repository
+class WalletRepository(Repository[WalletEntity, str]):
+    """CRUD + derived + specification queries for WalletEntity."""
+
+    # Derived query — compiled from the name by the post-processor
+    async def find_by_owner_id(
+        self, owner_id: str
+    ) -> list[WalletEntity]:
+        """All wallets owned by owner_id (derived query stub)."""
+        ...
+
+    # Specification query — composable predicate + pagination
+    async def find_rich(
+        self, min_minor: int, pageable: Pageable
+    ) -> Page[WalletEntity]:
+        """Page of wallets with balance >= min_minor."""
+        return await self.find_all_by_spec_paged(
+            balance_at_least(min_minor), pageable
+        )
+
+    # Upsert: one call for INSERT or UPDATE
+    async def upsert(self, entity: WalletEntity) -> WalletEntity:
+        """Persist entity whether the row is new or already exists."""
+        session = self._require_session()
+        merged = await session.merge(entity)
+        await session.flush()
+        return merged
+:::
+
+**How it works.** `@repository` tells the container to manage
+`WalletRepository` as a DI bean. The framework reads
+`Repository[WalletEntity, str]` at startup, generates the CRUD
+implementation internally, and registers the class — you inject
+`WalletRepository` directly by type anywhere in the application.
+There is no hand-written port interface and no separate adapter to
+maintain: **the framework supplies and injects the implementation;
+you depend on the repository class itself by type.**
+
+The three extra methods show the extension points the framework
+exposes on top of the inherited CRUD:
+
+- `find_by_owner_id` is a **derived query** — the
+  `RepositoryBeanPostProcessor` parses the method name and compiles
+  a real `SELECT … WHERE owner_id = :owner_id` at startup; you write
+  the stub (`...`) and the framework fills it in.
+- `find_rich` is a **Specification query** — it composes a reusable
+  `Specification` predicate and runs it with pagination and sorting
+  via the inherited `find_all_by_spec_paged`.
+- `upsert` is a thin convenience over `session.merge` so a command
+  handler can persist an entity whether it is new or already exists
+  with a single call.
 
 !!! spring "Spring parity"
     `@service`, `@component`, `@repository`, and `@configuration` map
     directly to Spring's `@Service`, `@Component`, `@Repository`, and
     `@Configuration`. `@rest_controller` mirrors `@RestController`.
-    The stereotype labels carry the same architectural intent and are
-    used by the framework for the same purposes.
+    `Repository[E, ID]` mirrors Spring Data's `JpaRepository<E, ID>`:
+    declare the entity and key types; the framework generates and
+    injects the full implementation. Derived query methods (names like
+    `find_by_owner_id`) compile to SQL at startup — the same mechanism
+    as Spring Data's query derivation from method names.
 
 ---
 
@@ -241,12 +288,20 @@ The `DepositFundsHandler` shows the pattern in full:
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 2.3 — DepositFundsHandler: @command_handler + @service stacked
 from __future__ import annotations
 
-from lumen.core.services.wallets.deposit_funds_command import DepositFunds
-from lumen.core.services.wallets.event_publishing import publish_domain_events
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
+from lumen.core.services.wallets.deposit_funds_command import (
+    DepositFunds,
+)
+from lumen.core.services.wallets.event_publishing import (
+    publish_domain_events,
+)
 from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -254,49 +309,66 @@ from pyfly.eda import EventPublisher
 @command_handler
 @service
 class DepositFundsHandler(CommandHandler[DepositFunds, int]):
-    """Credit funds to an existing wallet; returns the new balance."""
+    """Credit funds to an existing wallet; returns new balance."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
-    async def do_handle(self, command: DepositFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+    @transactional()
+    async def do_handle(  # type: ignore[override]
+        self, command: DepositFunds
+    ) -> int:
+        entity = await self._repository.find_by_id(
+            command.wallet_id
+        )
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
-        wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        wallet = to_aggregate(entity)
+        wallet.deposit(
+            Money(amount=command.amount, currency=wallet.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
 
-        await publish_domain_events(self._events, wallet.clear_events())
+        await publish_domain_events(
+            self._events, wallet.clear_events()
+        )
         return wallet.balance.amount
 :::
 
-**How it works.** Four decisions are visible in this listing:
+**How it works.** Five decisions are visible in this listing:
 
-- `@service` registers the class as a singleton bean. Without it, the
-  container never sees the class.
+- `@service` registers the class as a singleton bean. Without it,
+  the container never sees the class.
 - `@command_handler` (applied above `@service`, so it runs *after*
   registration) reads the first generic argument of
   `CommandHandler[DepositFunds, int]` and records that this bean
   handles `DepositFunds` commands.
-- The `__init__` signature is the complete wiring specification.
-  `repository: WalletRepository` resolves to the `@primary` adapter
-  (`InMemoryWalletRepository`); `events: EventPublisher` is resolved
-  automatically by the CQRS auto-configuration activated via
-  `@enable_domain_stack`.
-- `DepositFundsHandler` imports neither concrete class — it knows only
-  the interfaces.
-
-The business method follows the standard CQRS/DDD sequence: load the
-aggregate from the repository, mutate it through a domain method that
-enforces invariants, persist the new state, drain the events the
-aggregate raised, and publish them on the EDA bus. The ordering is
-deliberate — the wallet is saved *before* events are published, so any
-listener that queries the repository always finds the updated record.
+- The `__init__` signature is the complete wiring specification:
+  `repository: WalletRepository` — the framework-generated CRUD
+  bean; `events: EventPublisher` — resolved by the CQRS
+  auto-configuration; `session_factory: async_sessionmaker[AsyncSession]`
+  — the shared connection factory provided by the relational
+  auto-configuration. All three are resolved by type; `DepositFundsHandler`
+  never imports a concrete class.
+- `@transactional()` on `do_handle` wraps the entire body in a
+  single committed unit of work. The decorator opens a session from
+  `session_factory`, binds it to the repository for the duration of
+  the call, and commits on success (or rolls back on error).
+- The business logic follows the standard CQRS/DDD sequence: load
+  the entity, rehydrate the aggregate via the mapper, mutate through
+  domain methods that enforce invariants, persist via `upsert`, drain
+  and publish the events. The wallet is saved *before* events are
+  published, so any listener that queries the repository finds the
+  updated record.
 
 A read-side handler uses the same stacking pattern, only with
 `@query_handler` and `QueryHandler`:
@@ -314,16 +386,17 @@ class GetWalletHandler(QueryHandler[GetWallet, WalletDto | None]):
         super().__init__()
         self._repository = repository
 
-    async def do_handle(self, query: GetWallet) -> WalletDto | None:
-        wallet = await self._repository.find(query.wallet_id)
-        return wallet_to_dto(wallet) if wallet is not None else None
+    async def do_handle(
+        self, query: GetWallet
+    ) -> WalletDto | None:
+        entity = await self._repository.find_by_id(query.wallet_id)
+        return entity_to_dto(entity) if entity is not None else None
 ```
 
 The container resolves dependencies **recursively**. When it constructs
-`DepositFundsHandler` it also constructs `InMemoryWalletRepository`
-(the `@primary` implementation bound to `WalletRepository`) and the
-`EventPublisher` adapter — none of which the handler needs to know
-about.
+`DepositFundsHandler` it also constructs `WalletRepository` (the
+framework-generated CRUD bean), the `EventPublisher`, and the
+`async_sessionmaker` — none of which the handler needs to know about.
 
 ::: figure art/figures/02-di.svg | Figure 2.1 — The container injects dependencies from type hints.
 
@@ -393,11 +466,13 @@ in a runtime traceback is one of the container's key guarantees.
 
 `@primary` resolves ambiguity when several beans satisfy the same
 interface. Place it on the implementation you want as the default.
-Lumen registers two adapters for `WalletRepository`:
-`InMemoryWalletRepository` (marked `@primary`) and
-`SqlAlchemyWalletRepository` (no `@primary`). The application boots on
-the in-memory store; switching to the SQL adapter for production means
-moving `@primary` — nothing in the handlers changes.
+This arises whenever you have a `@runtime_checkable Protocol` port
+with more than one registered adapter — a common pattern for swappable
+infrastructure (cache store, message bus, notification channel).
+
+For example, suppose your application defines a `CacheStore` protocol
+and ships two adapters — an in-process one for local development and a
+Redis one for production:
 
 ```python
 from pyfly.container import repository, primary
@@ -405,21 +480,36 @@ from pyfly.container import repository, primary
 
 @primary
 @repository
-class InMemoryWalletRepository(WalletRepository):
+class InMemoryCacheStore(CacheStore):
+    """Default: active in development and tests."""
+    ...
+
+
+@repository
+class RedisCacheStore(CacheStore):
+    """Production cache — activated by profile or condition."""
     ...
 ```
 
-Without `@primary`, resolving `WalletRepository` with two registered
+Without `@primary`, resolving `CacheStore` with two registered
 implementations raises:
 
 ```
-NoUniqueBeanError: Multiple beans of type 'WalletRepository' found
+NoUniqueBeanError: Multiple beans of type 'CacheStore' found
   but none is marked @primary
-  Candidates: ['InMemoryWalletRepository', 'SqlAlchemyWalletRepository']
+  Candidates: ['InMemoryCacheStore', 'RedisCacheStore']
 ```
 
-The message names every competing candidate so you can make a deliberate
-decision rather than guessing which one the container would have picked.
+The message names every competing candidate so you can make a
+deliberate decision rather than guessing which one the container would
+have picked. Moving `@primary` from one adapter to the other is the
+only change needed to switch the application's backing store — nothing
+in the service code changes.
+
+Note that Lumen's own `WalletRepository` is a framework `Repository`
+subclass, so only one bean is registered and no `@primary` is needed.
+`@primary` is relevant whenever you hand-roll a port/adapter pair with
+multiple adapter implementations.
 
 ### @order
 
@@ -762,15 +852,21 @@ branch in service logic.
 
 ## What you built {.recap}
 
-Lumen now has a `WalletRepository` port backed by an in-memory adapter,
-a `DepositFundsHandler` wired to both the repository and the event
-publisher by type hints alone, and the `scan_packages` bootstrap that
-makes the container discover all of it. You saw why `@command_handler`
-and `@query_handler` **must be stacked on `@service`** — the CQRS
-decorators add routing metadata, but `@service` is what registers the
-bean. You also saw how `@primary` resolves ambiguity when two adapters
-compete, how `@post_construct` / `@pre_destroy` bracket a bean's life,
-and how `@conditional_on_missing_bean` enables defaults that automatically
+Lumen now has a `WalletEntity` mapped to the `wallets` table, a
+`WalletRepository` that subclasses the framework's
+`Repository[WalletEntity, str]` (giving a full async CRUD surface, a
+derived query, and a specification query), and a
+`DepositFundsHandler` wired to the repository, the event publisher,
+and the session factory — all by type hints alone. You saw why
+`@command_handler` and `@query_handler` **must be stacked on
+`@service`** — the CQRS decorators add routing metadata, but
+`@service` is what registers the bean. You saw that the framework
+auto-generates and injects the `Repository` implementation so you
+depend on the repository class itself by type, with no hand-written
+port/adapter pair required. You also saw how `@primary` resolves
+ambiguity when two adapters compete for a hand-rolled port, how
+`@post_construct` / `@pre_destroy` bracket a bean's life, and how
+`@conditional_on_missing_bean` enables defaults that automatically
 yield to real implementations.
 
 The through-line is consistent: you declare intent with decorators and
@@ -783,14 +879,15 @@ which become essential as Lumen grows through the rest of the book.
 
 ## Try it yourself {.exercises}
 
-1. **Add a second repository implementation and use `@primary`.**
-   Create a `DictWalletRepository` alongside `InMemoryWalletRepository`
-   — both inheriting `WalletRepository`. Start the application and
-   observe the `NoUniqueBeanError`. Then add `@primary` to the one you
-   prefer and watch startup succeed. Next, try injecting the other by
-   name: annotate a constructor parameter as
-   `Annotated[WalletRepository, Qualifier("dict_wallet_repo")]` after
-   registering it with `@repository(name="dict_wallet_repo")`.
+1. **Practice `@primary` with a hand-rolled port.**
+   Define a `CacheStore` protocol with a single `async def get(key)`
+   method. Register two `@repository` adapters — an in-process one
+   and a stub "remote" one — both inheriting `CacheStore`. Start the
+   application and observe the `NoUniqueBeanError`. Then add `@primary`
+   to the in-process adapter and watch startup succeed. Next, try
+   injecting the stub by name: annotate a constructor parameter as
+   `Annotated[CacheStore, Qualifier("remote_cache")]` after registering
+   it with `@repository(name="remote_cache")`.
 
 2. **Add a `@post_construct` that logs startup metadata.** Extend
    `WalletAuditListener` with an `async def on_ready(self)` method
