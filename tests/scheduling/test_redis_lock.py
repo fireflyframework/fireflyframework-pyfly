@@ -80,9 +80,11 @@ async def test_inprocess_lock_mutual_exclusion() -> None:
 
 
 def test_lock_provider_selection() -> None:
+    from pyfly.container.container import Container
     from pyfly.scheduling.auto_configuration import SchedulingAutoConfiguration
 
     ac = SchedulingAutoConfiguration()
-    assert isinstance(ac.distributed_lock(Config({})), LocalLock)  # default: none
+    container = Container()
+    assert isinstance(ac.distributed_lock(Config({}), container), LocalLock)  # default: none
     memory_cfg = Config({"pyfly": {"scheduling": {"lock": {"provider": "memory"}}}})
-    assert isinstance(ac.distributed_lock(memory_cfg), InProcessDistributedLock)
+    assert isinstance(ac.distributed_lock(memory_cfg, container), InProcessDistributedLock)

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.66 (2026-06-07)
+
+### Added (distributed lock — Postgres advisory-lock adapter; Postgres parity)
+
+- **`PostgresAdvisoryLock`** (`pyfly.scheduling.adapters.postgres_lock`) — a `DistributedLock`
+  backed by Postgres `pg_try_advisory_lock`/`pg_advisory_unlock`, selected via
+  `pyfly.scheduling.lock.provider=postgres`. Cluster-safe `@scheduled(lock=...)` coordination
+  with **no extra infrastructure** for apps already on Postgres (no Redis required) — the user's
+  "postgres, not just redis". Session-level advisory locks hold their connection from acquire to
+  release; a crashed instance drops the connection and Postgres auto-releases the lock (the
+  crash-safety mechanism in lieu of a TTL).
+- Hexagonal: the SQLAlchemy `AsyncEngine` is resolved lazily and injected by the composition
+  root; the adapter imports no SQLAlchemy at module scope. Validated against **real Postgres**
+  (testcontainers integration test: cross-connection contention).
+
 ## v26.06.65 (2026-06-07)
 
 ### Fixed (hexagonal — httpx adapter import leak)
