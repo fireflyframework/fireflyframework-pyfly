@@ -28,9 +28,9 @@ pyfly:
   eda:
     provider: memory
   # Relational data layer (SQLAlchemy + SQLite via aiosqlite). The
-  # framework creates the schema on startup (ddl-auto=create). This backs
-  # the selectable SqlAlchemyWalletRepository adapter; the app still boots
-  # on the @primary in-memory repository.
+  # framework creates the schema on startup (ddl-auto=create) and backs
+  # the WalletRepository (a framework Repository[WalletEntity, str]) that
+  # the command handlers persist through inside @transactional().
   data:
     relational:
       enabled: true
