@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.60 (2026-06-07)
+
+### Fixed (auto-configuration discovery)
+
+- **Session concurrency control now actually auto-wires.** `SessionConcurrencyAutoConfiguration`
+  (v26.06.55) was missing its `pyfly.auto_configuration` entry point, so it was never discovered
+  at startup and the `SessionConcurrencyController` bean was never created. Added the entry point.
+
+### Added (guardrail)
+
+- A test that AST-scans every `@auto_configuration` class and asserts each is reachable via an
+  entry point — so a forgotten entry point fails CI instead of silently disabling a feature.
+
 ## v26.06.59 (2026-06-07)
 
 ### Added (distributed primitives — Redis adapters, hexagonal)
