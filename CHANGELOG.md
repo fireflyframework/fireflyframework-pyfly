@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.53 (2026-06-07)
+
+### Added (scheduling — @scheduled distributed lock)
+
+- **`@scheduled(..., lock=..., lock_ttl=...)`** (ShedLock / Spring `@SchedulerLock` parity) —
+  when a job declares a lock, the scheduler acquires it before each run and **skips the tick**
+  if held elsewhere, so only one instance per cluster runs the job. `lock=True` auto-derives
+  the name `"Class.method"`; a string sets an explicit shared name; `lock_ttl` (a `timedelta`,
+  default 60s) bounds the hold so a crashed instance self-heals.
+- New **`DistributedLock`** protocol (`try_acquire`/`release`) + default **`LocalLock`**
+  (always acquires — single-instance behavior unchanged). Register a `DistributedLock` bean
+  (e.g. Redis-backed) and the scheduler auto-wires it for cross-process coordination.
+- The lock is always released in `finally` once the body completes.
+
 ## v26.06.52 (2026-06-07)
 
 ### Added (context — @RefreshScope + ContextRefresher + POST /actuator/refresh)
