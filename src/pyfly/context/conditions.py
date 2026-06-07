@@ -134,6 +134,36 @@ def conditional_on_bean(bean_type: type) -> Callable[[F], F]:
     return decorator
 
 
+def conditional_on_web_application() -> Callable[[F], F]:
+    """Only register this bean when a web stack is present (Starlette or FastAPI).
+
+    Mirrors Spring Boot's ``@ConditionalOnWebApplication``.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_web_application"})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
+def conditional_on_resource(path: str) -> Callable[[F], F]:
+    """Only register this bean when the filesystem resource at *path* exists.
+
+    Mirrors Spring Boot's ``@ConditionalOnResource``.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_resource", "path": path})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
 def auto_configuration(cls: T) -> T:
     """Mark a @configuration class as auto-configuration.
 

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.40 (2026-06-07)
+
+### Added (context — more @ConditionalOn* conditions)
+
+- **`@conditional_on_web_application()`** — registers the bean only when a web stack
+  (Starlette or FastAPI) is importable (Spring `@ConditionalOnWebApplication`).
+- **`@conditional_on_resource(path)`** — registers only when the filesystem resource at
+  *path* exists (Spring `@ConditionalOnResource`).
+
+Both exported from `pyfly.context`. (`@ConditionalOnSingleCandidate` remains on the
+roadmap — it needs careful bean-counting around interface-alias registrations.)
+
 ## v26.06.39 (2026-06-07)
 
 ### Added (config — Spring Boot 2.4+ profile expressions)

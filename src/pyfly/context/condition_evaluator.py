@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -90,6 +92,10 @@ class ConditionEvaluator:
             result = cond["check"]()
         elif cond_type == "on_expression":
             result = self._eval_on_expression(cond)
+        elif cond_type == "on_web_application":
+            result = self._eval_on_web_application()
+        elif cond_type == "on_resource":
+            result = self._eval_on_resource(cond)
         elif cond_type == "on_missing_bean":
             result = self._eval_on_missing_bean(cond, declaring_cls)
         elif cond_type == "on_bean":
@@ -126,6 +132,14 @@ class ConditionEvaluator:
         from pyfly.core.expression import evaluate
 
         return bool(evaluate(cond["expression"], self._config))
+
+    def _eval_on_web_application(self) -> bool:
+        """Match when a web stack (Starlette or FastAPI) is importable."""
+        return any(importlib.util.find_spec(name) is not None for name in ("starlette", "fastapi"))
+
+    def _eval_on_resource(self, cond: dict[str, Any]) -> bool:
+        """Match when the filesystem resource at the configured path exists."""
+        return os.path.exists(cond["path"])
 
     def _eval_on_missing_bean(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
         return not self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)
