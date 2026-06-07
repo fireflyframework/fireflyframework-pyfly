@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 40
+        assert len(classes) == 41
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -107,6 +107,7 @@ class TestDiscoverAutoConfigurations:
             "ServerAutoConfiguration",
             "SessionFilterAutoConfiguration",
             "SessionStoreAutoConfiguration",
+            "SessionConcurrencyAutoConfiguration",
             "ShellAutoConfiguration",
             "TracingAutoConfiguration",
             "TransactionalEngineAutoConfiguration",

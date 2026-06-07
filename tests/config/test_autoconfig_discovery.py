@@ -63,9 +63,7 @@ def test_every_auto_configuration_class_has_an_entry_point() -> None:
 
 @pytest.mark.asyncio
 async def test_session_concurrency_controller_is_autowired_when_enabled() -> None:
-    cfg = Config(
-        {"pyfly": {"session": {"enabled": "true", "concurrency": {"enabled": "true", "max-sessions": 2}}}}
-    )
+    cfg = Config({"pyfly": {"session": {"enabled": "true", "concurrency": {"enabled": "true", "max-sessions": 2}}}})
     ctx = ApplicationContext(cfg)
     await ctx.start()
     assert isinstance(ctx.get_bean(SessionConcurrencyController), SessionConcurrencyController)
