@@ -74,10 +74,31 @@ class SessionConcurrencyAutoConfiguration:
     def session_concurrency_controller(
         self, config: Config, session_store: SessionStore
     ) -> SessionConcurrencyController:
-        from pyfly.session.concurrency import ConcurrencyControlPolicy, InMemorySessionRegistry
+        from pyfly.session.concurrency import (
+            ConcurrencyControlPolicy,
+            InMemorySessionRegistry,
+            SessionRegistry,
+        )
 
         policy = ConcurrencyControlPolicy(
             max_sessions=int(config.get("pyfly.session.concurrency.max-sessions", -1)),
             strategy=str(config.get("pyfly.session.concurrency.strategy", "evict-oldest")),
         )
-        return SessionConcurrencyController(InMemorySessionRegistry(), policy, session_deleter=session_store.delete)
+        # Registry backend: 'memory' (default, single-instance) or 'redis' (cross-process).
+        # The Redis client is built here (composition root) and injected — the adapter never
+        # imports redis.
+        registry: SessionRegistry
+        registry_type = str(config.get("pyfly.session.concurrency.registry", "memory")).lower()
+        if registry_type == "redis" and AutoConfiguration.is_available("redis.asyncio"):
+            import redis.asyncio as aioredis
+
+            from pyfly.session.adapters.redis_registry import RedisSessionRegistry
+
+            url = str(
+                config.get("pyfly.session.concurrency.redis.url")
+                or config.get("pyfly.session.redis.url", "redis://localhost:6379/0")
+            )
+            registry = RedisSessionRegistry(aioredis.from_url(url))  # type: ignore[no-untyped-call,unused-ignore]
+        else:
+            registry = InMemorySessionRegistry()
+        return SessionConcurrencyController(registry, policy, session_deleter=session_store.delete)

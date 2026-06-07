@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.59 (2026-06-07)
+
+### Added (distributed primitives — Redis adapters, hexagonal)
+
+The clustering features shipped in v26.06.53/55 now have real cross-process backends. All
+adapters are hexagonal — the async Redis client is injected; **no adapter imports redis**, and
+the only gated lazy ``import redis.asyncio`` lives in the auto-config composition roots:
+
+- **`RedisDistributedLock`** (`pyfly.scheduling.adapters.redis_lock`) — `SET NX PX` acquire +
+  owner-token compare-and-delete release (an instance only releases a lock it still owns).
+  Selected via `pyfly.scheduling.lock.provider=redis`.
+- **`InProcessDistributedLock`** (`pyfly.scheduling`) — real single-process mutual exclusion
+  with TTL self-heal (`provider=memory`); `none` (default) stays the no-op `LocalLock`.
+- **`RedisSessionRegistry`** (`pyfly.session.adapters.redis_registry`) — a sorted set per
+  principal (oldest-first), for cross-process session concurrency control. Selected via
+  `pyfly.session.concurrency.registry=redis`.
+
+Verified by an adversarial review against the installed redis-py (signatures + token/ordering
+semantics) — `@scheduled(lock=...)` and `maximumSessions` now actually coordinate across a cluster.
+
 ## v26.06.58 (2026-06-07)
 
 ### Added (config — runtime reload, completing @RefreshScope)
