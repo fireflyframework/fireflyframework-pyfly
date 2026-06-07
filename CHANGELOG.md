@@ -6,6 +6,194 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.73 (2026-06-07)
+
+### Changed (benchmarks — rigor overhaul)
+
+A critical audit of `benchmarks/run.py` to measure what actually matters and keep ratios stable:
+
+- **Baseline de-inflated.** The old "bare Starlette ~436µs/req" was ~99% `TestClient`/httpx
+  round-trip artifact. Request benchmarks now drive the ASGI app **directly** (one event loop,
+  no httpx) — real bare-ASGI handling is **~5µs/req**. PyFly's filter-chain overhead is now
+  reported as an **absolute ~+44µs/req** over that real base (not a % of an inflated number);
+  the TestClient cost is called out and excluded.
+- **DI coverage expanded** to transient with 1/3/5/10 dependencies + nested depth-1/3/5 graphs —
+  the data shows resolution is **linear** in both width (~+0.4µs/cached dependency) and depth
+  (~+2.7µs/node, the transient-construction rate), with no superlinear or hidden per-bean cost.
+- **Request overhead reconciles.** The +~44µs is the sum of all **seven** default filters
+  (including the default-on `MetricsFilter` + `HttpExchangeRecorderFilter`, not just the explicit
+  web filters); the README per-filter decomposition sums to it, and the zero-filter chain
+  machinery is confirmed free (+0.2µs vs bare ASGI).
+- **Dependency baselines labelled.** `pydantic v2 model_dump_json` is tagged `[dep]` (measures
+  Pydantic, not PyFly); bare Starlette is tagged `[base]`.
+- **Naming fixed.** `TransactionIdFilter` is documented as an MDC-style `X-Transaction-Id`
+  correlation id — explicitly **not** declarative `@Transactional` transaction management.
+- **Measurement reliability.** Warmup + 9 timed runs with the GC disabled during measurement;
+  reports median µs/op, best, p99, and run-to-run spread (`±%`, observed ~1–3%). The access log
+  (sink-dependent I/O) is excluded from the CPU number and documented separately.
+
+## v26.06.72 (2026-06-07)
+
+### Added (observability — metrics recording port)
+
+- **`MetricsRecorder`** protocol port (`pyfly.observability`) — the abstraction instrumentation
+  depends on, so code is not hard-coupled to Prometheus. `MetricsRegistry` is now a nominal
+  `MetricsRecorder` (the Prometheus adapter), and **`NoOpMetricsRecorder`** is a dependency-free
+  adapter for tests and metrics-disabled deployments (every metric op is an inert no-op handle).
+  (Tracing exporters were already config-swappable via `pyfly.observability.tracing.exporter`;
+  a full multi-backend metrics abstraction would be YAGNI, so this stays a lightweight port + a
+  real second adapter.)
+
+## v26.06.71 (2026-06-07)
+
+### Added (tests — behavior coverage for external adapters)
+
+Closes the audit gap where several external adapters were only wiring/`isinstance`-tested. Added
+**42 mocked-I/O behavior tests** (no network/Docker) asserting both the outbound request shape
+(URL, verb, payload, auth headers) and the response→domain parsing, for:
+
+- **Notifications**: `ResendEmailProvider`, `TwilioSmsProvider`, `FirebasePushProvider`.
+- **ECM e-signature**: `DocuSignESignatureAdapter`, `AdobeSignESignatureAdapter`, `LogaltyESignatureAdapter`.
+- **ECM storage**: `AwsS3StorageAdapter` (fake injected boto3 client).
+- **IDP**: `KeycloakIdpAdapter`.
+
+Each covers happy-path, error/non-2xx mapping, and key edge cases (sender precedence, attachment
+encoding, multi-token partial success, status mapping, etc.).
+
+## v26.06.70 (2026-06-07)
+
+### Performance (notifications/ECM — pooled outbound HTTP clients)
+
+The SendGrid/Resend/Twilio/Firebase notification providers and the DocuSign/Adobe Sign/Logalty
+e-signature adapters built a **new `httpx.AsyncClient` per call** (no connection reuse). They now
+keep one long-lived, lazily-created client (connection pool reused across calls) and close it on
+shutdown via new `start()`/`stop()` lifecycle methods. A shared `PooledHttpClient` async-context
+wrapper keeps the existing `async with await self._client()` call sites unchanged while reusing
+the pooled client (it does not close on exit). Found by the ports/adapters audit.
+
+## v26.06.69 (2026-06-07)
+
+### Added (OAuth2 — persistent token stores; fixes a multi-instance production blocker)
+
+The OAuth2 authorization server's `TokenStore` was in-memory only, so refresh tokens were lost
+on restart and revocation didn't propagate across instances. It is now pluggable via
+`pyfly.security.oauth2.token-store.provider`:
+
+- **`RedisTokenStore`** (`provider=redis`) — JSON values with a TTL set to the refresh-token
+  lifetime (expired tokens self-evict); fast cross-instance revocation.
+- **`PostgresTokenStore`** (`provider=postgres`) — durable, auditable token rows; lazy
+  idempotent table creation; table name validated against injection.
+- `memory` (default) keeps `InMemoryTokenStore` for dev/test.
+
+Hexagonal: the Redis client / SQLAlchemy engine are obtained in the composition root and
+injected; the adapters import no driver at module scope. Both validated against **real Redis
+and real Postgres** (testcontainers: store/find/upsert/revoke).
+
+## v26.06.68 (2026-06-07)
+
+### Added (session — Postgres SessionRegistry; Postgres parity)
+
+- **`PostgresSessionRegistry`** (`pyfly.session.adapters.postgres_registry`) — a durable,
+  queryable, cross-process session-concurrency registry backed by a Postgres table
+  (`session_id` PK, `principal`, `created_at`), selected via
+  `pyfly.session.concurrency.registry=postgres`. Lets relational-only deployments run clustered
+  `maximumSessions` control with **no Redis** (the user's "postgres, not just redis"). The table
+  is created lazily and idempotently; the table name is validated against injection. Hexagonal:
+  the SQLAlchemy `AsyncEngine` is resolved lazily and injected by the composition root; the
+  adapter imports no SQLAlchemy at module scope. Validated against **real Postgres**
+  (testcontainers: upsert, oldest-first ordering, count, deregister).
+- **`SessionRegistry`** is now exported from `pyfly.session.ports` alongside `SessionStore`
+  (consistency fix from the audit).
+
+## v26.06.67 (2026-06-07)
+
+### Added (scheduling — pluggable task executor; fixes a weak default)
+
+- The `TaskScheduler`'s executor is now selectable via `pyfly.scheduling.executor.type`
+  (`asyncio`, default — in-loop tasks; or `thread` — offload blocking jobs to a pool of
+  `pyfly.scheduling.executor.max-workers`, default 4). The `ThreadPoolTaskExecutor` already
+  existed and was tested but was never reachable through configuration — the auto-config
+  hardcoded `AsyncIOTaskExecutor`. Found by the ports/adapters audit (weak default).
+
+## v26.06.66 (2026-06-07)
+
+### Added (distributed lock — Postgres advisory-lock adapter; Postgres parity)
+
+- **`PostgresAdvisoryLock`** (`pyfly.scheduling.adapters.postgres_lock`) — a `DistributedLock`
+  backed by Postgres `pg_try_advisory_lock`/`pg_advisory_unlock`, selected via
+  `pyfly.scheduling.lock.provider=postgres`. Cluster-safe `@scheduled(lock=...)` coordination
+  with **no extra infrastructure** for apps already on Postgres (no Redis required) — the user's
+  "postgres, not just redis". Session-level advisory locks hold their connection from acquire to
+  release; a crashed instance drops the connection and Postgres auto-releases the lock (the
+  crash-safety mechanism in lieu of a TTL).
+- Hexagonal: the SQLAlchemy `AsyncEngine` is resolved lazily and injected by the composition
+  root; the adapter imports no SQLAlchemy at module scope. Validated against **real Postgres**
+  (testcontainers integration test: cross-connection contention).
+
+## v26.06.65 (2026-06-07)
+
+### Fixed (hexagonal — httpx adapter import leak)
+
+- **`HttpxClientAdapter`** no longer imports `httpx` at module scope — the import is now lazy
+  (inside the constructor, under `TYPE_CHECKING` for annotations). Found by the framework-wide
+  ports/adapters audit: it was the only adapter that broke hexagonal discipline (importing its
+  third-party driver outside the composition root, so the module failed to import without the
+  `http` extra). Now the module imports cleanly without httpx; only the composition root that
+  selects this adapter triggers the import.
+
+## v26.06.64 (2026-06-07)
+
+### Performance (web — per-request footprint)
+
+Profiling the filter chain showed the chain *machinery* is essentially free (the middleware
+with zero filters measures within noise of bare Starlette) — the ~22% overhead vs bare
+Starlette is entirely the per-filter features, dominated by the per-request access log (~38µs).
+
+- **Access logging is now opt-out** via `pyfly.web.request-logging.enabled` (default `true`).
+  Disabling it drops ~38µs/request (overhead ~22% → ~13%) for latency-sensitive services.
+- **`SecurityHeadersFilter`** now precomputes its encoded header tuples once and bulk-appends
+  them to `response.raw_headers`, instead of N `MutableHeaders` setitems per request.
+- `benchmarks/README.md` documents the full per-filter footprint decomposition.
+
+## v26.06.63 (2026-06-07)
+
+### Performance (DI container — cached constructor plan)
+
+The container now parses each constructor's injection plan **once** (cached on the
+`Registration`) instead of calling `typing.get_type_hints` + `inspect.signature` on every
+resolution, and `_resolve_param` computes `get_origin` once per parameter with a fast path
+for plain-class dependencies. Singleton resolution (already cached) is unchanged, but
+**transient bean resolution with dependencies is ~5.3x faster** (~15.6µs → ~2.9µs per resolve;
+~64K → ~342K ops/s on the benchmark machine). The residual cost is the irreducible per-resolve
+dependency resolution + object construction. Behavior is unchanged (182 container tests green);
+`benchmarks/README.md` updated with the new numbers.
+
+## v26.06.62 (2026-06-07)
+
+### Added (hardening — benchmarks + Redis integration tests)
+
+- **`benchmarks/`** — a dependency-free micro-benchmark harness (`uv run python benchmarks/run.py`)
+  measuring DI container resolution (singleton/transient/with-deps), Pydantic serialization, and
+  the PyFly filter-chain request overhead vs bare Starlette. Surfaces regressions and quantifies
+  overhead (e.g. cached singleton resolve ~5.3M ops/s; filter chain ~+26% over bare Starlette;
+  transient-with-deps reveals per-resolve `get_type_hints` as a future optimization).
+- **`tests/integration/`** — Redis integration tests (testcontainers, `@requires_docker`) that
+  exercise `RedisDistributedLock` (SET NX PX, owner-token Lua release, TTL expiry) and
+  `RedisSessionRegistry` (sorted-set oldest-first) against a **real Redis**, not fakes.
+
+## v26.06.61 (2026-06-07)
+
+### Added (data — run-on-startup database migrations)
+
+- **`MigrationRunner`** + **`MigrationAutoConfiguration`** — when
+  `pyfly.data.relational.migrations.enabled=true`, pyfly applies `alembic upgrade head` on
+  startup (Spring Boot Flyway-style auto-migrate), reusing the project's existing Alembic
+  environment (`alembic.ini` + `alembic/env.py` from `pyfly db init`) and migrating the same
+  datasource as the app. The upgrade runs in a worker thread so the generated async `env.py`
+  (which calls `asyncio.run`) isn't nested in the running loop; if `alembic.ini` is absent it
+  logs a warning and skips rather than failing startup.
+- Config: `pyfly.data.relational.migrations.{enabled,config,revision}`.
+
 ## v26.06.60 (2026-06-07)
 
 ### Fixed (auto-configuration discovery)

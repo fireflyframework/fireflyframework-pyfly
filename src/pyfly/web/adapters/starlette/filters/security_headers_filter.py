@@ -32,20 +32,28 @@ class SecurityHeadersFilter(OncePerRequestFilter):
 
     def __init__(self, config: SecurityHeadersConfig | None = None) -> None:
         self._config = config or SecurityHeadersConfig()
+        # Precompute the encoded (name, value) header pairs ONCE — they are static config, so
+        # there is no need to re-encode or re-test the optional headers on every request.
+        cfg = self._config
+        pairs: list[tuple[str, str]] = [
+            ("x-content-type-options", cfg.x_content_type_options),
+            ("x-frame-options", cfg.x_frame_options),
+            ("strict-transport-security", cfg.strict_transport_security),
+            ("x-xss-protection", cfg.x_xss_protection),
+            ("referrer-policy", cfg.referrer_policy),
+        ]
+        if cfg.content_security_policy is not None:
+            pairs.append(("content-security-policy", cfg.content_security_policy))
+        if cfg.permissions_policy is not None:
+            pairs.append(("permissions-policy", cfg.permissions_policy))
+        self._encoded: list[tuple[bytes, bytes]] = [
+            (name.encode("latin-1"), value.encode("latin-1")) for name, value in pairs
+        ]
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
         response = cast(Response, await call_next(request))
-        cfg = self._config
-
-        response.headers["X-Content-Type-Options"] = cfg.x_content_type_options
-        response.headers["X-Frame-Options"] = cfg.x_frame_options
-        response.headers["Strict-Transport-Security"] = cfg.strict_transport_security
-        response.headers["X-XSS-Protection"] = cfg.x_xss_protection
-        response.headers["Referrer-Policy"] = cfg.referrer_policy
-
-        if cfg.content_security_policy is not None:
-            response.headers["Content-Security-Policy"] = cfg.content_security_policy
-        if cfg.permissions_policy is not None:
-            response.headers["Permissions-Policy"] = cfg.permissions_policy
-
+        # Bulk-append the precomputed headers in one extend rather than N MutableHeaders
+        # setitems (each re-scans the raw list). Security headers don't pre-exist on framework
+        # responses, so appending is correct.
+        response.raw_headers.extend(self._encoded)
         return response

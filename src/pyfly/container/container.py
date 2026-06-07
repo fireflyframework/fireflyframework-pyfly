@@ -474,18 +474,17 @@ class Container:
                 metrics.created_at = time.time()
                 return instance
 
-            init = reg.impl_type.__init__  # type: ignore[misc]
-            if init is object.__init__:
+            # Constructor injection plan is parsed once and cached on the registration —
+            # get_type_hints/inspect.signature are NOT re-run per resolve (notably for TRANSIENT).
+            if not reg.init_plan_built:
+                reg.init_plan = self._build_init_plan(reg.impl_type)
+                reg.init_plan_built = True
+
+            if reg.init_plan is None:  # trivial object.__init__
                 instance = reg.impl_type()
             else:
-                hints = typing.get_type_hints(init, include_extras=True)
-                hints.pop("return", None)
-                sig = inspect.signature(init)
-
                 kwargs: dict[str, Any] = {}
-                for param_name, param_type in hints.items():
-                    param = sig.parameters.get(param_name)
-                    has_default = param is not None and param.default is not inspect.Parameter.empty
+                for param_name, param_type, has_default in reg.init_plan:
                     try:
                         kwargs[param_name] = self._resolve_param(param_type)
                     except (NoSuchBeanError, NoUniqueBeanError):
@@ -513,10 +512,43 @@ class Container:
         finally:
             self._resolving.pop(reg.impl_type, None)
 
+    def _build_init_plan(self, impl_type: type) -> list[tuple[str, Any, bool]] | None:
+        """Parse an ``__init__`` into a cached injection plan (called once per registration).
+
+        Returns ``None`` for a trivial ``object.__init__``; otherwise a list of
+        ``(param_name, resolved_type, has_default)``. This isolates the expensive
+        ``typing.get_type_hints`` + ``inspect.signature`` work so it runs at most once per
+        bean instead of on every resolution (mature-container practice).
+        """
+        init = impl_type.__init__  # type: ignore[misc]
+        if init is object.__init__:
+            return None
+        hints = typing.get_type_hints(init, include_extras=True)
+        hints.pop("return", None)
+        sig = inspect.signature(init)
+        plan: list[tuple[str, Any, bool]] = []
+        for param_name, param_type in hints.items():
+            param = sig.parameters.get(param_name)
+            has_default = param is not None and param.default is not inspect.Parameter.empty
+            plan.append((param_name, param_type, has_default))
+        return plan
+
     def _resolve_param(self, param_type: type) -> Any:
-        """Resolve a single parameter, handling Annotated, Optional, and list."""
-        # Handle Annotated[T, Qualifier("name")] and Annotated[T, Value("${key}")]
-        if get_origin(param_type) is Annotated:
+        """Resolve a single parameter, handling Annotated, Optional, list, Provider, Map, generics.
+
+        ``get_origin`` is computed once and the plain-class dependency (the common case) is
+        fast-pathed, instead of re-running ``get_origin`` for each special form.
+        """
+        origin = get_origin(param_type)
+
+        # Fast path: a plain class dependency — no typing origin and not a PEP 604 union.
+        if origin is None and not isinstance(param_type, types.UnionType):
+            if param_type is type:
+                raise NoSuchBeanError(bean_type=None)
+            return self.resolve(param_type)
+
+        # Annotated[T, Qualifier("name")] / Annotated[T, Value("${key}")]
+        if origin is Annotated:
             from pyfly.core.value import Value
 
             args = get_args(param_type)
@@ -528,8 +560,8 @@ class Container:
                     return _coerce_value(metadata.resolve(self._get_config()), base_type)
             return self._resolve_param(base_type)
 
-        # Handle Optional[T] (Union[T, None] or T | None via PEP 604)
-        if get_origin(param_type) is Union or isinstance(param_type, types.UnionType):
+        # Optional[T] (Union[T, None] or T | None via PEP 604)
+        if origin is Union or isinstance(param_type, types.UnionType):
             args = get_args(param_type)
             non_none = [a for a in args if a is not type(None)]
             if len(non_none) == 1:
@@ -538,34 +570,32 @@ class Container:
                 except (NoSuchBeanError, NoUniqueBeanError):
                     return None
 
-        # Handle list[T]
-        if get_origin(param_type) is list:
+        # list[T]
+        if origin is list:
             args = get_args(param_type)
             if args:
                 return self.resolve_all(args[0])
 
-        # Handle Provider[T] — deferred / fresh resolution (Spring ObjectFactory)
-        if get_origin(param_type) is Provider:
+        # Provider[T] — deferred / fresh resolution (Spring ObjectFactory)
+        if origin is Provider:
             args = get_args(param_type)
             if args:
                 return Provider(self, args[0])
 
-        # Handle dict[str, T] — Map injection (bean-name -> bean), like Spring Map<String,T>
-        if get_origin(param_type) is dict:
+        # dict[str, T] — Map injection (bean-name -> bean), like Spring Map<String,T>
+        if origin is dict:
             args = get_args(param_type)
             if len(args) == 2 and args[0] is str:
                 return self._resolve_map(args[1])
 
-        # Handle type[T] or bare `type` — class references cannot be auto-resolved
-        if param_type is type or get_origin(param_type) is type:
+        # type[T] or bare `type` — class references cannot be auto-resolved
+        if param_type is type or origin is type:
             raise NoSuchBeanError(
                 bean_type=param_type if isinstance(param_type, type) else None,
             )
 
-        # Handle a parametrized generic interface, e.g. Repository[User] -> an impl
-        # parametrized with User (Spring's generic-aware injection). Falls back to
-        # resolving the bare origin when there is no generic family to match against.
-        origin = get_origin(param_type)
+        # Parametrized generic interface, e.g. Repository[User] -> the impl parametrized with
+        # User (Spring's generic-aware injection); falls back to the bare origin.
         if isinstance(origin, type) and origin not in (list, set, frozenset, tuple, dict):
             resolved = self._resolve_generic(origin, get_args(param_type))
             if resolved is not None:

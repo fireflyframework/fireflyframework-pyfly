@@ -11,6 +11,4 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyFly — Enterprise Python Framework."""
-
-__version__ = "26.06.73"
+"""Security outbound adapters (persistent OAuth2 token stores, etc.)."""

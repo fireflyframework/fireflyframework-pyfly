@@ -64,7 +64,13 @@ class TestVendorIsolation:
                 "bad = [l for l in lines "
                 "if '/data/' not in l and '/cli/' not in l "
                 "and '/transactional/persistence/' not in l "
-                "and '/eventsourcing/' not in l]; "
+                "and '/eventsourcing/' not in l "
+                "and '/scheduling/adapters/' not in l "
+                "and 'scheduling/auto_configuration' not in l "
+                "and '/session/adapters/' not in l "
+                "and 'session/auto_configuration' not in l "
+                "and '/security/adapters/' not in l "
+                "and 'security/auto_configuration' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

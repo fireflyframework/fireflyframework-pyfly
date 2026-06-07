@@ -21,6 +21,8 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from pyfly.observability.ports import MetricsRecorder
+
 try:
     from prometheus_client import Counter, Gauge, Histogram
 
@@ -34,8 +36,8 @@ except ImportError:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-class MetricsRegistry:
-    """Registry for application metrics.
+class MetricsRegistry(MetricsRecorder):
+    """Registry for application metrics — the Prometheus :class:`MetricsRecorder` adapter.
 
     Wraps prometheus_client to provide a clean API for creating and
     managing metrics. Ensures each metric name is registered only once.

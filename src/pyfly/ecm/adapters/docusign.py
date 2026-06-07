@@ -8,6 +8,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from pyfly.client.pooled import PooledHttpClient
 from pyfly.ecm.models import (
     ESignatureEnvelope,
     ESignatureStatus,
@@ -38,14 +39,17 @@ class DocuSignESignatureAdapter:
         self._base_url = base_url.rstrip("/")
         self._account_id = account_id
         self._access_token = access_token
+        self._http: Any = None
 
     async def _client(self) -> Any:
-        try:
-            import httpx  # type: ignore[import-not-found, unused-ignore]
-        except ImportError as exc:  # noqa: BLE001
-            msg = "DocuSignESignatureAdapter requires httpx — `pip install pyfly[client]`"
-            raise ImportError(msg) from exc
-        return httpx.AsyncClient(timeout=60.0)
+        if self._http is None:
+            try:
+                import httpx  # type: ignore[import-not-found, unused-ignore]
+            except ImportError as exc:  # noqa: BLE001
+                msg = "DocuSignESignatureAdapter requires httpx — `pip install pyfly[client]`"
+                raise ImportError(msg) from exc
+            self._http = httpx.AsyncClient(timeout=60.0)
+        return PooledHttpClient(self._http)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -122,6 +126,15 @@ class DocuSignESignatureAdapter:
                 headers=self._headers,
             )
             return bool(resp.status_code == 200)
+
+    async def start(self) -> None:
+        """No-op — the pooled HTTP client is created lazily on first use."""
+
+    async def stop(self) -> None:
+        """Close the pooled HTTP client on shutdown."""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
 
 def _map_status(value: str) -> ESignatureStatus:

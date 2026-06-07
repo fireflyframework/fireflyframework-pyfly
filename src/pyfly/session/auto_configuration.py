@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_missing_bean,
@@ -72,7 +75,7 @@ class SessionConcurrencyAutoConfiguration:
 
     @bean
     def session_concurrency_controller(
-        self, config: Config, session_store: SessionStore
+        self, config: Config, session_store: SessionStore, container: Container
     ) -> SessionConcurrencyController:
         from pyfly.session.concurrency import (
             ConcurrencyControlPolicy,
@@ -84,9 +87,10 @@ class SessionConcurrencyAutoConfiguration:
             max_sessions=int(config.get("pyfly.session.concurrency.max-sessions", -1)),
             strategy=str(config.get("pyfly.session.concurrency.strategy", "evict-oldest")),
         )
-        # Registry backend: 'memory' (default, single-instance) or 'redis' (cross-process).
-        # The Redis client is built here (composition root) and injected — the adapter never
-        # imports redis.
+        # Registry backend: 'memory' (default, single-instance), 'redis' (cross-process), or
+        # 'postgres' (durable + cross-process, no Redis needed). The Redis client / SQLAlchemy
+        # engine are obtained here (the composition root) and injected — the adapters never
+        # import their driver at module scope.
         registry: SessionRegistry
         registry_type = str(config.get("pyfly.session.concurrency.registry", "memory")).lower()
         if registry_type == "redis" and AutoConfiguration.is_available("redis.asyncio"):
@@ -99,6 +103,15 @@ class SessionConcurrencyAutoConfiguration:
                 or config.get("pyfly.session.redis.url", "redis://localhost:6379/0")
             )
             registry = RedisSessionRegistry(aioredis.from_url(url))  # type: ignore[no-untyped-call,unused-ignore]
+        elif registry_type == "postgres":
+            from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
+
+            def _engine() -> Any:
+                from sqlalchemy.ext.asyncio import AsyncEngine
+
+                return container.resolve(AsyncEngine)
+
+            registry = PostgresSessionRegistry(_engine)
         else:
             registry = InMemorySessionRegistry()
         return SessionConcurrencyController(registry, policy, session_deleter=session_store.delete)
