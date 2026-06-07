@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.57 (2026-06-07)
+
+### Added (container — public registration/introspection SPI)
+
+Promotes the previously-internal `Container._registrations` mutation pattern to a supported
+public API (no more reaching into registration internals across modules):
+
+- **`register_instance(cls, instance, *, name="")`** — register an already-constructed object
+  as a singleton bean (Spring's `registerSingleton`).
+- **`contains_type(cls)`**, **`get_registration(cls)`**, **`registered_types()`** — read-only
+  introspection.
+- **`reset_instance(cls)`** — drop a singleton's cached instance so it rebuilds on next resolve.
+
+`ApplicationContext`, test slices, and `ContextRefresher` now use this SPI instead of
+mutating `_registrations` directly.
+
 ## v26.06.56 (2026-06-07)
 
 ### Docs (parity documentation for v26.06.37–55)
