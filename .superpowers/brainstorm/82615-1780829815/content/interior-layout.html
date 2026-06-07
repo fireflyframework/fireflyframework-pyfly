@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyFly by Example — Interior page</title>
+<style>
+  :root{ --ui:#0d0f13; --muted:#9aa6a0; --line:#262b33; --amber:#ffc24b; --green:#43b02a;}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#16241a 0%,#0d0f13 60%);
+       color:#e9eee7;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:36px 24px 80px}
+  .head{max-width:1080px;margin:0 auto 26px}
+  h1{font-size:25px;margin:0 0 6px}.by{color:#5fd13a}
+  .sub{color:var(--muted);font-size:15px;line-height:1.5;margin:0;max-width:820px}
+  .cards{max-width:1120px;margin:0 auto;display:flex;gap:28px;flex-wrap:wrap;justify-content:center;align-items:flex-start}
+  .card{cursor:pointer;width:480px;border-radius:14px;transition:transform .18s,box-shadow .18s;border:2px solid transparent}
+  .card:hover{transform:translateY(-4px)}
+  .card.selected{border-color:var(--amber);box-shadow:0 0 0 3px rgba(255,194,75,.35),0 20px 60px rgba(0,0,0,.5)}
+  .cap{padding:12px 6px 0;color:var(--muted);font-size:13.5px;line-height:1.5}
+  .cap b{color:#e9eee7;font-size:16px;display:block;margin-bottom:3px}
+  .tag{display:inline-block;font-size:11px;letter-spacing:1.6px;text-transform:uppercase;color:var(--amber);border:1px solid #3a3325;padding:2px 8px;border-radius:999px;margin-bottom:8px}
+
+  /* ---------- the printed page ---------- */
+  .page{background:#fffef9;border-radius:8px;box-shadow:0 16px 50px rgba(0,0,0,.5);padding:34px 38px 26px;color:#1c2420}
+  .rh{display:flex;justify-content:space-between;font-size:9.5px;letter-spacing:1.5px;color:#9batxt;color:#a7b0a0;text-transform:uppercase;border-bottom:1px solid #e7ece1;padding-bottom:8px;margin-bottom:22px}
+  .eyebrow{color:var(--green);font-weight:700;letter-spacing:2px;font-size:11px;text-transform:uppercase}
+  .opener{display:flex;align-items:center;gap:14px;margin:6px 0 14px}
+  .badge{flex:none;width:62px;height:62px}
+  .ftr{display:flex;justify-content:space-between;margin-top:22px;padding-top:9px;border-top:1px solid #e7ece1;font-size:10px;color:#a7b0a0;letter-spacing:1px}
+
+  /* code listing (shared, light theme) */
+  .listing{margin:14px 0}
+  .filetab{display:inline-block;background:#eef3e8;color:#3f6b34;font:600 11px/1 "SF Mono",Menlo,Consolas,monospace;
+           padding:6px 10px;border-radius:7px 7px 0 0;border:1px solid #dde6d3;border-bottom:none}
+  pre{margin:0;background:#f7faf3;border:1px solid #dde6d3;border-radius:0 7px 7px 7px;padding:13px 15px;overflow:auto;
+      font:12.3px/1.62 "SF Mono","JetBrains Mono",Menlo,Consolas,monospace;color:#24292f}
+  .lcap{font-size:11.5px;color:#7a8472;margin-top:6px;font-style:italic}
+  .k{color:#cf222e}.s{color:#0a3069}.c{color:#6e7781;font-style:italic}.f{color:#8250df}.d{color:#953800}.n{color:#0550ae}.t{color:#116329}
+
+  /* figure */
+  figure{margin:16px 0 6px;text-align:center}
+  figure svg{width:78%;height:auto}
+  figcaption{font-size:11.5px;color:#7a8472;margin-top:7px}
+  figcaption b{color:#3f6b34}
+
+  /* ===== MODERN variant ===== */
+  .pg-modern{font-size:14.5px;line-height:1.72}
+  .pg-modern .chtitle{font:800 30px/1.12 -apple-system,"Segoe UI",Inter,Roboto,sans-serif;color:#15351a;margin:0}
+  .pg-modern h2{font:700 18px/1.3 -apple-system,"Segoe UI",Inter,sans-serif;color:#1c2420;margin:22px 0 8px}
+  .pg-modern p{margin:0 0 12px}
+  .pg-modern code{background:#eef3e8;color:#2f6b2a;padding:1px 5px;border-radius:4px;font:12px "SF Mono",Menlo,monospace}
+  .pg-modern .callout{border-radius:11px;padding:12px 14px 12px 12px;margin:14px 0;display:flex;gap:11px;font-size:13.5px;line-height:1.6}
+  .pg-modern .c-note{background:#eef6ff;border:1px solid #cfe3fb}
+  .pg-modern .c-spring{background:#f3fae9;border:1px solid #d4e9bd}
+  .pg-modern .ci{flex:none;width:30px;height:30px}
+  .pg-modern .clabel{font-weight:700;font-size:11px;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:2px}
+  .pg-modern .c-note .clabel{color:#1f6fd6}.pg-modern .c-spring .clabel{color:#3f8f24}
+
+  /* ===== CLASSIC variant ===== */
+  .pg-classic{font-family:Georgia,"Iowan Old Style",Palatino,serif;font-size:15px;line-height:1.66;color:#21271f}
+  .pg-classic .chtitle{font:700 30px/1.14 Georgia,serif;color:#173318;margin:0}
+  .pg-classic h2{font:700 19px/1.3 Georgia,serif;color:#21271f;margin:22px 0 7px;padding-bottom:5px;border-bottom:2px solid #e3ead9}
+  .pg-classic p{margin:0 0 12px}
+  .pg-classic code{background:#f0f2ec;color:#7a3a12;padding:0 3px;border-radius:3px;font:12.5px "SF Mono",Menlo,monospace}
+  .pg-classic .callout{padding:9px 14px;margin:14px 0;border-left:4px solid var(--green);background:#f6f8f1;font-size:13.5px;line-height:1.6}
+  .pg-classic .c-spring{border-left-color:var(--amber);background:#fbf6ea}
+  .pg-classic .clabel{font:700 11px/1 Georgia,serif;letter-spacing:1.5px;text-transform:uppercase;color:#3f6b34;display:block;margin-bottom:4px}
+  .pg-classic .c-spring .clabel{color:#9a6b15}
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>Interior page <span class="by">— pick the reading style</span></h1>
+    <p class="sub">Same chapter, two typographic systems. Both are full Packt-grade: chapter opener with Sparky, syntax-highlighted
+      code listing with a file tab + listing caption, callouts (Note + a green "Spring parity" box), and a captioned Friendly-Flat
+      figure. Code blocks are light so they print cleanly in the PDF. Pick the body that reads best to you.</p>
+  </div>
+
+  <div class="cards">
+
+    <!-- ============== MODERN ============== -->
+    <div class="card" data-choice="modern" onclick="toggleSelect(this)">
+      <div class="page pg-modern">
+        <div class="rh"><span>PyFly by Example</span><span>6 · Commands &amp; Queries</span></div>
+        <div class="eyebrow">Chapter 6</div>
+        <div class="opener">
+          <svg class="badge" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="32" cy="32" r="30" fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+            <path d="M24 46 C 8 42 12 22 30 21 C 44 20 47 9 35 5" fill="none" stroke="#5fd13a" stroke-width="7" stroke-linecap="round"/>
+            <g transform="translate(35,16)"><ellipse rx="11" ry="9.5" fill="#67d642" stroke="#2f7d1c" stroke-width="1.6"/>
+              <circle cx="-4" cy="-2" r="2.3" fill="#fff"/><circle cx="4" cy="-2" r="2.3" fill="#fff"/>
+              <circle cx="-3.4" cy="-1.4" r="1.1" fill="#16331a"/><circle cx="4.6" cy="-1.4" r="1.1" fill="#16331a"/>
+              <path d="M-3 4 Q 0 6.5 3 4" stroke="#1c5512" stroke-width="1.4" fill="none"/></g>
+          </svg>
+          <h1 class="chtitle">Commands &amp; Queries: CQRS for Transfers</h1>
+        </div>
+        <p>By now the wallet can hold money, but every change still runs through one fat service. In this chapter we split
+          <em>writes</em> from <em>reads</em> using PyFly's <code>CommandBus</code> and <code>QueryBus</code>, so a money transfer
+          becomes a small, testable, independently-authorized unit of work.</p>
+
+        <h2>Modelling a transfer as a command</h2>
+        <p>A command is an intention to change state. We declare it as a typed message and let the bus route it to exactly one handler:</p>
+
+        <div class="listing">
+          <span class="filetab">wallet/core/transfers/transfer_funds.py</span>
+<pre><span class="k">from</span> pyfly.cqrs <span class="k">import</span> Command, CommandHandler, command_handler
+<span class="k">from</span> pyfly.container <span class="k">import</span> service
+
+<span class="k">class</span> <span class="f">TransferFunds</span>(Command[TransferResult]):
+    from_wallet: <span class="t">str</span>
+    to_wallet: <span class="t">str</span>
+    amount: Money
+
+<span class="d">@command_handler</span>
+<span class="k">class</span> <span class="f">TransferFundsHandler</span>(CommandHandler[TransferFunds, TransferResult]):
+    <span class="k">def</span> <span class="f">__init__</span>(self, ledger: LedgerRepository, events: EventPublisher) -> <span class="k">None</span>:
+        self._ledger = ledger
+        self._events = events
+
+    <span class="k">async def</span> <span class="f">handle</span>(self, cmd: TransferFunds) -> TransferResult:
+        <span class="c"># post a double-entry: debit source, credit destination</span>
+        entry = <span class="k">await</span> self._ledger.post(cmd.from_wallet, cmd.to_wallet, cmd.amount)
+        <span class="k">await</span> self._events.publish(FundsTransferred(entry.id))
+        <span class="k">return</span> TransferResult(entry_id=entry.id)</pre>
+          <div class="lcap">Listing 6.2 — A command and its single handler, wired by the bus.</div>
+        </div>
+
+        <div class="callout c-note">
+          <svg class="ci" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="#1f6fd6"/>
+            <text x="16" y="22" text-anchor="middle" font-size="18" font-weight="800" fill="#fff" font-family="Georgia,serif">i</text></svg>
+          <div><span class="clabel">Note</span>The bus resolves the handler by the command's type — no manual registration. One command, one handler, enforced at startup.</div>
+        </div>
+
+        <div class="callout c-spring">
+          <svg class="ci" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="#5fd13a"/>
+            <path d="M9 17 l5 5 9 -11" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div><span class="clabel">Spring parity</span>PyFly's <code>@command_handler</code> mirrors Spring's <code>@CommandHandler</code> + Axon bus — same dispatch model, expressed with Python type hints.</div>
+        </div>
+
+        <figure>
+          <svg viewBox="0 0 360 120" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+            <rect x="6" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="6" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="52" y="71" text-anchor="middle" font-size="11" fill="#23402a">Controller</text>
+            <rect x="134" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="134" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="180" y="71" text-anchor="middle" font-size="11" fill="#23402a">CommandBus</text>
+            <rect x="262" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="262" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="308" y="71" text-anchor="middle" font-size="11" fill="#23402a">Handler</text>
+            <path d="M98 61 l36 0" stroke="#8aa07e" stroke-width="2" marker-end="url(#am)"/><path d="M226 61 l36 0" stroke="#8aa07e" stroke-width="2" marker-end="url(#am)"/>
+            <defs><marker id="am" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8aa07e"/></marker></defs>
+          </svg>
+          <figcaption><b>Figure 6.1</b> — A request becomes a command, routed by the bus to its handler.</figcaption>
+        </figure>
+
+        <div class="ftr"><span>The Firefly Framework</span><span>· 118 ·</span></div>
+      </div>
+      <div class="cap"><span class="tag">Variant A</span><b>Modern</b>Sans-serif body (Inter/system), airy spacing, rounded callouts with Sparky chips. Contemporary and clean — the current Packt house style.</div>
+    </div>
+
+    <!-- ============== CLASSIC ============== -->
+    <div class="card" data-choice="classic" onclick="toggleSelect(this)">
+      <div class="page pg-classic">
+        <div class="rh"><span>PyFly by Example</span><span>6 · Commands &amp; Queries</span></div>
+        <div class="eyebrow">Chapter 6</div>
+        <div class="opener">
+          <svg class="badge" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="32" cy="32" r="30" fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+            <path d="M24 46 C 8 42 12 22 30 21 C 44 20 47 9 35 5" fill="none" stroke="#5fd13a" stroke-width="7" stroke-linecap="round"/>
+            <g transform="translate(35,16)"><ellipse rx="11" ry="9.5" fill="#67d642" stroke="#2f7d1c" stroke-width="1.6"/>
+              <circle cx="-4" cy="-2" r="2.3" fill="#fff"/><circle cx="4" cy="-2" r="2.3" fill="#fff"/>
+              <circle cx="-3.4" cy="-1.4" r="1.1" fill="#16331a"/><circle cx="4.6" cy="-1.4" r="1.1" fill="#16331a"/>
+              <path d="M-3 4 Q 0 6.5 3 4" stroke="#1c5512" stroke-width="1.4" fill="none"/></g>
+          </svg>
+          <h1 class="chtitle">Commands &amp; Queries: CQRS for Transfers</h1>
+        </div>
+        <p>By now the wallet can hold money, but every change still runs through one fat service. In this chapter we split
+          <em>writes</em> from <em>reads</em> using PyFly's <code>CommandBus</code> and <code>QueryBus</code>, so a money transfer
+          becomes a small, testable, independently-authorized unit of work.</p>
+
+        <h2>Modelling a transfer as a command</h2>
+        <p>A command is an intention to change state. We declare it as a typed message and let the bus route it to exactly one handler:</p>
+
+        <div class="listing">
+          <span class="filetab">wallet/core/transfers/transfer_funds.py</span>
+<pre><span class="k">from</span> pyfly.cqrs <span class="k">import</span> Command, CommandHandler, command_handler
+<span class="k">from</span> pyfly.container <span class="k">import</span> service
+
+<span class="k">class</span> <span class="f">TransferFunds</span>(Command[TransferResult]):
+    from_wallet: <span class="t">str</span>
+    to_wallet: <span class="t">str</span>
+    amount: Money
+
+<span class="d">@command_handler</span>
+<span class="k">class</span> <span class="f">TransferFundsHandler</span>(CommandHandler[TransferFunds, TransferResult]):
+    <span class="k">def</span> <span class="f">__init__</span>(self, ledger: LedgerRepository, events: EventPublisher) -> <span class="k">None</span>:
+        self._ledger = ledger
+        self._events = events
+
+    <span class="k">async def</span> <span class="f">handle</span>(self, cmd: TransferFunds) -> TransferResult:
+        <span class="c"># post a double-entry: debit source, credit destination</span>
+        entry = <span class="k">await</span> self._ledger.post(cmd.from_wallet, cmd.to_wallet, cmd.amount)
+        <span class="k">await</span> self._events.publish(FundsTransferred(entry.id))
+        <span class="k">return</span> TransferResult(entry_id=entry.id)</pre>
+          <div class="lcap">Listing 6.2 — A command and its single handler, wired by the bus.</div>
+        </div>
+
+        <div class="callout c-note">
+          <span class="clabel">Note</span>The bus resolves the handler by the command's type — no manual registration. One command, one handler, enforced at startup.
+        </div>
+
+        <div class="callout c-spring">
+          <span class="clabel">Spring parity</span>PyFly's <code>@command_handler</code> mirrors Spring's <code>@CommandHandler</code> + Axon bus — same dispatch model, expressed with Python type hints.
+        </div>
+
+        <figure>
+          <svg viewBox="0 0 360 120" xmlns="http://www.w3.org/2000/svg" font-family="Georgia,serif">
+            <rect x="6" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="6" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="52" y="71" text-anchor="middle" font-size="11" fill="#23402a">Controller</text>
+            <rect x="134" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="134" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="180" y="71" text-anchor="middle" font-size="11" fill="#23402a">CommandBus</text>
+            <rect x="262" y="44" width="92" height="34" rx="7" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+            <rect x="262" y="44" width="92" height="11" rx="7" fill="#43b02a"/><text x="308" y="71" text-anchor="middle" font-size="11" fill="#23402a">Handler</text>
+            <path d="M98 61 l36 0" stroke="#8aa07e" stroke-width="2" marker-end="url(#am2)"/><path d="M226 61 l36 0" stroke="#8aa07e" stroke-width="2" marker-end="url(#am2)"/>
+            <defs><marker id="am2" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8aa07e"/></marker></defs>
+          </svg>
+          <figcaption><b>Figure 6.1</b> — A request becomes a command, routed by the bus to its handler.</figcaption>
+        </figure>
+
+        <div class="ftr"><span>The Firefly Framework</span><span>· 118 ·</span></div>
+      </div>
+      <div class="cap"><span class="tag">Variant B</span><b>Classic</b>Serif body (Georgia), ruled headings, left-border callouts. Traditional printed-book feel — like a classic O'Reilly/Packt title.</div>
+    </div>
+
+  </div>
+</body>
+</html>

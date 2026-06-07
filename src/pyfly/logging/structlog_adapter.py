@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from typing import Any, cast
 
 import structlog
@@ -29,6 +29,17 @@ from pyfly.logging.handlers import build_file_handler
 from pyfly.logging.redaction.engine import build_redactor
 from pyfly.logging.redaction.processor import make_structlog_redactor
 from pyfly.logging.redaction.stream import install_stream_redaction
+
+
+def _add_trace_ids(logger: Any, method_name: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """structlog processor: add ``trace_id``/``span_id`` of the active span to each log
+    record (the SLF4J MDC equivalent). No-op when there is no active span / no OTel."""
+    from pyfly.observability.propagation import current_trace_ids
+
+    ids = current_trace_ids()
+    if ids is not None:
+        event_dict["trace_id"], event_dict["span_id"] = ids
+    return event_dict
 
 
 class StructlogAdapter:
@@ -48,6 +59,7 @@ class StructlogAdapter:
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.add_log_level,
             structlog.stdlib.add_logger_name,
+            _add_trace_ids,
             timestamper,
         ]
         if redactor is not None:
