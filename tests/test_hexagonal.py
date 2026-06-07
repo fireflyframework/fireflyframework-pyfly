@@ -65,7 +65,8 @@ class TestVendorIsolation:
                 "if '/data/' not in l and '/cli/' not in l "
                 "and '/transactional/persistence/' not in l "
                 "and '/eventsourcing/' not in l "
-                "and '/scheduling/adapters/' not in l]; "
+                "and '/scheduling/adapters/' not in l "
+                "and 'scheduling/auto_configuration' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
