@@ -26,7 +26,7 @@ types from ``pyfly.data.relational`` or ``pyfly.data.document`` directly.
 """
 
 from pyfly.data.filter import BaseFilterUtils
-from pyfly.data.mapper import Mapper
+from pyfly.data.mapper import Mapper, default_mapper, mapping
 from pyfly.data.page import Page
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.ports.compiler import QueryMethodCompilerPort
@@ -43,6 +43,8 @@ __all__ = [
     "CrudRepository",
     "DERIVED_PREFIXES",
     "Mapper",
+    "default_mapper",
+    "mapping",
     "Order",
     "Page",
     "Pageable",
