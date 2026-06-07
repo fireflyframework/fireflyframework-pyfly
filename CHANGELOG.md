@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.58 (2026-06-07)
+
+### Added (config — runtime reload, completing @RefreshScope)
+
+- **`Config.reload_from_sources()`** — re-reads the original config files/profiles (the exact
+  merge `from_sources` performed) and atomically swaps in the result, so file/profile changes
+  are picked up at runtime. Returns `False` (no-op) for dict-constructed configs. `get()` reads
+  a single atomically-rebound dict, so concurrent readers always see a consistent snapshot.
+- **`ContextRefresher.refresh()`** now reloads config first, so a refresh (or
+  `POST /actuator/refresh`) rebuilds refresh-scoped and `@config_properties` beans against the
+  freshly-read config — not just the live environment. This closes the v26.06.52 follow-up.
+
 ## v26.06.57 (2026-06-07)
 
 ### Added (container — public registration/introspection SPI)

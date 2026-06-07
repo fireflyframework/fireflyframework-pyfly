@@ -29,21 +29,34 @@ if TYPE_CHECKING:
     from pyfly.container.container import Container
     from pyfly.container.refresh_scope import RefreshScope
     from pyfly.context.events import ApplicationEventBus
+    from pyfly.core.config import Config
 
 
 class ContextRefresher:
     """Triggers a refresh of refresh-scoped and ``@config_properties`` beans."""
 
-    def __init__(self, container: Container, scope: RefreshScope, event_bus: ApplicationEventBus) -> None:
+    def __init__(
+        self,
+        container: Container,
+        scope: RefreshScope,
+        event_bus: ApplicationEventBus,
+        config: Config | None = None,
+    ) -> None:
         self._container = container
         self._scope = scope
         self._event_bus = event_bus
+        self._config = config
 
     async def refresh(self) -> list[str]:
-        """Evict refresh-scoped beans, reset config-properties beans, publish the event.
+        """Reload config from sources, evict refresh-scoped beans, reset config-properties
+        beans, and publish the event.
 
         Returns the cache keys of the evicted refresh-scoped beans.
         """
+        # 1. Re-read the config sources so rebuilt beans pick up file/profile changes
+        # (no-op for dict-constructed config).
+        if self._config is not None:
+            self._config.reload_from_sources()
         evicted = self._scope.refresh()
         # Reset @config_properties singletons so they re-bind from the live Config on next
         # resolution (their factory is ``lambda: config.bind(cls)`` — see

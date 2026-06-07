@@ -89,7 +89,7 @@ class ApplicationContext:
         refresh_scope = RefreshScope()
         self._container.register_scope(REFRESH_SCOPE_NAME, refresh_scope)
         self._container.register_instance(
-            ContextRefresher, ContextRefresher(self._container, refresh_scope, self._event_bus)
+            ContextRefresher, ContextRefresher(self._container, refresh_scope, self._event_bus, self._config)
         )
 
     # ------------------------------------------------------------------
