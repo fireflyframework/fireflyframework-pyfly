@@ -19,4 +19,7 @@ parts:
   - title: "Part I — Foundations"
     chapters:
       - {id: ch01, file: 01-why-pyfly.md, num: 1, title: "Why PyFly?", opener: art/openers/ch01.svg}
+      - {id: ch02, file: 02-dependency-injection.md, num: 2, title: "Dependency Injection & the Application Context", opener: art/openers/ch02.svg}
+      - {id: ch03, file: 03-configuration.md, num: 3, title: "Configuration, Profiles & Secrets", opener: art/openers/ch03.svg}
+      - {id: ch04, file: 04-first-http-api.md, num: 4, title: "Your First HTTP API", opener: art/openers/ch04.svg}
 back: []
