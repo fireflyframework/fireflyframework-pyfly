@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.65 (2026-06-07)
+
+### Fixed (hexagonal — httpx adapter import leak)
+
+- **`HttpxClientAdapter`** no longer imports `httpx` at module scope — the import is now lazy
+  (inside the constructor, under `TYPE_CHECKING` for annotations). Found by the framework-wide
+  ports/adapters audit: it was the only adapter that broke hexagonal discipline (importing its
+  third-party driver outside the composition root, so the module failed to import without the
+  `http` extra). Now the module imports cleanly without httpx; only the composition root that
+  selects this adapter triggers the import.
+
 ## v26.06.64 (2026-06-07)
 
 ### Performance (web — per-request footprint)
