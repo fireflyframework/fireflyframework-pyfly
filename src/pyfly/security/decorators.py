@@ -23,6 +23,7 @@ from typing import Any, TypeVar
 
 from pyfly.kernel.exceptions import ForbiddenException, SecurityException
 from pyfly.security.context import SecurityContext
+from pyfly.security.expression import evaluate_security_expression
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -142,38 +143,7 @@ def _evaluate_expression(expr: str, ctx: SecurityContext) -> bool:
     Raises:
         SecurityException: If the expression contains invalid or unsafe tokens.
     """
-    result = expr
-
-    # Replace function calls with their boolean results.
-    # hasAnyRole must be matched before hasRole to avoid partial matches.
-    result = re.sub(
-        r"hasAnyRole\(([^)]+)\)",
-        lambda m: str(ctx.has_any_role(_parse_string_args(m.group(1)))),
-        result,
-    )
-    result = re.sub(
-        r"hasRole\(['\"]([^'\"]+)['\"]\)",
-        lambda m: str(ctx.has_role(m.group(1))),
-        result,
-    )
-    result = re.sub(
-        r"hasPermission\(['\"]([^'\"]+)['\"]\)",
-        lambda m: str(ctx.has_permission(m.group(1))),
-        result,
-    )
-    result = result.replace("isAuthenticated", str(ctx.is_authenticated))
-
-    # Validate that only safe tokens remain.
-    safe_tokens = {"True", "False", "and", "or", "not", "(", ")"}
-    cleaned = result.replace("(", " ( ").replace(")", " ) ")
-    tokens = cleaned.split()
-    if not all(t in safe_tokens for t in tokens):
-        raise SecurityException(
-            f"Invalid security expression: {expr}",
-            code="INVALID_EXPRESSION",
-        )
-
-    return _safe_bool_eval(cleaned)
+    return evaluate_security_expression(expr, ctx)
 
 
 def secure(

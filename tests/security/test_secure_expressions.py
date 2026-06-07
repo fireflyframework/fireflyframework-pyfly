@@ -269,7 +269,7 @@ class TestInvalidExpression:
             return "should not reach"
 
         ctx = SecurityContext(user_id="user1", roles=["ADMIN"])
-        with pytest.raises(SecurityException, match="Invalid security expression"):
+        with pytest.raises(SecurityException, match="security expression"):
             await dangerous(security_context=ctx)
 
     @pytest.mark.asyncio
@@ -279,5 +279,5 @@ class TestInvalidExpression:
             return "should not reach"
 
         ctx = SecurityContext(user_id="user1", roles=["ADMIN"])
-        with pytest.raises(SecurityException, match="Invalid security expression"):
+        with pytest.raises(SecurityException, match="security expression"):
             await sneaky(security_context=ctx)
