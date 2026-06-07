@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.52 (2026-06-07)
+
+### Added (context — @RefreshScope + ContextRefresher + POST /actuator/refresh)
+
+Spring Cloud's refresh scope, built on the v26.06.50 custom-scope SPI:
+
+- **`@refresh_scope`** (`pyfly.container`) / `scope="refresh"` — a bean is cached like a
+  singleton but evicted on refresh, so the next resolution rebuilds it (re-running injection
+  and re-reading `@Value`/env placeholders against the live `Config`). The `"refresh"` scope
+  and `RefreshScope` handler are built in (always available).
+- **`ContextRefresher`** (`pyfly.context`, injectable) — `await refresher.refresh()` evicts all
+  refresh-scoped beans, resets `@config_properties` beans so they re-bind from the live config,
+  and publishes a **`RefreshScopeRefreshedEvent`**.
+- **`POST /actuator/refresh`** — triggers a refresh and returns the refreshed bean keys
+  (web-exposed only when opted in via `management.endpoints.web.exposure.include`).
+
+Config *source* reload (re-reading files) remains a follow-up; this release rebinds beans
+against the live `Config` (which already re-reads env vars + `${...}` placeholders).
+
 ## v26.06.51 (2026-06-07)
 
 ### Added (testing — functional test slices)
