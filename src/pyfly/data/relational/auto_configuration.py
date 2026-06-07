@@ -38,6 +38,7 @@ from pyfly.context.conditions import (
 )
 from pyfly.core.config import Config
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+from pyfly.data.relational.migrations import MigrationRunner
 from pyfly.data.relational.named_datasources import NamedDataSources, build_named_data_sources
 from pyfly.data.relational.routing import RoutingSessionFactory
 from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
@@ -196,3 +197,21 @@ class RelationalAutoConfiguration:
         listener = AuditingEntityListener()
         listener.register()
         return listener
+
+
+@auto_configuration
+@conditional_on_property("pyfly.data.relational.migrations.enabled", having_value="true")
+class MigrationAutoConfiguration:
+    """Applies Alembic migrations on startup (Spring Boot Flyway-style auto-migrate).
+
+    Opt-in via ``pyfly.data.relational.migrations.enabled=true``; reuses the project's
+    Alembic environment (``pyfly db init``). Migrates the same datasource as the app.
+    """
+
+    @bean
+    def migration_runner(self, config: Config) -> MigrationRunner:
+        return MigrationRunner(
+            url=str(config.get("pyfly.data.relational.url", "")),
+            config_path=str(config.get("pyfly.data.relational.migrations.config", "alembic.ini")),
+            revision=str(config.get("pyfly.data.relational.migrations.revision", "head")),
+        )
