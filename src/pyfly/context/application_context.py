@@ -444,6 +444,9 @@ class ApplicationContext:
                     continue
                 if not evaluator.should_include_method(method):
                     continue
+                profile_expr = getattr(method, "__pyfly_profile__", "")
+                if profile_expr and not self._environment.accepts_profiles(profile_expr):
+                    continue
                 bean_methods.append((attr_name, method))
 
             bean_methods = self._sort_bean_methods(bean_methods)
@@ -469,6 +472,8 @@ class ApplicationContext:
                 self._container.register(impl_type, scope=bean_scope, name=bean_name)
                 impl_reg = self._container._registrations[impl_type]
                 impl_reg.factory = factory
+                if getattr(method, "__pyfly_bean_primary__", False):
+                    impl_reg.primary = True
                 if bean_scope == Scope.SINGLETON:
                     impl_reg.instance = result
 
