@@ -27,4 +27,9 @@ parts:
       - {id: ch05, file: 05-persistence.md, num: 5, title: "Persistence & the Repository Pattern", opener: art/openers/ch05.svg}
       - {id: ch06, file: 06-domain-driven-design.md, num: 6, title: "Domain-Driven Design", opener: art/openers/ch06.svg}
       - {id: ch07, file: 07-cqrs.md, num: 7, title: "CQRS: Commands & Queries", opener: art/openers/ch07.svg}
+  - title: "Part III — Event-Driven Architecture"
+    chapters:
+      - {id: ch08, file: 08-eda.md, num: 8, title: "Domain Events & Event-Driven Architecture", opener: art/openers/ch08.svg}
+      - {id: ch09, file: 09-event-sourcing.md, num: 9, title: "Event Sourcing the Ledger", opener: art/openers/ch09.svg}
+      - {id: ch10, file: 10-messaging.md, num: 10, title: "Messaging with Kafka & RabbitMQ", opener: art/openers/ch10.svg}
 back: []
