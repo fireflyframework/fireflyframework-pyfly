@@ -44,4 +44,11 @@ parts:
       - {id: ch16, file: 16-testing.md, num: 16, title: "Testing PyFly Applications", opener: art/openers/ch16.svg}
       - {id: ch17, file: 17-scheduling-notifications.md, num: 17, title: "Scheduling, Notifications, Webhooks & Callbacks", opener: art/openers/ch17.svg}
       - {id: ch18, file: 18-production.md, num: 18, title: "Extending PyFly & Going to Production", opener: art/openers/ch18.svg}
+  - title: "Appendices"
+    chapters:
+      - {id: appa, file: 90-appendix-a-spring.md,  num: "A", title: "Spring Boot → PyFly Cheat-Sheet"}
+      - {id: appb, file: 91-appendix-b-mongodb.md, num: "B", title: "MongoDB & Document Data"}
+      - {id: appc, file: 92-appendix-c-ecm.md,     num: "C", title: "ECM: Content & E-Signature"}
+      - {id: appd, file: 93-appendix-d-cli.md,     num: "D", title: "CLI & Troubleshooting"}
+      - {id: glossary, file: 94-glossary.md,       num: "",  title: "Glossary"}
 back: []

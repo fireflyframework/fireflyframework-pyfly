@@ -75,7 +75,7 @@ def _items_from_manifest(cfg: dict) -> list[dict]:
             items.append({
                 "kind": "chapter",
                 "id": ch["id"],
-                "title": f'{ch["num"]}. {ch["title"]}',
+                "title": (f'{ch["num"]}. {ch["title"]}' if ch.get("num") not in (None, "") else ch["title"]),
                 "num": ch["num"],
                 "path": str(MAN / ch["file"]),
                 "part": ptitle_full,
