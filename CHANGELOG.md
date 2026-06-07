@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.73 (2026-06-07)
+
+### Changed (benchmarks — rigor overhaul)
+
+A critical audit of `benchmarks/run.py` to measure what actually matters and keep ratios stable:
+
+- **Baseline de-inflated.** The old "bare Starlette ~436µs/req" was ~99% `TestClient`/httpx
+  round-trip artifact. Request benchmarks now drive the ASGI app **directly** (one event loop,
+  no httpx) — real bare-ASGI handling is **~4.8µs/req**. PyFly's filter-chain overhead is now
+  reported as an **absolute ~+43µs/req** over that real base (not a % of an inflated number);
+  the TestClient cost is called out and excluded.
+- **DI coverage expanded** to transient with 1/3/5/10 dependencies + a nested depth-3 graph — the
+  data shows resolution is **linear** (~+0.4µs/dependency), no superlinear or hidden per-bean cost.
+- **Dependency baselines labelled.** `pydantic v2 model_dump_json` is tagged `[dep]` (measures
+  Pydantic, not PyFly); bare Starlette is tagged `[base]`.
+- **Naming fixed.** `TransactionIdFilter` is documented as an MDC-style `X-Transaction-Id`
+  correlation id — explicitly **not** declarative `@Transactional` transaction management.
+- **Measurement reliability.** Warmup + 9 timed runs with the GC disabled during measurement;
+  reports median µs/op, best, p99, and run-to-run spread (`±%`, observed ~1–3%). The access log
+  (sink-dependent I/O) is excluded from the CPU number and documented separately.
+
 ## v26.06.72 (2026-06-07)
 
 ### Added (observability — metrics recording port)
