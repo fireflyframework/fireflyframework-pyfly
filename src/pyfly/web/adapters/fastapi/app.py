@@ -391,6 +391,13 @@ def create_app(
 
     app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
 
+    # JSON serializer + HttpMessageConverter chain + RFC 7807 flag — same wiring as the
+    # Starlette adapter (previously missing here, so content negotiation / global JSON
+    # config / problem+json silently did not apply on the FastAPI adapter).
+    from pyfly.web.message_converters import install_serialization_state
+
+    install_serialization_state(app, context)
+
     # Collect route metadata (used for OpenAPI generation and startup logging)
     route_metadata = registrar.collect_route_metadata(context) if context is not None else []
 

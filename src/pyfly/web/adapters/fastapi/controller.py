@@ -171,10 +171,15 @@ class FastAPIControllerRegistrar:
                 bound_method = getattr(_cache["instance"], method_name)
                 _cache["resolver"] = ParameterResolver(bound_method)
                 _cache["method"] = bound_method
+            accept = request.headers.get("accept")
+            try:
+                converters = getattr(request.app.state, "pyfly_message_converters", None)
+            except (KeyError, AttributeError):
+                converters = None
             try:
                 kwargs = await _cache["resolver"].resolve(request)
                 result = await _maybe_await(_cache["method"](**kwargs))
-                return handle_return_value(result, status_code)
+                return handle_return_value(result, status_code, accept=accept, converters=converters)
             except Exception as exc:
                 # 1. Check controller-local exception handlers
                 for exc_type, handler in _cache["exc_handlers"].items():
@@ -182,14 +187,14 @@ class FastAPIControllerRegistrar:
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result)
+                        return handle_return_value(result, accept=accept, converters=converters)
                 # 2. Check global @controller_advice exception handlers
                 for exc_type, handler in self._get_global_advice_handlers(ctx).items():
                     if isinstance(exc, exc_type):
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result)
+                        return handle_return_value(result, accept=accept, converters=converters)
                 raise
 
         return lazy_endpoint

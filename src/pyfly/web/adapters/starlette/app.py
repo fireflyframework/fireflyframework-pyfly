@@ -505,43 +505,12 @@ def create_app(
     from pyfly.web.converters import build_exception_converter_service
 
     app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
-    # RFC 7807 problem+json error responses — opt-in (Spring Boot 3 parity:
-    # spring.mvc.problemdetails.enabled). Default off preserves the {"error": {...}} envelope.
-    app.state.pyfly_problem_details = (
-        str(context.config.get("pyfly.web.problem-details.enabled", "false")).lower() in ("true", "1", "yes")
-        if context is not None
-        else False
-    )
     app.add_exception_handler(Exception, global_exception_handler)
 
-    # Central JSON serializer (the ObjectMapper-equivalent): global pyfly.web.json.*
-    # config + an optional user-provided JsonSerializers registry bean for custom types.
-    from pyfly.web.json import JsonSerializers, PyFlyJsonSerializer, json_properties_from_config
+    # JSON serializer + HttpMessageConverter chain + RFC 7807 flag — shared with the
+    # FastAPI adapter via install_serialization_state so the two cannot drift.
+    from pyfly.web.message_converters import install_serialization_state
 
-    json_props = json_properties_from_config(context.config) if context is not None else None
-    json_registry = JsonSerializers()
-    if context is not None:
-        try:
-            json_registry = context.get_bean(JsonSerializers)
-        except Exception:  # noqa: BLE001 - registry bean is optional; default when absent
-            json_registry = JsonSerializers()
-    serializer = PyFlyJsonSerializer(json_props, json_registry)
-    app.state.pyfly_json_serializer = serializer
-
-    # HTTP message converters (the HttpMessageConverter chain): JSON + XML by default,
-    # both backed by the serializer above. A user MessageConverterRegistry bean fully
-    # overrides (e.g. to add CBOR or reorder); content negotiation honors Accept/Content-Type.
-    from pyfly.web.message_converters import MessageConverterRegistry, default_message_converters
-
-    fail_on_unknown = json_props.fail_on_unknown_properties if json_props is not None else False
-    message_converters = default_message_converters(serializer, fail_on_unknown=fail_on_unknown)
-    if context is not None:
-        try:
-            override = context.get_bean(MessageConverterRegistry)
-        except Exception:  # noqa: BLE001 - override bean is optional; default when absent
-            override = None
-        if override is not None:
-            message_converters = override
-    app.state.pyfly_message_converters = message_converters
+    install_serialization_state(app, context)
 
     return app

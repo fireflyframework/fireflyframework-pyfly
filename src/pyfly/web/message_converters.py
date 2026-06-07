@@ -173,3 +173,42 @@ def default_message_converters(
             XmlMessageConverter(serializer),
         ]
     )
+
+
+def install_serialization_state(app: Any, context: Any) -> None:
+    """Wire the JSON serializer, message-converter registry, and RFC 7807 flag onto
+    ``app.state`` from config — shared by the Starlette AND FastAPI adapters so the two
+    cannot drift (the FastAPI adapter previously skipped this entirely).
+
+    Sets ``app.state.pyfly_json_serializer`` / ``pyfly_message_converters`` /
+    ``pyfly_problem_details``. A user ``JsonSerializers`` or ``MessageConverterRegistry``
+    bean overrides the defaults; with no context, lenient defaults are used.
+    """
+    from pyfly.web.json import JsonSerializers, PyFlyJsonSerializer, json_properties_from_config
+
+    props = json_properties_from_config(context.config) if context is not None else None
+    registry = JsonSerializers()
+    if context is not None:
+        try:
+            registry = context.get_bean(JsonSerializers)
+        except Exception:  # noqa: BLE001 - registry bean is optional; default when absent
+            registry = JsonSerializers()
+    serializer = PyFlyJsonSerializer(props, registry)
+    app.state.pyfly_json_serializer = serializer
+
+    fail_on_unknown = props.fail_on_unknown_properties if props is not None else False
+    converters = default_message_converters(serializer, fail_on_unknown=fail_on_unknown)
+    if context is not None:
+        try:
+            override = context.get_bean(MessageConverterRegistry)
+        except Exception:  # noqa: BLE001 - override bean is optional; default when absent
+            override = None
+        if override is not None:
+            converters = override
+    app.state.pyfly_message_converters = converters
+
+    app.state.pyfly_problem_details = (
+        str(context.config.get("pyfly.web.problem-details.enabled", "false")).lower() in ("true", "1", "yes")
+        if context is not None
+        else False
+    )

@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.33 (2026-06-07)
+
+### Fixed (web — FastAPI adapter serialization parity)
+
+The final parity audit found the **FastAPI adapter** (auto-config-preferred) silently
+bypassed the entire serialization stack added in v26.06.27/28, so global JSON config,
+content negotiation, and RFC 7807 only worked on the Starlette adapter.
+
+- The FastAPI controller now threads `accept` + the message-converter registry into
+  `handle_return_value`, so responses honor **`Accept` content negotiation** (JSON/XML,
+  q-values) and request bodies are parsed by **`Content-Type`** (incl. XML).
+- The FastAPI app now wires `pyfly_json_serializer`, `pyfly_message_converters`, and
+  `pyfly_problem_details` onto `app.state` — so the global `pyfly.web.json.*` config and
+  **RFC 7807 problem+json** apply on FastAPI too.
+- The wiring is now a **shared `install_serialization_state(app, context)`** used by both
+  the Starlette and FastAPI adapters, so they cannot drift again.
+
+---
+
 ## v26.06.32 (2026-06-07)
 
 ### Fixed (DI — two regressions found by the final parity audit)
