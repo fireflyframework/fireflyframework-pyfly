@@ -29,3 +29,4 @@ docs/plans/
 # The book's build sources are real source, not the Python build/ artifact dir
 !book/build/
 !book/build/**
+book/build/**/__pycache__/
