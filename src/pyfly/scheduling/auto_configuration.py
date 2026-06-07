@@ -21,23 +21,44 @@ try:
 except ImportError:
     TaskScheduler = object  # type: ignore[misc,assignment]
 
+from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
 from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
 from pyfly.context.conditions import auto_configuration, conditional_on_class
+from pyfly.core.config import Config
+from pyfly.scheduling.lock import DistributedLock, InProcessDistributedLock, LocalLock
 
 
 @auto_configuration
 @conditional_on_class("croniter")
 class SchedulingAutoConfiguration:
-    """Auto-configures a TaskScheduler bean when croniter is installed."""
+    """Auto-configures a TaskScheduler bean (and its distributed lock) when croniter is installed."""
+
+    @bean
+    def distributed_lock(self, config: Config) -> DistributedLock:
+        """Select the @scheduled lock backend (Spring/ShedLock parity).
+
+        ``pyfly.scheduling.lock.provider``: ``none`` (default, no coordination — LocalLock),
+        ``memory`` (single-process mutual exclusion), or ``redis`` (cross-process). The Redis
+        client is built here (the composition root) and injected — the adapter never imports redis.
+        """
+        provider = str(config.get("pyfly.scheduling.lock.provider", "none")).lower()
+        if provider == "redis" and AutoConfiguration.is_available("redis.asyncio"):
+            import redis.asyncio as aioredis
+
+            from pyfly.scheduling.adapters.redis_lock import RedisDistributedLock
+
+            url = str(config.get("pyfly.scheduling.lock.redis.url", "redis://localhost:6379/0"))
+            return RedisDistributedLock(aioredis.from_url(url))  # type: ignore[no-untyped-call,unused-ignore]
+        if provider == "memory":
+            return InProcessDistributedLock()
+        return LocalLock()
 
     @bean
     def task_scheduler(self, container: Container) -> TaskScheduler:
-        # Use a registered DistributedLock bean for @scheduled(lock=...) coordination,
-        # otherwise the scheduler falls back to its single-instance LocalLock.
-        from pyfly.scheduling.lock import DistributedLock
-
+        # Resolve the DistributedLock bean above for @scheduled(lock=...) coordination;
+        # fall back to the scheduler's own LocalLock if (unexpectedly) absent.
         try:
             lock = container.resolve(DistributedLock)  # type: ignore[type-abstract]
         except (NoSuchBeanError, NoUniqueBeanError):

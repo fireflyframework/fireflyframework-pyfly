@@ -22,6 +22,8 @@ instances.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Protocol, runtime_checkable
 
 
@@ -46,3 +48,28 @@ class LocalLock:
 
     async def release(self, name: str) -> None:
         return None
+
+
+class InProcessDistributedLock:
+    """Real mutual exclusion **within one process** (not cross-process) with TTL self-heal.
+
+    Prevents a slow job tick from overlapping its next tick in the same process; for true
+    multi-instance coordination use the Redis adapter. A held name auto-frees after its TTL so
+    a crashed/never-released lock recovers.
+    """
+
+    def __init__(self) -> None:
+        self._held: dict[str, float] = {}  # name -> monotonic expiry
+        self._guard = asyncio.Lock()
+
+    async def try_acquire(self, name: str, ttl: float) -> bool:
+        async with self._guard:
+            expiry = self._held.get(name)
+            if expiry is not None and expiry > time.monotonic():
+                return False
+            self._held[name] = time.monotonic() + ttl
+            return True
+
+    async def release(self, name: str) -> None:
+        async with self._guard:
+            self._held.pop(name, None)
