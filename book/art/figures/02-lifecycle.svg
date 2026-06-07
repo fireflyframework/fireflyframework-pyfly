@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 180"
+     role="img" aria-label="Bean lifecycle pipeline: scan → register → resolve → @post_construct → ready → @pre_destroy"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="680" height="180" fill="#eaf6df"/>
+
+  <!-- ── Arrow marker ── -->
+  <defs>
+    <marker id="lc-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Shared y-center for pipeline -->
+  <!-- Pipeline nodes at y=90; step boxes 80px wide, 40px tall, rx=10 -->
+  <!-- x positions: 20, 120, 220, 330, 450, 570 (last one amber = shutdown) -->
+
+  <!-- Step 1: scan -->
+  <rect x="20" y="70" width="80" height="40" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <text x="60" y="90" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">scan</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="100" y1="90" x2="118" y2="90"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#lc-arrow)"/>
+
+  <!-- Step 2: register -->
+  <rect x="120" y="70" width="84" height="40" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <text x="162" y="90" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">register</text>
+
+  <!-- Arrow 2→3 -->
+  <line x1="204" y1="90" x2="218" y2="90"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#lc-arrow)"/>
+
+  <!-- Step 3: resolve -->
+  <rect x="220" y="70" width="84" height="40" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <text x="262" y="90" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">resolve</text>
+
+  <!-- Arrow 3→4 -->
+  <line x1="304" y1="90" x2="324" y2="90"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#lc-arrow)"/>
+
+  <!-- Step 4: @post_construct -->
+  <rect x="326" y="70" width="120" height="40" rx="10" ry="10"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <text x="386" y="90" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="11" font-weight="600">@post_construct</text>
+
+  <!-- Arrow 4→5 -->
+  <line x1="446" y1="90" x2="462" y2="90"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#lc-arrow)"/>
+
+  <!-- Step 5: ready (main running state — green filled) -->
+  <rect x="464" y="70" width="70" height="40" rx="10" ry="10"
+        fill="#43b02a" stroke="#2c8a1c" stroke-width="2"/>
+  <text x="499" y="90" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="13" font-weight="700">ready</text>
+
+  <!-- Ellipsis indicating runtime -->
+  <text x="540" y="93" fill="#6a7a64" font-size="18">…</text>
+
+  <!-- Arrow 5→6 (dashed — shutdown path) -->
+  <line x1="558" y1="90" x2="580" y2="90"
+        stroke="#8aa07e" stroke-width="2" stroke-dasharray="5,3"
+        marker-end="url(#lc-arrow)"/>
+
+  <!-- Step 6: @pre_destroy — amber accent (shutdown) -->
+  <rect x="582" y="70" width="80" height="40" rx="10" ry="10"
+        fill="#fff8ea" stroke="#ffc24b" stroke-width="2.2"/>
+  <text x="622" y="83" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="9" font-weight="600">@pre_destroy</text>
+  <text x="622" y="99" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="9">(shutdown)</text>
+
+  <!-- Labels below steps -->
+  <text x="60" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">classpath</text>
+  <text x="162" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">definitions</text>
+  <text x="262" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">wire deps</text>
+  <text x="386" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">init hook</text>
+  <text x="499" y="130" text-anchor="middle" fill="#43b02a" font-size="10" font-weight="600">serving</text>
+  <text x="622" y="130" text-anchor="middle" fill="#ffc24b" font-size="10">cleanup</text>
+
+</svg>
