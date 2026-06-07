@@ -10,6 +10,8 @@ Lumen has wired services, a clean configuration story, and a lifecycle that span
 
 ## Controllers and route mappings
 
+Every web framework needs to answer two questions: how does a request find the right function to handle it, and how does that function get the dependencies it needs to do its job? Frameworks that answer these questions inconsistently force you to maintain separate wiring for the HTTP layer — a router file in one place, dependency injection glue in another, and documentation scaffolding somewhere else entirely. PyFly collapses all three concerns into a single class.
+
 A **controller** in PyFly is an ordinary Python class that the DI container manages and the web layer routes requests into. You mark it with two decorators: `@rest_controller` from `pyfly.container` (which registers it as a bean and sets its stereotype) and `@request_mapping` from `pyfly.web` (which sets the URL prefix for every handler in the class).
 
 Route handlers are plain `async def` methods on that class, each decorated with `@get_mapping`, `@post_mapping`, `@put_mapping`, `@patch_mapping`, or `@delete_mapping`. Every mapping decorator takes an optional relative path and an optional `status_code`. The full URL is the base path from `@request_mapping` concatenated with the relative path from the method decorator.
@@ -117,7 +119,15 @@ class WalletController:
         }
 :::
 
-The `@rest_controller` decorator does two things simultaneously: it registers `WalletController` as a singleton bean in the DI container, and it sets the `__pyfly_stereotype__` marker that the `ControllerRegistrar` uses to discover and register routes at startup. Constructor injection wires `WalletService` automatically from the type hint — no `@Autowired`, no factory, no configuration file.
+Let's walk through the key design choices in this listing before moving on.
+
+`@rest_controller` does two things simultaneously: it registers `WalletController` as a singleton bean in the DI container, and it sets the `__pyfly_stereotype__` marker that the `ControllerRegistrar` uses to discover and register routes at startup. The pairing with `@request_mapping("/wallets")` means every method-level decorator inherits `/wallets` as its prefix — you write the base path once and never repeat it.
+
+Constructor injection wires `WalletService` automatically from the type hint on `__init__`. There is no `@Autowired` annotation, no factory function, and no extra configuration file. The same container you used in Chapters 2 and 3 resolves this dependency identically, whether the controller has one collaborator or ten.
+
+Each handler returns a plain `dict` or `list`. The framework serialises the return value to JSON and sets the `Content-Type` header — the handler never builds a response object. The `status_code=201` argument to `@post_mapping` tells the framework to use 201 Created for successful wallet creation; all other handlers default to 200.
+
+The `@exception_handler(ResourceNotFoundException)` method at the bottom of the class is intentionally co-located with the routes it protects. You will read about controller-scoped handlers in detail in the *Errors that clients can trust* section.
 
 ::: figure art/figures/04-request.svg | Figure 4.1 — How a request flows to your handler.
 
@@ -137,7 +147,9 @@ The five mapping decorators accept the same two parameters:
 
 ## Binding request data
 
-PyFly uses **generic type annotations** to declare where a handler parameter comes from. The `ParameterResolver` inspects each handler signature at startup and builds a resolution plan so there is zero overhead per request for introspection. Five binding types cover every part of an HTTP request:
+A request carries data in several places at once: a segment of the URL path identifies the resource, the query string carries filters and pagination, the body carries the payload, and headers carry metadata. Most frameworks handle these through separate mechanisms that each have their own conventions to learn. PyFly unifies them under a single idea: **generic type annotations on handler parameters declare where data comes from**.
+
+PyFly uses this approach because handler signatures become self-documenting. Looking at the parameter list of any handler tells you exactly which parts of the request it reads, and what types it expects them to be, without opening a separate router file or reading framework documentation. The `ParameterResolver` inspects each handler signature at startup and builds a resolution plan so there is zero overhead per request for introspection. Five binding types cover every part of an HTTP request:
 
 ### PathVar[T] — path variables
 
@@ -209,7 +221,9 @@ async def get_my_wallets(
 
 ## Validation with Valid[T]
 
-Pydantic `BaseModel` gives you field-level constraints for free. `Valid[T]` is PyFly's marker type that ensures those constraints produce a **structured 422 response** instead of a raw Pydantic `ValidationError` bubbling up to a 500.
+Binding tells the framework where data comes from. Validation tells it what that data must look like before your handler ever sees it. Without a layer that intercepts bad input early, validation logic ends up scattered across service methods, manual `if` blocks appear throughout business code, and different handlers produce inconsistent error responses depending on where they happen to catch the problem.
+
+PyFly solves this cleanly. Pydantic `BaseModel` gives you field-level constraints for free. `Valid[T]` is PyFly's marker type that ensures those constraints produce a **structured 422 response** instead of a raw Pydantic `ValidationError` bubbling up to a 500.
 
 ### Pydantic DTOs for Lumen
 
@@ -228,7 +242,7 @@ class DepositRequest(BaseModel):
     amount: float = Field(gt=0)
 :::
 
-`Field(gt=0)` means the value must be greater than zero. `Field(min_length=1)` prevents empty strings. These constraints are standard Pydantic — PyFly adds nothing special to the models themselves.
+These are pure Pydantic models — PyFly adds nothing to them. `Field(min_length=1)` prevents the empty-string owner IDs that would silently create phantom wallets in a live system. `Field(default="USD", min_length=3, max_length=3)` enforces ISO 4217 currency code length while providing a sensible default so callers do not need to supply it every time. `Field(gt=0)` on `DepositRequest.amount` makes a negative or zero deposit a client error rather than a business logic decision — the constraint is explicit in the type, and Pydantic enforces it before your code runs.
 
 ### Using Valid[T] in a handler
 
@@ -303,6 +317,8 @@ Use `Valid[T]` for every endpoint that accepts user input.
 
 ## Errors that clients can trust
 
+A well-designed API fails loudly, consistently, and informatively. Clients should never need to parse exception stack traces or guess what went wrong from a generic 500. The challenge is achieving this without littering your service code with HTTP-specific logic — the HTTP status code is an infrastructure concern, not a business one.
+
 PyFly's exception hierarchy is the backbone of its error story. Every exception in the tree carries three things: a human-readable `message`, a machine-readable `code`, and an optional `context` dict for debugging detail. The web layer's global exception handler maps each subclass to the correct HTTP status code automatically — you `raise`, the framework responds.
 
 ### The exception tree
@@ -323,6 +339,8 @@ PyFlyException
     ├── CircuitBreakerException → 503
     └── ...
 ```
+
+The hierarchy is intentionally shallow. `BusinessException` covers anything that is the caller's fault; `InfrastructureException` covers anything that is the system's fault. Subclasses pin the status code. When a new domain error does not fit an existing subclass, you extend the nearest parent and the status code comes for free.
 
 Import them from `pyfly.kernel.exceptions`:
 
@@ -363,11 +381,11 @@ The global handler catches it, maps it to 404, and emits a structured JSON respo
 }
 ```
 
-You get the `transaction_id` for free — the `TransactionIdFilter` assigns a UUID to every request and threads it through to all error responses. Clients can log it and correlate it with your structured server logs.
+You get the `transaction_id` for free — the `TransactionIdFilter` assigns a UUID to every request and threads it through to all error responses. Clients can log it and correlate it with your structured server logs. When a user reports an error, a single ID is all support needs to reconstruct exactly what happened.
 
 ### Controller-level @exception_handler
 
-When you want to customise the response shape for a specific exception type — or handle a domain error that only makes sense inside one controller — decorate a method with `@exception_handler(ExceptionType)`:
+The global handler is the right tool when an exception type maps to the same HTTP shape everywhere. But sometimes an error only makes sense in the context of one controller — a domain-specific subclass, or a response shape that differs from the default envelope. Decorate a method with `@exception_handler(ExceptionType)` to capture that case:
 
 ::: listing lumen/wallet_controller_handler.py | Listing 4.3 — Controller-scoped exception handler
 from pyfly.kernel.exceptions import ResourceNotFoundException
@@ -395,7 +413,7 @@ handle_wallet_not_found = exception_handler(WalletNotFound)(
 )
 :::
 
-More naturally, the `@exception_handler` decorator lives directly on the method inside the controller class (as shown in Listing 4.1). When multiple handlers could match, the most-specific subclass wins. Returning a `(status_code, body)` tuple is the most concise form; you can also return a Starlette `Response` directly for full control.
+More naturally, the `@exception_handler` decorator lives directly on the method inside the controller class (as shown in Listing 4.1). The handler method receives the exception instance and returns either a `(status_code, body)` tuple for concise JSON responses, or a Starlette `Response` directly when you need full control over headers. When multiple handlers could match — for example, both a handler for `ResourceNotFoundException` and one for its `WalletNotFound` subclass — the most-specific subclass wins. This lets you give generic errors a sensible default at the global level and override only the exceptions that need special treatment.
 
 !!! note "RFC 7807"
     The default error envelope — `{"error": {...}}` — is PyFly's own format. If your team prefers the IETF standard, set `pyfly.web.problem-details.enabled: true` in `pyfly.yaml`. With that flag on, the same `ResourceNotFoundException` produces an `application/problem+json` response with `type`, `title`, `status`, `detail`, and `instance` as the standard RFC 7807 members, plus `code` and `transactionId` as PyFly extension members. Both modes use the same exception hierarchy and status mapping.
@@ -406,7 +424,9 @@ More naturally, the `@exception_handler` decorator lives directly on the method 
 
 ### JSON and XML
 
-PyFly's response pipeline runs through an ordered `HttpMessageConverter` chain. JSON is the default — when no `Accept` header is sent, the response is `application/json`. If the client sends `Accept: application/xml`, the XML converter takes over and serialises the same return value as XML, with no changes to your handler code:
+Returning a `dict` from a handler is not quite the end of the story. Somewhere between your handler's `return` statement and the bytes the client receives, the framework must decide on a wire format. Rather than hardcoding JSON, PyFly runs the return value through an ordered `HttpMessageConverter` chain. This matters for enterprise APIs that integrate with partners who still consume XML, or mobile clients that negotiate the lightest format available.
+
+JSON is the default — when no `Accept` header is sent, the response is `application/json`. If the client sends `Accept: application/xml`, the XML converter takes over and serialises the same return value as XML, with no changes to your handler code:
 
 ```
 GET /wallets/w-001   Accept: application/json  →  {"id": "w-001", ...}
@@ -416,6 +436,8 @@ GET /wallets/w-001   Accept: application/xml   →  <response><id>w-001</id>...<
 The same negotiation applies on reads: a `Body[T]` or `Valid[T]` parameter accepts both `Content-Type: application/json` and `Content-Type: application/xml` request bodies. JSON is the fallback when no `Content-Type` is present.
 
 ### Auto-generated documentation
+
+Documentation that is written by hand drifts. As routes change, parameters are renamed, and new models are added, manually maintained specs fall behind the code. PyFly eliminates this entirely by generating documentation from the same metadata that drives routing.
 
 As soon as Lumen starts, three documentation endpoints are live at no cost:
 
@@ -433,6 +455,8 @@ The `OpenAPIGenerator` introspects `ControllerRegistrar`'s route metadata — ev
 ---
 
 ## The server underneath
+
+At this point Lumen has routes, bindings, validation, and documentation. The last question is: what actually listens on port 8080? The answer matters because different servers make different trade-offs — throughput, HTTP version support, operating system compatibility, and ecosystem tooling all vary. Locking your application to a single server at the framework level forces you to accept those trade-offs permanently.
 
 PyFly does not hardcode an ASGI server. At startup, `ServerAutoConfiguration` runs a cascading selection based on what is installed:
 

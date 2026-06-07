@@ -14,15 +14,17 @@ This chapter refactors the wallet into a proper DDD aggregate: a `Money` value o
 
 ## Entities and value objects
 
-Every model has two kinds of objects. Some are defined by their identity — two wallets with different IDs are different wallets even if their balances and currencies happen to match. Others are defined entirely by their value — two amounts of one hundred euros are interchangeable; you do not care which "instance" you have, only what it is.
+Before you can build a model that enforces its own rules, you need a vocabulary for the two fundamentally different kinds of objects that appear in every domain.
 
-PyFly's `pyfly.domain` module names these two roles explicitly.
+Think about what makes two wallets distinct. Even if two wallets happen to hold exactly one hundred euros, they are still separate wallets belonging to separate owners. You care *which one* you have. Now think about the amount itself. One hundred euros is one hundred euros — the exact Python object that holds that value is irrelevant; only the value matters. If a deposit adds fifty euros to a wallet's balance, you do not want to update the existing amount in place; you want to derive a brand-new amount that records the result. Mutating in place invites aliasing bugs where two parts of the code unknowingly share a reference to the same object and see each other's changes.
+
+DDD names these two roles *entities* and *value objects*, and PyFly's `pyfly.domain` module makes them first-class concepts.
 
 **`Entity[TID]`** tracks identity. Two instances are equal if and only if they share the same non-null `id`. Newly constructed entities with `id=None` are *transient* — they have not been persisted yet — and compare equal only by Python's object identity (`id()`). Hashing follows the same rule, so you can safely put entities in sets and dicts.
 
 **`ValueObject`** tracks value. Subclass it with `@dataclass(frozen=True)` and Python's dataclass equality compares every field. The object is immutable by construction — any attempt to set an attribute raises `dataclasses.FrozenInstanceError`. The base class adds one convenience: a `replace(**changes)` helper that returns a new instance with the specified fields changed, the same idea as `dataclasses.replace` but available as a method.
 
-Money is the textbook value object. An amount of one hundred euros is not a specific object you track over time; it is a value. Two separate `Money(100, "EUR")` instances are equal. A deposit does not mutate the existing amount — it produces a new one.
+Money is the textbook value object. An amount of one hundred euros is not a specific object you track over time; it is a value. Two separate `Money(100, "EUR")` instances are equal. A deposit does not mutate the existing amount — it produces a new one, leaving the original untouched and the model free of hidden side-effects.
 
 Here is the `Money` value object for Lumen:
 
@@ -64,7 +66,11 @@ class Money(ValueObject):
         return f"{major}.{minor:02d} {self.currency}"
 :::
 
-A few design choices worth noting. The amount is stored in minor units (integer cents) to avoid floating-point rounding entirely — a chronic source of financial bugs. `add` and `subtract` reject mismatched currencies at the arithmetic level, so the error surfaces exactly where the mistake was made rather than silently producing a nonsensical result. And because `Money` is frozen, the aggregate root that owns it can never be half-updated; you always replace the whole value.
+**How it works.** The amount is stored in minor units — integer cents, pence, or whatever the currency's smallest denomination is — to eliminate floating-point rounding entirely. Financial calculations that use `float` are a chronic source of off-by-one-cent bugs that only surface in production, usually during reconciliation. Storing 100 EUR as `amount=10000` keeps all arithmetic exact.
+
+`add` and `subtract` each check currency compatibility before doing any arithmetic. Rejecting mismatched currencies at the operation level means the error surfaces exactly where the mistake was made, not somewhere downstream when the result gets compared to an expected total. Both methods return a *new* `Money` instance rather than modifying `self` — a direct consequence of the `frozen=True` decorator. This immutability guarantee means that the aggregate holding a `Money` value can never be partially updated: either the whole replacement succeeds or the old value is still in place, with nothing in between.
+
+The `__str__` method converts back to a human-readable decimal for logging and responses, but the canonical representation in memory always stays as the integer.
 
 !!! note "Minor units vs decimal"
     Storing money as integer cents is one convention; another is Python's `decimal.Decimal` with a fixed scale. Both are valid. What matters is picking one and sticking to it within the bounded context. For Lumen, integer cents keep the model free of import-time precision configuration.
@@ -76,9 +82,11 @@ A few design choices worth noting. The amount is stored in minor units (integer 
 
 ## The aggregate root
 
-An entity becomes an *aggregate root* when it owns a cluster of related objects and acts as the single point of entry for all changes within that cluster. The aggregate root is the consistency boundary: no external code reaches inside and mutates an inner object directly. All changes go through the root's methods, which enforce the rules.
+`Money` solves the representation problem — amounts are now immutable and currency-aware. But Lumen still needs something to *own* the wallet's balance and decide when a deposit or withdrawal is permitted. That is the job of the aggregate root.
 
-`AggregateRoot[TID]` extends `Entity[TID]` with one addition: an internal buffer of *pending domain events*. Every state-changing method calls `self.raise_event(event)` to record what happened. When the repository saves the aggregate, it drains that buffer with `clear_events()` and hands the events to the application service, which publishes them to the event bus.
+An entity becomes an *aggregate root* when it owns a cluster of related objects and acts as the single point of entry for all changes within that cluster. The aggregate root is the *consistency boundary*: no external code reaches inside and mutates an inner object directly. All changes go through the root's methods, which enforce the rules. This is the design that prevents the 11 pm bypass described in the chapter introduction — once every change must flow through the root, there is no back-channel.
+
+`AggregateRoot[TID]` extends `Entity[TID]` with one addition: an internal buffer of *pending domain events*. Every state-changing method calls `self.raise_event(event)` to record what happened. When the repository saves the aggregate, it drains that buffer with `clear_events()` and hands the events to the application service, which publishes them to the event bus. You will see the full publish cycle in the Domain events section; for now, focus on the aggregate itself.
 
 Here is the `Wallet` aggregate root:
 
@@ -235,7 +243,9 @@ class Wallet(AggregateRoot[str]):
         )
 :::
 
-The aggregate boundary is visible in the listing: `_balance` is a private attribute. Callers receive a read-only `balance` property and change the wallet only by calling `deposit` or `withdraw`. The factory class method `open` is the sole legitimate way to create a new wallet — it assigns the ID, sets the zero balance, and immediately queues the `WalletOpened` event.
+**How it works.** The aggregate boundary is enforced at three levels. First, `_balance` is a private attribute — Python's name-mangling convention signals clearly that it is not part of the public contract. Callers receive a read-only `balance` property and alter the wallet's state only through `deposit` or `withdraw`. Second, the factory class method `open` is the sole legitimate way to create a new wallet: it generates a UUID, initializes the zero balance in the wallet's native currency, and immediately queues the `WalletOpened` event. Using a factory method rather than calling `__init__` directly ensures that the opening event is *never* forgotten, even if a developer constructs a wallet deep inside a test fixture. Third, domain events such as `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` are frozen dataclasses defined at the top of the module — their fields are a deliberate record of the information that downstream consumers need to react. Notice that they capture `new_balance` as well as the transaction amount, so a subscriber does not need to call back into the aggregate to learn the current state after the change.
+
+The diagram below shows the complete picture: state, invariants, and the events the wallet emits.
 
 ::: figure art/figures/06-aggregate.svg | Figure 6.1 — The Wallet aggregate: state, invariants, and the events it emits.
 
@@ -246,7 +256,9 @@ The aggregate boundary is visible in the listing: `_balance` is a private attrib
 
 ## Protecting invariants
 
-An invariant is a rule that the model must never violate, regardless of how it is called or who calls it. Lumen's wallet has three:
+The aggregate root is only valuable if the rules it is supposed to enforce are actually unreachable by any other path. That is what the word *invariant* means in DDD: a condition the model must uphold regardless of how it is called, who calls it, or how many different services exist in the application. An invariant is not a suggestion — it is a constraint that cannot be violated because the model does not expose any mechanism to do so.
+
+Lumen's `Wallet` has three invariants:
 
 1. The balance must never go below zero (no overdraft).
 2. Funds can only be deposited or withdrawn in the wallet's native currency.
@@ -259,7 +271,7 @@ All three are enforced inside the aggregate methods you just read. The framework
 !!! warning "Keep invariants in the model, not the service"
     Moving the overdraft check back into `WalletService` creates two problems. First, any code that calls `repo.save(entity)` directly bypasses the check entirely. Second, you end up duplicating the rule across every path that modifies a wallet — the service, a background job, an admin command. When the rule changes — say, the product team introduces a configurable overdraft buffer — there is exactly one place to update: the aggregate method. That is the whole point.
 
-The difference between a service-level guard and an aggregate invariant is enforceability. A service guard is a convention; an aggregate invariant is a physical constraint. To illustrate, here is what the service-level approach from Chapter 5 looked like, and why it is fragile:
+The difference between a service-level guard and an aggregate invariant is enforceability. A service guard is a convention; an aggregate invariant is a physical constraint enforced by encapsulation. To make that difference concrete, here is what the service-level approach from Chapter 5 looked like, and why it is fragile:
 
 ::: listing lumen/wallet_service_before.py | Listing 6.3 — Before: business rules scattered across the service (fragile)
 # DO NOT DO THIS — rules that belong in the model
@@ -305,7 +317,9 @@ class WalletService:
         # Events are drained and published by the repository/service boundary
 :::
 
-The service is now a thin orchestrator: load, command, save. All knowledge of what "valid withdrawal" means lives in `Wallet.withdraw`.
+**How it works.** Notice how the after version communicates intent: `wallet.withdraw(...)` reads as "ask the wallet to withdraw". The service does not know — or care — what that entails. It trusts the aggregate to either succeed or raise a `BusinessRuleViolation`. This thin-orchestrator pattern has a practical consequence for team workflows: a new developer can implement a `transfer` endpoint without reading `WalletService` at all. The constraints are in `Wallet`, and that is the only place they need to look.
+
+The `rule` slug on `BusinessRuleViolation` matters too. Strings like `"insufficient-funds"` and `"deposit-currency-mismatch"` travel in the RFC 7807 response body, where they can be matched by client code without parsing free-text messages. They also appear in structured log fields, making production alerts straightforward to write.
 
 !!! note "AggregateNotFound"
     `AggregateNotFound` is the second domain exception in `pyfly.domain`. Raise it when the requested aggregate does not exist — it maps to a 404 problem-details response via the same RFC 7807 handler. The constructor takes the aggregate type name and the ID: `AggregateNotFound("Wallet", wallet_id)`.
@@ -314,9 +328,11 @@ The service is now a thin orchestrator: load, command, save. All knowledge of wh
 
 ## Domain events
 
-A domain event records something that happened inside the aggregate — past tense, immutable fact. Events are how the aggregate communicates with the outside world without coupling itself to it. The wallet does not know about Kafka, email, or audit logs; it only knows that a deposit happened and records that fact.
+Your aggregate now enforces its invariants and controls all state changes. But Lumen will eventually need to react to those changes: update an audit log, send a push notification, trigger fraud detection, publish a ledger entry. The naive solution is to put those side-effects directly inside `deposit` and `withdraw`. That couples the domain model to infrastructure — suddenly your wallet needs to know about Kafka topics and email templates, and every unit test drags in a broker connection.
 
-`DomainEvent` from `pyfly.domain` is a frozen-dataclass base that auto-populates two fields when an instance is created:
+Domain events are the solution. A domain event records something that *happened* inside the aggregate — past tense, immutable fact. The aggregate does not know what will be done with the fact; it only records it. Downstream consumers — event listeners, projectors, notification services — subscribe to the event and react in their own context, without the aggregate ever depending on them.
+
+`DomainEvent` from `pyfly.domain` is a frozen-dataclass base that auto-populates three fields when an instance is created:
 
 - `event_id` — a UUID v4 that uniquely identifies this occurrence.
 - `occurred_at` — a UTC timestamp at the moment of construction.
@@ -367,9 +383,11 @@ def demonstrate_event_fields() -> None:
     print(evt.event_type)     # "FundsDeposited"
 :::
 
-**The event lifecycle inside the aggregate.** When `wallet.deposit(amount)` succeeds, it calls `self.raise_event(FundsDeposited(...))`. That call appends the event to a private list maintained by `AggregateRoot`. Nothing is published yet — the aggregate is still in memory.
+**How it works.** Each event class declares only the fields that are unique to that occurrence — `wallet_id`, `amount`, `currency`, `new_balance`. Everything else comes for free from `DomainEvent`: a UUID `event_id` ensures idempotent processing, `occurred_at` provides an audit timestamp, and `event_type` gives a name consumers can route on without inspecting the Python class. All fields default to zero or empty string so that the `frozen=True` dataclass machinery can still provide keyword-argument construction without requiring positional arguments.
 
-**Draining and publishing.** After the repository saves the aggregate to the database and the transaction commits, the application service calls `wallet.clear_events()` to drain the buffer and passes the resulting list to `EventPublisher`. This sequence — *save first, publish after* — guarantees that an event is never published for a change that failed to persist. A minimal service-side pattern looks like this:
+Notice that `FundsDeposited` carries both `amount` (the transaction) and `new_balance` (the result). A subscriber that wants to update a read-model balance does not need to call back into the aggregate or the database — all the information it needs is in the event itself. That self-contained design makes event consumers simpler and avoids extra round-trips.
+
+The event lifecycle spans two phases. First, inside the aggregate: when `wallet.deposit(amount)` succeeds, it calls `self.raise_event(FundsDeposited(...))`, appending the event to a private list maintained by `AggregateRoot`. Nothing is published yet — the aggregate is still in memory. Second, at the service boundary: after the repository saves the aggregate and the database transaction commits, the application service drains the buffer and publishes. This sequence — *save first, publish after* — guarantees that an event is never dispatched for a change that failed to persist. Listing 6.6 shows that boundary in full:
 
 ::: listing lumen/wallet_application_service.py | Listing 6.6 — Draining domain events after a successful save
 from pyfly.container import service
@@ -411,6 +429,8 @@ class WalletApplicationService:
             await self._events.publish(event)
 :::
 
+**How it works.** `open_wallet` calls `Wallet.open`, which queues a `WalletOpened` event internally; after the `save`, `wallet.clear_events()` returns that one event, and `publish` dispatches it. The `deposit` method follows the same three-step pattern: load, mutate, save — then drain. The `for event in wallet.clear_events()` loop is intentionally explicit rather than hidden inside the repository, because the application service is the right place to decide *when* publishing happens (after the transaction boundary, not before).
+
 !!! tip "Event ordering"
     `raise_event` appends to the buffer in call order. `clear_events` drains and clears it, returning events in the same order. If a single aggregate method raises multiple events (a batch operation, for example), they arrive at the event bus in the order they were raised — oldest first.
 
@@ -418,13 +438,17 @@ class WalletApplicationService:
 
 ## Domain vs persistence
 
-The domain model and the persistence model serve different masters, and conflating them is a common mistake that makes both worse.
+With the domain model and its events in place, there is one remaining tension to resolve: how does the `Wallet` aggregate reach the database?
+
+The tempting shortcut is to annotate `Wallet` directly with SQLAlchemy `Mapped[]` fields and give it a `__tablename__`. That merges two concerns that change at very different rates: business rules change when the product evolves; column definitions change when the schema migrates. Mixing them means that a schema change forces you to touch the aggregate, and a rule change risks accidentally breaking a column mapping. It also drags SQLAlchemy into every unit test.
+
+The alternative is two models that coexist without knowing about each other: `Wallet` as pure Python, `WalletEntity` as pure persistence. A mapper converts between them. This is not extra ceremony — it is the boundary that lets you test domain logic at full speed without a database and tune persistence independently.
 
 `Wallet` (the aggregate root) is *pure Python*. It has no SQLAlchemy columns, no `Mapped[]` annotations, no `__tablename__`. You can instantiate it in a unit test with one line and exercise every invariant without a database connection.
 
 `WalletEntity` (from Chapter 5) is *pure persistence*. It knows exactly how to map to the `wallets` table. It carries the five `BaseEntity` audit columns. It is what SQLAlchemy's session sees.
 
-A **mapper** converts between the two. Keeping it in a dedicated module makes the boundary visible:
+A **mapper** converts between the two. Keeping it in a dedicated module makes the boundary explicit and visible to anyone reading the codebase:
 
 ::: listing lumen/domain/wallet_mapper.py | Listing 6.7 — WalletMapper: converting between the domain aggregate and the persistence entity
 from lumen.domain.money import Money
@@ -458,9 +482,11 @@ class WalletMapper:
         )
 :::
 
-The mapper is intentionally dumb. It does not enforce rules — `Wallet.__init__` and the behaviour methods do that. It does not publish events — the application service does that. It only translates shape.
+**How it works.** `to_entity` converts the minor-unit integer amount back to a floating-point value for the database column (`/ 100.0`) — the inverse of the `round(float(...) * 100)` reconstruction in `to_domain`. These two conversions are the *only* place where the minor-unit / float boundary is crossed. A `# type: ignore[assignment]` comment acknowledges that `entity.id` is typed as `int | None` in the ORM layer while the domain uses `str`; in practice, UUID strings round-trip correctly via SQLAlchemy's `String` column.
 
-**The domain repository.** The repository that the application service works with speaks in `Wallet` aggregates, not `WalletEntity` rows. PyFly's `DomainRepository` protocol from `pyfly.domain` describes the contract — four small methods — and the concrete implementation calls the mapper internally:
+The mapper is intentionally narrow. It does not enforce rules — `Wallet.__init__` and the behaviour methods do that. It does not publish events — the application service does that. It only translates shape, which means you can read it once and trust that it will never surprise you.
+
+**The domain repository.** The repository that the application service works with speaks entirely in `Wallet` aggregates — it never exposes a `WalletEntity`. PyFly's `DomainRepository` protocol from `pyfly.domain` describes the contract — four small async methods — and the concrete implementation calls the mapper on every crossing. The application service never needs to import `WalletEntityRepository` or SQLAlchemy at all:
 
 ::: listing lumen/domain/wallet_repository.py | Listing 6.8 — WalletDomainRepository: a DomainRepository that maps to WalletEntity under the hood
 from pyfly.container import repository
@@ -502,6 +528,8 @@ class WalletDomainRepository(DomainRepository[Wallet, str]):
         return str(uuid.uuid4())
 :::
 
+**How it works.** `WalletDomainRepository` is decorated with `@repository`, which registers it in the IoC container and makes it available for injection. Its constructor receives a `WalletEntityRepository` — the standard Spring-style entity repo from Chapter 5 — and stores it as `_entity_repo`. Every method is a one-liner: `find` asks the entity repo for a row, short-circuits to `None` if absent, and otherwise calls `WalletMapper.to_domain`; `save` does the inverse. The `add` alias delegates to `save` for callers that prefer the semantics of *inserting* rather than *upserting*. `next_id` generates a fresh UUID for callers that need an ID before the aggregate is saved — useful in the CQRS pattern you will see in Chapter 7.
+
 This is the hexagonal architecture Figure 5.1 described in its ports-and-adapters form: the application layer depends on the domain repository port; the adapter depends on both the port and the SQLAlchemy `WalletEntityRepository`. No domain code ever sees a SQLAlchemy type.
 
 !!! spring "Spring parity"
@@ -511,9 +539,11 @@ This is the hexagonal architecture Figure 5.1 described in its ports-and-adapter
 
 ## Specifications for business rules
 
-Not every rule fits neatly inside an aggregate method. Some rules are *queries*: "is this wallet eligible for a high-value withdrawal?" or "does this wallet qualify for the premium tier?" These rules may need to check properties that the aggregate does not own — the customer's account standing, the day of the week, the current regulatory threshold.
+The aggregate guards state-changing operations extremely well — you cannot overdraw a wallet or deposit the wrong currency. But not every rule is about mutation. Some rules are *eligibility checks*: "before we show this user the withdrawal button, is the wallet in a state that makes the operation meaningful?" or "out of ten thousand wallets, which ones qualify for the loyalty bonus?" These are read-only predicates, and encoding them as aggregate methods would clutter `Wallet` with query logic that has nothing to do with state transitions.
 
-A `Specification[T]` from `pyfly.domain` is a composable predicate for in-memory objects. Subclass it, implement `is_satisfied_by`, and combine instances with `&` (and), `|` (or), and `~` (not). A specification is also directly callable, so you can use it with Python's `filter`.
+The Specification pattern solves this cleanly. A specification is a named, reusable predicate: a single `is_satisfied_by(obj) -> bool` method wrapped in an object that can be composed with other specifications using Boolean operators. Because each rule is its own class, you can name rules clearly, reuse them across services, and combine them at runtime based on the calling context — something an `if` chain cannot do.
+
+`Specification[T]` from `pyfly.domain` is a composable predicate for in-memory objects. Subclass it, implement `is_satisfied_by`, and combine instances with `&` (and), `|` (or), and `~` (not). A specification is also directly callable, so you can pass it to Python's built-in `filter` without any adapter code.
 
 !!! note "Two kinds of specification"
     `pyfly.domain.Specification` is the in-memory predicate used inside domain services. `pyfly.data.relational.sqlalchemy.Specification` (Chapter 5) is the database-aware query predicate that pushes the rule down into SQL. The two coexist. Domain specifications are for business logic; data specifications are for queries.
@@ -558,7 +588,11 @@ def filter_eligible(
     return list(filter(spec, wallets))
 :::
 
-Specifications shine in domain services and read-model queries where you need to combine rules dynamically — for example, an admin search that adds filters depending on the operator's role. For aggregate-internal invariants (overdraft, currency mismatch), keep the rule directly in the aggregate method: a specification is a predicate, not a guard that raises an exception.
+**How it works.** `HasPositiveBalance` and `IsInCurrency` are each a single method — the concrete rule, nothing else. The `eligible_for_withdrawal` factory combines them with `&`, producing a composite specification whose `is_satisfied_by` returns `True` only when both component checks pass. Because `Specification` implements `__call__`, you can pass the composite directly to `filter()` without a lambda wrapper.
+
+The key design discipline: a specification is a *predicate*, not a *guard*. It returns `True` or `False` and never raises an exception. Aggregate invariants (overdraft, currency mismatch) belong inside `deposit` and `withdraw` because they must prevent the state change from occurring. Specifications belong in services and query handlers because they *select* or *classify* — they do not protect.
+
+Specifications shine in domain services and read-model queries where you need to combine rules dynamically — for example, an admin search that adds filters depending on the operator's role, or a batch job that iterates a list and partitions it into eligible and ineligible wallets. They are also straightforward to unit-test in isolation, since each class has exactly one method and no side-effects.
 
 !!! tip "Specification.of for quick lambdas"
     For one-off predicates that do not need a class, use the factory method: `spec = Specification.of(lambda w: w.balance.amount >= 1000, name="minimum-balance")`. It composes with `&`, `|`, and `~` the same way as a full subclass.

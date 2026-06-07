@@ -14,21 +14,25 @@ By the end of this chapter Lumen's controller dispatches commands and queries in
 
 ## Why separate reads from writes
 
-The surface-level reason to separate reads from writes is that they have different shapes. A write comes in with an intent and some data: "deposit 50 EUR into wallet w-001". A read comes in with a question: "what is the balance of wallet w-001?" The first operation modifies state and must never be cached. The second is repeatable and a natural candidate for caching. Running both through the same service method conflates two concerns that scale differently, test differently, and need different cross-cutting behaviour.
+Picture Lumen at the end of Chapter 6. `WalletController` calls `WalletApplicationService.credit(wallet_id, amount)`. That call mutates state, but nothing in the method signature makes that obvious. Now the team wants to add a balance cache. Where does it go? Inside `credit`? In a decorator around the service? The question itself reveals the problem: a single service method is asked to serve two masters — the write path, which must always touch the database, and the read path, which should avoid it whenever possible. Bolting caching onto a write method is awkward at best and dangerous at worst.
 
-The deeper reason is **clarity of intent**. When `WalletController` calls `wallet_service.credit(wallet_id, amount)`, every developer who reads that code must understand what `credit` does to know whether it is a safe operation to call twice or whether it has side effects. When the controller dispatches `DepositFunds(wallet_id=..., amount_cents=..., currency=...)`, the intent is unambiguous — and if the intent is wrong, you change the command name, not the service signature.
+Writes and reads have fundamentally different shapes. A write arrives with an intent and data: "deposit 50 EUR into wallet w-001". A read arrives with a question: "what is the current balance of wallet w-001?" The first must reach the database every time. The second is repeatable — asking twice should return the same answer without doubling the database load. Running both through the same method conflates concerns that scale differently, test differently, and need different cross-cutting behaviour.
+
+The deeper benefit is **clarity of intent**. When a future teammate reads `wallet_service.credit(wallet_id, amount)`, they must inspect the implementation to know whether it is safe to call twice, whether it publishes events, and whether it is idempotent. When they read `DepositFunds(wallet_id=..., amount_cents=..., currency=...)`, the intent is unambiguous — and if the intent turns out to be wrong, you rename the command, not the service signature.
 
 There are three concrete benefits that matter for Lumen.
 
-**Independent scaling.** Reads typically outnumber writes by orders of magnitude. Once the command and query paths are separate, you can cache query results at the bus level without affecting the write path at all. You can route queries to a read replica and commands to the primary database with a configuration change rather than a code change.
+**Independent scaling.** Reads typically outnumber writes by an order of magnitude or more. Once the command and query paths are separate, the bus can cache query results without touching the write path at all. You can route queries to a read replica and commands to the primary database with a configuration change rather than a code change.
 
-**Focused handlers.** Each handler implements one operation. A `TransferFundsHandler` knows about loading two wallets, calling `wallet.withdraw` and `target.deposit`, and saving both — nothing more. A `GetBalanceHandler` loads one wallet and returns a projection — nothing more. Both are trivially unit-testable because they are plain Python classes with injected dependencies.
+**Focused handlers.** Each handler implements exactly one operation. `TransferFundsHandler` knows how to load two wallets, drive both through their domain behaviour, and save both — nothing more. `GetBalanceHandler` loads one wallet and returns a projection — nothing more. Because handlers are plain Python classes with injected dependencies, you can unit-test each one in complete isolation from the HTTP layer.
 
-**Centralized cross-cutting concerns.** Validation, authorization, caching, and distributed tracing are defined once, in the bus pipeline, and apply to every handler without any handler-level boilerplate. Adding per-operation authorization later is a matter of overriding `authorize()` on the command; the bus ensures it runs.
+**Centralized cross-cutting concerns.** Validation, authorization, caching, and distributed tracing are implemented once in the bus pipeline and apply uniformly to every handler — no boilerplate required in the handler itself. Adding per-operation authorization later is a matter of overriding `authorize()` on the command; the bus ensures it runs before `do_handle` is ever reached.
 
 ---
 
 ## Commands and command handlers
+
+Before you write a single line of handler code, decide what your system's intentions are. In Lumen's wallet domain there are three things that can happen: a wallet can be opened, funds can be deposited, and funds can be transferred. Each of those is a **command** — a named, immutable message that expresses one intent. The bus delivers it; the handler acts on it; the domain aggregate enforces the rules. Commands are not method calls dressed up as objects: they are explicit contracts that live in your codebase as first-class citizens.
 
 A **command** is a frozen dataclass that inherits from `Command[R]`, where `R` is the type the handler returns. The generic parameter is documentation and a type-checker hint; the bus does not enforce it at runtime.
 
@@ -85,13 +89,21 @@ class TransferFunds(Command[None]):
         return ValidationResult.success()
 :::
 
-Three things to notice. First, every command is `frozen=True` — once created it is immutable, which makes it safe to pass across async boundaries. Second, the optional `validate()` hook on each command encodes business-rule pre-conditions that the bus validates *before* the handler even runs; there is no coupling between the command and the handler here. Third, each command is named in the **imperative mood** from the caller's perspective: not `WalletDeposit` but `DepositFunds`.
+Three design choices are baked into every command here, and it is worth being explicit about each one.
+
+`frozen=True` makes the dataclass immutable the moment it is constructed. You cannot accidentally mutate a field in one layer of the pipeline before it reaches another. Immutable messages are also hashable by default, which matters if you ever want to store or compare them in tests.
+
+`validate()` is an async hook that runs in the bus *before* the handler is dispatched. Notice that `OpenWallet.validate` checks `owner_id.strip()` and `len(currency) != 3`, while `TransferFunds.validate` checks both the positive-amount rule and the same-wallet guard. These are pre-conditions that belong to the command itself — they do not require a database lookup, and they do not belong in the domain aggregate either. The aggregate enforces invariants that require loaded state (overdraft, currency match). Commands enforce invariants that are knowable from the fields alone. Keeping these two layers of validation separate means your aggregate is never called with data that is structurally wrong.
+
+Naming follows the **imperative mood** from the caller's perspective: `DepositFunds`, not `WalletDeposit` or `DepositFundsCommand`. This convention makes the command log read like a business audit trail — a sequence of things that *happened* — rather than a list of technical operations.
 
 ### Implementing a command handler
 
-A command handler inherits from `CommandHandler[C, R]` and implements exactly one method: `do_handle`. The `@command_handler` decorator registers the class with the `HandlerRegistry` and configures the per-handler pipeline options. The `@service` decorator from `pyfly.container` wires the handler into the DI container so its constructor dependencies are injected automatically.
+A command handler inherits from `CommandHandler[C, R]` and implements exactly one method: `do_handle`. You write the *what*; the bus wraps it with the *how*.
 
-Here is the handler for `TransferFunds` — the most involved of the three because it loads two aggregates, drives both through their domain behaviour, and saves both:
+Two decorators appear on every handler. `@command_handler` registers the class with the `HandlerRegistry` by introspecting the first generic type argument (`TransferFunds` in the example below) — no manual registration call is needed. `@service` wires the handler into PyFly's DI container so that constructor arguments (`WalletDomainRepository` here) are resolved and injected automatically when the application starts.
+
+Here is the handler for `TransferFunds` — the most involved of the three because it must load two separate aggregates, drive both through their domain behaviour, and save both atomically:
 
 ::: listing lumen/cqrs/handlers/transfer_funds_handler.py | Listing 7.2 — TransferFundsHandler: loading two aggregates and driving the domain
 from __future__ import annotations
@@ -138,7 +150,9 @@ class TransferFundsHandler(CommandHandler[TransferFunds, None]):
         await self._repo.save(target)
 :::
 
-The handler is ten focused lines of business logic. Everything else — validation, tracing, event publishing — is handled by the bus pipeline. The two `AggregateNotFound` raises translate automatically to HTTP 404 responses via the RFC 7807 mapper you saw in Chapter 4. The `BusinessRuleViolation` from `wallet.withdraw` (insufficient funds, currency mismatch) translates to HTTP 422, also automatically.
+Walk through the handler method line by line. The first four lines load the source and target wallets by ID, raising `AggregateNotFound` if either is missing — those exceptions map to HTTP 404 automatically through the RFC 7807 error pipeline you configured in Chapter 4. The `Money` value object is constructed from the command's fields, giving the domain a strongly typed amount rather than raw integers. Then `source.withdraw(amount)` and `target.deposit(amount)` drive the two aggregates through their own invariant checks — overdraft protection, currency matching, positive-amount validation. If either call raises `BusinessRuleViolation`, the exception propagates as HTTP 422 without a single line of error-handling code in the handler. Finally, both aggregates are saved. Domain events queued inside each aggregate during the mutating calls are drained and published by the bus pipeline *after* both saves succeed.
+
+Notice what is absent: no try/except blocks, no logging calls, no validation checks, no tracing setup. All of that is the bus's responsibility. The handler is a pure expression of business intent.
 
 Here are the handlers for `OpenWallet` and `DepositFunds`:
 
@@ -187,9 +201,13 @@ class DepositFundsHandler(CommandHandler[DepositFunds, None]):
         await self._repo.save(wallet)
 :::
 
+`OpenWalletHandler` delegates the creation decision entirely to `Wallet.open` — the factory method on your domain aggregate — and then saves the result. Because `Wallet.open` assigns the ID internally (it was set by the repository mapper in Chapter 6), the `assert wallet.id is not None` line is a safety net for the type-checker, not a runtime guard. The handler returns the string ID, which flows back to the controller as `send`'s return value.
+
+`DepositFundsHandler` follows the classic command handler pattern: load, guard, act, save. The `AggregateNotFound` guard means you never pass a `None` wallet to `deposit` — the bus translates the exception to 404 before the controller ever sees it.
+
 ### Sending a command
 
-The `CommandBus` is the single entry point for all writes. After auto-configuration wires the bus into the container, inject `DefaultCommandBus` by type and call `send`:
+The `CommandBus` is the single entry point for all writes. PyFly's auto-configuration registers a `DefaultCommandBus` as a singleton in the DI container, so you only need to declare it as a constructor argument and the framework injects it. Sending a command is a single awaited call:
 
 ```python
 wallet_id: str = await command_bus.send(
@@ -208,7 +226,7 @@ await command_bus.send(
 )
 ```
 
-`send` is a coroutine; `await` it. The return value is whatever `do_handle` returned — `str` for `OpenWallet`, `None` for `DepositFunds` and `TransferFunds`. Failures are wrapped in `CommandProcessingException` and propagate out of `send`.
+`send` is a coroutine, so always `await` it. The return value is whatever `do_handle` returned — a `str` wallet ID for `OpenWallet`, and `None` for the mutation-only commands. If anything in the pipeline fails — validation, authorization, or the handler itself — the exception wraps in `CommandProcessingException` and propagates out of `send`, where the global error handler picks it up and maps it to the appropriate HTTP status code.
 
 ::: figure art/figures/07-cqrs.svg | Figure 7.1 — Commands flow to the write model; queries to the read model.
 
@@ -219,9 +237,11 @@ await command_bus.send(
 
 ## Queries and query handlers
 
-A **query** is a frozen dataclass that inherits from `Query[R]`, where `R` is the type of the result. Like commands, queries are immutable messages — but they carry no intent to change state. The bus treats them differently: it checks the cache before invoking the handler, and writes the result back to the cache after a successful execution.
+Commands travel one direction: into the write model. Queries are the return journey: they ask the system for a projection of its current state and expect an answer, not a side effect.
 
-Queries return **read DTOs** rather than domain aggregates. This keeps the query side free of domain model dependencies and lets you project exactly the fields the caller needs — no more, no less.
+A **query** is a frozen dataclass that inherits from `Query[R]`, where `R` is the type of the result. Like commands, queries are immutable messages — but they carry no intent to change state. The bus treats them differently: it checks the cache before invoking the handler, and writes the result back to the cache after a successful execution. From the caller's perspective, `query_bus.query(GetBalance(...))` either returns a fresh value from the database or a cached value from a previous read — the decision is transparent.
+
+Queries return **read DTOs** rather than domain aggregates. This separation is deliberate and important. If you returned the `Wallet` aggregate from `GetWalletHandler`, your API layer would become coupled to every field on the aggregate — meaning a change to the domain model could silently break the API contract. A dedicated `WalletView` dataclass projects exactly the fields the HTTP response needs. Add a field to `Wallet`? The projection only changes if you explicitly add it to the view. Remove a field from `Wallet`? The projection continues to compile until you clean it up.
 
 ::: listing lumen/cqrs/queries.py | Listing 7.4 — Lumen's read queries and their result DTOs
 from __future__ import annotations
@@ -258,6 +278,10 @@ class BalanceView:
     balance_cents: int
     currency: str
 :::
+
+Two things are worth noting about `BalanceView`. It has three fields — `wallet_id`, `balance_cents`, `currency` — and deliberately omits `owner_id`. A balance poll does not need to know the owner; by leaving that field out of the projection you save bandwidth and avoid accidentally exposing account ownership in a response that callers may log. The two queries therefore return different shapes for different purposes, even though both hit the same `WalletDomainRepository` under the hood.
+
+Lumen needs two queries: one that returns the full wallet view (for a detail page), and one that returns only the balance (for a dashboard widget or frequent polling). Keeping them separate means you can tune their caching independently.
 
 The `@query_handler` decorator mirrors `@command_handler` but adds caching parameters. Setting `cacheable=True` and a `cache_ttl` tells the bus to check the cache before hitting the handler, and to store the result after a successful read.
 
@@ -311,6 +335,8 @@ class GetBalanceHandler(QueryHandler[GetBalance, "BalanceView | None"]):
         )
 :::
 
+Notice the different TTL values: `GetWalletHandler` caches for 60 seconds, `GetBalanceHandler` for 30. Balance data changes more often (every deposit or transfer), so a shorter TTL means callers see fresher numbers after a mutation. The full wallet view includes less volatile data (owner, currency), so the longer TTL is safe. You are tuning caching policy at the handler level, not inside the handler — the handler itself is oblivious to whether its result was cached.
+
 The cache key for `GetBalance(wallet_id="w-001")` is automatically computed as `ClassName:sha256_hex16(fields)` — a stable SHA-256 digest of the dataclass field values, prefixed with `:cqrs:` by the bus. The same query object always maps to the same cache key across processes. You can override `get_cache_key()` on the query if you need a fully custom strategy.
 
 Executing a query goes through `QueryBus.query`:
@@ -321,7 +347,7 @@ balance: BalanceView | None = await query_bus.query(
 )
 ```
 
-On a cache hit the handler is not called at all. On a miss the handler runs, the result is cached, and subsequent calls within the TTL return the cached value. The cache is keyed per query instance, so `GetBalance(wallet_id="w-001")` and `GetBalance(wallet_id="w-002")` are independent entries.
+On a cache hit the handler is not called at all — the bus returns the stored value directly. On a miss the handler runs, the result is stored, and subsequent calls within the TTL return the cached value without touching the database. The cache is keyed per query *instance*, so `GetBalance(wallet_id="w-001")` and `GetBalance(wallet_id="w-002")` are completely independent entries. Adding a new wallet does not invalidate existing entries, and a deposit to `w-001` does not affect `w-002`'s cache slot.
 
 !!! note "Queries return None, not exceptions"
     Query handlers return `None` when the resource is not found rather than raising `AggregateNotFound`. This is a deliberate convention: a query that finds nothing is not an error — it is an answer. The controller turns a `None` result into a 404 response, keeping the HTTP concern out of the handler.
@@ -330,7 +356,9 @@ On a cache hit the handler is not called at all. On a miss the handler runs, the
 
 ## Wiring the bus into the controller
 
-Before CQRS, `WalletController` held a reference to `WalletApplicationService` and called methods on it directly. That coupling made the controller a relay: it bound the request, called the service, and returned the result. With CQRS, the controller's job narrows further — it binds the request, builds a command or query, and dispatches it. The bus handles the rest.
+The controller is the system's HTTP boundary. Its only job is to translate an HTTP request into a domain message and an HTTP response into a domain result. Everything in between belongs to the bus and the handlers. That boundary is much easier to see once the controller dispatches commands and queries rather than calling service methods directly.
+
+Before CQRS, `WalletController` held a reference to `WalletApplicationService` and called methods on it directly. Every time the service interface changed — a new parameter, a renamed method, a different return type — the controller had to change too. That coupling also meant the controller had implicit knowledge of how the service worked. With CQRS, the controller's knowledge is limited to one thing: what message to send.
 
 Here is the before state (condensed from Chapter 4 and Chapter 6's service layer):
 
@@ -490,7 +518,13 @@ class WalletController:
         return {"status": "ok"}
 :::
 
-The refactor is mechanical: replace `self._service.method(args)` with `self._commands.send(Command(...))` or `self._queries.query(Query(...))`. The controller no longer knows how the operation is executed, only what the caller intended. The DI container injects `DefaultCommandBus` and `DefaultQueryBus` automatically from their type hints — no factory configuration required.
+Compare the two constructors. In Listing 7.6 the controller takes `WalletApplicationService` — a concrete service class whose method signatures leak business logic decisions into the HTTP layer. In Listing 7.7 it takes `DefaultCommandBus` and `DefaultQueryBus` — two opaque channels through which messages flow. The controller knows *what* to send; it knows nothing about *how* the message is processed.
+
+Look at `open_wallet`. In the before version it calls `self._service.open_wallet(owner_id=..., currency=...)` — a positional-argument contract that breaks if the service method ever grows a new parameter. In the after version it constructs `OpenWallet(owner_id=body.owner_id, currency=body.currency)` — a named, immutable object whose fields are its API. Add a field to the command? The controller stays the same until you choose to populate that field.
+
+The request models (`OpenWalletRequest`, `DepositRequest`, `TransferRequest`) in the Pydantic section do the structural validation that was previously scattered across service methods. Field-level constraints — `min_length=1`, `gt=0`, three-character currency codes — are declared once here and enforced by `Valid[...]` before `do_handle` is ever called.
+
+The `get_wallet` and `get_balance` methods show the only HTTP concern left in the controller: translating a `None` query result into a 404 response. That one mapping belongs here because 404 is an HTTP status code and the handler deliberately has no HTTP knowledge. The DI container injects `DefaultCommandBus` and `DefaultQueryBus` automatically from their type hints — no factory configuration required.
 
 !!! tip "Let the bus raise"
     You do not need to catch `CommandProcessingException` or `QueryProcessingException` in the controller unless you want to customize the error shape. The global exception handler maps `AggregateNotFound` to 404 and `BusinessRuleViolation` to 422 — the same as before. The bus exceptions propagate those originals transparently.
@@ -499,13 +533,26 @@ The refactor is mechanical: replace `self._service.method(args)` with `self._com
 
 ## The handler pipeline
 
-Every `send` and `query` call passes through a fixed pipeline before and after the handler runs. The pipeline is defined once, in the bus, and applies uniformly to every handler registered with it. You never write pipeline logic inside a handler.
+A single `send` or `query` call triggers a sequence of steps beyond the handler itself. Understanding this pipeline tells you where to put each type of cross-cutting concern — and, just as importantly, where *not* to put it.
+
+Every call passes through a fixed pipeline before and after the handler runs. The pipeline is defined once, in the bus, and applies uniformly to every handler registered with it. You never write pipeline logic inside a handler. The order is strict: validation runs first, then authorization, then the handler, then (for commands) domain event publishing and tracing cleanup.
+
+| Step | Where it is defined | Applies to | Failure result |
+|---|---|---|---|
+| Structural validation | Pydantic `BaseModel` / `AutoValidationProcessor` | Commands + Queries | `CqrsValidationException` (HTTP 400) |
+| Business pre-condition validation | `validate()` hook on the message | Commands + Queries | `CqrsValidationException` (HTTP 422) |
+| Authorization | `authorize()` hook on the message | Commands + Queries | `AuthorizationException` (HTTP 403) |
+| Handler execution | `do_handle()` | Commands + Queries | Domain exceptions (4xx/5xx) |
+| Domain event publishing | Bus pipeline (post-handler) | Commands only | — |
+| Correlation ID cleanup | Bus pipeline (finally block) | Commands + Queries | — |
 
 ### Validation
 
-The bus invokes the message's `validate()` method before looking up the handler. For dataclasses backed by Pydantic `BaseModel`, the `AutoValidationProcessor` also runs field-level structural validation. Both phases are combined, and if either fails the bus raises `CqrsValidationException` — no handler code runs. You already saw this in the command definitions in Listing 7.1.
+Without a structured validation step, every handler would need its own guard clauses at the top: check this field is not blank, check that amount is positive, check the two wallets are different. That logic would be duplicated across handlers and tested only through integration paths. Centralizing validation in the message itself solves both problems.
 
-The validation hook is also the right place for cross-field business pre-conditions that are too simple to belong in the domain aggregate:
+The bus invokes the message's `validate()` method before looking up the handler. For request bodies backed by Pydantic `BaseModel`, the `AutoValidationProcessor` also runs field-level structural validation automatically. Both phases are combined into a single validation pass, and if either fails the bus raises `CqrsValidationException` without ever reaching the handler. You saw this in Listing 7.1.
+
+The validation hook is also the right place for cross-field business pre-conditions that are knowable from the fields alone — too simple for the domain aggregate, too application-specific for the request model:
 
 ```python
 @dataclass(frozen=True)
@@ -527,9 +574,11 @@ class TransferFunds(Command[None]):
 
 ### Authorization
 
-Authorization runs after validation passes. Both commands and queries expose an `authorize()` hook. Return `AuthorizationResult.success()` to allow execution, or `AuthorizationResult.failure(resource, message)` to deny it. The bus raises `AuthorizationException` on denial.
+Once a message is structurally valid, the bus asks: is the caller *allowed* to perform this operation? Authorization answers that question before any database access happens, which is both more efficient and safer — you do not load sensitive data only to discard it because the caller lacked permission.
 
-Use `authorize()` for operation-level access control — who is allowed to call this command at all — and leave resource-level decisions (can this user access *this* wallet?) to the handler, which has access to the loaded aggregate:
+Authorization runs after validation passes. Both commands and queries expose an `authorize()` hook. Return `AuthorizationResult.success()` to allow execution, or `AuthorizationResult.failure(resource, message)` to deny it. The bus raises `AuthorizationException` on denial, which maps to HTTP 403 via the global error handler.
+
+A clean rule of thumb keeps authorization concerns in the right place: use `authorize()` on the command for **operation-level** checks — who is allowed to call this command at all — and leave **resource-level** decisions (can this caller access *this specific* wallet?) to the handler, which has the loaded aggregate in scope and can inspect its ownership fields:
 
 ::: listing lumen/cqrs/commands_auth.py | Listing 7.8 — Authorization hook on a command
 from __future__ import annotations
@@ -554,17 +603,23 @@ class CloseWallet(Command[None]):
         return AuthorizationResult.success()
 :::
 
+`CloseWallet.authorize` checks a known set of internal service accounts. If `requested_by` is not in that set, authorization fails immediately and the bus never calls the handler. The set would normally come from a configuration value or a token claim injected into the command at the controller boundary — here it is hardcoded to keep the example readable. The key point is that the check lives inside the command, not scattered across handler code.
+
 ### Caching (queries)
+
+You have already seen caching from the handler's perspective in Listing 7.5. Here is how it works inside the bus pipeline: when a query handler is annotated with `cacheable=True`, the bus computes the cache key, checks the cache store, and either returns the cached value immediately (skipping `do_handle` entirely) or calls the handler and stores the result before returning it. The handler is not involved in either decision.
 
 For query handlers decorated with `@query_handler(cacheable=True, cache_ttl=N)`, the bus checks the cache before calling `do_handle`. The cache key is computed from the query's class name and a SHA-256 digest of its field values. If a cached value exists and has not expired, the handler is not called at all. After a successful handler execution the result is stored.
 
-To invalidate a specific entry call `await query_bus.clear_cache(key)`, or `await query_bus.clear_all_cache()` to flush everything. When a command mutates a wallet, the next `GetBalance` query for that wallet will miss the cache, load fresh data from the repository, and repopulate it.
+To invalidate a specific entry call `await query_bus.clear_cache(key)`, or `await query_bus.clear_all_cache()` to flush everything. When a command mutates a wallet, the next `GetBalance` query for that wallet will miss the cache, load fresh data from the repository, and repopulate it. This is the natural invalidation pattern: the write path and the read path are separate, and cache coherence is achieved through TTL expiry rather than explicit invalidation on every write.
 
 ### Distributed tracing
 
-Both buses set a correlation ID at the start of every pipeline execution via `CorrelationContext`. If the incoming message already carries a correlation ID (set by the caller via `command.set_correlation_id(id)`), that ID is used; otherwise a new UUID is generated. The prior correlation ID is always restored in a `finally` block, so nested command dispatches do not clobber the outer request's trace.
+In a system where one HTTP request can trigger multiple commands — and each command might call downstream services — you need a way to stitch all those logs and spans together. That is what `CorrelationContext` provides.
 
-The `CorrelationContext` propagates correctly across `await` chains via Python's `contextvars`. To pass trace context across service boundaries, read the outbound headers with `CorrelationContext.create_context_headers()` and restore them on the receiving side with `CorrelationContext.extract_context_from_headers(headers)`:
+Both buses set a correlation ID at the start of every pipeline execution. If the incoming message already carries an ID (set by the caller via `command.set_correlation_id(id)`), that ID is used. Otherwise a new UUID is generated and attached to the current execution context. The prior correlation ID is always restored in a `finally` block, so nested command dispatches within the same request do not clobber the outer trace.
+
+`CorrelationContext` propagates correctly across `await` chains via Python's `contextvars` — you do not need to pass the correlation ID manually through every function argument. For cross-service propagation, where the trace must survive an HTTP hop to another microservice, serialize the context to headers on the outgoing call and restore it on the incoming side:
 
 ```python
 from pyfly.cqrs.tracing.correlation import CorrelationContext
@@ -577,8 +632,10 @@ headers = CorrelationContext.create_context_headers()
 CorrelationContext.extract_context_from_headers(headers)
 ```
 
+The three headers — `X-Correlation-ID`, `X-Trace-ID`, and `X-Span-ID` — follow the W3C Trace Context naming convention, so they are compatible with OpenTelemetry-instrumented infrastructure out of the box.
+
 !!! tip "Where to put cross-cutting logic"
-    The bus pipeline is the right home for concerns that apply to *all* operations: validation, authorization, tracing, metrics, and caching. The handler is the right home for concerns specific to *one* operation: loading the aggregate, driving behaviour, saving. If you find yourself adding a try/except to every handler, or copying the same pre-condition check into multiple handlers, it belongs in the pipeline — either as a `validate()` hook on the command or as a bus-level service.
+    The bus pipeline is the right home for concerns that apply to *all* operations: validation, authorization, tracing, metrics, and caching. The handler is the right home for concerns specific to *one* operation: loading the aggregate, driving behaviour, saving. If you find yourself adding a try/except to every handler, or copying the same pre-condition check into multiple handlers, it belongs in the pipeline — either as a `validate()` hook on the command or as a bus-level service. The pipeline scales uniformly; handler boilerplate does not.
 
 ---
 
@@ -592,9 +649,9 @@ In Chapter 5 you gave the system persistence: SQLAlchemy `BaseEntity` with five 
 
 In this chapter you separated the write model from the read model with CQRS. `OpenWallet`, `DepositFunds`, and `TransferFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing in that order, automatically, for every command. `GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline, plus a cache check before the handler and a cache put after. Each handler is a small, focused class: load, act, save (for commands) or load, project, return (for queries).
 
-The `WalletController` no longer knows about the service layer at all. It builds a command or query from the HTTP request, dispatches it to the appropriate bus, and either returns the result or raises a domain exception. The bus handles everything in between.
+The `WalletController` no longer knows about the service layer at all. It builds a command or query from the HTTP request, dispatches it to the appropriate bus, and either returns the result or raises a domain exception. The bus handles everything in between. Adding a new command to Lumen now means three things: define a frozen dataclass, implement one `do_handle` method, and add one endpoint that calls `self._commands.send`. The pipeline applies automatically.
 
-The aggregate you spent Chapter 6 building is unchanged. CQRS does not replace the domain model — it delivers instructions to it.
+The aggregate you spent Chapter 6 building is unchanged. CQRS does not replace the domain model — it delivers instructions to it. That principle carries forward into the next part of the book, where commands begin crossing service boundaries and state changes need to be recorded permanently as events in an immutable log.
 
 ---
 

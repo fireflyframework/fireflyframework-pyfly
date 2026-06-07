@@ -12,7 +12,9 @@ This chapter shows you how PyFly solves that with a single `pyfly.yaml`, a four-
 
 ## pyfly.yaml: your single source of settings
 
-Every PyFly application is configured through a YAML (or TOML) file that PyFly auto-discovers in your project root. The framework checks candidates in order — `pyfly.yaml`, `pyfly.toml`, `config/pyfly.yaml`, `config/pyfly.toml` — and loads the first one it finds. For Lumen, create `pyfly.yaml` in the project root:
+Every non-trivial application has at least two audiences for its configuration: a developer who wants verbose logs and a relaxed database on localhost, and a production system that demands structured JSON logs, a real connection pool, and no debug mode. The naive solution — `if os.getenv("ENV") == "prod":` scattered through a dozen files — quickly becomes impossible to audit. PyFly's answer is one canonical YAML (or TOML) file that holds everything your application knows about itself, with separate mechanisms for varying what changes between environments.
+
+PyFly auto-discovers this file in your project root. The framework checks candidates in order — `pyfly.yaml`, `pyfly.toml`, `config/pyfly.yaml`, `config/pyfly.toml` — and loads the first one it finds. For Lumen, create `pyfly.yaml` in the project root:
 
 ::: listing pyfly.yaml | Listing 3.1 — Lumen's base configuration file
 pyfly:
@@ -47,7 +49,7 @@ lumen:
     default-currency: "USD"
 :::
 
-The top-level `pyfly:` section is reserved for framework settings. You can add your own top-level keys — `lumen:` here — for application-specific configuration, and access them with the same dot-notation API.
+A few things to notice here. The `pyfly:` top-level key is reserved exclusively for framework settings — web server, logging, data access, and profiles all live there. Anything outside `pyfly:` is yours: the `lumen:` section holds domain-specific settings that the framework ignores but that your own code can read through exactly the same API. This means Lumen's business rules (`daily-transfer-limit`, `default-currency`) are right there in the configuration file alongside the infrastructure settings, with no special treatment required.
 
 Nested keys map directly to dot-notation access through `Config.get()`:
 
@@ -57,7 +59,7 @@ config.get("pyfly.data.pool-size")           # 5  (kebab and snake interchangeab
 config.get("lumen.wallet.daily-transfer-limit")  # 10000
 ```
 
-`Config.get()` uses **relaxed segment matching**: `pool-size` and `pool_size` are treated as the same key, so your YAML can use kebab-case (the conventional YAML style) and your Python code can use snake_case — they always resolve to the same value.
+`Config.get()` uses **relaxed segment matching**: `pool-size` and `pool_size` are treated as the same key, so your YAML can use kebab-case (the conventional YAML style) and your Python code can use snake_case — they always resolve to the same value. You never have to remember which form you used in the file.
 
 PyFly uses `PyYAML` (`yaml.safe_load`) for YAML parsing; YAML's native types (integers, booleans, floats) are preserved. The integer `8080` in YAML arrives as an integer in Python — no string parsing needed.
 
@@ -68,7 +70,9 @@ PyFly uses `PyYAML` (`yaml.safe_load`) for YAML parsing; YAML's native types (in
 
 ## How configuration is layered
 
-PyFly's flexibility comes from layering four configuration sources, each deeply merged on top of the previous. Later layers win:
+A single file works well when you have one environment. Real projects have three or four — development, test, staging, production — and the differences between them are usually small: a database URL here, a log level there. If you duplicate the entire file for each environment, you create a maintenance burden; the first time someone updates the port in one file and forgets the others, you have a configuration drift bug.
+
+PyFly avoids this by layering four configuration sources, each deeply merged on top of the previous. Later layers win:
 
 ::: figure art/figures/03-config.svg | Figure 3.1 — Configuration precedence (later layers win).
 
@@ -82,7 +86,9 @@ PyFly's flexibility comes from layering four configuration sources, each deeply 
 
 ### Deep merge, not replacement
 
-Layers are combined using a recursive deep merge (`Config._deep_merge()`). Nested dictionaries are merged key-by-key; scalar values are replaced. This lets overlay files be surgical:
+Layers are combined using a recursive deep merge (`Config._deep_merge()`). Nested dictionaries are merged key-by-key; scalar values are replaced. This distinction matters more than it might seem: without deep merge, a production overlay that changes only the port would wipe out the `host` and `docs` keys that sit alongside it in the same `web:` section. With deep merge, you only write what you mean to change.
+
+To make this concrete, consider a base file and a prod overlay:
 
 ```yaml
 # pyfly.yaml (base)
@@ -121,6 +127,8 @@ Only the keys that differ need to appear in the overlay. Everything else is pres
 
 ## Profiles
 
+The layering system gives you the mechanism to vary configuration between environments. Profiles give you the vocabulary to name those environments and activate them cleanly, without any `if/else` logic in your application code.
+
 A **profile** is a named environment variant — `dev`, `test`, `staging`, `prod`. Activating a profile causes PyFly to load an overlay file and can conditionally include or exclude beans.
 
 ### Activating profiles
@@ -131,7 +139,7 @@ PyFly resolves the active profile through **early profile resolution** — it mu
 2. **`pyfly.profiles.active` in the base config file** — fallback when the env var is not set.
 3. **Passed programmatically** — via `Config.from_file("pyfly.yaml", active_profiles=["prod"])`.
 
-In Listing 3.1, `profiles.active: "dev"` activates the `dev` profile by default. In production you override it with an env var:
+In Listing 3.1, `profiles.active: "dev"` activates the `dev` profile by default, so every developer who clones the repository gets verbose logging and debug mode without any extra setup. In production you override it with an env var — no code change, no file edit:
 
 ```bash
 PYFLY_PROFILES_ACTIVE=prod python main.py
@@ -139,7 +147,7 @@ PYFLY_PROFILES_ACTIVE=prod python main.py
 
 ### Profile overlay files
 
-For each active profile `{name}`, PyFly looks for `pyfly-{name}.yaml` next to the base file. Here are Lumen's three overlays:
+For each active profile `{name}`, PyFly looks for `pyfly-{name}.yaml` next to the base file. Here are Lumen's three overlays, each containing only the keys that actually differ from the base:
 
 ::: listing pyfly-dev.yaml | Listing 3.2 — Development overlay: verbose logging, debug mode
 pyfly:
@@ -152,6 +160,8 @@ pyfly:
       root: "DEBUG"
 :::
 
+The dev overlay turns on debug mode so Starlette surfaces detailed tracebacks, enables SQL echo so you can see every query in the terminal, and drops the log level to `DEBUG` so framework internals are visible. Three keys — everything else comes unchanged from the base file.
+
 ::: listing pyfly-test.yaml | Listing 3.3 — Test overlay: in-memory SQLite, silent banner
 pyfly:
   banner:
@@ -162,6 +172,8 @@ pyfly:
     level:
       root: "WARNING"
 :::
+
+The test overlay silences the startup banner so test output is clean, disables data persistence (unit tests mock the repository layer), and raises the log threshold to `WARNING` so passing tests produce no noise.
 
 ::: listing pyfly-prod.yaml | Listing 3.4 — Production overlay: real database, JSON logging, docs off
 pyfly:
@@ -186,12 +198,14 @@ lumen:
     daily-transfer-limit: 50000
 :::
 
-Each overlay only specifies what changes. In `pyfly-dev.yaml`, you do not need to repeat the port, host, or database URL — they all come from the base file unchanged.
+The production overlay makes several deliberate choices worth explaining. It disables the interactive API docs (`enabled: false`) — you do not want a live Swagger UI on a production endpoint. It switches logging to `json` format so log aggregators like Datadog or CloudWatch can parse structured fields rather than scraping human-readable text. It bumps the connection pool to 20 and points `url` at the real PostgreSQL instance. And it raises `daily-transfer-limit` to 50,000 — production wallets have a higher business limit than the 10,000 default, and that domain rule lives here in configuration rather than buried in code.
 
 !!! tip "Tip"
     Multiple profiles are comma-separated in the env var and are applied in order, so the last profile wins on conflicts: `PYFLY_PROFILES_ACTIVE=prod,metrics` first applies `pyfly-prod.yaml`, then `pyfly-metrics.yaml`. Use this to compose cross-cutting concerns — a `metrics` profile can enable Prometheus scraping without duplicating your entire prod config.
 
 ### Profile-scoped beans
+
+Sometimes the difference between environments is not just a value — it is whether a whole component exists at all. A seed loader that populates test wallets should never run in production. A verbose audit logger that logs every field of every request is useful in development but a compliance risk in prod.
 
 The `profile` parameter on any stereotype controls when a bean participates in the container. The expression supports negation and comma-separated OR:
 
@@ -211,13 +225,15 @@ class VerboseAuditLogger:
     ...
 ```
 
-Profile expressions are evaluated by `Environment.accepts_profiles()` during the first pass of `ApplicationContext.start()`. Beans whose profile expression does not match the active set are removed before any resolution takes place.
+Profile expressions are evaluated by `Environment.accepts_profiles()` during the first pass of `ApplicationContext.start()`. Beans whose profile expression does not match the active set are removed before any resolution takes place — they are never instantiated, never wired, never present in the container. The result is a container that is structurally different per environment without any `if` statement in your application code.
 
 ---
 
 ## Type-safe settings with @config_properties
 
-Accessing config values through string keys works fine for one or two values, but a service like Lumen's `WalletService` has several related settings. Dot-notation strings are fragile — a typo surfaces at runtime, not at import time. `@config_properties` solves this by binding a config section to a typed Python dataclass.
+String-key lookups like `config.get("lumen.wallet.daily-transfer-limit")` work, but they do not scale well. Each call is an isolated read with no type information — you must remember to call `float()` on the result, and a typo in the key surfaces at the moment a request hits that code path in production, not the moment the application starts. For anything beyond a handful of scattered values, a better approach is to group related settings into a typed Python class that is populated once at startup and injected wherever it is needed.
+
+`@config_properties` solves this by binding a config section to a typed Python dataclass.
 
 ### Declaring a properties class
 
@@ -244,6 +260,8 @@ class LumenWebProperties:
 :::
 
 The decorator sets `__pyfly_config_prefix__` on the class. Field types must be `int`, `float`, `bool`, or `str` for coercion to work correctly; more complex types are left as-is.
+
+Notice that each field carries a default value matching the base `pyfly.yaml`. This is intentional: the class is self-documenting, and a `@config_properties` class can be constructed and used in unit tests without any YAML file on disk — just instantiate `WalletProperties()` and you get the development defaults.
 
 ### Binding and injecting
 
@@ -283,6 +301,8 @@ class WalletService:
         return {"from": from_id, "to": to_id, "amount": amount}
 :::
 
+Walk through what happens when the DI container starts Lumen. `WalletService.__init__` receives the shared `Config` singleton and immediately calls `config.bind(WalletProperties)`. That call resolves the bound values once, at startup, and stores them in `self.props` — a plain Python dataclass with real types. From that point on, `transfer()` reads `self.props.daily_transfer_limit` as a `float`, with full IDE autocompletion and no parsing code in sight.
+
 `config.bind()` works through these steps:
 
 1. Reads `__pyfly_config_prefix__` from the class.
@@ -290,6 +310,8 @@ class WalletService:
 3. Matches section keys to dataclass fields using relaxed (kebab/snake interchangeable) lookup.
 4. Applies type coercion for fields whose values arrived as strings (for example, from environment variables).
 5. Constructs the dataclass with the gathered kwargs; fields absent from the config use their dataclass default values.
+
+The key detail in step 2 is that `effective_section()` applies the full four-layer stack — defaults, file, profile overlay, env vars — before the dataclass is constructed. By the time `bind()` finishes, `WalletProperties` reflects whatever the production overlay or an injected env var says, not just the base YAML.
 
 ### Type coercion
 
@@ -310,6 +332,8 @@ If `bind()` is called on a class that is not decorated with `@config_properties`
 ---
 
 ## Environment variables & secrets
+
+Files are the right home for configuration that varies by environment but is safe to store — ports, log levels, database hostnames. They are the wrong home for secrets: passwords, API keys, signing tokens, and database credentials must never enter source control. The fourth layer of the configuration stack exists specifically to receive these values at deploy time, from a secrets manager or a CI/CD pipeline, without any of them touching the file system.
 
 The fourth and highest-priority layer is environment variables. PyFly checks them on every `Config.get()` call — at read time, not at startup — so they always win, even when set after the process begins.
 
@@ -337,6 +361,8 @@ For application-specific keys that do not start with `pyfly.`, the full dotted p
 lumen.wallet.daily-transfer-limit  →  PYFLY_LUMEN_WALLET_DAILY_TRANSFER_LIMIT
 ```
 
+The rule is mechanical and consistent, which matters in practice: when you need to tell a Kubernetes operator which env var controls a given setting, the answer is always "apply the four-step transformation" rather than hunting through framework source code.
+
 ### Env vars always win
 
 Activating production and overriding the database URL for a specific container instance is a one-liner:
@@ -356,6 +382,8 @@ Here, `PYFLY_WEB_PORT=8080` overrides the prod overlay's `port: 443`. The preced
 4. Env var → `port: 8080` (wins)
 
 Final effective port: `8080`. The prod overlay's value is superseded by the env var, and the base file's value never mattered once the overlay loaded.
+
+This is a useful pattern during a staged migration: you can keep `port: 443` in the overlay as the intended production default, while a temporary env var holds the service on `8080` for a traffic-splitting experiment. When the experiment ends, you remove the env var and the overlay takes over — no file edits needed.
 
 ### Keeping secrets out of files
 
@@ -377,6 +405,8 @@ PYFLY_SECURITY_JWT_SECRET="$(vault kv get -field=jwt_secret secret/lumen)"
 # Set it exclusively via env var — bind() still picks it up.
 PYFLY_LUMEN_WALLET_DAILY_TRANSFER_LIMIT=25000 python main.py
 ```
+
+This is a practical escape hatch during incremental rollouts: the team deploying to production can inject a new value before the YAML file has been updated and reviewed, and the application will pick it up without a code change.
 
 ---
 

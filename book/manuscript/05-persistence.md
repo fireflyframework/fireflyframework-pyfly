@@ -6,13 +6,15 @@
 
 Lumen has a wallet API that works — but every wallet disappears the moment you restart the process. The `InMemoryWalletRepository` you introduced in Chapter 2 was the right design for getting something running quickly: it let `WalletService` depend on a clean port, not an implementation, so you could focus on wiring and HTTP before thinking about databases.
 
-That investment pays off now. This chapter swaps the in-memory store for PostgreSQL-backed durable storage. You will map a `WalletEntity` to the database with SQLAlchemy, build a real `WalletRepository` with typed CRUD methods, derived queries, and pagination, then evolve the schema safely with a versioned Alembic migration. The controller and service stay exactly as they are — the port is the contract.
+That investment pays off now. The port is the contract, and the contract has not changed — so swapping the in-memory store for PostgreSQL is purely additive. This chapter makes that swap. You will map a `WalletEntity` to a database table with SQLAlchemy, build a real `WalletRepository` with typed CRUD methods, derived queries, and pagination, and then evolve the schema safely with a versioned Alembic migration. The controller and service from Chapters 2–4 stay exactly as they are.
 
 ---
 
 ## Entities: mapping your data
 
-Every relational table in PyFly begins as a Python class that extends `BaseEntity`. Defined in `pyfly.data.relational.sqlalchemy`, `BaseEntity` is an abstract SQLAlchemy `DeclarativeBase` that provides five columns you would otherwise write by hand on every table:
+Before you can read or write a row, you need to tell SQLAlchemy what that row looks like. In PyFly, that description is a plain Python class — the **entity** — that extends `BaseEntity` from `pyfly.data.relational.sqlalchemy`. The entity is the bridge between your Python objects and a relational table, and `BaseEntity` does the repetitive parts for you.
+
+Specifically, `BaseEntity` is an abstract SQLAlchemy `DeclarativeBase` that provides five audit columns you would otherwise copy-paste onto every table:
 
 | Field | Column type | Description |
 |---|---|---|
@@ -22,7 +24,7 @@ Every relational table in PyFly begins as a Python class that extends `BaseEntit
 | `created_by` | `String(255)` | Creator identifier (from `SecurityContext`, nullable) |
 | `updated_by` | `String(255)` | Updater identifier (nullable) |
 
-`BaseEntity` is abstract — no table is created for it. Your entity inherits the five columns and adds its own:
+`BaseEntity` is abstract — no table is created for it. Your entity inherits those five columns and adds only the business-specific ones:
 
 ::: listing lumen/wallet_entity.py | Listing 5.1 — WalletEntity: mapping the wallets table
 from sqlalchemy import String, Numeric
@@ -39,7 +41,9 @@ class WalletEntity(BaseEntity):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
 :::
 
-`WalletEntity` inherits `id`, `created_at`, `updated_at`, `created_by`, and `updated_by` from `BaseEntity` without writing a single column definition. Your four business columns are `owner_id`, `balance`, `currency`, and the implicit `created_at` that records when the wallet was opened. SQLAlchemy's async engine, session factory, and audit listener are all wired by auto-configuration.
+Three things to notice here. First, `WalletEntity` inherits `id`, `created_at`, `updated_at`, `created_by`, and `updated_by` without writing a single column definition — those five lines are invisible but present on every entity in the codebase. Second, the business columns use SQLAlchemy's `Mapped[T]` annotation syntax: the type hint drives both the Python attribute type and the generated DDL, so there is a single source of truth. Third, `owner_id` carries `index=True` — a deliberate choice because "find all wallets for this owner" is the most common query, and the index makes it fast regardless of table size.
+
+SQLAlchemy's async engine, session factory, and audit listener (which populates `created_by` / `updated_by` from the security context) are all wired by auto-configuration. You declare the entity; the framework handles the plumbing.
 
 To enable the SQLAlchemy adapter, add two keys to `pyfly.yaml`:
 
@@ -53,7 +57,7 @@ pyfly:
       ddl-auto: "none"
 :::
 
-`ddl-auto: none` tells PyFly not to auto-create tables — you want full control through migrations, which you will write at the end of this chapter. During development, `ddl-auto: create` is a faster alternative that applies the schema on every startup.
+`ddl-auto: none` tells PyFly not to touch the schema at startup — you want full control through migrations, which you will write at the end of this chapter. During very early development, `ddl-auto: create` is a faster alternative that creates (or drops and recreates) tables on every boot. Switch it back to `none` before you write your first migration.
 
 !!! tip "SQLite for development"
     Replace the `url` with `sqlite+aiosqlite:///lumen.db` for a zero-dependency local setup. SQLite works with every feature in this chapter; just swap back to PostgreSQL before staging.
@@ -62,11 +66,13 @@ pyfly:
 
 ## Repositories
 
-A repository is the **sole gateway** between your service layer and the database. In PyFly's hexagonal design your service depends on the *port* (`RepositoryPort[T, ID]` or a domain-specific sub-protocol), and the adapter provides the concrete class. The data commons layer defines the port; the SQLAlchemy adapter provides the implementation.
+The service layer should not know whether wallets live in PostgreSQL, MongoDB, or a spreadsheet. That is not a platitude — it is a practical guarantee: if `WalletService` depends on the database directly, you cannot test it without a database, and you cannot change the database without touching the service.
+
+A **repository** is the pattern that enforces this separation. It is the sole gateway between your service layer and the database: the service calls methods like `save`, `find_by_id`, and `find_paginated`; the repository translates those calls into SQL and back. In PyFly's hexagonal design your service declares its dependency as the *port* (`RepositoryPort[T, ID]`), and the SQLAlchemy adapter fulfils the port. The two never meet directly.
 
 ### The Repository[T, ID] class
 
-`Repository[T, ID]` from `pyfly.data.relational.sqlalchemy` is the concrete SQLAlchemy implementation. Subclass it with your entity and ID types and register the subclass with `@repository`. The framework resolves the entity type from the generic parameters at class-definition time and injects an async `AsyncSession` from the session factory automatically:
+`Repository[T, ID]` from `pyfly.data.relational.sqlalchemy` is the concrete SQLAlchemy implementation. Subclass it with your entity and ID types and annotate the subclass with `@repository`. The framework resolves the entity type from the generic parameters at class-definition time and injects an async `AsyncSession` from the session factory automatically:
 
 ::: listing lumen/wallet_repository.py | Listing 5.3 — WalletRepository: the SQLAlchemy-backed concrete repository
 from pyfly.container import repository
@@ -109,7 +115,7 @@ class WalletService:
         self._repo = repo
 ```
 
-`WalletService` written this way is completely database-agnostic. You can replace `WalletRepository` with a MongoDB adapter, a test-double, or any future persistence technology without changing a single line of service code.
+`WalletService` written this way is completely database-agnostic. Swap `WalletRepository` for a MongoDB adapter, a test-double, or any future storage technology, and the service needs no changes — not even a recompile.
 
 !!! spring "Spring parity"
     `Repository[T, ID]` maps directly to Spring Data JPA's `JpaRepository<T, ID>`, which itself extends `CrudRepository<T, ID>` and `PagingAndSortingRepository<T, ID>`. The same pattern applies: subclass the generic base with your entity and key types, annotate with `@repository` (≈ `@Repository` in Spring), and let the container wire everything. The method names — `save`, `findById`, `findAll`, `delete`, `count`, `existsById` — map one-to-one (camelCase vs snake_case aside).
@@ -118,9 +124,9 @@ class WalletService:
 
 ## Derived queries
 
-Typing common lookups by hand — `SELECT * FROM wallets WHERE owner_id = ?` — adds no value. PyFly generates those query bodies from the method name itself, following the same naming convention as Spring Data.
+Once you have a working repository, patterns emerge quickly. You find yourself writing `SELECT * FROM wallets WHERE owner_id = ?` in one place, `SELECT COUNT(*) FROM wallets WHERE owner_id = ?` in another, and a handful of similar one-liners throughout the codebase. They are not complex — they are just noise that obscures what the code is actually doing.
 
-You declare a **stub method** on your repository. The `RepositoryBeanPostProcessor` inspects the class after initialization, detects the stub (a method whose body is only `...` or `pass`), parses the name through `QueryMethodParser`, compiles it into a SQLAlchemy expression, and patches the method before any code calls it.
+PyFly generates those query bodies from the method name itself, following the same naming convention as Spring Data. You declare a **stub method** on your repository. The `RepositoryBeanPostProcessor` inspects the class after initialization, detects the stub (a method whose body is only `...` or `pass`), parses the name through `QueryMethodParser`, compiles it into a SQLAlchemy expression, and patches the method before any code calls it. By the time your service makes the first call, the real implementation is already in place — with no runtime reflection overhead per invocation.
 
 The naming grammar is:
 
@@ -174,7 +180,11 @@ class WalletRepository(Repository[WalletEntity, str]):
     ) -> list[WalletEntity]: ...
 :::
 
-Every stub body is `...`. That is all the compiler needs. `@query` accepts a JPQL-like string (`FROM WalletEntity w WHERE w.field = :param`) or raw SQL when `native=True` is passed. Named parameters in the query string (`:owner_id`, `:min_balance`) are bound from the method's arguments in order.
+Walk through what the parser does with each stub. `find_by_owner_id` decomposes to: prefix `find_by_`, field `owner_id`, operator implicit equality — the generated WHERE clause is `WHERE wallets.owner_id = :owner_id`. `find_by_balance_greater_than_order_by_created_at_desc` is longer but still mechanical: field `balance`, operator `greater_than` (mapped to `>`), then an ORDER BY clause on `created_at` descending. The method signature must supply one positional argument for each extracted field — the parser validates arity at class-load time, not at call time.
+
+For anything the naming grammar cannot express, `@query` accepts a JPQL-like string (`FROM WalletEntity w WHERE w.field = :param`) or raw SQL when `native=True` is passed. Named parameters in the query string (`:owner_id`, `:min_balance`) are bound from the method's keyword arguments in order.
+
+Every stub body is `...`. That is all the compiler needs — the rest is handled before the first call.
 
 !!! tip "Longest-match operator parsing"
     The parser matches operators longest-first, so `balance_greater_than_equal` is recognised as `>=` before falling back to `>`. Append `_order_by_<field>_asc` or `_order_by_<field>_desc` to any derived query to control result ordering — the clause is parsed after the predicates and applied at the end of the SELECT.
@@ -183,7 +193,7 @@ Every stub body is `...`. That is all the compiler needs. `@query` accepts a JPQ
 
 ## Pagination & sorting
 
-Returning an unbounded `list` from a repository is fine for small data sets. For anything user-facing, your API should accept `page` and `size` parameters and return a `Page[T]` — a frozen snapshot that carries the items, the total count, and enough metadata to drive client-side navigation.
+Returning an unbounded `list` from a repository is fine for small, bounded data sets. For anything user-facing — a wallet list, a transaction history, a search result page — you cannot afford to pull every row into memory just to show the first twenty. Your API needs to accept `page` and `size` parameters and return a `Page[T]`: a frozen snapshot that carries the current-page items, the total row count, and enough metadata to drive client-side navigation controls.
 
 The pagination vocabulary lives in `pyfly.data`:
 
@@ -191,9 +201,9 @@ The pagination vocabulary lives in `pyfly.data`:
 - `Sort` — an ordered list of `Order` objects; created with `Sort.by("field")` or `Sort.by("field").descending()`.
 - `Page[T]` — the result type returned by `find_paginated` and `find_all_by_spec_paged`.
 
-`Page[T]` exposes: `items` (the current-page list), `total` (rows across all pages), `page`, `size`, `total_pages`, `has_next`, `has_previous`. Call `page.map(fn)` to transform items while preserving all pagination metadata.
+`Page[T]` exposes: `items` (the current-page list), `total` (rows across all pages), `page`, `size`, `total_pages`, `has_next`, `has_previous`. Call `page.map(fn)` to transform items — converting `WalletEntity` to `WalletSummary`, for example — while preserving all pagination metadata automatically.
 
-Here is how to wire pagination into the wallet list endpoint. The controller passes `page` and `size` from query parameters to the service, which builds a `Pageable` and calls `find_paginated`:
+Here is how to wire pagination into the wallet list endpoint. The controller already accepts `page` and `size` as query parameters from Chapter 4; only the service method changes:
 
 ::: listing lumen/wallet_service.py | Listing 5.5 — Paginated wallet list in WalletService
 from dataclasses import dataclass
@@ -248,7 +258,7 @@ class WalletService:
         )
 :::
 
-The controller already accepts `page: QueryParam[int] = 1` and `size: QueryParam[int] = 20` from Chapter 4 — you only need to change what `WalletService.find_wallets` returns. The controller signature is untouched.
+Here is what each piece of this method does. `Pageable.of` bundles the page number, page size, and sort order into a single value object that the repository understands. `Sort.by("created_at").descending()` means the newest wallets always appear first — a sensible default for a financial product. The `if owner_id` branch uses a `FilterOperator.eq` specification (you will read about Specifications in the next section) to scope the query to a single owner; the `else` branch queries across all owners. Either way, `raw.map(...)` converts each `WalletEntity` to the lighter `WalletSummary` dataclass, carrying forward the total count and page metadata untouched. The controller receives a fully populated `Page[WalletSummary]` without knowing anything about how the data was fetched.
 
 !!! note "Note"
     `Pageable` validates its arguments: `page < 1` or `size < 1` raises `ValueError`. For an ad-hoc "fetch everything" query, use `Pageable.unpaged()` — the repository skips the `OFFSET` / `LIMIT` clauses and counts all matching rows.
@@ -257,9 +267,9 @@ The controller already accepts `page: QueryParam[int] = 1` and `size: QueryParam
 
 ## Specifications
 
-Derived queries cover equality and simple comparisons. When you need to compose conditions dynamically — adding a currency filter only when the caller supplies it, or building an admin search form with five optional fields — reach for `Specification`.
+Derived queries cover equality and simple comparisons, and they shine when the filter conditions are fixed. When you need to compose conditions *dynamically* — adding a currency filter only when the caller supplies it, combining three optional search fields from a form submission — method names become unwieldy and the combinatorial explosion of stubs is unmanageable.
 
-A `Specification[T]` is a callable predicate: it receives the entity class and a SQLAlchemy `Select` statement, applies a `WHERE` clause, and returns the modified statement. You create one from a lambda or use `FilterOperator`'s factory methods, then compose with `&` (AND), `|` (OR), and `~` (NOT):
+`Specification` solves this by treating each predicate as a first-class value you can compose at runtime. A `Specification[T]` is a callable predicate: it receives the entity class and a SQLAlchemy `Select` statement, applies a `WHERE` clause, and returns the modified statement. You create one from a lambda or use `FilterOperator`'s factory methods, then compose with `&` (AND), `|` (OR), and `~` (NOT) — the same way you compose boolean expressions, but lazily:
 
 ::: listing lumen/wallet_service.py | Listing 5.6 — Composable Specifications for dynamic wallet search
 from pyfly.data.relational.sqlalchemy import FilterOperator, Specification
@@ -290,7 +300,9 @@ async def search_wallets(
     return await repo.find_all_by_spec(spec)
 :::
 
-`FilterOperator` offers the full set — `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `contains`, `in_list`, `is_null`, `is_not_null`, `between` — so most predicates need no lambdas at all. Combine the result with `find_all_by_spec` for a simple list or `find_all_by_spec_paged` when you also need pagination.
+The pattern reads naturally: you start with a predicate that matches everything (the tautology `USD OR NOT USD`), then narrow it with `&` for each filter the caller actually provided. If `owner_id` is `None`, the owner clause is never added — not added as `WHERE owner_id IS NULL`, simply not added at all. The final `spec` is whatever combination of clauses was built, and a single `find_all_by_spec` call executes it.
+
+`FilterOperator` covers the full set of common predicates — `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `contains`, `in_list`, `is_null`, `is_not_null`, `between` — so most search forms need no hand-written lambdas. Combine the result with `find_all_by_spec` for a simple list or `find_all_by_spec_paged` when you also need pagination.
 
 !!! tip "Inline Specification"
     When `FilterOperator` does not cover your case, write a one-liner: `Specification(lambda root, q: q.where(root.balance > 0))`. The `root` is the SQLAlchemy mapped class; `q` is the current `Select`; return the modified statement. Composition with `&` / `|` / `~` works exactly the same way.
@@ -299,9 +311,9 @@ async def search_wallets(
 
 ## Transactions
 
-`save` and `delete` on `Repository` are already wrapped in a single flush — they do not need an explicit transaction for single-row operations. Multi-step writes are different. Crediting one wallet while debiting another must either both succeed or both fail; anything in between leaves the ledger corrupt.
+Every `save` and `delete` on `Repository` is already wrapped in a single flush — adequate for isolated, single-row operations. Multi-step writes are a different matter. Crediting one wallet while debiting another must either both succeed or both fail. If the credit completes and the debit then raises an exception, you have created money from nothing. If the debit completes and the credit fails, you have destroyed it. Either outcome is wrong, and neither is acceptable in a financial service.
 
-PyFly's `@transactional` decorator handles this declaratively. Import it alongside `Propagation` and `Isolation` from the SQLAlchemy adapter package, decorate the service method, and the framework opens a session, begins a transaction, commits on success, and rolls back on any exception:
+This all-or-nothing guarantee is what a database **transaction** provides. PyFly's `@transactional` decorator handles it declaratively, so you express the intent without writing session management code. Decorate the service method, and the framework opens a session, begins a transaction, commits on success, and rolls back on any exception — including exceptions raised deep inside called methods:
 
 ::: listing lumen/wallet_service.py | Listing 5.7 — Atomic fund transfer with @transactional
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -346,7 +358,9 @@ class TransferService:
         # Both saves committed atomically; any exception rolls back both
 :::
 
-`@transactional()` resolves `async_sessionmaker` from `self._session_factory` and automatically patches the repository instances on the service with the transaction-scoped session, so both `save` calls share the same transaction.
+Walk through the method. The two `find_by_id` calls load both wallets within the same transaction-scoped session — important, because a concurrent transfer to the same wallet must wait at the database level rather than racing in Python. The guard clauses raise `ValueError` before any mutation if either wallet is missing or the balance is insufficient; `@transactional` catches those exceptions and rolls back immediately. The two `save` calls then modify both entities; because they share the same session, they share the same transaction. Both writes commit together when the method returns normally, or both roll back if anything goes wrong after the first save.
+
+`@transactional()` resolves `async_sessionmaker` from `self._session_factory` and automatically patches the repository instances on the service with the transaction-scoped session, so both `save` calls share the same transaction without any wiring in your code.
 
 The decorator accepts optional `propagation` and `isolation` arguments. The default propagation is `REQUIRED`: join an existing transaction if one is active, otherwise open a new one. Use `Propagation.REQUIRES_NEW` for operations that must commit independently of the caller (audit logs, outbox events). Use `Isolation.SERIALIZABLE` for reports or transfer checks where phantom reads must be impossible.
 
@@ -357,7 +371,9 @@ The decorator accepts optional `propagation` and `isolation` arguments. The defa
 
 ## Evolving the schema: migrations
 
-`ddl-auto: create` is convenient during early development but is never acceptable in staging or production. It drops and recreates tables on every startup. You need **migrations**: versioned SQL scripts that describe each incremental change to the schema and can be applied, inspected, and — if necessary — reversed.
+`ddl-auto: create` is convenient in the first hours of development, when the schema is still in flux and losing data between restarts is acceptable. It is never acceptable in staging or production, because it **drops and recreates tables on every startup**, taking all existing data with it.
+
+The safe alternative is **migrations**: versioned scripts that describe each incremental change to the schema and can be applied forward or, when necessary, reversed. A migration knows what the schema looked like before it ran and what it should look like after. Applied in order, they bring any database — brand-new or months old — to exactly the version the code expects.
 
 PyFly's migration support is powered by [Alembic](https://alembic.sqlalchemy.org/). The `pyfly db` commands wrap Alembic with framework-aware defaults so you rarely need to touch `alembic.ini` or `env.py` directly.
 
@@ -369,7 +385,7 @@ Run this once in your project root:
 pyfly db init
 :::
 
-This creates an `alembic/` directory with Alembic's standard structure and writes a PyFly-customised `env.py` that already imports `Base.metadata` from `pyfly.data.relational.sqlalchemy`, wires `async_engine_from_config` for async database drivers (asyncpg, aiosqlite), and supports both online (live connection) and offline (SQL-script) migration modes.
+This creates an `alembic/` directory with Alembic's standard structure and writes a PyFly-customised `env.py` that already imports `Base.metadata` from `pyfly.data.relational.sqlalchemy`, wires `async_engine_from_config` for async database drivers (asyncpg, aiosqlite), and supports both online (live connection) and offline (SQL-script) migration modes. You do not need to configure any of this by hand.
 
 ### Generating the first migration
 
@@ -379,7 +395,7 @@ With `WalletEntity` defined, generate the initial migration:
 pyfly db migrate -m "create wallets table"
 :::
 
-Alembic compares `Base.metadata` (every entity you have defined) with the current database state and writes upgrade/downgrade functions in a new file under `alembic/versions/`. Open the file to review — Alembic is good but not perfect, and it is worth checking index names and constraints before applying.
+Alembic compares `Base.metadata` — every entity you have defined, including all inherited `BaseEntity` columns — against the current database state and writes `upgrade` and `downgrade` functions in a new file under `alembic/versions/`. Open the file and review it before applying: Alembic is accurate for columns and primary keys, but it does not detect every naming convention for constraints and indexes. This is a five-minute habit that prevents surprises in production.
 
 A generated migration file for the wallets table looks like this:
 
@@ -428,6 +444,8 @@ def downgrade() -> None:
     op.drop_table("wallets")
 :::
 
+Notice how the migration faithfully reflects what `WalletEntity` declared: the three business columns (`owner_id`, `balance`, `currency`), the five audit columns from `BaseEntity`, the primary key, and the index on `owner_id` that you requested with `index=True`. The `downgrade` function is the exact inverse — drop the index first, then the table — so rolling back this migration leaves the database in the state it was in before `upgrade` ran.
+
 ### Applying migrations
 
 Apply all pending migrations to bring the database to `head`:
@@ -452,7 +470,7 @@ Once the migration is applied, switch `ddl-auto` back to `none` in `pyfly.yaml` 
 
 Part II is off to a solid start.
 
-Lumen now writes to a real database without a single line of business logic changing. You defined `WalletEntity` by extending `BaseEntity` — five audit columns for free, four business columns for the domain — and enabled the SQLAlchemy adapter with two lines in `pyfly.yaml`. `WalletRepository` subclasses `Repository[WalletEntity, str]` and provides typed CRUD, derived query methods compiled from method names, and both list and paginated retrieval. `WalletService` depends on the repository through the `RepositoryPort` protocol and is unaware of the database engine underneath. Multi-step writes are wrapped in `@transactional()` to guarantee atomicity. And the schema is versioned with Alembic migrations generated by `pyfly db migrate` — no hand-written SQL, no `ddl-auto: create` in production.
+Lumen now writes to a real database without a single line of business logic changing. You defined `WalletEntity` by extending `BaseEntity` — five audit columns for free, four business columns for the domain — and enabled the SQLAlchemy adapter with two lines in `pyfly.yaml`. `WalletRepository` subclasses `Repository[WalletEntity, str]` and provides typed CRUD, derived query methods compiled from method names at class-load time, and both list and paginated retrieval. `WalletService` depends on the repository through the `RepositoryPort` protocol and remains unaware of the database engine underneath. Multi-step writes are wrapped in `@transactional()` to guarantee atomicity: both saves commit together or neither does. The schema is versioned with Alembic migrations generated by `pyfly db migrate` — no hand-written SQL, no `ddl-auto: create` in production.
 
 The controller and service code from Chapters 2–4 are untouched. That is the hexagonal payoff.
 
