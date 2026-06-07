@@ -11,6 +11,7 @@ extension (note/tip/warning + custom 'spring').
 from __future__ import annotations
 import re
 import base64
+import html.entities as _htmlent
 from pathlib import Path
 import markdown
 from markdown.preprocessors import Preprocessor
@@ -109,11 +110,25 @@ class PyflyExtension(Extension):
         md.preprocessors.register(_Directives(md, self.base), "pyfly_directives", 28)
         md.postprocessors.register(_AdmonitionIcons(md), "pyfly_adm_icons", 5)
 
+_XML_SAFE_ENTITIES = {"amp", "lt", "gt", "quot", "apos"}
+
+def _to_xml_entities(s: str) -> str:
+    """Convert HTML named entities (e.g. &nbsp;) to numeric refs so the output is
+    well-formed XML for EPUB3 XHTML (XML predefines only amp/lt/gt/quot/apos)."""
+    def repl(m: "re.Match[str]") -> str:
+        name = m.group(1)
+        if name in _XML_SAFE_ENTITIES:
+            return m.group(0)
+        cp = _htmlent.name2codepoint.get(name)
+        return f"&#{cp};" if cp is not None else m.group(0)
+    return re.sub(r"&([a-zA-Z][a-zA-Z0-9]*);", repl, s)
+
+
 def render_markdown(text: str, base: Path) -> str:
     md = markdown.Markdown(
         extensions=["extra", "admonition", "toc", "sane_lists", "codehilite",
                     PyflyExtension(base)],
         extension_configs={"codehilite": {"css_class": "code", "guess_lang": False}},
-        output_format="html5",
+        output_format="xhtml",
     )
-    return md.convert(text)
+    return _to_xml_entities(md.convert(text))
