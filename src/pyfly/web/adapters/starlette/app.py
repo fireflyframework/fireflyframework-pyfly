@@ -141,14 +141,20 @@ def create_app(
     # --- Build the WebFilter chain ---
     # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
     # and @pre_authorize/@post_authorize have a live RequestContext to read.
+    # Per-request access logging is on by default; it can be disabled to shave per-request
+    # footprint (the structlog emit is the costliest filter) via pyfly.web.request-logging.enabled.
+    request_logging_enabled = context is None or str(
+        context.config.get("pyfly.web.request-logging.enabled", "true")
+    ).lower() in ("true", "1", "yes")
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
         TracingFilter(),
         TransactionIdFilter(),
-        RequestLoggingFilter(),
-        SecurityHeadersFilter(),
     ]
+    if request_logging_enabled:
+        filters.append(RequestLoggingFilter())
+    filters.append(SecurityHeadersFilter())
     if metrics_filter_instance is not None:
         filters.append(metrics_filter_instance)
     if http_exchange_filter is not None:

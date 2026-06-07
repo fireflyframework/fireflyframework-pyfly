@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.64 (2026-06-07)
+
+### Performance (web — per-request footprint)
+
+Profiling the filter chain showed the chain *machinery* is essentially free (the middleware
+with zero filters measures within noise of bare Starlette) — the ~22% overhead vs bare
+Starlette is entirely the per-filter features, dominated by the per-request access log (~38µs).
+
+- **Access logging is now opt-out** via `pyfly.web.request-logging.enabled` (default `true`).
+  Disabling it drops ~38µs/request (overhead ~22% → ~13%) for latency-sensitive services.
+- **`SecurityHeadersFilter`** now precomputes its encoded header tuples once and bulk-appends
+  them to `response.raw_headers`, instead of N `MutableHeaders` setitems per request.
+- `benchmarks/README.md` documents the full per-filter footprint decomposition.
+
 ## v26.06.63 (2026-06-07)
 
 ### Performance (DI container — cached constructor plan)
