@@ -73,6 +73,7 @@ def build_actuator_routes(
     from pyfly.actuator.endpoints.loggers_endpoint import LoggersEndpoint
     from pyfly.actuator.endpoints.mappings_endpoint import MappingsEndpoint
     from pyfly.actuator.endpoints.metrics_endpoint import MetricsEndpoint
+    from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
     from pyfly.actuator.endpoints.scheduledtasks_endpoint import ScheduledTasksEndpoint
     from pyfly.actuator.endpoints.threaddump_endpoint import ThreadDumpEndpoint
     from pyfly.actuator.exposure import base_path, is_web_exposed, web_exposure
@@ -105,6 +106,7 @@ def build_actuator_routes(
         registry.register(ScheduledTasksEndpoint(context))
         registry.register(ConditionsEndpoint(context))
         registry.register(CachesEndpoint(context))
+        registry.register(RefreshEndpoint(context))
 
     # Prometheus scrape endpoint (only when prometheus_client is installed).
     try:

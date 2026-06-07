@@ -85,6 +85,16 @@ class ApplicationContext:
         # lifecycle or arbitrary domain events into the bus.
         self._container.register(ApplicationEventPublisher, scope=Scope.SINGLETON)
         self._container._registrations[ApplicationEventPublisher].instance = ApplicationEventPublisher(self._event_bus)
+        # Built-in "refresh" scope + injectable ContextRefresher (Spring Cloud @RefreshScope).
+        from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, RefreshScope
+        from pyfly.context.refresh import ContextRefresher
+
+        refresh_scope = RefreshScope()
+        self._container.register_scope(REFRESH_SCOPE_NAME, refresh_scope)
+        self._container.register(ContextRefresher, scope=Scope.SINGLETON)
+        self._container._registrations[ContextRefresher].instance = ContextRefresher(
+            self._container, refresh_scope, self._event_bus
+        )
 
     # ------------------------------------------------------------------
     # Bean registration

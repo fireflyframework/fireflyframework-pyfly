@@ -40,6 +40,16 @@ class ContextClosedEvent(ApplicationEvent):
     """Published when the ApplicationContext is shutting down."""
 
 
+class RefreshScopeRefreshedEvent(ApplicationEvent):
+    """Published after a refresh evicts refresh-scoped beans (Spring Cloud parity).
+
+    ``refreshed`` holds the cache keys of the evicted beans.
+    """
+
+    def __init__(self, refreshed: list[str]) -> None:
+        self.refreshed = refreshed
+
+
 def app_event_listener(func: F) -> F:
     """Mark a method as a listener for application events.
 
