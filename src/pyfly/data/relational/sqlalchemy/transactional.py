@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import functools
 from collections.abc import Callable
@@ -22,6 +23,8 @@ from contextvars import ContextVar
 from typing import Any, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from pyfly.data.relational.routing import read_only as _read_only_scope
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -75,6 +78,7 @@ def transactional(
     isolation: Isolation = Isolation.DEFAULT,
     read_only: bool = False,
     rollback_for: tuple[type[BaseException], ...] = (Exception,),
+    no_rollback_for: tuple[type[BaseException], ...] = (),
 ) -> Callable[[F], F]:
     """DI-aware declarative transaction management decorator.
 
@@ -122,26 +126,39 @@ def transactional(
             if isolation is not Isolation.DEFAULT:
                 execution_options["isolation_level"] = isolation.value
 
-            async with session_factory() as session:
-                if execution_options:
-                    session = session.execution_options(**execution_options)  # type: ignore[attr-defined]
+            # read_only routes to the replica when the session factory is a
+            # RoutingSessionFactory (pyfly.data.relational.routing) and flags the session.
+            ro_scope = _read_only_scope() if read_only else contextlib.nullcontext()
+            with ro_scope:
+                async with session_factory() as session:
+                    if read_only:
+                        session.info["read_only"] = True
+                    if execution_options:
+                        session = session.execution_options(**execution_options)  # type: ignore[attr-defined]
 
-                await session.begin()
-                token = _active_session_var.set(session)
-                if self_arg is not None:
-                    _patch_repositories(self_arg, session)
-                try:
-                    result = await func(*args, **kwargs)
-                    await session.commit()
-                    return result
-                except BaseException as exc:
-                    if isinstance(exc, tuple(rollback_for)):
-                        await session.rollback()
-                    else:
+                    await session.begin()
+                    token = _active_session_var.set(session)
+                    if self_arg is not None:
+                        _patch_repositories(self_arg, session)
+                    try:
+                        result = await func(*args, **kwargs)
                         await session.commit()
-                    raise
-                finally:
-                    _active_session_var.reset(token)
+                        return result
+                    except BaseException as exc:
+                        # Never commit partial work on cancellation/shutdown: a BaseException
+                        # that is not an Exception (asyncio.CancelledError, KeyboardInterrupt,
+                        # SystemExit) always rolls back, regardless of rollback_for.
+                        if not isinstance(exc, Exception):
+                            await session.rollback()
+                        elif isinstance(exc, tuple(no_rollback_for)):
+                            await session.commit()
+                        elif isinstance(exc, tuple(rollback_for)):
+                            await session.rollback()
+                        else:
+                            await session.commit()
+                        raise
+                    finally:
+                        _active_session_var.reset(token)
 
         wrapper.__pyfly_transactional__ = True  # type: ignore[attr-defined]
         wrapper.__pyfly_propagation__ = propagation  # type: ignore[attr-defined]

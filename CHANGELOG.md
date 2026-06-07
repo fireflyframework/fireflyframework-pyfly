@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.34 (2026-06-07)
+
+### Fixed (data — @transactional correctness)
+
+From the final parity audit:
+
+- **No partial commit on cancellation/shutdown (silent-failure fix).** The
+  `except` branch committed any `BaseException` not listed in `rollback_for`
+  (default `(Exception,)`) — so `asyncio.CancelledError`, `KeyboardInterrupt`, and
+  `SystemExit` **committed a partially-applied transaction**. A `BaseException` that
+  is not an `Exception` now always rolls back, regardless of `rollback_for`.
+- **`@transactional(read_only=True)` is now wired** (was dead code): it enters the
+  `read_only()` routing scope — so a `RoutingSessionFactory` routes the transaction to
+  the read replica — and flags the session (`session.info["read_only"]`).
+
+### Added
+
+- **`@transactional(no_rollback_for=(...))`** — exceptions that should commit rather
+  than roll back (Spring's `noRollbackFor`).
+
+---
+
 ## v26.06.33 (2026-06-07)
 
 ### Fixed (web — FastAPI adapter serialization parity)
