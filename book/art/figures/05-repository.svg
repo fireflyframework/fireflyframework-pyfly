@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 240"
+     role="img" aria-label="Hexagonal persistence: WalletService depends on RepositoryPort; SQLAlchemy adapter implements port and talks to DB"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="680" height="240" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="rep-shadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="rep-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <marker id="rep-arrow-muted" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+  </defs>
+
+  <!-- ── WalletService box ── -->
+  <rect x="24" y="78" width="140" height="84" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#rep-shadow)"/>
+  <!-- Header bar -->
+  <rect x="24" y="78" width="140" height="26" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="24" y="92" width="140" height="12" fill="#43b02a"/>
+  <text x="94" y="91" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="12" font-weight="700">WalletService</text>
+  <text x="94" y="124" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">transfer()</text>
+  <text x="94" y="142" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">deposit()</text>
+
+  <!-- Arrow WalletService → RepositoryPort -->
+  <line x1="164" y1="120" x2="208" y2="120"
+        stroke="#43b02a" stroke-width="2"
+        marker-end="url(#rep-arrow)"/>
+
+  <!-- ── RepositoryPort chip (the port) ── -->
+  <rect x="210" y="94" width="130" height="52" rx="10" ry="10"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <!-- Header bar -->
+  <rect x="210" y="94" width="130" height="22" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="210" y="106" width="130" height="10" fill="#43b02a"/>
+  <text x="275" y="105" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">RepositoryPort</text>
+  <text x="275" y="128" text-anchor="middle" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="10">«interface»</text>
+
+  <!-- Port boundary label -->
+  <text x="275" y="162" text-anchor="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">your code depends on the port</text>
+
+  <!-- Dashed boundary line (port wall) -->
+  <line x1="344" y1="60" x2="344" y2="185"
+        stroke="#8aa07e" stroke-width="1.5" stroke-dasharray="5,4"/>
+
+  <!-- Arrow RepositoryPort → SQLAlchemy adapter -->
+  <line x1="342" y1="120" x2="390" y2="120"
+        stroke="#8aa07e" stroke-width="2"
+        marker-end="url(#rep-arrow-muted)"/>
+
+  <!-- ── SQLAlchemy Adapter box ── -->
+  <rect x="392" y="82" width="150" height="76" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#rep-shadow)"/>
+  <!-- Header bar -->
+  <rect x="392" y="82" width="150" height="26" rx="12" ry="12" fill="#2c8a1c"/>
+  <rect x="392" y="96" width="150" height="12" fill="#2c8a1c"/>
+  <text x="467" y="95" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">SQLAlchemy Adapter</text>
+  <text x="467" y="124" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">save() / find()</text>
+  <text x="467" y="142" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">implements port</text>
+
+  <!-- Arrow Adapter → DB -->
+  <line x1="542" y1="120" x2="584" y2="120"
+        stroke="#43b02a" stroke-width="2"
+        marker-end="url(#rep-arrow)"/>
+
+  <!-- ── Database cylinder ── -->
+  <!-- top ellipse -->
+  <ellipse cx="626" cy="104" rx="38" ry="13" fill="#43b02a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- body -->
+  <rect x="588" y="104" width="76" height="50" fill="#5fd13a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- bottom ellipse -->
+  <ellipse cx="626" cy="154" rx="38" ry="13" fill="#43b02a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- sheen -->
+  <ellipse cx="614" cy="101" rx="14" ry="5" fill="#a0e070" opacity="0.5"/>
+
+  <!-- DB label -->
+  <text x="626" y="132" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">DB</text>
+
+  <!-- "adapter" label above boundary -->
+  <text x="395" y="56" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">infrastructure</text>
+  <text x="100" y="56" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">domain</text>
+
+</svg>

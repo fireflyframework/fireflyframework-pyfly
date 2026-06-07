@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 240"
+     role="img" aria-label="Production figure: Plugins and Rule Engine feed into Lumen runtime core; Lumen ships to Docker container deploy, then to cloud"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="700" height="240" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="prd-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="prd-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+    <marker id="prd-arr-g" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Section label -->
+  <text x="28" y="26" dominant-baseline="middle"
+        fill="#43b02a" font-size="11" font-weight="700">production — plugins · rule engine · Lumen → deploy → cloud</text>
+
+  <!-- ── Plugins box ── -->
+  <rect x="28" y="56" width="106" height="56" rx="10" ry="10"
+        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#prd-shadow)"/>
+  <rect x="28" y="56" width="106" height="22" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="28" y="68" width="106" height="10" fill="#43b02a"/>
+  <text x="81" y="67" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="11" font-weight="700">Plugins</text>
+  <text x="81" y="92" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">hook registry</text>
+  <text x="81" y="104" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">extension points</text>
+
+  <!-- ── Config server chip ── -->
+  <rect x="28" y="130" width="106" height="38" rx="8" ry="8"
+        fill="#fff" stroke="#5fd13a" stroke-width="1.8" filter="url(#prd-shadow)"/>
+  <rect x="28" y="130" width="106" height="18" rx="8" ry="8" fill="#5fd13a"/>
+  <rect x="28" y="140" width="106" height="8" fill="#5fd13a"/>
+  <text x="81" y="139" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="10" font-weight="700">Config server</text>
+  <text x="81" y="160" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="8.5">remote config reload</text>
+
+  <!-- ── Rule Engine chip ── -->
+  <rect x="28" y="184" width="106" height="40" rx="8" ry="8"
+        fill="#fff" stroke="#2c8a1c" stroke-width="1.8" filter="url(#prd-shadow)"/>
+  <rect x="28" y="184" width="106" height="18" rx="8" ry="8" fill="#2c8a1c"/>
+  <rect x="28" y="194" width="106" height="8" fill="#2c8a1c"/>
+  <text x="81" y="193" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="10" font-weight="700">Rule Engine</text>
+  <text x="81" y="214" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="8.5">hot-reload rules</text>
+
+  <!-- Arrows → Lumen -->
+  <line x1="134" y1="84" x2="210" y2="110"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
+  <line x1="134" y1="149" x2="210" y2="120"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
+  <line x1="134" y1="204" x2="210" y2="130"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
+
+  <!-- ── Lumen (central runtime) ── -->
+  <rect x="212" y="80" width="130" height="80" rx="12" ry="12"
+        fill="#fff" stroke="#2c8a1c" stroke-width="3" filter="url(#prd-shadow)"/>
+  <rect x="212" y="80" width="130" height="28" rx="12" ry="12" fill="#2c8a1c"/>
+  <rect x="212" y="96" width="130" height="12" fill="#2c8a1c"/>
+  <text x="277" y="94" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="14" font-weight="700">Lumen</text>
+  <text x="277" y="126" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9.5">PyFly runtime core</text>
+  <text x="277" y="148" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">DI · web · data · events</text>
+
+  <!-- Arrow Lumen → Docker -->
+  <line x1="342" y1="120" x2="386" y2="120"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#prd-arr-g)"/>
+  <text x="364" y="110" text-anchor="middle"
+        fill="#43b02a" font-size="9" font-weight="600">ship</text>
+
+  <!-- ── Docker deploy box ── -->
+  <rect x="388" y="80" width="120" height="80" rx="10" ry="10"
+        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#prd-shadow)"/>
+  <rect x="388" y="80" width="120" height="28" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="388" y="96" width="120" height="12" fill="#43b02a"/>
+  <text x="448" y="94" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">Docker</text>
+  <!-- Container with up-arrow inside -->
+  <rect x="420" y="118" width="56" height="28" rx="4" ry="4"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.5"/>
+  <text x="448" y="126" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="9" font-weight="600">container</text>
+  <line x1="448" y1="138" x2="448" y2="148" stroke="#43b02a" stroke-width="2"
+        marker-end="url(#prd-arr-g)"/>
+
+  <!-- Arrow Docker → cloud -->
+  <line x1="508" y1="120" x2="552" y2="120"
+        stroke="#43b02a" stroke-width="2" marker-end="url(#prd-arr-g)"/>
+
+  <!-- ── Cloud target ── -->
+  <!-- Cloud shape -->
+  <ellipse cx="600" cy="114" rx="46" ry="28" fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#prd-shadow)"/>
+  <ellipse cx="578" cy="118" rx="20" ry="16" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+  <ellipse cx="622" cy="118" rx="20" ry="16" fill="#fff" stroke="#43b02a" stroke-width="2"/>
+  <!-- Cloud inner fill to hide seams -->
+  <ellipse cx="600" cy="120" rx="48" ry="22" fill="#fff"/>
+  <text x="600" y="118" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="12" font-weight="700">cloud</text>
+  <text x="600" y="152" text-anchor="middle"
+        fill="#6a7a64" font-size="9">AWS / GCP / bare metal</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(666, 40)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>

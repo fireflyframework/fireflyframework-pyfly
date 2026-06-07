@@ -792,7 +792,18 @@ from pyfly.starters.domain import (
 )
 ```
 
-See **[`samples/order_service/`](samples/order_service/README.md)** for an end-to-end DDD microservice that uses every primitive: layered split (interfaces / models / core / web / sdk), a real `Order` aggregate that protects its invariants, CQRS handlers, and a `ConfirmOrderSaga` that walks the order through `PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation. See [docs/modules/domain.md](docs/modules/domain.md).
+See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD microservice that uses every primitive: a layered split (interfaces / models / core / web / sdk), a real `Wallet` aggregate built on a `Money` value object, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), CQRS handlers, an event-sourced ledger, domain-event publishing, and a money-transfer saga with full compensation. See [docs/modules/domain.md](docs/modules/domain.md).
+
+---
+
+## 📘 Learn PyFly with the book — *PyFly by Example*
+
+**[PyFly by Example](book/)** is the official, project-driven book for the framework. Across **18 chapters in five parts** it builds **Lumen** — the wallet & ledger service in [`samples/lumen/`](samples/lumen/README.md) — from an empty folder into a secured, observable, event-driven microservice. Every code listing is drawn from that real, running project (it boots and passes its tests against this framework version), so what you read is what actually runs.
+
+It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
+
+- **Read it** — the sources live in [`book/`](book/) (Markdown + SVG art); build the EPUB + PDF with `bash book/build/run.sh`.
+- **Run along** — `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 

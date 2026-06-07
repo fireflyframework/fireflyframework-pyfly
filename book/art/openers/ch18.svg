@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 18: Production — Plugins and Rule Engine feed into Lumen runtime core, shipped via Docker to the cloud with Config server"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="s18-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="s18-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+    <marker id="s18-arr-g" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Section label -->
+  <text x="360" y="26" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="13" font-weight="700">Production — plugins · Lumen · deploy</text>
+
+  <!-- Plugins box -->
+  <rect x="42" y="66" width="140" height="66" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s18-shadow)"/>
+  <rect x="42" y="66" width="140" height="28" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="42" y="82" width="140" height="12" fill="#43b02a"/>
+  <text x="112" y="80" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">Plugins</text>
+  <text x="112" y="116" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">rule engine / config</text>
+
+  <!-- Rule Engine chip -->
+  <rect x="42" y="154" width="140" height="52" rx="10" ry="10"
+        fill="#fff" stroke="#5fd13a" stroke-width="2" filter="url(#s18-shadow)"/>
+  <rect x="42" y="154" width="140" height="22" rx="10" ry="10" fill="#5fd13a"/>
+  <rect x="42" y="166" width="140" height="10" fill="#5fd13a"/>
+  <text x="112" y="165" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="11" font-weight="700">Rule Engine</text>
+  <text x="112" y="194" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">hot-reload rules</text>
+
+  <!-- Arrows Plugins + Rules → Lumen -->
+  <line x1="182" y1="99" x2="240" y2="126"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#s18-arr)"/>
+  <line x1="182" y1="180" x2="240" y2="156"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#s18-arr)"/>
+
+  <!-- Config server chip below -->
+  <rect x="42" y="222" width="140" height="34" rx="8" ry="8"
+        fill="#eaf6df" stroke="#8aa07e" stroke-width="1.4"/>
+  <text x="112" y="239" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10.5" font-weight="600">Config server</text>
+
+  <!-- Lumen (runtime core) — center -->
+  <rect x="242" y="88" width="160" height="84" rx="14" ry="14"
+        fill="#fff" stroke="#2c8a1c" stroke-width="2.5" filter="url(#s18-shadow)"/>
+  <rect x="242" y="88" width="160" height="32" rx="14" ry="14" fill="#2c8a1c"/>
+  <rect x="242" y="104" width="160" height="16" fill="#2c8a1c"/>
+  <text x="322" y="104" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="16" font-weight="700">Lumen</text>
+  <text x="322" y="154" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="11">runtime core</text>
+
+  <!-- Arrow Lumen → Docker -->
+  <line x1="402" y1="130" x2="454" y2="130"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#s18-arr-g)"/>
+  <text x="428" y="120" text-anchor="middle"
+        fill="#6a7a64" font-size="9.5" font-style="italic">ship</text>
+
+  <!-- Docker deploy box -->
+  <rect x="456" y="88" width="150" height="84" rx="14" ry="14"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s18-shadow)"/>
+  <rect x="456" y="88" width="150" height="32" rx="14" ry="14" fill="#43b02a"/>
+  <rect x="456" y="104" width="150" height="16" fill="#43b02a"/>
+  <text x="531" y="104" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="14" font-weight="700">Docker ↑</text>
+  <text x="531" y="154" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="11">container deploy</text>
+
+  <!-- Arrow Docker → Cloud -->
+  <line x1="531" y1="172" x2="531" y2="198"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#s18-arr-g)"/>
+
+  <!-- Cloud box -->
+  <rect x="454" y="200" width="154" height="50" rx="14" ry="14"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2" filter="url(#s18-shadow)"/>
+  <text x="531" y="225" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="15" font-weight="700">&#x2601; cloud</text>
+
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(682, 44)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(660, 200)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+</svg>

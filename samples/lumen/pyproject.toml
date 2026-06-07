@@ -1,0 +1,51 @@
+[project]
+name = "lumen"
+version = "1.0.0"
+description = "Lumen — a DDD digital-wallet service built on the PyFly framework"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Firefly Software Foundation" }]
+dependencies = [
+    # Sample uses the local checkout via uv's [tool.uv.sources] table below.
+    # `cli` brings in the `pyfly run` command line; `web` brings in the
+    # ASGI server; `data-relational` brings in SQLAlchemy 2 (async) +
+    # aiosqlite so the SQLite WalletRepository adapter runs with no
+    # external infra. CQRS / transactional / event-sourcing / in-memory
+    # EDA live in the base package (no extra deps), so naming them is
+    # optional.
+    "pyfly[cli,web,data-relational]",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+]
+
+[tool.uv.sources]
+pyfly = { path = "../..", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lumen"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    # The full-context integration test boots the framework's shared,
+    # pooled AsyncSession. SQLAlchemy emits a GC-timing SAWarning if a
+    # pooled aiosqlite connection is finalized by the garbage collector at
+    # interpreter teardown. It is a teardown artifact only — every test
+    # passes and persistence is verified by reload — so we silence just
+    # that one message.
+    "ignore:.*garbage collector is trying to clean up non-checked-in connection.*:Warning",
+]

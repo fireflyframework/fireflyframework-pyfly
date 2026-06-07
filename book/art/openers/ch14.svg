@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 14: Security — Request flows through JWT Filter and @secure RBAC check to Service, with IDP issuing the token below"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="s14-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="s14-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+    <marker id="s14-arr-g" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Section label -->
+  <text x="360" y="28" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="14" font-weight="700">Security — JWT auth + RBAC</text>
+
+  <!-- Request box (left) -->
+  <rect x="42" y="82" width="116" height="60" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="42" y="82" width="116" height="26" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="42" y="96" width="116" height="12" fill="#43b02a"/>
+  <text x="100" y="95" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">Request</text>
+  <text x="100" y="128" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">HTTP call</text>
+
+  <!-- Arrow Request → JWT Filter -->
+  <line x1="158" y1="112" x2="200" y2="112"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#s14-arr)"/>
+
+  <!-- JWT Filter box -->
+  <rect x="202" y="82" width="120" height="60" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="202" y="82" width="120" height="26" rx="12" ry="12" fill="#5fd13a"/>
+  <rect x="202" y="96" width="120" height="12" fill="#5fd13a"/>
+  <text x="262" y="95" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="12" font-weight="700">JWT Filter</text>
+  <text x="262" y="128" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">verify token</text>
+
+  <!-- Arrow JWT Filter → @secure -->
+  <line x1="322" y1="112" x2="364" y2="112"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#s14-arr)"/>
+
+  <!-- @secure check box -->
+  <rect x="366" y="82" width="120" height="60" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="366" y="82" width="120" height="26" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="366" y="96" width="120" height="12" fill="#43b02a"/>
+  <text x="426" y="95" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">@secure</text>
+  <text x="426" y="128" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">RBAC check</text>
+
+  <!-- Arrow @secure → Service -->
+  <line x1="486" y1="112" x2="528" y2="112"
+        stroke="#43b02a" stroke-width="2" marker-end="url(#s14-arr-g)"/>
+
+  <!-- Service box (right) -->
+  <rect x="530" y="82" width="148" height="60" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="530" y="82" width="148" height="26" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="530" y="96" width="148" height="12" fill="#43b02a"/>
+  <text x="604" y="95" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">Service</text>
+  <text x="604" y="128" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">business logic</text>
+
+  <!-- IDP badge below JWT Filter -->
+  <rect x="202" y="180" width="120" height="54" rx="10" ry="10"
+        fill="#fff" stroke="#ffc24b" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="202" y="180" width="120" height="24" rx="10" ry="10" fill="#ffc24b"/>
+  <rect x="202" y="194" width="120" height="10" fill="#ffc24b"/>
+  <text x="262" y="192" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="12" font-weight="700">IDP</text>
+  <text x="262" y="220" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">token issuer</text>
+
+  <!-- Dashed line IDP → JWT Filter -->
+  <line x1="262" y1="180" x2="262" y2="142"
+        stroke="#ffc24b" stroke-width="1.8" stroke-dasharray="5,4"/>
+  <text x="278" y="164" fill="#6a7a64" font-size="9" font-style="italic">issues JWT</text>
+
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(680, 44)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>

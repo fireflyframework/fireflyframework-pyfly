@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 340"
+     role="img" aria-label="Wallet aggregate root containing Money value object, owner_id and balance fields, balance-ge-0 invariant, and emitting WalletOpened and FundsDeposited events"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="640" height="340" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="agg-shadow" x="-8%" y="-8%" width="118%" height="118%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#2c8a1c" flood-opacity="0.28"/>
+    </filter>
+    <marker id="agg-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ffc24b"/>
+    </marker>
+  </defs>
+
+  <!-- ── Large Wallet aggregate root container ── -->
+  <rect x="30" y="40" width="420" height="270" rx="20" ry="20"
+        fill="#ffffff" stroke="#43b02a" stroke-width="3" filter="url(#agg-shadow)"/>
+  <!-- Header bar -->
+  <rect x="30" y="40" width="420" height="36" rx="20" ry="20" fill="#43b02a"/>
+  <rect x="30" y="60" width="420" height="16" fill="#43b02a"/>
+  <text x="240" y="58" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="15" font-weight="700">Wallet  «aggregate root»</text>
+
+  <!-- Fields section -->
+  <text x="56" y="108" dominant-baseline="middle"
+        fill="#23402a" font-size="13" font-family="monospace,monospace">owner_id: OwnerId</text>
+  <line x1="30" y1="124" x2="450" y2="124" stroke="#b8d9a0" stroke-width="1"/>
+  <text x="56" y="142" dominant-baseline="middle"
+        fill="#23402a" font-size="13" font-family="monospace,monospace">balance: Money</text>
+  <line x1="30" y1="158" x2="450" y2="158" stroke="#b8d9a0" stroke-width="1"/>
+
+  <!-- ── Money value object chip ── -->
+  <rect x="56" y="170" width="160" height="44" rx="10" ry="10"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <!-- Header bar -->
+  <rect x="56" y="170" width="160" height="20" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="56" y="180" width="160" height="10" fill="#43b02a"/>
+  <text x="136" y="180" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">Money  «value object»</text>
+  <text x="136" y="203" text-anchor="middle" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="11" font-family="monospace,monospace">amount, currency</text>
+
+  <!-- ── Invariant note ── -->
+  <!-- Note shape: rectangle with folded corner -->
+  <polygon points="258,170 378,170 388,180 388,222 258,222"
+           fill="#fffbe6" stroke="#ffc24b" stroke-width="2"/>
+  <!-- Folded corner triangle -->
+  <polygon points="378,170 388,180 378,180"
+           fill="#ffc24b"/>
+  <text x="323" y="192" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="11" font-weight="700">«invariant»</text>
+  <text x="323" y="211" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="12" font-family="monospace,monospace">balance ≥ 0</text>
+
+  <!-- Methods section -->
+  <line x1="30" y1="232" x2="450" y2="232" stroke="#b8d9a0" stroke-width="1"/>
+  <text x="56" y="252" dominant-baseline="middle"
+        fill="#23402a" font-size="12" font-family="monospace,monospace">deposit(amount)</text>
+  <text x="56" y="272" dominant-baseline="middle"
+        fill="#23402a" font-size="12" font-family="monospace,monospace">withdraw(amount)</text>
+  <text x="56" y="292" dominant-baseline="middle"
+        fill="#23402a" font-size="12" font-family="monospace,monospace">open(owner_id)</text>
+
+  <!-- ── Amber event sparks emitting top-right ── -->
+  <!-- WalletOpened spark -->
+  <g transform="translate(532, 80)">
+    <path d="M0,-16 L3.5,-3.5 L16,0 L3.5,3.5 L0,16 L-3.5,3.5 L-16,0 L-3.5,-3.5 Z" fill="#ffc24b"/>
+  </g>
+  <text x="532" y="108" text-anchor="middle"
+        fill="#23402a" font-size="11" font-weight="700">WalletOpened</text>
+
+  <!-- FundsDeposited spark -->
+  <g transform="translate(548, 175)">
+    <path d="M0,-14 L3,-3 L14,0 L3,3 L0,14 L-3,3 L-14,0 L-3,-3 Z" fill="#ffc24b"/>
+  </g>
+  <text x="548" y="202" text-anchor="middle"
+        fill="#23402a" font-size="11" font-weight="700">FundsDeposited</text>
+
+  <!-- Arrows from aggregate top-right edge to event sparks -->
+  <line x1="450" y1="78" x2="512" y2="78"
+        stroke="#ffc24b" stroke-width="2" stroke-dasharray="4,3"
+        marker-end="url(#agg-arrow)"/>
+  <line x1="450" y1="172" x2="530" y2="172"
+        stroke="#ffc24b" stroke-width="2" stroke-dasharray="4,3"
+        marker-end="url(#agg-arrow)"/>
+
+  <!-- "emits" labels -->
+  <text x="480" y="70" text-anchor="middle"
+        fill="#ffc24b" font-size="9" font-weight="600">emits</text>
+  <text x="488" y="164" text-anchor="middle"
+        fill="#ffc24b" font-size="9" font-weight="600">emits</text>
+
+</svg>

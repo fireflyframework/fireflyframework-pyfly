@@ -1,0 +1,53 @@
+title: "PyFly by Example"
+subtitle: "Event-Driven Python Microservices with the Firefly Framework"
+author: "Firefly Software Foundation"
+publisher: "Firefly Software Foundation"
+language: "en"
+identifier: "urn:uuid:7c1b1f2e-0a9e-4e3a-9d2a-c0ffee123456"
+rights: "Copyright (c) 2026 Firefly Software Foundation. Licensed under Apache-2.0."
+cover_svg: "art/cover.svg"
+cover_png: "art/cover.png"
+trim_width: "7.5in"
+trim_height: "9.25in"
+front:
+  - {id: title,       file: 00-front/00-title.md,       nav: false}
+  - {id: copyright,   file: 00-front/00-copyright.md,   nav: false}
+  - {id: preface,     file: 00-front/00-preface.md,     title: "Preface"}
+  - {id: conventions, file: 00-front/00-conventions.md, title: "Conventions"}
+parts:
+  - title: "Part I — Foundations"
+    chapters:
+      - {id: ch01, file: 01-why-pyfly.md, num: 1, title: "Why PyFly?", opener: art/openers/ch01.svg}
+      - {id: ch02, file: 02-dependency-injection.md, num: 2, title: "Dependency Injection & the Application Context", opener: art/openers/ch02.svg}
+      - {id: ch03, file: 03-configuration.md, num: 3, title: "Configuration, Profiles & Secrets", opener: art/openers/ch03.svg}
+      - {id: ch04, file: 04-first-http-api.md, num: 4, title: "Your First HTTP API", opener: art/openers/ch04.svg}
+  - title: "Part II — Modeling & Persisting the Domain"
+    chapters:
+      - {id: ch05, file: 05-persistence.md, num: 5, title: "Persistence & the Repository Pattern", opener: art/openers/ch05.svg}
+      - {id: ch06, file: 06-domain-driven-design.md, num: 6, title: "Domain-Driven Design", opener: art/openers/ch06.svg}
+      - {id: ch07, file: 07-cqrs.md, num: 7, title: "CQRS: Commands & Queries", opener: art/openers/ch07.svg}
+  - title: "Part III — Event-Driven Architecture"
+    chapters:
+      - {id: ch08, file: 08-eda.md, num: 8, title: "Domain Events & Event-Driven Architecture", opener: art/openers/ch08.svg}
+      - {id: ch09, file: 09-event-sourcing.md, num: 9, title: "Event Sourcing the Ledger", opener: art/openers/ch09.svg}
+      - {id: ch10, file: 10-messaging.md, num: 10, title: "Messaging with Kafka & RabbitMQ", opener: art/openers/ch10.svg}
+  - title: "Part IV — Into Microservices"
+    chapters:
+      - {id: ch11, file: 11-http-clients.md, num: 11, title: "Splitting the Monolith: HTTP Clients & the BFF", opener: art/openers/ch11.svg}
+      - {id: ch12, file: 12-sagas.md, num: 12, title: "Distributed Transactions: Sagas, Workflows & TCC", opener: art/openers/ch12.svg}
+      - {id: ch13, file: 13-caching-resilience.md, num: 13, title: "Caching & Resilience", opener: art/openers/ch13.svg}
+  - title: "Part V — Secure, Observe & Ship"
+    chapters:
+      - {id: ch14, file: 14-security.md, num: 14, title: "Security, Sessions & Identity", opener: art/openers/ch14.svg}
+      - {id: ch15, file: 15-observability.md, num: 15, title: "Observability & the Admin Dashboard", opener: art/openers/ch15.svg}
+      - {id: ch16, file: 16-testing.md, num: 16, title: "Testing PyFly Applications", opener: art/openers/ch16.svg}
+      - {id: ch17, file: 17-scheduling-notifications.md, num: 17, title: "Scheduling, Notifications, Webhooks & Callbacks", opener: art/openers/ch17.svg}
+      - {id: ch18, file: 18-production.md, num: 18, title: "Extending PyFly & Going to Production", opener: art/openers/ch18.svg}
+  - title: "Appendices"
+    chapters:
+      - {id: appa, file: 90-appendix-a-spring.md,  num: "A", title: "Spring Boot → PyFly Cheat-Sheet"}
+      - {id: appb, file: 91-appendix-b-mongodb.md, num: "B", title: "MongoDB & Document Data"}
+      - {id: appc, file: 92-appendix-c-ecm.md,     num: "C", title: "ECM: Content & E-Signature"}
+      - {id: appd, file: 93-appendix-d-cli.md,     num: "D", title: "CLI & Troubleshooting"}
+      - {id: glossary, file: 94-glossary.md,       num: "",  title: "Glossary"}
+back: []

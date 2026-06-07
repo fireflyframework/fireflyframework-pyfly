@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 2: Dependency Injection — @service, @repository and @component beans snap into the ApplicationContext container"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch02-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch02-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Floating bean chips arriving from left -->
+  <!-- @service chip -->
+  <g transform="translate(0,0)">
+    <rect x="58" y="76" width="128" height="38" rx="10" ry="10"
+          fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+    <text x="122" y="95" text-anchor="middle" dominant-baseline="middle"
+          fill="#16331a" font-size="14" font-weight="600">@service</text>
+  </g>
+  <!-- @repository chip -->
+  <rect x="58" y="130" width="128" height="38" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <text x="122" y="149" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="14" font-weight="600">@repository</text>
+  <!-- @component chip -->
+  <rect x="58" y="184" width="128" height="38" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <text x="122" y="203" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="14" font-weight="600">@component</text>
+
+  <!-- Arrows from chips into container -->
+  <line x1="186" y1="95" x2="262" y2="95"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#ch02-arrow)"/>
+  <line x1="186" y1="149" x2="262" y2="149"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#ch02-arrow)"/>
+  <line x1="186" y1="203" x2="262" y2="203"
+        stroke="#43b02a" stroke-width="2.5" marker-end="url(#ch02-arrow)"/>
+
+  <!-- ApplicationContext main container -->
+  <rect x="264" y="50" width="330" height="180" rx="20" ry="20"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch02-shadow)"/>
+  <!-- Header bar -->
+  <rect x="264" y="50" width="330" height="40" rx="20" ry="20" fill="#43b02a"/>
+  <rect x="264" y="70" width="330" height="20" fill="#43b02a"/>
+  <text x="429" y="70" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="16" font-weight="700">ApplicationContext</text>
+
+  <!-- Three bean chips inside the container -->
+  <!-- @service chip inside -->
+  <rect x="290" y="106" width="128" height="34" rx="9" ry="9"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="354" y="123" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">@service</text>
+
+  <!-- @repository chip inside -->
+  <rect x="290" y="152" width="128" height="34" rx="9" ry="9"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="354" y="169" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">@repository</text>
+
+  <!-- @component chip inside -->
+  <rect x="290" y="198" width="128" height="22" rx="9" ry="9"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="354" y="209" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">@component</text>
+
+  <!-- Plug dots on right edge of each chip inside -->
+  <circle cx="418" cy="123" r="5" fill="#43b02a"/>
+  <circle cx="418" cy="169" r="5" fill="#43b02a"/>
+  <circle cx="418" cy="209" r="5" fill="#43b02a"/>
+
+  <!-- Connector lines to container right wall -->
+  <line x1="423" y1="123" x2="590" y2="123" stroke="#8aa07e" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="423" y1="169" x2="590" y2="169" stroke="#8aa07e" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="423" y1="209" x2="590" y2="209" stroke="#8aa07e" stroke-width="1.5" stroke-dasharray="5,4"/>
+
+  <!-- Socket circles on container right wall -->
+  <circle cx="590" cy="123" r="6" fill="none" stroke="#43b02a" stroke-width="2.5"/>
+  <circle cx="590" cy="169" r="6" fill="none" stroke="#43b02a" stroke-width="2.5"/>
+  <circle cx="590" cy="209" r="6" fill="none" stroke="#43b02a" stroke-width="2.5"/>
+
+  <!-- Amber sparkles -->
+  <g transform="translate(640, 70)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(244, 240)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(668, 200)">
+    <path d="M0,-5 L1.2,-1.2 L5,0 L1.2,1.2 L0,5 L-1.2,1.2 L-5,0 L-1.2,-1.2 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+
+</svg>

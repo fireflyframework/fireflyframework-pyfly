@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 16: Testing — pytest spins up Testcontainers with Postgres, Redis and Kafka Docker containers, then asserts all tests pass"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="s16-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="s16-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+    <marker id="s16-arr-g" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Section label -->
+  <text x="360" y="28" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="14" font-weight="700">Testing — pytest · Testcontainers · ✓</text>
+
+  <!-- pytest box -->
+  <rect x="42" y="82" width="134" height="66" rx="12" ry="12"
+        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s16-shadow)"/>
+  <rect x="42" y="82" width="134" height="28" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="42" y="98" width="134" height="12" fill="#43b02a"/>
+  <text x="109" y="96" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="13" font-weight="700">pytest</text>
+  <text x="109" y="132" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">test suite</text>
+
+  <!-- Arrow pytest → Testcontainers -->
+  <line x1="177" y1="115" x2="222" y2="115"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#s16-arr)"/>
+  <text x="200" y="106" text-anchor="middle"
+        fill="#6a7a64" font-size="9" font-style="italic">spins up</text>
+
+  <!-- Testcontainers box -->
+  <rect x="224" y="68" width="218" height="94" rx="12" ry="12"
+        fill="#fff" stroke="#5fd13a" stroke-width="2.5" filter="url(#s16-shadow)"/>
+  <rect x="224" y="68" width="218" height="28" rx="12" ry="12" fill="#5fd13a"/>
+  <rect x="224" y="84" width="218" height="12" fill="#5fd13a"/>
+  <text x="333" y="82" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="12" font-weight="700">Testcontainers</text>
+
+  <!-- Container chips inside -->
+  <rect x="238" y="108" width="50" height="20" rx="7" ry="7"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.4"/>
+  <text x="263" y="118" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="9.5" font-weight="600">PG</text>
+  <rect x="298" y="108" width="50" height="20" rx="7" ry="7"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.4"/>
+  <text x="323" y="118" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="9.5" font-weight="600">Redis</text>
+  <rect x="358" y="108" width="50" height="20" rx="7" ry="7"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.4"/>
+  <text x="383" y="118" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="9.5" font-weight="600">Kafka</text>
+
+  <text x="333" y="151" text-anchor="middle"
+        fill="#6a7a64" font-size="9" font-style="italic">real Docker containers</text>
+
+  <!-- Arrow Testcontainers → assert ✓ -->
+  <line x1="443" y1="115" x2="488" y2="115"
+        stroke="#43b02a" stroke-width="2" marker-end="url(#s16-arr-g)"/>
+  <text x="466" y="106" text-anchor="middle"
+        fill="#6a7a64" font-size="9" font-style="italic">asserts</text>
+
+  <!-- Green check badge -->
+  <circle cx="548" cy="115" r="50" fill="#43b02a" opacity="0.1"/>
+  <circle cx="548" cy="115" r="38" fill="#43b02a"/>
+  <text x="548" y="115" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="38" font-weight="700">✓</text>
+
+  <text x="548" y="172" text-anchor="middle"
+        fill="#43b02a" font-size="12" font-weight="700">all tests pass</text>
+
+  <!-- @service_connection badge -->
+  <rect x="608" y="72" width="94" height="22" rx="8" ry="8"
+        fill="#eaf6df" stroke="#8aa07e" stroke-width="1.2"/>
+  <text x="655" y="83" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9" font-weight="600">@service_connection</text>
+
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(680, 44)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>

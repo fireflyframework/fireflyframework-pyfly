@@ -1,0 +1,54 @@
+/* Print-only page setup for the WeasyPrint PDF (7.5in x 9.25in). */
+@page{
+  size: 7.5in 9.25in;
+  margin: 0.82in 0.78in 0.86in;
+  @bottom-center{ content: counter(page); font:9pt -apple-system,"Segoe UI",sans-serif; color:#9aa6a0; }
+  @top-center{ content: string(runhead); font:8pt -apple-system,"Segoe UI",sans-serif;
+    letter-spacing:.12em; text-transform:uppercase; color:#a7b0a0; }
+}
+@page :first{ @top-center{ content:none; } @bottom-center{ content:none; } }
+
+html{ font-size: 11pt; }            /* map rem-based sizes to print */
+body{ background:#fff; }
+
+/* the cover image is its own first page (no header/number) */
+.cover-page{ break-after:page; text-align:center; }
+.cover-page img{ width:100%; height:auto; }
+
+/* each front-matter doc and each chapter starts on a fresh page */
+.chapter{ break-before:page; padding-bottom:0; }
+.cover-page + .chapter{ break-before:auto; }   /* title page follows cover directly */
+
+/* running head from the chapter title */
+h1.chtitle{ string-set: runhead content(text); }
+
+/* keep blocks intact across page boundaries */
+table,figure.fig,.admonition{ break-inside:avoid; }
+tr{ break-inside:avoid; }                 /* never split a row */
+thead{ display:table-header-group; }      /* repeat header on each page */
+h1,h2,h3{ break-after:avoid; }
+p{ orphans:3; widows:3; }
+
+/* nothing may exceed the text column; code wraps instead of clipping */
+img,svg,table,pre.code{ max-width:100%; }
+pre.code{ white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* ============ Contents page (print) ============ */
+/* start on its own page; suppress the running head (no chtitle here) */
+section.toc{ break-before:page; break-after:page; }
+section.toc h1.chtitle{ string-set:runhead "Contents"; }
+/* dotted leader + the resolved page number of the linked chapter */
+.toc-link{ text-decoration:none; color:var(--ink); }
+.toc-link::after{
+  content: leader('.') ' ' target-counter(attr(href url), page);
+  color:#6b7768;
+}
+
+/* ============ Part-divider page (print) ============ */
+section.part-divider{
+  break-before:page; break-after:page;
+  display:flex; flex-direction:column; justify-content:center;
+  min-height:7.2in; text-align:center;
+}
+/* dividers have no running head or page number of their own */
+section.part-divider{ string-set:runhead ""; }

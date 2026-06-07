@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 5: Persistence — WalletRepository with save, find and find_all methods connecting to a wallets database cylinder"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch05-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch05-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- WalletRepository box — centered left -->
+  <rect x="90" y="48" width="258" height="184" rx="16" ry="16"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch05-shadow)"/>
+  <!-- Header bar -->
+  <rect x="90" y="48" width="258" height="36" rx="16" ry="16" fill="#43b02a"/>
+  <rect x="90" y="68" width="258" height="16" fill="#43b02a"/>
+  <text x="219" y="66" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="15" font-weight="700">WalletRepository</text>
+
+  <!-- Method rows -->
+  <line x1="90" y1="104" x2="348" y2="104" stroke="#b8d9a0" stroke-width="1"/>
+  <text x="114" y="126" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="13" font-family="monospace,monospace">save(wallet)</text>
+  <line x1="90" y1="146" x2="348" y2="146" stroke="#b8d9a0" stroke-width="1"/>
+  <text x="114" y="168" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="13" font-family="monospace,monospace">find(id)</text>
+  <line x1="90" y1="188" x2="348" y2="188" stroke="#b8d9a0" stroke-width="1"/>
+  <text x="114" y="210" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="13" font-family="monospace,monospace">find_all()</text>
+
+  <!-- Arrow from repository to DB cylinder -->
+  <line x1="350" y1="140" x2="406" y2="140"
+        stroke="#8aa07e" stroke-width="2.5"
+        marker-end="url(#ch05-arrow)"/>
+
+  <!-- Database cylinder — centered right -->
+  <!-- top ellipse -->
+  <ellipse cx="494" cy="112" rx="56" ry="18" fill="#43b02a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- body -->
+  <rect x="438" y="112" width="112" height="80" fill="#5fd13a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- bottom ellipse -->
+  <ellipse cx="494" cy="192" rx="56" ry="18" fill="#43b02a" stroke="#2f7d1c" stroke-width="2"/>
+  <!-- sheen on top ellipse -->
+  <ellipse cx="480" cy="108" rx="22" ry="7" fill="#a0e070" opacity="0.5"/>
+
+  <!-- DB label -->
+  <text x="494" y="152" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="15" font-weight="700">wallets</text>
+
+  <!-- Amber sparkles -->
+  <g transform="translate(626, 60)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(60, 240)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>

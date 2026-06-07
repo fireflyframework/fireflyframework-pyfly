@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 3: Configuration — defaults, pyfly.yaml, profile overrides and env vars merge into a single Config object"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <marker id="ch03-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <filter id="ch03-shadow" x="-8%" y="-8%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Stack of 4 layered cards bottom-to-top with slight vertical offset -->
+  <!-- Card 1 (bottom): defaults -->
+  <rect x="116" y="196" width="210" height="46" rx="12" ry="12"
+        fill="#d8efc6" stroke="#43b02a" stroke-width="2"/>
+  <text x="221" y="219" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="14" font-weight="600">defaults</text>
+
+  <!-- Card 2: pyfly.yaml -->
+  <rect x="116" y="148" width="210" height="46" rx="12" ry="12"
+        fill="#bfe3a6" stroke="#43b02a" stroke-width="2"/>
+  <text x="221" y="171" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="14" font-weight="600">pyfly.yaml</text>
+
+  <!-- Card 3: profile override -->
+  <rect x="116" y="100" width="210" height="46" rx="12" ry="12"
+        fill="#a7e76a" stroke="#43b02a" stroke-width="2"/>
+  <text x="221" y="123" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">pyfly-{profile}.yaml</text>
+
+  <!-- Card 4 (top): env vars — amber accent "wins" -->
+  <rect x="116" y="52" width="210" height="46" rx="12" ry="12"
+        fill="#fff8ea" stroke="#ffc24b" stroke-width="2.5"/>
+  <text x="221" y="75" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="14" font-weight="700">env vars</text>
+  <!-- "wins" star -->
+  <g transform="translate(318, 75)">
+    <path d="M0,-8 L2,-2 L8,0 L2,2 L0,8 L-2,2 L-8,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <text x="338" y="79" fill="#e89c00" font-size="10" font-weight="700">wins</text>
+
+  <!-- Arrow from stack to Config chip -->
+  <line x1="370" y1="140" x2="440" y2="140"
+        stroke="#43b02a" stroke-width="4"
+        marker-end="url(#ch03-arrow)"/>
+
+  <!-- "merges" label on arrow -->
+  <text x="405" y="130" text-anchor="middle"
+        fill="#43b02a" font-size="11" font-weight="600">merges</text>
+
+  <!-- Config destination chip — centered right -->
+  <rect x="452" y="94" width="168" height="92" rx="18" ry="18"
+        fill="#43b02a" filter="url(#ch03-shadow)"/>
+  <text x="536" y="140" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="30" font-weight="700">Config</text>
+
+  <!-- Amber sparkle bottom-left -->
+  <g transform="translate(90, 228)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(658, 56)">
+    <path d="M0,-7 L1.8,-1.8 L7,0 L1.8,1.8 L0,7 L-1.8,1.8 L-7,0 L-1.8,-1.8 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+</svg>

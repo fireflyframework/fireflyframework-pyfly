@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 7: CQRS — a Bus dispatches commands to the write handler and queries to the read handler"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch07-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch07-arrow-green" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <marker id="ch07-arrow-muted" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+  </defs>
+
+  <!-- Bus box — centered left -->
+  <rect x="100" y="102" width="148" height="76" rx="16" ry="16"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch07-shadow)"/>
+  <!-- Header -->
+  <rect x="100" y="102" width="148" height="34" rx="16" ry="16" fill="#43b02a"/>
+  <rect x="100" y="118" width="148" height="18" fill="#43b02a"/>
+  <text x="174" y="119" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="16" font-weight="700">Bus</text>
+  <text x="174" y="158" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="12">dispatch()</text>
+
+  <!-- Fork lines from Bus -->
+  <!-- Up to Command -->
+  <polyline points="248,126 310,84 374,84"
+            fill="none" stroke="#43b02a" stroke-width="2.5"
+            marker-end="url(#ch07-arrow-green)"/>
+  <!-- Down to Query -->
+  <polyline points="248,156 310,196 374,196"
+            fill="none" stroke="#8aa07e" stroke-width="2.5"
+            marker-end="url(#ch07-arrow-muted)"/>
+
+  <!-- Arrow labels on fork -->
+  <text x="284" y="75" text-anchor="middle"
+        fill="#43b02a" font-size="12" font-weight="600">Command</text>
+  <text x="284" y="218" text-anchor="middle"
+        fill="#6a7a64" font-size="12" font-weight="600">Query</text>
+
+  <!-- Write box (top-right) -->
+  <rect x="376" y="52" width="180" height="68" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch07-shadow)"/>
+  <!-- Header -->
+  <rect x="376" y="52" width="180" height="30" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="376" y="66" width="180" height="16" fill="#43b02a"/>
+  <text x="466" y="67" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="14" font-weight="700">write</text>
+  <text x="466" y="102" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="12">handler</text>
+
+  <!-- Read box (bottom-right) -->
+  <rect x="376" y="160" width="180" height="68" rx="12" ry="12"
+        fill="#eaf6df" stroke="#8aa07e" stroke-width="2.5" filter="url(#ch07-shadow)"/>
+  <!-- Header -->
+  <rect x="376" y="160" width="180" height="30" rx="12" ry="12" fill="#8aa07e"/>
+  <rect x="376" y="174" width="180" height="16" fill="#8aa07e"/>
+  <text x="466" y="175" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="14" font-weight="700">read</text>
+  <text x="466" y="212" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="12">handler</text>
+
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(628, 52)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(620, 200)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+
+</svg>

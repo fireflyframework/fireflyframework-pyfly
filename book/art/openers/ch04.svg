@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 4: HTTP API — GET /wallets request pill flows through Controller and returns a JSON response"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <marker id="ch04-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <filter id="ch04-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- GET /wallets pill (request) — centered left -->
+  <rect x="62" y="116" width="174" height="48" rx="24" ry="24"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5"/>
+  <!-- Method badge -->
+  <rect x="62" y="116" width="56" height="48" rx="24" ry="24" fill="#43b02a"/>
+  <rect x="86" y="116" width="32" height="48" fill="#43b02a"/>
+  <text x="90" y="140" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="13" font-weight="700">GET</text>
+  <text x="172" y="140" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="13" font-weight="600">/wallets</text>
+
+  <!-- Arrow: pill → Controller -->
+  <line x1="237" y1="140" x2="286" y2="140"
+        stroke="#43b02a" stroke-width="3.5"
+        marker-end="url(#ch04-arrow)"/>
+
+  <!-- Controller box -->
+  <rect x="288" y="96" width="170" height="88" rx="14" ry="14"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch04-shadow)"/>
+  <!-- Header bar -->
+  <rect x="288" y="96" width="170" height="34" rx="14" ry="14" fill="#43b02a"/>
+  <rect x="288" y="110" width="170" height="20" fill="#43b02a"/>
+  <text x="373" y="113" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="15" font-weight="700">Controller</text>
+  <text x="373" y="156" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="12">handle(request)</text>
+
+  <!-- Arrow: Controller → JSON response -->
+  <line x1="459" y1="140" x2="508" y2="140"
+        stroke="#43b02a" stroke-width="3.5"
+        marker-end="url(#ch04-arrow)"/>
+
+  <!-- JSON response card -->
+  <rect x="510" y="96" width="148" height="88" rx="14" ry="14"
+        fill="#ffffff" stroke="#8aa07e" stroke-width="2" filter="url(#ch04-shadow)"/>
+  <!-- Header bar -->
+  <rect x="510" y="96" width="148" height="34" rx="14" ry="14" fill="#8aa07e"/>
+  <rect x="510" y="110" width="148" height="20" fill="#8aa07e"/>
+  <text x="584" y="113" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="15" font-weight="700">Response</text>
+  <text x="584" y="150" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="20" font-weight="700">{ }</text>
+  <text x="584" y="172" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">200 OK — JSON</text>
+
+  <!-- Amber sparkles -->
+  <g transform="translate(254, 70)">
+    <path d="M0,-7 L1.8,-1.8 L7,0 L1.8,1.8 L0,7 L-1.8,1.8 L-7,0 L-1.8,-1.8 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(480, 210)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.85"/>
+  </g>
+  <g transform="translate(672, 72)">
+    <path d="M0,-5 L1.2,-1.2 L5,0 L1.2,1.2 L0,5 L-1.2,1.2 L-5,0 L-1.2,-1.2 Z" fill="#ffc24b" opacity="0.75"/>
+  </g>
+
+</svg>

@@ -1,0 +1,38 @@
+pyfly:
+  app:
+    name: lumen
+    version: 1.0.0
+  banner:
+    mode: console
+  web:
+    port: 8080
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: false
+  cqrs:
+    enabled: true
+  transactional:
+    enabled: true
+    persistence:
+      provider: in-memory
+  eventsourcing:
+    enabled: true
+  cache:
+    provider: in-memory
+  # Event-Driven Architecture: the in-memory bus (no broker needed).
+  # Setting the provider registers the EventPublisher bean that the
+  # wallet command handlers publish domain events through and that the
+  # @event_listener audit projection auto-subscribes to.
+  eda:
+    provider: memory
+  # Relational data layer (SQLAlchemy + SQLite via aiosqlite). The
+  # framework creates the schema on startup (ddl-auto=create) and backs
+  # the WalletRepository (a framework Repository[WalletEntity, str]) that
+  # the command handlers persist through inside @transactional().
+  data:
+    relational:
+      enabled: true
+      url: "sqlite+aiosqlite:///./lumen.db"
+      ddl-auto: create

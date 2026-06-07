@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 11: HTTP Service Clients — Wallet service calls Payments service via a typed @service_client over HTTP"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch11-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch11-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Wallet service box (left) -->
+  <rect x="62" y="104" width="162" height="72" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch11-shadow)"/>
+  <rect x="62" y="104" width="162" height="30" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="62" y="120" width="162" height="14" fill="#43b02a"/>
+  <text x="143" y="119" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="15" font-weight="700">Wallet</text>
+  <text x="143" y="157" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="11">service</text>
+
+  <!-- Arrow: Wallet → Payments with client chip -->
+  <line x1="226" y1="140" x2="494" y2="140"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#ch11-arrow)"/>
+
+  <!-- @service_client chip on the wire -->
+  <rect x="282" y="122" width="156" height="30" rx="15" ry="15"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5"/>
+  <text x="360" y="137" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="12" font-weight="700">@service_client</text>
+
+  <!-- Wire labels -->
+  <text x="360" y="108" text-anchor="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">HTTP</text>
+  <text x="360" y="170" text-anchor="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">typed call across the network</text>
+
+  <!-- Payments service box (right) -->
+  <rect x="496" y="104" width="162" height="72" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch11-shadow)"/>
+  <rect x="496" y="104" width="162" height="30" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="496" y="120" width="162" height="14" fill="#43b02a"/>
+  <text x="577" y="119" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="15" font-weight="700">Payments</text>
+  <text x="577" y="157" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="11">service</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(360, 58)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(58, 242)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+</svg>

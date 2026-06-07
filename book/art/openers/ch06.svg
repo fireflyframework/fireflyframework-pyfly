@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 6: Domain-Driven Design — Wallet aggregate with Money value object, invariant shield, and FundsDeposited domain event"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch06-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch06-arrow" markerWidth="8" markerHeight="6"
+            refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ffc24b"/>
+    </marker>
+  </defs>
+
+  <!-- Wallet aggregate container — centered left -->
+  <rect x="80" y="40" width="294" height="210" rx="16" ry="16"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch06-shadow)"/>
+  <!-- Header bar -->
+  <rect x="80" y="40" width="294" height="36" rx="16" ry="16" fill="#43b02a"/>
+  <rect x="80" y="60" width="294" height="16" fill="#43b02a"/>
+  <text x="227" y="58" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="16" font-weight="700">Wallet</text>
+
+  <!-- Fields -->
+  <text x="108" y="98" dominant-baseline="middle"
+        fill="#23402a" font-size="13" font-family="monospace,monospace">balance: Money</text>
+  <text x="108" y="122" dominant-baseline="middle"
+        fill="#23402a" font-size="13" font-family="monospace,monospace">owner: OwnerId</text>
+
+  <!-- Separator -->
+  <line x1="80" y1="140" x2="374" y2="140" stroke="#b8d9a0" stroke-width="1"/>
+
+  <!-- Money value object chip -->
+  <rect x="108" y="152" width="148" height="34" rx="10" ry="10"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="182" y="169" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="12" font-weight="600">Money «value»</text>
+
+  <!-- Shield icon (invariant) -->
+  <path d="M284 148 L 314 148 L 326 168 L 299 184 L 272 168 Z"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <text x="299" y="170" text-anchor="middle" dominant-baseline="middle"
+        fill="#2f7d1c" font-size="10" font-weight="700">inv</text>
+
+  <!-- Invariant label -->
+  <text x="299" y="208" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">balance ≥ 0</text>
+
+  <!-- Arrow from Wallet box to event spark -->
+  <line x1="374" y1="88" x2="438" y2="88"
+        stroke="#ffc24b" stroke-width="2" stroke-dasharray="5,4"
+        marker-end="url(#ch06-arrow)"/>
+
+  <!-- Amber event spark: FundsDeposited -->
+  <g transform="translate(500, 88)">
+    <path d="M0,-22 L5,-5 L22,0 L5,5 L0,22 L-5,5 L-22,0 L-5,-5 Z" fill="#ffc24b"/>
+  </g>
+  <text x="500" y="124" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="12" font-weight="700">FundsDeposited</text>
+
+  <!-- "emits" label on arrow -->
+  <text x="406" y="78" text-anchor="middle"
+        fill="#6a7a64" font-size="10" font-style="italic">emits</text>
+
+  <!-- Small amber sparkle bottom-left -->
+  <g transform="translate(60, 240)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b"/>
+  </g>
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(670, 50)">
+    <path d="M0,-7 L1.8,-1.8 L7,0 L1.8,1.8 L0,7 L-1.8,1.8 L-7,0 L-1.8,-1.8 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+
+</svg>

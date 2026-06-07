@@ -1,0 +1,133 @@
+/* tokens.css + pygments.css are loaded alongside this file by the build
+   (the EPUB links all three stylesheets; the PDF passes them to WeasyPrint),
+   so no @import is needed here — and @import breaks strict EPUB validation. */
+
+/* ============ base ============ */
+html{ -webkit-text-size-adjust:100%; }
+body{
+  color:var(--ink); background:var(--page);
+  font-family:-apple-system,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  font-size:1rem; line-height:1.72; margin:0;
+  text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased;
+}
+.chapter{ padding:0 0 2.5rem; }
+
+/* ============ headings ============ */
+h1,h2,h3,h4{ color:var(--ink); line-height:1.22; font-weight:800; }
+.eyebrow{ display:block; color:var(--green); font-weight:800; letter-spacing:.18em;
+  font-size:.72rem; text-transform:uppercase; margin-bottom:.4rem; }
+h1.chtitle{ font-size:2.3rem; line-height:1.08; margin:.1rem 0 1.15rem; color:#15351a;
+  letter-spacing:-.015em; }
+h2{ font-size:1.4rem; font-weight:800; color:#173a1b; margin:2rem 0 .7rem;
+  padding-bottom:.35rem; border-bottom:2px solid #e7efdc; }
+h3{ font-size:1.08rem; font-weight:700; margin:1.35rem 0 .4rem; color:#21402a; }
+h2+p,h3+p{ margin-top:0; }
+
+/* ============ text ============ */
+p{ margin:0 0 .9rem; }
+strong,b{ color:#173a1b; font-weight:700; }
+em{ color:inherit; }
+a{ color:var(--green-deep); text-decoration:underline; text-decoration-color:#bcd9a8;
+  text-underline-offset:2px; }
+ul,ol{ margin:.3rem 0 1rem; padding-left:1.45rem; }
+li{ margin:.28rem 0; }
+li::marker{ color:var(--green); }
+hr{ border:none; border-top:1px solid var(--rule); margin:1.7rem 0; }
+
+/* inline code */
+code{ background:#eef3e8; color:#2c6e22; padding:.06em .36em; border-radius:4px;
+  font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-size:.85em;
+  word-break:break-word; }
+
+/* ============ code listings ============ */
+.listing{ margin:1.2rem 0; }
+.filetab{ display:inline-block; background:#e7f0dc; color:#3f6b34;
+  font:600 .72rem/1 "SF Mono","JetBrains Mono",Menlo,monospace;
+  padding:.44rem .72rem; border:1px solid var(--code-border); border-bottom:none;
+  border-radius:8px 8px 0 0; }
+pre.code{
+  margin:0; background:var(--code-bg); border:1px solid var(--code-border);
+  border-radius:0 8px 8px 8px; padding:.85rem 1rem;
+  font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  font-size:.78rem; line-height:1.62; color:#24292f;
+  white-space:pre-wrap; overflow-wrap:anywhere; word-break:normal; tab-size:4;
+}
+.filetab + pre.code{ border-top-left-radius:0; }
+.lcap{ font-size:.76rem; color:var(--muted); margin-top:.45rem; font-style:italic; }
+
+/* ============ figures ============ */
+figure.fig{ margin:1.45rem auto; text-align:center; }
+figure.fig svg{ max-width:100%; height:auto; }
+figure.fig img.fig-img{ max-width:240px; height:auto; }
+figcaption{ font-size:.78rem; color:var(--muted); margin-top:.55rem; line-height:1.45; }
+figcaption b,figcaption strong{ color:#3f6b34; }
+
+/* ============ tables ============ */
+table{ width:100%; border-collapse:collapse; margin:1.15rem 0; font-size:.9rem; line-height:1.5; }
+th,td{ border:1px solid #e1e8d6; padding:.5rem .72rem; text-align:left; vertical-align:top; }
+thead th{ background:#eef6e3; color:#1f4d22; font-weight:700; }
+tbody tr:nth-child(even){ background:#fafdf6; }
+td code,th code{ background:#eef3e8; }
+
+/* ============ callouts ============ */
+.admonition{ border-radius:10px; padding:.8rem 1rem; margin:1.2rem 0; font-size:.92rem;
+  line-height:1.6; border:1px solid var(--rule); border-left-width:4px; background:#f6f8f1; }
+.admonition>:last-child{ margin-bottom:0; }
+.admonition>:first-child{ margin-top:0; }
+.admonition-title{ font-weight:800; font-size:.7rem; letter-spacing:.08em; text-transform:uppercase;
+  margin:0 0 .35rem; display:flex; align-items:center; gap:.45rem; }
+.adm-ico{ flex:none; width:15px; height:15px; }
+.admonition.note{ background:var(--note-bg); border-color:#cfe3fb; border-left-color:var(--note); }
+.admonition.note>.admonition-title{ color:var(--note); }
+.admonition.tip{ background:#eefaed; border-color:#cdeccd; border-left-color:var(--tip); }
+.admonition.tip>.admonition-title{ color:var(--tip); }
+.admonition.warning{ background:var(--warn-bg); border-color:#fcd9c2; border-left-color:var(--warn); }
+.admonition.warning>.admonition-title{ color:var(--warn); }
+.admonition.spring{ background:#f1fae6; border-color:#d4e9bd; border-left-color:var(--green); }
+.admonition.spring>.admonition-title{ color:var(--green-deep); }
+
+/* ============ recap / exercises (applied to the section H2) ============ */
+h2.recap,h2.exercises{ color:var(--green-deep); border-bottom-color:#cfe0bb;
+  display:flex; align-items:center; gap:.5rem; }
+h2.recap::before{ content:"\2713"; color:var(--green); font-size:1.05rem; }
+h2.exercises::before{ content:"\270E"; color:var(--green); font-size:1.05rem; }
+
+/* ============ Table of Contents (Packt style) ============ */
+.toc{ padding:0 0 2.5rem; }
+.toc h1.chtitle{ margin-bottom:1.4rem; }
+.toc-part-group{ margin:1.5rem 0 .4rem; }
+.toc-part-title{                       /* part heading in green, no underline */
+  font-size:1.18rem; font-weight:800; color:var(--green-deep);
+  margin:1.5rem 0 .55rem; padding:0; border:none; letter-spacing:-.005em;
+}
+.toc-part-eyebrow{ color:var(--green); font-weight:800; letter-spacing:.12em;
+  font-size:.74rem; text-transform:uppercase; margin-right:.5rem; }
+ol.toc-chapters{ list-style:none; margin:0; padding:0; }
+ol.toc-chapters > li{ margin:.18rem 0; }
+.toc-link{                             /* readable chapter row; leader fills to the page number */
+  display:block; color:var(--ink); text-decoration:none; font-size:.98rem; line-height:1.75;
+}
+.toc-link:hover{ color:var(--green-deep); }
+
+/* ============ EPUB nav (part-grouped) ============ */
+nav#toc ol{ list-style:none; padding-left:1rem; }
+nav#toc > ol{ padding-left:0; }
+nav#toc li{ margin:.22rem 0; }
+nav#toc li.toc-part > a,
+nav#toc li.toc-part{                    /* part labels stand out in green */
+  color:var(--green-deep); font-weight:800; text-decoration:none;
+}
+nav#toc li.toc-part > ol{ margin-top:.2rem; }
+nav#toc li.toc-part > ol a{ font-weight:400; color:var(--ink); }
+
+/* ============ Part-divider page ============ */
+.part-divider{ padding:0; }
+.part-divider-inner{ text-align:center; }
+.part-eyebrow{                         /* "Part I" */
+  display:block; color:var(--green); font-weight:800; letter-spacing:.22em;
+  font-size:1rem; text-transform:uppercase; margin-bottom:.8rem;
+}
+.part-title{                           /* "Foundations" — centered and large */
+  font-size:2.9rem; line-height:1.1; font-weight:800; color:#15351a;
+  letter-spacing:-.02em; margin:0; border:none; padding:0;
+}

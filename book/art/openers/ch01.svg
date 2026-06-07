@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 1: Flask, Kafka and ORM options converge into PyFly — infinite choice becomes cohesion"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <marker id="ch01-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <filter id="ch01-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Three tilted option cards — left cluster -->
+  <!-- Card 1: Flask? tilted left -->
+  <g transform="translate(188, 98) rotate(-8)">
+    <rect x="-58" y="-26" width="116" height="52" rx="12" ry="12"
+          fill="#ffffff" stroke="#8aa07e" stroke-width="1.8"/>
+    <text x="0" y="8" text-anchor="middle" fill="#6a7a64"
+          font-size="20" font-weight="600">Flask?</text>
+  </g>
+
+  <!-- Card 2: Kafka? tilted right -->
+  <g transform="translate(208, 170) rotate(6)">
+    <rect x="-60" y="-26" width="120" height="52" rx="12" ry="12"
+          fill="#ffffff" stroke="#8aa07e" stroke-width="1.8"/>
+    <text x="0" y="8" text-anchor="middle" fill="#6a7a64"
+          font-size="20" font-weight="600">Kafka?</text>
+  </g>
+
+  <!-- Card 3: ORM? slightly tilted -->
+  <g transform="translate(186, 238) rotate(-4)">
+    <rect x="-54" y="-26" width="108" height="52" rx="12" ry="12"
+          fill="#ffffff" stroke="#8aa07e" stroke-width="1.8"/>
+    <text x="0" y="8" text-anchor="middle" fill="#6a7a64"
+          font-size="20" font-weight="600">ORM?</text>
+  </g>
+
+  <!-- Amber sparkles -->
+  <g transform="translate(320, 60)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(108, 162)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(346, 220)">
+    <path d="M0,-5 L1.2,-1.2 L5,0 L1.2,1.2 L0,5 L-1.2,1.2 L-5,0 L-1.2,-1.2 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+  <g transform="translate(278, 252)">
+    <path d="M0,-7 L1.8,-1.8 L7,0 L1.8,1.8 L0,7 L-1.8,1.8 L-7,0 L-1.8,-1.8 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+  <!-- Big green arrow -->
+  <line x1="360" y1="168" x2="428" y2="168"
+        stroke="#43b02a" stroke-width="6"
+        marker-end="url(#ch01-arr)"/>
+
+  <!-- PyFly destination box — centered right -->
+  <rect x="440" y="112" width="212" height="112" rx="22" ry="22"
+        fill="#43b02a" filter="url(#ch01-shadow)"/>
+  <text x="546" y="168" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="42" font-weight="700"
+        letter-spacing="0.5">PyFly</text>
+
+</svg>

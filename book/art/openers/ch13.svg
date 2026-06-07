@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 13: Caching and Resilience — Cache fast lane sits in front of Service, with a resilience shield guarding the path"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch13-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch13-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Cache chip (pill, fast lane) — centered left -->
+  <rect x="82" y="108" width="188" height="68" rx="34" ry="34"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch13-shadow)"/>
+  <text x="176" y="134" text-anchor="middle" dominant-baseline="middle"
+        fill="#43b02a" font-size="18" font-weight="700">Cache</text>
+  <text x="176" y="158" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="12">fast lane</text>
+
+  <!-- Arrow: Cache → Service -->
+  <line x1="272" y1="142" x2="344" y2="142"
+        stroke="#43b02a" stroke-width="3"
+        marker-end="url(#ch13-arrow)"/>
+
+  <!-- Service box — centered middle -->
+  <rect x="346" y="96" width="200" height="92" rx="14" ry="14"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch13-shadow)"/>
+  <rect x="346" y="96" width="200" height="36" rx="14" ry="14" fill="#43b02a"/>
+  <rect x="346" y="114" width="200" height="18" fill="#43b02a"/>
+  <text x="446" y="114" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="16" font-weight="700">Service</text>
+  <text x="446" y="162" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="12">business logic</text>
+
+  <!-- Shield icon (resilience) — right side -->
+  <path d="M598 96 C 598 96 578 102 578 120 C 578 138 594 150 598 153 C 602 150 618 138 618 120 C 618 102 598 96 598 96 Z"
+        fill="#ffc24b" stroke="#e0a030" stroke-width="2"/>
+  <!-- Shield check mark -->
+  <polyline points="589,119 594,125 607,110"
+            fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Shield label -->
+  <text x="598" y="170" text-anchor="middle"
+        fill="#23402a" font-size="12" font-weight="600">resilience</text>
+
+  <!-- Amber sparkle top-right -->
+  <g transform="translate(668, 60)">
+    <path d="M0,-7 L1.7,-1.7 L7,0 L1.7,1.7 L0,7 L-1.7,1.7 L-7,0 L-1.7,-1.7 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(56, 240)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+</svg>

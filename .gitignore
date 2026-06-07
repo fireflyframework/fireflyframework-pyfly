@@ -1,3 +1,4 @@
+.DS_Store
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,5 +24,20 @@ docs/plans/
 .playwright-mcp/
 .audit/
 
-# Superpowers brainstorming visual companion scratch
+# Superpowers brainstorming visual companion scratch (local only)
 .superpowers/
+
+# The book's build sources are real source, not the Python build/ artifact dir
+!book/build/
+!book/build/**
+book/build/**/__pycache__/
+
+# Internal Claude / superpowers design docs + session files — kept local, never committed
+.claude/
+docs/superpowers/
+
+# Ship the built book (the deliverable); the rest of book/dist/ stays ignored
+!book/dist/
+book/dist/**
+!book/dist/pyfly-by-example.pdf
+!book/dist/pyfly-by-example.epub

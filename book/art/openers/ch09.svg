@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 9: Event Sourcing — append-only event log with WalletOpened, FundsDeposited, FundsWithdrawn cards replayed into current Wallet state with a snapshot tag"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="ch09-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch09-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Event log label -->
+  <text x="184" y="36" text-anchor="middle" fill="#43b02a" font-size="13" font-weight="700">EventStore (append-only)</text>
+
+  <!-- Event cards stacked vertically — left column -->
+  <!-- Card 1: WalletOpened -->
+  <rect x="82" y="52" width="204" height="44" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#ch09-shadow)"/>
+  <rect x="82" y="52" width="204" height="20" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="82" y="64" width="204" height="8" fill="#43b02a"/>
+  <text x="184" y="62" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="11" font-weight="700">WalletOpened</text>
+  <text x="184" y="84" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">seq: 1</text>
+
+  <!-- Card 2: FundsDeposited -->
+  <rect x="82" y="106" width="204" height="44" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#ch09-shadow)"/>
+  <rect x="82" y="106" width="204" height="20" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="82" y="118" width="204" height="8" fill="#43b02a"/>
+  <text x="184" y="116" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="11" font-weight="700">FundsDeposited</text>
+  <text x="184" y="138" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">seq: 2</text>
+
+  <!-- Card 3: FundsWithdrawn -->
+  <rect x="82" y="160" width="204" height="44" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#ch09-shadow)"/>
+  <rect x="82" y="160" width="204" height="20" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="82" y="172" width="204" height="8" fill="#43b02a"/>
+  <text x="184" y="170" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="11" font-weight="700">FundsWithdrawn</text>
+  <text x="184" y="192" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">seq: 3</text>
+
+  <!-- Snapshot tag -->
+  <rect x="296" y="116" width="90" height="28" rx="12" ry="12"
+        fill="#ffc24b" stroke="#e89c00" stroke-width="1.8"/>
+  <text x="341" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="11" font-weight="700">snapshot</text>
+
+  <!-- Replay arrow -->
+  <line x1="400" y1="128" x2="460" y2="128"
+        stroke="#43b02a" stroke-width="3"
+        marker-end="url(#ch09-arrow)"/>
+  <text x="430" y="118" text-anchor="middle" fill="#43b02a" font-size="11" font-weight="600">replay →</text>
+
+  <!-- Wallet state box — right -->
+  <rect x="462" y="96" width="180" height="68" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch09-shadow)"/>
+  <rect x="462" y="96" width="180" height="30" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="462" y="110" width="180" height="16" fill="#43b02a"/>
+  <text x="552" y="111" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="14" font-weight="700">Wallet</text>
+  <text x="552" y="146" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="12">balance: £750</text>
+
+  <!-- Amber star top-right -->
+  <g transform="translate(672, 72)">
+    <path d="M0,-8 L2,-2 L8,0 L2,2 L0,8 L-2,2 L-8,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(56, 230)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.7"/>
+  </g>
+
+</svg>
