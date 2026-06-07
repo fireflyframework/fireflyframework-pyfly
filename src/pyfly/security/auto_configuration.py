@@ -64,6 +64,8 @@ except ImportError:
 from collections.abc import Sequence
 
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
+from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
@@ -289,8 +291,17 @@ class OAuth2LoginAutoConfiguration:
     def oauth2_login_handler(
         self,
         client_registration_repository: InMemoryClientRegistrationRepository,
+        container: Container,
     ) -> OAuth2LoginHandler:
-        return OAuth2LoginHandler(client_repository=client_registration_repository)
+        # Wire session concurrency control if a controller bean is present (opt-in via
+        # pyfly.session.concurrency.enabled); otherwise the handler enforces no cap.
+        from pyfly.session.concurrency import SessionConcurrencyController
+
+        try:
+            concurrency = container.resolve(SessionConcurrencyController)
+        except (NoSuchBeanError, NoUniqueBeanError):
+            concurrency = None
+        return OAuth2LoginHandler(client_repository=client_registration_repository, concurrency=concurrency)
 
     @bean
     @conditional_on_missing_bean(OAuth2SessionSecurityFilter)

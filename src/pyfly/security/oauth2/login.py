@@ -63,8 +63,13 @@ class OAuth2LoginHandler:
         client_repository: Repository to look up client registrations.
     """
 
-    def __init__(self, client_repository: ClientRegistrationRepository) -> None:
+    def __init__(
+        self,
+        client_repository: ClientRegistrationRepository,
+        concurrency: Any = None,
+    ) -> None:
         self._client_repository = client_repository
+        self._concurrency = concurrency  # optional SessionConcurrencyController
 
     def routes(self) -> list[Route]:
         """Return the Starlette routes for the OAuth2 login flow."""
@@ -213,6 +218,17 @@ class OAuth2LoginHandler:
         session.rotate_id()
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
 
+        # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
+        # is now bound to the (rotated) session id, so this is the one correct enforcement point.
+        if self._concurrency is not None:
+            allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            if not allowed:
+                session.invalidate()
+                return JSONResponse(
+                    {"error": "max_sessions", "message": "Maximum concurrent sessions for this user reached"},
+                    status_code=401,
+                )
+
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
 
         redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
@@ -226,6 +242,11 @@ class OAuth2LoginHandler:
     async def _handle_logout(self, request: Request) -> Response:
         """Invalidate the session and redirect to the root."""
         session: HttpSession = request.state.session
+        if self._concurrency is not None:
+            principal = session.get_attribute(_SECURITY_CONTEXT_KEY)
+            user_id = getattr(principal, "user_id", None)
+            if user_id is not None:
+                await self._concurrency.on_logout(user_id, session.id)
         session.invalidate()
         return RedirectResponse(url="/", status_code=302)
 

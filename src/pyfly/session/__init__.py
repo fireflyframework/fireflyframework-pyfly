@@ -19,12 +19,22 @@ Import concrete store types from the adapter package::
     from pyfly.session.adapters.redis import RedisSessionStore
 """
 
+from pyfly.session.concurrency import (
+    ConcurrencyControlPolicy,
+    InMemorySessionRegistry,
+    SessionConcurrencyController,
+    SessionRegistry,
+)
 from pyfly.session.filter import SessionFilter
 from pyfly.session.ports.outbound import SessionStore
 from pyfly.session.session import HttpSession
 
 __all__ = [
+    "ConcurrencyControlPolicy",
     "HttpSession",
+    "InMemorySessionRegistry",
+    "SessionConcurrencyController",
     "SessionFilter",
+    "SessionRegistry",
     "SessionStore",
 ]
