@@ -26,6 +26,7 @@ from typing import Any
 
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.cron import CronExpression
+from pyfly.scheduling.lock import DistributedLock, LocalLock
 from pyfly.scheduling.ports.outbound import TaskExecutorPort
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,8 @@ class _ScheduledEntry:
     fixed_delay: timedelta | None = None
     initial_delay: timedelta | None = None
     zone: str | None = None
+    lock: str | None = None
+    lock_ttl: float = 60.0
 
 
 class TaskScheduler:
@@ -56,8 +59,9 @@ class TaskScheduler:
         await scheduler.stop()
     """
 
-    def __init__(self, executor: TaskExecutorPort | None = None) -> None:
+    def __init__(self, executor: TaskExecutorPort | None = None, lock: DistributedLock | None = None) -> None:
         self._executor: TaskExecutorPort = executor or AsyncIOTaskExecutor()
+        self._lock: DistributedLock = lock or LocalLock()
         self._running: bool = False
         self._entries: list[_ScheduledEntry] = []
         self._loop_tasks: list[asyncio.Task[Any]] = []
@@ -88,6 +92,16 @@ class TaskScheduler:
                 if not getattr(attr, "__pyfly_scheduled__", False):
                     continue
 
+                # Resolve the lock name: True -> "Class.method", str -> as-is, else None.
+                lock_value = getattr(attr, "__pyfly_scheduled_lock__", None)
+                if lock_value is True:
+                    lock_name: str | None = f"{type(bean).__name__}.{name}"
+                elif isinstance(lock_value, str):
+                    lock_name = lock_value
+                else:
+                    lock_name = None
+                lock_ttl = getattr(attr, "__pyfly_scheduled_lock_ttl__", None)
+
                 entry = _ScheduledEntry(
                     bean=bean,
                     method=attr,
@@ -96,6 +110,8 @@ class TaskScheduler:
                     fixed_delay=getattr(attr, "__pyfly_scheduled_fixed_delay__", None),
                     initial_delay=getattr(attr, "__pyfly_scheduled_initial_delay__", None),
                     zone=getattr(attr, "__pyfly_scheduled_zone__", None),
+                    lock=lock_name,
+                    lock_ttl=lock_ttl if lock_ttl is not None else 60.0,
                 )
                 self._entries.append(entry)
                 count += 1
@@ -111,14 +127,20 @@ class TaskScheduler:
         self._running = True
         for entry in self._entries:
             if entry.cron is not None:
-                task = asyncio.create_task(self._run_cron_loop(entry.bean, entry.method, entry.cron, entry.zone))
+                task = asyncio.create_task(
+                    self._run_cron_loop(entry.bean, entry.method, entry.cron, entry.zone, entry.lock, entry.lock_ttl)
+                )
             elif entry.fixed_rate is not None:
                 task = asyncio.create_task(
-                    self._run_fixed_rate_loop(entry.bean, entry.method, entry.fixed_rate, entry.initial_delay)
+                    self._run_fixed_rate_loop(
+                        entry.bean, entry.method, entry.fixed_rate, entry.initial_delay, entry.lock, entry.lock_ttl
+                    )
                 )
             elif entry.fixed_delay is not None:
                 task = asyncio.create_task(
-                    self._run_fixed_delay_loop(entry.bean, entry.method, entry.fixed_delay, entry.initial_delay)
+                    self._run_fixed_delay_loop(
+                        entry.bean, entry.method, entry.fixed_delay, entry.initial_delay, entry.lock, entry.lock_ttl
+                    )
                 )
             else:
                 logger.warning(
@@ -155,7 +177,13 @@ class TaskScheduler:
     # ------------------------------------------------------------------
 
     async def _run_cron_loop(
-        self, bean: Any, method: Callable[..., Any], cron_expr: str, zone: str | None = None
+        self,
+        bean: Any,
+        method: Callable[..., Any],
+        cron_expr: str,
+        zone: str | None = None,
+        lock: str | None = None,
+        lock_ttl: float = 60.0,
     ) -> None:
         """Loop: sleep until next cron fire time, execute method, repeat."""
         cron = CronExpression(cron_expr, zone=zone)
@@ -164,7 +192,7 @@ class TaskScheduler:
             await asyncio.sleep(delay)
             if not self._running:
                 break
-            await self._executor.submit(self._invoke(bean, method))
+            await self._executor.submit(self._invoke(bean, method, lock, lock_ttl))
 
     async def _run_fixed_rate_loop(
         self,
@@ -172,12 +200,14 @@ class TaskScheduler:
         method: Callable[..., Any],
         rate: timedelta,
         initial_delay: timedelta | None,
+        lock: str | None = None,
+        lock_ttl: float = 60.0,
     ) -> None:
         """Loop: execute at fixed intervals regardless of execution time."""
         if initial_delay:
             await asyncio.sleep(initial_delay.total_seconds())
         while self._running:
-            await self._executor.submit(self._invoke(bean, method))
+            await self._executor.submit(self._invoke(bean, method, lock, lock_ttl))
             await asyncio.sleep(rate.total_seconds())
             if not self._running:
                 break
@@ -188,12 +218,14 @@ class TaskScheduler:
         method: Callable[..., Any],
         delay: timedelta,
         initial_delay: timedelta | None,
+        lock: str | None = None,
+        lock_ttl: float = 60.0,
     ) -> None:
         """Loop: wait for completion, then wait delay, then execute again."""
         if initial_delay:
             await asyncio.sleep(initial_delay.total_seconds())
         while self._running:
-            task = await self._executor.submit(self._invoke(bean, method))
+            task = await self._executor.submit(self._invoke(bean, method, lock, lock_ttl))
             try:
                 await task  # Wait for completion
             except Exception:
@@ -204,8 +236,9 @@ class TaskScheduler:
                 break
             await asyncio.sleep(delay.total_seconds())
 
-    @staticmethod
-    async def _invoke(bean: Any, method: Callable[..., Any]) -> None:
+    async def _invoke(
+        self, bean: Any, method: Callable[..., Any], lock: str | None = None, lock_ttl: float = 60.0
+    ) -> None:
         """Invoke a scheduled method, handling both sync and async methods.
 
         An async method is awaited on the event loop; a **synchronous** method is
@@ -213,10 +246,20 @@ class TaskScheduler:
         (I/O, ``time.sleep``) does not stall the loop — and therefore the whole
         application — for the duration of the task.
 
+        When *lock* is set, a distributed lock is acquired first; if it is held elsewhere
+        the tick is **skipped** (so only one instance in a cluster runs the job), and the
+        lock is always released in ``finally`` once the body completes — the TTL is the
+        safety valve if an instance crashes mid-run.
+
         Exceptions are logged (not propagated) so a failing iteration of a
         cron / fixed-rate job — whose task is not awaited by the loop — is still
         reported through the framework logger instead of vanishing (audit #186).
         """
+        if lock is not None and not await self._lock.try_acquire(lock, lock_ttl):
+            logger.debug(
+                "scheduled task '%s' skipped — lock %r held elsewhere", getattr(method, "__name__", method), lock
+            )
+            return
         try:
             if inspect.iscoroutinefunction(method):
                 await method()
@@ -226,3 +269,6 @@ class TaskScheduler:
                     await result
         except Exception:
             logger.exception("scheduled task '%s' failed", getattr(method, "__name__", method))
+        finally:
+            if lock is not None:
+                await self._lock.release(lock)

@@ -22,6 +22,8 @@ except ImportError:
     TaskScheduler = object  # type: ignore[misc,assignment]
 
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
+from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
 from pyfly.context.conditions import auto_configuration, conditional_on_class
 
 
@@ -31,5 +33,13 @@ class SchedulingAutoConfiguration:
     """Auto-configures a TaskScheduler bean when croniter is installed."""
 
     @bean
-    def task_scheduler(self) -> TaskScheduler:
-        return TaskScheduler()
+    def task_scheduler(self, container: Container) -> TaskScheduler:
+        # Use a registered DistributedLock bean for @scheduled(lock=...) coordination,
+        # otherwise the scheduler falls back to its single-instance LocalLock.
+        from pyfly.scheduling.lock import DistributedLock
+
+        try:
+            lock = container.resolve(DistributedLock)  # type: ignore[type-abstract]
+        except (NoSuchBeanError, NoUniqueBeanError):
+            lock = None
+        return TaskScheduler(lock=lock)
