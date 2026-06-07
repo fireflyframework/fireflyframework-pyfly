@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.69 (2026-06-07)
+
+### Added (OAuth2 — persistent token stores; fixes a multi-instance production blocker)
+
+The OAuth2 authorization server's `TokenStore` was in-memory only, so refresh tokens were lost
+on restart and revocation didn't propagate across instances. It is now pluggable via
+`pyfly.security.oauth2.token-store.provider`:
+
+- **`RedisTokenStore`** (`provider=redis`) — JSON values with a TTL set to the refresh-token
+  lifetime (expired tokens self-evict); fast cross-instance revocation.
+- **`PostgresTokenStore`** (`provider=postgres`) — durable, auditable token rows; lazy
+  idempotent table creation; table name validated against injection.
+- `memory` (default) keeps `InMemoryTokenStore` for dev/test.
+
+Hexagonal: the Redis client / SQLAlchemy engine are obtained in the composition root and
+injected; the adapters import no driver at module scope. Both validated against **real Redis
+and real Postgres** (testcontainers: store/find/upsert/revoke).
+
 ## v26.06.68 (2026-06-07)
 
 ### Added (session — Postgres SessionRegistry; Postgres parity)

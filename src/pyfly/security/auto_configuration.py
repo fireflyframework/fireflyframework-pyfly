@@ -62,7 +62,9 @@ except ImportError:
     WebFilter = object  # type: ignore[misc,assignment]
 
 from collections.abc import Sequence
+from typing import Any
 
+from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
 from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
@@ -186,12 +188,13 @@ class OAuth2AuthorizationServerAutoConfiguration:
         self,
         config: Config,
         client_registration_repository: InMemoryClientRegistrationRepository,
+        container: Container,
     ) -> AuthorizationServer:
         secret = str(config.get("pyfly.security.oauth2.authorization-server.secret", "change-me-in-production"))
         issuer = config.get("pyfly.security.oauth2.authorization-server.issuer")
         access_ttl = int(config.get("pyfly.security.oauth2.authorization-server.access-token-ttl", 3600))
         refresh_ttl = int(config.get("pyfly.security.oauth2.authorization-server.refresh-token-ttl", 86400))
-        token_store = InMemoryTokenStore()
+        token_store = self._build_token_store(config, container, refresh_ttl)
         return AuthorizationServer(
             secret=secret,
             client_repository=client_registration_repository,
@@ -200,6 +203,36 @@ class OAuth2AuthorizationServerAutoConfiguration:
             refresh_token_ttl=refresh_ttl,
             issuer=str(issuer) if issuer is not None else None,
         )
+
+    def _build_token_store(self, config: Config, container: Container, refresh_ttl: int) -> Any:
+        """Select the token-store backend (Spring parity for a persistent authorization server).
+
+        ``pyfly.security.oauth2.token-store.provider``: ``memory`` (default, single-instance),
+        ``redis`` (fast cross-instance revocation, TTL = refresh-token lifetime), or ``postgres``
+        (durable + auditable). The Redis client / SQLAlchemy engine are obtained here (the
+        composition root) and injected — the adapters never import their driver at module scope.
+        """
+        provider = str(config.get("pyfly.security.oauth2.token-store.provider", "memory")).lower()
+        if provider == "redis" and AutoConfiguration.is_available("redis.asyncio"):
+            import redis.asyncio as aioredis
+
+            from pyfly.security.adapters.redis_token_store import RedisTokenStore
+
+            url = str(
+                config.get("pyfly.security.oauth2.token-store.redis.url")
+                or config.get("pyfly.session.redis.url", "redis://localhost:6379/0")
+            )
+            return RedisTokenStore(aioredis.from_url(url), ttl=refresh_ttl)  # type: ignore[no-untyped-call,unused-ignore]
+        if provider == "postgres":
+            from pyfly.security.adapters.postgres_token_store import PostgresTokenStore
+
+            def _engine() -> Any:
+                from sqlalchemy.ext.asyncio import AsyncEngine
+
+                return container.resolve(AsyncEngine)
+
+            return PostgresTokenStore(_engine)
+        return InMemoryTokenStore()
 
 
 # ---------------------------------------------------------------------------
