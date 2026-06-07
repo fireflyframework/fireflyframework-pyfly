@@ -31,6 +31,7 @@ from pyfly.starters.domain import enable_domain_stack
     scan_packages=[
         "lumen.models.repositories",
         "lumen.core.services.wallets",
+        "lumen.core.services.transfers",
         "lumen.core.services.listeners",
         "lumen.web.controllers",
     ],
