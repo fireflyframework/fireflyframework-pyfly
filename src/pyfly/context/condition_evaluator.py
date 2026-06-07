@@ -166,41 +166,55 @@ class ConditionEvaluator:
     def _eval_on_single_candidate(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
         """Spring @ConditionalOnSingleCandidate: match on exactly one candidate, or on a
         unique @primary among several."""
-        impls = self._candidate_impls(cond["bean_type"], exclude=declaring_cls)
-        if len(impls) == 1:
+        groups = self._candidate_bean_groups(cond["bean_type"], exclude=declaring_cls)
+        if len(groups) == 1:
             return True
-        if len(impls) > 1:
-            return sum(1 for cls in impls if self._is_primary(cls)) == 1
+        if len(groups) > 1:
+            primary_groups = sum(1 for regs in groups.values() if any(self._is_primary(cls, reg) for cls, reg in regs))
+            return primary_groups == 1
         return False
 
-    def _candidate_impls(self, bean_type: type, *, exclude: type | None = None) -> set[type]:
-        """Distinct concrete impl types assignable to *bean_type*, deduped by impl identity.
+    def _candidate_bean_groups(self, bean_type: type, *, exclude: type | None = None) -> dict[Any, list[Any]]:
+        """Group registrations assignable to *bean_type* by distinct bean identity.
 
-        Type-only (never resolves instances). Interface-alias registrations — a reg whose
-        key is an interface that has explicit bindings — are skipped; their concrete impls
-        are counted via ``_bindings`` so one impl of an interface counts once, not twice.
+        Type-only (never resolves instances). Registrations are keyed by their shared
+        factory/instance, so an ``@bean``'s interface-alias registration collapses onto its
+        concrete one (one impl of an interface counts ONCE). Genuinely distinct beans — e.g.
+        a concrete base class AND a registered subclass, where the base is also a ``_bindings``
+        key — each retain their own identity and count separately.
         """
         container = self._container
-        impls: set[type] = set()
-        # (1) Concrete impls explicitly bound to the interface/base type.
+        groups: dict[Any, list[Any]] = {}
+        seen: set[type] = set()
+
+        def _consider(cls: type) -> None:
+            if cls is exclude or cls in seen:
+                return
+            reg = container._registrations.get(cls)
+            if reg is None:
+                return
+            seen.add(cls)
+            if reg.factory is not None:
+                key: Any = ("factory", id(reg.factory))
+            elif reg.instance is not None:
+                key = ("instance", id(reg.instance))
+            else:
+                key = ("type", cls)
+            groups.setdefault(key, []).append((cls, reg))
+
         for impl in container._bindings.get(bean_type, []):
-            if impl is not exclude and impl in container._registrations:
-                impls.add(impl)
-        # (2) Registrations assignable to bean_type, excluding interface-alias regs.
-        for cls in container._registrations:
-            if cls is exclude or (container._bindings.get(cls)):
-                # `cls` is an interface with bindings -> its reg is an alias (impls
-                # already counted in step 1). Skip to avoid double-counting.
+            _consider(impl)
+        for cls in list(container._registrations):
+            if cls is exclude:
                 continue
             try:
                 if cls is bean_type or issubclass(cls, bean_type):
-                    impls.add(cls)
+                    _consider(cls)
             except TypeError:
                 # Protocol with non-method members: rely on explicit bindings only.
                 pass
-        return impls
+        return groups
 
-    def _is_primary(self, cls: type) -> bool:
-        """Whether *cls* is the primary candidate (class @primary or @bean(primary=True))."""
-        reg = self._container._registrations.get(cls)
-        return bool(getattr(cls, "__pyfly_primary__", False) or (reg is not None and reg.primary))
+    def _is_primary(self, cls: type, reg: Any) -> bool:
+        """Whether this candidate is primary (class @primary or @bean(primary=True))."""
+        return bool(getattr(cls, "__pyfly_primary__", False) or reg.primary)

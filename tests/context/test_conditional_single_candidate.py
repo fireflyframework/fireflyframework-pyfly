@@ -42,12 +42,19 @@ def _cond(bean_type: type) -> dict:
 
 
 def _register_interface_bean(container: Container, interface: type, impl: type) -> None:
-    """Mirror how @bean returning *interface* with concrete *impl* registers:
-    a concrete reg, an interface->impl binding, and an interface-alias reg."""
+    """Mirror how @bean returning *interface* with concrete *impl* registers: a concrete reg,
+    an interface->impl binding, and an interface-alias reg SHARING the concrete's factory
+    (exactly what ApplicationContext does at lines 482/500-502)."""
     container.register(impl)
     container.bind(interface, impl)
+
+    def factory() -> None:  # the shared @bean factory closure
+        return None
+
+    container._registrations[impl].factory = factory
     if interface not in container._registrations:
         container.register(interface)  # the alias reg (impl_type == interface)
+    container._registrations[interface].factory = factory  # alias shares the factory
 
 
 def test_single_impl_of_interface_matches() -> None:
@@ -57,10 +64,26 @@ def test_single_impl_of_interface_matches() -> None:
 
 
 def test_interface_alias_is_not_double_counted() -> None:
-    # Core regression guard: the alias reg must not inflate the count to 2.
+    # Core regression guard: the alias reg must collapse onto its concrete (one group).
     c = Container()
     _register_interface_bean(c, Repo, SqlRepo)
-    assert _ev(c)._candidate_impls(Repo) == {SqlRepo}
+    assert len(_ev(c)._candidate_bean_groups(Repo)) == 1
+
+
+def test_concrete_base_that_is_also_a_binding_key_counts_both() -> None:
+    # Regression for the review finding: a concrete base bean that is ALSO a _bindings key
+    # (because a registered subclass is bound to it) must NOT be skipped — two distinct beans.
+    class Svc:
+        pass
+
+    class PremiumSvc(Svc):
+        pass
+
+    c = Container()
+    c.register(Svc)
+    c.register(PremiumSvc)
+    c.bind(Svc, PremiumSvc)  # Svc is now a _bindings key AND its own distinct bean
+    assert _ev(c)._eval_on_single_candidate(_cond(Svc)) is False  # two real candidates
 
 
 def test_two_impls_no_primary_is_ambiguous() -> None:
