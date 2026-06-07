@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.67 (2026-06-07)
+
+### Added (scheduling — pluggable task executor; fixes a weak default)
+
+- The `TaskScheduler`'s executor is now selectable via `pyfly.scheduling.executor.type`
+  (`asyncio`, default — in-loop tasks; or `thread` — offload blocking jobs to a pool of
+  `pyfly.scheduling.executor.max-workers`, default 4). The `ThreadPoolTaskExecutor` already
+  existed and was tested but was never reachable through configuration — the auto-config
+  hardcoded `AsyncIOTaskExecutor`. Found by the ports/adapters audit (weak default).
+
 ## v26.06.66 (2026-06-07)
 
 ### Added (distributed lock — Postgres advisory-lock adapter; Postgres parity)

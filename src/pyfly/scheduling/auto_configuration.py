@@ -30,6 +30,7 @@ from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
 from pyfly.context.conditions import auto_configuration, conditional_on_class
 from pyfly.core.config import Config
 from pyfly.scheduling.lock import DistributedLock, InProcessDistributedLock, LocalLock
+from pyfly.scheduling.ports.outbound import TaskExecutorPort
 
 
 @auto_configuration
@@ -74,11 +75,19 @@ class SchedulingAutoConfiguration:
         return LocalLock()
 
     @bean
-    def task_scheduler(self, container: Container) -> TaskScheduler:
+    def task_scheduler(self, container: Container, config: Config) -> TaskScheduler:
         # Resolve the DistributedLock bean above for @scheduled(lock=...) coordination;
         # fall back to the scheduler's own LocalLock if (unexpectedly) absent.
         try:
             lock = container.resolve(DistributedLock)  # type: ignore[type-abstract]
         except (NoSuchBeanError, NoUniqueBeanError):
             lock = None
-        return TaskScheduler(lock=lock)
+
+        # Executor backend: pyfly.scheduling.executor.type = 'asyncio' (default, in-loop tasks)
+        # or 'thread' (offload blocking jobs to a pool of pyfly.scheduling.executor.max-workers).
+        executor: TaskExecutorPort | None = None
+        if str(config.get("pyfly.scheduling.executor.type", "asyncio")).lower() == "thread":
+            from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
+
+            executor = ThreadPoolTaskExecutor(max_workers=int(config.get("pyfly.scheduling.executor.max-workers", 4)))
+        return TaskScheduler(executor=executor, lock=lock)
