@@ -50,7 +50,8 @@ def main() -> int:
     if cover_png.exists():
         parts_html.append(f'<div class="cover-page"><img src="{cfg["cover_png"]}"/></div>')
     for (cid, title, path, in_nav) in docs:
-        parts_html.append(render_markdown(Path(path).read_text(encoding="utf-8"), BOOK))
+        body = render_markdown(Path(path).read_text(encoding="utf-8"), BOOK)
+        parts_html.append(f'<section class="chapter">{body}</section>')
     full = ("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
             + "\n".join(parts_html) + "</body></html>")
     render_pdf(full, base_url=BOOK,

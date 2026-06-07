@@ -1,11 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sparky">
-  <circle cx="32" cy="32" r="30" fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
-  <path d="M24 46 C 8 42 12 22 30 21 C 44 20 47 9 35 5" fill="none" stroke="#5fd13a"
-        stroke-width="7" stroke-linecap="round"/>
-  <g transform="translate(35,16)">
-    <ellipse rx="11" ry="9.5" fill="#67d642" stroke="#2f7d1c" stroke-width="1.6"/>
-    <circle cx="-4" cy="-2" r="2.3" fill="#fff"/><circle cx="4" cy="-2" r="2.3" fill="#fff"/>
-    <circle cx="-3.4" cy="-1.4" r="1.1" fill="#16331a"/><circle cx="4.6" cy="-1.4" r="1.1" fill="#16331a"/>
-    <path d="M-3 4 Q 0 6.5 3 4" stroke="#1c5512" stroke-width="1.4" fill="none"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 232" role="img" aria-label="Sparky the PyFly snake">
+  <defs>
+    <linearGradient id="sbody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#74d94a"/><stop offset="1" stop-color="#52bf30"/>
+    </linearGradient>
+    <radialGradient id="shead" cx="42%" cy="36%" r="72%">
+      <stop offset="0" stop-color="#80e354"/><stop offset="1" stop-color="#5bc636"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="200" height="232" rx="22" fill="#eaf6df"/>
+  <ellipse cx="104" cy="207" rx="58" ry="12" fill="#cbe3b2" opacity="0.75"/>
+  <!-- body: dark outline under bright fill -->
+  <path d="M100 86 C 60 106 64 158 104 168 C 134 176 154 160 150 142"
+        fill="none" stroke="#2f7d1c" stroke-width="30" stroke-linecap="round"/>
+  <path d="M100 86 C 60 106 64 158 104 168 C 134 176 154 160 150 142"
+        fill="none" stroke="url(#sbody)" stroke-width="24" stroke-linecap="round"/>
+  <!-- head -->
+  <g transform="translate(100,58)">
+    <ellipse cx="0" cy="0" rx="40" ry="35" fill="url(#shead)" stroke="#2f7d1c" stroke-width="3"/>
+    <ellipse cx="-15" cy="-5" rx="11" ry="13" fill="#ffffff"/>
+    <ellipse cx="15" cy="-5" rx="11" ry="13" fill="#ffffff"/>
+    <circle cx="-12" cy="-2" r="5.4" fill="#15321a"/>
+    <circle cx="18" cy="-2" r="5.4" fill="#15321a"/>
+    <circle cx="-10" cy="-4.4" r="1.9" fill="#ffffff"/>
+    <circle cx="20" cy="-4.4" r="1.9" fill="#ffffff"/>
+    <path d="M-12 16 Q 0 26 12 16" stroke="#1c5512" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M0 22 l0 12 m0 -3 l-6 7 m6 -7 l6 7" stroke="#e8443c" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+  </g>
+  <g fill="#ffce4d">
+    <path d="M166 72 l3.2 8 8 3.2 -8 3.2 -3.2 8 -3.2 -8 -8 -3.2 8 -3.2z"/>
+    <path d="M33 98 l2.4 6 6 2.4 -6 2.4 -2.4 6 -2.4 -6 -6 -2.4 6 -2.4z"/>
   </g>
 </svg>
