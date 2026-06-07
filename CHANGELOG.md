@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.30 (2026-06-07)
+
+### Added (core — SpEL-lite expression evaluation)
+
+Wave 4 — a safe subset of Spring's SpEL for the `#{ ... }` form.
+
+- **`@Value("#{ ... }")`** now evaluates expressions: arithmetic, comparison,
+  boolean (`and`/`or`/`not`), the ternary `a if c else b`, lists/tuples, literals,
+  `${key:default}` config-placeholder substitution (numeric values participate in
+  arithmetic), and an `env` mapping — e.g. `Value("#{${pyfly.workers} * 2}")`.
+- **`@conditional_on_expression("#{ ... }")`** (`pyfly.context`) — register a bean
+  when an expression is truthy (Spring's `@ConditionalOnExpression`), evaluated in the
+  config pass at startup.
+- **Safe by construction**: expressions are parsed with `ast` and evaluated against a
+  whitelist of node types — no attribute access, no function/method calls, no imports;
+  `eval` is never used. `pyfly.core.expression.evaluate` / `ExpressionError` /
+  `is_expression` are public.
+
+Plain `${key}` placeholders and literal `@Value` strings behave exactly as before.
+
+---
+
 ## v26.06.29 (2026-06-07)
 
 ### Added (data — read/write datasource routing)

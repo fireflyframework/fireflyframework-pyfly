@@ -55,6 +55,25 @@ def conditional_on_property(key: str, having_value: str = "", *, match_if_missin
     return decorator
 
 
+def conditional_on_expression(expression: str) -> Callable[[F], F]:
+    """Only register this bean if a SpEL-lite ``#{ ... }`` expression is truthy.
+
+    Mirrors Spring Boot's ``@ConditionalOnExpression``. The expression supports
+    arithmetic/comparison/boolean/ternary, ``${key:default}`` config-placeholder
+    substitution, and an ``env`` mapping — e.g.
+    ``@conditional_on_expression("#{${pyfly.workers:1} > 1}")``. Evaluated against the
+    active config at ApplicationContext startup.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_expression", "expression": expression})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
 def conditional_on_class(module_name: str) -> Callable[[F], F]:
     """Only register this bean if the given module is importable.
 

@@ -37,7 +37,9 @@ class Value:
     Expressions:
         ``${key}`` — resolve from Config, raise KeyError if missing.
         ``${key:default}`` — resolve from Config, use default if missing.
-        ``literal`` — return the string as-is (no ``${}`` wrapper).
+        ``#{ ... }`` — evaluate a SpEL-lite expression (arithmetic/boolean/ternary,
+            with ``${key}`` substitution and an ``env`` mapping).
+        ``literal`` — return the string as-is (no ``${}``/``#{}`` wrapper).
     """
 
     def __init__(self, expression: str) -> None:
@@ -49,6 +51,11 @@ class Value:
 
     def resolve(self, config: Config) -> Any:
         """Resolve the expression against the given Config."""
+        from pyfly.core.expression import evaluate, is_expression
+
+        if is_expression(self._expression):
+            return evaluate(self._expression, config)
+
         match = _PLACEHOLDER_RE.match(self._expression)
         if not match:
             return self._expression
