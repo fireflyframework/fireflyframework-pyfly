@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.48 (2026-06-07)
+
+### Added (data — multiple named datasources)
+
+- **`NamedDataSources`** — configure secondary datasources under
+  `pyfly.data.relational.datasources.<name>.url` (+ optional `echo`); inject `NamedDataSources`
+  and call `.get("<name>")` for that datasource's `async_sessionmaker` (Spring's multiple
+  `DataSource` beans). `.names()` lists them; `await .dispose()` closes their engines. The
+  primary datasource keeps its dedicated beans unchanged; the registry is empty when none
+  are configured.
+
 ## v26.06.47 (2026-06-07)
 
 ### Added (messaging — @message_listener retry + dead-letter routing)

@@ -38,6 +38,7 @@ from pyfly.context.conditions import (
 )
 from pyfly.core.config import Config
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+from pyfly.data.relational.named_datasources import NamedDataSources, build_named_data_sources
 from pyfly.data.relational.routing import RoutingSessionFactory
 from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.post_processor import (
@@ -127,6 +128,19 @@ class RelationalAutoConfiguration:
     def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
         """Create an ``async_sessionmaker`` factory bound to the engine."""
         return async_sessionmaker(async_engine, expire_on_commit=False)
+
+    @bean
+    def named_data_sources(self, config: Config) -> NamedDataSources:
+        """Secondary datasources from ``pyfly.data.relational.datasources.<name>``.
+
+        Inject and call ``.get("<name>")`` for that datasource's ``async_sessionmaker``.
+        Empty when none are configured (the primary keeps its dedicated beans).
+        """
+        return build_named_data_sources(
+            config,
+            lambda url, echo=False: create_async_engine(url, echo=echo),
+            lambda engine: async_sessionmaker(engine, expire_on_commit=False),
+        )
 
     @bean
     def routing_session_factory(
