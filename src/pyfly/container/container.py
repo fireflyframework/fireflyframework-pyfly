@@ -33,6 +33,7 @@ from pyfly.container.exceptions import (
 )
 from pyfly.container.metrics import BeanMetrics
 from pyfly.container.ordering import get_order
+from pyfly.container.provider import Provider
 from pyfly.container.registry import Registration
 from pyfly.container.types import Scope
 
@@ -50,6 +51,20 @@ def _assignable(instance: Any, expected_type: Any) -> bool:
         return isinstance(instance, expected_type)
     except TypeError:
         return True
+
+
+def _coerce_value(resolved: Any, base_type: Any) -> Any:
+    """Best-effort coercion of a resolved @Value to the declared parameter type."""
+    if not isinstance(base_type, type) or isinstance(resolved, base_type):
+        return resolved
+    if base_type is bool:
+        return str(resolved).strip().lower() in ("true", "1", "yes", "on")
+    if base_type in (int, float, str):
+        try:
+            return base_type(resolved)
+        except (TypeError, ValueError):
+            return resolved
+    return resolved
 
 
 class Container:
@@ -198,6 +213,27 @@ class Container:
         ordered.sort(key=lambda pair: pair[0])
         return [cast(T, instance) for _, instance in ordered]
 
+    def _resolve_map(self, value_type: Any) -> dict[str, Any]:
+        """Map injection: ``{bean-name: bean}`` for every named bean assignable to *value_type*."""
+        result: dict[str, Any] = {}
+        for name, reg in self._named.items():
+            instance = self._resolve_registration(reg)
+            if _assignable(instance, value_type):
+                result[name] = instance
+        return result
+
+    def _get_config(self) -> Any:
+        """The Config bean instance — required to resolve @Value placeholders."""
+        from pyfly.core.config import Config
+
+        reg = self._registrations.get(Config)
+        if reg is None or reg.instance is None:
+            raise NoSuchBeanError(
+                bean_type=Config,
+                suggestions=["@Value requires the Config bean to be registered"],
+            )
+        return reg.instance
+
     def contains(self, name: str) -> bool:
         """Check if a named bean exists."""
         return name in self._named
@@ -309,13 +345,17 @@ class Container:
 
     def _resolve_param(self, param_type: type) -> Any:
         """Resolve a single parameter, handling Annotated, Optional, and list."""
-        # Handle Annotated[T, Qualifier("name")]
+        # Handle Annotated[T, Qualifier("name")] and Annotated[T, Value("${key}")]
         if get_origin(param_type) is Annotated:
+            from pyfly.core.value import Value
+
             args = get_args(param_type)
             base_type = args[0]
             for metadata in args[1:]:
                 if isinstance(metadata, Qualifier):
                     return self.resolve_by_name(metadata.name, expected_type=base_type)
+                if isinstance(metadata, Value):
+                    return _coerce_value(metadata.resolve(self._get_config()), base_type)
             return self._resolve_param(base_type)
 
         # Handle Optional[T] (Union[T, None] or T | None via PEP 604)
@@ -333,6 +373,18 @@ class Container:
             args = get_args(param_type)
             if args:
                 return self.resolve_all(args[0])
+
+        # Handle Provider[T] — deferred / fresh resolution (Spring ObjectFactory)
+        if get_origin(param_type) is Provider:
+            args = get_args(param_type)
+            if args:
+                return Provider(self, args[0])
+
+        # Handle dict[str, T] — Map injection (bean-name -> bean), like Spring Map<String,T>
+        if get_origin(param_type) is dict:
+            args = get_args(param_type)
+            if len(args) == 2 and args[0] is str:
+                return self._resolve_map(args[1])
 
         # Handle type[T] or bare `type` — class references cannot be auto-resolved
         if param_type is type or get_origin(param_type) is type:
