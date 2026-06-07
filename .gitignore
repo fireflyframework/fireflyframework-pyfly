@@ -35,3 +35,9 @@ book/build/**/__pycache__/
 # Internal Claude / superpowers design docs + session files — kept local, never committed
 .claude/
 docs/superpowers/
+
+# Ship the built book (the deliverable); the rest of book/dist/ stays ignored
+!book/dist/
+book/dist/**
+!book/dist/pyfly-by-example.pdf
+!book/dist/pyfly-by-example.epub
