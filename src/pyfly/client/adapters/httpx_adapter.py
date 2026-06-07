@@ -16,13 +16,19 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import httpx
+if TYPE_CHECKING:
+    import httpx
 
 
 class HttpxClientAdapter:
-    """HTTP client adapter backed by httpx.AsyncClient."""
+    """HTTP client adapter backed by httpx.AsyncClient.
+
+    Hexagonal: ``httpx`` is imported lazily in the constructor (not at module scope), so this
+    module imports cleanly without the ``http`` extra — only the composition root that selects
+    this adapter triggers the import.
+    """
 
     def __init__(
         self,
@@ -30,6 +36,8 @@ class HttpxClientAdapter:
         timeout: timedelta = timedelta(seconds=30),
         headers: dict[str, str] | None = None,
     ) -> None:
+        import httpx
+
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout.total_seconds(),
