@@ -358,14 +358,18 @@ pyfly:
 
 ### Profile Expressions in Beans
 
-Stereotype decorators accept a `profile` parameter that controls when a bean is active.
-The `Environment.accepts_profiles()` method evaluates these expressions:
+Stereotype decorators (`@service`, `@component`, `@repository`, …) and `@bean` accept a
+`profile` parameter that controls when a bean is active — the equivalent of Spring's
+`@Profile`. The expression is stored as `__pyfly_profile__` and evaluated by
+`Environment.accepts_profiles()` during `ApplicationContext` startup
+(`_filter_by_profile()`); beans whose expression does not match the active profiles are
+dropped before instantiation.
 
 | Expression | Meaning |
 |---|---|
 | `"dev"` | Active when the `dev` profile is active. |
 | `"!production"` | Active when `production` is **not** active. |
-| `"dev,test"` | Active when `dev` **or** `test` is active. |
+| `"dev,test"` | Active when `dev` **or** `test` is active (legacy comma-OR). |
 
 ```python
 @service(profile="dev")
@@ -378,6 +382,51 @@ class ProductionService:
     """Loaded in all profiles except 'test'."""
     ...
 ```
+
+#### Boolean Profile Expressions
+
+Since **v26.06.39**, profile expressions support the full Spring Boot 2.4+ grammar:
+the `&` (and), `|` (or), and `!` (not) operators combined with `()` grouping. This is
+evaluated by `Environment.accepts_profiles()` (in `pyfly.context.environment`). The legacy
+comma-OR form still works for backward compatibility.
+
+| Expression | Active when… |
+|---|---|
+| `"prod & cloud"` | both `prod` **and** `cloud` are active. |
+| `"prod \| qa"` | either `prod` **or** `qa` is active. |
+| `"(prod & cloud) \| qa"` | `prod` and `cloud` are both active, **or** `qa` is active. |
+| `"!(dev \| test)"` | neither `dev` **nor** `test` is active. |
+
+```python
+@service(profile="prod & cloud")
+class CloudMetricsExporter:
+    """Only loaded when BOTH 'prod' and 'cloud' profiles are active."""
+    ...
+
+@service(profile="!(dev | test)")
+class RealPaymentGateway:
+    """Loaded in any profile that is not 'dev' and not 'test'."""
+    ...
+```
+
+You can also evaluate expressions directly against the `Environment`:
+
+```python
+from pyfly.core import Config
+from pyfly.context.environment import Environment
+
+env = Environment(Config({"pyfly": {"profiles": {"active": "prod,cloud"}}}))
+
+env.accepts_profiles("prod & cloud")        # True
+env.accepts_profiles("(prod & cloud) | qa") # True
+env.accepts_profiles("!(dev | test)")       # True
+env.accepts_profiles("dev,test")            # False (legacy comma-OR still supported)
+```
+
+The evaluator is safe by construction: each profile token is substituted with `True`/`False`
+and the resulting boolean expression is parsed with `ast.parse(..., mode="eval")` and walked
+node-by-node (only `and`/`or`/`not` and grouping are honored), never via Python `eval`. A
+malformed expression evaluates to `False` rather than raising.
 
 ### Early Profile Resolution
 

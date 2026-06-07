@@ -20,6 +20,7 @@ logging -- along with a health check system for readiness and liveness probes.
    - [@span Decorator](#span-decorator)
    - [Error Recording](#error-recording)
    - [OpenTelemetry Integration](#opentelemetry-integration)
+   - [Distributed Trace Propagation](#distributed-trace-propagation)
 4. [Logging](#logging)
    - [Quick Start with get_logger](#quick-start-with-get_logger)
    - [LoggingPort Protocol](#loggingport-protocol)
@@ -416,6 +417,116 @@ process-order [200ms]
   +-- fetch-customer [50ms]
   +-- check-inventory [30ms]
 ```
+
+### Distributed Trace Propagation
+
+The spans above stay correlated *within* a single process automatically. To keep a
+trace correlated **across** services, PyFly propagates the W3C
+[`traceparent`](https://www.w3.org/TR/trace-context/) header on the way in and on the
+way out, and stamps the active trace/span IDs onto every log line. This works end to
+end without any per-handler code, and every piece is a safe no-op when OpenTelemetry
+is not installed.
+
+The low-level helpers live in `pyfly.observability.propagation`:
+
+```python
+from pyfly.observability.propagation import (
+    extract_context,    # inbound: parse traceparent from request headers
+    inject_headers,     # outbound: write traceparent into request headers
+    current_trace_ids,  # (trace_id, span_id) hex of the active span, or None
+    has_otel,           # whether opentelemetry is installed
+)
+```
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `extract_context` | `(headers: Mapping[str, str]) -> Any` | Parse the upstream context from inbound headers; pass the result as `context=` to `start_as_current_span`. Returns `None` without OTel. |
+| `inject_headers` | `(headers: dict[str, str]) -> dict[str, str]` | Inject the active context (W3C `traceparent` etc.) into `headers` in place and return it. |
+| `current_trace_ids` | `() -> tuple[str, str] \| None` | `(trace_id, span_id)` as hex (`032x` / `016x`) for the active span, or `None` if there is no valid span / no OTel. |
+| `has_otel` | `() -> bool` | Whether `opentelemetry` is importable. |
+
+**Source:** `src/pyfly/observability/propagation.py`
+
+#### Inbound: the TracingFilter server span
+
+Both the Starlette and FastAPI adapters wire `TracingFilter` into the built-in
+filter chain (immediately after `CorrelationFilter`). For each request it extracts
+the upstream context from the inbound headers and opens a **SERVER** span as a child
+of that context, so every `@span` created during the request — and every log line —
+belongs to the caller's distributed trace.
+
+```python
+from pyfly.web.adapters.starlette.filters import TracingFilter
+```
+
+The filter is installed for you by `create_app(...)`; you do not register it
+manually. Conceptually it does:
+
+```python
+# pyfly/web/adapters/starlette/filters/tracing_filter.py (simplified)
+parent = extract_context(request.headers)            # from W3C traceparent
+tracer = trace.get_tracer("pyfly")
+with tracer.start_as_current_span(
+    f"{request.method} {request.url.path}",
+    context=parent,
+    kind=trace.SpanKind.SERVER,
+) as span:
+    response = await call_next(request)
+    span.set_attribute("http.request.method", request.method)
+    span.set_attribute("url.path", request.url.path)
+    span.set_attribute("http.response.status_code", response.status_code)
+    return response
+```
+
+When OpenTelemetry is not installed, the filter is a transparent pass-through.
+
+**Source:** `src/pyfly/web/adapters/starlette/filters/tracing_filter.py` (and the
+FastAPI adapter, which wires the same filter).
+
+#### Outbound: the httpx client adapter
+
+`HttpxClientAdapter` injects the current trace context into every outbound request,
+so a downstream service's `TracingFilter` can continue the same trace:
+
+```python
+from datetime import timedelta
+from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
+
+client = HttpxClientAdapter(base_url="https://inventory.internal")
+
+# Within an active span, the request carries a W3C traceparent automatically:
+resp = await client.request("GET", "/skus/WIDGET-42")
+# Outbound headers include e.g.:
+#   traceparent: 00-<trace_id>-<span_id>-01
+```
+
+Internally, `request()` calls `inject_headers()` on the per-request headers before
+delegating to `httpx.AsyncClient`, so the same trace flows to the callee.
+
+**Source:** `src/pyfly/client/adapters/httpx_adapter.py`
+
+#### Logs carry trace_id and span_id
+
+The `StructlogAdapter` registers a processor that stamps the active span's IDs onto
+every record (the MDC equivalent), so logs and traces are joinable in your backend.
+No code change is required — `get_logger(...)` calls pick this up automatically:
+
+```python
+from pyfly.logging import get_logger
+
+logger = get_logger("inventory_service")
+logger.info("sku_lookup", sku="WIDGET-42")
+```
+
+Inside an active span the record gains `trace_id` and `span_id` fields:
+
+```json
+{"event": "sku_lookup", "sku": "WIDGET-42", "trace_id": "1a4b3145ed8f2dd11172ee3584123f4a", "span_id": "d2a62aaa81b0ad66", "timestamp": "2026-01-15T10:30:00Z", "level": "info", "logger": "inventory_service"}
+```
+
+When there is no active span (or OTel is absent) the fields are simply omitted.
+
+**Source:** `src/pyfly/logging/structlog_adapter.py` (the `_add_trace_ids` processor).
 
 ---
 

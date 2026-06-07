@@ -8,28 +8,37 @@ fallback strategies using the PyFly resilience module.
 ## Table of Contents
 
 1. [Introduction](#introduction)
-2. [Rate Limiter](#rate-limiter)
+2. [Retry](#retry)
+   - [@retry Decorator](#retry-decorator)
+   - [Backoff, Cap, and Jitter](#backoff-cap-and-jitter)
+   - [Filtering Exception Types](#filtering-which-exceptions-retry)
+3. [Circuit Breaker](#circuit-breaker)
+   - [CircuitBreaker Class](#circuitbreaker-class)
+   - [Count-Based vs Rate-Based Tripping](#count-based-vs-rate-based-tripping)
+   - [Half-Open Recovery](#half-open-recovery)
+   - [@circuit_breaker Decorator](#circuit_breaker-decorator)
+4. [Rate Limiter](#rate-limiter)
    - [RateLimiter Class](#ratelimiter-class)
    - [Token Bucket Algorithm](#token-bucket-algorithm)
    - [@rate_limiter Decorator](#rate_limiter-decorator)
-3. [Bulkhead](#bulkhead)
+5. [Bulkhead](#bulkhead)
    - [Bulkhead Class](#bulkhead-class)
    - [Permit-Counter Concurrency Limiting](#permit-counter-concurrency-limiting)
    - [@bulkhead Decorator](#bulkhead-decorator)
-4. [Time Limiter](#time-limiter)
+6. [Time Limiter](#time-limiter)
    - [@time_limiter Decorator](#time_limiter-decorator)
    - [How It Works](#how-it-works)
-5. [Fallback](#fallback)
+7. [Fallback](#fallback)
    - [@fallback Decorator](#fallback-decorator)
    - [Fallback with a Method](#fallback-with-a-method)
    - [Fallback with a Static Value](#fallback-with-a-static-value)
    - [Filtering Exception Types](#filtering-exception-types)
-6. [Exception Types](#exception-types)
-7. [Combining Patterns](#combining-patterns)
+8. [Exception Types](#exception-types)
+9. [Combining Patterns](#combining-patterns)
    - [Stacking Decorators](#stacking-decorators)
    - [Recommended Order](#recommended-order)
-8. [Configuration](#configuration)
-9. [Complete Example](#complete-example)
+10. [Configuration](#configuration)
+11. [Complete Example](#complete-example)
 
 ---
 
@@ -45,6 +54,8 @@ interacts with unreliable resources:
 
 | Pattern | Purpose |
 |---|---|
+| **Retry** | Re-invokes a failing call with backoff to ride out transient errors |
+| **Circuit Breaker** | Stops calling a failing dependency to let it recover |
 | **Rate Limiter** | Caps the number of calls in a time window to prevent overload |
 | **Bulkhead** | Limits concurrent executions to isolate failures |
 | **Time Limiter** | Enforces a maximum execution time to avoid hanging calls |
@@ -56,6 +67,10 @@ are available from a single import:
 
 ```python
 from pyfly.resilience import (
+    retry,
+    CircuitBreaker,
+    CircuitState,
+    circuit_breaker,
     RateLimiter,
     rate_limiter,
     Bulkhead,
@@ -64,6 +79,196 @@ from pyfly.resilience import (
     fallback,
 )
 ```
+
+---
+
+## Retry
+
+The retry pattern re-invokes a callable that raises a transient error, sleeping
+between attempts so the dependency has time to recover. It is the PyFly
+equivalent of Spring Retry / Resilience4j `@Retry`.
+
+### @retry Decorator
+
+`retry()` returns a decorator that works on **both sync and async** callables
+(it detects coroutine functions and adapts the wait between attempts):
+
+```python
+from pyfly.resilience import retry
+
+@retry(max_attempts=3, delay=0.2, backoff=2.0)
+async def fetch_user(user_id: str) -> dict:
+    return await http_client.get(f"/users/{user_id}")
+```
+
+**Parameters** (`max_attempts` is positional; the rest are keyword-only):
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_attempts` | `int` | `3` | Total attempts **including the first** (must be `>= 1`, else `ValueError`). |
+| `delay` | `float` | `0.0` | Base delay in seconds before the first retry. |
+| `backoff` | `float` | `1.0` | Multiplier applied to the delay each subsequent attempt. |
+| `max_delay` | `float \| None` | `None` | Optional cap on the per-attempt wait. |
+| `jitter` | `float` | `0.0` | Randomization fraction in `[0, 1]` applied as `±jitter * wait`. |
+| `exceptions` | `tuple[type[BaseException], ...]` | `(Exception,)` | Exception types that trigger a retry; others propagate immediately. |
+
+After all attempts are exhausted, the **last** exception is re-raised. With the
+default `delay=0.0` there is no sleep between attempts.
+
+### Backoff, Cap, and Jitter
+
+The wait before retry number `attempt` (0-indexed) is:
+
+```
+wait = delay * (backoff ** attempt)        # exponential growth
+wait += random.uniform(-jitter, jitter) * wait   # if jitter > 0
+wait = min(wait, max_delay)                # if max_delay is set
+```
+
+So exponential backoff with a ceiling and anti-thundering-herd jitter looks
+like this:
+
+```python
+@retry(max_attempts=5, delay=0.5, backoff=2.0, max_delay=10.0, jitter=0.2)
+async def call_flaky_service() -> str:
+    # waits ~0.5s, ~1.0s, ~2.0s, ~4.0s (each ±20%, capped at 10s)
+    return await client.invoke()
+```
+
+### Filtering Which Exceptions Retry
+
+Pass `exceptions` to retry only on specific error types. Anything not listed
+propagates on the first occurrence without retrying:
+
+```python
+from pyfly.kernel.exceptions import OperationTimeoutException
+
+@retry(max_attempts=4, delay=0.1, exceptions=(ConnectionError, OperationTimeoutException))
+async def load_config() -> dict:
+    return await remote_config.get()
+```
+
+Here a `ValueError` would surface immediately, while `ConnectionError` or
+`OperationTimeoutException` are retried up to four total attempts.
+
+---
+
+## Circuit Breaker
+
+A circuit breaker stops calling a dependency that is failing, giving it room to
+recover instead of hammering it with doomed requests. It is a thread-safe
+state machine with three states (`CircuitState.CLOSED`, `OPEN`, `HALF_OPEN`) and
+is the PyFly equivalent of Resilience4j's circuit breaker.
+
+### CircuitBreaker Class
+
+```python
+from pyfly.resilience import CircuitBreaker
+
+breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
+```
+
+**Constructor parameters** (`failure_rate_threshold`, `window_size`, and
+`half_open_max_calls` are keyword-only):
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `failure_threshold` | `int` | `5` | Consecutive failures that trip the circuit (used when `failure_rate_threshold` is `None`). |
+| `recovery_timeout` | `float` | `30.0` | Seconds the circuit stays `OPEN` before moving to `HALF_OPEN`. |
+| `expected` | `tuple[type[BaseException], ...]` | `(Exception,)` | Exception types that count as failures; others pass through without affecting the circuit. |
+| `failure_rate_threshold` | `float \| None` | `None` | When set, trip on failure *rate* over the window (COUNT_BASED window) instead of consecutive count. |
+| `window_size` | `int` | `10` | Size of the sliding outcome window used for rate-based tripping. |
+| `half_open_max_calls` | `int` | `1` | Trial calls admitted in `HALF_OPEN`; this many successes close the circuit (coerced to `>= 1`). |
+
+The current state is read via the `state` property, which also performs the
+lazy `OPEN -> HALF_OPEN` transition once `recovery_timeout` has elapsed:
+
+```python
+from pyfly.resilience import CircuitState
+
+if breaker.state is CircuitState.OPEN:
+    ...
+```
+
+### Count-Based vs Rate-Based Tripping
+
+By default the breaker trips after `failure_threshold` **consecutive** failures;
+a single success resets the counter:
+
+```python
+# Trip after 5 consecutive failures (default behavior)
+breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
+```
+
+Set `failure_rate_threshold` to switch to a Resilience4j-style **COUNT_BASED**
+window: the breaker trips once the failure rate over the last `window_size`
+calls reaches the threshold. Two conditions must both hold before a rate-based
+trip occurs:
+
+1. The window must be **full** (`window_size` outcomes recorded) — a partial
+   window is never judged.
+2. The threshold is checked when a **failure** is recorded, so the call that
+   completes the window and pushes the rate over the line must itself be a
+   failure.
+
+```python
+# Trip when 50% of the last 10 calls failed
+breaker = CircuitBreaker(
+    recovery_timeout=15.0,
+    failure_rate_threshold=0.5,
+    window_size=10,
+    expected=(ConnectionError,),
+)
+```
+
+### Half-Open Recovery
+
+After `recovery_timeout` seconds in `OPEN`, the next state read moves the
+circuit to `HALF_OPEN`, which admits up to `half_open_max_calls` trial calls.
+Excess probes are rejected with `CircuitBreakerException`. If those trials all
+succeed the circuit closes; any failure during `HALF_OPEN` re-opens it
+immediately:
+
+```python
+# Require 2 successful trial calls to close the circuit again
+breaker = CircuitBreaker(
+    failure_threshold=3,
+    recovery_timeout=10.0,
+    half_open_max_calls=2,
+)
+```
+
+### @circuit_breaker Decorator
+
+`circuit_breaker(breaker)` guards a callable (sync or async) with an existing
+`CircuitBreaker` instance. It rejects calls while the circuit is `OPEN` (or the
+half-open probe budget is exhausted) by raising `CircuitBreakerException`, and
+records success/failure otherwise. Only exceptions in `breaker.expected` count
+as failures:
+
+```python
+from pyfly.resilience import CircuitBreaker, circuit_breaker
+from pyfly.kernel.exceptions import CircuitBreakerException
+
+inventory_breaker = CircuitBreaker(
+    failure_threshold=3,
+    recovery_timeout=20.0,
+    expected=(ConnectionError,),
+)
+
+@circuit_breaker(inventory_breaker)
+async def check_stock(sku: str) -> int:
+    return await inventory_api.count(sku)
+
+try:
+    qty = await check_stock("ABC-123")
+except CircuitBreakerException:
+    qty = 0  # circuit is open — serve a degraded value
+```
+
+Share a single `CircuitBreaker` instance across multiple functions to trip them
+together, or pair `@circuit_breaker` with `@retry` and `@fallback` (see
+[Combining Patterns](#combining-patterns)).
 
 ---
 
@@ -415,7 +620,7 @@ from pyfly.kernel.exceptions import (
 | `RateLimitException` | `RateLimiter.acquire()` | `"Rate limit exceeded"` |
 | `BulkheadException` | `Bulkhead.acquire()` | `"Bulkhead at capacity (10 concurrent calls)"` |
 | `OperationTimeoutException` | `time_limiter` | `"fetch_data exceeded timeout of 5.0s"` |
-| `CircuitBreakerException` | `CircuitBreaker.call()` | `"Circuit breaker is open"` |
+| `CircuitBreakerException` | `CircuitBreaker.before_call()` / `@circuit_breaker` | `"Circuit breaker is open"` |
 
 These are all subclasses of `InfrastructureException`, which itself extends
 `PyFlyException`. You can catch them individually or catch the parent class for
@@ -431,8 +636,10 @@ except InfrastructureException as exc:
     return fallback_result
 ```
 
-For circuit breaker and retry patterns, see the [HTTP Client module](client.md),
-which provides `CircuitBreaker` and `RetryPolicy`.
+For the circuit breaker and retry patterns, see the [Retry](#retry) and
+[Circuit Breaker](#circuit-breaker) sections above. The [HTTP Client
+module](client.md) layers its own retry/circuit-breaking on top of outbound
+requests.
 
 ---
 

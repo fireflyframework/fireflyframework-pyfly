@@ -27,6 +27,7 @@ event-driven tests for PyFly applications.
    - [@DataTest](#datatest)
    - [@ServiceTest](#servicetest)
    - [get_test_slice()](#get_test_slice)
+   - [Functional Slices (web_slice / service_slice / data_slice)](#functional-slices-web_slice--service_slice--data_slice)
 7. [PyFlyTestClient](#pyflytestclient)
    - [TestResponse](#testresponse)
    - [Fluent Assertion Methods](#fluent-assertion-methods)
@@ -559,6 +560,143 @@ get_test_slice(PlainTest)    # None
 | `@ServiceTest` | `"service"` | Services and business logic |
 
 **Source:** `src/pyfly/testing/slices.py`
+
+### Functional Slices (web_slice / service_slice / data_slice)
+
+While the `@WebTest`/`@DataTest`/`@ServiceTest` decorators *mark* a test class,
+the **functional slices** actually *build and start* a minimal `ApplicationContext`
+containing only the beans you pass (plus the collaborators you supply via
+`overrides`). They are the explicit-builder equivalents of Spring Boot's
+`@WebMvcTest` / `@DataJpaTest` / `@SpringBootTest` slices: each slice registers a
+focused set of beans, starts a real context, and — for the web slice — wraps it in
+a `PyFlyTestClient` so routes, filters, and error handlers are wired exactly as in
+production via `create_app(context=...)`.
+
+```python
+from pyfly.testing import web_slice, service_slice, data_slice, slice_context
+```
+
+| Helper | Yields | Use for |
+|---|---|---|
+| `web_slice(*controllers, config=None, overrides=None)` | `(context, client)` | Controllers + a `PyFlyTestClient` |
+| `service_slice(*beans, config=None, overrides=None)` | `context` | Services and business logic |
+| `data_slice(*beans, config=None, overrides=None)` | `context` | Repositories and queries |
+| `slice_context(*beans, config=None, overrides=None)` | `context` | Generic minimal context |
+
+`service_slice` and `data_slice` are intent-named aliases of `slice_context`. Each
+helper is a coroutine, so you `await` it to get an async context manager — the
+context is started on `__aenter__` and stopped on `__aexit__`:
+
+```python
+async with await web_slice(...) as (context, client):
+    ...   # context started; stopped automatically on exit
+```
+
+**Overrides.** The `overrides` parameter maps an interface/dependency type to a
+replacement. The value can be either a **class** (registered as a `SINGLETON` and
+bound to the interface) or a **pre-built instance/mock** (installed directly under
+the interface type):
+
+```python
+overrides={WidgetService: FakeWidgetService}       # a replacement class
+overrides={WidgetService: FakeWidgetService()}      # a pre-built instance/fake
+```
+
+#### Web slice
+
+```python
+from pyfly.container.stereotypes import rest_controller
+from pyfly.web.mappings import get_mapping, request_mapping
+from pyfly.testing import web_slice
+
+
+class WidgetService:
+    def names(self) -> list[str]:
+        return ["real-widget"]
+
+
+class FakeWidgetService:
+    def names(self) -> list[str]:
+        return ["fake-widget"]
+
+
+@rest_controller
+@request_mapping("/api/widgets")
+class WidgetController:
+    def __init__(self, widget_service: WidgetService) -> None:
+        self._service = widget_service
+
+    @get_mapping("/")
+    async def list_widgets(self) -> dict:
+        return {"widgets": self._service.names()}
+
+
+async def test_widgets_endpoint():
+    # Real dependency: pass WidgetController and WidgetService.
+    async with await web_slice(WidgetController, WidgetService) as (ctx, client):
+        assert ctx.get_bean(WidgetController) is not None
+        client.get("/api/widgets/").assert_status(200)
+
+    # Swap the collaborator for a fake instance via overrides.
+    async with await web_slice(
+        WidgetController, overrides={WidgetService: FakeWidgetService()}
+    ) as (_ctx, client):
+        assert client.get("/api/widgets/").json() == {"widgets": ["fake-widget"]}
+```
+
+#### Service / data slices
+
+`service_slice` and `data_slice` yield the started context directly (no client).
+Resolve beans with `ctx.get_bean(...)`:
+
+```python
+from pyfly.container.stereotypes import service
+from pyfly.testing import service_slice, data_slice
+
+
+@service
+class GreetingService:
+    def __init__(self, widget_service: WidgetService) -> None:
+        self._service = widget_service
+
+    def greet(self) -> str:
+        return f"hello {self._service.names()[0]}"
+
+
+async def test_service_slice():
+    # Override the collaborator with a replacement class.
+    async with await service_slice(
+        GreetingService, overrides={WidgetService: FakeWidgetService}
+    ) as ctx:
+        assert ctx.get_bean(GreetingService).greet() == "hello fake-widget"
+
+
+async def test_data_slice():
+    async with await data_slice(WidgetService) as ctx:
+        repo = ctx.get_bean(WidgetService)
+        assert repo.names() == ["real-widget"]
+```
+
+#### Fail-fast on missing collaborators
+
+A slice never silently pulls in unrelated infrastructure. After the context
+starts, each slice bean is resolved immediately, so a missing collaborator surfaces
+at build time (matching Spring slice startup) rather than on first use:
+
+```python
+import pytest
+from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError
+from pyfly.testing import web_slice
+
+
+async def test_missing_collaborator_fails_loudly():
+    # WidgetController needs WidgetService, which is neither passed nor overridden.
+    with pytest.raises((NoSuchBeanError, BeanCreationException)):
+        async with await web_slice(WidgetController):
+            pass
+```
+
+**Source:** `src/pyfly/testing/slice_context.py`
 
 ---
 

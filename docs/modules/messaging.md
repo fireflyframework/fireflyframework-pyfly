@@ -164,21 +164,27 @@ async def handle_order(msg: Message) -> None:
 
 ### Parameters
 
-| Parameter | Type           | Default | Description |
-|-----------|----------------|---------|-------------|
-| `topic`   | `str`          | *required* | The topic to listen on. |
-| `group`   | `str \| None`  | `None`     | Consumer group name. Handlers in the same group receive messages in round-robin fashion (only one handler per group processes each message). |
+| Parameter           | Type           | Default    | Description |
+|---------------------|----------------|------------|-------------|
+| `topic`             | `str`          | *required* | The topic to listen on. |
+| `group`             | `str \| None`  | `None`     | Consumer group name. Handlers in the same group receive messages in round-robin fashion (only one handler per group processes each message). |
+| `retries`           | `int`          | `0`        | Number of times to re-invoke the handler if it raises. Keyword-only. |
+| `retry_delay`       | `float`        | `0.0`      | Base delay in seconds between retries; attempt *N* waits `retry_delay * N` (linear backoff). Keyword-only. |
+| `dead_letter_topic` | `str \| None`  | `None`     | When set, a message still failing after `retries` is re-published here instead of propagating. Keyword-only. |
 
 ### How It Works
 
-Under the hood, the decorator stores three metadata attributes on the wrapped
+Under the hood, the decorator stores metadata attributes on the wrapped
 function:
 
-| Attribute                       | Value |
-|---------------------------------|-------|
-| `__pyfly_message_listener__`    | `True` |
-| `__pyfly_listener_topic__`      | The topic string |
-| `__pyfly_listener_group__`      | The group string (or `None`) |
+| Attribute                          | Value |
+|------------------------------------|-------|
+| `__pyfly_message_listener__`       | `True` |
+| `__pyfly_listener_topic__`         | The topic string |
+| `__pyfly_listener_group__`         | The group string (or `None`) |
+| `__pyfly_listener_retries__`       | The retry count |
+| `__pyfly_listener_retry_delay__`   | The base retry delay (seconds) |
+| `__pyfly_listener_dlq__`           | The dead-letter topic (or `None`) |
 
 During application startup, the framework scans registered beans for functions
 carrying `__pyfly_message_listener__ = True` and calls
@@ -200,6 +206,64 @@ class PaymentProcessor:
     async def on_payment(self, msg: Message) -> None:
         data = json.loads(msg.value)
         await self._process_payment(data)
+```
+
+### Retry and Dead-Letter Routing
+
+A listener can transparently retry on failure and route exhausted messages to a
+dead-letter topic (DLQ). This is **adapter-agnostic**: the handler is wrapped
+once at wiring time, so retry/DLQ behaves identically across the Kafka,
+RabbitMQ, and in-memory brokers. It mirrors Spring Kafka's `@RetryableTopic` /
+`DefaultErrorHandler` dead-letter routing.
+
+```python
+from pyfly.container import service
+from pyfly.messaging import message_listener, Message
+
+@service
+class PaymentProcessor:
+
+    @message_listener(
+        topic="payments",
+        group="payment-group",
+        retries=3,                      # re-invoke up to 3 times on failure
+        retry_delay=0.5,                # linear backoff: 0.5s, 1.0s, 1.5s
+        dead_letter_topic="payments.DLQ",
+    )
+    async def on_payment(self, msg: Message) -> None:
+        data = json.loads(msg.value)
+        await self._charge(data)        # if this keeps raising -> DLQ
+```
+
+Behavior:
+
+* The handler is invoked, and on any `Exception` it is retried up to `retries`
+  times. Attempt *N* sleeps for `retry_delay * N` seconds before retrying
+  (linear backoff). With `retry_delay=0.0` (the default), retries happen
+  immediately.
+* After the retries are exhausted, if `dead_letter_topic` is set the original
+  message is re-published there (preserving `value` and `key`) and the
+  exception is swallowed so the consumer keeps running. If no
+  `dead_letter_topic` is set, the exception propagates.
+* The DLQ message carries the original headers plus two diagnostic headers:
+
+  | Header             | Value |
+  |--------------------|-------|
+  | `x-original-topic` | The topic the message was originally consumed from. |
+  | `x-exception`      | The class name of the exception (e.g. `ValueError`). |
+
+* When both `retries <= 0` and `dead_letter_topic is None`, the handler is
+  registered unchanged with zero overhead.
+
+You can inspect dead-lettered messages by subscribing to the DLQ topic like any
+other listener:
+
+```python
+@message_listener(topic="payments.DLQ", group="dlq-audit")
+async def on_dead_letter(self, msg: Message) -> None:
+    original = msg.headers.get("x-original-topic")
+    exc = msg.headers.get("x-exception")
+    print(f"DLQ: {original} failed with {exc}: {msg.value!r}")
 ```
 
 ---

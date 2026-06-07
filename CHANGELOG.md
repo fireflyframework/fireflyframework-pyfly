@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.56 (2026-06-07)
+
+### Docs (parity documentation for v26.06.37–55)
+
+Documented every feature shipped in v26.06.37–55 across 14 docs files (verified — all
+referenced imports/config keys resolve against the released source):
+
+- **dependency-injection**: custom-scope SPI, `@RefreshScope`, `Scope.SESSION`,
+  `@conditional_on_single_candidate` / `@conditional_on_web_application` / `@conditional_on_resource`
+- **security**: full method-security SpEL, role hierarchy, OAuth2 PKCE
+- **observability**: OpenTelemetry distributed-trace propagation
+- **configuration**: profile boolean expressions (`& | ! ()`)
+- **events**: injectable `ApplicationEventPublisher` + arbitrary domain events
+- **caching**: `@cacheable` condition / unless
+- **resilience**: `@retry` jitter, circuit-breaker failure-rate window & half-open tuning
+- **scheduling**: `@scheduled` time zones + distributed lock
+- **messaging**: `@message_listener` retry + dead-letter routing
+- **data-relational**: multiple named datasources
+- **testing**: functional test slices
+- **session**: session concurrency control
+- **actuator**: `POST /actuator/refresh`
+- **spring-comparison**: parity rows for all of the above (and corrected stale resilience API examples)
+
 ## v26.06.55 (2026-06-07)
 
 ### Added (session — concurrency control)
