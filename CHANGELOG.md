@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.35 (2026-06-07)
+
+### Fixed (messaging — Kafka consumer per-message error isolation)
+
+From the final parity audit: the Kafka consume loop awaited each handler with no
+per-message guard, so **a single handler exception propagated out of the `async for`
+and killed the consumer** — silently halting processing of every subsequent message
+(and, under auto-commit, losing it). Each handler invocation is now wrapped: a handler
+exception is logged (`kafka_message_handler_failed`) and the consumer continues with
+the next message; `asyncio.CancelledError` is re-raised so shutdown still stops the
+loop cleanly. (RabbitMQ already isolated per message via `message.process()`.)
+
+---
+
 ## v26.06.34 (2026-06-07)
 
 ### Fixed (data — @transactional correctness)
