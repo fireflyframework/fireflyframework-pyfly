@@ -15,23 +15,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 
-from pyfly.testing import postgres_container, pyfly_config_for, redis_container, requires_docker
-
-
-@pytest.fixture
-def redis_url() -> Iterator[str]:
-    with redis_container() as container:
-        yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
-
-
-@pytest.fixture
-def pg_url() -> Iterator[str]:
-    with postgres_container() as container:
-        yield pyfly_config_for(container)["pyfly.data.relational.url"]
+from pyfly.testing import requires_docker  # `redis_url` / `pg_url` fixtures provided by conftest.py
 
 
 @requires_docker

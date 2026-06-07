@@ -21,19 +21,10 @@ just fakes. Gated by ``@requires_docker``; run in CI (``--all-extras`` + Docker)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import pytest
 
-from pyfly.testing import redis_container, requires_docker
-
-
-@pytest.fixture
-def redis_url() -> Iterator[str]:
-    with redis_container() as container:
-        host = container.get_container_host_ip()
-        port = container.get_exposed_port(6379)
-        yield f"redis://{host}:{port}/0"
+from pyfly.testing import requires_docker  # the `redis_url` fixture is provided by conftest.py
 
 
 @requires_docker
