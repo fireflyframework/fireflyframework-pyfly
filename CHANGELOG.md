@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.50 (2026-06-07)
+
+### Added (container — custom bean-scope SPI)
+
+- **`Container.register_scope(name, handler)`** / **`unregister_scope(name)`** plus the
+  **`ScopeHandler`** protocol (`get(name, object_factory)` / `remove(name)`) — Spring's
+  `ConfigurableBeanFactory.registerScope` + `Scope` SPI. Declare a bean with a custom scope
+  via `register(cls, scope="my-scope")` or `__pyfly_scope__ = "my-scope"`, and the container
+  resolves it through the registered handler. Built-in scope names are reserved; resolving an
+  unregistered scope raises a clear error.
+- Back-compat: `SINGLETON` / `TRANSIENT` / `REQUEST` / `SESSION` dispatch is byte-for-byte
+  unchanged (the new branch is a single `isinstance(reg.scope, str)` check after them).
+  `Registration.scope` is widened to `Scope | str`; admin/actuator bean views render the
+  scope via a `scope_name()` helper.
+
 ## v26.06.49 (2026-06-07)
 
 ### Added (context — @ConditionalOnSingleCandidate)

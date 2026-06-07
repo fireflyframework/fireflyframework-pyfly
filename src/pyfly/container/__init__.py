@@ -34,7 +34,7 @@ from pyfly.container.stereotypes import (
     rest_controller,
     service,
 )
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeHandler
 
 __all__ = [
     "Autowired",
@@ -48,6 +48,7 @@ __all__ = [
     "Provider",
     "Qualifier",
     "Scope",
+    "ScopeHandler",
     "bean",
     "component",
     "configuration",

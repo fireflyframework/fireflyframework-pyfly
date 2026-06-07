@@ -18,6 +18,8 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from pyfly.container.types import scope_name
+
 if TYPE_CHECKING:
     from pyfly.context.application_context import ApplicationContext
 
@@ -45,7 +47,7 @@ class BeansEndpoint:
             bean_name = reg.name or cls.__name__
             beans[bean_name] = {
                 "aliases": [],
-                "scope": reg.scope.name.lower(),
+                "scope": scope_name(reg.scope).lower(),
                 "type": f"{cls.__module__}.{cls.__qualname__}",
                 "resource": getattr(cls, "__module__", ""),
                 "dependencies": self._dependencies(cls, type_to_name),

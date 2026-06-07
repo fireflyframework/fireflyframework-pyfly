@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec
 
 
 @dataclass
@@ -27,7 +27,7 @@ class Registration:
     """Metadata for a registered service."""
 
     impl_type: type
-    scope: Scope = Scope.SINGLETON
+    scope: ScopeSpec = Scope.SINGLETON  # a built-in Scope or a custom scope name (str)
     condition: Callable[..., bool] | None = None
     instance: Any = field(default=None, repr=False)
     name: str = ""
