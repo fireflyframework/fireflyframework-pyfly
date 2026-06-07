@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.39 (2026-06-07)
+
+### Added (config — Spring Boot 2.4+ profile expressions)
+
+`Environment.accepts_profiles` (and `@profile` / `conditional_on_*` profile checks) now
+support the full Spring Boot 2.4+ profile expression grammar — boolean operators `&`
+(AND), `|` (OR), `!` (NOT), and `()` grouping — e.g. `"prod & cloud"`, `"prod | qa"`,
+`"(prod & cloud) | qa"`, `"!(dev | test)"`. Parsed via a safe AST evaluator (no `eval`).
+The legacy comma-OR (`"dev,test"`) and simple/negated forms remain supported.
+
 ## v26.06.38 (2026-06-07)
 
 ### Added (observability — OpenTelemetry distributed-trace propagation)

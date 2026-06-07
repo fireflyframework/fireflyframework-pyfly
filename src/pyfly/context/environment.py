@@ -15,10 +15,29 @@
 
 from __future__ import annotations
 
+import ast
 import os
+import re
 from typing import Any
 
 from pyfly.core.config import Config
+
+_PROFILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]+|[&|!()]")
+
+
+def _eval_bool_ast(node: ast.AST) -> bool:
+    """Safely evaluate a boolean AST of Constant/BoolOp/UnaryOp(Not) nodes (no ``eval``)."""
+    if isinstance(node, ast.Expression):
+        return _eval_bool_ast(node.body)
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            return all(_eval_bool_ast(v) for v in node.values)
+        return any(_eval_bool_ast(v) for v in node.values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return not _eval_bool_ast(node.operand)
+    raise ValueError("Unsupported profile expression")
 
 
 class Environment:
@@ -41,19 +60,44 @@ class Environment:
     def accepts_profiles(self, *profiles: str) -> bool:
         """Return True if any of the given profile expressions match.
 
-        Supports:
-        - Simple profiles: "dev" matches if "dev" is active
-        - Negation: "!production" matches if "production" is NOT active
-        - Comma-separated: "dev,test" matches if "dev" OR "test" is active
+        Supports the Spring Boot 2.4+ profile expression grammar:
+        - Simple profiles: ``"dev"`` matches if ``"dev"`` is active
+        - Negation: ``"!production"`` / ``"!(prod)"``
+        - Boolean operators with grouping: ``"prod & cloud"``, ``"prod | qa"``,
+          ``"(prod & cloud) | qa"``
+        - Comma-separated (legacy pyfly OR): ``"dev,test"``
         """
         return any(self._matches_profile_expression(expr) for expr in profiles)
 
     def _matches_profile_expression(self, expr: str) -> bool:
         """Evaluate a single profile expression."""
+        expr = expr.strip()
+        if any(op in expr for op in ("&", "|", "(")):
+            return self._eval_boolean_profile(expr)
         if "," in expr:
             sub_profiles = [p.strip() for p in expr.split(",") if p.strip()]
             return any(self._matches_single(p) for p in sub_profiles)
         return self._matches_single(expr)
+
+    def _eval_boolean_profile(self, expr: str) -> bool:
+        """Evaluate a boolean profile expression (``&``/``|``/``!``/``()``)."""
+        translated: list[str] = []
+        for token in _PROFILE_TOKEN_RE.findall(expr):
+            if token == "&":
+                translated.append(" and ")
+            elif token == "|":
+                translated.append(" or ")
+            elif token == "!":
+                translated.append(" not ")
+            elif token in ("(", ")"):
+                translated.append(token)
+            else:
+                translated.append("True" if token in self._active_profiles else "False")
+        try:
+            tree = ast.parse("".join(translated).strip(), mode="eval")
+            return _eval_bool_ast(tree)
+        except (SyntaxError, ValueError):
+            return False
 
     def _matches_single(self, profile: str) -> bool:
         """Evaluate a single profile token (with optional ! negation)."""
