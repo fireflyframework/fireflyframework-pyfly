@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.43 (2026-06-07)
+
+### Added (resilience — tuning)
+
+Completes the v26.06.36 resilience decorators toward Resilience4j parity:
+
+- **`@retry(jitter=...)`** — a randomization fraction in ``[0, 1]`` applied to each backoff
+  wait (``±jitter * wait``), to avoid thundering-herd retries.
+- **`CircuitBreaker` failure-rate window** — set `failure_rate_threshold` (+ `window_size`)
+  to open on the failure *rate* over the last N calls (Resilience4j COUNT_BASED) instead of
+  consecutive failures.
+- **`CircuitBreaker(half_open_max_calls=...)`** — admit N trial calls in HALF_OPEN; that
+  many successes close the circuit, any failure re-opens it.
+
+Existing consecutive-failure behavior is unchanged when these options are not set.
+
 ## v26.06.42 (2026-06-07)
 
 ### Added (cache — @cacheable condition / unless)

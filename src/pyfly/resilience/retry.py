@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import random
 import time
 from collections.abc import Callable
 from typing import Any
@@ -29,6 +30,7 @@ def retry(
     delay: float = 0.0,
     backoff: float = 1.0,
     max_delay: float | None = None,
+    jitter: float = 0.0,
     exceptions: tuple[type[BaseException], ...] = (Exception,),
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Re-invoke the wrapped callable up to *max_attempts* times while it raises one of
@@ -41,6 +43,8 @@ def retry(
         delay: Base delay (seconds) before the first retry.
         backoff: Multiplier applied to the delay each subsequent attempt.
         max_delay: Optional cap on the per-attempt delay.
+        jitter: Randomization fraction in ``[0, 1]`` applied to each wait
+            (``±jitter * wait``) to avoid thundering-herd retries.
         exceptions: Exception types that trigger a retry; others propagate immediately.
     """
     if max_attempts < 1:
@@ -48,7 +52,10 @@ def retry(
 
     def _wait(attempt: int) -> float:
         computed = delay * (backoff**attempt)
-        return min(computed, max_delay) if max_delay is not None else computed
+        if jitter:
+            computed += random.uniform(-jitter, jitter) * computed
+        capped = min(computed, max_delay) if max_delay is not None else computed
+        return max(0.0, capped)
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         if inspect.iscoroutinefunction(func):
