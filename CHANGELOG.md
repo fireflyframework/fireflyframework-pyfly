@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.36 (2026-06-07)
+
+### Added (resilience — `@retry` + `@circuit_breaker` decorators)
+
+The final parity audit flagged that the starter docs advertised `@retry` and
+`@circuit_breaker` as resilience capabilities, but no such decorators existed (retry /
+circuit breaking lived only as config-driven behavior inside `pyfly.client` / `pyfly.eda`).
+They now exist as standalone decorators in `pyfly.resilience`:
+
+- **`@retry(max_attempts, delay, backoff, max_delay, exceptions)`** — re-invokes on the
+  listed exceptions with exponential backoff (capped), re-raising the last exception when
+  exhausted; works on sync and async callables. (Spring Retry / Resilience4j `@Retry`.)
+- **`@circuit_breaker(breaker)`** with **`CircuitBreaker`** / **`CircuitState`** — a
+  thread-safe closed→open→half-open state machine that rejects calls with
+  `CircuitBreakerException` while open and recovers via a half-open trial. (Resilience4j
+  `@CircuitBreaker`.)
+
+---
+
 ## v26.06.35 (2026-06-07)
 
 ### Fixed (messaging — Kafka consumer per-message error isolation)
