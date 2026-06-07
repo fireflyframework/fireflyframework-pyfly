@@ -21,6 +21,7 @@ The PyFly CLI provides command-line tools for project scaffolding, application m
   - [pyfly db migrate](#pyfly-db-migrate)
   - [pyfly db upgrade](#pyfly-db-upgrade)
   - [pyfly db downgrade](#pyfly-db-downgrade)
+  - [Running Migrations on Startup](#running-migrations-on-startup)
 - [pyfly license](#pyfly-license)
 - [pyfly sbom](#pyfly-sbom)
 - [Development Workflow](#typical-development-workflow)
@@ -757,6 +758,25 @@ pyfly db downgrade -1       # Revert one migration step
 pyfly db downgrade abc123   # Revert to specific revision
 pyfly db downgrade base     # Revert all migrations
 ```
+
+### Running Migrations on Startup
+
+Instead of (or in addition to) running `pyfly db upgrade` by hand, PyFly can apply migrations **automatically on application startup** — the Flyway-style auto-migrate equivalent. This reuses the same Alembic environment created by `pyfly db init`, so the CLI commands above continue to work unchanged.
+
+It is **opt-in** via configuration, not a CLI flag. Enable it in `pyfly.yaml`:
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+asyncpg://user:pass@localhost:5432/app
+      migrations:
+        enabled: true            # run `alembic upgrade head` on startup
+        config: alembic.ini      # Alembic config path (default: alembic.ini)
+        revision: head           # target revision (default: head)
+```
+
+When enabled, the app runs `alembic upgrade <revision>` against the same datasource (`pyfly.data.relational.url`) during startup. If `alembic.ini` is not found, the migration step is skipped with a warning suggesting you run `pyfly db init` — startup is not aborted. See [Data Relational — Run Migrations on Startup](modules/data-relational.md#run-migrations-on-startup-flyway-style) for the full configuration reference.
 
 ---
 

@@ -10,6 +10,7 @@ logging -- along with a health check system for readiness and liveness probes.
 
 1. [Introduction](#introduction)
 2. [Metrics](#metrics)
+   - [MetricsRecorder Port and NoOpMetricsRecorder](#metricsrecorder-port-and-noopmetricsrecorder)
    - [MetricsRegistry](#metricsregistry)
    - [Counter Metrics](#counter-metrics)
    - [Histogram Metrics](#histogram-metrics)
@@ -55,6 +56,7 @@ The core observability utilities come from two packages:
 ```python
 # Metrics and tracing
 from pyfly.observability import (
+    MetricsRecorder, NoOpMetricsRecorder,  # Metrics port + dependency-free adapter
     MetricsRegistry, timed, counted,   # Metrics (requires pyfly[observability])
     span,                               # Tracing (requires opentelemetry)
 )
@@ -71,6 +73,53 @@ from pyfly.actuator import (
 ---
 
 ## Metrics
+
+### MetricsRecorder Port and NoOpMetricsRecorder
+
+`MetricsRecorder` is the **port** that framework and application instrumentation depend
+on, so metric-emitting code is not hard-coupled to Prometheus. It is a
+`@runtime_checkable` `Protocol` with three factory methods that each return a backend
+metric handle:
+
+```python
+from typing import Any, Protocol, runtime_checkable
+
+@runtime_checkable
+class MetricsRecorder(Protocol):
+    def counter(self, name: str, description: str, labels: list[str] | None = None) -> Any: ...
+    def histogram(
+        self,
+        name: str,
+        description: str,
+        labels: list[str] | None = None,
+        buckets: tuple[float, ...] | None = None,
+    ) -> Any: ...
+    def gauge(self, name: str, description: str, labels: list[str] | None = None) -> Any: ...
+```
+
+`MetricsRegistry` (below) is the default Prometheus-backed adapter for this port.
+`NoOpMetricsRecorder` is a **dependency-free** adapter for tests and for deployments
+that disable metrics — every method returns a shared no-op metric handle, so
+instrumentation code can always hold a recorder instead of guarding `None`:
+
+```python
+from pyfly.observability import MetricsRecorder, NoOpMetricsRecorder
+
+recorder: MetricsRecorder = NoOpMetricsRecorder()
+
+# Each factory returns a chainable no-op handle that accepts every Prometheus-style
+# operation (.labels(...).inc(), .observe(...), .set(...), and the .time()/async
+# context-manager forms) and does nothing.
+recorder.counter("orders_total", "Total orders").labels(status="created").inc()
+recorder.histogram("latency_seconds", "Latency").observe(0.042)
+```
+
+Both `MetricsRecorder` and `NoOpMetricsRecorder` are exported from
+`pyfly.observability` (and live in `pyfly.observability.ports`). Because
+`NoOpMetricsRecorder` has no `prometheus_client` dependency, it never raises
+`ImportError`, unlike constructing a `MetricsRegistry`.
+
+**Source:** `src/pyfly/observability/ports.py`
 
 ### MetricsRegistry
 

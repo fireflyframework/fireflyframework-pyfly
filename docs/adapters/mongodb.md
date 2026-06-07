@@ -77,19 +77,28 @@ Wires compiled query methods onto `MongoRepository` subclasses at startup — id
 
 ### Transactions
 
-Use `@mongo_transactional` for multi-document transactions. The decorator
-requires a `Motor` client (injected from the auto-configured bean):
+Use the unified **`@transactional`** (from `pyfly.data`) for multi-document transactions — the
+same annotation as the relational backend. On a service exposing a Motor client as
+`self._motor_client`, it opens a session + transaction and injects it as the `session` keyword
+argument (requires a MongoDB replica set):
 
 ```python
-from pyfly.data.document.mongodb import mongo_transactional
-from motor.motor_asyncio import AsyncIOMotorClient
+from pyfly.container import service
+from pyfly.data import transactional
 
-client: AsyncIOMotorClient = ...  # injected by DI
 
-@mongo_transactional(client)
-async def transfer(from_id: str, to_id: str, amount: float) -> None:
-    ...
+@service
+class AccountService:
+    def __init__(self, motor_client) -> None:
+        self._motor_client = motor_client  # selects the MongoDB transaction manager
+
+    @transactional()
+    async def transfer(self, from_id: str, to_id: str, amount: float, *, session=None) -> None:
+        ...
 ```
+
+> `from pyfly.data.document.mongodb import mongo_transactional` still works but is a **deprecated
+> alias** of `@transactional`.
 
 ---
 

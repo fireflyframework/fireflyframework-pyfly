@@ -15,36 +15,38 @@ and the full reference of framework defaults.
    - [get()](#get)
    - [get_section()](#get_section)
    - [bind()](#bind)
-3. [YAML Configuration](#yaml-configuration)
-4. [TOML Configuration](#toml-configuration)
-5. [Profile System](#profile-system)
+   - [reload_from_sources()](#reload_from_sources)
+3. [Runtime Configuration Refresh](#runtime-configuration-refresh)
+4. [YAML Configuration](#yaml-configuration)
+5. [TOML Configuration](#toml-configuration)
+6. [Profile System](#profile-system)
    - [Activating Profiles](#activating-profiles)
    - [Profile-Specific Files](#profile-specific-files)
    - [Profile Expressions in Beans](#profile-expressions-in-beans)
-6. [Configuration Layering](#configuration-layering)
+7. [Configuration Layering](#configuration-layering)
    - [Layer 1: Framework Defaults](#layer-1-framework-defaults)
    - [Layer 2: User Configuration File](#layer-2-user-configuration-file)
    - [Layer 3: Profile Overlays](#layer-3-profile-overlays)
    - [Layer 4: Environment Variables](#layer-4-environment-variables)
    - [Deep Merge Behavior](#deep-merge-behavior)
    - [Remote Config Import (Config Server)](#remote-config-import-config-server)
-7. [Environment Variable Overrides](#environment-variable-overrides)
+8. [Environment Variable Overrides](#environment-variable-overrides)
    - [Naming Convention](#naming-convention)
    - [Type Coercion](#type-coercion)
    - [Examples](#environment-variable-examples)
-8. [@config_properties](#config_properties)
+9. [@config_properties](#config_properties)
    - [Defining a Config Class](#defining-a-config-class)
    - [Binding at Runtime](#binding-at-runtime)
    - [Type Coercion in bind()](#type-coercion-in-bind)
-9. [@Value (Field-Level Config Injection)](#value-field-level-config-injection)
-   - [Expression Syntax](#expression-syntax)
-   - [Usage in Beans](#usage-in-beans)
-   - [@Value vs @config_properties](#value-vs-config_properties)
-10. [SpEL-lite Expressions](#spel-lite-expressions)
+10. [@Value (Field-Level Config Injection)](#value-field-level-config-injection)
+    - [Expression Syntax](#expression-syntax)
+    - [Usage in Beans](#usage-in-beans)
+    - [@Value vs @config_properties](#value-vs-config_properties)
+11. [SpEL-lite Expressions](#spel-lite-expressions)
     - [The `#{ ... }` Form](#the-spel-form)
     - [`@conditional_on_expression`](#conditional_on_expression)
     - [Safety Model](#safety-model)
-11. [Framework Defaults Reference](#framework-defaults-reference)
+12. [Framework Defaults Reference](#framework-defaults-reference)
     - [Application](#application-defaults)
     - [Profiles](#profiles-defaults)
     - [Banner](#banner-defaults)
@@ -58,7 +60,7 @@ and the full reference of framework defaults.
     - [Admin](#admin-defaults)
     - [Security](#security-defaults)
     - [Observability](#observability-defaults)
-12. [Complete Example: Multi-Environment Setup](#complete-example-multi-environment-setup)
+13. [Complete Example: Multi-Environment Setup](#complete-example-multi-environment-setup)
 
 ---
 
@@ -215,6 +217,120 @@ print(web.port)  # 8080
 ```
 
 Raises `ValueError` if the class is not decorated with `@config_properties`.
+
+### reload_from_sources()
+
+```python
+def reload_from_sources(self) -> bool:
+```
+
+Re-reads the original configuration sources and **atomically swaps in** the freshly
+merged result, so a running application picks up edits to the config files and profile
+overlays without a restart (Spring Cloud config refresh). It replays the exact merge
+recorded by [`from_sources()`](#from_sources) — framework defaults, starter defaults,
+`config/` files, project-root files, and profile overlays — under an internal lock, then
+rebinds `_data` in a single assignment. Because `get()` reads that single attribute,
+concurrent readers always see a consistent snapshot (the old tree or the new one, never a
+half-merged mix).
+
+Returns:
+
+| Return | Meaning |
+|---|---|
+| `True` | The sources were re-read and the merged config was swapped in. |
+| `False` | The instance was **not** built via `from_sources()` (e.g. a dict-constructed `Config`), so there is nothing to reload — a no-op. |
+
+```python
+config = Config.from_sources(".", active_profiles=["prod"])
+# ... edit pyfly.yaml / pyfly-prod.yaml on disk ...
+config.reload_from_sources()        # True — files re-read, get() now returns new values
+Config({"a": 1}).reload_from_sources()  # False — dict-constructed, nothing to reload
+```
+
+> **Note:** environment-variable overrides and `${...}` placeholders are always resolved at
+> *read time* in `get()`, so they reflect the current process environment regardless of
+> reloading. `reload_from_sources()` is specifically about re-reading the **files**.
+
+This method is invoked automatically by `POST /actuator/refresh` — see
+[Runtime Configuration Refresh](#runtime-configuration-refresh) below.
+
+---
+
+## Runtime Configuration Refresh
+
+PyFly supports Spring Cloud-style runtime configuration refresh: you can change config
+files (or profile overlays) on disk and have a running application pick up the changes —
+no restart — by issuing a single management request.
+
+```bash
+curl -X POST http://localhost:8080/actuator/refresh
+# {"refreshed": ["FeatureFlags-singleton", "PricingProperties-singleton"]}
+```
+
+### What happens on POST /actuator/refresh
+
+The endpoint resolves the injectable `ContextRefresher` and calls its `refresh()`, which
+performs the following steps in order (`src/pyfly/context/refresh.py`):
+
+1. **Re-reads the config sources.** It calls `Config.reload_from_sources()`, which replays
+   the original multi-source merge and atomically swaps in the new tree. This is the step
+   that lets edits to `pyfly.yaml` / `pyfly-{profile}.yaml` take effect at runtime. (For a
+   dict-constructed `Config` this is a no-op.)
+2. **Evicts all refresh-scoped beans** (`@refresh_scope`). Each cached instance is dropped
+   so the next resolution rebuilds it — re-running constructor/field injection and
+   re-reading `@Value` placeholders against the now-refreshed `Config`.
+3. **Resets `@config_properties` singletons.** Their backing instances are cleared so they
+   re-`bind()` from the live `Config` (which now reflects the re-read files, env-var
+   overrides, and resolved `${...}` placeholders) on next resolution.
+4. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
+
+The response is `{"refreshed": [...]}`, listing the cache keys of the evicted
+refresh-scoped beans (an empty list when none are registered).
+
+### Picking up file changes in your beans
+
+Because step 1 now re-reads the files before steps 2–3 rebuild the affected beans, both
+`@refresh_scope` and `@config_properties` beans see the **new file values** after a
+refresh:
+
+```python
+from dataclasses import dataclass
+from pyfly.container import component
+from pyfly.core import config_properties
+from pyfly.container.refresh_scope import refresh_scope
+from pyfly.core.value import Value
+
+
+@config_properties(prefix="pyfly.pricing")
+@dataclass
+class PricingProperties:
+    base_rate: float = 1.0      # edit pyfly.yaml + POST /actuator/refresh -> re-bound
+
+
+@component
+@refresh_scope
+class FeatureFlags:
+    new_checkout: bool = Value("${features.new-checkout:false}")
+    # next resolution after refresh re-reads ${features.new-checkout} from the live Config
+```
+
+### Exposure (opt-in)
+
+Like Spring Boot, the actuator is secure-by-default: only `health` and `info` are
+reachable over HTTP. The `refresh` endpoint is registered whenever the actuator is enabled
+with a context, but it is **not mounted** until you add it to the exposure include list:
+
+```yaml
+pyfly:
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: "health,info,refresh"   # or "*" to expose every enabled endpoint
+```
+
+With the default `health,info`, `POST /actuator/refresh` returns `404`. See the
+[Actuator guide](actuator.md#refresh-endpoint) for the full endpoint reference.
 
 ---
 
