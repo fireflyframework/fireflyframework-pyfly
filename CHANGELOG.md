@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.54 (2026-06-07)
+
+### Added (security — OAuth2 authorization_code PKCE)
+
+The OAuth2 login flow (`OAuth2LoginHandler`) gained **PKCE** (RFC 7636, S256):
+
+- **`ClientRegistration(use_pkce=True)`** — when enabled, the authorization redirect carries a
+  `code_challenge` + `code_challenge_method=S256` (the one-time verifier is stashed in the
+  session), and the callback sends the `code_verifier` on the token exchange. Recommended for
+  public clients; harmless and more secure for confidential clients.
+- Default `use_pkce=False` preserves the existing flow byte-for-byte.
+
 ## v26.06.53 (2026-06-07)
 
 ### Added (scheduling — @scheduled distributed lock)
