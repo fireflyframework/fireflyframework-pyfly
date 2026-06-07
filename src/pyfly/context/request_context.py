@@ -27,6 +27,10 @@ from pyfly.security.context import SecurityContext
 
 _request_context_var: ContextVar[RequestContext | None] = ContextVar("pyfly_request_context", default=None)
 
+# Attribute key under which the SessionFilter stashes the active HttpSession, so the
+# container can resolve SESSION-scoped beans from it.
+HTTP_SESSION_KEY = "__pyfly_http_session__"
+
 
 class RequestContext:
     """Holds per-request state: request ID, security context, and custom attributes.

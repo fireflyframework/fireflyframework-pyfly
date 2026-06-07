@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.46 (2026-06-07)
+
+### Added (container — SESSION bean scope)
+
+- **`Scope.SESSION`** — register a bean with `scope=Scope.SESSION` to get one instance per
+  HTTP session (Spring's session scope). The instance lives as an `HttpSession` attribute, so
+  the `SessionFilter` must be active; it is persisted with the session, so it must be
+  serializable when a non-memory session store (e.g. Redis) is used.
+- The `SessionFilter` now exposes the active `HttpSession` to the container via the
+  `RequestContext`, mirroring how `REQUEST`-scoped beans are resolved.
+
+(A general custom-scope SPI remains on the roadmap; this adds the concrete SESSION scope.)
+
 ## v26.06.45 (2026-06-07)
 
 ### Added (security — role hierarchy)

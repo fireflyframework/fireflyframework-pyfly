@@ -22,3 +22,4 @@ class Scope(Enum):
     SINGLETON = auto()
     TRANSIENT = auto()
     REQUEST = auto()
+    SESSION = auto()
