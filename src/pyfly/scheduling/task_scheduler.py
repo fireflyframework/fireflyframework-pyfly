@@ -41,6 +41,7 @@ class _ScheduledEntry:
     fixed_rate: timedelta | None = None
     fixed_delay: timedelta | None = None
     initial_delay: timedelta | None = None
+    zone: str | None = None
 
 
 class TaskScheduler:
@@ -94,6 +95,7 @@ class TaskScheduler:
                     fixed_rate=getattr(attr, "__pyfly_scheduled_fixed_rate__", None),
                     fixed_delay=getattr(attr, "__pyfly_scheduled_fixed_delay__", None),
                     initial_delay=getattr(attr, "__pyfly_scheduled_initial_delay__", None),
+                    zone=getattr(attr, "__pyfly_scheduled_zone__", None),
                 )
                 self._entries.append(entry)
                 count += 1
@@ -109,7 +111,7 @@ class TaskScheduler:
         self._running = True
         for entry in self._entries:
             if entry.cron is not None:
-                task = asyncio.create_task(self._run_cron_loop(entry.bean, entry.method, entry.cron))
+                task = asyncio.create_task(self._run_cron_loop(entry.bean, entry.method, entry.cron, entry.zone))
             elif entry.fixed_rate is not None:
                 task = asyncio.create_task(
                     self._run_fixed_rate_loop(entry.bean, entry.method, entry.fixed_rate, entry.initial_delay)
@@ -152,9 +154,11 @@ class TaskScheduler:
     # Private loop methods
     # ------------------------------------------------------------------
 
-    async def _run_cron_loop(self, bean: Any, method: Callable[..., Any], cron_expr: str) -> None:
+    async def _run_cron_loop(
+        self, bean: Any, method: Callable[..., Any], cron_expr: str, zone: str | None = None
+    ) -> None:
         """Loop: sleep until next cron fire time, execute method, repeat."""
-        cron = CronExpression(cron_expr)
+        cron = CronExpression(cron_expr, zone=zone)
         while self._running:
             delay = cron.seconds_until_next()
             await asyncio.sleep(delay)

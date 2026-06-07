@@ -26,15 +26,18 @@ def scheduled(
     fixed_rate: timedelta | None = None,
     fixed_delay: timedelta | None = None,
     initial_delay: timedelta | None = None,
+    zone: str | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a method to be scheduled for periodic execution.
 
     Exactly one of cron, fixed_rate, or fixed_delay must be provided.
 
-    - cron: 5-field cron expression (e.g., "0 0 * * *" for midnight)
+    - cron: 5- or 6-field cron expression (e.g., "0 0 * * *" for midnight)
     - fixed_rate: Run at fixed intervals regardless of execution time
     - fixed_delay: Wait delay after previous run completes
     - initial_delay: Optional delay before first execution
+    - zone: IANA time zone for ``cron`` evaluation (e.g. "America/New_York");
+      defaults to UTC. Spring's ``@Scheduled(zone=...)``.
     """
     triggers = sum(x is not None for x in (cron, fixed_rate, fixed_delay))
     if triggers != 1:
@@ -46,6 +49,7 @@ def scheduled(
         func.__pyfly_scheduled_fixed_rate__ = fixed_rate  # type: ignore[attr-defined]
         func.__pyfly_scheduled_fixed_delay__ = fixed_delay  # type: ignore[attr-defined]
         func.__pyfly_scheduled_initial_delay__ = initial_delay  # type: ignore[attr-defined]
+        func.__pyfly_scheduled_zone__ = zone  # type: ignore[attr-defined]
         return func
 
     return decorator

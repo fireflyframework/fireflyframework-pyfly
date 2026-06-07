@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.44 (2026-06-07)
+
+### Added (scheduling — @scheduled time zones)
+
+- **`@scheduled(cron=..., zone="America/New_York")`** — cron expressions are now evaluated
+  in the given IANA time zone (Spring's `@Scheduled(zone=...)`); defaults to UTC.
+  `CronExpression` gained a `zone` argument and computes fire times in that zone.
+
 ## v26.06.43 (2026-06-07)
 
 ### Added (resilience — tuning)
