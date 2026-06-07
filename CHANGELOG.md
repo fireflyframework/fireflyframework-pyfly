@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.37 (2026-06-07)
+
+### Added (security — full method-security SpEL)
+
+Method-security expressions (`@pre_authorize` / `@post_authorize` / `@secure(expression=...)`)
+were a narrow regex-based subset (`hasRole` / `hasAnyRole` / `hasPermission` / bare
+`isAuthenticated`). They now run through a proper AST-based Spring-Security SpEL evaluator
+(`pyfly.security.expression`):
+
+- Full vocabulary — `hasRole`, `hasAnyRole`, `hasAuthority`, `hasAnyAuthority`,
+  `hasPermission` (1- and 2-arg), `isAuthenticated`, `isAnonymous`, `permitAll`, `denyAll`
+  (each usable bare or called, e.g. `isAuthenticated` or `isAuthenticated()`).
+- **`principal` / `authentication`** references with attribute access, **method-argument
+  references `#paramName`** (`@pre_authorize`), and **`returnObject`** (`@post_authorize`) —
+  enabling ownership/ABAC rules like `@pre_authorize("#ownerId == principal.user_id")`.
+- Boolean operators, comparisons, and `in`/`not in`.
+
+Safe by construction (parsed with `ast`, whitelisted nodes, no `eval`, only security
+functions callable, dunder attributes rejected). Existing expressions remain valid.
+
+---
+
 ## v26.06.36 (2026-06-07)
 
 ### Added (resilience — `@retry` + `@circuit_breaker` decorators)

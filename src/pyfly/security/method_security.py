@@ -17,13 +17,24 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 from pyfly.kernel.exceptions import ForbiddenException, UnauthorizedException
-from pyfly.security.decorators import _evaluate_expression
+from pyfly.security.expression import evaluate_security_expression
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _bind_args(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Map a call's positional/keyword arguments to parameter names for ``#param`` refs."""
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        return dict(bound.arguments)
+    except TypeError:
+        return {}
 
 
 def _get_security_context() -> Any:
@@ -43,15 +54,22 @@ def _get_security_context() -> Any:
     return req_ctx.security_context
 
 
-def _check_expression(expression: str) -> None:
+def _check_expression(
+    expression: str,
+    *,
+    args: dict[str, Any] | None = None,
+    return_object: Any = None,
+) -> None:
     """Evaluate a security expression against the current SecurityContext.
+
+    *args* binds ``#paramName`` references; *return_object* binds ``returnObject``.
 
     Raises:
         UnauthorizedException: If no SecurityContext is available.
         ForbiddenException: If the expression evaluates to False.
     """
     ctx = _get_security_context()
-    if not _evaluate_expression(expression, ctx):
+    if not evaluate_security_expression(expression, ctx, args=args, return_object=return_object):
         raise ForbiddenException(
             f"Access denied by expression: {expression}",
             code="FORBIDDEN",
@@ -77,7 +95,7 @@ def pre_authorize(expression: str) -> Callable[[F], F]:
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                _check_expression(expression)
+                _check_expression(expression, args=_bind_args(func, args, kwargs))
                 return await func(*args, **kwargs)
 
             async_wrapper.__pyfly_pre_authorize__ = expression  # type: ignore[attr-defined]
@@ -85,7 +103,7 @@ def pre_authorize(expression: str) -> Callable[[F], F]:
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            _check_expression(expression)
+            _check_expression(expression, args=_bind_args(func, args, kwargs))
             return func(*args, **kwargs)
 
         sync_wrapper.__pyfly_pre_authorize__ = expression  # type: ignore[attr-defined]
@@ -118,7 +136,7 @@ def post_authorize(expression: str) -> Callable[[F], F]:
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 result = await func(*args, **kwargs)
-                _check_expression(expression)
+                _check_expression(expression, args=_bind_args(func, args, kwargs), return_object=result)
                 return result
 
             async_wrapper.__pyfly_post_authorize__ = expression  # type: ignore[attr-defined]
@@ -127,7 +145,7 @@ def post_authorize(expression: str) -> Callable[[F], F]:
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             result = func(*args, **kwargs)
-            _check_expression(expression)
+            _check_expression(expression, args=_bind_args(func, args, kwargs), return_object=result)
             return result
 
         sync_wrapper.__pyfly_post_authorize__ = expression  # type: ignore[attr-defined]
