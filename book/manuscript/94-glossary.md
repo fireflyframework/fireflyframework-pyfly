@@ -4,7 +4,7 @@
 
 **Adapter** — A concrete class that implements a port by delegating to a specific library or infrastructure technology (PostgreSQL, Redis, Kafka, etc.). Adapters live at the edge of the hexagonal architecture and can be swapped without touching the domain or application layers. In PyFly, the async SQLAlchemy session factory, `RedisCacheAdapter`, and `KafkaMessageBroker` are all adapters (Chapters 5, 10, 13).
 
-**Aggregate root** — The single entry point to a cluster of domain objects that must stay consistent together; all state changes are routed through its methods, which enforce invariants and emit domain events. External code loads and saves only the root, never its inner objects. In PyFly, `AggregateRoot[ID]` is the base class; `Wallet` is Lumen's aggregate root (Chapter 6).
+**Aggregate root** — The single entry point to a cluster of domain objects that must stay consistent together; all state changes are routed through its methods, which enforce invariants and emit domain events. External code loads and saves only the root, never its inner objects. In PyFly, `AggregateRoot[ID]` is the state-stored base class; `Wallet` is Lumen's state-stored aggregate root and `LedgerAccount` is its event-sourced counterpart (Chapters 6, 9).
 
 **AOP (Aspect-Oriented Programming)** — A technique for adding cross-cutting concerns — logging, metrics, security checks — declaratively to methods without modifying their source code. PyFly's `@aspect` and `@before`/`@after`/`@around` advice decorators implement AOP; Chapter 15 uses it to attach observability to every service method.
 
@@ -78,7 +78,7 @@
 
 **QueryBus** — The pipeline that receives a `Query`, optionally returns a cached result, dispatches to the matching `QueryHandler`, and optionally stores the result in cache. Separating the query bus from the command bus allows different cross-cutting behaviour — caching, read-replica routing — for read paths (Chapter 7).
 
-**Rate limiter** — A resilience component that caps the number of requests an endpoint or service client can accept within a time window, preventing overload from bursty traffic. PyFly's `@rate_limit(requests=N, window=timedelta(...))` implements a token-bucket limiter (Chapter 13).
+**Rate limiter** — A resilience component that caps the number of requests an endpoint or service client can accept within a time window, preventing overload from bursty traffic. PyFly's `RateLimiter(max_tokens=N, refill_rate=r)` + `@rate_limiter(limiter)` implements a token-bucket limiter (Chapter 13).
 
 **Repository** — A collection-like abstraction over the persistence layer that allows the application to load and save aggregates or entities without any SQL in the business code. PyFly's `CrudRepository[E, ID]` provides typed `find_by_id`, `save`, `delete`, and derived-query helpers; custom implementations annotated `@repository` replace the in-memory defaults (Chapters 2, 5).
 
@@ -86,7 +86,7 @@
 
 **Saga** — A sequence of local transactions coordinated by a central orchestrator. Each step commits to its own service's database; if a later step fails, the orchestrator calls the compensating transaction for each already-committed step in reverse order. PyFly's `@saga` and `@saga_step` decorators implement the orchestrated saga pattern with a parallel-execution DAG (Chapter 12).
 
-**Serialization** — The process of converting an in-memory object to a wire format (JSON, Protobuf, Avro) for HTTP responses or message publishing, and deserializing the reverse. PyFly's central `ObjectMapper` bean configures Pydantic-backed JSON serialization once and applies it to every HTTP response and message envelope (Chapters 4, 10).
+**Serialization** — The process of converting an in-memory object to a wire format (JSON, Protobuf, Avro) for HTTP responses or message publishing, and deserializing the reverse. PyFly's central `PyFlyJsonSerializer` bean (`from pyfly.web import PyFlyJsonSerializer`) configures Pydantic-backed JSON serialization once and applies it to every HTTP response and message envelope (Chapters 4, 10).
 
 **Service** — A managed bean decorated with `@service` that houses business logic and orchestrates calls to repositories, event publishers, and other services. Services are the application layer in hexagonal architecture: they translate incoming commands into domain operations and persist results (Chapter 2).
 
@@ -94,11 +94,11 @@
 
 **Stereotype** — A decorator that registers a class as a bean and signals its architectural role: `@service`, `@repository`, `@component`, `@configuration`, or `@rest_controller`. All stereotypes are technically equivalent in the container; the semantic difference is for human readers and tooling (Chapter 2).
 
-**TCC (Try-Confirm-Cancel)** — A distributed-transaction pattern in which each participant first *reserves* a resource (Try), then the coordinator either *confirms* all reservations or *cancels* them based on whether all Tries succeeded. TCC is useful when exact, immediate reservation semantics are required — for example, holding funds before capturing a payment. PyFly's `@tcc_step` implements the TCC protocol alongside the saga engine (Chapter 12).
+**TCC (Try-Confirm-Cancel)** — A distributed-transaction pattern in which each participant first *reserves* a resource (Try), then the coordinator either *confirms* all reservations or *cancels* them based on whether all Tries succeeded. TCC is useful when exact, immediate reservation semantics are required — for example, holding funds before capturing a payment. PyFly's `@tcc(name="…")` + `@tcc_participant(id="…", order=N)` decorators implement the TCC protocol alongside the saga engine (Chapter 12).
 
 **Testcontainers** — A library that starts real Docker containers (PostgreSQL, Redis, Kafka) for integration tests and tears them down when the suite finishes. PyFly's `pyfly.testing` module provides `postgres_container` and `redis_container` fixtures that wire Testcontainers into the DI container via `@ServiceConnection`-style configuration (Chapter 16).
 
-**Value object** — An immutable domain object identified by its value rather than by an identity field. Two value objects are equal if all their fields are equal. In PyFly, `ValueObject` is the base class; apply `@dataclass(frozen=True)` to enforce immutability. `Money` — an amount and a currency — is Lumen's canonical value object (Chapter 6).
+**Value object** — An immutable domain object identified by its value rather than by an identity field. Two value objects are equal if all their fields are equal. In PyFly, `ValueObject` is the base class; apply `@dataclass(frozen=True)` to enforce immutability. `Money` — an integer amount in **minor units** (cents) and a `Currency` `StrEnum` — is Lumen's canonical value object; `Wallet` is the aggregate root that owns it (Chapter 6).
 
 **Webhook** — An inbound HTTP callback that an external provider (Stripe, Twilio, etc.) calls to notify your service of an asynchronous event, such as a payment-status change. PyFly's `@webhook_listener` decorator verifies the HMAC-SHA256 signature, deduplicates replays via a nonce cache, and routes the payload to a typed handler (Chapter 17).
 

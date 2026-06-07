@@ -18,7 +18,7 @@ PyFly auto-discovers this file in your project root. The framework checks candid
 
 ::: listing pyfly.yaml | Listing 3.1 — Lumen's base configuration file
 pyfly:
-  application:
+  app:
     name: lumen
     version: 1.0.0
   banner:
@@ -55,12 +55,12 @@ pyfly:
       ddl-auto: create
 :::
 
-A few things to notice here. The `pyfly:` top-level key is reserved exclusively for framework settings — web server, observability, CQRS, EDA, data access, and profiles all live there. The `pyfly.application.name` and `pyfly.application.version` keys identify the service; they appear in the startup banner, in health endpoints, and in trace metadata. The `pyfly.data.relational.*` block configures the SQLAlchemy/aiosqlite layer — `url`, `ddl-auto`, and `enabled` are its three core keys.
+A few things to notice here. The `pyfly:` top-level key is reserved exclusively for framework settings — web server, observability, CQRS, EDA, data access, and profiles all live there. The `pyfly.app.name` and `pyfly.app.version` keys identify the service; they appear in the startup banner, in health endpoints, and in trace metadata. The `pyfly.data.relational.*` block configures the SQLAlchemy/aiosqlite layer — `url`, `ddl-auto`, and `enabled` are its three core keys.
 
 Nested keys map directly to dot-notation access through `Config.get()`:
 
 ```python
-config.get("pyfly.application.name")       # "lumen"
+config.get("pyfly.app.name")       # "lumen"
 config.get("pyfly.web.port")               # 8080
 config.get("pyfly.data.relational.url")    # "sqlite+aiosqlite:///./lumen.db"
 config.get("pyfly.eda.provider")           # "memory"
@@ -339,8 +339,8 @@ from pyfly.core import Value
 
 @service
 class WalletService:
-    # Resolved from pyfly.application.name in the merged config.
-    app_name: str = Value("${pyfly.application.name}")
+    # Resolved from pyfly.app.name in the merged config.
+    app_name: str = Value("${pyfly.app.name}")
     # Falls back to 10000 when the key is absent.
     transfer_limit: float = Value(
         "${lumen.wallet.daily-transfer-limit:10000}"
@@ -383,7 +383,7 @@ Every dot-notation config key maps to a `PYFLY_`-prefixed environment variable t
 
 | Config key | Environment variable |
 |---|---|
-| `pyfly.application.name` | `PYFLY_APPLICATION_NAME` |
+| `pyfly.app.name` | `PYFLY_APP_NAME` |
 | `pyfly.web.port` | `PYFLY_WEB_PORT` |
 | `pyfly.web.debug` | `PYFLY_WEB_DEBUG` |
 | `pyfly.data.relational.url` | `PYFLY_DATA_RELATIONAL_URL` |
@@ -450,7 +450,7 @@ This is a practical escape hatch during incremental rollouts: the team deploying
 
 ## What you built {.recap}
 
-Lumen now has a clean configuration story across three environments. A `pyfly.yaml` holds the shared baseline — `pyfly.application.name`, `pyfly.eda.provider`, `pyfly.data.relational.*`, and the rest of the framework knobs Lumen actually uses. `pyfly-dev.yaml`, `pyfly-test.yaml`, and `pyfly-prod.yaml` hold only the per-environment deltas. Activating a profile is a single env var (`PYFLY_PROFILES_ACTIVE=prod`). Typed settings live in `@config_properties` dataclasses — like the framework's own `RelationalProperties` — bound at startup with full type coercion, so services read typed fields rather than calling `float(os.environ.get(...))` scattered through service code. Individual values can be injected with `Value("${key}")`, which fails fast at startup if the key is missing. Secrets stay in environment variables, never in files.
+Lumen now has a clean configuration story across three environments. A `pyfly.yaml` holds the shared baseline — `pyfly.app.name`, `pyfly.eda.provider`, `pyfly.data.relational.*`, and the rest of the framework knobs Lumen actually uses. `pyfly-dev.yaml`, `pyfly-test.yaml`, and `pyfly-prod.yaml` hold only the per-environment deltas. Activating a profile is a single env var (`PYFLY_PROFILES_ACTIVE=prod`). Typed settings live in `@config_properties` dataclasses — like the framework's own `RelationalProperties` — bound at startup with full type coercion, so services read typed fields rather than calling `float(os.environ.get(...))` scattered through service code. Individual values can be injected with `Value("${key}")`, which fails fast at startup if the key is missing. Secrets stay in environment variables, never in files.
 
 The four-layer stack — defaults → file → profile overlay → env vars — gives you a single mental model that works from `pyfly run` on your laptop to a locked-down container with secrets injected at deploy time, without touching a line of business logic.
 

@@ -290,7 +290,7 @@ The full `pyfly.yaml` for Lumen also configures CQRS, EDA, event sourcing, and o
 
 ::: listing pyfly.yaml | Listing 5.7 — Complete pyfly.yaml for the Lumen sample
 pyfly:
-  application:
+  app:
     name: lumen
     version: 1.0.0
   banner:

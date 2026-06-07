@@ -80,12 +80,13 @@ If you have shipped production services with Spring Boot, the concepts in PyFly 
 | `application.yml` | `pyfly.yaml` | Same hierarchical structure. |
 | `application-{profile}.yml` | `pyfly-{profile}.yaml` | Profile overlays. |
 | `spring.profiles.active=dev` | `PYFLY_PROFILES_ACTIVE=dev` (env var) or `pyfly.profiles.active: dev` in `pyfly.yaml` | Activation is identical in priority order. |
-| `@ConfigurationProperties(prefix=…)` | `@config_properties(prefix=…)` on a `@dataclass` | Pydantic-backed: validated and frozen at startup. |
-| `@Value("${key}")` | `field: str = Value("${key}")` | Raises on missing key. |
+| `@ConfigurationProperties(prefix=…)` | `@config_properties(prefix=…)` on a `@dataclass` (`from pyfly.core import config_properties`) | Pydantic-backed: validated and frozen at startup. |
+| `@Value("${key}")` | `field: str = Value("${key}")` (`from pyfly.core import Value`) | Raises on missing key. |
 | `@Value("${key:default}")` | `field: str = Value("${key:default}")` | Default after the colon. |
 | `@Value("#{expr}")` SpEL | `Value("#{...}")` SpEL-lite | Arithmetic, comparison, boolean, `${...}` substitution, `env` mapping. Constructor injection: `Annotated[bool, Value("#{...}")]`. |
 | `@Bean @Profile("dev")` | `@bean(profile="dev")` | Profile expression (`& \| ! ()`) on any `@bean`. |
 | Boolean `@Profile("prod & cloud")` | `profile="prod & cloud"` | Spring Boot 2.4+ operators; legacy comma-OR form still works. |
+| `spring.application.name` | `pyfly.app.name` | Application name key in `pyfly.yaml`. |
 
 Property-source priority (lowest → highest):
 
@@ -100,6 +101,12 @@ This is identical to Spring Boot's property-source ordering.
 
 ## Web Layer
 
+Imports: `from pyfly.web import (Body, PathVar, QueryParam, Valid,`
+`    get_mapping, post_mapping, put_mapping, delete_mapping, patch_mapping,`
+`    request_mapping)`. Stereotypes: `from pyfly.container import rest_controller,`
+`    service, repository, component, configuration`. 404: `from pyfly.kernel`
+`    import ResourceNotFoundException`.
+
 | Spring Boot | PyFly | Notes |
 |---|---|---|
 | `@RestController` | `@rest_controller` | |
@@ -109,9 +116,9 @@ This is identical to Spring Boot's property-source ordering.
 | `@PutMapping` | `@put_mapping` | |
 | `@DeleteMapping` | `@delete_mapping` | |
 | `@PatchMapping` | `@patch_mapping` | |
-| `@PathVariable Long id` | `id: int` param | Matched by name; auto type-converted. No annotation needed. |
+| `@PathVariable Long id` | `id: PathVar[int]` param | Type annotation required; matched by name. |
 | `@RequestParam(defaultValue="0") int page` | `page: QueryParam[int] = 0` | Python default replaces `defaultValue`. |
-| `@RequestBody T body` | `body: Body[T]` | Pydantic deserialization + validation. |
+| `@RequestBody @Valid T body` | `body: Valid[Body[T]]` | Pydantic deserialization + validation combined. |
 | `@RequestHeader("X-Token") String t` | `t: Header[str]` | |
 | `@ResponseStatus(HttpStatus.CREATED)` | `@post_mapping("/", status_code=201)` | Status code on the mapping decorator. |
 | `@ControllerAdvice` + `@ExceptionHandler` | `@exception_handler` or built-in exception hierarchy | `ResourceNotFoundException` → 404, `ValidationException` → 422, etc. |
@@ -165,11 +172,11 @@ This is identical to Spring Boot's property-source ordering.
 | Spring Boot | PyFly | Notes |
 |---|---|---|
 | `@KafkaListener(topics=…, groupId=…)` | `@message_listener(topic=…, group_id=…)` | Handler is `async def`. |
-| `KafkaTemplate.send(topic, event)` | `await event_bus.publish(EventEnvelope(...))` | `MessageBrokerPort` abstraction; swap Kafka for RabbitMQ without changing callers. |
+| `KafkaTemplate.send(topic, event)` | `await publisher.publish(dest, event_type, payload)` | `EventPublisher` port (`from pyfly.eda import EventPublisher`); swap adapters via config. |
 | `@RetryableTopic` / DLT | `@message_listener(retries=3, retry_delay=1.0, dead_letter_topic="…")` | Linear-backoff retry; exhausted messages routed to DLQ with `x-original-topic` / `x-exception` headers. |
 | `ApplicationEvent` | `EventEnvelope` | Domain event container. |
-| `@EventListener` | `@event_listener` | In-process event handler. |
-| `ApplicationEventPublisher` | `ApplicationEventPublisher` (injectable) | `await publisher.publish(event)`. |
+| `@EventListener` | `@event_listener(event_types=["TypeName"])` | In-process EDA handler; `event_type` is the class name string. No `@domain_event_listener`. |
+| `ApplicationEventPublisher` | `ApplicationEventPublisher` (injectable) | `await publisher.publish(event)` for Spring-style app events. |
 
 !!! tip "Messaging vs EDA"
     PyFly separates **broker messaging** (`pyfly.messaging` — Kafka/RabbitMQ transport) from **domain events** (`pyfly.eda` — `EventEnvelope` + `EventBus`). Start with `InMemoryEventBus` inside a monolith; switch to a Kafka adapter later by changing one configuration key, not your handlers.
@@ -205,12 +212,15 @@ This is identical to Spring Boot's property-source ordering.
 
 ## Resilience
 
+`from pyfly.resilience import retry, CircuitBreaker, circuit_breaker,`
+`    RateLimiter, rate_limiter, Bulkhead, bulkhead, time_limiter, fallback`
+
 | Spring (Resilience4j) | PyFly | Notes |
 |---|---|---|
-| `@Retry` | `@retry(max_attempts=3, delay=0.1, backoff=2.0, jitter=True, exceptions=[IOError])` | Sync + async; exponential backoff with optional cap. |
-| `@CircuitBreaker` | `CircuitBreaker(...) + @circuit_breaker(breaker)` | Count-based (`failure_threshold`) or rate-based (`failure_rate_threshold` + `window_size`); `half_open_max_calls` trial calls. |
-| `@RateLimiter` | `RateLimiter(max_tokens=100, refill_rate=100/60) + @rate_limiter(limiter)` | Token-bucket. |
-| `@Bulkhead` | `Bulkhead(max_concurrent=10) + @bulkhead(bh)` | Concurrency cap. |
+| `@Retry` | `@retry(max_attempts=3, *, delay=0.1, backoff=2.0, jitter=0.1, exceptions=(IOError,))` | `delay`/`backoff`/`jitter` are keyword-only. `jitter` is a float fraction in `[0,1]`. |
+| `@CircuitBreaker` | `breaker = CircuitBreaker(...); @circuit_breaker(breaker)` | Pass a `CircuitBreaker` *instance*. Count-based (`failure_threshold`) or rate-based (`failure_rate_threshold` + `window_size`). |
+| `@RateLimiter` | `limiter = RateLimiter(max_tokens=100, refill_rate=100/60); @rate_limiter(limiter)` | Token-bucket; pass an *instance*. |
+| `@Bulkhead` | `bh = Bulkhead(max_concurrent=10); @bulkhead(bh)` | Concurrency cap; pass an *instance*. |
 | `@TimeLimiter` | `@time_limiter(timeout=timedelta(seconds=2))` | Raises `asyncio.TimeoutError` on breach. |
 | `fallbackMethod` | `@fallback(fallback_method=fn)` or `@fallback(fallback_value=v)` | Static or callable fallback. |
 
@@ -251,19 +261,29 @@ Pointcut DSL: `execution(* pkg.services.*.*(..))` for method patterns; `annotati
 
 ## CQRS & Sagas
 
+`from pyfly.cqrs import (Command, CommandHandler, DefaultCommandBus,`
+`    Query, QueryHandler, DefaultQueryBus, command_handler, query_handler)`
+`from pyfly.transactional.saga.annotations import (saga, saga_step, Input, FromStep)`
+
 | Spring Boot / Axon | PyFly | Notes |
 |---|---|---|
-| `@CommandHandler` | `@command_handler` | Dispatched by `CommandBus`. |
-| `@QueryHandler` | `@query_handler` | Dispatched by `QueryBus`. |
+| `@CommandHandler` | `@command_handler` + `@service` stacked | Both decorators required; `@service` registers the bean. Override `do_handle(self, cmd)`. |
+| `@QueryHandler` | `@query_handler` + `@service` stacked | Same rule. Override `do_handle(self, qry)`. Bus method: `.query(...)`. |
+| Controller bus injection | `commands: DefaultCommandBus, queries: DefaultQueryBus` | Inject the concrete classes, not the protocol. `commands.send(cmd)`, `queries.query(qry)`. |
+| `@Repository` + port | `@repository` on a class that inherits the `@runtime_checkable Protocol` port | Port is a `Protocol`; adapter class inherits it. |
 | `@EventHandler` (event-sourcing) | `@event_handler` | Sourced from `EventStore`. |
-| `@Saga` | `@saga(name="…", layer_concurrency=N)` | Saga orchestration class. |
-| `@SagaStep(id=…, compensate=…)` | `@saga_step(id="…", compensate="method_name", retry=3, backoff_ms=100, timeout_ms=5000)` | |
-| `@Input` | `Annotated[T, Input]` | Inject the saga's initial payload. |
-| `@FromStep("id")` | `Annotated[T, FromStep("id")]` | Inject the output of a prior step. |
+| `@Saga` | `@saga(name="…", layer_concurrency=N)` + `@service` | Both decorators required for DI + engine registration. |
+| `@SagaStep(id=…, compensate=…)` | `@saga_step(id="…", compensate="method_name")` | |
+| `@Input` | `Annotated[T, Input()]` | Marker is an **instance**: `Input()`. Injects the saga's initial payload. |
+| `@FromStep("id")` | `Annotated[T, FromStep("id")]` | Marker is an **instance**: `FromStep("step-id")`. Injects a prior step's result. |
 | `@Tcc` | `@tcc(name="…")` | TCC (Try-Confirm-Cancel) transaction class. |
 | `@TccParticipant` | `@tcc_participant(id="…", order=N)` | |
 | `@TryMethod` / `@ConfirmMethod` / `@CancelMethod` | `@try_method` / `@confirm_method` / `@cancel_method` | TCC three-phase methods. |
 | `@FromTry` | `Annotated[T, FromTry]` | Inject the try-phase result into confirm/cancel. |
+
+Event sourcing: `from pyfly.eventsourcing import AggregateRoot, EventSourcedRepository`.
+Aggregate uses `self.when(EventType, handler_fn)` to register apply-handlers.
+Data: `from pyfly.data.relational.sqlalchemy import Base` (requires `pyfly[data-relational]`).
 
 ---
 
