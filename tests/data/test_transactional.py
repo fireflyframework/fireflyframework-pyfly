@@ -385,8 +385,10 @@ class TestPatchRepositories:
 class TestErrorCases:
     @pytest.mark.asyncio
     async def test_no_session_factory_raises(self) -> None:
+        # A service exposing neither a relational _session_factory nor a document _motor_client
+        # gets the unified "no transaction manager" error (it names both expected attributes).
         svc = _NoFactoryService()
-        with pytest.raises(RuntimeError, match="No _session_factory"):
+        with pytest.raises(RuntimeError, match="no transaction manager"):
             await svc.do_work()
 
     @pytest.mark.asyncio

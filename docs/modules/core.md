@@ -23,6 +23,7 @@ depends on them.
    - [Reading Values: get()](#reading-values-get)
    - [Reading Sections: get_section()](#reading-sections-get_section)
    - [Typed Binding: bind()](#typed-binding-bind)
+   - [Runtime Reload: reload_from_sources()](#runtime-reload-reload_from_sources)
 5. [@config_properties Decorator](#config_properties-decorator)
 6. [Configuration Layering](#configuration-layering)
    - [Framework Defaults](#framework-defaults)
@@ -372,6 +373,41 @@ Binds configuration values to a `@config_properties` dataclass or Pydantic `Base
 It reads the prefix from the decorator, fetches the effective config section (with
 `${...}` placeholders resolved, env overrides applied, and env-only keys injected),
 and constructs the dataclass with relaxed key matching and type coercion.
+
+### Runtime Reload: reload_from_sources()
+
+```python
+def reload_from_sources(self) -> bool:
+```
+
+Re-reads the original configuration sources and **atomically swaps in** the freshly merged
+result, so a running application can pick up edits to its config files / profile overlays
+without a restart (Spring Cloud config refresh). It replays the exact merge recorded by
+`from_sources()` (framework defaults, starter defaults, `config/` files, project-root
+files, and profile overlays) under an internal lock, then rebinds the backing data in a
+single assignment — `get()` reads that one attribute, so concurrent readers always see a
+consistent snapshot.
+
+Returns `True` when the sources were re-read and swapped in; returns `False` for instances
+not built via `from_sources()` (e.g. a dict-constructed `Config`), where there is nothing
+to reload (a no-op).
+
+```python
+config = Config.from_sources(".", active_profiles=["prod"])
+# ... edit pyfly.yaml / pyfly-prod.yaml on disk ...
+config.reload_from_sources()   # True — get() now returns the new file values
+```
+
+Environment-variable overrides and `${...}` placeholders are resolved at read time in
+`get()`, so they already track the live process environment; `reload_from_sources()` is
+specifically about re-reading the **files**.
+
+This is what `POST /actuator/refresh` calls under the hood: the `ContextRefresher`
+(`pyfly.context.refresh`) reloads config from sources *before* it evicts refresh-scoped
+beans and resets `@config_properties` singletons, so those beans re-bind against the
+re-read files on next resolution. See the
+[Configuration guide](configuration.md#runtime-configuration-refresh) and the
+[Actuator guide](actuator.md#refresh-endpoint).
 
 ---
 

@@ -33,8 +33,13 @@ PyFly scheduling module.
 6. [AsyncIOTaskExecutor](#asynciotaskexecutor)
 7. [ThreadPoolTaskExecutor](#threadpooltaskexecutor)
 8. [Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock)
+   - [Built-in Lock Providers](#built-in-lock-providers)
+   - [Cross-Process Coordination (custom)](#cross-process-coordination-custom)
+   - [Registering a DistributedLock Bean](#registering-a-distributedlock-bean)
 9. [The @async_method Decorator](#the-async_method-decorator)
 10. [Configuration](#configuration)
+    - [Selecting the Executor](#selecting-the-executor)
+    - [Selecting the Lock Provider](#selecting-the-lock-provider)
 11. [Auto-Configuration](#auto-configuration)
 12. [Complete Example](#complete-example)
 
@@ -56,9 +61,12 @@ The module is built around a hexagonal architecture:
 - **TaskScheduler** is the engine that discovers decorated methods, creates
   execution loops, and manages their lifecycle.
 - **TaskExecutorPort** is the outbound port abstraction, allowing you to swap
-  execution strategies.
-- **AsyncIOTaskExecutor** and **ThreadPoolTaskExecutor** are the built-in
-  adapters.
+  execution strategies; **AsyncIOTaskExecutor** and **ThreadPoolTaskExecutor**
+  are the built-in adapters, selectable via `pyfly.scheduling.executor.type`.
+- **DistributedLock** coordinates `@scheduled(lock=...)` jobs across instances;
+  **LocalLock**, **InProcessDistributedLock**, **RedisDistributedLock**, and
+  **PostgresAdvisoryLock** are the built-in providers, selectable via
+  `pyfly.scheduling.lock.provider`.
 
 All public types are available from a single import:
 
@@ -71,9 +79,13 @@ from pyfly.scheduling import (
     TaskExecutorPort,
     DistributedLock,
     LocalLock,
+    InProcessDistributedLock,
 )
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
+# Built-in cluster-coordination lock adapters (normally selected via config):
+from pyfly.scheduling.adapters.redis_lock import RedisDistributedLock
+from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
 ```
 
 ---
@@ -212,8 +224,10 @@ class ImportService:
 
 `lock` works with all three trigger types (`cron`, `fixed_rate`,
 `fixed_delay`). Out of the box the scheduler uses an in-process `LocalLock`
-that always acquires — so single-instance behavior is unchanged. For true
-cross-process coordination you must register a `DistributedLock` bean; see
+that always acquires — so single-instance behavior is unchanged. For real
+coordination, select a built-in lock provider with
+`pyfly.scheduling.lock.provider` (`memory`, `redis`, or `postgres`) — no custom
+code required — or register your own `DistributedLock` bean. See
 [Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock).
 
 ### Decorator Metadata
@@ -568,11 +582,65 @@ from pyfly.scheduling import TaskScheduler, LocalLock
 scheduler = TaskScheduler(lock=LocalLock())  # default behavior
 ```
 
-### Cross-Process Coordination
+### Built-in Lock Providers
 
-To actually serialize a job across instances, implement `DistributedLock`
-against a shared store (Redis, a database row, etc.) and pass it to the
-scheduler. Any object with conforming `try_acquire` / `release` coroutines
+You do **not** need to write a lock to coordinate across instances. The
+`SchedulingAutoConfiguration.distributed_lock` bean selects a provider from
+`pyfly.scheduling.lock.provider`, and the auto-wired `TaskScheduler` uses it for
+every `@scheduled(lock=...)` job:
+
+| `pyfly.scheduling.lock.provider` | Implementation | Scope | Extra infra |
+|---|---|---|---|
+| `none` *(default)* | `LocalLock` | single instance (always acquires) | none |
+| `memory` | `InProcessDistributedLock` | one process (real mutual exclusion within the process) | none |
+| `redis` | `RedisDistributedLock` | cross-process / cluster | Redis |
+| `postgres` | `PostgresAdvisoryLock` | cross-process / cluster | none beyond an existing Postgres |
+
+```yaml
+# pyfly.yaml
+pyfly:
+  scheduling:
+    lock:
+      provider: postgres   # none | memory | redis | postgres
+```
+
+- **`none`** — `LocalLock`; `try_acquire` always returns `True`. Single-instance
+  default; `lock=` declarations are effectively no-ops.
+- **`memory`** — `InProcessDistributedLock`; real mutual exclusion **within one
+  process** (with a TTL self-heal so a crashed/never-released name auto-frees
+  after `lock_ttl`). Prevents a slow tick from overlapping its next tick in the
+  same process, but does **not** coordinate across processes.
+- **`redis`** — `RedisDistributedLock`; cross-process via an atomic Redis
+  `SET key value NX PX <ttl-ms>`, with an owner-token compare-and-delete release
+  (an instance only releases a lock it still owns). The async Redis client is
+  built by the auto-config from `pyfly.scheduling.lock.redis.url` (default
+  `redis://localhost:6379/0`) and injected — the adapter never imports `redis`
+  itself. Selected only when `redis.asyncio` is importable; otherwise the bean
+  falls back to `LocalLock`. Keys are prefixed `pyfly:schedlock:`.
+- **`postgres`** — `PostgresAdvisoryLock`; cross-process via Postgres
+  **session-level advisory locks** (`pg_try_advisory_lock` /
+  `pg_advisory_unlock`). For apps already on Postgres this gives cluster-safe
+  coordination with **no extra infrastructure**. The lock name is mapped to a
+  stable signed 64-bit key (blake2b, deterministic across processes). The
+  `AsyncEngine` is resolved lazily from the container on first acquire (so
+  bean-ordering does not matter). Note there is **no TTL** for this provider:
+  the advisory lock lives with the holding connection and is auto-released when
+  the connection closes — including when the process dies, which is the
+  crash-safety mechanism in lieu of `lock_ttl`.
+
+**When to use which:**
+
+- Single instance, no cluster → leave the default `none` (or `memory` if you
+  want to prevent in-process overlap of a slow job).
+- Multiple instances and you already run Redis → `redis`.
+- Multiple instances and you already run Postgres (but no Redis) → `postgres`,
+  to avoid standing up new infrastructure just for scheduling.
+
+### Cross-Process Coordination (custom)
+
+If none of the built-in providers fit, implement `DistributedLock` against any
+shared store and pass it to the scheduler (or register it as a bean — see
+below). Any object with conforming `try_acquire` / `release` coroutines
 satisfies the protocol:
 
 ```python
@@ -599,10 +667,12 @@ scheduler = TaskScheduler(lock=RedisLock(redis_client))
 
 ### Registering a DistributedLock Bean
 
-With auto-configuration, the auto-wired `TaskScheduler` automatically looks up a
-`DistributedLock` bean from the container and uses it for `@scheduled(lock=...)`
-coordination. If none is registered, it falls back to `LocalLock`. Just declare
-your implementation as a bean of type `DistributedLock`:
+The built-in providers above (`pyfly.scheduling.lock.provider`) are themselves
+registered as the `distributed_lock` bean, so in most cases a YAML setting is
+all you need. If you want a fully custom lock, declare your own bean of type
+`DistributedLock`; the auto-wired `TaskScheduler` looks it up from the container
+and uses it for `@scheduled(lock=...)` coordination (falling back to `LocalLock`
+if none is registered):
 
 ```python
 from pyfly.container.bean import bean
@@ -649,26 +719,75 @@ The framework picks this up and routes the call through the configured
 
 ## Configuration
 
-Scheduling behavior can be configured in `pyfly.yaml`:
+Scheduling behavior is configured in `pyfly.yaml`. The auto-configured
+`task_scheduler` and `distributed_lock` beans read these keys to pick the
+executor and lock backend:
 
 ```yaml
 pyfly:
   scheduling:
     enabled: true
-    thread-pool:
-      max-workers: 4
+    executor:
+      type: asyncio       # asyncio | thread
+      max-workers: 4      # thread-pool size when type=thread
+    lock:
+      provider: none      # none | memory | redis | postgres
+      redis:
+        url: redis://localhost:6379/0   # used when provider=redis
 ```
 
 | Key | Description | Default |
 |---|---|---|
-| `pyfly.scheduling.enabled` | Enable or disable the scheduling subsystem | `true` |
-| `pyfly.scheduling.thread-pool.max-workers` | Max threads for `ThreadPoolTaskExecutor` | `4` |
-
-When `enabled` is `false`, the `TaskScheduler` will not start any loops and
-`@scheduled` methods will be ignored.
+| `pyfly.scheduling.enabled` | Convention flag set by the `application`/`data` starters (see [Auto-Configuration](#auto-configuration)) | `true` |
+| `pyfly.scheduling.executor.type` | Executor backend: `asyncio` (in-loop) or `thread` (`ThreadPoolTaskExecutor`) | `asyncio` |
+| `pyfly.scheduling.executor.max-workers` | Thread-pool size when `executor.type=thread` | `4` |
+| `pyfly.scheduling.lock.provider` | Distributed-lock backend: `none` / `memory` / `redis` / `postgres` | `none` |
+| `pyfly.scheduling.lock.redis.url` | Redis URL when `lock.provider=redis` | `redis://localhost:6379/0` |
 
 **Requires:** `uv add "pyfly[scheduling]"` (installs `croniter` for cron
-expression parsing)
+expression parsing). The `redis` lock provider additionally needs
+`redis.asyncio` importable; the `postgres` provider needs a SQLAlchemy
+`AsyncEngine` bean.
+
+### Selecting the Executor
+
+The scheduler submits each run through a `TaskExecutorPort`. The auto-config
+chooses the adapter from `pyfly.scheduling.executor.type`:
+
+- `asyncio` *(default)* — `AsyncIOTaskExecutor`. Ideal for I/O-bound
+  `async`/`await` tasks; runs work on the event loop.
+- `thread` — `ThreadPoolTaskExecutor(max_workers=pyfly.scheduling.executor.max-workers)`.
+  Offloads blocking/CPU-bound jobs to a worker-thread pool.
+
+```yaml
+pyfly:
+  scheduling:
+    executor:
+      type: thread
+      max-workers: 8
+```
+
+This is equivalent to constructing
+`TaskScheduler(executor=ThreadPoolTaskExecutor(max_workers=8))` yourself (see
+[ThreadPoolTaskExecutor](#threadpooltaskexecutor)). To swap in a fully custom
+executor, override the `task_scheduler` bean (see
+[Overriding the Auto-Configured Scheduler](#overriding-the-auto-configured-scheduler)).
+
+### Selecting the Lock Provider
+
+`pyfly.scheduling.lock.provider` chooses the `distributed_lock` bean used for
+`@scheduled(lock=...)` coordination. See
+[Built-in Lock Providers](#built-in-lock-providers) for the full matrix and
+guidance on `none` / `memory` / `redis` / `postgres`.
+
+```yaml
+pyfly:
+  scheduling:
+    lock:
+      provider: redis
+      redis:
+        url: redis://cache:6379/0
+```
 
 ---
 
@@ -682,7 +801,8 @@ When `croniter` is installed, PyFly automatically registers a `TaskScheduler` be
 
 | Bean | Type | Description |
 |------|------|-------------|
-| `task_scheduler` | `TaskScheduler` | Container-managed scheduler that discovers and runs `@scheduled` methods |
+| `distributed_lock` | `DistributedLock` | Lock backend for `@scheduled(lock=...)`, selected by `pyfly.scheduling.lock.provider` (`none`/`memory`/`redis`/`postgres`) |
+| `task_scheduler` | `TaskScheduler` | Container-managed scheduler that discovers and runs `@scheduled` methods; uses the executor from `pyfly.scheduling.executor.type` and resolves the `distributed_lock` bean |
 
 With auto-configuration, you no longer need a `SchedulerManager` service. The `ApplicationContext` automatically:
 
@@ -725,7 +845,11 @@ The `TaskScheduler` is auto-wired as a container bean and the `ApplicationContex
 
 ### Overriding the Auto-Configured Scheduler
 
-Provide your own `TaskScheduler` bean to override the auto-configured one:
+For the common cases — switching the executor to a thread pool, or picking a
+lock provider — you do **not** need a custom bean; just set
+`pyfly.scheduling.executor.type` / `pyfly.scheduling.lock.provider` in
+`pyfly.yaml` (see [Configuration](#configuration)). Provide your own
+`TaskScheduler` bean only when you need a fully custom executor or lock:
 
 ```python
 from pyfly.container.bean import bean

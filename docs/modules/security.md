@@ -1208,7 +1208,44 @@ class TokenStore(Protocol):
     async def revoke(self, token_id: str) -> None: ...
 ```
 
-`InMemoryTokenStore` is the built-in adapter for development and testing. In production, implement `TokenStore` with Redis or a database backend.
+`InMemoryTokenStore` is the built-in adapter for development and testing. PyFly also ships persistent Redis and Postgres adapters for production use (see below).
+
+#### Persistent Token Stores (multi-instance authorization server)
+
+`InMemoryTokenStore` keeps refresh tokens in a process-local dict — it is fine for a single-instance dev/test server, but it **loses all tokens on restart** and is not shared across instances (a refresh issued on one node is unknown to another, and revocation does not propagate). To run the authorization server across multiple instances, select a persistent token store via configuration. `OAuth2AuthorizationServerAutoConfiguration._build_token_store()` reads `pyfly.security.oauth2.token-store.provider` (case-insensitive) and wires the matching adapter:
+
+| Provider | Adapter | Persistence | When to use |
+|---|---|---|---|
+| `memory` (default) | `InMemoryTokenStore` (`pyfly.security.oauth2.authorization_server`) | Process-local; **lost on restart**, not shared across instances | Development and testing only — single instance |
+| `redis` | `RedisTokenStore` (`pyfly.security.adapters.redis_token_store`) | Cross-instance, fast distributed revocation; tokens self-evict at the refresh-token TTL | Multi-instance servers wanting fast revocation |
+| `postgres` | `PostgresTokenStore` (`pyfly.security.adapters.postgres_token_store`) | Durable + auditable in a SQL table, no Redis required | Multi-instance servers needing durable, auditable storage |
+
+Selecting `redis` or `postgres` fixes multi-instance authorization servers: refresh tokens and revocations are shared across all nodes, so a token issued or revoked on one instance is honoured everywhere, and tokens survive a restart (postgres) or persist until their TTL (redis).
+
+```yaml
+pyfly:
+  security:
+    oauth2:
+      authorization-server:
+        enabled: true
+        secret: "${OAUTH2_SECRET}"
+        refresh-token-ttl: 86400          # also the Redis token TTL
+      token-store:
+        provider: redis                   # memory (default) | redis | postgres
+        redis:
+          url: "redis://localhost:6379/0" # falls back to pyfly.session.redis.url
+```
+
+**Configuration keys:**
+
+| Key | Default | Description |
+|---|---|---|
+| `pyfly.security.oauth2.token-store.provider` | `memory` | `memory`, `redis`, or `postgres` (matched case-insensitively) |
+| `pyfly.security.oauth2.token-store.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis connection URL (redis provider only) |
+
+**Redis adapter.** When `provider=redis` and the `redis.asyncio` driver is available, the composition root builds an async client with `redis.asyncio.from_url(url)` and injects it into `RedisTokenStore(client, ttl=refresh_ttl)`. Tokens are stored as JSON under the `pyfly:oauth2:token:` key prefix with an `ex` equal to the refresh-token TTL, so expired tokens self-evict. If the driver is unavailable the store falls back to `InMemoryTokenStore`.
+
+**Postgres adapter.** When `provider=postgres`, the composition root resolves a SQLAlchemy `AsyncEngine` from the container (so an `AsyncEngine` bean must be present) and injects an engine factory into `PostgresTokenStore`. The adapter lazily and idempotently creates a `pyfly_oauth2_tokens` table (`token_id TEXT PRIMARY KEY, data TEXT NOT NULL`) on first use and upserts refresh tokens with `ON CONFLICT (token_id) DO UPDATE`. Both adapters are hexagonal: they never import their driver at module scope — the client/engine is injected by the auto-configuration.
 
 #### Error Codes
 

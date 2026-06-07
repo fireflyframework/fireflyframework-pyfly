@@ -797,44 +797,48 @@ Source files:
 
 ## Transaction Management
 
-### mongo_transactional Decorator
+### The unified `@transactional` decorator
 
-The `@mongo_transactional` decorator provides declarative async transaction management for MongoDB, mirroring the `@reactive_transactional` decorator from the SQLAlchemy adapter:
+MongoDB uses the **same** `@transactional` annotation as the relational adapter — import it from
+`pyfly.data`. On a service exposing a Motor client as `self._motor_client`, it opens a Mongo
+session + transaction, injects the session as the `session` keyword argument, commits on success,
+and aborts on error (honouring `rollback_for` / `no_rollback_for`, like the relational backend):
 
 ```python
-from pyfly.data.document.mongodb import mongo_transactional
-from motor.motor_asyncio import AsyncIOMotorClient
-
-client: AsyncIOMotorClient = ...
+from pyfly.container import service
+from pyfly.data import transactional
 
 
-@mongo_transactional(client)
-async def transfer_funds(from_id: str, to_id: str, amount: float) -> None:
-    from_account = await AccountDocument.get(from_id)
-    to_account = await AccountDocument.get(to_id)
+@service
+class AccountService:
+    def __init__(self, motor_client) -> None:
+        self._motor_client = motor_client  # selects the MongoDB transaction manager
 
-    from_account.balance -= amount
-    to_account.balance += amount
-
-    await from_account.save()
-    await to_account.save()
-    # Transaction is committed automatically on success
-    # Transaction is aborted automatically on exception
+    @transactional()
+    async def transfer_funds(self, from_id: str, to_id: str, amount: float, *, session=None) -> None:
+        from_account = await AccountDocument.get(from_id)
+        to_account = await AccountDocument.get(to_id)
+        from_account.balance -= amount
+        to_account.balance += amount
+        await from_account.save()
+        await to_account.save()
+        # Committed automatically on success; aborted automatically on exception.
 ```
 
 **How it works:**
 
-1. Starts a new Motor session via `client.start_session()`.
-2. Begins a transaction on the session via `session.start_transaction()`.
-3. Calls the wrapped function with all original arguments.
-4. On success: the transaction is committed (via the `async with` context manager).
-5. On exception: the transaction is aborted and the exception is re-raised.
+1. Resolves the Motor client from `self._motor_client`.
+2. Opens a session (`client.start_session()`) and a transaction (`session.start_transaction()`).
+3. Injects the live `ClientSession` as the `session` keyword argument and calls the function.
+4. On success the transaction commits; on an exception in `rollback_for` it aborts; an exception
+   in `no_rollback_for` commits and is then re-raised (mirroring the relational semantics).
 
-Unlike `@reactive_transactional` (which injects the session as the first argument), `@mongo_transactional` does not inject the session. The Beanie document operations automatically participate in the active transaction through Motor's session context.
+> **Deprecated:** `from pyfly.data.document.mongodb import mongo_transactional` still works but is
+> a thin alias of `@transactional`. Prefer `@transactional`.
 
 ### Replica Set Requirement
 
-MongoDB transactions require a replica set deployment. Standalone MongoDB instances do not support multi-document transactions. If you attempt to use `@mongo_transactional` against a standalone instance, MongoDB will raise an error.
+MongoDB transactions require a replica set deployment. Standalone MongoDB instances do not support multi-document transactions. If you attempt to use `@transactional` (or the deprecated `@mongo_transactional`) against a standalone instance, MongoDB will raise an error.
 
 For local development, you can run a single-node replica set:
 

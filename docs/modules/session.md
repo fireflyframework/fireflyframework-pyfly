@@ -228,17 +228,71 @@ pyfly:
   pending session and responds with HTTP `401` and body
   `{"error": "max_sessions", ...}`.
 
+### Registry Backends
+
+The cap is enforced against a `SessionRegistry` — a per-principal index of live
+session ids, kept separate from the `SessionStore`. Three backends ship out of
+the box, selected by `pyfly.session.concurrency.registry`:
+
+| `registry` | Implementation | Scope | Requirements |
+|---|---|---|---|
+| `memory` (default) | `InMemorySessionRegistry` | Single process only | none |
+| `redis` | `RedisSessionRegistry` | Cross-process / multi-instance | `redis.asyncio` installed |
+| `postgres` | `PostgresSessionRegistry` | Cross-process / durable | SQLAlchemy `AsyncEngine` bean |
+
+- **`memory`** — in-process index guarded by an `asyncio.Lock` (mirrors
+  `InMemorySessionStore`). Each app instance counts only its own sessions, so
+  the cap is **not** enforced across multiple processes. Suitable for
+  single-node deployments, development, and testing. State is lost on restart.
+- **`redis`** — a cross-process index shared by all app instances. Each
+  principal's live sessions are stored in a Redis sorted set (score =
+  `created_at`, member = `session_id`), so `list_sessions` is naturally
+  oldest-first. Requires `redis.asyncio`; if it is unavailable the
+  auto-configuration falls back to the in-memory registry. The connection URL
+  comes from `pyfly.session.concurrency.redis.url`, falling back to
+  `pyfly.session.redis.url`, then `redis://localhost:6379/0`.
+- **`postgres`** — a durable, queryable, cross-process index for
+  relational-only deployments (no Redis required). Session ids are stored in a
+  Postgres table (`session_id` PK, `principal`, `created_at`), created lazily
+  and idempotently on first use. Resolves a SQLAlchemy `AsyncEngine` bean from
+  the container; this requires the data module / an `AsyncEngine` to be
+  configured.
+
+### Configuration (Registry Backend)
+
+```yaml
+pyfly:
+  session:
+    concurrency:
+      enabled: true
+      max-sessions: 1
+      strategy: evict-oldest
+      registry: redis                          # memory (default) | redis | postgres
+      redis:
+        url: redis://localhost:6379/0          # optional; falls back to pyfly.session.redis.url
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pyfly.session.concurrency.registry` | `memory` | Registry backend: `memory`, `redis`, or `postgres` (case-insensitive) |
+| `pyfly.session.concurrency.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis connection URL (used when `registry=redis`) |
+
 ### Auto-Configuration
 
 When `pyfly.session.concurrency.enabled=true`,
 `SessionConcurrencyAutoConfiguration` registers a
-`SessionConcurrencyController` bean backed by an `InMemorySessionRegistry`.
+`SessionConcurrencyController` bean backed by the registry selected via
+`pyfly.session.concurrency.registry` (`InMemorySessionRegistry` by default).
 The OAuth2 login auto-configuration resolves this bean (if present) and passes
 it to `OAuth2LoginHandler`, so no manual wiring is required:
 
 | Class | Bean | Condition |
 |---|---|---|
 | `SessionConcurrencyAutoConfiguration` | `session_concurrency_controller` | `pyfly.session.concurrency.enabled=true` |
+
+The Redis client and SQLAlchemy `AsyncEngine` are obtained in the
+auto-configuration (the composition root) and injected into the adapters — the
+adapters never import their driver at module scope (hexagonal wiring).
 
 The controller's `session_deleter` is wired to `SessionStore.delete`, so an
 evicted session is purged from whichever store backend is active (memory or
@@ -267,9 +321,12 @@ policy = ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new")
 | `strategy` | `"evict-oldest"` | `"evict-oldest"` or `"reject-new"` |
 
 `SessionRegistry` is a `runtime_checkable` Protocol — a per-principal index of
-live session ids, kept separate from the `SessionStore`:
+live session ids, kept separate from the `SessionStore`. It is also exported
+from `pyfly.session.ports`:
 
 ```python
+from pyfly.session.ports import SessionRegistry
+
 class SessionRegistry(Protocol):
     async def register(self, principal: str, session_id: str, created_at: float) -> None: ...
     async def deregister(self, principal: str, session_id: str) -> None: ...
@@ -278,8 +335,27 @@ class SessionRegistry(Protocol):
 ```
 
 `InMemorySessionRegistry` is the in-process implementation (guarded by an
-`asyncio.Lock`), the default used by auto-configuration. Provide your own
-`SessionRegistry` implementation for a distributed registry.
+`asyncio.Lock`), the default used by auto-configuration when
+`registry=memory`. Two cross-process implementations ship as adapters; both
+have their driver/engine injected by the composition root:
+
+```python
+from pyfly.session.adapters.redis_registry import RedisSessionRegistry
+from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
+```
+
+`RedisSessionRegistry(client, *, key_prefix="pyfly:session:user:", ttl=86400)`
+stores each principal's sessions in a Redis sorted set (oldest-first by
+`created_at`). The `ttl` (seconds) bounds orphan growth and slides forward on
+each `register`. Used when `registry=redis`.
+
+`PostgresSessionRegistry(engine_factory, *, table="pyfly_session_registry")`
+stores sessions in a Postgres table. `engine_factory` is a zero-arg callable
+returning a SQLAlchemy `AsyncEngine` (resolved lazily on first use); the table
+name is validated as a SQL identifier. Used when `registry=postgres`.
+
+You may still provide your own `SessionRegistry` bean to override the
+auto-configured one entirely.
 
 `SessionConcurrencyController` enforces the policy:
 

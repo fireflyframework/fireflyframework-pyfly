@@ -172,7 +172,22 @@ class RequestLoggingFilter(OncePerRequestFilter):
 Logged fields: `method`, `path`, `status_code`, `duration_ms`, `transaction_id`.
 Failed requests are logged at `error` level with `error` and `error_type` fields.
 
+**Disabling per-request access logging.** The `RequestLoggingFilter` is on by default,
+but it is the costliest filter (the `structlog` emit runs on every request). To shave
+that per-request footprint, set `pyfly.web.request-logging.enabled` to `false`; the
+filter is then omitted from the chain entirely. The default is `true`, and the toggle
+is read by `create_app()` (Starlette **and** FastAPI adapters) when an
+`ApplicationContext` is supplied.
+
+```yaml
+pyfly:
+  web:
+    request-logging:
+      enabled: false   # default: true — omits RequestLoggingFilter from the chain
+```
+
 **Source:** `src/pyfly/web/adapters/starlette/filters/request_logging_filter.py`
+(toggle wired in `src/pyfly/web/adapters/starlette/app.py` and `.../fastapi/app.py`)
 
 ### SecurityHeadersFilter
 

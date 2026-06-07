@@ -6,6 +6,90 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.77 (2026-06-08)
+
+### Docs (feature sync — v26.06.57-76 are now documented)
+
+A sweep bringing the docs (and the companion plugin skills) in line with everything shipped since
+v26.06.57, verified key-by-key against the source:
+
+- **Scheduling** — distributed-lock providers (`pyfly.scheduling.lock.provider` = none|memory|redis|
+  **postgres** advisory lock) and the pluggable executor (`pyfly.scheduling.executor.type` =
+  asyncio|thread).
+- **Session** — concurrency registry backends (`pyfly.session.concurrency.registry` = memory|redis|
+  **postgres**).
+- **Security** — persistent OAuth2 token store (`pyfly.security.oauth2.token-store.provider` =
+  memory|redis|postgres) for multi-instance auth servers.
+- **Config** — `Config.reload_from_sources()` + `POST /actuator/refresh` now re-reads config files.
+- **Data/CLI** — run-on-startup Alembic migrations (`pyfly.data.relational.migrations.enabled`).
+- **Web** — access-log opt-out (`pyfly.web.request-logging.enabled`).
+- **Observability** — the `MetricsRecorder` port + `NoOpMetricsRecorder`.
+- **DI** — the public container SPI (`register_instance` / `contains_type` / `get_registration` /
+  `registered_types` / `reset_instance`).
+- Fixed the broken `@mongo_transactional(client)` example in the MongoDB adapter doc and the
+  stale `/actuator/refresh` description (now reflect the unified `@transactional` + config reload).
+
+## v26.06.76 (2026-06-08)
+
+### Tested (data — MongoDB query/projection execution coverage)
+
+Closes the last audit test-depth gaps for the document repository. The Mongo query compiler and
+projections were previously only smoke-tested (clause construction / return-type acceptance);
+`tests/data/test_mongo_query_execution.py` now EXECUTES them against a real (mongomock) collection
+and asserts results: every comparison operator (`greater_than`/`_equal`, `less_than`, `between`,
+`in`, `containing` case-insensitive, `order_by` desc, `count_by`) end-to-end, and projection
+queries returning the field-subset (`SimpleNamespace`, non-projected fields absent) rather than full
+documents.
+
+## v26.06.75 (2026-06-07)
+
+### Changed (data — unified `@transactional` for every backend)
+
+There is now **one** `@transactional` annotation for both relational and document services,
+imported from `pyfly.data` (Spring's uniform-annotation model). It dispatches at call time to the
+transaction manager the service exposes:
+
+- relational `async_sessionmaker` on `self._session_factory` → SQLAlchemy transaction (propagation,
+  isolation, read-only, `rollback_for`/`no_rollback_for`, repository session patching);
+- MongoDB client on `self._motor_client` → Mongo session + transaction (session injected as the
+  `session` kwarg, commit/abort with `rollback_for`/`no_rollback_for` parity).
+
+The decorator is backend-neutral (`pyfly.data.transactional`) and imports neither SQLAlchemy nor
+Motor at module scope; each backend supplies a lazily-imported runner (`run_relational_transaction`
+/ `run_mongo_transaction`). `from pyfly.data.relational.sqlalchemy import transactional` still works
+(same object); **`mongo_transactional` is now a deprecated alias** of `@transactional`.
+
+### Fixed / tested
+
+- The MongoDB transaction path — previously **completely untested** — now has behavior tests
+  (commit, abort on `rollback_for`, commit-and-re-raise on `no_rollback_for`, session injection,
+  missing-client error) and gained `rollback_for`/`no_rollback_for` parity with relational.
+- Relational isolation is now verified (a test asserts the `isolation_level` execution option
+  actually reaches the session — previously only the enum/metadata were checked).
+- Docs (`data.md`, `data-document.md`) + the companion `implement-data-repository` skill updated to
+  teach the single annotation; the doc's broken `@mongo_transactional(client)` example is corrected.
+
+## v26.06.74 (2026-06-07)
+
+### Docs (data — query-mechanism decision guide + Spring-Data parity matrix)
+
+Following a full Spring-Data parity audit (CrudRepository / Pageable / derived queries / @query /
+Specifications / Query-by-Example, relational **and** document — all present and behavior-tested),
+`docs/modules/data.md` gains two teaching sections so users know **when** to use each tool and
+where the boundaries are:
+
+- **Choosing a Query Mechanism** — a decision table for derived methods vs `@query` vs
+  Specifications vs Query-by-Example (and when *not* to use each), plus how `Pageable`/`Sort`
+  layer on top.
+- **Spring Data Parity & Current Limitations** — a relational-vs-document capability matrix
+  (soft-delete, optimistic locking, auditing, transactions differ by backend) and an explicit list
+  of Spring features **not yet** implemented (`@Modifying` bulk writes, `Slice`, DTO/open
+  projections, the `StartingWith`/`IgnoreCase`/`Top<N>` derived keywords, etc.) — so the docs set
+  accurate expectations rather than implying parity that isn't there.
+
+The companion plugin's `implement-data-repository` skill gains the same decision table + capability
+matrix + limitations (verified against the source: every cited symbol and operator exists).
+
 ## v26.06.73 (2026-06-07)
 
 ### Changed (benchmarks — rigor overhaul)

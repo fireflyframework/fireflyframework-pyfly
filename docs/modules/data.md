@@ -1045,6 +1045,49 @@ Source files:
 
 ---
 
+## Choosing a Query Mechanism
+
+PyFly offers four ways to express a read, plus pagination that layers on top of any of them.
+Reach for the simplest one that fits, and escalate only when it can't express the query:
+
+| Mechanism | Use it when | Avoid it when | Example |
+|-----------|-------------|---------------|---------|
+| **Derived query methods** (`find_by_…`) | The predicate is a fixed combination of fields and the [supported operators](#operators), joined by AND/OR, optionally ordered. Type-safe, no SQL. **Start here.** | The query needs joins, aggregation, `OR` across more than a couple of fields, or an operator PyFly doesn't derive (see limitations). | `find_by_status_and_total_greater_than(...)` |
+| **`@query`** (JPQL-like or `native=True`) | The query is too complex to name — joins, aggregates, hand-tuned SQL, or a MongoDB filter document. | A derived method would read clearly — don't write SQL for `find_by_id`. | `@query("SELECT o FROM Order o WHERE o.total > :min")` |
+| **Specification** | The predicate is **dynamic** — built at runtime from optional filters and composed with `&` / `\|` / `~`. | The predicate is fixed (use a derived method) or static (use `@query`). | `active & (admin \| owner)` |
+| **Query-by-Example** (`FilterUtils.from_example` / `from_dict`) | You have a populated example object or a dict of equality filters (e.g. straight from API query params). | You need ranges, `OR`, or anything beyond field-equality `AND`. | `FilterUtils.from_dict({"status": "ACTIVE"})` |
+
+Then wrap any of the above with **`Pageable` + `Sort`** for paginated, ordered results
+(`find_paginated`, `find_all_by_spec_paged`). Use `Pageable.unpaged()` to fetch everything.
+
+## Spring Data Parity & Current Limitations
+
+PyFly's repositories are Spring-Data-equivalent for the everyday feature set — across **both**
+backends: CRUD + batch ops, `Pageable`/`Sort`/`Page`, derived queries, `@query`, Specifications,
+Query-by-Example, projections, repository auto-implementation, and generic-type extraction are all
+implemented and behavior-tested on relational **and** document.
+
+Some capabilities are **backend-specific** today:
+
+| Capability | Relational (SQLAlchemy) | Document (MongoDB) |
+|------------|:-----------------------:|:------------------:|
+| CRUD + batch, Pageable/Sort/Page, derived queries, `@query`, Specifications, QBE | ✅ | ✅ |
+| Projections | ✅ | ✅ (closed/field-subset) |
+| Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
+| Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ❌ not yet |
+| Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ propagation / isolation / read-only / `rollback_for` | ✅ commit/abort + `rollback_for` (replica set; propagation/isolation are relational-only) |
+
+**Not yet implemented on either backend** (so you don't reach for them): `@Modifying`-style
+declarative bulk `UPDATE`/`DELETE`; `Slice` (count-less paging) and streaming/reactive result
+types; DTO / open (SpEL) / dynamic / association-traversing projections; the derived-query keywords
+`StartingWith` / `EndingWith` / `IgnoreCase` / `True` / `False` / `Distinct` / `Top<N>` /
+`After` / `Before` (use `_like`/`_containing`/`@query` instead); `ExampleMatcher` string-match
+modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fall back to `@query`
+(or `native=True`) — it covers every case the derived parser doesn't.
+
+---
+
 ## Available Adapters
 
 | Adapter | Package | Backend | Guide |
