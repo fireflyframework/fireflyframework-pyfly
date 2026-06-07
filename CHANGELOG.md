@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.24 (2026-06-07)
+
+### Improved (`pyfly.data.Mapper` — the MapStruct equivalent)
+
+Spring-parity work, wave 3. Extended the existing runtime mapper rather than
+cloning MapStruct's compile-time codegen:
+
+- **Pydantic-aware.** Field extraction is now shallow and keeps nested models as
+  live instances (previously `dataclasses.asdict` deep-flattened nested models to
+  dicts, breaking nested destinations). Pydantic models are read via
+  `model_fields` and constructed through their validating constructor.
+- **Nested-model recursion.** A destination field whose declared type is itself a
+  mappable model (dataclass / Pydantic) is now mapped recursively.
+- **Collection recursion.** `list`/`tuple`/`set` destination fields of a mappable
+  element type are mapped element-wise.
+- **Declarative `@mapping` decorator.** `@mapping(Source, Dest, rename=..., transform=..., exclude=...)`
+  registers a mapping on the module-level `default_mapper`, so configuration lives
+  next to the types. Exported as `pyfly.data.mapping` / `pyfly.data.default_mapper`.
+
+Existing `Mapper` API (`add_mapping`, `map`, `map_list`, projections) is unchanged
+and back-compatible.
+
+---
+
 ## v26.06.23 (2026-06-07)
 
 ### Added (DI / autowiring feature parity)
