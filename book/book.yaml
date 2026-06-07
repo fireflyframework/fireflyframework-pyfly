@@ -14,7 +14,6 @@ front:
   - {id: copyright,   file: 00-front/00-copyright.md,   nav: false}
   - {id: preface,     file: 00-front/00-preface.md,     title: "Preface"}
   - {id: conventions, file: 00-front/00-conventions.md, title: "Conventions"}
-  - {id: sparky,      file: 00-front/00-meet-sparky.md, title: "Meet Sparky"}
 parts:
   - title: "Part I — Foundations"
     chapters:

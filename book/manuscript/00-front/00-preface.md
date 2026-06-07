@@ -46,7 +46,7 @@ Each chapter ends with a **Recap** that summarises what changed in the Lumen cod
 
 ### Conventions in Brief
 
-Typographic and structural conventions — code listing captions, callout types, figure numbering, and the role of Sparky — are demonstrated, with live examples, in the **Conventions** section that follows.
+Typographic and structural conventions — code listing captions, callout types, and figure numbering — are demonstrated, with live examples, in the **Conventions** section that follows.
 
 ### Downloading the Example Code
 
