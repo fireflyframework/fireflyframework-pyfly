@@ -728,8 +728,18 @@ class ApplicationContext:
                         return
                 topic = getattr(method, "__pyfly_listener_topic__", "")
                 group = getattr(method, "__pyfly_listener_group__", None)
+                # Apply retry + dead-letter handling (adapter-agnostic) when configured.
+                from pyfly.messaging.error_handling import wrap_listener
+
+                handler = wrap_listener(
+                    method,
+                    broker,
+                    retries=getattr(method, "__pyfly_listener_retries__", 0),
+                    retry_delay=getattr(method, "__pyfly_listener_retry_delay__", 0.0),
+                    dead_letter_topic=getattr(method, "__pyfly_listener_dlq__", None),
+                )
                 # MessageBrokerPort.subscribe is async; defer via create_task
-                task = asyncio.get_running_loop().create_task(broker.subscribe(topic, method, group=group))
+                task = asyncio.get_running_loop().create_task(broker.subscribe(topic, handler, group=group))
                 self._background_tasks.append(task)
                 count += 1
         self._wiring_counts["message_listeners"] = count

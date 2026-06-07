@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.47 (2026-06-07)
+
+### Added (messaging — @message_listener retry + dead-letter routing)
+
+`@message_listener` gained resilience options (Spring Kafka `@RetryableTopic` /
+`DefaultErrorHandler` parity), applied adapter-agnostically (Kafka, RabbitMQ, in-memory):
+
+- **`retries`** — re-invoke the handler N times on failure, with linear `retry_delay`
+  backoff (attempt N waits `retry_delay * N`).
+- **`dead_letter_topic`** — a message still failing after `retries` is re-published there
+  with `x-original-topic` / `x-exception` headers, instead of propagating.
+
+With no options set, the handler is wired unchanged (zero overhead). The wrapper lives in
+`pyfly.messaging.error_handling.wrap_listener` and is applied during listener wiring.
+
 ## v26.06.46 (2026-06-07)
 
 ### Added (container — SESSION bean scope)
