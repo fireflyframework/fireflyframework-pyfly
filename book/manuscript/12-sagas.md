@@ -4,11 +4,11 @@
 
 ::: figure art/openers/ch12.svg | &nbsp;
 
-Chapter 10 sent Lumen's wallet events across process boundaries through Kafka. Chapter 11 split the application into co-operating services and showed how to call them over HTTP. Both steps unlocked scale and ownership, but they also uncovered a new kind of danger: you can now have two services, each with its own database, that both need to change state as part of the same business operation — and no distributed ACID transaction to protect you.
+Chapter 10 sent Lumen's wallet events across process boundaries through Kafka. Chapter 11 split the application into co-operating services and showed how to call them over HTTP. Both steps unlocked scale and ownership, but they also uncovered a new kind of danger: you can now have multiple aggregates — or multiple services — that all need to change state as part of the same business operation, with no distributed ACID transaction to protect you.
 
-Imagine a Lumen "Pay a friend" flow. You debit the sender's wallet in WalletService. You capture the payment in PaymentsService. You send a push notification in NotificationsService. If the payment capture succeeds but the wallet debit fails, you have charged the user without moving money. If the debit succeeds but the notification fails, the recipient does not know about the deposit. You cannot wrap three service calls in a single `BEGIN … COMMIT` — each service owns its own PostgreSQL connection, and two-phase commit across service boundaries is operationally fragile and does not compose at the protocol level.
+Imagine a Lumen wallet transfer. You debit the source wallet. Then you credit the destination wallet. If the source is debited and the credit fails — wrong currency, missing wallet — the source owner has lost money with nothing deposited on the other side. You cannot wrap two independent repository calls in a single `BEGIN … COMMIT` when each aggregate owns its own consistency boundary, and two-phase commit across independent aggregates is operationally fragile.
 
-The answer is **eventual consistency with explicit compensation**. You accept that each step may succeed or fail independently, and you design a recovery path — a *compensating transaction* — for every step that could succeed before a later one fails. When the whole sequence succeeds you have your business result. When any step fails, the engine walks back the steps that already completed, calling each one's compensation to restore consistent state. This chapter shows you how to build that with PyFly's `pyfly.transactional` module.
+The answer is **eventual consistency with explicit compensation**. You accept that each step commits to its own store independently, and you design a recovery path — a *compensating transaction* — for every step that could succeed before a later one fails. When the whole sequence succeeds you have your business result. When any step fails, the engine walks back the steps that already completed, calling each one's compensation to restore consistent state. This chapter shows you how to build that with PyFly's `pyfly.transactional` module.
 
 You will model the money transfer as an **orchestrated saga** — a central class that declares each step and its compensation, using a DAG (directed acyclic graph) of dependencies so the engine can run independent steps in parallel. You will then look at compensation in depth, the **Workflow** pattern for long-running or human-in-the-loop flows, and **TCC (Try-Confirm-Cancel)** as a reservation-based alternative. Finally you will see how pluggable persistence lets the engine survive a process crash and resume stale executions automatically.
 
@@ -18,24 +18,23 @@ You will model the money transfer as an **orchestrated saga** — a central clas
 
 Before writing any code it is worth making the failure modes concrete.
 
-### Two services, no safety net
+### Two aggregates, no safety net
 
-Lumen's transfer flow touches three services in sequence:
+Lumen's wallet transfer operates on two `Wallet` aggregates that are stored in the same PostgreSQL schema but are independent domain objects — each is loaded, mutated, and saved in its own round trip. Consider the steps:
 
-1. `WalletService` — debit the sender (subtract funds).
-2. `PaymentsService` — capture the transaction from the sender's card.
-3. `NotificationsService` — push an alert to both parties.
+1. **Debit the source** — withdraw `amount` from the source `Wallet` (enforces `balance >= 0`).
+2. **Credit the destination** — deposit `amount` into the destination `Wallet` (enforces currency match).
 
-In a monolith all three writes could share a single database transaction. In a microservices deployment each service has its own store. A network timeout, a downstream outage, or a logic error in step 2 can leave WalletService having debited the sender while PaymentsService has no record of the charge. The user sees money gone with nothing to show for it.
+In a monolith these two writes could share a single database transaction. In the real Lumen domain service each step is an independent repository call. A currency mismatch on the destination wallet, or a missing wallet id, can cause step 2 to fail after step 1 has already committed — leaving the source wallet debited and the destination unchanged. The user loses money.
 
-Retrying the whole operation is not safe: you might debit the sender twice. Skipping failed steps silently violates business rules. You need a principled pattern that commits the forward path step by step and rolls back consistently on failure.
+Retrying the whole operation is not safe: you might debit the source twice. Skipping the failed step silently leaves balances inconsistent. You need a principled pattern that commits each step independently and rolls back all completed steps consistently on failure.
 
 ### Eventual consistency and compensation
 
-A **saga** decomposes the operation into a sequence of local transactions, one per service. Each step is durable — it commits to its own store independently. If a step fails, the engine runs **compensating transactions** in reverse order for each step that has already completed. Compensations are not rollbacks in the database sense; they are *semantic undos* — new forward operations that reverse the effect. "Refund a payment" is not a rollback; it is a new debit record on the other direction.
+A **saga** decomposes the operation into a sequence of local transactions, each of which commits to its own store independently. If a step fails, the engine runs **compensating transactions** in reverse order for each step that has already completed. Compensations are not rollbacks in the database sense; they are *semantic undos* — new forward operations that reverse the effect. "Re-credit the source wallet" is not a rollback; it is a new deposit operation that restores the original balance.
 
 !!! note "Sagas are eventually consistent"
-    A saga does not give you serializability or isolation. Between the moment WalletService debits the sender and the moment PaymentsService captures the payment, another request could read a partially-consistent state. This is the trade-off you accept when you choose distributed services. Sagas give you *consistency in the end* — either all forward steps committed or all are compensated — not *consistency at every point*.
+    A saga does not give you serializability or isolation. Between the moment the source wallet is debited and the moment the destination wallet is credited, another request could read the source wallet and see a balance that is lower than it will ultimately be. This is the trade-off you accept when you choose to operate across independent aggregates without a distributed lock. Sagas give you *consistency in the end* — either all forward steps committed or all are compensated — not *consistency at every point*.
 
 ---
 
@@ -45,271 +44,221 @@ PyFly's `pyfly.transactional` module provides the `@saga` and `@saga_step` decor
 
 ### Enabling the engine
 
-Activate the transactional engine by annotating your configuration class:
+The transactional engine is activated by the `@enable_domain_stack` starter decorator on your application class, together with one YAML property that turns the engine on. In Lumen:
 
-::: listing lumen/config/app_config.py | Listing 12.1 — Enabling the transactional engine
-from pyfly.transactional import enable_transactional_engine
-from pyfly.context.conditions import configuration
+::: listing lumen/app.py | Listing 12.1 — Enabling the transactional engine via the domain stack
+from pyfly.core import pyfly_application
+from pyfly.starters.domain import enable_domain_stack
 
 
-@enable_transactional_engine
-@configuration
-class AppConfig:
+@enable_domain_stack
+@pyfly_application(
+    name="lumen",
+    scan_packages=[
+        "lumen.models.repositories",
+        "lumen.core.services.transfers",
+        # ... other packages
+    ],
+)
+class LumenApplication:
     pass
 :::
 
-**How it works:** `@enable_transactional_engine` triggers `TransactionalEngineAutoConfiguration`, which wires every engine component — `SagaEngine`, `TccEngine`, `SagaRegistry`, `InMemoryPersistenceAdapter`, and `LoggerEventsAdapter` — into the DI container. You can override any adapter bean by providing your own; the auto-configuration uses conditional wiring so your beans take precedence.
+Add the property in `application.yaml`:
+
+```yaml
+pyfly:
+  transactional:
+    enabled: true
+```
+
+**How it works:** `@enable_domain_stack` imports `TransactionalEngineAutoConfiguration`, which is guarded by `@conditional_on_property("pyfly.transactional.enabled", having_value="true")`. When the property is set, the auto-configuration wires every engine component — `SagaEngine`, `TccEngine`, `WorkflowEngine`, `SagaRegistry`, `InMemoryPersistenceAdapter`, and `LoggerEventsAdapter` — into the DI container. The `OrchestrationBeanPostProcessor` then scans every bean produced during startup: any bean carrying `__pyfly_saga__` metadata is registered into the `SagaRegistry` automatically. You never call `registry.register_from_bean()` yourself in production code.
 
 ### Declaring the transfer saga
 
-The money transfer saga has three steps arranged in a linear chain. Each step depends on its predecessor, so the engine runs them sequentially — exactly what you want when ordering matters.
+Lumen's wallet transfer is a two-step saga: debit the source wallet, then credit the destination. If the credit fails (wrong currency, missing wallet), the engine compensates by re-crediting the source — so both balances return to their original values.
 
-::: listing lumen/transfer/transfer_saga.py | Listing 12.2 — MoneyTransferSaga: three steps, three compensations
+::: listing lumen/core/services/transfers/money_transfer_saga.py | Listing 12.2 — MoneyTransferSaga: debit → credit, with compensation
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Annotated
 
-from pyfly.container import component
+from lumen.core.services.transfers.transfer_request import TransferRequest
+from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.entities.v1.money import Money
+from lumen.models.repositories.wallet_repository import WalletRepository
+from pyfly.container import service
+from pyfly.domain import AggregateNotFound
 from pyfly.transactional.saga.annotations import (
+    FromStep,
+    Input,
     saga,
     saga_step,
-    Input,
-    FromStep,
-    Header,
 )
 from pyfly.transactional.saga.core.context import SagaContext
-from pyfly.transactional.saga.core.result import SagaResult
 
-from lumen.wallet.service import WalletService
-from lumen.payments.service import PaymentsService
-from lumen.notifications.service import NotificationsService
-
-
-# ── Domain types ──────────────────────────────────────────────────────────
-
-@dataclass(frozen=True)
-class TransferRequest:
-    sender_id: str
-    recipient_id: str
-    amount_cents: int
-    currency: str
+MONEY_TRANSFER_SAGA = "money-transfer"
 
 
 @dataclass(frozen=True)
 class DebitResult:
-    debit_id: str
-    new_balance_cents: int
+    wallet_id: str
+    amount: int
+    currency: Currency
+    balance: int
 
 
-@dataclass(frozen=True)
-class CaptureResult:
-    transaction_id: str
-    charged_cents: int
-
-
-@dataclass(frozen=True)
-class NotifyResult:
-    notification_ids: list[str]
-
-
-# ── Saga definition ───────────────────────────────────────────────────────
-
-@saga(name="money-transfer", layer_concurrency=0)
-@component
+@saga(name=MONEY_TRANSFER_SAGA)
+@service
 class MoneyTransferSaga:
-    """Orchestrated saga: debit → capture → notify, with full compensation."""
+    """Debit source wallet, credit destination; compensate on failure."""
 
-    def __init__(
+    def __init__(self, repository: WalletRepository) -> None:
+        self._repository = repository
+
+    # -- Step 1: debit the source ----------------------------------------
+
+    @saga_step(id="debit-source", compensate="recredit_source")
+    async def debit_source(
         self,
-        wallet_svc: WalletService,
-        payments_svc: PaymentsService,
-        notifications_svc: NotificationsService,
-    ) -> None:
-        self._wallet = wallet_svc
-        self._payments = payments_svc
-        self._notify = notifications_svc
-
-    # ── Step 1: debit the sender ──────────────────────────────────────────
-
-    @saga_step(
-        id="debit-wallet",
-        compensate="refund_wallet",
-        depends_on=[],
-        retry=3,
-        backoff_ms=200,
-        timeout_ms=5000,
-        jitter=True,
-        jitter_factor=0.3,
-    )
-    async def debit_wallet(
-        self,
-        req: Annotated[TransferRequest, Input],
+        request: Annotated[TransferRequest, Input()],
         ctx: SagaContext,
     ) -> DebitResult:
-        return await self._wallet.debit(
-            wallet_id=req.sender_id,
-            amount=req.amount_cents,
-            currency=req.currency,
-            idempotency_key=ctx.correlation_id,
+        wallet = await self._repository.find(request.source_wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", request.source_wallet_id)
+        wallet.withdraw(Money(amount=request.amount, currency=request.currency))
+        await self._repository.add(wallet)
+        wallet.clear_events()
+        return DebitResult(
+            wallet_id=request.source_wallet_id,
+            amount=request.amount,
+            currency=request.currency,
+            balance=wallet.balance.amount,
         )
 
-    async def refund_wallet(
+    async def recredit_source(
         self,
-        result: Annotated[DebitResult, FromStep("debit-wallet")],
-    ) -> None:
-        await self._wallet.refund(result.debit_id)
+        debit: Annotated[DebitResult, FromStep("debit-source")],
+    ) -> int:
+        """Compensation: put the money back. Receives the forward step's
+        result via FromStep — NOT the saga input."""
+        wallet = await self._repository.find(debit.wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", debit.wallet_id)
+        wallet.deposit(Money(amount=debit.amount, currency=debit.currency))
+        await self._repository.add(wallet)
+        wallet.clear_events()
+        return wallet.balance.amount
 
-    # ── Step 2: capture payment ───────────────────────────────────────────
+    # -- Step 2: credit the destination ----------------------------------
 
-    @saga_step(
-        id="capture-payment",
-        compensate="void_payment",
-        depends_on=["debit-wallet"],
-        retry=2,
-        backoff_ms=500,
-        timeout_ms=10_000,
-    )
-    async def capture_payment(
+    @saga_step(id="credit-destination", depends_on=["debit-source"])
+    async def credit_destination(
         self,
-        req: Annotated[TransferRequest, Input],
-        debit: Annotated[DebitResult, FromStep("debit-wallet")],
-        user_id: Annotated[str, Header("X-User-Id")],
-    ) -> CaptureResult:
-        return await self._payments.capture(
-            sender_id=req.sender_id,
-            recipient_id=req.recipient_id,
-            amount=req.amount_cents,
-            debit_ref=debit.debit_id,
-        )
-
-    async def void_payment(
-        self,
-        result: Annotated[CaptureResult, FromStep("capture-payment")],
-    ) -> None:
-        await self._payments.void(result.transaction_id)
-
-    # ── Step 3: notify both parties ───────────────────────────────────────
-
-    @saga_step(
-        id="notify-parties",
-        compensate="cancel_notifications",
-        depends_on=["capture-payment"],
-        retry=1,
-        timeout_ms=3_000,
-    )
-    async def notify_parties(
-        self,
-        req: Annotated[TransferRequest, Input],
-        capture: Annotated[CaptureResult, FromStep("capture-payment")],
-    ) -> NotifyResult:
-        return await self._notify.transfer_confirmed(
-            sender_id=req.sender_id,
-            recipient_id=req.recipient_id,
-            amount=req.amount_cents,
-            transaction_id=capture.transaction_id,
-        )
-
-    async def cancel_notifications(
-        self,
-        result: Annotated[NotifyResult, FromStep("notify-parties")],
-    ) -> None:
-        for nid in result.notification_ids:
-            await self._notify.cancel(nid)
+        request: Annotated[TransferRequest, Input()],
+        ctx: SagaContext,
+    ) -> int:
+        wallet = await self._repository.find(request.destination_wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", request.destination_wallet_id)
+        wallet.deposit(Money(amount=request.amount, currency=request.currency))
+        await self._repository.add(wallet)
+        wallet.clear_events()
+        return wallet.balance.amount
 :::
 
 **How it works — step by step:**
 
-`@saga(name="money-transfer")` marks the class for the `SagaRegistry`, which scans the DI container on startup, reads the `__pyfly_saga__` metadata, and builds an internal `SagaDefinition` with a validated DAG. If a `depends_on` entry references a nonexistent step id, or if the graph contains a cycle, `SagaValidationError` is raised immediately — you discover configuration errors at startup rather than at runtime.
+`@saga(name=MONEY_TRANSFER_SAGA)` stamps `__pyfly_saga__` on the class with the saga name. The decorator only attaches metadata — it does not wrap the class or create any proxy. The **critical requirement** is that `@saga` must be stacked *on top of* `@service`. The `@service` annotation causes the DI container to instantiate and scan the bean during application startup; the `OrchestrationBeanPostProcessor.after_init()` hook then sees `__pyfly_saga__` on the bean and calls `SagaRegistry.register_from_bean()`. Without `@service`, the class is never scanned and the saga cannot be executed by name.
 
-`@saga_step` attaches metadata to each method without wrapping it, so `inspect.iscoroutinefunction` continues to work and the engine correctly awaits the call. The `compensate` parameter is the name of the *method on the same class* to call when rolling back this step. `depends_on=["debit-wallet"]` tells the engine that `capture-payment` cannot start until `debit-wallet` finishes; `depends_on=[]` (or omitting it) means the step may run as soon as the engine starts.
+`@saga_step` attaches `__pyfly_saga_step__` metadata directly to the async method — no wrapper, no proxy. `inspect.iscoroutinefunction` keeps returning `True` so the engine correctly `await`s the call. The `compensate="recredit_source"` parameter names the *method on the same class* to call when rolling back this step. Omitting `depends_on` (or passing `[]`) means the step can run as soon as the engine starts.
 
-`retry=3, backoff_ms=200, jitter=True` — if `debit_wallet` raises any exception, the engine waits `200ms × (1 + random(0, 0.3))` before the next attempt, up to three times. Only after all retries are exhausted does the engine declare the step failed and begin compensating.
+Parameter injection uses `typing.Annotated` with **marker instances**, not bare classes:
 
-Parameter injection uses `typing.Annotated` with marker classes. `Annotated[TransferRequest, Input]` asks the `ArgumentResolver` to inject the full input object you passed to `saga_engine.execute()`. `Annotated[DebitResult, FromStep("debit-wallet")]` reads the result that step `"debit-wallet"` stored in the `SagaContext` when it completed. `Annotated[str, Header("X-User-Id")]` reads a header from the headers dict you passed at execution time. The resolver inspects type hints at runtime via `typing.get_type_hints(func, include_extras=True)`, so no wrapper or proxy is involved.
+- `Annotated[TransferRequest, Input()]` — the `Input()` is an instance (note the parentheses); bare `Input` without `()` does not resolve.
+- `Annotated[DebitResult, FromStep("debit-source")]` — reads the result that step `"debit-source"` stored in the `SagaContext` when it completed.
+- `ctx: SagaContext` — injected by type; no `Annotated` marker needed.
+
+The resolver inspects type hints at runtime via `typing.get_type_hints(func, include_extras=True)`.
+
+**Compensation methods do not receive the saga input.** `recredit_source` takes `Annotated[DebitResult, FromStep("debit-source")]` — the result the forward step returned — rather than the `TransferRequest`. This is the correct pattern: the compensation always reads from `ctx.step_results` via `FromStep`, never from the original input.
 
 ### The step DAG
 
-The three steps form a linear chain with only one path through the graph:
+The two steps form a linear chain:
 
-::: figure art/figures/12-saga.svg | Figure 12.1 — DAG for MoneyTransferSaga: steps run in topological-layer order; each layer executes its steps in parallel when they share no dependency.
+::: figure art/figures/12-saga.svg | Figure 12.1 — DAG for MoneyTransferSaga: steps run in topological-layer order; independent steps in a layer run with asyncio.gather.
 
 ```
-Layer 0:  debit-wallet
+Layer 0:  debit-source
               │
-Layer 1:  capture-payment
-              │
-Layer 2:  notify-parties
+Layer 1:  credit-destination
 ```
 
-Because each step depends on exactly one predecessor, there is only one step per layer and no parallelism here. A more complex saga — say, a fraud check and a balance check that are independent, both feeding a payment — would group those two in the same layer and run them with `asyncio.gather`.
+Because `credit-destination` depends on `debit-source`, they must run sequentially. A more complex saga — for example, a fraud check and a KYC check that are independent, both feeding a capture step — would put the two checks in the same layer and run them with `asyncio.gather`.
 
 ### Executing the saga
 
 Inject `SagaEngine` from the DI container and call `execute`:
 
-::: listing lumen/transfer/transfer_service.py | Listing 12.3 — Executing the money transfer saga
+::: listing lumen/core/services/transfers/transfer_service.py | Listing 12.3 — Executing the money transfer saga
+from __future__ import annotations
+
 from typing import Any
 
+from lumen.core.services.transfers.money_transfer_saga import MONEY_TRANSFER_SAGA
+from lumen.core.services.transfers.transfer_request import TransferRequest
 from pyfly.container import service
-from pyfly.transactional.saga.engine.saga_engine import SagaEngine
 from pyfly.transactional.saga.core.result import SagaResult
-
-from lumen.transfer.transfer_saga import TransferRequest
+from pyfly.transactional.saga.engine.saga_engine import SagaEngine
 
 
 @service
-class TransferOrchestrationService:
+class TransferService:
+    """Run the money-transfer saga and report the outcome."""
 
     def __init__(self, saga_engine: SagaEngine) -> None:
-        self._engine = saga_engine
+        self._saga_engine = saga_engine
 
-    async def transfer(
-        self,
-        sender_id: str,
-        recipient_id: str,
-        amount_cents: int,
-        currency: str,
-        user_id: str,
-    ) -> dict[str, Any]:
-        req = TransferRequest(
-            sender_id=sender_id,
-            recipient_id=recipient_id,
-            amount_cents=amount_cents,
-            currency=currency,
-        )
-        result: SagaResult = await self._engine.execute(
-            saga_name="money-transfer",
-            input_data=req,
-            headers={"X-User-Id": user_id},
+    async def transfer(self, request: TransferRequest) -> dict[str, Any]:
+        result: SagaResult = await self._saga_engine.execute(
+            saga_name=MONEY_TRANSFER_SAGA,
+            input_data=request,
         )
 
         if result.success:
-            capture = result.result_of("capture-payment")
+            debit = result.result_of("debit-source")
             return {
                 "status": "completed",
-                "transaction_id": capture.transaction_id,
                 "correlation_id": result.correlation_id,
+                "source_balance": debit.balance,
+                "destination_balance": result.result_of("credit-destination"),
             }
 
-        failed = result.failed_steps()
         return {
             "status": "failed",
-            "failed_steps": list(failed.keys()),
-            "error": str(result.error),
             "correlation_id": result.correlation_id,
+            "failed_steps": list(result.failed_steps().keys()),
+            "compensated_steps": list(result.compensated_steps().keys()),
+            "error": str(result.error),
         }
 :::
 
-**How it works:** `saga_engine.execute()` resolves the `MoneyTransferSaga` bean from the registry, creates a `SagaContext` with an auto-generated UUID `correlation_id`, and starts executing layers. On success, `SagaResult.success` is `True` and `result_of("capture-payment")` returns the `CaptureResult` your step returned. On failure, `result.failed_steps()` returns a dict of step id to `StepOutcome` for every step that failed after all retries.
+**How it works:** `saga_engine.execute()` resolves `MoneyTransferSaga` from the registry by name, creates a `SagaContext` with an auto-generated UUID `correlation_id`, and starts executing layers. On success, `SagaResult.success` is `True` and `result_of("debit-source")` returns the `DebitResult` the forward step produced. On failure, `result.failed_steps()` returns a dict of step id to `StepOutcome` for every step that failed after all retries; `result.compensated_steps()` returns the steps that were successfully rolled back.
 
-`SagaResult` is an immutable frozen dataclass. In addition to `success` and `error`, it carries:
-- `result.steps` — a dict of step id to `StepOutcome` (contains `status`, `attempts`, `latency_ms`, `result`, `error`, `compensated`).
-- `result.compensated_steps()` — steps that ran and were then compensated.
-- `result.correlation_id` — the UUID you can use to correlate logs and traces across services.
+`SagaResult` is an immutable frozen dataclass. Its key members:
+
+- `result.success` — `True` when every forward step completed.
+- `result.result_of(step_id)` — the value returned by that step, or `None`.
+- `result.failed_steps()` — dict of step id → `StepOutcome` for failed steps.
+- `result.compensated_steps()` — dict of step id → `StepOutcome` for compensated steps.
+- `result.correlation_id` — UUID to correlate logs and traces across services.
+- `result.error` — the exception that stopped the saga, or `None` on success.
 
 !!! spring "Spring parity"
-    `@saga` / `@saga_step` mirror the `@Saga` / `@SagaStep` annotations in the Java `fireflyframework-transactional-engine` library. The parameter-injection markers (`Input`, `FromStep`, `Header`) map directly to `@Input`, `@FromStep`, and `@Header` in the Java version. The async model differs: Java uses Project Reactor (`Mono<T>`) while PyFly uses native `async/await` with `asyncio.gather` for parallel layers — the API surface and configuration model are otherwise identical.
+    `@saga` / `@saga_step` mirror `@Saga` / `@SagaStep` in the Java `fireflyframework-transactional-engine` library. The decorator-stack rule (`@saga` on `@service`) mirrors the Java rule that `@Saga` must be on a `@Service`-annotated class so the `WorkflowBeanPostProcessor` can discover it. The parameter-injection markers (`Input()`, `FromStep("id")`) map directly to `@Input` and `@FromStep` in the Java version. The async model differs: Java uses Project Reactor (`Mono<T>`) while PyFly uses native `async/await` with `asyncio.gather` for parallel layers.
 
 ---
 
@@ -319,21 +268,16 @@ The happy path is straightforward: every step succeeds and the saga commits. The
 
 ### What runs on failure
 
-When a step fails after all retries, the engine switches to *compensation mode*. It inspects the `SagaContext` to find every step whose status is `DONE`, then calls their compensation methods in reverse completion order under the default `STRICT_SEQUENTIAL` policy:
+When a step fails after all retries, the engine switches to *compensation mode*. It inspects the `SagaContext` to find every step whose status is `DONE`, then calls their compensation methods in reverse completion order under the default `STRICT_SEQUENTIAL` policy. In `MoneyTransferSaga`, the destination wallet not existing causes `credit-destination` to raise `AggregateNotFound`. The engine then compensates the step that already completed:
 
 ```
-Forward path:    debit-wallet ✓  →  capture-payment ✗
-Compensation:    refund_wallet (for debit-wallet)
+Forward path:  debit-source ✓  →  credit-destination ✗
+Compensation:  recredit_source (for debit-source)
 ```
 
-If `notify-parties` had also completed before the failure:
+The net effect: the source wallet is back to its original balance and the destination wallet was never touched — as if the transfer never happened.
 
-```
-Forward path:    debit-wallet ✓  →  capture-payment ✓  →  notify-parties ✓  →  [later step fails]
-Compensation:    cancel_notifications  →  void_payment  →  refund_wallet
-```
-
-Compensation methods receive their arguments through the same injection system as forward steps. `Annotated[DebitResult, FromStep("debit-wallet")]` reads the result that `debit_wallet` stored in the context when it succeeded — so you always compensate with the actual data that was committed, never with an approximation.
+Compensation methods receive their arguments through the same injection system as forward steps. `Annotated[DebitResult, FromStep("debit-source")]` reads the `DebitResult` that `debit_source` stored in the context when it completed — so you always compensate with the actual data that was committed, never with an approximation.
 
 ### Compensation policies
 
@@ -362,12 +306,12 @@ pyfly:
 Override retry and timeout specifically for compensation without changing forward-step behaviour:
 
 ::: listing lumen/transfer/transfer_saga_hardened.py | Listing 12.4 — Per-step compensation retry and timeout
-from pyfly.container import component
+from pyfly.container import service
 from pyfly.transactional.saga.annotations import saga, saga_step
 
 
 @saga(name="money-transfer-hardened")
-@component
+@service
 class HardenedTransferSaga:
 
     @saga_step(
@@ -396,31 +340,32 @@ When the compensation logic is complex enough to warrant its own class, or when 
 ::: listing lumen/transfer/compensation_steps.py | Listing 12.5 — External compensation step class
 from typing import Annotated
 
-from pyfly.container import component
+from pyfly.container import service
 from pyfly.transactional.saga.annotations import (
-    compensation_step,
     FromStep,
+    compensation_step,
 )
 
-from lumen.transfer.transfer_saga import DebitResult
-from lumen.wallet.service import WalletService
+from lumen.core.services.transfers.money_transfer_saga import DebitResult
+from lumen.models.repositories.wallet_repository import WalletRepository
 
 
-@compensation_step(saga="money-transfer", for_step_id="debit-wallet")
-@component
-class WalletRefundCompensation:
+@compensation_step(saga="money-transfer", for_step_id="debit-source")
+@service
+class SourceRecreditCompensation:
 
-    def __init__(self, wallet_svc: WalletService) -> None:
-        self._wallet = wallet_svc
+    def __init__(self, repository: WalletRepository) -> None:
+        self._repository = repository
 
     async def execute(
         self,
-        result: Annotated[DebitResult, FromStep("debit-wallet")],
+        debit: Annotated[DebitResult, FromStep("debit-source")],
     ) -> None:
-        await self._wallet.refund(result.debit_id)
+        """External alternative to the inline recredit_source method."""
+        ...
 :::
 
-The `SagaRegistry` discovers `@compensation_step` classes at startup alongside `@saga` classes and wires them into the saga's step definitions automatically.
+The `SagaRegistry` discovers `@compensation_step` classes at startup alongside `@saga` classes and wires them into the saga's step definitions automatically. Note the `for_step_id` parameter matches the step's `id` string exactly.
 
 ---
 
@@ -443,19 +388,16 @@ The `SagaRegistry` discovers `@compensation_step` classes at startup alongside `
 ::: listing lumen/transfer/approval_workflow.py | Listing 12.6 — LargeTransferWorkflow: signal-driven approval for high-value transfers
 from __future__ import annotations
 
-from pyfly.container import component
+from pyfly.container import service
 from pyfly.transactional.core.model import TriggerMode
 from pyfly.transactional.workflow.annotations import (
-    workflow,
-    workflow_step,
-    wait_for_signal,
     compensation_step,
     on_workflow_complete,
     on_workflow_error,
+    wait_for_signal,
+    workflow,
     workflow_query,
-)
-from pyfly.transactional.workflow.annotations import (
-    WaitForSignal as _WFS,
+    workflow_step,
 )
 
 
@@ -465,13 +407,12 @@ from pyfly.transactional.workflow.annotations import (
     timeout_ms=86_400_000,    # 24 hours
     max_retries=1,
 )
-@component
+@service
 class LargeTransferWorkflow:
     """High-value transfers require a compliance officer to approve."""
 
     @workflow_step(id="enrich-request", depends_on=[])
     async def enrich_request(self, payload: dict) -> dict:
-        # Attach risk score and account metadata
         return {**payload, "risk_score": 0.12}
 
     @workflow_step(
@@ -479,11 +420,11 @@ class LargeTransferWorkflow:
         depends_on=["enrich-request"],
         compensatable=True,
         compensation_method="release_review",
-        timeout_ms=82_800_000,   # 23 hours
+        timeout_ms=82_800_000,
     )
     @wait_for_signal("approved", timeout_ms=82_800_000)
     async def compliance_review(self) -> None:
-        """Suspends here until a compliance officer sends the signal."""
+        """Suspends until a compliance officer delivers the signal."""
 
     @compensation_step(for_step="compliance-review")
     async def release_review(self) -> None:
@@ -494,7 +435,6 @@ class LargeTransferWorkflow:
         depends_on=["compliance-review"],
     )
     async def settle_transfer(self, payload: dict) -> dict:
-        # Call MoneyTransferSaga via SagaEngine
         return {"settled": True}
 
     @workflow_query(name="status")
@@ -510,11 +450,11 @@ class LargeTransferWorkflow:
         pass   # alert on-call
 :::
 
-**How it works:** `@wait_for_signal("approved", timeout_ms=82_800_000)` stacks on top of `@workflow_step` and tells the engine to *suspend* execution at that step until someone delivers a signal named `"approved"`. The engine persists the `ExecutionContext` and the coroutine state to the configured `ExecutionPersistenceProvider`. If the process restarts, the engine re-hydrates the context and resumes from the last completed layer.
+**How it works:** The decorator stack follows the same rule as sagas: `@workflow` on top of `@service`. `@workflow(id=...)` takes keyword-only arguments — `id` is required; all others are optional. `@wait_for_signal("approved", timeout_ms=82_800_000)` stacks on top of `@workflow_step` and tells the engine to suspend execution at that step until someone delivers a signal named `"approved"`. The engine persists the `ExecutionContext` to the configured `ExecutionPersistenceProvider`. If the process restarts, the engine re-hydrates the context and resumes from the last completed layer.
 
-`@compensation_step(for_step="compliance-review")` registers `release_review` as the compensation handler for the `compliance-review` step — the same semantic as saga compensation, but declared at method level rather than via the `compensate=` parameter.
+`@compensation_step(for_step="compliance-review")` uses the keyword argument `for_step` (not positional). It registers `release_review` as the compensation handler for the `compliance-review` step.
 
-`@workflow_query(name="status")` marks a method as a read-side query handler. You can call it while the workflow is suspended without advancing the execution.
+`@workflow_query(name="status")` marks a method as a read-side query handler. You can call it while the workflow is suspended without advancing execution.
 
 ### Driving the workflow engine
 
@@ -523,6 +463,7 @@ from __future__ import annotations
 
 from pyfly.container import service
 from pyfly.transactional.workflow.engine import WorkflowEngine
+from pyfly.transactional.workflow.result import WorkflowResult
 
 
 @service
@@ -531,22 +472,15 @@ class TransferApprovalService:
     def __init__(self, workflow_engine: WorkflowEngine) -> None:
         self._wf = workflow_engine
 
-    async def request_large_transfer(
-        self,
-        payload: dict,
-    ) -> str:
-        result = await self._wf.start(
+    async def request_large_transfer(self, payload: dict) -> str:
+        result: WorkflowResult = await self._wf.start(
             "large-transfer-approval",
             input=payload,
         )
-        # Returns immediately; workflow is suspended at compliance-review
+        # Returns immediately; workflow is now suspended at compliance-review.
         return result.correlation_id
 
-    async def approve(
-        self,
-        correlation_id: str,
-        reviewer_id: str,
-    ) -> None:
+    async def approve(self, correlation_id: str, reviewer_id: str) -> None:
         await self._wf.deliver_signal(
             correlation_id,
             "approved",
@@ -554,13 +488,12 @@ class TransferApprovalService:
         )
 
     async def check_status(self, correlation_id: str) -> str:
-        return await self._wf.query(
-            correlation_id,
-            "status",
-        )
+        return await self._wf.query(correlation_id, "status")
 :::
 
-**How it works:** `workflow_engine.start()` runs the first layer (`enrich-request`) synchronously, then suspends at `compliance-review` because of the `@wait_for_signal` annotation. It returns a `WorkflowResult` immediately with `correlation_id` — the caller can store this id and poll or await notification. Later, `deliver_signal()` resumes the workflow from the point of suspension; the `settle-transfer` layer then runs to completion.
+**How it works:** `workflow_engine.start(workflow_id, input=payload)` runs the first layer (`enrich-request`) synchronously, then suspends at `compliance-review` because of the `@wait_for_signal` annotation. It returns a `WorkflowResult` immediately with `correlation_id` — the caller stores this id and polls later. Later, `deliver_signal()` resumes the workflow; the `settle-transfer` layer then runs to completion.
+
+`WorkflowResult` carries: `workflow_id`, `correlation_id`, `status` (an `ExecutionStatus` enum), `duration_ms`, `step_results` (dict), and `variables`. The boolean `result.successful` is `True` when `status` is `COMPLETED` or `CONFIRMED`.
 
 ### The programmatic builder
 
@@ -568,6 +501,7 @@ When you need to construct a workflow dynamically — from a database configurat
 
 ::: listing lumen/transfer/dynamic_workflow.py | Listing 12.8 — Building a workflow programmatically
 from pyfly.transactional.workflow.builder import WorkflowBuilder
+from pyfly.transactional.workflow.definition import WorkflowDefinition
 
 
 async def enrich_fn(payload: dict) -> dict:
@@ -578,7 +512,7 @@ async def settle_fn(payload: dict) -> dict:
     return {"settled": True}
 
 
-definition = (
+definition: WorkflowDefinition = (
     WorkflowBuilder("simple-transfer")
     .step("enrich", enrich_fn, depends_on=[])
     .wait_signal(
@@ -596,7 +530,7 @@ definition = (
 )
 :::
 
-`WorkflowBuilder.step()` accepts a callable and keyword arguments for dependencies, timeouts, and retries. `wait_signal()` inserts a signal-gate step without requiring a real handler — it creates an internal no-op coroutine that the engine replaces with the signal-wait logic. `build()` returns an immutable `WorkflowDefinition` you can register directly with `WorkflowEngine`.
+`WorkflowBuilder.step(step_id, handler, *, depends_on, timeout_ms, max_retries, ...)` accepts a callable and keyword arguments for dependencies, timeouts, and retries. `wait_signal(step_id, signal, *, depends_on, timeout_ms)` inserts a signal-gate step without requiring a real handler — it creates an internal no-op coroutine that the engine replaces with the signal-wait logic. `build()` returns a `WorkflowDefinition` you can register directly with `WorkflowEngine`.
 
 ---
 
@@ -619,14 +553,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pyfly.container import component
+from pyfly.container import service
 from pyfly.transactional.tcc.annotations import (
+    FromTry,
+    cancel_method,
+    confirm_method,
     tcc,
     tcc_participant,
     try_method,
-    confirm_method,
-    cancel_method,
-    FromTry,
 )
 from pyfly.transactional.tcc.core.context import TccContext
 
@@ -641,7 +575,7 @@ from lumen.payments.service import PaymentsService
     max_retries=3,
     backoff_ms=500,
 )
-@component
+@service
 class WalletTransferTcc:
     """Reserve funds and payment in lockstep; confirm or cancel together."""
 
@@ -717,11 +651,15 @@ The engine runs all participants' Try phases in `order` sequence. If every Try s
 ### Executing a TCC transaction
 
 ::: listing lumen/transfer/tcc_service.py | Listing 12.10 — Executing a TCC transaction
-from pyfly.container import service
-from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
-from pyfly.transactional.tcc.core.result import TccResult
+from __future__ import annotations
 
-from lumen.transfer.transfer_saga import TransferRequest
+from typing import Any
+
+from pyfly.container import service
+from pyfly.transactional.tcc.core.result import TccResult
+from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
+
+from lumen.core.services.transfers.transfer_request import TransferRequest
 
 
 @service
@@ -730,7 +668,7 @@ class TccTransferService:
     def __init__(self, tcc_engine: TccEngine) -> None:
         self._engine = tcc_engine
 
-    async def transfer(self, req: TransferRequest) -> dict:
+    async def transfer(self, req: TransferRequest) -> dict[str, Any]:
         result: TccResult = await self._engine.execute(
             tcc_name="wallet-transfer",
             input_data=req,
@@ -901,25 +839,26 @@ saga_def = (
 
 ## What you built {.recap}
 
-You started with the insight that a money transfer spanning three services has no distributed rollback. You declared a `MoneyTransferSaga` using `@saga` and `@saga_step`, with parameter injection via `Input`, `FromStep`, and `Header` markers, and a compensation method for every step. You saw how the engine builds a validated DAG at startup, executes steps in topological-layer order (running independent steps in parallel with `asyncio.gather`), and compensates in reverse when any step fails.
+You started with the insight that a wallet transfer across two separate database aggregates cannot use a single database transaction. You declared `MoneyTransferSaga` by stacking `@saga` on `@service`, so the `OrchestrationBeanPostProcessor` registers it into the auto-configured `SagaEngine` at startup. Each step uses `Annotated[T, Input()]` and `Annotated[T, FromStep("step-id")]` marker instances (not bare classes) for parameter injection, and `ctx: SagaContext` is injected by type. The compensation method `recredit_source` does not receive the saga input — it pulls the forward step's `DebitResult` via `FromStep("debit-source")` from `SagaContext`. When `credit-destination` raises `AggregateNotFound`, the engine auto-runs `recredit_source`, leaving both balances unchanged.
 
-You explored compensation in depth: five policies from strict sequential to best-effort parallel, per-step compensation retries and timeouts, and the critical requirement that all compensations be idempotent. You saw how `@wait_for_signal` suspends a `@workflow` until a human or an external event resumes it, and how `WorkflowBuilder` constructs workflows programmatically. You walked through TCC as a reservation-based alternative that locks resources across all participants before committing any. Finally you wired a custom `TransactionalPersistencePort` and configured `SagaRecoveryService` to detect and surface stale executions after a crash.
+You explored compensation in depth: five policies from strict sequential to best-effort parallel, per-step compensation retries and timeouts, and the critical requirement that all compensations be idempotent. You saw how `@workflow(id=...) @service` and `@wait_for_signal` suspend a long-running workflow until a human delivers a signal, and how `WorkflowResult.successful` reports the final state. You walked through TCC as a reservation-based alternative that locks resources across all participants before committing any. Finally you wired a custom `TransactionalPersistencePort` and configured `SagaRecoveryService` to detect and surface stale executions after a crash.
 
 Key concepts to carry forward:
 
-- **`@saga` / `@saga_step`** — decorator pair that declares the class as a saga and marks each method as a step, with compensation by name and `depends_on` for DAG ordering.
-- **Parameter injection** — `Annotated[T, Input]`, `Annotated[T, FromStep("id")]`, `Annotated[str, Header("name")]` resolve from the `SagaContext` at runtime.
-- **`SagaEngine.execute(saga_name, input_data, headers)`** — the single call that runs the saga and returns a `SagaResult`.
-- **`@workflow` / `@wait_for_signal`** — signal-driven, long-running alternative with built-in persistence after every layer.
-- **`@tcc` / `@tcc_participant`** — reservation-based coordination with `@try_method`, `@confirm_method`, `@cancel_method` and `Annotated[T, FromTry()]` injection.
+- **`@saga` on `@service`** — the decorator stack that makes a class both a DI bean and a registered saga; `@saga` alone is not enough.
+- **Marker instances** — `Input()`, `FromStep("step-id")` must be instances (with parentheses), not bare classes.
+- **Compensation via `FromStep`** — compensation methods receive the forward step's result, never the saga input.
+- **`SagaEngine.execute(saga_name, input_data)`** — the single call that returns `SagaResult` with `.success`, `.result_of()`, `.failed_steps()`, `.compensated_steps()`.
+- **`@workflow(id=...) @service` / `@wait_for_signal`** — signal-driven, long-running alternative; `WorkflowResult.successful` for success check.
+- **`@tcc` on `@service` / `@tcc_participant`** — reservation-based coordination; `FromTry()` (instance) injects the try-result into confirm/cancel methods.
 - **`TransactionalPersistencePort`** — implement and register this protocol to give the engine durable state and crash recovery.
 
 ---
 
 ## Try it yourself {.exercises}
 
-**Exercise 1 — Parallel fraud check.** Add a `check-fraud` step to `MoneyTransferSaga` that calls a `FraudService`. The step should run *in parallel* with `debit-wallet` (no dependency between them) and `capture-payment` should depend on both. Verify the topology with `SagaBuilder` and write a unit test that asserts `result.success` is `True` when both complete.
+**Exercise 1 — Parallel balance validation.** Add a `validate-source` step to `MoneyTransferSaga` that checks the source wallet has sufficient funds, without performing the debit. The step should run *in parallel* with nothing (no `depends_on`), and `debit-source` should depend on it. Extend `credit-destination` to depend on `debit-source` as before. Verify the topology via `SagaRegistry.get("money-transfer")` in a test and assert that `definition.steps["debit-source"].depends_on == ["validate-source"]`.
 
-**Exercise 2 — Compensation error handler.** Change `MoneyTransferSaga`'s compensation policy to `RETRY_WITH_BACKOFF` in YAML. Then deliberately make `refund_wallet` raise `RuntimeError` on the first call and succeed on the second. Write a pytest test using `AsyncMock` that verifies the saga eventually compensates successfully and `result.compensated_steps()` contains `"debit-wallet"`.
+**Exercise 2 — Compensation error handler.** Change `MoneyTransferSaga`'s global compensation policy to `RETRY_WITH_BACKOFF` in `application.yaml`. Then deliberately make `recredit_source` raise `RuntimeError` on the first call and succeed on the second. Write a pytest test using `AsyncMock` on `WalletRepository` that verifies the saga eventually compensates successfully and `result.compensated_steps()` contains `"debit-source"`.
 
-**Exercise 3 — Custom persistence.** Implement `TransactionalPersistencePort` backed by a plain Python `dict` that logs every call. Register it as a `@component` and write a test that runs `MoneyTransferSaga`, then calls `get_state(correlation_id)` on your adapter and asserts the recorded `status` is `"COMPLETED"`. Extend the test to simulate a stale saga by manually setting `status = "IN_FLIGHT"` and a past `started_at`, then assert `SagaRecoveryService.recover_stale(stale_threshold_seconds=0)` returns `1`.
+**Exercise 3 — Custom persistence.** Implement `TransactionalPersistencePort` backed by a plain Python `dict` that logs every call. Register it as a `@service` and write a test that runs `TransferService`, then calls `get_state(correlation_id)` on your adapter and asserts the recorded `status` is `"COMPLETED"`. Extend the test to simulate a stale saga by manually setting `status = "IN_FLIGHT"` and a past `started_at`, then assert `SagaRecoveryService.recover_stale(stale_threshold_seconds=0)` returns `1`.

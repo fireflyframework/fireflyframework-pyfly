@@ -63,9 +63,7 @@ The service always requires an `exp` claim — a token with no expiry is rejecte
 at decode time. That invariant means every token in circulation has a bounded
 lifetime.
 
-::: listing lumen/auth/service.py | Listing 14.1 — Issuing a JWT on successful login
-from datetime import UTC, datetime, timedelta
-
+::: listing lumen/core/services/auth/auth_service.py | Listing 14.1 — Issuing a JWT on successful login
 from pyfly.container import service
 from pyfly.kernel.exceptions import UnauthorizedException
 from pyfly.security import BcryptPasswordEncoder, JWTService, SecurityContext
@@ -92,6 +90,7 @@ class AuthService:
             raise UnauthorizedException(
                 "Invalid credentials", code="INVALID_CREDENTIALS"
             )
+        # encode() auto-appends exp (default: 3 600 s from now)
         return self._jwt.encode({
             "sub": str(user.id),
             "roles": [user.role],
@@ -123,8 +122,10 @@ def _permissions_for(role: str) -> list[str]:
 
 **How it works.** `login` fetches the user record and uses
 `BcryptPasswordEncoder.verify` to compare the supplied password with the stored
-hash. On success it calls `jwt.encode`, which auto-appends an `exp` claim one
-hour from now (the default `expiration_seconds=3600`). The caller receives a
+hash. On success it calls `jwt.encode`, which auto-appends an `exp` claim
+`expiration_seconds` seconds from now (default `3600` — one hour). There is no
+need to import `datetime`: the service adds a Unix-timestamp `exp` using
+`int(time.time()) + expiration_seconds` internally. The caller receives a
 compact, self-contained token string.
 
 ### The SecurityContext
@@ -217,13 +218,13 @@ class SecurityConfig:
     def http_security_filter(self):
         hs = HttpSecurity()
         hs.authorize_requests() \
-            .request_matchers("/api/admin/**").has_role("ADMIN") \
-            .request_matchers("/api/**").authenticated() \
+            .request_matchers("/idp/admin/**").has_role("ADMIN") \
+            .request_matchers("/api/v1/wallets/**").authenticated() \
             .request_matchers(
                 "/health", "/docs", "/openapi.json",
-                "/api/auth/login", "/api/auth/register",
+                "/idp/login", "/idp/refresh",
             ).permit_all() \
-            .any_request().deny_all()
+            .any_request().permit_all()
         return hs.build()
 
 :::
@@ -237,6 +238,12 @@ role and permission checks have a fully hydrated context to inspect. The
 `deny_all` terminal methods cover every common policy; unsatisfied rules return
 RFC 7807 problem-detail JSON (`application/problem+json`) with the appropriate
 HTTP status.
+
+!!! note "Two-layer defense"
+    `HttpSecurity` provides fast URL-level policy before routes are even
+    dispatched — good for blanket rules like "everything under `/api/v1/wallets`
+    needs authentication." The `@secure` decorators on individual methods are
+    the second, finer-grained layer. Use both together for defense in depth.
 
 !!! spring "Spring parity"
     `HttpSecurity` mirrors Spring Security's `HttpSecurity.authorizeHttpRequests()` chain. `request_matchers` corresponds to `requestMatchers`, `authenticated()` to `.authenticated()`, `has_role` to `hasRole`, and `build()` triggers registration of the underlying filter just as `build()` finalises the Spring filter chain. The fnmatch glob patterns (`/api/admin/**`) behave identically to Spring's Ant-style path matching.
@@ -303,90 +310,175 @@ keyword argument — that is how `@secure` accesses the current user.
 
 ### Role-based protection
 
-::: listing lumen/wallet/handlers.py | Listing 14.5 — Role and permission guards
+Lumen's wallet endpoints (`/api/v1/wallets`) are the natural place to apply
+`@secure`. The real `WalletController` injects the command and query buses; you
+add `security_context: SecurityContext` to each method that needs protection
+and stack `@secure` on top.
+
+::: listing lumen/web/controllers/wallet_controller.py | Listing 14.5 — Role and permission guards on real Lumen endpoints
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.get_balance_query import GetBalance
+from lumen.core.services.wallets.get_wallet_query import GetWallet
+from lumen.core.services.wallets.open_wallet_command import OpenWallet
+from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
+from lumen.interfaces.dtos.v1.deposit_request import DepositRequest
+from lumen.interfaces.dtos.v1.open_wallet_request import OpenWalletRequest
+from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
+from pyfly.container import rest_controller
+from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
+from pyfly.kernel import ResourceNotFoundException
 from pyfly.security import SecurityContext, secure
+from pyfly.web import Body, PathVar, Valid, get_mapping, post_mapping, request_mapping
 
 
-@secure(roles=["USER", "ADMIN"])
-async def get_balance(
-    wallet_id: str,
-    security_context: SecurityContext,
-) -> dict:
-    """Any authenticated user can read their own balance."""
-    ...
+@rest_controller
+@request_mapping("/api/v1/wallets")
+class WalletController:
+    """Digital-wallet REST API: open, deposit, withdraw, inspect."""
 
+    def __init__(
+        self,
+        commands: DefaultCommandBus,
+        queries: DefaultQueryBus,
+    ) -> None:
+        self._commands = commands
+        self._queries = queries
 
-@secure(roles=["ADMIN"])
-async def list_all_wallets(
-    security_context: SecurityContext,
-) -> list[dict]:
-    """Only ADMINs see all wallets."""
-    ...
+    # Any authenticated user (USER or ADMIN) may open a wallet.
+    @secure(roles=["USER", "ADMIN"])
+    @post_mapping("", status_code=201)
+    async def open_wallet(
+        self,
+        request: Valid[Body[OpenWalletRequest]],
+        security_context: SecurityContext,
+    ) -> dict[str, str]:
+        wallet_id = await self._commands.send(
+            OpenWallet(
+                owner_id=request.owner_id,
+                currency=request.currency,
+            )
+        )
+        return {"wallet_id": wallet_id}
 
+    # Deposit: USER role plus the wallet:deposit permission.
+    @secure(roles=["USER", "ADMIN"], permissions=["wallet:deposit"])
+    @post_mapping("/{wallet_id}/deposit")
+    async def deposit(
+        self,
+        wallet_id: PathVar[str],
+        request: Valid[Body[DepositRequest]],
+        security_context: SecurityContext,
+    ) -> dict[str, int | str]:
+        # DepositRequest.amount is in minor units (cents).
+        balance = await self._commands.send(
+            DepositFunds(wallet_id=wallet_id, amount=request.amount)
+        )
+        return {"wallet_id": wallet_id, "balance_minor": balance}
 
-@secure(roles=["ADMIN"], permissions=["wallet:delete"])
-async def delete_wallet(
-    wallet_id: str,
-    security_context: SecurityContext,
-) -> None:
-    """ADMIN role AND wallet:delete permission required."""
-    ...
+    # Read balance: any authenticated user.
+    @secure(roles=["USER", "ADMIN"])
+    @get_mapping("/{wallet_id}/balance")
+    async def get_balance(
+        self,
+        wallet_id: PathVar[str],
+        security_context: SecurityContext,
+    ) -> BalanceDto:
+        result = await self._queries.query(GetBalance(wallet_id=wallet_id))
+        if result is None:
+            raise ResourceNotFoundException(
+                f"Wallet {wallet_id!r} not found",
+                code="WALLET_NOT_FOUND",
+                context={"wallet_id": wallet_id},
+            )
+        return result
+
+    # Full wallet view: ADMIN only.
+    @secure(roles=["ADMIN"])
+    @get_mapping("/{wallet_id}")
+    async def get_wallet(
+        self,
+        wallet_id: PathVar[str],
+        security_context: SecurityContext,
+    ) -> WalletDto:
+        result = await self._queries.query(GetWallet(wallet_id=wallet_id))
+        if result is None:
+            raise ResourceNotFoundException(
+                f"Wallet {wallet_id!r} not found",
+                code="WALLET_NOT_FOUND",
+                context={"wallet_id": wallet_id},
+            )
+        return result
 
 :::
 :::
 
-**How it works.** When multiple roles are listed, the user must have **at least
-one** (OR semantics). When multiple permissions are listed the user must have
-**all** of them (AND semantics). When both `roles` and `permissions` are
-supplied, both checks must pass. The decorator raises:
+**How it works.** `@secure` is stacked **above** `@post_mapping` /
+`@get_mapping` so authorization runs before the route binding. The decorated
+method must accept `security_context: SecurityContext` as a keyword argument —
+the framework injects it from `request.state.security_context`, which
+`SecurityMiddleware` already populated.
 
-- `SecurityException(code="AUTH_REQUIRED")` → HTTP 401 when the context is
-  absent or the user is anonymous.
-- `ForbiddenException(code="FORBIDDEN")` → HTTP 403 when the user is
-  authenticated but fails the role or permission check.
+When multiple roles are listed, the user needs **at least one** (OR semantics).
+When multiple permissions are listed the user needs **all** of them (AND
+semantics). When both `roles` and `permissions` are supplied, both checks must
+pass.
+
+!!! note "Amounts in minor units"
+    `DepositRequest.amount` is an `int` in **minor units** (cents). €10.50 is
+    `1050`. This convention avoids floating-point rounding errors throughout
+    the Money domain. `WalletDto.balance_minor` carries the same integer;
+    `WalletDto.balance` is a `float` rendered for display only.
 
 ### Expression-based authorization
 
-For complex policies that cannot be expressed with a flat role list, use the
-`expression` parameter. PyFly evaluates the expression using safe AST parsing —
+For policies that cannot be expressed with a flat role list, use the
+`expression` parameter. PyFly evaluates the expression with safe AST parsing —
 no `eval()` or `exec()` is used anywhere in the chain.
 
-::: listing lumen/wallet/admin_handler.py | Listing 14.6 — Security expressions
+::: listing lumen/web/controllers/wallet_controller.py | Listing 14.6 — Security expressions on wallet endpoints
 from pyfly.security import SecurityContext, secure
 
 
+# ADMIN, or a MANAGER who also holds wallet:write.
 @secure(
     expression=(
         "hasRole('ADMIN')"
         " or (hasRole('MANAGER') and hasPermission('wallet:write'))"
     )
 )
-async def approve_deposit(
+async def approve_large_deposit(
+    self,
     deposit_id: str,
     security_context: SecurityContext,
 ) -> None:
-    """ADMIN, or a MANAGER who also holds wallet:write."""
     ...
 
 
+# Any authenticated, non-guest user can see the wallet dashboard.
 @secure(expression="isAuthenticated and not hasRole('GUEST')")
-async def member_dashboard(
+async def dashboard(
+    self,
     security_context: SecurityContext,
 ) -> dict:
-    """Any authenticated non-guest can see the dashboard."""
     ...
 
 :::
 :::
 
-Supported expression vocabulary:
+Supported expression vocabulary (full set):
 
 | Token | Description |
 |---|---|
 | `hasRole('X')` | User has role `X` |
 | `hasAnyRole('X', 'Y')` | User has at least one of the listed roles |
+| `hasAuthority('X')` | User has role **or** permission `X` |
+| `hasAnyAuthority('X', 'Y')` | At least one of the listed roles/permissions |
 | `hasPermission('X')` | User has permission `X` |
 | `isAuthenticated` | User is authenticated |
+| `isAnonymous` | User is **not** authenticated |
+| `permitAll` | Always allow |
+| `denyAll` | Always deny |
+| `principal` / `authentication` | The current `SecurityContext` object |
 | `and` / `or` / `not` | Boolean operators |
 | `(...)` | Grouping |
 
@@ -398,31 +490,36 @@ Supported expression vocabulary:
 
 ### Applying @secure to CQRS handlers
 
-`@secure` is not limited to REST handlers. You can protect CQRS command handlers
-in exactly the same way:
+`@secure` is not limited to REST controllers. You can protect CQRS command
+handlers in exactly the same way — it fires before the handler body runs
+because the DI container injects `security_context` from
+`request.state.security_context` when it resolves the handler:
 
-::: listing lumen/wallet/commands.py | Listing 14.7 — @secure on a CQRS handler
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 14.7 — @secure on a CQRS command handler
 from pyfly.cqrs import command_handler
 from pyfly.security import SecurityContext, secure
 
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+
 
 @command_handler
-class DeleteWalletHandler:
+class DepositFundsHandler:
 
-    @secure(roles=["ADMIN"], permissions=["wallet:delete"])
+    @secure(roles=["USER", "ADMIN"], permissions=["wallet:deposit"])
     async def handle(
         self,
-        command: DeleteWalletCommand,
+        command: DepositFunds,
         security_context: SecurityContext,
-    ) -> None:
-        await self._wallets.delete(command.wallet_id)
+    ) -> int:
+        # command.amount is in minor units (cents)
+        ...
 
 :::
 :::
 
-The DI container injects `security_context` from `request.state.security_context`
-whenever it resolves the handler, so the check fires before any business logic
-runs.
+The check fires before any business logic because the DI container injects
+`security_context` from `request.state.security_context` when it resolves the
+handler.
 
 ---
 
@@ -519,18 +616,20 @@ mutation state so the filter knows when to persist:
 |---|---|
 | `id` | UUID hex string session identifier |
 | `is_new` | `True` if created during this request |
-| `created_at` | Unix timestamp of creation |
-| `last_accessed` | Unix timestamp of most recent access |
-| `modified` | `True` if any attribute was written |
+| `created_at` | Unix timestamp (`float`) of creation |
+| `last_accessed` | Unix timestamp (`float`) of most recent access |
+| `modified` | `True` if any attribute was written or session is new |
 | `invalidated` | `True` if `invalidate()` was called |
+| `previous_id` | Former id after `rotate_id()` (used by filter to clean up old entry) |
 | `get_attribute(name)` | Return attribute value or `None` |
 | `set_attribute(name, value)` | Write an attribute; marks session modified |
 | `remove_attribute(name)` | Remove attribute if present |
-| `get_attribute_names()` | List all user-set attribute names |
-| `rotate_id()` | Assign a fresh session id, preserving data |
+| `get_attribute_names()` | List user-set attribute names (excludes internal `_*` keys) |
+| `rotate_id()` | Assign a fresh session id, preserving all data |
 | `invalidate()` | Mark for deletion on next filter pass |
+| `get_data()` | Return the raw session dict (includes internal metadata) |
 
-::: listing lumen/auth/session_handler.py | Listing 14.9 — Using the session after login
+::: listing lumen/core/services/auth/session_handler.py | Listing 14.9 — Using the session after login
 from pyfly.session import HttpSession
 
 
@@ -753,8 +852,7 @@ Key DTOs:
 
 ::: listing lumen/config/idp_config.py | Listing 14.11 — Wiring the Keycloak adapter
 from pyfly.container import bean, configuration
-from pyfly.idp.adapters.keycloak import KeycloakIdpAdapter
-from pyfly.idp.port import IdpAdapter
+from pyfly.idp import IdpAdapter, KeycloakIdpAdapter
 
 
 @configuration
@@ -782,10 +880,9 @@ so without this cache every admin call would make two network round trips.
 
 ### Using the IDP in a service
 
-::: listing lumen/auth/idp_service.py | Listing 14.12 — Using IdpAdapter in the auth service
+::: listing lumen/core/services/auth/idp_auth_service.py | Listing 14.12 — Using IdpAdapter in the auth service
 from pyfly.container import service
-from pyfly.idp.models import IdpUser, LoginRequest
-from pyfly.idp.port import IdpAdapter
+from pyfly.idp import IdpAdapter, IdpUser, LoginRequest
 from pyfly.kernel.exceptions import UnauthorizedException
 
 
@@ -912,8 +1009,7 @@ URL-level rules, and a Redis session store for the admin dashboard:
 
 ::: listing lumen/config/security_full.py | Listing 14.14 — Full security configuration
 from pyfly.container import bean, configuration
-from pyfly.idp.adapters.keycloak import KeycloakIdpAdapter
-from pyfly.idp.port import IdpAdapter
+from pyfly.idp import IdpAdapter, KeycloakIdpAdapter
 from pyfly.security.http_security import HttpSecurity
 
 
@@ -941,9 +1037,9 @@ class LumenSecurityConfig:
                 "/idp/admin/**"
             ).has_role("ADMIN") \
             .request_matchers(
-                "/api/**"
+                "/api/v1/wallets/**"
             ).authenticated() \
-            .any_request().deny_all()
+            .any_request().permit_all()
         return hs.build()
 
 :::
@@ -963,14 +1059,18 @@ This chapter opened Part V by closing Lumen's open front door. You:
 
 - Used **`JWTService`** to issue signed tokens at login and to decode them back
   into a `SecurityContext` on every subsequent request. The `exp` claim is
-  mandatory — tokens without expiry are rejected at the boundary.
+  mandatory — `encode()` auto-adds it using a Unix timestamp so you never
+  need to import `datetime`; tokens without `exp` are rejected at the boundary.
 - Added **`SecurityMiddleware`** to the Starlette application so every request
   carries a populated `SecurityContext` by the time it reaches a handler.
 - Declared URL-level policy with the **`HttpSecurity`** builder — a fluent DSL
-  that produces an `HttpSecurityFilter` evaluated before the route dispatcher.
-- Protected individual handlers and CQRS commands with **`@secure`**, specifying
-  roles, permissions, or full security expressions evaluated via safe AST
-  parsing.
+  that produces an `HttpSecurityFilter` evaluated before the route dispatcher,
+  covering Lumen's real `/api/v1/wallets/**` tree and the IDP admin routes.
+- Protected Lumen's real wallet endpoints in `WalletController` with
+  **`@secure`**, specifying roles, permissions, or full security expressions.
+  Authorization failures raise `SecurityException` (401, code `AUTH_REQUIRED`)
+  for unauthenticated callers and `ForbiddenException` (403, code `FORBIDDEN`)
+  for authenticated callers who lack the required role or permission.
 - Hashed passwords with **`BcryptPasswordEncoder`**, the default adapter for the
   `PasswordEncoder` protocol. The cost factor is tunable; the stored hash is
   self-describing; verification is timing-safe.

@@ -87,56 +87,63 @@ class CacheConfig:
 
 `@cacheable` is the most common decorator. On the first call it runs the function body and stores the return value. On every subsequent call with the same key it returns the stored value *without executing the function body at all*.
 
-::: listing lumen/wallet/service.py | Listing 13.3 — @cacheable on a wallet balance read
+Lumen's `GetBalanceHandler` is a natural fit: balance reads are read-heavy, cheap to cache, and tolerate a few seconds of staleness. The handler receives the `CacheAdapter` through its constructor — injected by PyFly's DI container — and passes it as the `backend` argument to the decorator at class-body time using a module-level cache instance, or wraps `do_handle` in `__init__`:
+
+::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 13.3 — @cacheable on GetBalanceHandler
 from datetime import timedelta
 
+from lumen.core.mappers.wallet_mapper import wallet_to_balance_dto
+from lumen.core.services.wallets.get_balance_query import GetBalance
+from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
+from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cacheable
 from pyfly.container import service
+from pyfly.cqrs import QueryHandler, query_handler
 
 
+@query_handler
 @service
-class WalletReadService:
+class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
+    """Return a cached :class:`BalanceDto`; bypass the DB on a hit."""
 
-    def __init__(self, cache: CacheAdapter, repo) -> None:
-        self._cache = cache
-        self._repo = repo
+    def __init__(
+        self,
+        repository: WalletRepository,
+        cache: CacheAdapter,
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        # Wrap do_handle at construction time so `cache` is in scope.
+        self.do_handle = cacheable(
+            backend=cache,
+            key="wallet:balance:{query.wallet_id}",
+            ttl=timedelta(seconds=5),
+        )(self._fetch)
 
-    @cacheable(
-        backend=None,  # injected at runtime; use self._cache in practice
-        key="wallet:balance:{wallet_id}",
-        ttl=timedelta(seconds=5),
-    )
-    async def get_balance(self, wallet_id: str) -> dict:
-        row = await self._repo.find_balance(wallet_id)
-        return {"wallet_id": wallet_id, "balance": row.balance}
+    async def _fetch(
+        self, query: GetBalance
+    ) -> BalanceDto | None:
+        wallet = await self._repository.find(query.wallet_id)
+        return wallet_to_balance_dto(wallet) if wallet else None
 :::
 
-!!! note "Passing the backend"
-    The `backend` parameter must be a `CacheAdapter` instance. Inside a `@service` class, receive the cache via `__init__` and pass `self._cache`:
-    ```python
-    @cacheable(backend=self._cache, key="wallet:balance:{wallet_id}",
-               ttl=timedelta(seconds=5))
-    async def get_balance(self, wallet_id: str) -> dict: ...
-    ```
-    PyFly's DI container resolves `CacheAdapter` from the `@bean` you registered.
-
-**How it works — key resolution:** The `key` string `"wallet:balance:{wallet_id}"` is a format template. PyFly calls `inspect.signature(func).bind(*args, **kwargs)` to bind the actual call arguments, then `key.format(**bound.arguments)` to produce the resolved key. Calling `get_balance("w-001")` produces the cache key `"wallet:balance:w-001"`. `get_balance("w-002")` produces `"wallet:balance:w-002"`. The entries are stored independently; each wallet has its own bucket.
+!!! note "Key template and `self`"
+    The `key` template `"wallet:balance:{query.wallet_id}"` uses Python's `str.format` syntax. PyFly binds the actual call arguments with `inspect.signature(func).bind(*args, **kwargs)`, then calls `key.format(**bound.arguments)`. Because `do_handle` is an unbound function inside `__init__`, the first positional argument is `query` — so `{query.wallet_id}` expands to the wallet id. Calling with `GetBalance(wallet_id="wlt-001")` produces the cache key `"wallet:balance:wlt-001"`.
 
 **`ttl=timedelta(seconds=5)`** means the cache entry expires five seconds after it is written. After expiry the next call runs the function body again and refreshes the entry. A TTL of `None` (the default) means the entry never expires — appropriate only for truly immutable data.
 
 **Null caching:** If the function returns `None`, PyFly still stores the entry and records that the key *exists*. A subsequent call finds the key, reads that it exists, and returns `None` without calling the function again. This prevents cache-penetration attacks where an adversary floods requests for non-existent keys, each of which falls through to the database.
 
-**`condition` and `unless`:** Both decorators accept optional predicates. `condition` is a callable that receives the same arguments as the wrapped function; if it returns `False`, caching is bypassed entirely for that call. `unless` is a callable that receives the *result*; if it returns `True`, the result is returned but not stored. Both are keyword-only:
+**`condition` and `unless`:** Both `@cache` and `@cacheable` accept optional predicates. `condition` is a callable with the same signature as the decorated function; if it returns `False`, caching is bypassed entirely for that call. `unless` is a callable that receives the *result*; if it returns `True`, the result is returned but not stored. Both are keyword-only:
 
 ```python
-@cacheable(
+cacheable(
     backend=cache,
-    key="wallet:balance:{wallet_id}",
+    key="wallet:balance:{query.wallet_id}",
     ttl=timedelta(seconds=5),
-    condition=lambda self, wallet_id: wallet_id != "test",
-    unless=lambda result: result["balance"] < 0,
-)
-async def get_balance(self, wallet_id: str) -> dict: ...
+    condition=lambda query: not query.wallet_id.startswith("test-"),
+    unless=lambda result: result is None,
+)(self._fetch)
 ```
 
 !!! spring "Spring parity"
@@ -146,31 +153,59 @@ async def get_balance(self, wallet_id: str) -> dict: ...
 
 `@cacheable` is for reads: it short-circuits the function when the cache already has a value. `@cache_put` is for writes: it *always* executes the function and *always* stores the result. Use it when the function itself is the source of truth — a command handler that modifies the wallet and must ensure the cache reflects the new state.
 
-::: listing lumen/wallet/service.py | Listing 13.4 — @cache_put refreshes the cache on a deposit
+`DepositFundsHandler` is the canonical example. After a deposit succeeds, the new balance must be visible immediately to the next read — without waiting for the TTL to expire. Wrapping `do_handle` with `@cache_put` refreshes the cache entry atomically with the write:
+
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 13.4 — @cache_put refreshes the cache on a deposit
 from datetime import timedelta
 
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.event_publishing import publish_domain_events
+from lumen.models.entities.v1.money import Money
+from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cache_put
 from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.domain import AggregateNotFound
+from pyfly.eda import EventPublisher
 
 
+@command_handler
 @service
-class WalletWriteService:
+class DepositFundsHandler(CommandHandler[DepositFunds, int]):
+    """Credit funds to an existing wallet; returns the new balance
+    in minor units and refreshes the cached balance entry."""
 
-    def __init__(self, cache: CacheAdapter, repo) -> None:
-        self._cache = cache
-        self._repo = repo
+    def __init__(
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        cache: CacheAdapter,
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self._events = events
+        # Wrap at construction time so `cache` is in scope.
+        self.do_handle = cache_put(
+            backend=cache,
+            key="wallet:balance:{command.wallet_id}",
+            ttl=timedelta(seconds=5),
+        )(self._deposit)
 
-    @cache_put(
-        backend=None,  # pass self._cache at runtime
-        key="wallet:balance:{wallet_id}",
-        ttl=timedelta(seconds=5),
-    )
-    async def deposit(self, wallet_id: str, amount: int) -> dict:
-        row = await self._repo.add_funds(wallet_id, amount)
-        return {"wallet_id": wallet_id, "balance": row.new_balance}
+    async def _deposit(self, command: DepositFunds) -> int:
+        wallet = await self._repository.find(command.wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+
+        wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
+        await self._repository.add(wallet)
+        await publish_domain_events(self._events, wallet.clear_events())
+        return wallet.balance.amount
 :::
 
-**How it works:** `@cache_put` wraps the function in `try/finally`-free fashion — it awaits the function, then calls `backend.put(resolved_key, result, ttl=ttl)`. Because the function always runs, the cached value after a `deposit` call is the freshly committed balance, not a stale pre-deposit snapshot. The next `@cacheable` read picks up this fresh value without touching the database.
+**How it works:** `@cache_put` awaits the wrapped function, then calls `backend.put(resolved_key, result, ttl=ttl)`. Because the function always runs, the cached value after a `DepositFunds` command is the freshly committed balance, not a stale pre-deposit snapshot. The next `@cacheable` read on `GetBalanceHandler` picks up this fresh value without touching the database.
+
+!!! note "Cache key must match"
+    The `@cache_put` key `"wallet:balance:{command.wallet_id}"` must match the `@cacheable` key `"wallet:balance:{query.wallet_id}"` when both resolve to the same wallet id. Mismatched keys mean the deposit writes to a different cache slot than the balance read looks up — staleness returns.
 
 | Decorator | Function executes? | On hit |
 |---|---|---|
@@ -179,33 +214,47 @@ class WalletWriteService:
 
 ### @cache_evict — remove after deletion
 
-When you delete a wallet or cancel a transaction, the associated cache entry must go. `@cache_evict` runs the function body and then removes the named key (or clears the entire cache when `all_entries=True`).
+When you close a wallet or roll back a transaction, the associated cache entry must go. `@cache_evict` runs the function body and then removes the named key (or clears the entire cache when `all_entries=True`).
 
-::: listing lumen/wallet/service.py | Listing 13.5 — @cache_evict after closing a wallet
+::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 13.5 — @cache_evict after removing a wallet
 from pyfly.cache import CacheAdapter, cache_evict
 from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
 
 
+@command_handler
 @service
-class WalletAdminService:
+class CloseWalletHandler(CommandHandler["CloseWallet", None]):
+    """Close a wallet and evict its cached balance entry."""
 
-    def __init__(self, cache: CacheAdapter, repo) -> None:
-        self._cache = cache
-        self._repo = repo
+    def __init__(
+        self,
+        repository,
+        cache: CacheAdapter,
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self.do_handle = cache_evict(
+            backend=cache,
+            key="wallet:balance:{command.wallet_id}",
+        )(self._close)
 
-    @cache_evict(
-        backend=None,  # pass self._cache at runtime
-        key="wallet:balance:{wallet_id}",
-    )
-    async def close_wallet(self, wallet_id: str) -> None:
-        await self._repo.mark_closed(wallet_id)
-
-    @cache_evict(backend=None, all_entries=True)
-    async def reset_all_balances(self) -> None:
-        await self._repo.truncate()
+    async def _close(self, command) -> None:
+        wallet = await self._repository.find(command.wallet_id)
+        if wallet is not None:
+            await self._repository.remove(wallet)
 :::
 
-**How it works:** The function body runs first — the closure or reset executes before eviction so that on failure the cache entry is not prematurely removed. Then either `backend.evict(resolved_key)` removes one key or `backend.clear()` flushes everything. With `CacheManager`, the evict call propagates to both primary and fallback caches so no stale entry lingers in either tier.
+To flush every cached balance at once — useful for an administrative reset — pass `all_entries=True`:
+
+```python
+self.do_handle = cache_evict(
+    backend=cache,
+    all_entries=True,
+)(self._reset_all)
+```
+
+**How it works:** The function body runs first — the wallet is removed before eviction, so on failure the cache entry is not prematurely removed. Then either `backend.evict(resolved_key)` removes one key or `backend.clear()` flushes everything. With `CacheManager`, the evict call propagates to both primary and fallback caches so no stale entry lingers in either tier.
 
 `all_entries=True` is a blunt instrument reserved for administrative resets. In normal operation, prefer targeted eviction by key.
 
@@ -215,13 +264,14 @@ A coherent caching strategy matches each operation to the right decorator:
 
 | Operation | Decorator | Rationale |
 |---|---|---|
-| Balance read | `@cacheable` | Skip DB on hit; 5 s TTL bounds staleness |
-| Deposit / withdraw | `@cache_put` | Refresh the cache entry atomically with the write |
+| `GetBalance` query | `@cacheable` | Skip DB on hit; 5 s TTL bounds staleness |
+| `DepositFunds` command | `@cache_put` | Refresh the cache entry atomically with the write |
+| `WithdrawFunds` command | `@cache_put` | Same — keep the post-withdrawal balance warm |
 | Close wallet | `@cache_evict` | Remove the entry; the next read rebuilds it from DB |
 | Admin truncate | `@cache_evict(all_entries=True)` | Bulk reset; full cache flush is correct |
 
 !!! warning "Async requirement"
-    All three decorators require the wrapped function to be declared `async`. Cache adapters are fully async (they `await` backend operations), so a synchronous target would fail with a `TypeError` at decoration time — PyFly raises the error immediately so you catch the mistake at startup rather than at runtime.
+    All three decorators require the wrapped function to be declared `async`. Cache adapters are fully async (they `await` backend operations), so a synchronous target will fail with a `TypeError` at decoration time — PyFly raises the error immediately so you catch the mistake at startup rather than at runtime.
 
 ---
 
@@ -347,7 +397,7 @@ Two modes are available. The first returns a **static value**:
 from pyfly.resilience import fallback
 
 
-@fallback(fallback_value={"balance": 0, "source": "fallback"})
+@fallback(fallback_value={"balance_minor": 0, "source": "fallback"})
 async def fetch_account(account_id: str) -> dict:
     ...
 :::
@@ -369,7 +419,7 @@ async def account_from_cache(
     cached = await _cache.get(f"account:{account_id}")
     if cached:
         return {**cached, "source": "cache"}
-    return {"account_id": account_id, "balance": 0, "source": "fallback"}
+    return {"account_id": account_id, "balance_minor": 0, "source": "fallback"}
 
 
 @fallback(fallback_method=account_from_cache)
@@ -390,6 +440,8 @@ async def fetch_account(account_id: str) -> dict:
 
 Network errors are often transient: a packet is lost, a connection pool is momentarily exhausted, a downstream pod restarts. `@retry` re-invokes the decorated function up to `max_attempts` times, sleeping between attempts according to an exponential backoff schedule.
 
+The `@retry` decorator takes `max_attempts` as its only positional argument; every other parameter is keyword-only:
+
 ::: listing lumen/resilience/retry_example.py | Listing 13.11 — Retry with exponential backoff
 from pyfly.resilience import retry
 
@@ -409,12 +461,12 @@ async def fetch_account(account_id: str) -> dict:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `max_attempts` | `3` | Total attempts including the first (≥ 1). |
-| `delay` | `0.0` | Base sleep in seconds before the first retry. |
-| `backoff` | `1.0` | Multiplier applied to `delay` each attempt. |
-| `max_delay` | `None` | Cap on per-attempt sleep. `None` means no cap. |
-| `jitter` | `0.0` | Randomisation fraction `[0, 1]` applied to each wait. |
-| `exceptions` | `(Exception,)` | Exception types that trigger a retry; others propagate immediately. |
+| `max_attempts` | `3` | Total attempts including the first (≥ 1). Positional. |
+| `delay` | `0.0` | Base sleep in seconds before the first retry. Keyword-only. |
+| `backoff` | `1.0` | Multiplier applied to `delay` each attempt. Keyword-only. |
+| `max_delay` | `None` | Cap on per-attempt sleep. `None` means no cap. Keyword-only. |
+| `jitter` | `0.0` | Randomisation fraction `[0, 1]` applied to each wait. Keyword-only. |
+| `exceptions` | `(Exception,)` | Exception types that trigger a retry; others propagate immediately. Keyword-only. |
 
 !!! warning "Idempotency is your responsibility"
     `@retry` will call the function body multiple times. If the operation is not idempotent — if calling it twice has a different effect than calling it once — you can apply changes more than once. Wallet deposits are not safe to retry naively: retrying a failed deposit could credit the same amount twice. Wrap non-idempotent operations in an idempotency key check (store the operation ID before executing; skip if the ID already exists) or limit `exceptions` to errors that are definitely pre-execution (connection errors, timeouts during the request phase) rather than post-execution ambiguity.
@@ -431,7 +483,7 @@ PyFly's circuit breaker has three states:
 | **OPEN** | All calls raise `CircuitBreakerException` immediately, without network I/O. |
 | **HALF_OPEN** | After `recovery_timeout` seconds, a limited probe call is admitted. If it succeeds the circuit closes; if it fails the circuit reopens. |
 
-`circuit_breaker` takes a `CircuitBreaker` **instance**, not keyword arguments:
+`@circuit_breaker` takes a `CircuitBreaker` **instance**, not keyword arguments. Construct the `CircuitBreaker` separately and pass it in:
 
 ::: listing lumen/resilience/cb_example.py | Listing 13.12 — Circuit breaker around AccountService
 from pyfly.resilience import CircuitBreaker, circuit_breaker
@@ -452,7 +504,18 @@ async def fetch_account(account_id: str) -> dict:
 
 Only exceptions in `expected` trip the breaker. Business exceptions — `ValueError`, `PermissionError` — propagate normally without affecting the circuit state.
 
-The `failure_rate_threshold` and `window_size` constructor parameters (not shown above) switch from consecutive-count mode to windowed-rate mode, matching Resilience4j's COUNT_BASED sliding window. Set `failure_rate_threshold=0.5` and `window_size=10` to open the circuit when more than half of the last 10 calls fail.
+**`CircuitBreaker` constructor parameters** (`failure_rate_threshold`, `window_size`, and `half_open_max_calls` are keyword-only):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `failure_threshold` | `5` | Consecutive failures that trip the circuit. |
+| `recovery_timeout` | `30.0` | Seconds in OPEN before moving to HALF_OPEN. |
+| `expected` | `(Exception,)` | Exception types that count as failures. |
+| `failure_rate_threshold` | `None` | Switch to windowed-rate mode when set (e.g. `0.5`). |
+| `window_size` | `10` | Outcome window size for rate-based tripping. |
+| `half_open_max_calls` | `1` | Probe calls required to close from HALF_OPEN. |
+
+The `failure_rate_threshold` and `window_size` parameters switch from consecutive-count mode to windowed-rate mode, matching Resilience4j's COUNT_BASED sliding window. Set `failure_rate_threshold=0.5` and `window_size=10` to open the circuit when more than half of the last 10 calls fail.
 
 !!! spring "Spring parity"
     `@retry` mirrors Spring Retry's `@Retryable` (with `maxAttempts`, `backoff`, `include`). `CircuitBreaker` mirrors Resilience4j's `CircuitBreaker` (failure threshold, recovery timeout, CLOSED/OPEN/HALF_OPEN state machine, half-open probe calls, expected-exception filter). PyFly does not use the Resilience4j Java library — it is a pure-Python re-implementation with the same semantics.
@@ -524,7 +587,7 @@ _cb = CircuitBreaker(
     expected=(IOError, TimeoutError),
 )
 
-DEGRADED = {"status": "degraded", "balance": None}
+DEGRADED = {"status": "degraded", "balance_minor": None}
 
 
 @service
@@ -535,7 +598,7 @@ class AccountGateway:
         self._cache = cache
 
     @cacheable(
-        backend=None,  # pass self._cache at runtime
+        backend=None,  # pass self._cache at runtime (see note below)
         key="account:{account_id}",
         ttl=timedelta(seconds=30),
     )
@@ -552,6 +615,9 @@ class AccountGateway:
         resp = await self._http.get(f"/accounts/{account_id}")
         return resp.json()
 :::
+
+!!! note "Wiring `backend` in a class method"
+    Because Python evaluates class-body decorators before `__init__` runs, `self._cache` is not yet available there. The listing above passes `backend=None` as a placeholder to illustrate the stacking order. In practice, wrap `get_account` in `__init__` the same way as the handler examples: `self.get_account = cacheable(backend=cache, key=..., ttl=...)(self._do_get_account)`. Alternatively, use a module-level `InMemoryCache` instance for testing and swap it via the DI container in production.
 
 **How a call flows through the layers:**
 
@@ -578,16 +644,16 @@ This chapter closes Part IV. Look back at the arc: in Chapter 11 you split Lumen
 
 Concretely, you learned:
 
-- **`@cacheable`** short-circuits balance reads on a cache hit; the five-second TTL bounds staleness to an acceptable window without stale data accumulating indefinitely.
-- **`@cache_put`** refreshes the cache as a side-effect of each deposit command, so the next read is never stale after a write.
-- **`@cache_evict`** removes entries on deletion or administrative resets; `all_entries=True` flushes the entire cache in a single call.
+- **`@cacheable`** short-circuits balance reads on a cache hit; the five-second TTL bounds staleness to an acceptable window without stale data accumulating indefinitely. Applied to `GetBalanceHandler` by wrapping `do_handle` at construction time with a `CacheAdapter` injected through `__init__`.
+- **`@cache_put`** refreshes the cache as a side-effect of each `DepositFunds` command, so the next read is never stale after a write. The key template must match the `@cacheable` key to hit the same slot.
+- **`@cache_evict`** removes entries on wallet closure or administrative resets; `all_entries=True` flushes the entire cache in a single call.
 - **`CacheManager`** mirrors writes to both Redis (primary) and `InMemoryCache` (fallback) and fails over transparently; it is the right default for any production deployment.
 - **`RateLimiter`** + `@rate_limiter` cap inbound traffic with a token-bucket algorithm that allows controlled bursting.
 - **`Bulkhead`** + `@bulkhead` isolate concurrency with a fail-fast semaphore that prevents one slow dependency from consuming all available resources.
 - **`@time_limiter`** enforces deadlines using `asyncio.wait_for`, turning indefinitely hanging calls into bounded `OperationTimeoutException` errors.
-- **`@fallback`** provides a degraded but functional response when every other layer has failed; it can invoke a fallback method with the original arguments and the caught exception.
-- **`@retry`** re-invokes non-idempotent-safe operations a bounded number of times with exponential backoff; it works on both async and sync callables.
-- **`@circuit_breaker`** opens the circuit after a failure threshold, short-circuiting all subsequent calls during the recovery window to give the downstream time to recover.
+- **`@fallback`** provides a degraded but functional response when every other layer has failed; it can invoke a fallback method with the original arguments and the caught exception via the `exc` keyword argument.
+- **`@retry`** takes `max_attempts` as its only positional argument; all other parameters (`delay`, `backoff`, `max_delay`, `jitter`, `exceptions`) are keyword-only. It re-invokes non-idempotent-safe operations a bounded number of times with exponential backoff.
+- **`@circuit_breaker`** takes a `CircuitBreaker` **instance** — not keyword arguments — and opens the circuit after a failure threshold, short-circuiting all subsequent calls during the recovery window to give the downstream time to recover.
 - **Decorator order** matters: fallback outermost, rate limiter, bulkhead, time limiter, circuit breaker, retry innermost — with caching above the fallback to cache even degraded responses.
 
 Lumen is now a multi-service, saga-coordinated, cached, and resilient system. Part V will add the final production concerns: observability — metrics, distributed tracing, and health endpoints — so you can see exactly what Lumen is doing in production.
@@ -596,8 +662,8 @@ Lumen is now a multi-service, saga-coordinated, cached, and resilient system. Pa
 
 ## Try it yourself {.exercises}
 
-**Exercise 1 — Conditional caching.** The `get_balance` endpoint is called far more often for active wallets than for wallets whose status is `CLOSED`. Add `condition=lambda self, wallet_id: not wallet_id.startswith("closed-")` to the `@cacheable` decorator and verify with a unit test using `InMemoryCache` that calls for closed-wallet IDs always reach the repository.
+**Exercise 1 — Conditional caching.** The `GetBalance` handler is called far more often for active wallets than for test wallets. Add `condition=lambda query: not query.wallet_id.startswith("test-")` to the `cacheable(...)` call inside `GetBalanceHandler.__init__` and verify with a unit test using `InMemoryCache` that queries for test wallet ids always reach the repository.
 
 **Exercise 2 — Circuit breaker with rate-based threshold.** Replace the consecutive-count circuit breaker in `AccountGateway` with a rate-based one: open the circuit when more than 60% of the last 20 calls fail. Construct `CircuitBreaker(failure_rate_threshold=0.6, window_size=20, recovery_timeout=60.0, expected=(IOError, TimeoutError))` and write a test that fires 12 failing calls followed by 8 successful ones, asserting that the circuit opens after the 13th failure (crossing 60% of 20).
 
-**Exercise 3 — Evict by prefix.** Lumen sometimes needs to invalidate all cache entries for a given user (GDPR deletion). Add a `purge_user(user_id: str)` method to `WalletAdminService` that calls `backend.evict_by_prefix(f"wallet:balance:{user_id}:")` directly (without a decorator), and write a test that pre-populates three wallet keys for one user and one for another, calls `purge_user`, and asserts that only the target user's entries are gone.
+**Exercise 3 — Evict by prefix.** Lumen sometimes needs to invalidate all cache entries for a given wallet owner (GDPR deletion). Add a `purge_owner(owner_id: str)` method to a wallet admin service that calls `backend.evict_by_prefix(f"wallet:balance:{owner_id}:")` directly (without a decorator), and write a test that pre-populates three wallet keys for one owner and one for another, calls `purge_owner`, and asserts that only the target owner's entries are gone.
