@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.62 (2026-06-07)
+
+### Added (hardening — benchmarks + Redis integration tests)
+
+- **`benchmarks/`** — a dependency-free micro-benchmark harness (`uv run python benchmarks/run.py`)
+  measuring DI container resolution (singleton/transient/with-deps), Pydantic serialization, and
+  the PyFly filter-chain request overhead vs bare Starlette. Surfaces regressions and quantifies
+  overhead (e.g. cached singleton resolve ~5.3M ops/s; filter chain ~+26% over bare Starlette;
+  transient-with-deps reveals per-resolve `get_type_hints` as a future optimization).
+- **`tests/integration/`** — Redis integration tests (testcontainers, `@requires_docker`) that
+  exercise `RedisDistributedLock` (SET NX PX, owner-token Lua release, TTL expiry) and
+  `RedisSessionRegistry` (sorted-set oldest-first) against a **real Redis**, not fakes.
+
 ## v26.06.61 (2026-06-07)
 
 ### Added (data — run-on-startup database migrations)
