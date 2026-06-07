@@ -28,6 +28,7 @@ from pyfly.context.environment import Environment
 from pyfly.context.events import (
     ApplicationEvent,
     ApplicationEventBus,
+    ApplicationEventPublisher,
     ApplicationReadyEvent,
     ContextClosedEvent,
     ContextRefreshedEvent,
@@ -41,6 +42,7 @@ __all__ = [
     "ApplicationContext",
     "ApplicationEvent",
     "ApplicationEventBus",
+    "ApplicationEventPublisher",
     "ApplicationReadyEvent",
     "BeanPostProcessor",
     "ContextClosedEvent",

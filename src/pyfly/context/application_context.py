@@ -38,6 +38,7 @@ from pyfly.context.environment import Environment
 from pyfly.context.events import (
     ApplicationEvent,
     ApplicationEventBus,
+    ApplicationEventPublisher,
     ApplicationReadyEvent,
     ContextClosedEvent,
     ContextRefreshedEvent,
@@ -80,6 +81,10 @@ class ApplicationContext:
         self._container._registrations[Config].instance = config
         self._container.register(Container, scope=Scope.SINGLETON)
         self._container._registrations[Container].instance = self._container
+        # Injectable event publisher (Spring ApplicationEventPublisher) — beans can fire
+        # lifecycle or arbitrary domain events into the bus.
+        self._container.register(ApplicationEventPublisher, scope=Scope.SINGLETON)
+        self._container._registrations[ApplicationEventPublisher].instance = ApplicationEventPublisher(self._event_bus)
 
     # ------------------------------------------------------------------
     # Bean registration
@@ -688,13 +693,15 @@ class ApplicationContext:
                 # return annotation must not be mistaken for the event (audit #119).
                 hints = typing.get_type_hints(method)
                 hints.pop("return", None)
-                event_type: type[ApplicationEvent] | None = None
+                # The first type-annotated parameter is the event type — any type, so a
+                # listener can subscribe to arbitrary domain events, not only ApplicationEvent.
+                event_type: type = ApplicationEvent
                 for param_type in hints.values():
-                    if isinstance(param_type, type) and issubclass(param_type, ApplicationEvent):
+                    # A concrete class (not typing.Any, which is a class in 3.11+ but is
+                    # the "untyped" catch-all here) becomes the subscribed event type.
+                    if isinstance(param_type, type) and param_type is not typing.Any:
                         event_type = param_type
                         break
-                if event_type is None:
-                    event_type = ApplicationEvent
                 self._event_bus.subscribe(event_type, method, owner_cls=type(reg.instance))
                 count += 1
         self._wiring_counts["event_listeners"] = count
