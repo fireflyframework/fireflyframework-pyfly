@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 260"
+     role="img" aria-label="Testing figure: pytest box spins up real Postgres, Redis, and Kafka containers via Testcontainers, then asserts with a green check mark"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="680" height="260" fill="#eaf6df"/>
+
+  <defs>
+    <filter id="tst-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    </filter>
+    <marker id="tst-arr" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+    <marker id="tst-arr-g" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Section label -->
+  <text x="28" y="26" dominant-baseline="middle"
+        fill="#43b02a" font-size="11" font-weight="700">testing — pytest + Testcontainers → real containers → ✓</text>
+
+  <!-- ── pytest box ── -->
+  <rect x="28" y="90" width="108" height="64" rx="10" ry="10"
+        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#tst-shadow)"/>
+  <rect x="28" y="90" width="108" height="24" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="28" y="102" width="108" height="12" fill="#43b02a"/>
+  <text x="82" y="102" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="12" font-weight="700">pytest</text>
+  <text x="82" y="130" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9.5">test suite</text>
+  <text x="82" y="144" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">conftest / fixtures</text>
+
+  <!-- Arrow pytest → Testcontainers -->
+  <line x1="136" y1="122" x2="172" y2="122"
+        stroke="#8aa07e" stroke-width="2" marker-end="url(#tst-arr)"/>
+  <text x="154" y="112" text-anchor="middle"
+        fill="#6a7a64" font-size="8.5" font-style="italic">spins up</text>
+
+  <!-- ── Testcontainers wrapper ── -->
+  <rect x="174" y="70" width="262" height="104" rx="12" ry="12"
+        fill="#fff" stroke="#5fd13a" stroke-width="2.5" filter="url(#tst-shadow)"/>
+  <rect x="174" y="70" width="262" height="24" rx="12" ry="12" fill="#5fd13a"/>
+  <rect x="174" y="82" width="262" height="12" fill="#5fd13a"/>
+  <text x="305" y="82" text-anchor="middle" dominant-baseline="middle"
+        fill="#16331a" font-size="12" font-weight="700">Testcontainers</text>
+
+  <!-- Container chips -->
+  <!-- Postgres -->
+  <rect x="192" y="106" width="68" height="44" rx="8" ry="8"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="226" y="122" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="10" font-weight="700">Postgres</text>
+  <text x="226" y="138" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="8.5">real DB</text>
+
+  <!-- Redis -->
+  <rect x="272" y="106" width="68" height="44" rx="8" ry="8"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="306" y="122" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="10" font-weight="700">Redis</text>
+  <text x="306" y="138" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="8.5">real cache</text>
+
+  <!-- Kafka -->
+  <rect x="352" y="106" width="68" height="44" rx="8" ry="8"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
+  <text x="386" y="122" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="10" font-weight="700">Kafka</text>
+  <text x="386" y="138" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="8.5">real broker</text>
+
+  <!-- @service_connection badge -->
+  <rect x="184" y="188" width="242" height="20" rx="8" ry="8"
+        fill="#eaf6df" stroke="#8aa07e" stroke-width="1.2"/>
+  <text x="305" y="198" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9" font-weight="600">@service_connection — auto-wired to fixtures</text>
+
+  <!-- Arrow Testcontainers → assert -->
+  <line x1="436" y1="122" x2="476" y2="122"
+        stroke="#43b02a" stroke-width="2" marker-end="url(#tst-arr-g)"/>
+  <text x="456" y="112" text-anchor="middle"
+        fill="#6a7a64" font-size="8.5" font-style="italic">asserts</text>
+
+  <!-- ── Green check badge ── -->
+  <circle cx="530" cy="122" r="44" fill="#43b02a" opacity="0.12"/>
+  <circle cx="530" cy="122" r="34" fill="#43b02a"/>
+  <text x="530" y="122" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="36" font-weight="700">✓</text>
+
+  <text x="530" y="176" text-anchor="middle"
+        fill="#43b02a" font-size="11" font-weight="700">all tests pass</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(646, 40)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+
+</svg>
