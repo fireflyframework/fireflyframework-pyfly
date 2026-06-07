@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.63 (2026-06-07)
+
+### Performance (DI container — cached constructor plan)
+
+The container now parses each constructor's injection plan **once** (cached on the
+`Registration`) instead of calling `typing.get_type_hints` + `inspect.signature` on every
+resolution, and `_resolve_param` computes `get_origin` once per parameter with a fast path
+for plain-class dependencies. Singleton resolution (already cached) is unchanged, but
+**transient bean resolution with dependencies is ~5.3x faster** (~15.6µs → ~2.9µs per resolve;
+~64K → ~342K ops/s on the benchmark machine). The residual cost is the irreducible per-resolve
+dependency resolution + object construction. Behavior is unchanged (182 container tests green);
+`benchmarks/README.md` updated with the new numbers.
+
 ## v26.06.62 (2026-06-07)
 
 ### Added (hardening — benchmarks + Redis integration tests)
