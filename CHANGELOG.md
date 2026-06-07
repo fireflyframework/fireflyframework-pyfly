@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.51 (2026-06-07)
+
+### Added (testing — functional test slices)
+
+- **`web_slice(*controllers, ...)`**, **`service_slice(...)`**, **`data_slice(...)`**, and the
+  generic **`slice_context(*beans, ...)`** (`pyfly.testing`) — build a minimal, *started*
+  ApplicationContext containing only the beans you pass, with collaborators supplied via an
+  `overrides={Interface: fake_or_class}` map (Spring's `@WebMvcTest`/`@DataJpaTest` slices).
+  `web_slice` additionally wraps the context in a `PyFlyTestClient` via `create_app(context=...)`.
+  Each builder returns an async context manager that stops the context on exit, and **fails
+  fast**: the slice's beans are resolved at build time, so a missing collaborator raises
+  immediately rather than on first request.
+
 ## v26.06.50 (2026-06-07)
 
 ### Added (container — custom bean-scope SPI)
