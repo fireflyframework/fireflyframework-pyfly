@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.22 (2026-06-07)
+
+### Fixed (DI / autowiring correctness)
+
+Surfaced by a Spring-parity review of the DI container (autowiring front, wave 1):
+
+- **`@Qualifier` now verifies the named bean's type.** `resolve_by_name` /
+  `Annotated[T, Qualifier(name)]` / `Autowired(qualifier=...)` looked the bean up
+  purely by name and **silently injected a wrong-typed bean**. A qualifier now
+  raises if the named bean is not assignable to the declared type (Protocols /
+  generics that can't be `isinstance`-checked are still accepted).
+- **`list[T]` injection now honors `@order`.** `resolve_all` returned beans in
+  binding order, so an injected `list[T]` (e.g. a filter/interceptor chain) was
+  unordered — Spring orders injected `List<T>` by `@Order`. Now sorted by `@order`
+  (stable within equal order).
+- **`@bean` factories can be marked primary.** `bean(primary=True)` records the
+  primary flag on the registration so it wins interface resolution among several
+  beans (the `@Bean @Primary` equivalent — previously only the class-level
+  `@primary` worked, never `@bean` methods).
+- **`@bean` methods are profile-filtered.** `bean(profile="...")` is now honored —
+  a profile-guarded factory is skipped when the profile is inactive (previously
+  only class beans were profile-filtered; `@bean` methods always ran).
+- **Cycle detection is thread-safe.** The in-creation set used for
+  circular-dependency detection was a single process-wide dict mutated without the
+  lock on the transient/request paths, so concurrent resolution could raise
+  spurious `BeanCurrentlyInCreationError`. It is now thread-local.
+
+---
+
 ## v26.06.21 (2026-06-07)
 
 ### Changed (security — behavior change)

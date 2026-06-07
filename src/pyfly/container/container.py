@@ -32,10 +32,24 @@ from pyfly.container.exceptions import (
     NoUniqueBeanError,
 )
 from pyfly.container.metrics import BeanMetrics
+from pyfly.container.ordering import get_order
 from pyfly.container.registry import Registration
 from pyfly.container.types import Scope
 
 T = TypeVar("T")
+
+
+def _assignable(instance: Any, expected_type: Any) -> bool:
+    """Best-effort ``isinstance`` that tolerates non-runtime-checkable Protocols
+    and subscripted generics (which raise on ``isinstance``) by accepting them.
+
+    Used to verify a ``Qualifier``-named bean is of the declared type, so a
+    mistyped qualifier raises instead of silently injecting an incompatible bean.
+    """
+    try:
+        return isinstance(instance, expected_type)
+    except TypeError:
+        return True
 
 
 class Container:
@@ -52,7 +66,10 @@ class Container:
         self._registrations: dict[type, Registration] = {}
         self._named: dict[str, Registration] = {}
         self._bindings: dict[type, list[type]] = {}
-        self._resolving: dict[type, None] = {}  # insertion-ordered, O(1) lookup
+        # Per-thread in-creation set for cycle detection — thread-local so
+        # concurrent TRANSIENT/REQUEST resolution (which does not hold the lock)
+        # can't race on a shared dict or raise spurious circular-dependency errors.
+        self._resolving_local = threading.local()
         self._metrics: dict[type, BeanMetrics] = {}
         # Every registration keyed by (impl_type, name), preserving insertion
         # order. ``_registrations`` keeps only the last registration per type, so
@@ -61,6 +78,15 @@ class Container:
         # one bean would silently vanish from type/list resolution.
         self._all: dict[tuple[type, str], Registration] = {}
         self._lock = threading.RLock()
+
+    @property
+    def _resolving(self) -> dict[type, None]:
+        """This thread's in-creation set (insertion-ordered for cycle chains)."""
+        stack: dict[type, None] | None = getattr(self._resolving_local, "stack", None)
+        if stack is None:
+            stack = {}
+            self._resolving_local.stack = stack
+        return stack
 
     def register(
         self,
@@ -109,21 +135,38 @@ class Container:
         if len(impls) == 1:
             return cast(T, self._resolve_registration(self._registrations[impls[0]]))
 
-        # Multiple impls: pick @primary
+        # Multiple impls: pick @primary — a class-level marker OR an @bean-level
+        # primary recorded on the registration (the @Bean @Primary equivalent).
         for impl in impls:
-            if getattr(impl, "__pyfly_primary__", False):
+            reg = self._registrations.get(impl)
+            if getattr(impl, "__pyfly_primary__", False) or (reg is not None and reg.primary):
                 return cast(T, self._resolve_registration(self._registrations[impl]))
 
         raise NoUniqueBeanError(bean_type=cls, candidates=impls)
 
-    def resolve_by_name(self, name: str) -> Any:
-        """Resolve a bean by its registered name."""
+    def resolve_by_name(self, name: str, expected_type: type | None = None) -> Any:
+        """Resolve a bean by its registered name.
+
+        When *expected_type* is given, the named bean must be assignable to it —
+        otherwise a mistyped ``Qualifier`` would silently inject an incompatible
+        object. Protocols/generics that cannot be ``isinstance``-checked are accepted.
+        """
         if name not in self._named:
             raise NoSuchBeanError(
                 bean_name=name,
                 suggestions=list(self._named.keys()),
             )
-        return self._resolve_registration(self._named[name])
+        instance = self._resolve_registration(self._named[name])
+        if expected_type is not None and not _assignable(instance, expected_type):
+            raise NoSuchBeanError(
+                bean_name=name,
+                bean_type=expected_type if isinstance(expected_type, type) else None,
+                suggestions=[
+                    f"bean {name!r} is a {type(instance).__name__}, not assignable to "
+                    f"{getattr(expected_type, '__name__', expected_type)!r}"
+                ],
+            )
+        return instance
 
     def resolve_all(self, cls: type[T]) -> list[T]:
         """Resolve every bean assignable to *cls*.
@@ -134,14 +177,14 @@ class Container:
         identity so the synthetic interface registration does not double-count
         an already-bound implementation.
         """
-        results: list[T] = []
+        ordered: list[tuple[int, Any]] = []
         seen: set[int] = set()
 
         def _add(reg: Registration) -> None:
             instance = self._resolve_registration(reg)
             if id(instance) not in seen:
                 seen.add(id(instance))
-                results.append(cast(T, instance))
+                ordered.append((get_order(reg.impl_type), instance))
 
         for impl in self._bindings.get(cls, []):
             reg = self._registrations.get(impl)
@@ -150,7 +193,10 @@ class Container:
         for reg in self._all.values():
             if reg.impl_type is cls:
                 _add(reg)
-        return results
+        # Honor @order for injected list[T] (Spring orders List<T> by @Order);
+        # stable sort keeps registration order within the same @order value.
+        ordered.sort(key=lambda pair: pair[0])
+        return [cast(T, instance) for _, instance in ordered]
 
     def contains(self, name: str) -> bool:
         """Check if a named bean exists."""
@@ -269,7 +315,7 @@ class Container:
             base_type = args[0]
             for metadata in args[1:]:
                 if isinstance(metadata, Qualifier):
-                    return self.resolve_by_name(metadata.name)
+                    return self.resolve_by_name(metadata.name, expected_type=base_type)
             return self._resolve_param(base_type)
 
         # Handle Optional[T] (Union[T, None] or T | None via PEP 604)
@@ -331,7 +377,8 @@ class Container:
                 continue
 
             if default.qualifier:
-                value = self.resolve_by_name(default.qualifier)
+                base = get_args(attr_type)[0] if get_origin(attr_type) is Annotated else attr_type
+                value = self.resolve_by_name(default.qualifier, expected_type=base)
             elif get_origin(attr_type) is Annotated:
                 value = self._resolve_param(attr_type)
             else:

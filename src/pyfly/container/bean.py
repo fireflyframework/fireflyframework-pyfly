@@ -33,6 +33,8 @@ def bean(
     *,
     name: str = "",
     scope: Scope = Scope.SINGLETON,
+    primary: bool = False,
+    profile: str = "",
 ) -> Callable[[F], F]: ...
 
 
@@ -41,10 +43,20 @@ def bean(
     *,
     name: str = "",
     scope: Scope = Scope.SINGLETON,
+    primary: bool = False,
+    profile: str = "",
 ) -> F | Callable[[F], F]:
     """Mark a method inside a @configuration class as a bean factory.
 
     The return type annotation determines the interface the bean satisfies.
+
+    Args:
+        name: Explicit bean name (defaults to the method name).
+        scope: Bean scope (default singleton).
+        primary: Mark this the primary candidate when several beans share an
+            interface — the ``@Bean @Primary`` equivalent.
+        profile: Only create this bean when the expression matches the active
+            profiles — the ``@Bean @Profile`` equivalent.
     """
 
     def decorator(func: F) -> F:
@@ -52,6 +64,10 @@ def bean(
         func.__pyfly_bean_scope__ = scope  # type: ignore[attr-defined]
         if name:
             func.__pyfly_bean_name__ = name  # type: ignore[attr-defined]
+        if primary:
+            func.__pyfly_bean_primary__ = True  # type: ignore[attr-defined]
+        if profile:
+            func.__pyfly_profile__ = profile  # type: ignore[attr-defined]
         return func
 
     if func is not None:
