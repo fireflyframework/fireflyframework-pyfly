@@ -11,51 +11,69 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MongoDB transactional decorator — wraps async functions in a Mongo session + transaction."""
+"""MongoDB execution for the unified ``@transactional`` decorator.
+
+Use the backend-neutral ``@transactional`` from :mod:`pyfly.data` on document services too — it
+dispatches here when the service exposes a ``_motor_client``. ``mongo_transactional`` is kept as a
+**deprecated** alias of ``@transactional`` for backward compatibility.
+"""
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
-F = TypeVar("F", bound=Callable[..., Any])
+from pyfly.data.transactional import transactional
 
 
-def mongo_transactional(func: F) -> F:
-    """Wrap an async function in a MongoDB session and transaction.
+async def run_mongo_transaction(
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    rollback_for: tuple[type[BaseException], ...] = (Exception,),
+    no_rollback_for: tuple[type[BaseException], ...] = (),
+) -> Any:
+    """Execute *func* inside a MongoDB transaction (the document arm of ``@transactional``).
 
-    The decorated function receives an extra ``session`` keyword argument
-    bound to the active ``ClientSession``.  If the function completes
-    without error the transaction is committed; otherwise it is aborted.
-
-    Requires a :class:`motor.motor_asyncio.AsyncIOMotorClient` to be
-    resolvable from the first positional argument's ``_motor_client``
-    attribute (typically ``self`` in a service bean).
-
-    Example::
-
-        class OrderService:
-            def __init__(self, motor_client):
-                self._motor_client = motor_client
-
-            @mongo_transactional
-            async def place_order(self, order, *, session=None):
-                ...
+    Resolves the Motor client from ``self._motor_client``, opens a session + transaction, injects
+    the session as the ``session`` keyword argument, and commits on success. On error it aborts —
+    except for exception types in ``no_rollback_for`` (or any ``Exception`` not in ``rollback_for``),
+    which commit and then re-raise, mirroring the relational ``@transactional`` semantics. A
+    ``BaseException`` that is not an ``Exception`` (cancellation/shutdown) always aborts.
     """
+    self_arg = args[0] if args else None
+    motor_client = getattr(self_arg, "_motor_client", None)
+    if motor_client is None:
+        raise RuntimeError(
+            f"{func.__qualname__}: cannot resolve Motor client. Ensure the service has a '_motor_client' attribute."
+        )
 
-    @functools.wraps(func)
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        # Resolve the Motor client from the first arg (self)
-        self_arg = args[0] if args else None
-        motor_client = getattr(self_arg, "_motor_client", None)
-        if motor_client is None:
-            raise RuntimeError(
-                f"{func.__qualname__}: cannot resolve Motor client. Ensure the service has a '_motor_client' attribute."
-            )
+    async with await motor_client.start_session() as session:
+        kwargs["session"] = session
+        # session.start_transaction() commits on a clean context exit and aborts when an exception
+        # escapes it. To honour no_rollback_for we let such exceptions exit cleanly (commit) and
+        # re-raise them afterwards, rather than driving abort/commit manually (which would depend
+        # on Motor's lazy-vs-eager start_transaction semantics).
+        deferred: BaseException | None = None
+        result: Any = None
+        async with session.start_transaction():
+            try:
+                result = await func(*args, **kwargs)
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    raise  # cancellation/shutdown -> abort
+                if isinstance(exc, tuple(no_rollback_for)):
+                    deferred = exc  # commit, then surface
+                elif isinstance(exc, tuple(rollback_for)):
+                    raise  # -> abort
+                else:
+                    deferred = exc  # not in rollback_for -> commit, then surface
+        if deferred is not None:
+            raise deferred
+        return result
 
-        async with await motor_client.start_session() as session, session.start_transaction():
-            kwargs["session"] = session
-            return await func(*args, **kwargs)
 
-    return wrapper  # type: ignore[return-value]
+# Backward-compatibility alias. Prefer the unified `@transactional` from `pyfly.data`.
+mongo_transactional = transactional
+"""Deprecated alias of :func:`pyfly.data.transactional.transactional`. Use ``@transactional``."""

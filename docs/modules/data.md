@@ -1076,7 +1076,7 @@ Some capabilities are **backend-specific** today:
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
 | Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ❌ not yet |
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
-| `@transactional` (propagation, isolation, read-only, `rollback_for`) | ✅ | ⚠️ basic commit/abort (`@mongo_transactional`, replica set required) |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ propagation / isolation / read-only / `rollback_for` | ✅ commit/abort + `rollback_for` (replica set; propagation/isolation are relational-only) |
 
 **Not yet implemented on either backend** (so you don't reach for them): `@Modifying`-style
 declarative bulk `UPDATE`/`DELETE`; `Slice` (count-less paging) and streaming/reactive result

@@ -36,27 +36,31 @@ from pyfly.data.projection import is_projection, projection, projection_fields
 from pyfly.data.query import query
 from pyfly.data.query_parser import QueryMethodParser
 from pyfly.data.specification import Specification
+from pyfly.data.transactional import Isolation, Propagation, transactional
 
 __all__ = [
     "BaseFilterUtils",
     "BaseRepositoryPostProcessor",
     "CrudRepository",
     "DERIVED_PREFIXES",
+    "Isolation",
     "Mapper",
-    "default_mapper",
-    "mapping",
     "Order",
     "Page",
     "Pageable",
     "PagingRepository",
+    "Propagation",
     "QueryMethodCompilerPort",
     "QueryMethodParser",
     "RepositoryPort",
     "SessionPort",
     "Sort",
     "Specification",
+    "default_mapper",
     "is_projection",
+    "mapping",
     "projection",
     "projection_fields",
     "query",
+    "transactional",
 ]
