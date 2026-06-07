@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.61 (2026-06-07)
+
+### Added (data — run-on-startup database migrations)
+
+- **`MigrationRunner`** + **`MigrationAutoConfiguration`** — when
+  `pyfly.data.relational.migrations.enabled=true`, pyfly applies `alembic upgrade head` on
+  startup (Spring Boot Flyway-style auto-migrate), reusing the project's existing Alembic
+  environment (`alembic.ini` + `alembic/env.py` from `pyfly db init`) and migrating the same
+  datasource as the app. The upgrade runs in a worker thread so the generated async `env.py`
+  (which calls `asyncio.run`) isn't nested in the running loop; if `alembic.ini` is absent it
+  logs a warning and skips rather than failing startup.
+- Config: `pyfly.data.relational.migrations.{enabled,config,revision}`.
+
 ## v26.06.60 (2026-06-07)
 
 ### Fixed (auto-configuration discovery)
