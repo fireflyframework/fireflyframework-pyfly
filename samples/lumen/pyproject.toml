@@ -40,3 +40,12 @@ packages = ["src/lumen"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    # The full-context integration test boots the framework's shared,
+    # pooled AsyncSession. SQLAlchemy emits a GC-timing SAWarning if a
+    # pooled aiosqlite connection is finalized by the garbage collector at
+    # interpreter teardown. It is a teardown artifact only — every test
+    # passes and persistence is verified by reload — so we silence just
+    # that one message.
+    "ignore:.*garbage collector is trying to clean up non-checked-in connection.*:Warning",
+]

@@ -36,8 +36,12 @@ Wiring notes (verified against ``src/pyfly/transactional``):
   saga input, so it reads what it needs from its forward step's result via
   ``FromStep("debit-source")`` (the engine threads step results through the
   ``SagaContext``).
-* The saga depends only on the hexagonal ``WalletRepository`` *port* and the
-  ``Money`` value object — the same domain code the CQRS handlers use.
+* The saga depends on the framework :class:`WalletRepository` and the ``Money``
+  value object — the same persistence and domain code the CQRS handlers use.
+  Each step loads the row, rehydrates the :class:`Wallet` aggregate, mutates it,
+  and ``upsert``-s the new state. Because saga steps share one ``AsyncSession``,
+  ``upsert`` flushes so each step sees the previous step's write; the surrounding
+  application boundary owns the commit.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.transfers.transfer_request import TransferRequest
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
@@ -73,8 +78,8 @@ class DebitResult:
 class MoneyTransferSaga:
     """Debit the source wallet, credit the destination, compensate on failure.
 
-    Injects the :class:`WalletRepository` *port*; the in-memory adapter (or any
-    other) is resolved by the DI container.
+    Injects the framework :class:`WalletRepository` bean, resolved by the DI
+    container.
     """
 
     def __init__(self, repository: WalletRepository) -> None:
@@ -94,12 +99,13 @@ class MoneyTransferSaga:
         currency mismatch, so an invalid debit fails here and the saga never
         touches the destination.
         """
-        wallet = await self._repository.find(request.source_wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(request.source_wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", request.source_wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.withdraw(Money(amount=request.amount, currency=request.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return DebitResult(
             wallet_id=request.source_wallet_id,
@@ -119,12 +125,13 @@ class MoneyTransferSaga:
         not receive the saga input) and deposits the same amount back into the
         source wallet, restoring its balance.
         """
-        wallet = await self._repository.find(debit.wallet_id)
-        if wallet is None:  # pragma: no cover - source existed to be debited
+        entity = await self._repository.find_by_id(debit.wallet_id)
+        if entity is None:  # pragma: no cover - source existed to be debited
             raise AggregateNotFound("Wallet", debit.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=debit.amount, currency=debit.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return wallet.balance.amount
 
@@ -143,11 +150,12 @@ class MoneyTransferSaga:
         raises — the engine then compensates ``debit-source`` via
         ``recredit_source``.
         """
-        wallet = await self._repository.find(request.destination_wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(request.destination_wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", request.destination_wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=request.amount, currency=request.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
         return wallet.balance.amount

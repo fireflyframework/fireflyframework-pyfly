@@ -8,6 +8,10 @@ from lumen.core.services.wallets.get_balance_handler import GetBalanceHandler
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.core.services.wallets.get_wallet_handler import GetWalletHandler
 from lumen.core.services.wallets.get_wallet_query import GetWallet
+from lumen.core.services.wallets.list_rich_wallets_handler import ListRichWalletsHandler
+from lumen.core.services.wallets.list_rich_wallets_query import ListRichWallets
+from lumen.core.services.wallets.list_wallets_handler import ListWalletsHandler
+from lumen.core.services.wallets.list_wallets_query import ListWallets
 from lumen.core.services.wallets.open_wallet_command import OpenWallet
 from lumen.core.services.wallets.open_wallet_handler import OpenWalletHandler
 from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
@@ -20,6 +24,10 @@ __all__ = [
     "GetBalanceHandler",
     "GetWallet",
     "GetWalletHandler",
+    "ListRichWallets",
+    "ListRichWalletsHandler",
+    "ListWallets",
+    "ListWalletsHandler",
     "OpenWallet",
     "OpenWalletHandler",
     "WithdrawFunds",

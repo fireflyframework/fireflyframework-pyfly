@@ -1,11 +1,13 @@
 # Copyright 2026 Firefly Software Foundation.
 # Licensed under the Apache License, Version 2.0.
-"""Feature 1 — the SQLAlchemy/SQLite WalletRepository adapter (Chapter 5).
+"""Feature 1 — the framework :class:`WalletRepository` over SQLite (Chapter 5).
 
-Drives the FULL wallet flow (open -> deposit -> withdraw -> get) through
-the real :class:`SqlAlchemyWalletRepository` against a temporary SQLite
-database file, then proves persistence by re-opening the database with a
-fresh engine/session and reading the wallet back.
+Exercises the Spring-Data-style repository the application boots on: the
+inherited CRUD surface (``save``/``upsert``, ``find_by_id``, ``count``,
+``find_paginated``), the **derived query** (``find_by_owner_id``, compiled
+from the method name by the real ``RepositoryBeanPostProcessor``), and the
+**Specification** path (``find_rich`` / ``find_all_by_spec``). It then
+proves persistence by re-opening the database with a fresh engine/session.
 
 Everything runs with no external infrastructure: SQLite + aiosqlite.
 """
@@ -13,6 +15,7 @@ Everything runs with no external infrastructure: SQLite + aiosqlite.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -23,17 +26,30 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from lumen.interfaces.enums.v1.currency import Currency
-from lumen.models.entities.v1.money import Money
-from lumen.models.entities.v1.wallet_entity import Wallet
-from lumen.models.repositories.sql_wallet_repository import (
-    SqlAlchemyWalletRepository,
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories.wallet_repository import (
+    WalletRepository,
+    balance_at_least,
 )
+from pyfly.data import Pageable, Sort
 from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
+
+
+def _entity(wid: str, owner: str, minor: int, *, currency: str = "EUR", age_days: int = 0) -> WalletEntity:
+    created = datetime.now(UTC) - timedelta(days=age_days)
+    return WalletEntity(id=wid, owner_id=owner, currency=currency, balance_minor=minor, created_at=created)
+
+
+def _make_repo(session: AsyncSession) -> WalletRepository:
+    repo = WalletRepository(WalletEntity, session)
+    # Mirror the ApplicationContext: compile derived-query stubs onto the bean.
+    RepositoryBeanPostProcessor().after_init(repo, "walletRepository")
+    return repo
 
 
 @pytest_asyncio.fixture
-async def sqlite_session(tmp_path: Path) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], str]]:
+async def sqlite_factory(tmp_path: Path) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], str]]:
     """A temp-file SQLite engine + session factory, schema created.
 
     Mirrors what PyFly's ``EngineLifecycle`` does at startup: build the
@@ -52,72 +68,109 @@ async def sqlite_session(tmp_path: Path) -> AsyncIterator[tuple[async_sessionmak
 
 
 @pytest.mark.asyncio
-async def test_full_flow_persists_through_sqlite_adapter(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_upsert_inserts_then_updates_and_persists(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, db_url = sqlite_session
+    factory, db_url = sqlite_factory
 
-    # --- open -> deposit -> withdraw through the SQLite adapter ---------
+    # --- INSERT then UPDATE through upsert, committing the unit of work --
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
+        repo = _make_repo(session)
+        await repo.upsert(_entity("wlt-1", "owner-42", 0, currency="USD"))
+        # update: same PK, new balance
+        await repo.upsert(_entity("wlt-1", "owner-42", 2500, currency="USD"))
+        await session.commit()
 
-        wallet_id = await repo.next_id()
-        wallet = Wallet.open(wallet_id, owner_id="owner-42", currency=Currency.USD)
-        await repo.add(wallet)
-
-        loaded = await repo.find(wallet_id)
-        assert loaded is not None
-        loaded.deposit(Money(2500, Currency.USD))
-        await repo.add(loaded)
-
-        loaded = await repo.find(wallet_id)
-        assert loaded is not None
-        loaded.withdraw(Money(1000, Currency.USD))
-        await repo.add(loaded)
-
-        # get
-        got = await repo.find(wallet_id)
+        got = await repo.find_by_id("wlt-1")
         assert got is not None
         assert got.owner_id == "owner-42"
-        assert got.currency is Currency.USD
-        assert got.balance == Money(1500, Currency.USD)
+        assert got.currency == "USD"
+        assert got.balance_minor == 2500
+        assert await repo.count() == 1
 
     # --- prove persistence: reconnect with a brand-new engine/session ---
     fresh_engine = create_async_engine(db_url)
     fresh_factory = async_sessionmaker(fresh_engine, expire_on_commit=False)
     try:
         async with fresh_factory() as fresh_session:
-            fresh_repo = SqlAlchemyWalletRepository(session=fresh_session)
-            persisted = await fresh_repo.find(wallet_id)
+            fresh_repo = _make_repo(fresh_session)
+            persisted = await fresh_repo.find_by_id("wlt-1")
             assert persisted is not None, "wallet should survive a reconnect"
-            assert persisted.balance == Money(1500, Currency.USD)
-            assert persisted.owner_id == "owner-42"
-            assert await fresh_repo.all_ids() == [wallet_id]
+            assert persisted.balance_minor == 2500
     finally:
         await fresh_engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_find_unknown_returns_none(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_find_by_id_unknown_returns_none(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, _ = sqlite_session
+    factory, _ = sqlite_factory
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
-        assert await repo.find("wlt-nope") is None
+        repo = _make_repo(session)
+        assert await repo.find_by_id("wlt-nope") is None
 
 
 @pytest.mark.asyncio
-async def test_remove_deletes_the_row(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_derived_find_by_owner_id(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, _ = sqlite_session
+    factory, _ = sqlite_factory
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
-        wallet = Wallet.open(await repo.next_id(), owner_id="o", currency=Currency.EUR)
-        await repo.add(wallet)
-        assert await repo.find(wallet.id) is not None  # type: ignore[arg-type]
+        repo = _make_repo(session)
+        await repo.upsert(_entity("wlt-1", "alice", 100))
+        await repo.upsert(_entity("wlt-2", "alice", 200))
+        await repo.upsert(_entity("wlt-3", "bob", 300))
+        await session.commit()
 
-        await repo.remove(wallet)
-        assert await repo.find(wallet.id) is None  # type: ignore[arg-type]
-        assert await repo.all_ids() == []
+        owned = await repo.find_by_owner_id("alice")
+        assert sorted(w.id for w in owned) == ["wlt-1", "wlt-2"]
+        assert await repo.find_by_owner_id("nobody") == []
+
+
+@pytest.mark.asyncio
+async def test_specification_find_rich_paged_and_sorted(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_factory
+    async with factory() as session:
+        repo = _make_repo(session)
+        # age_days drives created_at so we can assert newest-first ordering.
+        await repo.upsert(_entity("wlt-poor", "a", 50, age_days=3))
+        await repo.upsert(_entity("wlt-mid", "b", 1000, age_days=2))
+        await repo.upsert(_entity("wlt-rich", "c", 5000, age_days=1))
+        await session.commit()
+
+        # Specification: balance_minor >= 1000, newest first, page size 1.
+        newest_first = Sort.by("created_at").descending()
+        page = await repo.find_rich(1000, Pageable.of(1, 1, newest_first))
+        assert page.total == 2  # mid + rich
+        assert page.total_pages == 2
+        assert page.has_next is True
+        assert [w.id for w in page.items] == ["wlt-rich"]  # newest of the two
+
+        page2 = await repo.find_rich(1000, Pageable.of(2, 1, newest_first))
+        assert [w.id for w in page2.items] == ["wlt-mid"]
+
+        # The bare predicate also works through find_all_by_spec.
+        rich = await repo.find_all_by_spec(balance_at_least(5000))
+        assert [w.id for w in rich] == ["wlt-rich"]
+
+
+@pytest.mark.asyncio
+async def test_find_paginated_counts_and_pages(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_factory
+    async with factory() as session:
+        repo = _make_repo(session)
+        for i in range(5):
+            await repo.upsert(_entity(f"wlt-{i}", "owner", i * 100, age_days=5 - i))
+        await session.commit()
+
+        page = await repo.find_paginated(pageable=Pageable.of(1, 2, Sort.by("created_at").descending()))
+        assert page.total == 5
+        assert page.total_pages == 3
+        assert len(page.items) == 2
+        # newest first -> wlt-4 (age 1 day) then wlt-3
+        assert [w.id for w in page.items] == ["wlt-4", "wlt-3"]
