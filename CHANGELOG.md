@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.75 (2026-06-07)
+
+### Changed (data — unified `@transactional` for every backend)
+
+There is now **one** `@transactional` annotation for both relational and document services,
+imported from `pyfly.data` (Spring's uniform-annotation model). It dispatches at call time to the
+transaction manager the service exposes:
+
+- relational `async_sessionmaker` on `self._session_factory` → SQLAlchemy transaction (propagation,
+  isolation, read-only, `rollback_for`/`no_rollback_for`, repository session patching);
+- MongoDB client on `self._motor_client` → Mongo session + transaction (session injected as the
+  `session` kwarg, commit/abort with `rollback_for`/`no_rollback_for` parity).
+
+The decorator is backend-neutral (`pyfly.data.transactional`) and imports neither SQLAlchemy nor
+Motor at module scope; each backend supplies a lazily-imported runner (`run_relational_transaction`
+/ `run_mongo_transaction`). `from pyfly.data.relational.sqlalchemy import transactional` still works
+(same object); **`mongo_transactional` is now a deprecated alias** of `@transactional`.
+
+### Fixed / tested
+
+- The MongoDB transaction path — previously **completely untested** — now has behavior tests
+  (commit, abort on `rollback_for`, commit-and-re-raise on `no_rollback_for`, session injection,
+  missing-client error) and gained `rollback_for`/`no_rollback_for` parity with relational.
+- Relational isolation is now verified (a test asserts the `isolation_level` execution option
+  actually reaches the session — previously only the enum/metadata were checked).
+- Docs (`data.md`, `data-document.md`) + the companion `implement-data-repository` skill updated to
+  teach the single annotation; the doc's broken `@mongo_transactional(client)` example is corrected.
+
 ## v26.06.74 (2026-06-07)
 
 ### Docs (data — query-mechanism decision guide + Spring-Data parity matrix)
