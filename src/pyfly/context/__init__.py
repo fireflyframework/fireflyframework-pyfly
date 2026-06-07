@@ -21,6 +21,8 @@ from pyfly.context.conditions import (
     conditional_on_expression,
     conditional_on_missing_bean,
     conditional_on_property,
+    conditional_on_resource,
+    conditional_on_web_application,
 )
 from pyfly.context.environment import Environment
 from pyfly.context.events import (
@@ -52,6 +54,8 @@ __all__ = [
     "conditional_on_missing_bean",
     "conditional_on_expression",
     "conditional_on_property",
+    "conditional_on_resource",
+    "conditional_on_web_application",
     "post_construct",
     "pre_destroy",
 ]

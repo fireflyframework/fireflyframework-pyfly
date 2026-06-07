@@ -22,3 +22,6 @@ docs/plans/
 # Playwright MCP verification artifacts
 .playwright-mcp/
 .audit/
+
+# Superpowers brainstorming visual companion scratch
+.superpowers/
