@@ -15,17 +15,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 
-from pyfly.testing import postgres_container, pyfly_config_for, requires_docker
-
-
-@pytest.fixture
-def pg_url() -> Iterator[str]:
-    with postgres_container() as container:
-        yield pyfly_config_for(container)["pyfly.data.relational.url"]
+from pyfly.testing import requires_docker  # the `pg_url` fixture is provided by conftest.py
 
 
 @requires_docker
