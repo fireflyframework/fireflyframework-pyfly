@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.74 (2026-06-07)
+
+### Docs (data — query-mechanism decision guide + Spring-Data parity matrix)
+
+Following a full Spring-Data parity audit (CrudRepository / Pageable / derived queries / @query /
+Specifications / Query-by-Example, relational **and** document — all present and behavior-tested),
+`docs/modules/data.md` gains two teaching sections so users know **when** to use each tool and
+where the boundaries are:
+
+- **Choosing a Query Mechanism** — a decision table for derived methods vs `@query` vs
+  Specifications vs Query-by-Example (and when *not* to use each), plus how `Pageable`/`Sort`
+  layer on top.
+- **Spring Data Parity & Current Limitations** — a relational-vs-document capability matrix
+  (soft-delete, optimistic locking, auditing, transactions differ by backend) and an explicit list
+  of Spring features **not yet** implemented (`@Modifying` bulk writes, `Slice`, DTO/open
+  projections, the `StartingWith`/`IgnoreCase`/`Top<N>` derived keywords, etc.) — so the docs set
+  accurate expectations rather than implying parity that isn't there.
+
+The companion plugin's `implement-data-repository` skill gains the same decision table + capability
+matrix + limitations (verified against the source: every cited symbol and operator exists).
+
 ## v26.06.73 (2026-06-07)
 
 ### Changed (benchmarks — rigor overhaul)
