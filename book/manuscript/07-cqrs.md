@@ -8,7 +8,7 @@ Lumen's wallet is now a first-class citizen of the domain. The `Wallet` aggregat
 
 **CQRS** — Command Query Responsibility Segregation — addresses all of this by drawing a bright line between the two things a service can do: *change state* and *read state*. Writes become **commands**: strongly typed, named, immutable messages that flow through a `CommandBus`. Reads become **queries**: equally typed messages that flow through a `QueryBus`. Each bus runs a fixed pipeline — validation, authorization, execution, then (for commands) domain event publishing. Your handler implements exactly one intent; the bus handles everything else.
 
-By the end of this chapter Lumen's controller dispatches commands and queries instead of calling the service directly. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` travel the command path; `GetWallet` and `GetBalance` travel the query path. The `Wallet` aggregate you built in Chapter 6 remains untouched — CQRS does not replace the domain model; it is the delivery mechanism for instructions to it.
+By the end of this chapter Lumen's controller dispatches commands and queries instead of calling the service directly. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` travel the command path; `GetWallet`, `GetBalance`, `ListWallets`, and `ListRichWallets` travel the query path. The `Wallet` aggregate you built in Chapter 6 remains untouched — CQRS does not replace the domain model; it is the delivery mechanism for instructions to it.
 
 ---
 
@@ -134,17 +134,25 @@ A command handler inherits from `CommandHandler[C, R]` and implements exactly on
 
 **Both decorators on every handler are required.** `@command_handler` registers the class with the `HandlerRegistry` by introspecting the first generic type argument — no manual registration needed. `@service` wires the handler into PyFly's DI container so constructor arguments are resolved and injected automatically at startup. The order matters: `@command_handler` on top, `@service` directly below. Without `@service`, the DI container never instantiates the class and the bus cannot find the handler; without `@command_handler`, the registry never maps the command type to the class. Omitting either decorator is a silent failure — the bus raises "no handler found" at dispatch time.
 
+**`@transactional()` turns `do_handle` into a committed unit of work.** Command handlers inject `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. When `@transactional()` runs `do_handle` it opens a fresh session from that factory, swaps it onto the repository for the duration of the call, commits on success, and rolls back on any exception. Without `@transactional()` the framework's shared session only flushes — the write survives within the request but is never committed to the database.
+
 Here is `OpenWalletHandler`:
 
-::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 7.4 — OpenWalletHandler: @command_handler + @service stacking
+::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 7.4 — OpenWalletHandler: @transactional() unit of work + upsert
 from __future__ import annotations
 
+from uuid import uuid4
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_entity
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.core.services.wallets.open_wallet_command import OpenWallet
 from lumen.models.entities.v1.wallet_entity import Wallet
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.eda import EventPublisher
 
 
@@ -154,35 +162,42 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
     """Open a new, empty wallet."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        # @transactional resolves the unit-of-work session from here.
+        self._session_factory = session_factory
 
-    async def do_handle(  # type: ignore[override]
-        self, command: OpenWallet
-    ) -> str:
-        wallet_id = await self._repository.next_id()
+    @transactional()
+    async def do_handle(self, command: OpenWallet) -> str:  # type: ignore[override]
+        wallet_id = f"wlt-{uuid4()}"
         wallet = Wallet.open(
             wallet_id=wallet_id,
             owner_id=command.owner_id,
             currency=command.currency,
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet_id
 :::
 
-Walk through `do_handle` step by step. `next_id()` allocates a stable prefixed identifier (`wlt-<uuid4>`). `Wallet.open(...)` calls the factory, which enforces the non-empty owner pre-condition and buffers a `WalletOpened` event. `repository.add(wallet)` persists the aggregate. Then `wallet.clear_events()` drains the buffer and `publish_domain_events` forwards each event to the EDA bus so downstream listeners can react. The handler returns the wallet ID, which flows back to the controller as the `send` return value.
+Walk through `do_handle` step by step. `f"wlt-{uuid4()}"` generates a stable prefixed identifier. `Wallet.open(...)` calls the factory, which enforces the non-empty owner pre-condition and buffers a `WalletOpened` event. `to_entity(wallet)` maps the aggregate to a flat `WalletEntity` row. `repository.upsert(...)` calls `session.merge` — a single call that inserts if no row exists or updates if one does — then flushes. Using `upsert` instead of `save` avoids an `IntegrityError` on the primary key: the aggregate owns its id, so both INSERT and UPDATE key on the same stable string. `wallet.clear_events()` drains the buffer and `publish_domain_events` forwards each event to the EDA bus. The `@transactional()` decorator commits the session on the way out. The handler returns the wallet ID, which flows back to the controller as the `send` return value.
 
-Note the constructor requirement: `super().__init__()` is mandatory on `CommandHandler`. Skip it and the base-class bookkeeping — correlation context, lifecycle hooks — is never initialized. Both the repository and the `EventPublisher` are injected by the DI container from type hints; no factory configuration is needed.
+Note the constructor requirement: `super().__init__()` is mandatory on `CommandHandler`. Skip it and the base-class bookkeeping — correlation context, lifecycle hooks — is never initialized. The repository, `EventPublisher`, and `session_factory` are all injected by the DI container from type hints; no factory configuration is needed.
 
 Here are the deposit and withdrawal handlers:
 
-::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 7.5 — DepositFundsHandler: load, act, save, drain events
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 7.5 — DepositFundsHandler: find_by_id → to_aggregate → act → upsert
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
@@ -190,6 +205,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.eda import EventPublisher
 
 
@@ -199,20 +215,26 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     """Credit funds to an existing wallet; returns the new balance."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
-    async def do_handle(  # type: ignore[override]
-        self, command: DepositFunds
-    ) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+    @transactional()
+    async def do_handle(self, command: DepositFunds) -> int:  # type: ignore[override]
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
+
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
+
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
@@ -220,6 +242,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 ::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listing 7.6 — WithdrawFundsHandler: identical pattern, overdraft refused by the aggregate
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
 from lumen.models.entities.v1.money import Money
@@ -227,6 +252,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
+from pyfly.data.relational.sqlalchemy import transactional
 from pyfly.eda import EventPublisher
 
 
@@ -236,27 +262,47 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
     """Debit funds from an existing wallet; returns the new balance."""
 
     def __init__(
-        self, repository: WalletRepository, events: EventPublisher
+        self,
+        repository: WalletRepository,
+        events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
-    async def do_handle(  # type: ignore[override]
-        self, command: WithdrawFunds
-    ) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+    @transactional()
+    async def do_handle(self, command: WithdrawFunds) -> int:  # type: ignore[override]
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
+
+        wallet = to_aggregate(entity)
         wallet.withdraw(Money(amount=command.amount, currency=wallet.currency))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
+
         await publish_domain_events(self._events, wallet.clear_events())
         return wallet.balance.amount
 :::
 
-`DepositFundsHandler` and `WithdrawFundsHandler` follow the classic pattern: load, guard, act, save, drain. The `AggregateNotFound` guard ensures you never pass a `None` wallet to `deposit` or `withdraw` — the bus translates the exception to a 404 before the controller sees it. `Money` is constructed from the command's `amount` and the *wallet's* currency — never a currency from the command itself — because the wallet owns that invariant. If `wallet.withdraw` refuses (balance would go negative), it raises `BusinessRuleViolation`, which propagates as HTTP 422 without a single line of error-handling code in the handler.
+`DepositFundsHandler` and `WithdrawFundsHandler` follow the classic pattern: **find → to_aggregate → act → to_entity → upsert → drain**. `repository.find_by_id` returns the flat `WalletEntity` row; `to_aggregate(entity)` rehydrates the rich domain object so the aggregate's invariants are in scope. `Money` is constructed from the command's `amount` and the *wallet's* currency — never a currency from the command itself — because the wallet owns that invariant. If `wallet.withdraw` refuses (balance would go negative), it raises `BusinessRuleViolation`, which propagates as HTTP 422 without a single line of error-handling code in the handler.
 
 Notice what is absent: no try/except blocks, no logging calls, no tracing setup. All of that belongs to the bus pipeline. The handler is a pure expression of business intent.
+
+### The entity↔aggregate mapper
+
+Command handlers do not interact with the repository through the domain aggregate. They interact through a flat `WalletEntity` row — the persistence shape the framework `Repository[WalletEntity, str]` understands — and use `wallet_mapper` to translate between the two worlds:
+
+```python
+# Aggregate → row (before upsert)
+to_entity(wallet)      # Wallet → WalletEntity
+
+# Row → aggregate (after find_by_id)
+to_aggregate(entity)   # WalletEntity → Wallet
+```
+
+This separation keeps the aggregate free of SQLAlchemy annotations and the repository free of domain logic. The mapper is a single module; changing the storage schema touches one file, not every handler.
 
 ### Sending a command
 
@@ -281,7 +327,7 @@ balance: int = await command_bus.send(
 ::: figure art/figures/07-cqrs.svg | Figure 7.1 — Commands flow to the write model; queries to the read model.
 
 !!! spring "Spring parity"
-    `CommandBus.send(command)` is the Python equivalent of Axon Framework's `CommandGateway.send(command)` or `CommandGateway.sendAndWait(command)`. Each command handler class corresponds to a method annotated with `@CommandHandler` in Axon, or a `@MessageHandler` in Spring Modulith's ApplicationEventPublisher model. The `@command_handler` decorator is PyFly's counterpart of `@CommandHandler`: it registers the handler with the registry by introspecting the generic type parameter, exactly as Axon resolves handler methods by parameter type. The `@service` stacking mirrors the fact that in Spring every `@CommandHandler` bean is also a Spring `@Component` — registration and injection are inseparable.
+    `CommandBus.send(command)` is the Python equivalent of Axon Framework's `CommandGateway.send(command)` or `CommandGateway.sendAndWait(command)`. Each command handler class corresponds to a method annotated with `@CommandHandler` in Axon, or a `@MessageHandler` in Spring Modulith's ApplicationEventPublisher model. The `@command_handler` decorator is PyFly's counterpart of `@CommandHandler`: it registers the handler with the registry by introspecting the generic type parameter, exactly as Axon resolves handler methods by parameter type. The `@service` stacking mirrors the fact that in Spring every `@CommandHandler` bean is also a Spring `@Component` — registration and injection are inseparable. The `@transactional()` decorator maps directly to Spring's `@Transactional`: both open a unit-of-work session, commit on success, and roll back on any exception — so `upsert` (backed by `session.merge`) is the Python analogue of `repository.save()` inside a `@Transactional` method.
 
 ---
 
@@ -289,7 +335,7 @@ balance: int = await command_bus.send(
 
 Commands travel one direction: into the write model. Queries are the return journey — they ask the system for a projection of current state and expect an answer, not a side effect.
 
-A **query** is a frozen dataclass that inherits from `Query[R]`, where `R` is the result type. Like commands, queries are immutable messages, but they carry no intent to change state. `query_bus.query(GetBalance(...))` loads fresh data from the repository and returns a typed DTO.
+A **query** is a frozen dataclass that inherits from `Query[R]`, where `R` is the result type. Like commands, queries are immutable messages, but they carry no intent to change state. `query_bus.query(GetBalance(...))` loads fresh data from the repository and returns a typed DTO. Queries do not need `@transactional()` — reads do not mutate state, so there is nothing to commit or roll back.
 
 Queries return **read DTOs** rather than domain aggregates. The separation is deliberate. If `GetWalletHandler` returned a `Wallet` aggregate, the API layer would be coupled to every field on the aggregate — a change to the domain model could silently break the API contract. A dedicated `WalletDto` Pydantic model projects exactly the fields the HTTP response needs. Add a field to `Wallet`? The projection changes only if you explicitly include it in the DTO. Remove a field from `Wallet`? The projection compiles until you clean it up.
 
@@ -329,10 +375,10 @@ Both queries carry only `wallet_id`. `GetWallet` returns a `WalletDto` — the f
 
 The query handlers live under the same `wallets/` package as the commands. **The same `@query_handler` + `@service` stacking applies**: `@query_handler` registers the class with the handler registry; `@service` wires it into the DI container. Both decorators are required for the same reasons as on command handlers.
 
-::: listing lumen/core/services/wallets/get_wallet_handler.py | Listing 7.9 — GetWalletHandler: load, map to DTO, return
+::: listing lumen/core/services/wallets/get_wallet_handler.py | Listing 7.9 — GetWalletHandler: find_by_id → entity_to_dto → return
 from __future__ import annotations
 
-from lumen.core.mappers.wallet_mapper import wallet_to_dto
+from lumen.core.mappers.wallet_mapper import entity_to_dto
 from lumen.core.services.wallets.get_wallet_query import GetWallet
 from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
 from lumen.models.repositories.wallet_repository import WalletRepository
@@ -347,17 +393,15 @@ class GetWalletHandler(QueryHandler[GetWallet, WalletDto | None]):
         super().__init__()
         self._repository = repository
 
-    async def do_handle(  # type: ignore[override]
-        self, query: GetWallet
-    ) -> WalletDto | None:
-        wallet = await self._repository.find(query.wallet_id)
-        return wallet_to_dto(wallet) if wallet is not None else None
+    async def do_handle(self, query: GetWallet) -> WalletDto | None:  # type: ignore[override]
+        entity = await self._repository.find_by_id(query.wallet_id)
+        return entity_to_dto(entity) if entity is not None else None
 :::
 
-::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 7.10 — GetBalanceHandler: same pattern, lighter projection
+::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 7.10 — GetBalanceHandler: @projection view via Mapper.project
 from __future__ import annotations
 
-from lumen.core.mappers.wallet_mapper import wallet_to_balance_dto
+from lumen.core.mappers.wallet_mapper import entity_to_balance_dto
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
 from lumen.models.repositories.wallet_repository import WalletRepository
@@ -372,14 +416,105 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
         super().__init__()
         self._repository = repository
 
-    async def do_handle(  # type: ignore[override]
-        self, query: GetBalance
-    ) -> BalanceDto | None:
-        wallet = await self._repository.find(query.wallet_id)
-        return wallet_to_balance_dto(wallet) if wallet is not None else None
+    async def do_handle(self, query: GetBalance) -> BalanceDto | None:  # type: ignore[override]
+        entity = await self._repository.find_by_id(query.wallet_id)
+        return entity_to_balance_dto(entity) if entity is not None else None
 :::
 
-Both handlers delegate projection to `wallet_mapper` — the single module that owns the DTO shape. `wallet_to_dto` fills in all six fields of `WalletDto` (including `balance` as a major-unit float via `balance.major_units`). `wallet_to_balance_dto` fills in the four fields of `BalanceDto`. Neither handler touches the Pydantic model directly; a field rename touches one file, not every handler.
+Both handlers delegate projection to `wallet_mapper` — the single module that owns the DTO shape. `entity_to_dto` fills in all six fields of `WalletDto` directly from the row. `entity_to_balance_dto` takes a different path: it calls `Mapper.project(entity, BalanceView)` against a `@projection`-marked interface that declares exactly the four fields the balance endpoint needs, with a registered transform that computes `balance` (major units) from `balance_minor`. The mapper copies only those declared fields — a read-side equivalent of Spring Data's interface projections. Neither handler touches the Pydantic model directly; a field rename touches one file.
+
+### Paged and specification queries
+
+The read side does not stop at single-resource lookups. Production systems need lists with pagination metadata and the ability to filter by runtime predicates. The framework handles both through the `Repository` base class.
+
+`ListWallets` wraps a `Pageable` (page number, size, sort) and asks the repository for a counted, sorted, limited slice. `ListRichWallets` adds a `min_minor` threshold and runs it through a composable `Specification` — a predicate object that can be combined with `&`, `|`, and `~` before execution.
+
+::: listing lumen/core/services/wallets/list_wallets_query.py | Listing 7.11 — ListWallets: a Pageable-carrying query
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
+from pyfly.data import Page, Pageable
+from pyfly.cqrs import Query
+
+
+@dataclass(frozen=True)
+class ListWallets(Query[Page[WalletDto]]):
+    """List wallets, one page at a time."""
+
+    pageable: Pageable
+:::
+
+::: listing lumen/core/services/wallets/list_rich_wallets_query.py | Listing 7.12 — ListRichWallets: adds a balance threshold for Specification filtering
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
+from pyfly.data import Page, Pageable
+from pyfly.cqrs import Query
+
+
+@dataclass(frozen=True)
+class ListRichWallets(Query[Page[WalletDto]]):
+    """List wallets whose balance is at least ``min_minor``, paged."""
+
+    min_minor: int
+    pageable: Pageable
+:::
+
+::: listing lumen/core/services/wallets/list_wallets_handler.py | Listing 7.13 — ListWalletsHandler: find_paginated + Page.map
+from __future__ import annotations
+
+from lumen.core.mappers.wallet_mapper import entity_to_dto
+from lumen.core.services.wallets.list_wallets_query import ListWallets
+from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
+from lumen.models.repositories.wallet_repository import WalletRepository
+from pyfly.container import service
+from pyfly.cqrs import QueryHandler, query_handler
+from pyfly.data import Page
+
+
+@query_handler
+@service
+class ListWalletsHandler(QueryHandler[ListWallets, Page[WalletDto]]):
+    def __init__(self, repository: WalletRepository) -> None:
+        super().__init__()
+        self._repository = repository
+
+    async def do_handle(self, query: ListWallets) -> Page[WalletDto]:  # type: ignore[override]
+        page = await self._repository.find_paginated(pageable=query.pageable)
+        return page.map(entity_to_dto)
+:::
+
+::: listing lumen/core/services/wallets/list_rich_wallets_handler.py | Listing 7.14 — ListRichWalletsHandler: Specification + find_all_by_spec_paged
+from __future__ import annotations
+
+from lumen.core.mappers.wallet_mapper import entity_to_dto
+from lumen.core.services.wallets.list_rich_wallets_query import ListRichWallets
+from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
+from lumen.models.repositories.wallet_repository import WalletRepository
+from pyfly.container import service
+from pyfly.cqrs import QueryHandler, query_handler
+from pyfly.data import Page
+
+
+@query_handler
+@service
+class ListRichWalletsHandler(QueryHandler[ListRichWallets, Page[WalletDto]]):
+    def __init__(self, repository: WalletRepository) -> None:
+        super().__init__()
+        self._repository = repository
+
+    async def do_handle(self, query: ListRichWallets) -> Page[WalletDto]:  # type: ignore[override]
+        page = await self._repository.find_rich(query.min_minor, query.pageable)
+        return page.map(entity_to_dto)
+:::
+
+`find_paginated` is inherited from the framework `Repository` base. It counts the total rows, applies the `Pageable`'s sort, and slices with `LIMIT`/`OFFSET` — returning a `Page[WalletEntity]` that carries `items`, `total`, `page`, `size`, `total_pages`, `has_next`, and `has_previous`. `Page.map(entity_to_dto)` transforms the items without touching the metadata. The controller wraps the result in a `PageDto` for the wire.
+
+`find_rich` is defined on `WalletRepository` itself and delegates to the inherited `find_all_by_spec_paged`. It constructs a `Specification` — a composable `WHERE` predicate — and passes it alongside the `Pageable`. The framework appends the `WHERE` clause, the sort, and the `LIMIT`/`OFFSET`, then executes a count query for the total. The handler calls `repo.find_rich(query.min_minor, query.pageable)` and maps the page exactly as before.
 
 Executing a query goes through `QueryBus.query`:
 
@@ -411,57 +546,61 @@ from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
 
 Why concrete classes? PyFly's CQRS auto-configuration registers exactly one instance of each bus in the DI container. Injecting by the concrete type is unambiguous — no protocol dispatch, and the type checker sees the full `send` / `query` surface. Using a protocol alias would require an explicit container binding; the concrete type works out of the box.
 
+### Route ordering: why the single-resource handlers are named `wallet_*`
+
+The framework registers a controller's routes in **alphabetical method-name order**; Starlette's router then applies first-registered-wins matching. This means a literal segment like `/rich` must be registered *before* the path variable `/{wallet_id}` — otherwise every `GET /api/v1/wallets/rich` request would match the variable route and look for a wallet whose id is the string `"rich"`.
+
+The collection handlers are named `list_wallets` and `list_rich_wallets`; the single-resource handlers are named `wallet_detail` and `wallet_balance`. Alphabetically, `l` sorts before `w`, so the collection routes (`GET /`, `GET /rich`) are always registered ahead of the parameterised routes (`GET /{wallet_id}`, `GET /{wallet_id}/balance`). If you rename `wallet_detail` to something that sorts before `list_*`, the `/rich` route will silently break.
+
 Here is the complete controller:
 
-::: listing lumen/web/controllers/wallet_controller.py | Listing 7.11 — WalletController: injects DefaultCommandBus + DefaultQueryBus and dispatches messages
+::: listing lumen/web/controllers/wallet_controller.py | Listing 7.15 — WalletController: DefaultCommandBus + DefaultQueryBus + paged list endpoints
 from __future__ import annotations
 
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.core.services.wallets.get_wallet_query import GetWallet
+from lumen.core.services.wallets.list_rich_wallets_query import ListRichWallets
+from lumen.core.services.wallets.list_wallets_query import ListWallets
 from lumen.core.services.wallets.open_wallet_command import OpenWallet
 from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
 from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
 from lumen.interfaces.dtos.v1.deposit_request import DepositRequest
 from lumen.interfaces.dtos.v1.open_wallet_request import OpenWalletRequest
+from lumen.interfaces.dtos.v1.page_dto import PageDto
 from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
 from pyfly.container import rest_controller
 from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
+from pyfly.data import Pageable, Sort
 from pyfly.kernel import ResourceNotFoundException
 from pyfly.web import (
-    Body, PathVar, Valid,
+    Body, PathVar, QueryParam, Valid,
     get_mapping, post_mapping, request_mapping,
 )
+
+#: Newest-first ordering shared by the list endpoints.
+_NEWEST_FIRST = Sort.by("created_at").descending()
 
 
 @rest_controller
 @request_mapping("/api/v1/wallets")
 class WalletController:
-    """Wallet REST API: open, deposit, withdraw, inspect.
-
-    Injects the concrete ``DefaultCommandBus`` / ``DefaultQueryBus``
-    beans registered by CQRS auto-configuration.  No business logic
-    lives here — each endpoint builds a command or query and dispatches
-    it through the bus.
-    """
+    """Digital-wallet REST API: open, deposit, withdraw, list, inspect."""
 
     def __init__(
-        self,
-        commands: DefaultCommandBus,
-        queries: DefaultQueryBus,
+        self, commands: DefaultCommandBus, queries: DefaultQueryBus
     ) -> None:
         self._commands = commands
         self._queries = queries
+
+    # --- commands --------------------------------------------------------
 
     @post_mapping("", status_code=201)
     async def open_wallet(
         self, request: Valid[Body[OpenWalletRequest]]
     ) -> dict[str, str]:
         wallet_id = await self._commands.send(
-            OpenWallet(
-                owner_id=request.owner_id,
-                currency=request.currency,
-            )
+            OpenWallet(owner_id=request.owner_id, currency=request.currency)
         )
         return {"wallet_id": wallet_id}
 
@@ -487,8 +626,36 @@ class WalletController:
         )
         return {"wallet_id": wallet_id, "balance_minor": balance}
 
+    # --- paged / specification queries (registered before /{wallet_id}) --
+
+    @get_mapping("")
+    async def list_wallets(
+        self, page: QueryParam[int] = 1, size: QueryParam[int] = 20
+    ) -> PageDto[WalletDto]:
+        result = await self._queries.query(
+            ListWallets(pageable=Pageable.of(page, size, _NEWEST_FIRST))
+        )
+        return PageDto.from_page(result)
+
+    @get_mapping("/rich")
+    async def list_rich_wallets(
+        self,
+        min_minor: QueryParam[int] = 0,
+        page: QueryParam[int] = 1,
+        size: QueryParam[int] = 20,
+    ) -> PageDto[WalletDto]:
+        result = await self._queries.query(
+            ListRichWallets(
+                min_minor=min_minor,
+                pageable=Pageable.of(page, size, _NEWEST_FIRST),
+            )
+        )
+        return PageDto.from_page(result)
+
+    # --- single-wallet queries (named wallet_* so they sort after list_*) -
+
     @get_mapping("/{wallet_id}")
-    async def get_wallet(self, wallet_id: PathVar[str]) -> WalletDto:
+    async def wallet_detail(self, wallet_id: PathVar[str]) -> WalletDto:
         result = await self._queries.query(GetWallet(wallet_id=wallet_id))
         if result is None:
             raise ResourceNotFoundException(
@@ -499,7 +666,7 @@ class WalletController:
         return result
 
     @get_mapping("/{wallet_id}/balance")
-    async def get_balance(self, wallet_id: PathVar[str]) -> BalanceDto:
+    async def wallet_balance(self, wallet_id: PathVar[str]) -> BalanceDto:
         result = await self._queries.query(
             GetBalance(wallet_id=wallet_id)
         )
@@ -518,7 +685,9 @@ Look at `open_wallet`. Before, it called `self._service.open_wallet(owner_id=...
 
 The request DTOs (`OpenWalletRequest`, `DepositRequest`) are Pydantic models in `lumen/interfaces/dtos/v1/`. `OpenWalletRequest` validates `owner_id` length and constrains `currency` to the `Currency` enum. `DepositRequest` is shared by both the deposit and withdraw endpoints — both move a positive `amount` in the wallet's own currency. Field-level constraints in those DTOs are enforced by `Valid[Body[...]]` before the handler is ever called.
 
-The `get_wallet` and `get_balance` methods show the only remaining HTTP concern in the controller: translating a `None` query result into a 404 via `ResourceNotFoundException`. That mapping belongs here because 404 is an HTTP status code and the handler deliberately has no HTTP knowledge. Return types are declared as `WalletDto` and `BalanceDto` — Pydantic models the framework serializes to JSON automatically.
+The paged list endpoints (`list_wallets`, `list_rich_wallets`) build a `Pageable` from the query-string parameters, dispatch the query through the bus, and wrap the resulting `Page[WalletDto]` in a `PageDto` for the wire. `PageDto` is a Pydantic model that mirrors all the `Page` metadata fields — `total`, `total_pages`, `has_next`, `has_previous` — so clients get consistent pagination envelopes without a custom serializer.
+
+The `wallet_detail` and `wallet_balance` methods show the only remaining HTTP concern in the controller: translating a `None` query result into a 404 via `ResourceNotFoundException`. That mapping belongs here because 404 is an HTTP status code and the handler deliberately has no HTTP knowledge. Return types are declared as `WalletDto` and `BalanceDto` — Pydantic models the framework serializes to JSON automatically.
 
 !!! tip "Let the bus raise"
     You do not need to catch `CommandProcessingException` or `QueryProcessingException` in the controller unless you want to customize the error shape. The global exception handler maps `AggregateNotFound` to 404 and `BusinessRuleViolation` to 422 — the same as before. The bus exceptions propagate those originals transparently.
@@ -573,7 +742,7 @@ Both commands and queries expose an `authorize()` hook. Return `AuthorizationRes
 
 A clean rule of thumb: use `authorize()` on the command for **operation-level** checks — who is allowed to call this command at all — and leave **resource-level** decisions (can this caller access *this specific* wallet?) to the handler, which has the loaded aggregate in scope:
 
-::: listing lumen/cqrs/commands_auth.py | Listing 7.12 — Authorization hook on a command
+::: listing lumen/cqrs/commands_auth.py | Listing 7.16 — Authorization hook on a command
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -629,20 +798,26 @@ The three headers — `X-Correlation-ID`, `X-Trace-ID`, and `X-Span-ID` — foll
 
 Part II is complete. Lumen now has a full vertical slice from HTTP to domain and back — one built on architectural decisions that will scale without rewriting.
 
-In Chapter 5 you gave the system persistence: a `WalletRepository` port backed by an `InMemoryWalletRepository` (the `@primary` default) and a `SqlAlchemyWalletRepository` mapped to a `WalletRow(Base)` table via SQLAlchemy 2.0 async, with `ddl-auto: create` handling schema lifecycle. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
+In Chapter 5 you gave the system persistence: a `WalletRepository` subclassing `Repository[WalletEntity, str]` — the framework's Spring-Data-style generic repository that provides `find_by_id`, `find_paginated`, `find_all_by_spec_paged`, and more out of the box, with the `AsyncSession` injected by relational auto-configuration. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
 
-In this chapter you separated the write model from the read model. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing automatically for every command. `GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline without the event-publishing step. Each handler carries the `@command_handler` + `@service` (or `@query_handler` + `@service`) stack: the first decorator registers the class by introspecting its generic type argument; the second wires it into the DI container so constructor dependencies are injected automatically. Both decorators are required. Each handler is a small, focused class: `next_id` → `open` → `add` → `clear_events` → `publish` for commands; `find` → `map_to_dto` → `return` for queries.
+In this chapter you separated the write model from the read model. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing automatically for every command. Each command handler carries `@transactional()` on `do_handle`: the decorator opens a committed unit of work from `self._session_factory`, swaps the session onto the repository, commits on success, and rolls back on failure. Persistence goes through `repository.upsert` — backed by `session.merge` — so INSERT and UPDATE share a single code path keyed on the aggregate's own id.
 
-`WalletController` no longer knows about the service layer. It injects `DefaultCommandBus` and `DefaultQueryBus`, builds a command or query from the HTTP request, dispatches it, and either returns the result or raises a domain exception. Adding a new command now means three things: define a frozen dataclass, implement one `do_handle` decorated with `@command_handler` + `@service`, and add one endpoint that calls `self._commands.send`. The pipeline applies automatically.
+`GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline without the event-publishing step, and without `@transactional()` because reads do not commit. `GetBalanceHandler` projects through a `@projection`-marked `BalanceView` interface and `Mapper.project`, copying only the declared fields and applying a registered major-unit transform. `ListWallets` and `ListRichWallets` round out the query side: `find_paginated` returns a counted, sorted, offset-limited `Page[WalletEntity]`; `find_all_by_spec_paged` runs a composable `Specification` predicate on top of the same pagination machinery. Both use `Page.map(entity_to_dto)` to project items without touching the metadata.
 
-The aggregate you built in Chapter 6 is unchanged. CQRS does not replace the domain model — it delivers instructions to it. That principle carries forward into the next part of the book, where commands begin crossing service boundaries and state changes are recorded permanently as events in an immutable log.
+Each handler carries the `@command_handler` + `@service` (or `@query_handler` + `@service`) stack: the first decorator registers the class by introspecting its generic type argument; the second wires it into the DI container so constructor dependencies are injected automatically.
+
+`WalletController` no longer knows about the service layer. It injects `DefaultCommandBus` and `DefaultQueryBus`, builds a command or query from the HTTP request, dispatches it, and either returns the result or raises a domain exception. Single-resource handler methods are named `wallet_detail` and `wallet_balance` — a deliberate choice so they sort alphabetically *after* the collection methods `list_wallets` and `list_rich_wallets`, ensuring the literal `/rich` segment is registered before the `/{wallet_id}` variable route.
+
+Adding a new command now means three things: define a frozen dataclass, implement one `do_handle` decorated with `@command_handler` + `@service` and annotated with `@transactional()`, and add one endpoint that calls `self._commands.send`. The pipeline applies automatically.
 
 ---
 
 ## Try it yourself {.exercises}
 
-1. **Trace the full lifecycle in the test suite.** Open `samples/lumen/tests/test_cqrs_flow.py` and run it against a real database using Testcontainers (Chapter 11). The test `test_full_wallet_lifecycle` opens a wallet, deposits 1 500 minor units, withdraws 500, then queries both `GetWallet` and `GetBalance`. Step through it with a debugger: confirm that `wallet.clear_events()` drains the `FundsDeposited` and `FundsWithdrawn` events after each `repository.add` call, and that `GetWallet` returns a `WalletDto` with `balance_minor == 1000` and `balance == 10.0`.
+1. **Trace the full lifecycle in the test suite.** Open `samples/lumen/tests/test_cqrs_flow.py` and run it against a real database using Testcontainers (Chapter 11). The test `test_full_wallet_lifecycle` opens a wallet, deposits 1 500 minor units, withdraws 500, then queries both `GetWallet` and `GetBalance`. Step through it with a debugger: confirm that `wallet.clear_events()` drains the `FundsDeposited` and `FundsWithdrawn` events after each `upsert` call, and that `GetWallet` returns a `WalletDto` with `balance_minor == 1000` and `balance == 10.0`.
 
-2. **Add a `ListWallets` query with paging.** Define `ListWallets(Query[list[WalletDto]])` with `owner_id: str | None = None`, `page: int = 1`, and `size: int = 20`. Implement `ListWalletsHandler(QueryHandler[ListWallets, list[WalletDto]])` — decorated with `@query_handler` + `@service` — that delegates to `WalletRepository.find_all(owner_id=..., page=..., size=...)` (add that method to the repository if it does not exist yet). Add a `GET /api/v1/wallets` endpoint to `WalletController` that reads `owner_id`, `page`, and `size` as query parameters and dispatches the query. Verify that `GET /api/v1/wallets?owner_id=u-1&page=1&size=5` returns the correct subset.
+2. **Observe `upsert` vs `save`.** In a test, call `DepositFunds` twice on the same wallet without `@transactional()` and observe the `IntegrityError`. Then restore `@transactional()` and verify both deposits commit. Open `WalletRepository.upsert` and trace how `session.merge` resolves the primary-key conflict that a plain `INSERT` would raise.
 
-3. **Add authorization to `WithdrawFunds`.** Extend `WithdrawFunds` with an `initiated_by: str` field. Override `authorize()` to return `AuthorizationResult.failure("withdraw", "Initiator is required")` when `initiated_by` is blank, and `AuthorizationResult.success()` otherwise. Update `WithdrawFundsHandler.do_handle` to record `command.initiated_by` in the `FundsWithdrawn` event payload. Write a test that calls `await WithdrawFunds(wallet_id="wlt-1", amount=100, initiated_by="").authorize()` and asserts that the result denies authorization.
+3. **Add a `ListByOwner` query.** Define `ListByOwner(Query[list[WalletDto]])` with an `owner_id: str` field. Implement `ListByOwnerHandler` — decorated with `@query_handler` + `@service` — that calls `WalletRepository.find_by_owner_id(query.owner_id)` (the derived query stub already exists) and maps the result list with `entity_to_dto`. Add a `GET /api/v1/wallets/by-owner/{owner_id}` endpoint to `WalletController`. Ensure the new endpoint method name sorts before `wallet_detail` so Starlette matches the literal `/by-owner/…` segment first.
+
+4. **Add authorization to `WithdrawFunds`.** Extend `WithdrawFunds` with an `initiated_by: str` field. Override `authorize()` to return `AuthorizationResult.failure("withdraw", "Initiator is required")` when `initiated_by` is blank, and `AuthorizationResult.success()` otherwise. Update `WithdrawFundsHandler.do_handle` to record `command.initiated_by` in the `FundsWithdrawn` event payload. Write a test that calls `await WithdrawFunds(wallet_id="wlt-1", amount=100, initiated_by="").authorize()` and asserts that the result denies authorization.

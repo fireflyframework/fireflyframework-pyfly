@@ -425,7 +425,7 @@ class WalletApplicationService:
 
     def __init__(
         self,
-        repo: object,              # typed as WalletDomainRepository in practice
+        repo: object,              # typed as WalletRepository in practice
         events: EventPublisher,
     ) -> None:
         self._repo = repo
@@ -472,99 +472,88 @@ The alternative is two models that coexist without knowing about each other — 
 | Model | Contains | Knows about |
 |---|---|---|
 | `Wallet` | Business rules, domain events, invariants | Nothing outside `pyfly.domain` |
-| `WalletRow` | Five columns: `id`, `owner_id`, `currency`, `balance_minor`, `created_at` | Only SQLAlchemy |
+| `WalletEntity` | Five columns: `id`, `owner_id`, `currency`, `balance_minor`, `created_at` | Only SQLAlchemy + `pyfly.data` |
 
-`Wallet` is pure Python: no `Mapped[]` annotations, no `__tablename__`. You can instantiate it in a unit test with two lines and exercise every invariant without a database connection. `WalletRow` is pure persistence: it knows nothing about domain rules or events. The SQLAlchemy adapter converts between them on every crossing.
+`Wallet` is pure Python: no `Mapped[]` annotations, no `__tablename__`. You can instantiate it in a unit test with two lines and exercise every invariant without a database connection. `WalletEntity` is pure persistence: it subclasses `Base` from `pyfly.data.relational.sqlalchemy`, carries SQLAlchemy 2.0 typed columns, and knows nothing about domain rules or events. The framework's `Repository[WalletEntity, str]` (Chapter 5) stores and retrieves rows; a thin mapper converts between the row and the aggregate on every crossing.
 
-Listing 6.7 shows the key translation as a standalone mapper class to make the pattern explicit. In the real `SqlAlchemyWalletRepository`, the same conversion lives inside `_to_aggregate` and `add`:
+Listing 6.7 shows `WalletEntity` — the ORM row — followed by the two mapper functions that cross the boundary:
 
-::: listing lumen/domain/wallet_mapper.py | Listing 6.7 — WalletMapper: converting between the domain aggregate and the persistence row
-from lumen.interfaces.enums.v1.currency import Currency
-from lumen.models.entities.v1.money import Money
-from lumen.models.entities.v1.wallet_entity import Wallet
+::: listing lumen/models/entities/v1/wallet_orm.py | Listing 6.7 — WalletEntity: the SQLAlchemy persistence row
+from __future__ import annotations
 
+from datetime import UTC, datetime
 
-class WalletRow:
-    """Simplified stand-in for the SQLAlchemy WalletRow (see sql_wallet_repository.py)."""
-    id: str
-    owner_id: str
-    currency: str
-    balance_minor: int
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from pyfly.data.relational.sqlalchemy import Base
 
 
-class WalletMapper:
-    """Converts between the Wallet domain aggregate and WalletRow."""
+class WalletEntity(Base):
+    """One persisted wallet row, keyed by the aggregate's own string id."""
 
-    @staticmethod
-    def to_row(wallet: Wallet) -> WalletRow:
-        """Produce a WalletRow suitable for SQLAlchemy persistence."""
-        row = WalletRow()
-        row.id = wallet.id  # type: ignore[assignment]
-        row.owner_id = wallet.owner_id
-        row.currency = wallet.balance.currency.value
-        row.balance_minor = wallet.balance.amount  # integer minor units
-        return row
+    __tablename__ = "wallets"
 
-    @staticmethod
-    def to_domain(row: WalletRow) -> Wallet:
-        """Reconstruct a Wallet aggregate from a persisted WalletRow."""
-        currency = Currency(row.currency)
-        return Wallet(
-            id=row.id,
-            owner_id=row.owner_id,
-            balance=Money(amount=row.balance_minor, currency=currency),
-        )
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC)
+    )
 :::
 
-**How it works.** `to_row` writes `wallet.balance.amount` (an integer) directly into `balance_minor` — no float conversion. `to_domain` reconstructs a `Currency` enum from the stored ISO string via `Currency(row.currency)`, then builds a `Money` from the raw integer minor-unit value. There is no floating-point boundary crossing anywhere: the database stores the integer, the domain object holds the integer, and the mapper passes it straight through.
-
-The mapper is intentionally narrow. It does not enforce rules — `Wallet.__init__` and the behaviour methods do that. It does not publish events — the application service does that. It only translates shape, so you can read it once and trust that it will never surprise you.
-
-**The domain repository.** The repository the application service uses speaks entirely in `Wallet` aggregates — it never exposes a `WalletRow`. PyFly's `DomainRepository` protocol from `pyfly.domain` describes the contract, and the concrete implementation converts between aggregate and row on every crossing. The application service never imports `SqlAlchemyWalletRepository` or SQLAlchemy at all:
-
-::: listing lumen/domain/wallet_repository.py | Listing 6.8 — WalletDomainRepository: a DomainRepository that maps to WalletRow under the hood
-import uuid
-
-from pyfly.container import repository
-from pyfly.domain import DomainRepository
+::: listing lumen/core/mappers/wallet_mapper.py | Listing 6.8 — wallet_mapper: pure functions that cross the domain/persistence boundary
+from __future__ import annotations
 
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
 from lumen.models.entities.v1.wallet_entity import Wallet
+from lumen.models.entities.v1.wallet_orm import WalletEntity
 
 
-@repository
-class WalletDomainRepository(DomainRepository[Wallet, str]):
-    """
-    Speaks Wallet aggregates to the application layer.
-    Delegates to SqlAlchemyWalletRepository for actual SQL.
-    """
+def to_entity(wallet: Wallet) -> WalletEntity:
+    """Flatten a Wallet aggregate into a persistable row."""
+    assert wallet.id is not None
+    return WalletEntity(
+        id=wallet.id,
+        owner_id=wallet.owner_id,
+        currency=wallet.currency.value,
+        balance_minor=wallet.balance.amount,
+        created_at=wallet.created_at,
+    )
 
-    def __init__(self, sql_repo: object) -> None:  # SqlAlchemyWalletRepository
-        self._sql_repo = sql_repo
 
-    async def find(self, wallet_id: str) -> Wallet | None:
-        return await self._sql_repo.find(wallet_id)  # already maps to Wallet
-
-    async def save(self, wallet: Wallet) -> Wallet:
-        return await self._sql_repo.add(wallet)
-
-    async def add(self, wallet: Wallet) -> Wallet:
-        return await self._sql_repo.add(wallet)
-
-    async def remove(self, wallet: Wallet) -> None:
-        await self._sql_repo.remove(wallet)
-
-    async def next_id(self) -> str:
-        return await self._sql_repo.next_id()
+def to_aggregate(entity: WalletEntity) -> Wallet:
+    """Rehydrate a Wallet aggregate from a persistence row."""
+    currency = Currency(entity.currency)
+    return Wallet(
+        id=entity.id,
+        owner_id=entity.owner_id,
+        balance=Money(amount=entity.balance_minor, currency=currency),
+        created_at=entity.created_at,
+    )
 :::
 
-**How it works.** `@repository` registers the class in the IoC container and makes it available for injection. Its constructor receives `SqlAlchemyWalletRepository`, which already speaks `Wallet` aggregates (the row-to-aggregate conversion lives inside `_to_aggregate`). Every method delegates in a single call: `find` returns `Wallet | None`, `add` and `save` both upsert via `sql_repo.add`, `remove` passes the aggregate through, and `next_id` delegates to the SQL repo's UUID generator. The `save` alias exists so callers thinking in update semantics can express that intent without caring whether the store is upsert-based.
+**How it works.** `WalletEntity` subclasses `Base` rather than carrying any domain logic, so importing it registers the `wallets` table in `Base.metadata`; the framework's `EngineLifecycle` creates the table on startup when `ddl-auto=create` is set. The primary key is the aggregate's own string id (`wlt-…`) — not a surrogate — so the row and the `Wallet` share one identity and no translation is needed.
 
-This is the hexagonal architecture from Figure 5.1: the application layer depends on the domain repository port; the adapter depends on both the port and the SQLAlchemy `WalletRepository`. No domain code ever sees a SQLAlchemy type.
+`to_entity` writes `wallet.balance.amount` (an integer) directly into `balance_minor` — no float conversion. `to_aggregate` reconstructs a `Currency` enum from the stored ISO-4217 string via `Currency(entity.currency)`, then builds a `Money` from the raw integer minor-unit value. The `created_at` field is preserved on the round-trip so rehydrated aggregates carry their original timestamp. There is no floating-point boundary crossing anywhere.
+
+The mapper is intentionally narrow. It does not enforce rules — `Wallet.__init__` and the behaviour methods do that. It does not publish events — the application service does that. It only translates shape.
+
+**The repository.** The application service never interacts with `WalletEntity` directly. Instead a command handler calls `wallet_mapper.to_entity(wallet)` before persisting and `wallet_mapper.to_aggregate(entity)` after loading, while the framework `WalletRepository(Repository[WalletEntity, str])` handles all SQL. Chapter 5 covers `Repository` in full; the key point here is that `Wallet` itself never imports SQLAlchemy — the aggregate stays free of persistence concerns across both sides of the mapper boundary.
 
 !!! spring "Spring parity"
-    This double-layer repository is the Python equivalent of the pattern advocated in Vaughn Vernon's *Implementing Domain-Driven Design* for Spring: a `WalletRepository` interface (domain port), a `WalletJpaRepository` (Spring Data JPA), and a `WalletRepositoryImpl` that calls the JPA repository and maps between `Wallet` aggregate and `WalletJpaEntity`. The row-to-aggregate conversion inside `SqlAlchemyWalletRepository._to_aggregate` corresponds to MapStruct's generated code or a hand-written `WalletAssembler` in that world. The structure is identical; the boilerplate is less.
+    This two-model-plus-mapper structure is the Python equivalent of the pattern
+    advocated in Vaughn Vernon's *Implementing Domain-Driven Design* for Spring:
+    a `WalletJpaEntity` annotated with `@Entity` (the persistence row), a
+    `Wallet` domain object (the aggregate), and a `WalletAssembler` or
+    MapStruct-generated mapper that translates between them. Spring Data JPA's
+    `JpaRepository<WalletJpaEntity, String>` corresponds to PyFly's
+    `Repository[WalletEntity, str]`. The structure is identical; the boilerplate
+    is less.
 
 ---
 
@@ -638,7 +627,7 @@ Lumen's wallet is now a first-class domain model.
 
 `Wallet(AggregateRoot[str])` is the consistency boundary. Its factory `open` and behaviour methods `deposit`/`withdraw` enforce all three invariants — no overdraft, no cross-currency operations, no non-positive amounts — by raising `BusinessRuleViolation` with a stable rule slug. Every state change queues a domain event (`WalletOpened`, `FundsDeposited`, `FundsWithdrawn`); the post-operation balance is recorded in each event so subscribers need no callback. After a successful save the application service drains events with `clear_events()` and hands them to `EventPublisher`.
 
-The persistence layer sees only `WalletRow` (five columns, no domain logic). `SqlAlchemyWalletRepository._to_aggregate` rehydrates the row into a `Wallet`, and `WalletDomainRepository` wraps the adapter to present a pure-aggregate interface to the application layer. `Specification[Wallet]` gives you a composable, callable predicate for eligibility checks that live outside the aggregate boundary.
+The persistence layer sees only `WalletEntity` (five columns, no domain logic). `to_aggregate` in `wallet_mapper` rehydrates the row into a `Wallet`, and `to_entity` flattens it back; the framework `WalletRepository(Repository[WalletEntity, str])` handles all SQL without the aggregate ever importing SQLAlchemy. `Specification[Wallet]` gives you a composable, callable predicate for eligibility checks that live outside the aggregate boundary.
 
 The controller is untouched. The service shrank. The rules are enforced by the object that owns them.
 
