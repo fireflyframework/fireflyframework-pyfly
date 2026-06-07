@@ -16,10 +16,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from pyfly.messaging.ports.outbound import MessageHandler
 from pyfly.messaging.types import Message
+
+logger = logging.getLogger(__name__)
 
 
 class KafkaAdapter:
@@ -116,6 +119,16 @@ class KafkaAdapter:
                     headers=headers,
                 )
                 for handler in handlers:
-                    await handler(msg)
+                    try:
+                        await handler(msg)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # Per-message error isolation: one handler failure must not kill the
+                        # consumer (which would silently stop processing all later messages).
+                        logger.exception(
+                            "kafka_message_handler_failed",
+                            extra={"topic": record.topic, "key": record.key},
+                        )
         except asyncio.CancelledError:
             pass
