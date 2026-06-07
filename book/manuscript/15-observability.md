@@ -59,7 +59,7 @@ without your team even noticing.
 Structured logging replaces the interpolated string with an event name and
 explicit key-value pairs. The pairs are rendered as JSON in production and as
 readable key=value in development. A log aggregation system ingests JSON
-natively; you query on `order_id` or `customer_id` as first-class fields.
+natively; you query on `wallet_id` or `owner_id` as first-class fields.
 
 ### get_logger
 
@@ -72,11 +72,11 @@ from pyfly.logging import get_logger
 
 logger = get_logger("lumen.wallet")
 
-logger.info("wallet_created", wallet_id="w-001", owner="acme")
-logger.warning("balance_low", wallet_id="w-001", remaining=3)
+logger.info("wallet_opened", wallet_id="wlt-001", owner_id="usr-42")
+logger.warning("balance_low", wallet_id="wlt-001", remaining=300)
 logger.error(
-    "payment_failed",
-    wallet_id="w-001",
+    "deposit_rejected",
+    wallet_id="wlt-001",
     reason="insufficient_funds",
 )
 :::
@@ -84,15 +84,15 @@ logger.error(
 In development with `format: console` the output reads naturally:
 
 ```
-10:30:00 [info    ] wallet_created  wallet_id=w-001 owner=acme
-10:30:01 [warning ] balance_low     wallet_id=w-001 remaining=3
-10:30:02 [error   ] payment_failed  wallet_id=w-001 reason=insufficient_funds
+10:30:00 [info    ] wallet_opened   wallet_id=wlt-001 owner_id=usr-42
+10:30:01 [warning ] balance_low     wallet_id=wlt-001 remaining=300
+10:30:02 [error   ] deposit_rejected wallet_id=wlt-001 reason=insufficient_funds
 ```
 
 In production with `format: json` every line is a self-contained JSON object:
 
 ```json
-{"event":"wallet_created","wallet_id":"w-001","owner":"acme",
+{"event":"wallet_opened","wallet_id":"wlt-001","owner_id":"usr-42",
  "timestamp":"2026-06-07T10:30:00Z","level":"info",
  "logger":"lumen.wallet"}
 ```
@@ -115,7 +115,7 @@ your code. An environment variable `PYFLY_LOGGING_LEVEL_ROOT=WARNING` overrides
 the config key, which is useful for staging builds.
 
 !!! tip "Why not stdlib `logging` directly?"
-    `logging.getLogger("x").info("event", wallet_id="w-001")` raises
+    `logging.getLogger("x").info("event", wallet_id="wlt-001")` raises
     `TypeError` — the stdlib rejects keyword arguments. `get_logger` guarantees
     the structured signature works regardless of which adapter is active.
 
@@ -135,23 +135,23 @@ from pyfly.logging import get_logger
 logger = get_logger("lumen.wallet")
 
 
-async def handle_deposit(wallet_id: str, amount: int, user_id: str) -> dict:
+async def handle_deposit(wallet_id: str, amount: int, owner_id: str) -> dict:
     structlog.contextvars.bind_contextvars(
         wallet_id=wallet_id,
-        user_id=user_id,
+        owner_id=owner_id,
     )
 
     logger.info("deposit_started", amount=amount)
     # ... business logic ...
-    result = {"wallet_id": wallet_id, "new_balance": 1050}
+    result = {"wallet_id": wallet_id, "new_balance": 1350}
     logger.info("deposit_completed", new_balance=result["new_balance"])
 
-    structlog.contextvars.unbind_contextvars("wallet_id", "user_id")
+    structlog.contextvars.unbind_contextvars("wallet_id", "owner_id")
     return result
 :::
 
 Every `logger.*` call inside `handle_deposit` — including calls deep in
-downstream service methods — carries `wallet_id` and `user_id` without any
+downstream service methods — carries `wallet_id` and `owner_id` without any
 further plumbing.
 
 ### PII redaction
@@ -266,24 +266,50 @@ The `@timed` decorator records how long an async or sync function takes to run,
 using a labeled histogram. It works on any callable and adds `class`, `method`,
 and `exception` labels automatically:
 
-::: listing lumen/wallet/service.py | Listing 15.4 — @timed on a deposit handler
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.4 — @timed on DepositFundsHandler
+from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.domain import AggregateNotFound
+from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, timed
+
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.event_publishing import publish_domain_events
+from lumen.models.entities.v1.money import Money
+from lumen.models.repositories.wallet_repository import WalletRepository
 
 registry = MetricsRegistry()
 
 
-class WalletService:
+@command_handler
+@service
+class DepositFundsHandler(CommandHandler[DepositFunds, int]):
+    """Credit funds to an existing wallet; returns the new balance."""
 
-    @timed(registry, "lumen.deposit.duration", "Time to process a deposit")
-    async def deposit(self, wallet_id: str, amount: int) -> dict:
-        # ... persistence + event publication ...
-        return {"wallet_id": wallet_id, "new_balance": 1050}
+    def __init__(
+        self, repository: WalletRepository, events: EventPublisher
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self._events = events
+
+    @timed(registry, "lumen.deposit.duration", "Deposit handler latency")
+    async def do_handle(self, command: DepositFunds) -> int:
+        wallet = await self._repository.find(command.wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
+        await self._repository.add(wallet)
+        await publish_domain_events(self._events, wallet.clear_events())
+        return wallet.balance.amount
 :::
 
 The decorator records `start = time.perf_counter()`, calls the function, and
 in the `finally` block observes the elapsed time on the histogram. The
 `exception` label is `"none"` on success and the exception type name on
-failure, so you can split latency by outcome in Grafana.
+failure, so you can split latency by outcome in Grafana. Two additional
+labels, `class` and `method`, are derived automatically from the function's
+qualified name — no extra configuration required.
 
 The histogram name follows Micrometer dot.case convention.
 `"lumen.deposit.duration"` becomes `lumen_deposit_duration_seconds` in
@@ -291,45 +317,88 @@ Prometheus, with a `_seconds` suffix added if absent.
 
 ### @counted — automatic invocation counter
 
-`@counted` increments a counter on every function call:
+`@counted` increments a counter on every function call. Lumen's
+`GetBalanceHandler` is a natural fit — every balance read increments the
+counter, tagged by outcome:
 
-::: listing lumen/wallet/service.py | Listing 15.5 — @counted on order creation
+::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 15.5 — @counted on GetBalanceHandler
+from pyfly.container import service
+from pyfly.cqrs import QueryHandler, query_handler
 from pyfly.observability import MetricsRegistry, counted
 
+from lumen.core.mappers.wallet_mapper import wallet_to_balance_dto
+from lumen.core.services.wallets.get_balance_query import GetBalance
+from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
+from lumen.models.repositories.wallet_repository import WalletRepository
+
 registry = MetricsRegistry()
 
 
-class OrderService:
+@query_handler
+@service
+class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
 
-    @counted(registry, "lumen.orders.created", "Orders created")
-    async def create_order(self, customer_id: str, items: list) -> dict:
-        # ... business logic ...
-        return {"order_id": "ord-123", "status": "created"}
+    def __init__(self, repository: WalletRepository) -> None:
+        super().__init__()
+        self._repository = repository
+
+    @counted(registry, "lumen.balance.reads", "Balance queries served")
+    async def do_handle(self, query: GetBalance) -> BalanceDto | None:
+        wallet = await self._repository.find(query.wallet_id)
+        return wallet_to_balance_dto(wallet) if wallet is not None else None
 :::
 
-On success the counter is incremented with labels `result="success"` and
-`exception="none"`. On failure it uses `result="failure"` and
-`exception=<TypeName>`, then re-raises the original exception. The counter name
-gets a `_total` suffix in Prometheus automatically (per the naming convention).
+On success the counter is incremented with labels `class="GetBalanceHandler"`,
+`method="do_handle"`, `result="success"`, and `exception="none"`. On failure
+it uses `result="failure"` and `exception=<TypeName>`, then re-raises the
+original exception. The counter name gets a `_total` suffix in Prometheus
+automatically (per the naming convention).
 
-You can stack both decorators on the same method:
+You can stack both decorators on the same method. Here is Lumen's
+`WithdrawFundsHandler` timed and counted simultaneously:
 
-::: listing lumen/wallet/service.py | Listing 15.6 — Stacking @timed and @counted
+::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listing 15.6 — Stacking @timed and @counted
+from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.domain import AggregateNotFound
+from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, counted, timed
 
+from lumen.core.services.wallets.event_publishing import publish_domain_events
+from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
+from lumen.models.entities.v1.money import Money
+from lumen.models.repositories.wallet_repository import WalletRepository
 
 registry = MetricsRegistry()
 
 
-class PaymentService:
+@command_handler
+@service
+class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
+    """Debit funds from a wallet; returns the new balance in minor units."""
 
-    @timed(registry, "lumen.payment.duration", "Payment processing time")
-    @counted(registry, "lumen.payment.processed", "Payments processed")
-    async def process_payment(self, order_id: str, amount: float) -> dict:
-        return {"order_id": order_id, "status": "paid"}
+    def __init__(
+        self, repository: WalletRepository, events: EventPublisher
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self._events = events
+
+    @timed(registry, "lumen.withdrawal.duration", "Withdrawal latency")
+    @counted(registry, "lumen.withdrawals", "Withdrawal attempts")
+    async def do_handle(self, command: WithdrawFunds) -> int:
+        wallet = await self._repository.find(command.wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet.withdraw(Money(amount=command.amount, currency=wallet.currency))
+        await self._repository.add(wallet)
+        await publish_domain_events(self._events, wallet.clear_events())
+        return wallet.balance.amount
 :::
 
-Each invocation produces both a histogram observation and a counter increment.
+`amount` is an `int` representing minor units (e.g. 1050 = €10.50) — the
+`Money` value object enforces this. Each invocation produces both a histogram
+observation and a counter increment.
 
 ### Prometheus scrape endpoint
 
@@ -362,34 +431,34 @@ OpenTelemetry's context propagation, so calling a `@span`-decorated function
 from inside another `@span`-decorated function produces a parent-child
 relationship in your trace viewer:
 
-::: listing lumen/wallet/service.py | Listing 15.7 — @span on service methods
+::: listing lumen/wallet/service.py | Listing 15.7 — @span on CQRS handler methods
 from pyfly.observability import span
 
 
-class WalletService:
+class DepositFundsHandler:
 
-    @span("process-deposit")
-    async def deposit(self, wallet_id: str, amount: int) -> dict:
-        balance = await self._fetch_balance(wallet_id)
-        await self._persist_deposit(wallet_id, amount)
-        return {"wallet_id": wallet_id, "new_balance": balance + amount}
+    @span("deposit-funds")
+    async def do_handle(self, command):
+        balance = await self._fetch_wallet(command.wallet_id)
+        await self._persist_deposit(command.wallet_id, command.amount)
+        return balance + command.amount
 
-    @span("fetch-balance")
-    async def _fetch_balance(self, wallet_id: str) -> int:
-        # ... database query ...
+    @span("fetch-wallet")
+    async def _fetch_wallet(self, wallet_id: str) -> int:
+        # ... repository.find(wallet_id) ...
         return 1000
 
     @span("persist-deposit")
     async def _persist_deposit(self, wallet_id: str, amount: int) -> None:
-        # ... write to DB ...
+        # ... repository.add(wallet) ...
         pass
 :::
 
 In a trace viewer this appears as:
 
 ```
-process-deposit  [120 ms]
-  +-- fetch-balance   [15 ms]
+deposit-funds  [120 ms]
+  +-- fetch-wallet   [15 ms]
   +-- persist-deposit [90 ms]
 ```
 
@@ -500,8 +569,8 @@ an active span gains `trace_id` and `span_id` fields automatically:
 ```json
 {
   "event": "deposit_completed",
-  "wallet_id": "w-001",
-  "new_balance": 1050,
+  "wallet_id": "wlt-001",
+  "new_balance": 1350,
   "trace_id": "1a4b3145ed8f2dd11172ee3584123f4a",
   "span_id": "d2a62aaa81b0ad66",
   "timestamp": "2026-06-07T10:30:00Z",
@@ -511,7 +580,7 @@ an active span gains `trace_id` and `span_id` fields automatically:
 ```
 
 With `trace_id` in every log record, you can jump from a Grafana Loki search
-for `wallet_id=w-001` directly to the correlated Tempo trace view, and from
+for `wallet_id=wlt-001` directly to the correlated Tempo trace view, and from
 there to the Prometheus latency charts for that time window — all three pillars
 joined on a single identifier.
 
@@ -571,11 +640,37 @@ instantiates all built-in endpoints, and mounts them at `/actuator/*`.
 ### Custom HealthIndicator
 
 Any `@component` bean with an `async def health(self) -> HealthStatus` method
-is automatically discovered and registered as a health indicator:
+is automatically discovered and registered as a health indicator. Lumen's
+`WalletRepository` is a good candidate — a quick `find()` call against a known
+wallet ID exercises the in-memory store or database connection:
 
 ::: listing lumen/health/indicators.py | Listing 15.9 — HealthIndicator beans
 from pyfly.actuator import HealthStatus
 from pyfly.container import component
+
+from lumen.models.repositories.wallet_repository import WalletRepository
+
+
+@component
+class WalletRepositoryHealthIndicator:
+    """Checks the wallet store is reachable with a lightweight probe."""
+
+    def __init__(self, repository: WalletRepository) -> None:
+        self._repository = repository
+
+    async def health(self) -> HealthStatus:
+        try:
+            # next_id() exercises the repository without mutating data.
+            await self._repository.next_id()
+            return HealthStatus(
+                status="UP",
+                details={"store": "wallet-repository"},
+            )
+        except Exception as exc:
+            return HealthStatus(
+                status="DOWN",
+                details={"error": str(exc)},
+            )
 
 
 @component
@@ -598,28 +693,6 @@ class DatabaseHealthIndicator:
                 status="DOWN",
                 details={"error": str(exc)},
             )
-
-
-@component
-class RedisHealthIndicator:
-    """Checks Redis connectivity with a PING command."""
-
-    def __init__(self, redis_client) -> None:
-        self._redis = redis_client
-
-    async def health(self) -> HealthStatus:
-        try:
-            await self._redis.ping()
-            info = await self._redis.info("server")
-            return HealthStatus(
-                status="UP",
-                details={"version": info.get("redis_version", "unknown")},
-            )
-        except Exception as exc:
-            return HealthStatus(
-                status="DOWN",
-                details={"error": str(exc)},
-            )
 :::
 
 `HealthStatus.status` takes one of four values: `"UP"`, `"DOWN"`,
@@ -635,13 +708,13 @@ A healthy response looks like:
 {
   "status": "UP",
   "components": {
+    "WalletRepositoryHealthIndicator": {
+      "status": "UP",
+      "details": {"store": "wallet-repository"}
+    },
     "DatabaseHealthIndicator": {
       "status": "UP",
       "details": {"type": "postgresql", "pool_active": 3}
-    },
-    "RedisHealthIndicator": {
-      "status": "UP",
-      "details": {"version": "7.2.0"}
     }
   }
 }
@@ -673,9 +746,9 @@ The endpoint uses Spring Boot's level vocabulary (`OFF`, `ERROR`, `WARN`,
 
 ### Custom actuator endpoint
 
-Implement `ActuatorEndpoint` and annotate the class with `@component` to expose
-a custom endpoint. PyFly discovers it during context startup and mounts it at
-`/actuator/{endpoint_id}`:
+Implement the `ActuatorEndpoint` protocol and annotate the class with
+`@component` to expose a custom endpoint. PyFly discovers it during context
+startup and mounts it at `/actuator/{endpoint_id}`:
 
 ::: listing lumen/actuator/git_info.py | Listing 15.10 — Custom actuator endpoint
 from pyfly.container import component
@@ -1006,11 +1079,12 @@ class AuditLoggingAspect:
 The pointcut `"service.*.*"` matches every public method on every
 `@service`-stereotype bean. `*` matches exactly one dot-separated segment;
 `**` matches one or more segments. Partial globs are supported within a
-segment (`"service.*.create_*"` matches all `create_` methods).
+segment (`"service.*.do_handle"` matches all `do_handle` methods on all
+service-stereotype handlers).
 
 Qualified names follow the pattern `"{stereotype}.{ClassName}.{method_name}"`,
-so a `@service` class `WalletService` with method `deposit` has the qualified
-name `service.WalletService.deposit`.
+so a `@service` class `DepositFundsHandler` with method `do_handle` has the
+qualified name `service.DepositFundsHandler.do_handle`.
 
 !!! tip "`@before` handlers must be synchronous"
     `@before`, `@after_returning`, `@after_throwing`, and `@after` handlers
@@ -1093,61 +1167,77 @@ Every advice handler receives a `JoinPoint` dataclass:
 | `exception` | `@after_throwing`, `@after` | The raised exception (or `None`) |
 | `proceed` | `@around` only | Callable; `await`-able for async methods |
 
-### Putting it together — full observability on WalletService
+### Putting it together — full observability on DepositFundsHandler
 
-Here is Lumen's wallet service with all three pillars applied cleanly — no
+Here is Lumen's deposit handler with all three pillars applied cleanly — no
 observability code inside the business logic at all:
 
-::: listing lumen/wallet/service.py | Listing 15.14 — WalletService with full observability
+::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.14 — DepositFundsHandler with full observability
 from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.domain import AggregateNotFound
+from pyfly.eda import EventPublisher
 from pyfly.logging import get_logger
-from pyfly.observability import MetricsRegistry, span, timed, counted
+from pyfly.observability import MetricsRegistry, counted, span, timed
+
+from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+from lumen.core.services.wallets.event_publishing import publish_domain_events
+from lumen.models.entities.v1.money import Money
+from lumen.models.repositories.wallet_repository import WalletRepository
 
 logger = get_logger("lumen.wallet")
 registry = MetricsRegistry()
 
 
+@command_handler
 @service
-class WalletService:
+class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     """
-    Deposits and balance reads for the Lumen wallet.
+    Credits funds to an existing wallet and returns the new balance
+    (in minor units, e.g. 1350 = €13.50).
 
-    Logging, metrics, and tracing are applied by aspects and decorators;
+    Logging, metrics, and tracing are applied by decorators and aspects;
     the business logic here stays free of cross-cutting concerns.
     """
 
-    def __init__(self, repo) -> None:
-        self._repo = repo
+    def __init__(
+        self, repository: WalletRepository, events: EventPublisher
+    ) -> None:
+        super().__init__()
+        self._repository = repository
+        self._events = events
 
     @timed(registry, "lumen.wallet.deposit.duration", "Deposit latency")
     @counted(registry, "lumen.wallet.deposits", "Total deposit attempts")
     @span("wallet-deposit")
-    async def deposit(self, wallet_id: str, amount: int) -> dict:
-        logger.info("deposit_started", wallet_id=wallet_id, amount=amount)
-        new_balance = await self._repo.add_funds(wallet_id, amount)
-        logger.info(
-            "deposit_completed",
-            wallet_id=wallet_id,
-            new_balance=new_balance,
-        )
-        return {"wallet_id": wallet_id, "new_balance": new_balance}
-
-    @timed(registry, "lumen.wallet.balance.duration", "Balance query latency")
-    @span("wallet-balance")
-    async def get_balance(self, wallet_id: str) -> dict:
-        balance = await self._repo.fetch_balance(wallet_id)
-        return {"wallet_id": wallet_id, "balance": balance}
+    async def do_handle(self, command: DepositFunds) -> int:
+        logger.info("deposit_started", wallet_id=command.wallet_id,
+                    amount=command.amount)
+        wallet = await self._repository.find(command.wallet_id)
+        if wallet is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+        wallet.deposit(Money(amount=command.amount, currency=wallet.currency))
+        await self._repository.add(wallet)
+        await publish_domain_events(self._events, wallet.clear_events())
+        logger.info("deposit_completed", wallet_id=command.wallet_id,
+                    new_balance=wallet.balance.amount)
+        return wallet.balance.amount
 :::
 
-`@span` opens an OpenTelemetry span. `@timed` records duration. `@counted`
-increments the call counter. `AuditLoggingAspect` fires `@before` and
-`@after_returning` on every service method. `MetricsAspect` adds its
+`@span` opens an OpenTelemetry span. `@timed` records the `do_handle` duration.
+`@counted` increments the call counter. `AuditLoggingAspect` fires `@before`
+and `@after_returning` on every service method. `MetricsAspect` adds its
 own `@around` histogram. PII redaction strips sensitive values from log output.
 The actuator exposes `/actuator/health`, `/actuator/prometheus`, and
 `/actuator/loggers`. The Admin Dashboard shows live traces and log records.
 
-Seven lines of decorators and one `get_logger` call — and Lumen is fully
-observable.
+`command.amount` is an `int` — minor units enforced by the `DepositFunds`
+command's validator (`amount > 0`). The `Money` value object wraps it with the
+wallet's `Currency`, preventing any cross-currency arithmetic at the domain
+boundary.
+
+Seven lines of decorators and one `get_logger` call — and Lumen's deposit path
+is fully observable.
 
 ---
 
@@ -1163,22 +1253,22 @@ chapter Lumen:
   at `/actuator/prometheus`.
 - Propagates **OpenTelemetry traces** end-to-end: `TracingFilter` opens a
   SERVER span from the inbound `traceparent` header, `@span` creates child
-  spans for service calls, `HttpxClientAdapter` injects context into outbound
+  spans for handler calls, `HttpxClientAdapter` injects context into outbound
   requests, and `StructlogAdapter` stamps every log record with `trace_id`
   and `span_id`.
 - Answers **Kubernetes health probes** at `/actuator/health/liveness` and
   `/actuator/health/readiness` via auto-discovered `HealthIndicator` beans,
-  with configurable severity aggregation.
+  including a `WalletRepositoryHealthIndicator` that probes the wallet store.
 - Surfaces all of the above in the **embedded Admin Dashboard** at `/admin`,
   with 15 built-in views, real-time SSE streams, a live log tail, an HTTP
   trace analytics panel, and runtime logger-level management.
 - Applies logging and metrics **cross-cuttingly** via `@aspect`,
   `@before`, `@after_returning`, `@after_throwing`, and `@around`, woven
-  automatically by `AspectBeanPostProcessor` without touching service code.
+  automatically by `AspectBeanPostProcessor` without touching handler code.
 
 ## Try it yourself {.exercises}
 
-1. **PII redaction audit.** Add a log statement to `WalletService.deposit`
+1. **PII redaction audit.** Add a log statement to `DepositFundsHandler.do_handle`
    that includes a fake email address as a field value
    (`customer_email="alice@example.com"`) and a `token` field with an
    arbitrary string. Run Lumen locally with `format: console`, observe that

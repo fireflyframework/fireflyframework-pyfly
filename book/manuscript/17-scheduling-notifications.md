@@ -12,20 +12,21 @@ process: it reacts to requests, but it never reaches out unprompted.
 
 Real financial platforms are different. They send nightly account
 statements, fire an SMS the moment funds land, receive payment-status
-webhooks from Stripe at midnight, and call back partner systems to
-confirm that a disbursement was booked. That is four distinct
-integration patterns — scheduling, notifications, inbound webhooks, and
-outbound callbacks — and this chapter covers all of them.
+webhooks from a payment provider at midnight, and call back partner
+systems to confirm that a disbursement was booked. That is four
+distinct integration patterns — scheduling, notifications, inbound
+webhooks, and outbound callbacks — and this chapter covers all of them.
 
 By the end of the chapter Lumen will:
 
-- run a **nightly scheduled job** that tallies daily transaction totals
+- run a **nightly scheduled job** that tallies daily wallet balances
   using `@scheduled` with a cron expression;
 - send a **"funds received" email and push notification** via PyFly's
-  pluggable `EmailService` and `PushService` ports;
-- accept **inbound webhooks** from a payment provider, verifying the
-  HMAC-SHA256 signature, deduplicating replays, and dispatching to a
-  typed listener;
+  pluggable `EmailService` and `PushService` ports, triggered by the
+  real `FundsDeposited` domain event;
+- accept **inbound webhooks** from an illustrative payment provider,
+  verifying the HMAC-SHA256 signature, deduplicating replays, and
+  dispatching to a typed listener;
 - dispatch **outbound callbacks** to partner systems, signing each
   payload, retrying on transient failures, and recording every
   delivery attempt.
@@ -67,25 +68,31 @@ or `cron`. Providing zero or more than one trigger raises a `ValueError`
 at decoration time, so mistakes surface at startup, not silently at
 three in the morning.
 
-::: listing lumen/ledger/daily_rollup.py | Listing 17.1 — Nightly statement rollup with @scheduled
+::: listing lumen/ledger/daily_rollup.py | Listing 17.1 — Nightly wallet balance rollup with @scheduled
 from datetime import timedelta
 
+from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.scheduling import scheduled
 
 
 @service
 class DailyRollupService:
-    """Aggregates transaction totals once per night at 02:00 UTC."""
+    """Tallies all wallet balances once per night at 02:00 UTC."""
 
-    def __init__(self, tx_repo, statement_repo) -> None:
-        self._tx = tx_repo
-        self._statements = statement_repo
+    def __init__(self, wallet_repo: WalletRepository) -> None:
+        self._wallets = wallet_repo
 
     @scheduled(cron="0 2 * * *")
     async def run(self) -> None:
-        totals = await self._tx.aggregate_yesterday()
-        await self._statements.save_daily(totals)
+        wallets = await self._wallets.find_all()
+        total_minor_units = sum(w.balance.amount for w in wallets)
+        # Persist or ship the nightly snapshot; here we log it.
+        print(
+            f"[rollup] {len(wallets)} wallets, "
+            f"total {total_minor_units / 100:.2f} "
+            f"(minor units: {total_minor_units})"
+        )
 :::
 
 `@scheduled(cron="0 2 * * *")` fires every day at 02:00 UTC. The
@@ -340,6 +347,11 @@ deposit handler.
 
 ### Messages and results
 
+`FundsDeposited` carries `amount` and `balance` as **integer minor
+units** (cents). The `Money.major_units` property converts them to a
+decimal for display — `Money(25000, Currency.EUR).major_units` is
+`250.0`. Keep that in mind when formatting notification bodies.
+
 ::: listing lumen/notifications/models_overview.py | Listing 17.5 — The core DTOs
 from pyfly.notifications import (
     EmailMessage,
@@ -372,7 +384,7 @@ push = PushMessage(
     device_tokens=["FCM_TOKEN_GOES_HERE"],
     title="Funds received",
     body="EUR 250.00 credited",
-    data={"wallet_id": "w-001", "amount": "250.00"},
+    data={"wallet_id": "w-001", "amount_minor": 25000},
 )
 :::
 
@@ -428,12 +440,20 @@ sits behind it.
 
 ### Sending a "funds received" notification
 
-Now wire `EmailService` and `PushService` into the deposit handler:
+Lumen publishes a `FundsDeposited` domain event every time the
+`deposit()` command succeeds (see Chapter 8). The cleanest place to
+trigger the notification is an EDA listener subscribed to that event —
+not in the command handler itself, which keeps the deposit path free
+of notification concerns.
 
-::: listing lumen/wallet/deposit_handler.py | Listing 17.7 — Notifying on deposit
+`FundsDeposited` carries `wallet_id: str`, `amount: int` (minor units),
+`currency: str`, and `balance: int` (new balance, minor units). The
+listener converts `amount` to a display string via `amount / 100`:
+
+::: listing lumen/wallet/deposit_notification_listener.py | Listing 17.7 — Notifying on FundsDeposited
 from pyfly.container import service
+from pyfly.eda import EventEnvelope, event_listener
 from pyfly.notifications import (
-    DefaultPushService,
     EmailMessage,
     EmailService,
     PushMessage,
@@ -442,8 +462,8 @@ from pyfly.notifications import (
 
 
 @service
-class DepositNotificationService:
-    """Sends email + push notifications when a deposit is confirmed."""
+class DepositNotificationListener:
+    """Sends email + push when a FundsDeposited event is observed."""
 
     def __init__(
         self,
@@ -453,27 +473,41 @@ class DepositNotificationService:
         self._email = email_service
         self._push = push_service
 
-    async def notify(
-        self,
-        wallet_id: str,
-        amount: str,
-        email: str,
-        device_token: str,
+    @event_listener(event_types=["FundsDeposited"])
+    async def on_funds_deposited(
+        self, envelope: EventEnvelope,
     ) -> None:
+        payload = envelope.payload
+        wallet_id = str(payload.get("wallet_id", ""))
+        amount_minor = int(payload.get("amount", 0))
+        currency = str(payload.get("currency", "EUR"))
+        balance_minor = int(payload.get("balance", 0))
+        amount_str = f"{amount_minor / 100:.2f} {currency}"
+        balance_str = f"{balance_minor / 100:.2f} {currency}"
+
+        # Fetch contact details from a wallet profile service in prod;
+        # hardcoded here for illustration.
+        email = "customer@example.com"
+        device_token = "FCM_TOKEN_GOES_HERE"
+
         await self._email.send(EmailMessage(
             to=[email],
             sender="no-reply@lumenbank.com",
-            subject=f"Funds received: {amount}",
+            subject=f"Funds received: {amount_str}",
             body_text=(
-                f"EUR {amount} has been credited to wallet "
-                f"{wallet_id}."
+                f"{amount_str} has been credited to wallet "
+                f"{wallet_id}. New balance: {balance_str}."
             ),
         ))
         await self._push.send(PushMessage(
             device_tokens=[device_token],
             title="Funds received",
-            body=f"EUR {amount} credited",
-            data={"wallet_id": wallet_id, "amount": amount},
+            body=f"{amount_str} credited",
+            data={
+                "wallet_id": wallet_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+            },
         ))
 :::
 
@@ -491,8 +525,9 @@ field if you want to log failures or schedule retries.
 
 ## Inbound webhooks
 
-Stripe will POST a `payment_intent.succeeded` event to Lumen whenever a
-customer tops up their wallet from a card. Lumen must:
+An illustrative payment provider will POST a `payment_intent.succeeded`
+event to Lumen whenever a customer tops up their wallet from a card.
+Lumen must:
 
 1. **verify the HMAC-SHA256 signature** to reject forged payloads;
 2. **deduplicate** replays using the idempotency key so a retry does
@@ -509,7 +544,7 @@ Every inbound event is modelled as a `WebhookEvent` dataclass:
 @dataclass
 class WebhookEvent:
     id: str               # auto-generated UUID
-    source: str           # e.g. "stripe"
+    source: str           # e.g. "payment-provider"
     event_type: str       # from body["type"]
     headers: dict[str, str]
     body: dict[str, Any]
@@ -521,27 +556,38 @@ class WebhookEvent:
 Subclass `AbstractWebhookEventListener` and set `source` to the name
 you will pass to `WebhookProcessor.process()`:
 
-::: listing lumen/webhooks/stripe_listener.py | Listing 17.8 — Stripe webhook listener
+::: listing lumen/webhooks/payment_listener.py | Listing 17.8 — Payment-provider webhook listener
 from pyfly.container import service
 from pyfly.webhooks import AbstractWebhookEventListener, WebhookEvent
 
+from lumen.models.entities.v1.money import Money
+from lumen.interfaces.enums.v1.currency import Currency
+
 
 @service
-class StripeWebhookListener(AbstractWebhookEventListener):
-    source = "stripe"
+class PaymentWebhookListener(AbstractWebhookEventListener):
+    source = "payment-provider"
 
-    def __init__(self, deposit_svc) -> None:
-        self._deposits = deposit_svc
+    def __init__(self, deposit_handler) -> None:
+        self._handler = deposit_handler
 
     async def handle(self, event: WebhookEvent) -> None:
         if event.event_type == "payment_intent.succeeded":
             pi = event.body.get("data", {}).get("object", {})
             wallet_id = pi.get("metadata", {}).get("wallet_id")
-            amount_cents = pi.get("amount_received", 0)
-            if wallet_id:
-                await self._deposits.credit(
-                    wallet_id=wallet_id,
-                    cents=amount_cents,
+            amount_minor = int(pi.get("amount_received", 0))
+            currency_code = pi.get("currency", "EUR").upper()
+            if wallet_id and amount_minor > 0:
+                # Delegate to the CQRS command handler so the aggregate
+                # enforces the balance invariant and raises FundsDeposited.
+                from lumen.core.services.wallets.deposit_funds_command import (
+                    DepositFunds,
+                )
+                await self._handler.handle(
+                    DepositFunds(
+                        wallet_id=wallet_id,
+                        amount=amount_minor,
+                    )
                 )
 
     async def on_error(
@@ -565,7 +611,7 @@ from pyfly.webhooks import (
     HmacSignatureValidator,
     WebhookProcessor,
 )
-from lumen.webhooks.stripe_listener import StripeWebhookListener
+from lumen.webhooks.payment_listener import PaymentWebhookListener
 
 
 @configuration
@@ -573,21 +619,21 @@ class WebhookConfig:
 
     @bean
     def webhook_processor(
-        self, stripe_listener: StripeWebhookListener,
+        self, payment_listener: PaymentWebhookListener,
     ) -> WebhookProcessor:
         return WebhookProcessor(
-            listeners=[stripe_listener],
+            listeners=[payment_listener],
             signature_validators={
-                "stripe": HmacSignatureValidator(
+                "payment-provider": HmacSignatureValidator(
                     secret="whsec_REPLACE_ME",
                 ),
             },
         )
 :::
 
-`HmacSignatureValidator` expects the Stripe-style `sha256=<hex>` header
-format and uses `hmac.compare_digest` for a constant-time comparison.
-The `header_prefix` parameter can be changed if your provider uses a
+`HmacSignatureValidator` expects the `sha256=<hex>` header format and
+uses `hmac.compare_digest` for a constant-time comparison. The
+`header_prefix` parameter can be changed if your provider uses a
 different prefix.
 
 ### Handling a webhook in an HTTP handler
@@ -595,33 +641,32 @@ different prefix.
 Call `processor.process()` from your inbound HTTP handler. Pass the raw
 request body (unmodified bytes) for signature verification:
 
-::: listing lumen/webhooks/stripe_handler.py | Listing 17.10 — Inbound Stripe webhook endpoint
+::: listing lumen/webhooks/payment_handler.py | Listing 17.10 — Inbound payment-provider webhook endpoint
 from pyfly.container import service
 from pyfly.web import Request, Response, router
 from pyfly.webhooks import WebhookProcessor
 
 
 @service
-class StripeWebhookHandler:
+class PaymentWebhookHandler:
 
     def __init__(self, processor: WebhookProcessor) -> None:
         self._processor = processor
 
-    @router.post("/webhooks/stripe")
+    @router.post("/webhooks/payment")
     async def receive(self, request: Request) -> Response:
         raw_body = await request.body()
         headers = {
             "X-Signature": request.headers.get(
-                "Stripe-Signature", ""
+                "X-Webhook-Signature", ""
             ),
             "X-Idempotency-Key": request.headers.get(
-                "Stripe-Idempotency-Key",
-                request.headers.get("Idempotency-Key", ""),
+                "X-Idempotency-Key", ""
             ),
         }
         try:
             await self._processor.process(
-                source="stripe",
+                source="payment-provider",
                 raw_body=raw_body,
                 headers=headers,
             )
@@ -754,13 +799,14 @@ class CallbackConfig_:
         )
 :::
 
-Then in the domain service:
+Then in the domain service. Note the payload uses `amount` in minor
+units (cents) — `Money(50000, Currency.EUR)` is EUR 500.00:
 
 ```python
 results = await dispatcher.dispatch(
     "lumen",            # tenant_id
     "DisbursementSettled",
-    {"id": "txn-009", "amount": 500_00, "currency": "EUR"},
+    {"id": "txn-009", "amount": 50_000, "currency": "EUR"},
 )
 ```
 
@@ -831,7 +877,8 @@ config = CallbackConfig(
 )
 ```
 
-Subdomains of allowed domains are also accepted (e.g. `api.clearancebank.example.com`).
+Subdomains of allowed domains are also accepted
+(e.g. `api.clearancebank.example.com`).
 
 !!! spring "Spring parity"
     PyFly's `@scheduled` / `CronExpression` / `TaskScheduler` trio
@@ -860,7 +907,9 @@ incoming requests:
   port protocols decouple business logic from provider adapters (SMTP,
   SendGrid, Resend, Twilio, Firebase). `DefaultEmailService` and its
   siblings catch provider errors and return structured `NotificationResult`
-  values rather than propagating exceptions.
+  values rather than propagating exceptions. The `DepositNotificationListener`
+  subscribes to the real `FundsDeposited` EDA event and converts
+  minor-unit amounts to display strings before sending.
 
 - **Inbound webhooks** — `AbstractWebhookEventListener` defines typed
   consumers. `WebhookProcessor` gates every event with `HmacSignatureValidator`
@@ -886,13 +935,15 @@ incoming requests:
 
 2. **Provider swap.** Replace `SmtpEmailProvider` with a
    `DummyEmailProvider` in the test suite. Write a test that deposits
-   EUR 100 into wallet `w-001` via the deposit handler and asserts that
-   `DummyEmailProvider.last_message` contains the wallet ID and amount
-   in its `body_text`.
+   EUR 100 (10 000 minor units) into wallet `w-001` via the deposit
+   handler, triggering a `FundsDeposited` event. Assert that
+   `DummyEmailProvider.last_message` contains the wallet ID and the
+   formatted amount (`100.00 EUR`) in its `body_text`.
 
 3. **Signature replay attack.** Write a test that calls
-   `StripeWebhookHandler.receive()` twice with the same raw body,
+   `PaymentWebhookHandler.receive()` twice with the same raw body,
    headers, and idempotency key. Assert that the first call returns 200
-   and credits the wallet, and the second call also returns 200 (the
-   duplicate is silently ignored by `InMemoryWebhookEventStore`) but
-   does **not** credit the wallet a second time.
+   and credits the wallet (triggering `FundsDeposited`), and the second
+   call also returns 200 (the duplicate is silently ignored by
+   `InMemoryWebhookEventStore`) but does **not** credit the wallet a
+   second time.

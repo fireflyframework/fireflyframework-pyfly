@@ -49,14 +49,17 @@ from pyfly.plugins import (
 
 
 @extension_point(id="audit-sinks")
-class _AuditSink: ...
+class AuditSink:
+    """Interface that all audit sinks must implement."""
+
+    def record(self, event: dict) -> None: ...
 
 
 @plugin(id="console-audit", version="1.0.0")
 class ConsoleAuditPlugin:
 
     @extension(point="audit-sinks", priority=10)
-    class ConsoleSink:
+    class ConsoleSink(AuditSink):
         name = "console"
 
         def record(self, event: dict) -> None:
@@ -71,13 +74,15 @@ class ConsoleAuditPlugin:
 
 **How it works.**
 
-1. `@extension_point(id="audit-sinks")` registers a named slot so
-   that the registry knows its interface type.
+1. `@extension_point(id="audit-sinks")` registers a named slot and
+   declares the interface type every contribution must implement.
 2. `@plugin(id="console-audit", version="1.0.0")` declares a
    plugin class with a mandatory `id` and `version`.
 3. `@extension(point="audit-sinks", priority=10)` marks an inner
-   class as a contribution to that slot. Higher priority wins first
-   position when you iterate the results.
+   class as a contribution to that slot. The inner class must
+   inherit the extension-point interface so the registry can
+   validate it. Higher priority wins first position when you iterate
+   the results.
 
 Loading and running the plugin:
 
@@ -96,7 +101,7 @@ async def main() -> None:
 
     sinks = await manager.registry.get("audit-sinks")
     for sink in sinks:
-        sink.record({"action": "deposit", "amount": 100})
+        sink.record({"action": "deposit", "amount_minor": 100})
 
     await manager.stop_all()
 
@@ -131,17 +136,17 @@ raise `PluginResolutionError` before any code runs.
 ## Business rules with the Rule Engine
 
 Most real-world services have logic that belongs to the business, not
-the code: "flag orders over $5,000", "block shipments to sanctioned
-regions", "apply a 10% surcharge after hours." Hard-coding those
-thresholds in Python means a rebuild every time the business changes
-its mind.
+the code: "flag orders over 500,000 cents", "block shipments to
+sanctioned regions", "apply a surcharge after hours." Hard-coding
+those thresholds in Python means a rebuild every time the business
+changes its mind.
 
 PyFly's `pyfly.rule_engine` gives product owners a YAML dial they
 can turn without touching source code.
 
 ### Defining rules in YAML
 
-::: listing lumen/rules/transaction_rules.yaml | Listing 18.3 — Fraud and daily-limit rules
+::: listing lumen/rules/transaction_rules.yaml | Listing 18.3 — Fraud and daily-limit rules (amounts in minor units)
 id: transaction-rules
 name: Lumen transaction rules
 
@@ -151,7 +156,7 @@ rules:
     when:
       op: ge
       field: transaction.daily_total
-      value: 5000
+      value: 500000
     then:
       - type: set
         target: flags.limit_exceeded
@@ -177,7 +182,7 @@ rules:
     when:
       op: ge
       field: transaction.amount
-      value: 1000
+      value: 100000
     then:
       - type: set
         target: flags.high_value
@@ -185,7 +190,8 @@ rules:
 :::
 
 Each rule has a `when` condition and a list of `then` actions.
-Conditions use these operators:
+Amounts in Lumen are always **integer minor units** (cents), so
+`100000` is €1,000.00. Conditions use these operators:
 
 | Comparison | Logical |
 |---|---|
@@ -193,8 +199,8 @@ Conditions use these operators:
 | `in`, `not_in`, `regex` | (with `conditions: [...]`) |
 
 Actions are `set` (write a context path), `increment`, or `log`.
-Subclass `RuleEvaluator._execute_action` to add `call`, `calculate`,
-or any custom verb.
+Subclass `RuleEvaluator` and override `_execute_action` to add
+`call`, `calculate`, or any custom verb.
 
 ### Evaluating rules in a service
 
@@ -218,8 +224,8 @@ class RiskService:
 
     def assess(
         self,
-        amount: float,
-        daily_total: float,
+        amount: int,
+        daily_total: int,
         country: str,
     ) -> dict:
         ctx = {
@@ -237,9 +243,11 @@ class RiskService:
 `RuleSetLoader.from_yaml(text)` parses the YAML into an AST.
 `RuleSetEvaluator.evaluate(ruleset, ctx)` walks every rule in
 priority order, evaluates the `when` clause, and applies matching
-`then` actions by mutating `ctx` in place. The flags dict is the
-authoritative output — a downstream handler can reject, queue, or
-flag the transaction based on whatever keys are set.
+`then` actions — mutating `ctx` in place and returning a
+`list[EvaluationResult]`. The `flags` dict is the authoritative
+output — a downstream handler can reject, queue, or flag the
+transaction based on whatever keys are set. `amount` and
+`daily_total` are in minor units (cents) to match the Lumen domain.
 
 ::: figure art/figures/18-production.svg | Figure 18.1 — Rule evaluation at the service boundary. YAML rules are parsed once at startup; each transaction passes through the evaluator as a mutable context dict.
 
@@ -366,13 +374,13 @@ pyfly:
 ```yaml
 # i18n/messages_en.yaml
 wallet:
-  deposit_ok: "Deposited {0} to wallet {1}."
-  limit_exceeded: "Daily limit exceeded. Maximum is {0}."
+  deposit_ok: "Deposited {0} minor units to wallet {1}."
+  limit_exceeded: "Daily limit exceeded. Maximum is {0} minor units."
 
 # i18n/messages_es.yaml
 wallet:
-  deposit_ok: "Se depositaron {0} en la billetera {1}."
-  limit_exceeded: "Se superó el límite diario. El máximo es {0}."
+  deposit_ok: "Se depositaron {0} unidades menores en la billetera {1}."
+  limit_exceeded: "Se superó el límite diario. El máximo es {0} unidades menores."
 ```
 
 `ResourceBundleMessageSource` resolves keys with dot notation and
@@ -403,21 +411,24 @@ class NotificationService:
     def deposit_confirmation(
         self,
         request,
-        amount: float,
+        amount_minor: int,
         wallet_id: str,
     ) -> str:
         locale = self._resolver.resolve_locale(request)
         return self._messages.get_message_or_default(
             "wallet.deposit_ok",
             default="Deposit successful.",
-            args=(amount, wallet_id),
+            args=(amount_minor, wallet_id),
             locale=locale,
         )
 :::
 
 `AcceptHeaderLocaleResolver` parses the `Accept-Language` header and
 returns the highest-`q` primary subtag. Override with
-`FixedLocaleResolver` for single-language deployments or tests.
+`FixedLocaleResolver` for single-language deployments or tests. Auto-
+configuration registers both when `pyfly.i18n.enabled: true`;
+inject `MessageSource` (the port protocol) or the concrete
+`ResourceBundleMessageSource` — both work.
 
 !!! spring "Spring parity"
     `MessageSource`, `ResourceBundleMessageSource`,
@@ -460,7 +471,7 @@ class BalanceFeedController:
             while True:
                 balance = await self._wallet.get_balance(wallet_id)
                 await session.send_json(
-                    {"wallet_id": wallet_id, "balance": balance}
+                    {"wallet_id": wallet_id, "balance_minor": balance}
                 )
                 await asyncio.sleep(1)
         finally:
@@ -484,17 +495,17 @@ decorator's path.
 | `await send_text(data)` | Send a plain string |
 | `await receive_text()` | Block until a text message arrives |
 | `await receive_json()` | Block until a JSON message arrives |
-| `await close(code=1000)` | Close the connection cleanly |
+| `await close(code=1000, reason=None)` | Close the connection cleanly |
 
 `session.path_params`, `session.query_params`, and
 `session.headers` expose connection metadata. WebSocket routes are
 auto-discovered alongside HTTP routes — no extra configuration is
 needed.
 
-The `on_disconnect` hook is invoked in a `finally` block after the
-handler returns or the client disconnects, giving controllers a safe
-place to release resources. A `WebSocketDisconnect` raised by the
-client is treated as a normal close and does not propagate.
+The optional `on_disconnect` method is invoked automatically by the
+registrar after the `@websocket_mapping` handler returns or the
+client closes the connection (but only if the connection was accepted
+first), giving controllers a safe place to release resources.
 
 !!! tip "Broadcasting"
     Keep a `set[WebSocketSession]` on the controller and fan out
@@ -532,18 +543,18 @@ class WalletCommands:
 
     @shell_method(group="wallet", help="Deposit funds into a wallet")
     @shell_argument("wallet_id", help="Target wallet identifier")
-    @shell_option("--amount", help="Amount to deposit (integer cents)")
+    @shell_option("--amount", help="Amount in minor units (integer cents)")
     async def deposit(
         self, wallet_id: str, amount: int = 100
     ) -> str:
         result = await self._wallet.deposit(wallet_id, amount)
-        return f"New balance: {result['balance']}"
+        return f"New balance: {result['balance_minor']} minor units"
 
     @shell_method(group="wallet", help="Show current balance")
     @shell_argument("wallet_id", help="Wallet to inspect")
     async def balance(self, wallet_id: str) -> str:
         data = await self._wallet.get_balance(wallet_id)
-        return f"{wallet_id}: {data['balance']}"
+        return f"{wallet_id}: {data['balance_minor']} minor units"
 :::
 
 Enable the shell in `pyfly.yaml`:
@@ -560,7 +571,7 @@ PyFly auto-configures a `ClickShellAdapter` and wires every
 ```bash
 python -m lumen wallet deposit w-001 --amount 500
 python -m lumen wallet balance w-001
-python -m lumen --interactive  # REPL mode
+python -m lumen        # no args → drops into REPL mode
 ```
 
 ### CommandLineRunner — one-shot post-startup tasks
@@ -570,10 +581,11 @@ checks), implement `CommandLineRunner`:
 
 ::: listing lumen/runners/seed_runner.py | Listing 18.10 — Post-startup database seeder
 from pyfly.container import service
+from pyfly.shell import CommandLineRunner
 
 
 @service
-class SeedRunner:
+class SeedRunner(CommandLineRunner):
     """Seed the database with a default admin wallet on first boot."""
 
     def __init__(self, wallet_service) -> None:
@@ -585,9 +597,10 @@ class SeedRunner:
             print("Default wallet ensured.")
 :::
 
-Any bean with `async def run(self, args: list[str]) -> None`
-structurally satisfies `CommandLineRunner`. The framework detects it
-via `isinstance()` after `ApplicationReadyEvent` fires and invokes
+Any bean whose class implements `async def run(self, args: list[str])
+-> None` structurally satisfies the `CommandLineRunner` protocol.
+The framework detects it via `isinstance()` (the protocol is
+`@runtime_checkable`) after `ApplicationReadyEvent` fires and invokes
 it with the raw CLI arguments. Use `@order(n)` to control execution
 order when multiple runners coexist.
 
@@ -640,7 +653,7 @@ The generated `lumen_client` package contains typed models and a
 as a dependency and call it without knowing anything about HTTP:
 
 ::: listing payment/services/wallet_client.py | Listing 18.11 — Consuming the generated Lumen SDK
-from lumen_client import DefaultApi, ApiClient, Configuration
+from lumen_client import ApiClient, Configuration, DefaultApi
 
 
 class WalletGateway:
@@ -650,9 +663,9 @@ class WalletGateway:
         cfg = Configuration(host=base_url)
         self._api = DefaultApi(ApiClient(cfg))
 
-    def get_balance(self, wallet_id: str) -> float:
+    def get_balance(self, wallet_id: str) -> int:
         result = self._api.get_wallet_balance(wallet_id)
-        return result.balance
+        return result.balance_minor
 :::
 
 !!! tip "Keep the spec versioned"
@@ -717,7 +730,7 @@ does not validate secrets — that is your responsibility.
 
 ### Graceful shutdown
 
-PyFly honours `server.shutdown: graceful` by default. Set
+PyFly honours graceful shutdown by default. Set
 `pyfly.server.graceful-timeout` (seconds) to control how long the
 server waits for in-flight requests to complete before forcing exit:
 
@@ -777,14 +790,15 @@ PyFly exposes Spring-Boot-style actuator endpoints out of the box:
 Add them to `pyfly.yaml`:
 
 ```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,metrics
-  endpoint:
-    health:
-      show-details: when-authorized
+pyfly:
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: health,metrics
+    endpoint:
+      health:
+        show-details: when-authorized
 ```
 
 Then wire your Kubernetes deployment:
@@ -891,7 +905,8 @@ copier. You are now a practitioner.
 
 1. **Add a custom plugin.** Implement an `AuditPlugin` that
    contributes an extension to an `"audit-sinks"` extension point.
-   The extension should write each event to a file.
+   The extension class must inherit the `AuditSink` interface and
+   write each event to a file.
    In a test, use `PluginManager.registry.get("audit-sinks")` to
    assert that your extension is returned with the expected `name`.
 
