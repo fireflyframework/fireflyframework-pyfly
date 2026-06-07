@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.68 (2026-06-07)
+
+### Added (session — Postgres SessionRegistry; Postgres parity)
+
+- **`PostgresSessionRegistry`** (`pyfly.session.adapters.postgres_registry`) — a durable,
+  queryable, cross-process session-concurrency registry backed by a Postgres table
+  (`session_id` PK, `principal`, `created_at`), selected via
+  `pyfly.session.concurrency.registry=postgres`. Lets relational-only deployments run clustered
+  `maximumSessions` control with **no Redis** (the user's "postgres, not just redis"). The table
+  is created lazily and idempotently; the table name is validated against injection. Hexagonal:
+  the SQLAlchemy `AsyncEngine` is resolved lazily and injected by the composition root; the
+  adapter imports no SQLAlchemy at module scope. Validated against **real Postgres**
+  (testcontainers: upsert, oldest-first ordering, count, deregister).
+- **`SessionRegistry`** is now exported from `pyfly.session.ports` alongside `SessionStore`
+  (consistency fix from the audit).
+
 ## v26.06.67 (2026-06-07)
 
 ### Added (scheduling — pluggable task executor; fixes a weak default)

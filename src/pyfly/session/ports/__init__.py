@@ -13,6 +13,7 @@
 # limitations under the License.
 """Session ports — abstract interfaces for the session module."""
 
+from pyfly.session.concurrency import SessionRegistry
 from pyfly.session.ports.outbound import SessionStore
 
-__all__ = ["SessionStore"]
+__all__ = ["SessionRegistry", "SessionStore"]
