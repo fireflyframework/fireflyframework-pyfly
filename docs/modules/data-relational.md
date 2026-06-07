@@ -41,6 +41,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Queries](#paginated-queries)
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
+- [Read/Write Routing (Read Replicas)](#readwrite-routing-read-replicas)
 - [Data Auditing](#data-auditing)
   - [AuditingEntityListener](#auditingentitylistener)
   - [How Auditing Works](#how-auditing-works)
@@ -561,6 +562,75 @@ async def transfer_funds(session: AsyncSession, from_id: str, to_id: str, amount
 # Call it without the session argument:
 await transfer_funds("acc-1", "acc-2", 100.0)
 ```
+
+---
+
+## Read/Write Routing (Read Replicas)
+
+PyFly can route read-only work to a database **read replica** while keeping writes on the primary — the equivalent of Spring's `AbstractRoutingDataSource` driven by `@Transactional(readOnly = true)`. Routing is **opt-in**: with no replica configured, every session goes to the primary, so behavior is unchanged for existing apps.
+
+```python
+from pyfly.data.relational.routing import RoutingSessionFactory, read_only, is_read_only
+```
+
+### Enabling a Replica
+
+Set the replica URL under `pyfly.data.relational.read-replica.url`. `RelationalAutoConfiguration` then builds a separate engine + `async_sessionmaker` for the replica and wires it into the `routing_session_factory` bean:
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+asyncpg://user:pass@primary:5432/app
+      read-replica:
+        url: postgresql+asyncpg://user:pass@replica:5432/app
+```
+
+When `read-replica.url` is absent, `routing_session_factory` is still registered but has no replica — it always returns a primary session.
+
+### RoutingSessionFactory
+
+`RoutingSessionFactory` is a drop-in replacement for an `async_sessionmaker` call site: calling the factory (`factory()`) returns an `AsyncSession`, routed by context.
+
+| Member | Returns | Description |
+|--------|---------|-------------|
+| `factory()` (`__call__`) | `AsyncSession` | Routes by context: the replica when inside a `read_only()` block **and** a replica is configured; otherwise the primary. |
+| `factory.primary()` | `AsyncSession` | Forces a primary (read/write) session regardless of context. |
+| `factory.replica()` | `AsyncSession` | Forces a replica session; falls back to the primary when none is configured. |
+| `factory.has_replica` | `bool` | Whether a replica session maker is configured. |
+
+### read_only() and is_read_only()
+
+The `read_only()` context manager marks the enclosed block read-only so the factory routes to the replica (the `@Transactional(readOnly = true)` analogue). It is backed by a `ContextVar`, so it is safe across `async`/await and supports nesting — the prior value is restored on exit. `is_read_only()` reports whether the current context is marked read-only.
+
+```python
+from pyfly.container import service
+from pyfly.data.relational.routing import RoutingSessionFactory, read_only
+from sqlalchemy import select
+
+
+@service
+class UserService:
+    def __init__(self, sessions: RoutingSessionFactory) -> None:
+        self._sessions = sessions
+
+    async def list_users(self) -> list[User]:
+        with read_only():                       # routes to the replica when one is configured
+            session = self._sessions()          # AsyncSession bound to the replica
+            result = await session.execute(select(User))
+            return list(result.scalars())
+
+    async def create_user(self, name: str) -> User:
+        session = self._sessions()              # no read_only() -> primary (read/write)
+        user = User(name=name)
+        session.add(user)
+        await session.commit()
+        return user
+```
+
+Outside any `read_only()` block, `factory()` always returns a primary session. Inside one, it returns a replica session **only if** a replica is configured; otherwise it falls back to the primary, so the same code runs unchanged in environments without a replica.
+
+**Source:** `src/pyfly/data/relational/routing.py` · bean: `RelationalAutoConfiguration.routing_session_factory`
 
 ---
 

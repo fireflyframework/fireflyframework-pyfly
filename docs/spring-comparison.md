@@ -19,6 +19,7 @@ If you're coming from the Java/Spring Boot ecosystem, this guide shows you how e
 - [Web Controllers](#web-controllers)
 - [Request Parameters](#request-parameters)
 - [Exception Handling](#exception-handling)
+- [JSON Serialization and Content Negotiation](#json-serialization-and-content-negotiation)
 - [Data Access](#data-access)
 - [Caching](#caching)
 - [Scheduling](#scheduling)
@@ -28,6 +29,7 @@ If you're coming from the Java/Spring Boot ecosystem, this guide shows you how e
 - [Messaging](#messaging)
 - [Distributed Transactions](#distributed-transactions)
 - [Server Abstraction](#server-abstraction)
+- [Integration Testing with Containers](#integration-testing-with-containers)
 - [Quick Reference Table](#quick-reference-table)
 
 ---
@@ -176,6 +178,126 @@ class PostgresOrderRepo:
 
 When multiple beans satisfy the same type, `@primary` marks the default.
 
+### Injecting Configuration Values — `@Value`
+
+**Spring:**
+```java
+@Service
+public class MailService {
+    @Value("${mail.host}")
+    private String host;
+
+    @Value("${mail.port:25}")
+    private int port;
+
+    public MailService(@Value("#{${mail.workers:1} > 1}") boolean concurrent) { }
+}
+```
+
+**PyFly:**
+```python
+from typing import Annotated
+from pyfly.core import Value
+
+@service
+class MailService:
+    # Field injection — resolved against Config at bean creation time
+    host: str = Value("${mail.host}")           # raises if missing
+    port: int = Value("${mail.port:25}")        # default after the colon
+
+    # Constructor injection — wrap with Annotated, the value is coerced to the param type
+    def __init__(self, concurrent: Annotated[bool, Value("#{${mail.workers:1} > 1}")]) -> None:
+        self._concurrent = concurrent
+```
+
+`Value` lives in `pyfly.core`. It supports three expression forms:
+
+| Form | Behavior |
+|------|----------|
+| `${key}` | Resolve from `Config`; raise if missing |
+| `${key:default}` | Resolve from `Config`, use `default` if missing |
+| `#{ ... }` | Evaluate a SpEL-lite expression (the pyfly subset of Spring's SpEL) |
+
+The `#{ ... }` evaluator supports arithmetic, comparison, boolean (`and`/`or`/`not`), the Python ternary (`a if c else b`), literals, lists/tuples, `${key:default}` placeholder substitution, and an `env` mapping for environment variables. It is parsed with `ast` against a whitelist of node types — there is no `eval`, no attribute access, and no function calls, so an expression can never execute arbitrary code. This is intentionally narrower than Spring's full SpEL.
+
+### Deferred Resolution — `Provider[T]` (Spring `ObjectFactory`/`Provider`)
+
+**Spring:**
+```java
+@Service
+public class Worker {
+    private final ObjectFactory<Job> jobs;
+    public Worker(ObjectFactory<Job> jobs) { this.jobs = jobs; }
+    public void run() { Job job = jobs.getObject(); }
+}
+```
+
+**PyFly:**
+```python
+from pyfly.container import Provider
+
+@service
+class Worker:
+    def __init__(self, jobs: Provider[Job]) -> None:
+        self._jobs = jobs
+
+    def run(self) -> None:
+        job = self._jobs.get()   # or self._jobs() — fresh resolution each call
+```
+
+Inject `Provider[T]` instead of `T` to defer resolution. Each `.get()` (or calling the provider directly) re-resolves the bean — so a singleton can obtain fresh `TRANSIENT` instances, and construction-time cycles or expensive beans can be deferred until first use. This is the Spring `ObjectFactory`/`Provider` equivalent.
+
+### Map Injection (Spring `Map<String, T>`)
+
+**Spring:**
+```java
+public PaymentRouter(Map<String, PaymentGateway> gateways) { }
+```
+
+**PyFly:**
+```python
+@service
+class PaymentRouter:
+    def __init__(self, gateways: dict[str, PaymentGateway]) -> None:
+        self._gateways = gateways   # {bean-name: bean} for every named PaymentGateway
+```
+
+Declare a `dict[str, T]` parameter and PyFly injects a map of `{bean-name: bean}` for every named bean assignable to `T` — exactly like Spring's `Map<String, T>` injection.
+
+### Generic Repository Injection (generic-aware DI)
+
+**Spring** resolves `Repository<User>` to the implementation parametrized with `User`. **PyFly** does the same:
+
+```python
+@service
+class UserService:
+    def __init__(self, repo: Repository[User, int]) -> None:
+        self._repo = repo   # the registered Repository subclass parametrized with User
+```
+
+When several implementations share a generic interface, the container matches the one whose generic bases carry the requested type args (honoring `@primary` to break ties), mirroring Spring's generic-aware injection.
+
+### Lazy Beans — `@lazy` (Spring `@Lazy`)
+
+**Spring:**
+```java
+@Lazy
+@Service
+public class ExpensiveService { }
+```
+
+**PyFly:**
+```python
+from pyfly.container import lazy
+
+@lazy
+@service
+class ExpensiveService:
+    """Not created at startup — constructed on first resolution instead."""
+```
+
+A `@lazy` bean is **not** eagerly created during startup; it is constructed on first resolution. Useful for expensive beans that may never be used, or to avoid heavy work at boot — the Spring `@Lazy` equivalent.
+
 ---
 
 ## Bean Stereotypes
@@ -241,6 +363,36 @@ class DatabaseConfig:
 
 **Return type hint:** PyFly uses the return type annotation (`-> DataSource`) to determine what type this bean satisfies. This is equivalent to Spring inferring the bean type from the method return type.
 
+### Primary and Profile-Scoped `@bean`
+
+`@bean` accepts the same modifiers Spring expresses with `@Primary` and `@Profile`:
+
+**Spring:**
+```java
+@Bean
+@Primary
+public PaymentGateway stripeGateway() { return new StripeGateway(); }
+
+@Bean
+@Profile("dev")
+public PaymentGateway sandboxGateway() { return new SandboxGateway(); }
+```
+
+**PyFly:**
+```python
+@configuration
+class PaymentConfig:
+    @bean(primary=True)
+    def stripe_gateway(self) -> PaymentGateway:
+        return StripeGateway()
+
+    @bean(profile="dev")
+    def sandbox_gateway(self) -> PaymentGateway:
+        return SandboxGateway()
+```
+
+`primary=True` marks the bean the default candidate when several share an interface (the `@Bean @Primary` equivalent). `profile="dev"` creates the bean only when the expression matches the active profiles (the `@Bean @Profile` equivalent). `@bean` also takes `name=` and `scope=`.
+
 ---
 
 ## Conditional Beans
@@ -253,6 +405,22 @@ Both frameworks support conditional bean registration based on runtime condition
 | `@ConditionalOnClass` | `@conditional_on_class` | Register only if a Python module is importable |
 | `@ConditionalOnMissingBean` | `@conditional_on_missing_bean` | Register only if no bean of that type exists |
 | `@ConditionalOnBean` | `@conditional_on_bean` | Register only if a bean of that type exists |
+| `@ConditionalOnExpression` | `@conditional_on_expression` | Register only if a SpEL-lite `#{ ... }` expression is truthy |
+
+### Example: Expression-Based Conditions
+
+`@conditional_on_expression` evaluates the same SpEL-lite `#{ ... }` syntax used by `@Value`, against the active config at `ApplicationContext` startup:
+
+```python
+from pyfly.context import conditional_on_expression
+
+@configuration
+@conditional_on_expression("#{${pyfly.workers:1} > 1}")
+class MultiWorkerConfig:
+    """Only registered when more than one worker is configured."""
+```
+
+`${key:default}` placeholders are substituted from config before evaluation, and an `env` mapping exposes environment variables — mirroring Spring Boot's `@ConditionalOnExpression`.
 
 ### Example: Auto-Configuration
 
@@ -566,9 +734,118 @@ raise ValidationException("Invalid order data", code="VALIDATION_ERROR")
 | `RateLimitException` | 429 |
 | `ServiceUnavailableException` | 503 |
 
-**Key difference:** Spring requires you to write `@ControllerAdvice` classes to map exceptions to responses. PyFly's exception hierarchy has this mapping built in — just throw the right exception and the framework produces an RFC 7807-style error response automatically.
+**Key difference:** Spring requires you to write `@ControllerAdvice` classes to map exceptions to responses. PyFly's exception hierarchy has this mapping built in — just throw the right exception and the framework produces a structured error response automatically.
 
 You can still add custom exception handlers per controller using `@exception_handler` for cases where you need custom response formatting.
+
+### RFC 7807 `application/problem+json`
+
+By default PyFly emits an `{"error": {...}}` envelope. Like Spring Boot 3, it can instead emit RFC 7807 `application/problem+json` — opt in with one config key:
+
+```yaml
+pyfly:
+  web:
+    problem-details:
+      enabled: true
+```
+
+The response then uses the standard `type`, `title`, `status`, `detail`, and `instance` members, plus pyfly extension members (`code`, `transactionId`, `timestamp`, and `context` when present), served with the `application/problem+json` media type:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Order not found",
+  "instance": "/api/orders/42",
+  "code": "ORDER_NOT_FOUND",
+  "transactionId": "…",
+  "timestamp": "…"
+}
+```
+
+---
+
+## JSON Serialization and Content Negotiation
+
+### Jackson `ObjectMapper` → `pyfly.web.json`
+
+In Spring, a central `ObjectMapper` (configured globally via `spring.jackson.*`) serializes every response. PyFly keeps **per-model** behavior with Pydantic (`Field(alias=...)`, `@field_serializer`, discriminated unions) and adds the piece Spring centralizes: **global** JSON config applied at one serialization boundary, plus a registry for non-Pydantic types.
+
+**Spring:**
+```yaml
+spring:
+  jackson:
+    property-naming-strategy: LOWER_CAMEL_CASE
+    default-property-inclusion: non_null
+```
+
+**PyFly:**
+```yaml
+pyfly:
+  web:
+    json:
+      property-naming-strategy: as-is   # as-is | camelCase (camelCase implies by-alias on output)
+      by-alias: false
+      exclude-none: false
+      exclude-defaults: false
+      fail-on-unknown-properties: false
+```
+
+These keys bind to `JsonProperties` and are applied by `PyFlyJsonSerializer` at the response boundary.
+
+**Custom encoders for non-Pydantic types** (the Jackson module/serializer equivalent) go through `JsonSerializers`:
+
+```python
+from pyfly.web.json import JsonSerializers
+
+serializers = JsonSerializers()
+serializers.register(Money, encode=lambda m: {"amount": str(m.amount), "ccy": m.currency})
+```
+
+**Opt-in camelCase models** use the `CamelModel` base instead of a global alias generator that mutates your models:
+
+```python
+from pyfly.web.json import CamelModel
+
+class OrderResponse(CamelModel):
+    order_id: int      # serializes as "orderId"; also accepts snake_case input
+    total_amount: float
+```
+
+`pyfly.web.json` is deliberately **not** a Jackson clone — there is no `@JsonView`, no `ObjectMapper` god-object, no codegen, and no global alias generator injected into your models.
+
+### `HttpMessageConverter` → `message_converters`
+
+Spring's `HttpMessageConverter` registry reads request bodies and writes responses based on content negotiation. PyFly mirrors this with an ordered, pluggable `MessageConverterRegistry`:
+
+```python
+from pyfly.web.message_converters import (
+    default_message_converters,
+    MessageConverter,
+    MessageConverterRegistry,
+)
+
+# Built-in registry: JSON (first/default) then XML, sharing one serializer
+registry = default_message_converters()
+
+# Register your own (highest priority) — e.g. a CBOR converter
+class CborConverter(MessageConverter):
+    media_types = ("application/cbor",)
+    def read(self, body: bytes, target_type: type): ...
+    def write(self, value): ...
+
+registry.add(CborConverter())
+```
+
+| Spring | PyFly | Behavior |
+|--------|-------|----------|
+| `HttpMessageConverter` | `MessageConverter` | Reads/writes bodies for its media types |
+| `MappingJackson2HttpMessageConverter` | `JsonMessageConverter` | JSON via `PyFlyJsonSerializer` + Pydantic validation |
+| `MappingJackson2XmlHttpMessageConverter` | `XmlMessageConverter` | XML via stdlib `ElementTree` |
+| Converter list on `WebMvcConfigurer` | `MessageConverterRegistry` | Ordered; first match wins |
+
+Reads select a converter by the request `Content-Type`; writes select by the `Accept` header, ordered by **q-value** (`parse_accept` honors `q=` weights). All formats route JSON-level serialization through `PyFlyJsonSerializer`, so the global `pyfly.web.json.*` config applies to every format. With `fail-on-unknown-properties` enabled, the JSON converter validates request bodies against an `extra='forbid'` overlay so unknown keys are rejected.
 
 ---
 
@@ -636,6 +913,60 @@ page: Page[Order] = await repository.find_all_paginated(
 )
 # page.content, page.total_elements, page.total_pages, page.number
 ```
+
+### Entity ↔ DTO Mapping — MapStruct → `Mapper`
+
+**Spring (MapStruct):**
+```java
+@Mapper
+public interface UserMapper {
+    @Mapping(source = "username", target = "name")
+    UserDTO toDto(User user);
+    List<UserDTO> toDtoList(List<User> users);
+}
+```
+
+**PyFly:**
+```python
+from pyfly.data import Mapper, mapping, default_mapper
+
+# Imperative
+mapper = Mapper()
+mapper.add_mapping(User, UserDTO, field_map={"username": "name"}, transformers={"email": str.lower})
+dto = mapper.map(user, UserDTO)             # auto name-match + nested-model recursion
+dtos = mapper.map_list(users, UserDTO)
+
+# Declarative — config lives next to the types
+@mapping(User, UserDTO, rename={"username": "name"}, transform={"email": str.lower})
+class UserMapper: ...
+
+dto = default_mapper.map(user, UserDTO)
+```
+
+`Mapper` (from `pyfly.data`) maps between dataclasses and Pydantic models by matching field names, with renaming (`field_map`/`rename`), value transformers, field exclusion, projections, and recursion into nested models and collections of models.
+
+**Key difference:** MapStruct generates `*Impl` classes at compile time. PyFly's `Mapper` is a runtime, reflection-based mapper — intentionally no codegen, no generated classes, and no string-expression DSL. It is Pydantic-aware: it keeps nested models as live instances and constructs the destination through its (validating) constructor.
+
+### Read/Write Routing — `AbstractRoutingDataSource` → `RoutingSessionFactory`
+
+**Spring** routes between datasources with `AbstractRoutingDataSource` and `@Transactional(readOnly = true)`. **PyFly** uses `RoutingSessionFactory` plus a `read_only()` context:
+
+```python
+from pyfly.data.relational import RoutingSessionFactory, read_only
+
+factory = ctx.get_bean(RoutingSessionFactory)
+
+async def list_users() -> list[User]:
+    with read_only():            # routes to the read replica when one is configured
+        session = factory()      # AsyncSession from the replica session maker
+        ...
+
+async def create_user(data: dict) -> User:
+    session = factory()          # outside read_only() -> primary (read/write)
+    ...
+```
+
+The factory picks the primary or read-replica session maker based on whether the current block is inside `read_only()` (the `@Transactional(readOnly = true)` analogue). Routing is opt-in: with no replica configured, the factory always uses the primary. `factory.primary()` and `factory.replica()` force a specific side regardless of context.
 
 ---
 
@@ -1045,6 +1376,52 @@ pyfly:
 
 ---
 
+## Integration Testing with Containers
+
+### Spring Boot
+
+```java
+@SpringBootTest
+@Testcontainers
+class OrderRepositoryTest {
+    @Container
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+}
+```
+
+`@Testcontainers` manages the container lifecycle and `@ServiceConnection` wires its connection details into the application context.
+
+### PyFly
+
+```python
+from pyfly.testing.testcontainers import postgres_container, pyfly_config, requires_docker
+
+@requires_docker   # skips cleanly when no Docker daemon is reachable
+def test_with_real_postgres():
+    with postgres_container() as pg:                # postgres:16-alpine by default
+        config = pyfly_config(pg)                   # the @ServiceConnection equivalent
+        # config now carries pyfly.data.relational.url -> the container's async URL
+        ...
+```
+
+`pyfly.testing.testcontainers` is the `@Testcontainers` / `@ServiceConnection` equivalent: it spins up a real Postgres/MySQL/Redis/MongoDB/Kafka in Docker, then maps each started container's connection details straight into pyfly config keys.
+
+| Spring | PyFly | Purpose |
+|--------|-------|---------|
+| `@Testcontainers` | `with postgres_container() as pg:` | Container lifecycle (context-managed) |
+| `@ServiceConnection` | `pyfly_config(pg)` / `pyfly_config_for(pg)` | Map connection details into config |
+| `PostgreSQLContainer` | `postgres_container()` | Postgres (async URL rewritten to `asyncpg`) |
+| `MySQLContainer` | `mysql_container()` | MySQL (rewritten to `aiomysql`) |
+| `GenericContainer` (Redis) | `redis_container()` | Redis (cache + session URLs) |
+| `MongoDBContainer` | `mongodb_container()` | MongoDB |
+| `KafkaContainer` | `kafka_container()` | Kafka |
+| `@DynamicPropertySource` | `pyfly_config(*containers, base=...)` | One-call Config for several containers |
+
+Requires the extra and a running Docker daemon: `pip install 'pyfly[testcontainers]'`. Use `@requires_docker` (or `is_docker_available()`) to skip integration tests cleanly where Docker is absent.
+
+---
+
 ## Quick Reference Table
 
 A complete mapping of Spring Boot concepts to PyFly equivalents:
@@ -1059,11 +1436,17 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `@Configuration` + `@Bean` | `@configuration` + `@bean` | Bean factories |
 | `@Autowired` | Constructor injection (automatic) + `Autowired()` field injection | Type-hint based |
 | `@Qualifier` | `Qualifier("name")` with `Annotated` | Named bean selection |
-| `@Primary` | `@primary` | Default implementation |
+| `@Primary` | `@primary` / `@bean(primary=True)` | Default implementation |
+| `@Value("${...}")` / `#{...}` | `Value("${...}")` / `Value("#{...}")` | Config-value injection (SpEL-lite) |
+| `ObjectFactory<T>` / `Provider<T>` | `Provider[T]` | Deferred / fresh resolution |
+| `Map<String, T>` | `dict[str, T]` | Inject all named beans by name |
+| `@Lazy` | `@lazy` | Lazy-initialized bean |
+| `@Bean @Profile("dev")` | `@bean(profile="dev")` | Profile-scoped factory bean |
 | `@ConditionalOnProperty` | `@conditional_on_property` | Config-based activation |
 | `@ConditionalOnClass` | `@conditional_on_class` | Library detection |
 | `@ConditionalOnMissingBean` | `@conditional_on_missing_bean` | Missing bean check |
 | `@ConditionalOnBean` | `@conditional_on_bean` | Bean presence check |
+| `@ConditionalOnExpression` | `@conditional_on_expression` | SpEL-lite expression check |
 | `@PostConstruct` | `@post_construct` | Initialization hook |
 | `@PreDestroy` | `@pre_destroy` | Cleanup hook |
 | `@Order` | `@order` | Execution priority |
@@ -1080,6 +1463,11 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `@RequestParam` | `QueryParam[T]` | Query string parameter |
 | `@RequestHeader` | `Header[T]` | HTTP header value |
 | `@ControllerAdvice` | `@exception_handler` | Exception handling |
+| RFC 7807 `problem+json` | `pyfly.web.problem-details.enabled` | RFC 7807 error responses |
+| Jackson `ObjectMapper` | `PyFlyJsonSerializer` + `pyfly.web.json.*` | Global JSON config |
+| Jackson serializer/module | `JsonSerializers.register(...)` | Non-Pydantic type encoders |
+| `@JsonNaming` (camelCase) | `CamelModel` | Opt-in camelCase model base |
+| `HttpMessageConverter` | `MessageConverter` / `MessageConverterRegistry` | Body read/write + negotiation |
 | `@Scheduled(fixedRate)` | `@scheduled(fixed_rate)` | Periodic tasks |
 | `@Scheduled(cron)` | `@scheduled(cron)` | Cron-based scheduling |
 | `@Cacheable` | `@cacheable` | Method caching |
@@ -1097,6 +1485,9 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `Specification` | `Specification` | Dynamic query predicates |
 | `Page<T>` | `Page[T]` | Paginated results |
 | `Pageable` | `Pageable` | Pagination request |
+| MapStruct `@Mapper` | `Mapper` / `@mapping` | Entity ↔ DTO mapping |
+| `AbstractRoutingDataSource` | `RoutingSessionFactory` | Read/write datasource routing |
+| `@Transactional(readOnly=true)` | `read_only()` context | Route to read replica |
 | Actuator `/health` | Actuator `/actuator/health` | Health checks |
 | Actuator `/info` | Actuator `/actuator/info` | App metadata |
 | Actuator `/beans` | Actuator `/actuator/beans` | Bean registry |
@@ -1141,6 +1532,9 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `TracingAutoConfiguration` | `TracingAutoConfiguration` | Auto-configured when `opentelemetry` is installed |
 | `ActuatorAutoConfiguration` | `ActuatorAutoConfiguration` + `MetricsActuatorAutoConfiguration` | Split by optional dependency |
 | `WebServerFactoryAutoConfiguration` | `ServerAutoConfiguration` | Auto-detects Granian > Uvicorn > Hypercorn |
+| `@Testcontainers` | `postgres_container()` (context-managed) | Container lifecycle |
+| `@ServiceConnection` | `pyfly_config()` / `pyfly_config_for()` | Wire container into config |
+| `@DynamicPropertySource` | `pyfly_config(*containers, base=...)` | Build a Config from containers |
 
 ---
 

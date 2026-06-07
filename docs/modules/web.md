@@ -40,6 +40,13 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
 - [Response Handling](#response-handling)
   - [Return Value Conversion](#return-value-conversion)
   - [handle_return_value()](#handle_return_value)
+- [JSON & Content Negotiation](#json--content-negotiation)
+  - [Global JSON Config: pyfly.web.json.\*](#global-json-config-pyflywebjson)
+  - [CamelModel: Opt-in camelCase Models](#camelmodel-opt-in-camelcase-models)
+  - [JsonSerializers: Custom Non-Pydantic Types](#jsonserializers-custom-non-pydantic-types)
+  - [HttpMessageConverter Chain](#httpmessageconverter-chain)
+  - [Registering a Custom MessageConverterRegistry](#registering-a-custom-messageconverterregistry)
+  - [RFC 7807 problem+json](#rfc-7807-problemjson)
 - [Exception Handling](#exception-handling)
   - [Controller-Level Exception Handlers](#controller-level-exception-handlers)
   - [Global Exception Handler](#global-exception-handler)
@@ -730,6 +737,266 @@ response = handle_return_value(None, status_code=201)
 ```
 
 Source file: `src/pyfly/web/adapters/starlette/response.py`
+
+---
+
+## JSON & Content Negotiation
+
+PyFly centralizes JSON (de)serialization the way Spring centralizes Jackson's `ObjectMapper`: a single, app-wide configuration boundary plus a registry for serializing arbitrary, non-Pydantic types. On top of that sits an ordered, pluggable `HttpMessageConverter` chain that reads request bodies and writes responses in multiple formats (JSON and XML out of the box), negotiating the format from the `Accept` header (with q-values) on write and the `Content-Type` header on read.
+
+This layer is deliberately **not** a Jackson clone — there is no `@JsonView`, no Modules SPI, no `ObjectMapper` god-object, and no global `alias_generator` injected into your models. **Per-field behavior stays Pydantic's job**: `Field(alias=...)`, `@field_serializer`, discriminated unions, and validators all work exactly as they do in plain Pydantic. The pyfly layer adds only what Pydantic does not centralize — global toggles applied at the one serialization boundary, and a way to serialize types Pydantic never sees.
+
+Source files:
+- `src/pyfly/web/json.py` -- `JsonProperties`, `CamelModel`, `JsonSerializers`, `PyFlyJsonSerializer`, `json_properties_from_config()`
+- `src/pyfly/web/message_converters.py` -- `MessageConverter`, `JsonMessageConverter`, `XmlMessageConverter`, `MessageConverterRegistry`, `default_message_converters()`, `parse_accept()`
+- `src/pyfly/web/adapters/starlette/app.py` -- wires config + registry into `app.state`
+
+### Global JSON Config: pyfly.web.json.\*
+
+The `JsonProperties` model captures the global JSON settings, bound from the `pyfly.web.json.*` namespace at startup via `json_properties_from_config()`:
+
+```yaml
+# application.yml
+pyfly:
+  web:
+    json:
+      property-naming-strategy: as-is   # as-is | camelCase (camelCase implies by-alias on output)
+      by-alias: false
+      exclude-none: false
+      exclude-defaults: false
+      fail-on-unknown-properties: false
+```
+
+| Config key (`pyfly.web.json.*`) | `JsonProperties` field      | Type                       | Default  | Effect                                                                 |
+|---------------------------------|-----------------------------|----------------------------|----------|------------------------------------------------------------------------|
+| `property-naming-strategy`      | `property_naming_strategy`  | `"as-is"` \| `"camelCase"` | `as-is`  | `camelCase` dumps responses using field aliases (implies `by-alias`).  |
+| `by-alias`                      | `by_alias`                  | `bool`                     | `false`  | Dump models using their Pydantic field aliases.                        |
+| `exclude-none`                  | `exclude_none`              | `bool`                     | `false`  | Omit fields whose value is `None` from the JSON output.                |
+| `exclude-defaults`              | `exclude_defaults`          | `bool`                     | `false`  | Omit fields still set to their default value.                          |
+| `fail-on-unknown-properties`    | `fail_on_unknown_properties`| `bool`                     | `false`  | Reject request bodies containing keys not declared on the model (422). |
+
+These settings apply at the single serialization boundary in `PyFlyJsonSerializer`, so they affect every response and every JSON request body — you do not annotate individual models. The `camelCase` strategy is a convenience: `JsonProperties.effective_by_alias()` returns `True` whenever `by_alias` is set **or** the strategy is `camelCase`, so picking `camelCase` automatically dumps by alias.
+
+```python
+from pyfly.web.json import JsonProperties, PyFlyJsonSerializer
+
+serializer = PyFlyJsonSerializer(JsonProperties(exclude_none=True))
+serializer.to_response_data(Item(item_name="a", qty=1))
+# -> {"item_name": "a", "qty": 1}   # the None "note" field is dropped
+```
+
+`fail-on-unknown-properties` is enforced by the JSON message converter on **read**: when enabled, an unknown key in the request body raises a Pydantic `ValidationError` (which the converter chain surfaces as a structured 422). It does this without mutating your model — it transparently overlays an `extra="forbid"` subclass for the validation only.
+
+> **Naming note.** `JsonProperties` is bound from `pyfly.web.json.*` by `json_properties_from_config()`, which reads kebab-case keys directly from the `Config` object. It is **not** registered with `@config_properties`; `create_app()` calls `json_properties_from_config(context.config)` itself.
+
+### CamelModel: Opt-in camelCase Models
+
+Because pyfly never injects a global `alias_generator` into your models, opting a model into camelCase JSON I/O is done per-model by inheriting from `CamelModel`:
+
+```python
+from pyfly.web.json import CamelModel
+
+
+class CreateOrderRequest(CamelModel):
+    customer_id: str
+    line_items: list[str]
+    unit_price: float
+```
+
+`CamelModel` configures `alias_generator=to_camel`, `populate_by_name=True`, and `serialize_by_alias=True`, so it:
+
+- **accepts** both camelCase (`customerId`) and snake_case (`customer_id`) on input, and
+- **emits** camelCase on output.
+
+```python
+from pyfly.web.json import CamelModel, JsonProperties, PyFlyJsonSerializer
+
+
+class Item(CamelModel):
+    item_name: str
+    unit_price: float
+
+
+s = PyFlyJsonSerializer(JsonProperties(property_naming_strategy="camelCase"))
+s.to_response_data(Item(item_name="a", unit_price=1.5))
+# -> {"itemName": "a", "unitPrice": 1.5}
+```
+
+Use `CamelModel` when you want a camelCase wire contract for specific DTOs without flipping the global strategy. (With the global `camelCase` strategy set, `CamelModel`'s aliases are what gets emitted; plain `BaseModel` fields have no aliases and so serialize unchanged.)
+
+### JsonSerializers: Custom Non-Pydantic Types
+
+Some values are not Pydantic models and are not JSON primitives — a `Money` value object, a domain enum wrapper, a third-party type. `JsonSerializers` is a registry of encoders for exactly these. Register an encoder once, typically via a DI bean, and the type serializes consistently everywhere:
+
+```python
+from decimal import Decimal
+
+from pyfly.web.json import JsonSerializers
+
+
+class Money:
+    def __init__(self, amount: Decimal, currency: str) -> None:
+        self.amount = amount
+        self.currency = currency
+
+
+registry = JsonSerializers()
+registry.register(Money, encode=lambda m: {"amount": str(m.amount), "ccy": m.currency})
+```
+
+`encode_for()` honors inheritance (it walks the type's MRO), so an encoder registered for a base class also covers its subclasses. The serializer applies the registry recursively, so a `Money` nested inside a dict, list, or another structure is encoded correctly:
+
+```python
+from pyfly.web.json import JsonProperties, PyFlyJsonSerializer
+
+s = PyFlyJsonSerializer(JsonProperties(), registry)
+s.to_response_data({"price": Money(Decimal("9.99"), "USD")})
+# -> {"price": {"amount": "9.99", "ccy": "USD"}}
+```
+
+**Wiring it into the app.** At startup, `create_app()` looks for a `JsonSerializers` bean in the `ApplicationContext`; if present, it is used as the registry for the app-wide `PyFlyJsonSerializer`. Register one as a bean so all responses use your encoders:
+
+```python
+from decimal import Decimal
+
+from pyfly.container.bean import bean
+from pyfly.web.json import JsonSerializers
+
+
+@bean
+def json_serializers() -> JsonSerializers:
+    registry = JsonSerializers()
+    registry.register(Money, encode=lambda m: {"amount": str(m.amount), "ccy": m.currency})
+    return registry
+```
+
+Note that even without a registered encoder, `PyFlyJsonSerializer` already handles common stdlib types that bare `json.dumps` cannot: `datetime`/`date`/`time` (ISO format), `UUID` and `Decimal` (as strings, matching Pydantic's `mode="json"`), `Enum` (its `.value`), `set`/`frozenset` (as a list), `bytes` (UTF-8 decoded), and dataclasses (via `asdict`). The registry is for your own types beyond these.
+
+### HttpMessageConverter Chain
+
+The `MessageConverterRegistry` is an ordered list of `MessageConverter` instances, each bound to one or more media types and used for **both** reading request bodies and writing responses. The built-in registry from `default_message_converters()` contains, in order:
+
+1. `JsonMessageConverter` -- `application/json` (the default)
+2. `XmlMessageConverter` -- `application/xml`, `text/xml`
+
+Both converters share the same `PyFlyJsonSerializer`, so the global `pyfly.web.json.*` config applies to every format — XML responses are normalized through the serializer too.
+
+**Write — `Accept` negotiation with q-values.** `find_writer(accept)` parses the `Accept` header into media types ordered by descending q-value (`parse_accept()`) and returns the first converter that supports the highest-priority type. JSON is the fallback when nothing matches or no `Accept` header is sent.
+
+```python
+from pyfly.web.message_converters import default_message_converters
+
+reg = default_message_converters()
+reg.find_writer("application/xml")                                   # -> XmlMessageConverter
+reg.find_writer("application/json")                                  # -> JsonMessageConverter
+reg.find_writer(None)                                                # -> JsonMessageConverter (default)
+reg.find_writer("application/json;q=0.8, application/xml;q=0.9")     # -> XmlMessageConverter (higher q)
+```
+
+In a controller, this happens automatically — the `ControllerRegistrar` passes the request's `Accept` header and the app's registry to `handle_return_value()`, which negotiates the writer:
+
+```python
+@rest_controller
+class WidgetController:
+    @get_mapping("/widget")
+    async def get_widget(self) -> Widget:
+        return Widget(name="gadget", qty=3)
+```
+
+```
+GET /widget   Accept: application/json   ->  {"name": "gadget", "qty": 3}
+GET /widget   Accept: application/xml    ->  <response><name>gadget</name><qty>3</qty></response>
+```
+
+**Read — `Content-Type` parsing (including XML bodies).** `find_reader(content_type)` selects the converter for the request's `Content-Type`, falling back to the first converter (JSON) when the header is absent or unrecognized. This means `Body[T]` and `Valid[T]` parameters now accept XML request bodies, not just JSON:
+
+```python
+@post_mapping("/widget")
+async def echo_widget(self, widget: Body[Widget]) -> Widget:
+    return widget
+```
+
+```
+POST /widget   Content-Type: application/json
+{"name": "x", "qty": 5}
+->  Widget(name="x", qty=5)
+
+POST /widget   Content-Type: application/xml
+<widget><name>y</name><qty>7</qty></widget>
+->  Widget(name="y", qty=7)        # XML text "7" is coerced back to int by Pydantic
+```
+
+The XML converter unwraps the single root element and validates the inner dict against the target Pydantic model, so XML and JSON bodies bind to the same model identically.
+
+### Registering a Custom MessageConverterRegistry
+
+To support an additional format (CBOR, MessagePack, etc.) or to reorder priority, expose a `MessageConverterRegistry` bean. When present in the `ApplicationContext`, it **fully replaces** the default registry for the app. Build on `default_message_converters()` and `add()` your converter — `add()` inserts at the front, so user-added converters take priority:
+
+```python
+from pyfly.container.bean import bean
+from pyfly.web.json import PyFlyJsonSerializer
+from pyfly.web.message_converters import MessageConverter, MessageConverterRegistry, default_message_converters
+
+
+class CborConverter(MessageConverter):
+    media_types = ("application/cbor",)
+
+    def read(self, body: bytes, target_type: type):
+        import cbor2
+
+        data = cbor2.loads(body)
+        if isinstance(target_type, type) and issubclass(target_type, BaseModel):
+            return target_type.model_validate(data)
+        return data
+
+    def write(self, value) -> tuple[bytes, str]:
+        import cbor2
+
+        return cbor2.dumps(value), "application/cbor"
+
+
+@bean
+def message_converters() -> MessageConverterRegistry:
+    registry = default_message_converters(PyFlyJsonSerializer())
+    registry.add(CborConverter())   # inserted at front; JSON + XML still work
+    return registry
+```
+
+A `MessageConverter` subclass defines its `media_types` tuple and implements `read(body, target_type)` and `write(value) -> (body_bytes, content_type)`. The base `supports()` matches the bare media type (a `;`-suffixed `Content-Type` is normalized, and `*/*` matches anything).
+
+> **How it is wired.** `create_app()` stores the negotiated serializer on `app.state.pyfly_json_serializer` and the converter registry on `app.state.pyfly_message_converters`. The `ParameterResolver` reads `pyfly_message_converters` to pick a reader by `Content-Type`; the `ControllerRegistrar` reads it to pick a writer by `Accept`. `fail-on-unknown-properties` is threaded into the default JSON converter via `default_message_converters(serializer, fail_on_unknown=...)`.
+
+### RFC 7807 problem+json
+
+By default, the global exception handler emits the `{"error": {...}}` envelope (see [Global Exception Handler](#global-exception-handler)). Setting `pyfly.web.problem-details.enabled: true` switches it to RFC 7807 `application/problem+json` responses instead, matching Spring Boot 3's `spring.mvc.problemdetails.enabled`:
+
+```yaml
+pyfly:
+  web:
+    problem-details:
+      enabled: false   # opt-in; default off preserves the {"error": {...}} envelope
+```
+
+With it enabled, a `ResourceNotFoundException("widget not found", code="WIDGET_NOT_FOUND")` raised at `/widgets/42` produces:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "widget not found",
+  "instance": "/widgets/42",
+  "code": "WIDGET_NOT_FOUND",
+  "transactionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "timestamp": "2026-06-07T10:30:00+00:00"
+}
+```
+
+The response uses the `application/problem+json` media type. `type`, `title`, `status`, `detail`, and `instance` are the standard RFC 7807 members (`title` is the HTTP reason phrase for the status; `instance` is the request path). `code`, `transactionId`, `timestamp`, and an optional `context` are pyfly extension members. The same exception-to-status mapping described under [Exception-to-Status Mapping](#exception-to-status-mapping) applies in both modes.
+
+Source files:
+- `src/pyfly/web/adapters/starlette/errors.py` -- `global_exception_handler`, problem+json emission
+- `src/pyfly/web/adapters/starlette/app.py` -- reads `pyfly.web.problem-details.enabled` onto `app.state.pyfly_problem_details`
 
 ---
 

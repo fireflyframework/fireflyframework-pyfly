@@ -40,7 +40,11 @@ and the full reference of framework defaults.
    - [Expression Syntax](#expression-syntax)
    - [Usage in Beans](#usage-in-beans)
    - [@Value vs @config_properties](#value-vs-config_properties)
-10. [Framework Defaults Reference](#framework-defaults-reference)
+10. [SpEL-lite Expressions](#spel-lite-expressions)
+    - [The `#{ ... }` Form](#the-spel-form)
+    - [`@conditional_on_expression`](#conditional_on_expression)
+    - [Safety Model](#safety-model)
+11. [Framework Defaults Reference](#framework-defaults-reference)
     - [Application](#application-defaults)
     - [Profiles](#profiles-defaults)
     - [Banner](#banner-defaults)
@@ -54,7 +58,7 @@ and the full reference of framework defaults.
     - [Admin](#admin-defaults)
     - [Security](#security-defaults)
     - [Observability](#observability-defaults)
-11. [Complete Example: Multi-Environment Setup](#complete-example-multi-environment-setup)
+12. [Complete Example: Multi-Environment Setup](#complete-example-multi-environment-setup)
 
 ---
 
@@ -672,13 +676,16 @@ from pyfly.core.value import Value
 
 ### Expression Syntax
 
-`@Value` supports three expression forms:
+`@Value` supports four expression forms:
 
 | Expression | Behaviour | Example |
 |---|---|---|
 | `${key}` | Resolve from Config; raise `KeyError` if missing | `Value("${pyfly.app.name}")` |
 | `${key:default}` | Resolve from Config; use default if missing | `Value("${pyfly.timeout:30}")` |
-| `literal` | Return the string as-is (no `${}` wrapper) | `Value("hello")` |
+| `#{ ... }` | Evaluate a SpEL-lite expression (arithmetic/boolean/ternary, `${key}` substitution, `env`) | `Value("#{${pyfly.workers:1} * 2}")` |
+| `literal` | Return the string as-is (no `${}`/`#{}` wrapper) | `Value("hello")` |
+
+The `#{ ... }` form is the [SpEL-lite expression](#spel-lite-expressions) language described below.
 
 The key uses dot-notation to navigate the Config hierarchy (e.g., `pyfly.data.mongodb.uri` resolves to `config["pyfly"]["data"]["mongodb"]["uri"]`).
 
@@ -725,6 +732,138 @@ The DI container resolves `Value` descriptors during bean initialization, before
 **Rule of thumb:** Use `@Value` for 1-3 config values in a bean. Use `@config_properties` when a component needs a whole section of related configuration.
 
 Source file: `src/pyfly/core/value.py`
+
+---
+
+## SpEL-lite Expressions
+
+PyFly ships a small, **safe** expression evaluator — its subset of Spring's SpEL. It
+backs the `#{ ... }` form used by [`@Value`](#value-field-level-config-injection) and
+[`@conditional_on_expression`](#conditional_on_expression), letting you compute config
+values and toggle beans from arithmetic and config-placeholder substitution without
+writing any Python at the call site.
+
+```python
+from pyfly.core.expression import evaluate, is_expression
+```
+
+### The `#{ ... }` Form
+
+An expression is any string wrapped in `#{ ... }`. `evaluate(text, config=None)` parses
+it with Python's `ast` module and evaluates it against a whitelist of node types; the
+result is the computed value (any Python type).
+
+Supported constructs:
+
+| Category | Operators / Forms | Example | Result |
+|---|---|---|---|
+| Arithmetic | `+`, `-`, `*`, `/`, `//`, `%`, `**`, unary `+`/`-` | `#{2 * 5 + 1}` | `11` |
+| Comparison | `==`, `!=`, `<`, `<=`, `>`, `>=` (incl. chained) | `#{3 > 2}` | `True` |
+| Boolean | `and`, `or`, `not` | `#{not false}` | `True` |
+| Ternary | `a if cond else b` | `#{100 if 2 > 1 else 200}` | `100` |
+| Literals | numbers, strings, `true`/`false`/`null`, lists, tuples | `#{[1, 2, 3]}` | `[1, 2, 3]` |
+| Subscript | `mapping[key]` | `#{env['HOME']}` | env value |
+
+`true`/`false`/`null` (and their Python `True`/`False`/`None` spellings) are recognized as
+literals.
+
+**`${key:default}` substitution.** Before evaluation, every `${key}` /
+`${key:default}` placeholder in the expression is resolved against the `Config` passed to
+`evaluate()` and inlined as a literal. A bare `${key}` raises `ExpressionError` if the key
+is missing; the `:default` form falls back to the default.
+
+```python
+from pyfly.core import Config
+from pyfly.core.expression import evaluate
+
+cfg = Config({"pyfly": {"workers": 4}})
+
+evaluate("#{${pyfly.workers} * 2}", cfg)     # 8
+evaluate("#{${pyfly.missing:3} + 1}", cfg)   # 4  (default used)
+```
+
+**The `env` mapping.** A read-only `env` mapping exposes the process environment
+(`os.environ`) for subscripting:
+
+```python
+import os
+os.environ["FEATURE_FLAG"] = "on"
+
+evaluate("#{env['FEATURE_FLAG'] == 'on'}")   # True
+```
+
+In a bean, the same forms work through `@Value`:
+
+```python
+from pyfly.container import service
+from pyfly.core.value import Value
+
+
+@service
+class PoolService:
+    # double the configured worker count, defaulting to 1
+    pool_size: int = Value("#{${pyfly.workers:1} * 2}")
+    # enable batching only when more than one worker is configured
+    batching: bool = Value("#{${pyfly.workers:1} > 1}")
+```
+
+`is_expression(text)` returns whether a string is a `#{ ... }` expression — `@Value`
+uses it to decide between SpEL-lite evaluation and plain `${...}` placeholder resolution.
+
+### @conditional_on_expression
+
+`@conditional_on_expression` registers a bean only when a SpEL-lite `#{ ... }` expression
+is truthy — the equivalent of Spring Boot's `@ConditionalOnExpression`. The expression is
+evaluated against the active config at `ApplicationContext` startup.
+
+```python
+from pyfly.container import service
+from pyfly.context import conditional_on_expression
+
+
+@conditional_on_expression("#{${pyfly.workers:1} > 1}")
+@service
+class ParallelScheduler:
+    """Only registered when pyfly.workers is greater than 1."""
+    ...
+```
+
+Because the expression supports `${key:default}` substitution and the `env` mapping, it
+covers numeric thresholds and environment-driven toggles that `@conditional_on_property`
+(string equality only) cannot express. Combine it with the other `@conditional_on_*`
+decorators (`@conditional_on_property`, `@conditional_on_class`, `@conditional_on_bean`,
+`@conditional_on_missing_bean`) for auto-configuration-style wiring.
+
+### Safety Model
+
+The evaluator is intentionally **not** full SpEL — it is designed so an expression can
+never execute arbitrary code:
+
+- **No `eval`.** Expressions are parsed with `ast.parse(..., mode="eval")` and walked
+  node-by-node; Python's `eval`/`exec` are never called.
+- **Whitelisted node types only.** Only the operators and literal forms listed above are
+  evaluated. Any other node raises `ExpressionError`.
+- **No attribute access.** `#{(1).__class__}` is rejected — attribute navigation is not a
+  whitelisted node.
+- **No function or method calls.** `#{__import__('os')}` is rejected — call nodes are not
+  whitelisted.
+- **No assignment, no name resolution beyond the safe builtins.** The only names available
+  are the literals (`true`/`false`/`null`) and the `env` mapping; an unknown name raises
+  `ExpressionError`.
+
+A malformed expression raises `ExpressionError` (a subclass of `PyFlyException`).
+
+```python
+from pyfly.core.expression import ExpressionError, evaluate
+
+for unsafe in ("#{__import__('os')}", "#{(1).__class__}", "#{unknown_name}"):
+    try:
+        evaluate(unsafe)
+    except ExpressionError:
+        pass  # all three are rejected
+```
+
+Source file: `src/pyfly/core/expression.py` (decorator in `src/pyfly/context/conditions.py`)
 
 ---
 
