@@ -17,6 +17,7 @@ a multi-layer application where every component is managed, wired, and lifecycle
    - [resolve_by_name()](#resolve_by_name)
    - [resolve_all()](#resolve_all)
    - [contains()](#contains)
+   - [Introspection / registration SPI](#introspection--registration-spi)
 3. [Stereotypes](#stereotypes)
    - [@component](#component)
    - [@service](#service)
@@ -266,6 +267,49 @@ Returns `True` if a bean with the given name is registered.
 if container.contains("cache_adapter"):
     cache = container.resolve_by_name("cache_adapter")
 ```
+
+### Introspection / registration SPI
+
+`Container` exposes a small **public SPI** for installing pre-built instances and
+inspecting registrations, so callers (refresh/config-reload, tests, tooling) never have
+to reach into the private `_registrations` dict. All five methods live on `Container`
+(from `pyfly.container`):
+
+```python
+def register_instance(self, cls: type, instance: Any, *, name: str = "") -> None:
+def contains_type(self, cls: type) -> bool:
+def get_registration(self, cls: type) -> Registration | None:
+def registered_types(self) -> list[type]:
+def reset_instance(self, cls: type) -> Any | None:
+```
+
+| Method | Behaviour |
+|---|---|
+| `register_instance(cls, instance, *, name="")` | Register an already-constructed object as a `SINGLETON` bean (Spring's `registerSingleton`). The supported way to install a pre-built instance — preferred over mutating registration internals. |
+| `contains_type(cls)` | `True` if a bean is registered under **exactly** `cls`. (Compare with `contains(name)`, which checks the named-bean store.) |
+| `get_registration(cls)` | The `Registration` for `cls`, or `None` if unregistered. |
+| `registered_types()` | A snapshot `list[type]` of every registered bean type. |
+| `reset_instance(cls)` | Drop the cached `SINGLETON` instance of `cls` so it is rebuilt on the next `resolve()`. Returns the evicted instance (or `None`). Used by refresh / config-reload to force re-creation without reaching into registration internals. |
+
+```python
+from pyfly.container import Container
+
+container = Container()
+
+# Install a pre-built singleton (optionally named):
+container.register_instance(Clock, SystemClock(), name="system_clock")
+
+# Inspect registrations:
+container.contains_type(Clock)        # True
+reg = container.get_registration(Clock)   # Registration | None
+all_types = container.registered_types()  # [Clock, ...]
+
+# Force re-creation on next resolve (refresh / config reload):
+previous = container.reset_instance(Clock)  # returns the evicted instance or None
+fresh = container.resolve(Clock)            # rebuilt
+```
+
+**Source:** `src/pyfly/container/container.py`
 
 ---
 

@@ -41,6 +41,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Queries](#paginated-queries)
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
+- [Run Migrations on Startup (Flyway-Style)](#run-migrations-on-startup-flyway-style)
 - [Read/Write Routing (Read Replicas)](#readwrite-routing-read-replicas)
 - [Multiple Named Datasources](#multiple-named-datasources)
   - [NamedDataSources](#nameddatasources)
@@ -564,6 +565,46 @@ async def transfer_funds(session: AsyncSession, from_id: str, to_id: str, amount
 # Call it without the session argument:
 await transfer_funds("acc-1", "acc-2", 100.0)
 ```
+
+---
+
+## Run Migrations on Startup (Flyway-Style)
+
+By default schema migrations are applied with the [`pyfly db`](../cli.md#pyfly-db) CLI commands. PyFly can also apply them **automatically on application startup** — the equivalent of Spring Boot's Flyway/Liquibase auto-migrate. This is **opt-in** and reuses the existing Alembic environment created by `pyfly db init`; the CLI commands keep working exactly as before.
+
+Enable it with `pyfly.data.relational.migrations.enabled`:
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+asyncpg://user:pass@primary:5432/app
+      migrations:
+        enabled: true            # apply `alembic upgrade head` on startup
+        config: alembic.ini      # path to the Alembic config (default: alembic.ini)
+        revision: head           # target revision (default: head)
+```
+
+When enabled, `MigrationAutoConfiguration` registers a `MigrationRunner` bean. `MigrationRunner` implements the `start()` / `stop()` lifecycle, so the `ApplicationContext` auto-discovers it as an infrastructure adapter and calls `start()` once during startup. On `start()` it runs `alembic upgrade <revision>` against the **same datasource** the app uses (it forwards `pyfly.data.relational.url` into Alembic's `sqlalchemy.url`, so there is a single source of truth for the connection string).
+
+The upgrade runs in a worker thread (`asyncio.to_thread`) because the generated async `alembic/env.py` calls `asyncio.run` internally, which must not be nested inside the running event loop.
+
+If the Alembic config file is not found, startup migration is **skipped with a warning** (rather than failing) telling you to run `pyfly db init` first:
+
+```
+pyfly.data.relational.migrations.enabled is true but alembic.ini was not found —
+run 'pyfly db init' to create the Alembic environment; skipping migrations.
+```
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `pyfly.data.relational.migrations.enabled` | `false` (absent) | Apply migrations on startup when `true`. |
+| `pyfly.data.relational.migrations.config` | `alembic.ini` | Path to the Alembic config file. |
+| `pyfly.data.relational.migrations.revision` | `head` | Target revision passed to `alembic upgrade`. |
+
+> **Migrations vs. `ddl-auto`:** startup migrations are independent of the `engine_lifecycle` `ddl-auto` schema strategy. For an Alembic-managed database, set `pyfly.data.relational.ddl-auto: none` so the engine does not also create tables from `Base.metadata`, and let migrations own the schema.
+
+**Source:** `src/pyfly/data/relational/migrations.py` (`MigrationRunner`) · `src/pyfly/data/relational/auto_configuration.py` (`MigrationAutoConfiguration`)
 
 ---
 

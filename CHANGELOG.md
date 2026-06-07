@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.77 (2026-06-08)
+
+### Docs (feature sync — v26.06.57-76 are now documented)
+
+A sweep bringing the docs (and the companion plugin skills) in line with everything shipped since
+v26.06.57, verified key-by-key against the source:
+
+- **Scheduling** — distributed-lock providers (`pyfly.scheduling.lock.provider` = none|memory|redis|
+  **postgres** advisory lock) and the pluggable executor (`pyfly.scheduling.executor.type` =
+  asyncio|thread).
+- **Session** — concurrency registry backends (`pyfly.session.concurrency.registry` = memory|redis|
+  **postgres**).
+- **Security** — persistent OAuth2 token store (`pyfly.security.oauth2.token-store.provider` =
+  memory|redis|postgres) for multi-instance auth servers.
+- **Config** — `Config.reload_from_sources()` + `POST /actuator/refresh` now re-reads config files.
+- **Data/CLI** — run-on-startup Alembic migrations (`pyfly.data.relational.migrations.enabled`).
+- **Web** — access-log opt-out (`pyfly.web.request-logging.enabled`).
+- **Observability** — the `MetricsRecorder` port + `NoOpMetricsRecorder`.
+- **DI** — the public container SPI (`register_instance` / `contains_type` / `get_registration` /
+  `registered_types` / `reset_instance`).
+- Fixed the broken `@mongo_transactional(client)` example in the MongoDB adapter doc and the
+  stale `/actuator/refresh` description (now reflect the unified `@transactional` + config reload).
+
 ## v26.06.76 (2026-06-08)
 
 ### Tested (data — MongoDB query/projection execution coverage)
