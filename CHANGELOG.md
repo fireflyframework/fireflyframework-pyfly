@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.76 (2026-06-08)
+
+### Tested (data — MongoDB query/projection execution coverage)
+
+Closes the last audit test-depth gaps for the document repository. The Mongo query compiler and
+projections were previously only smoke-tested (clause construction / return-type acceptance);
+`tests/data/test_mongo_query_execution.py` now EXECUTES them against a real (mongomock) collection
+and asserts results: every comparison operator (`greater_than`/`_equal`, `less_than`, `between`,
+`in`, `containing` case-insensitive, `order_by` desc, `count_by`) end-to-end, and projection
+queries returning the field-subset (`SimpleNamespace`, non-projected fields absent) rather than full
+documents.
+
 ## v26.06.75 (2026-06-07)
 
 ### Changed (data — unified `@transactional` for every backend)
