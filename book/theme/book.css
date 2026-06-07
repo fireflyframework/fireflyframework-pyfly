@@ -57,6 +57,7 @@ pre.code{
 /* ============ figures ============ */
 figure.fig{ margin:1.45rem auto; text-align:center; }
 figure.fig svg{ max-width:100%; height:auto; }
+figure.fig img.fig-img{ max-width:240px; height:auto; }
 figcaption{ font-size:.78rem; color:var(--muted); margin-top:.55rem; line-height:1.45; }
 figcaption b,figcaption strong{ color:#3f6b34; }
 
@@ -73,20 +74,16 @@ td code,th code{ background:#eef3e8; }
 .admonition>:last-child{ margin-bottom:0; }
 .admonition>:first-child{ margin-top:0; }
 .admonition-title{ font-weight:800; font-size:.7rem; letter-spacing:.08em; text-transform:uppercase;
-  margin:0 0 .35rem; display:flex; align-items:baseline; gap:.4rem; }
-.admonition-title::before{ font-weight:700; }
+  margin:0 0 .35rem; display:flex; align-items:center; gap:.45rem; }
+.adm-ico{ flex:none; width:15px; height:15px; }
 .admonition.note{ background:var(--note-bg); border-color:#cfe3fb; border-left-color:var(--note); }
 .admonition.note>.admonition-title{ color:var(--note); }
-.admonition.note>.admonition-title::before{ content:"\2139"; }
 .admonition.tip{ background:#eefaed; border-color:#cdeccd; border-left-color:var(--tip); }
 .admonition.tip>.admonition-title{ color:var(--tip); }
-.admonition.tip>.admonition-title::before{ content:"\1F4A1"; }
 .admonition.warning{ background:var(--warn-bg); border-color:#fcd9c2; border-left-color:var(--warn); }
 .admonition.warning>.admonition-title{ color:var(--warn); }
-.admonition.warning>.admonition-title::before{ content:"\26A0"; }
 .admonition.spring{ background:#f1fae6; border-color:#d4e9bd; border-left-color:var(--green); }
 .admonition.spring>.admonition-title{ color:var(--green-deep); }
-.admonition.spring>.admonition-title::before{ content:"\1F33F"; }
 
 /* ============ recap / exercises (applied to the section H2) ============ */
 h2.recap,h2.exercises{ color:var(--green-deep); border-bottom-color:#cfe0bb;
