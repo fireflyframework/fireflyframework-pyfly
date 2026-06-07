@@ -196,7 +196,8 @@ class ApplicationContext:
             key=lambda item: get_order(item[0]),
         )
         for cls, reg in sorted_entries:
-            if reg.scope == Scope.SINGLETON and reg.instance is None:
+            # @lazy beans are not eagerly created — they resolve on first request.
+            if reg.scope == Scope.SINGLETON and reg.instance is None and not getattr(cls, "__pyfly_lazy__", False):
                 try:
                     self._container.resolve(cls)
                 except BeanCreationException as exc:

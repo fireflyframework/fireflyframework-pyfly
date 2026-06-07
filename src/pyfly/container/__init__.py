@@ -22,7 +22,9 @@ from pyfly.container.exceptions import (
     NoSuchBeanError,
     NoUniqueBeanError,
 )
+from pyfly.container.lazy import lazy
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, LOWEST_PRECEDENCE, order
+from pyfly.container.provider import Provider
 from pyfly.container.stereotypes import (
     component,
     configuration,
@@ -43,6 +45,7 @@ __all__ = [
     "LOWEST_PRECEDENCE",
     "NoSuchBeanError",
     "NoUniqueBeanError",
+    "Provider",
     "Qualifier",
     "Scope",
     "bean",
@@ -50,6 +53,7 @@ __all__ = [
     "configuration",
     "controller",
     "controller_advice",
+    "lazy",
     "order",
     "primary",
     "repository",

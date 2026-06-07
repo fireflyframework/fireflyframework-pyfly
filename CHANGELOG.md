@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.23 (2026-06-07)
+
+### Added (DI / autowiring feature parity)
+
+Spring-parity DI work, wave 2 (feature gaps):
+
+- **Constructor-parameter `@Value`.** Inject a config value into a constructor
+  argument via `Annotated[T, Value("${key:default}")]` (Spring's most common
+  `@Value` form) — previously `@Value` worked only on fields. The resolved value
+  is coerced to the declared type (`int`/`float`/`bool`/`str`).
+- **`Provider[T]`** (`pyfly.container.Provider`). Inject a deferred handle and call
+  `.get()` (or the instance) for a freshly-resolved bean each time — so a singleton
+  can obtain fresh `TRANSIENT` instances, or defer expensive/cyclic beans. The
+  Spring `ObjectFactory`/`Provider` equivalent.
+- **Map injection.** A `dict[str, T]` constructor/field parameter is injected as
+  `{bean-name: bean}` for every named bean assignable to `T` (Spring `Map<String,T>`).
+- **`@lazy`** (`pyfly.container.lazy`). Mark a bean lazy-initialized — not created
+  during startup, constructed on first resolution instead (Spring `@Lazy`).
+
+Note: generics-aware injection of a parametrized interface (e.g. `Repository[User]`)
+remains a deliberate scope decision — inject the concrete repository type; the
+parametrized form is not auto-matched.
+
+---
+
 ## v26.06.22 (2026-06-07)
 
 ### Fixed (DI / autowiring correctness)
