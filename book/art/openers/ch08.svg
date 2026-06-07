@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 8 opener: Domain Events / EDA — Sparky beside an EventBus rail fanning out to projection, notifier, and audit listener boxes"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <!-- ── Sparky (left) ── -->
+  <ellipse cx="160" cy="242" rx="52" ry="10" fill="#b8d9a0" opacity="0.6"/>
+
+  <path d="M170 230 C 90 220 95 160 130 148 C 165 136 168 100 148 78"
+        fill="none" stroke="#5fd13a" stroke-width="22" stroke-linecap="round"/>
+  <path d="M168 232 C 185 238 200 228 190 218"
+        fill="none" stroke="#5fd13a" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <ellipse cx="148" cy="68" rx="28" ry="24" fill="#67d642" stroke="#2f7d1c" stroke-width="3"/>
+  <circle cx="138" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="158" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="139.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="159.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="140.5" cy="59.5" r="1" fill="#fff"/>
+  <circle cx="160.5" cy="59.5" r="1" fill="#fff"/>
+  <path d="M140 76 Q 148 83 156 76" stroke="#1c5512" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M148 80 L 148 86 M 145 86 L 148 86 L 151 86"
+        stroke="#e8334a" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+  <!-- Divider -->
+  <line x1="300" y1="30" x2="300" y2="250" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,6"/>
+
+  <!-- ── EDA diagram ── -->
+  <defs>
+    <filter id="ch08-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch08-arrow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+  </defs>
+
+  <!-- EventBus horizontal rail -->
+  <rect x="318" y="122" width="130" height="44" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch08-shadow)"/>
+  <!-- Header bar -->
+  <rect x="318" y="122" width="130" height="22" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="318" y="134" width="130" height="10" fill="#43b02a"/>
+  <text x="383" y="133" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="12" font-weight="700">EventBus</text>
+  <text x="383" y="155" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">publish(event)</text>
+
+  <!-- Amber event star on the bus -->
+  <g transform="translate(440, 90)">
+    <path d="M0,-11 L2.6,-2.6 L11,0 L2.6,2.6 L0,11 L-2.6,2.6 L-11,0 L-2.6,-2.6 Z" fill="#ffc24b"/>
+  </g>
+  <text x="440" y="108" text-anchor="middle" fill="#23402a" font-size="9" font-weight="600">FundsDeposited</text>
+
+  <!-- Fan-out arrows from bus to listeners -->
+  <!-- Arrow to projection (top) -->
+  <polyline points="448,138 500,88 528,88"
+            fill="none" stroke="#8aa07e" stroke-width="2"
+            marker-end="url(#ch08-arrow)"/>
+  <!-- Arrow to notifier (middle) -->
+  <line x1="448" y1="144" x2="528" y2="144"
+        fill="none" stroke="#8aa07e" stroke-width="2"
+        marker-end="url(#ch08-arrow)"/>
+  <!-- Arrow to audit (bottom) -->
+  <polyline points="448,150 500,200 528,200"
+            fill="none" stroke="#8aa07e" stroke-width="2"
+            marker-end="url(#ch08-arrow)"/>
+
+  <!-- projection listener -->
+  <rect x="530" y="68" width="90" height="40" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <rect x="530" y="68" width="90" height="18" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="530" y="77" width="90" height="9" fill="#43b02a"/>
+  <text x="575" y="77" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="10" font-weight="700">projection</text>
+  <text x="575" y="97" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">update view</text>
+
+  <!-- notifier listener -->
+  <rect x="530" y="124" width="90" height="40" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <rect x="530" y="124" width="90" height="18" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="530" y="133" width="90" height="9" fill="#43b02a"/>
+  <text x="575" y="133" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="10" font-weight="700">notifier</text>
+  <text x="575" y="153" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">send email</text>
+
+  <!-- audit listener -->
+  <rect x="530" y="180" width="90" height="40" rx="8" ry="8"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <rect x="530" y="180" width="90" height="18" rx="8" ry="8" fill="#43b02a"/>
+  <rect x="530" y="189" width="90" height="9" fill="#43b02a"/>
+  <text x="575" y="189" text-anchor="middle" dominant-baseline="middle"
+        fill="#fff" font-size="10" font-weight="700">audit</text>
+  <text x="575" y="209" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="9">log event</text>
+
+</svg>
