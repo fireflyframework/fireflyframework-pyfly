@@ -4,19 +4,20 @@
 
 ::: figure art/openers/ch16.svg | &nbsp;
 
-The wallet works. Deposits land, balances update, events propagate through the bus, and the saga coordinator rolls back cleanly on failure. What you do not yet have is **confidence** that it will keep working after the next refactor. That confidence comes from tests — tests that run in milliseconds, prove the domain model enforces its invariants, verify the CQRS pipeline dispatches correctly, and exercise the repository against a real SQLite database without any external infrastructure.
+The wallet works. Deposits land, balances update, events propagate through the bus, and the saga coordinator rolls back cleanly on failure. What you do not yet have is **confidence** that it will keep working after the next refactor. That confidence comes from tests — tests that run in milliseconds, prove the domain model enforces its invariants, verify the CQRS pipeline dispatches correctly, exercise the repository's derived queries and Specification predicates against a real SQLite database, and boot the full application context in an integration test that proves the entire DI + persistence composition.
 
 PyFly treats testing as a first-class concern. The `pyfly.testing` module ships higher-level helpers — `PyFlyTestCase`, `create_test_container`, `assert_event_published`, Testcontainers wiring — that you can reach for when you need them. Lumen's own test suite does not use them: it wires real components directly from `conftest.py`, uses standard pytest fixtures, and covers every layer of the pyramid with no boilerplate. That is the approach this chapter teaches.
 
-::: figure art/figures/16-testing.svg | Figure 16.1 — PyFly's testing pyramid. Fast unit tests form the wide base; integration tests sit in the middle; real-DB adapter tests crown the top.
+::: figure art/figures/16-testing.svg | Figure 16.1 — PyFly's testing pyramid. Fast unit tests form the wide base; integration tests sit in the middle; real-DB adapter tests and a booted-context integration test crown the top.
 
-The pyramid has three levels. **Unit tests** sit at the base — many of them, running in milliseconds, exercising the domain model with no dependencies. **CQRS flow tests** occupy the middle tier — the full open/deposit/withdraw/query cycle routed through the real bus and the in-memory repository, all wired in `conftest.py`. **SQLite adapter tests** crown the pyramid — a small number that exercise the SQLAlchemy/aiosqlite repository against a temporary file database, with no Docker required.
+The pyramid has four levels. **Unit tests** sit at the base — many of them, running in milliseconds, exercising the domain model with no dependencies. **CQRS flow tests** occupy the next tier — the full open/deposit/withdraw/query cycle routed through the real bus and the real repository, all wired in `conftest.py`. **Repository tests** exercise derived queries, pagination, and Specification predicates against SQLite. At the peak, a **booted-context integration test** starts the real `ApplicationContext` — DI scan, CQRS auto-config, `RepositoryBeanPostProcessor`, `@transactional` seam, EDA — and drives the full lifecycle.
 
-| Level         | Dependencies                | Speed | Lumen approach                |
-|---------------|-----------------------------|-------|-------------------------------|
-| Unit          | None                        | Fast  | plain pytest, no fixtures     |
-| CQRS flow     | In-memory bus + repository  | Fast  | conftest.py fixtures          |
-| Repository/DB | SQLite + aiosqlite          | Fast  | `tmp_path` + SQLAlchemy async |
+| Level               | Dependencies                      | Speed | Lumen approach              |
+|---------------------|-----------------------------------|-------|-----------------------------|
+| Unit                | None                              | Fast  | plain pytest, no fixtures   |
+| CQRS flow           | Real bus + repository over SQLite | Fast  | conftest.py fixtures        |
+| Repository          | SQLite + aiosqlite                | Fast  | `tmp_path` + SQLAlchemy     |
+| Booted-context      | Full ApplicationContext + SQLite  | Fast  | `monkeypatch` env override  |
 
 The project uses pytest with `pytest-asyncio` in **auto mode**. Enable it once in `pyproject.toml` and every `async def test_*` function is collected automatically:
 
@@ -195,9 +196,11 @@ Three details deserve attention. First, `Wallet.open` takes three positional arg
 
 ## Wiring the test stack with conftest.py
 
-The CQRS and event-listener tests need real infrastructure: a repository, an event bus, command and query handlers, and a running bus. Rather than recreating this in every test module, Lumen declares the wiring once in `tests/conftest.py`. Pytest discovers the file automatically and makes the fixtures available to every test in the package.
+The CQRS and event-listener tests need real infrastructure: a SQLite-backed `WalletRepository`, an event bus, command and query handlers, and a running bus. Rather than recreating this in every test module, Lumen declares the wiring once in `tests/conftest.py`. Pytest discovers the file automatically and makes the fixtures available to every test in the package.
 
-::: listing tests/conftest.py | Listing 16.3 — conftest.py: real components wired with no mocks
+The key difference from a hand-rolled adapter test is that the `repository` fixture uses the **real framework `WalletRepository`** — the same Spring-Data-style class the application boots — and runs it through the **real `RepositoryBeanPostProcessor`**, which compiles derived-query stubs from method names at startup.
+
+::: listing tests/conftest.py | Listing 16.3 — conftest.py: real framework components wired with no mocks
 from __future__ import annotations
 
 import sys
@@ -205,6 +208,11 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 # Make the sample's `src/` importable
 _HERE = Path(__file__).resolve().parent
@@ -216,27 +224,62 @@ from lumen.core.services.wallets import (
     DepositFundsHandler,
     GetBalanceHandler,
     GetWalletHandler,
+    ListRichWalletsHandler,
+    ListWalletsHandler,
     OpenWalletHandler,
     WithdrawFundsHandler,
 )
-from lumen.models.repositories import InMemoryWalletRepository
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories import WalletRepository
 
-from pyfly.cqrs import (
-    DefaultCommandBus,
-    DefaultQueryBus,
-    HandlerRegistry,
+from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus, HandlerRegistry
+from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy.post_processor import (
+    RepositoryBeanPostProcessor,
 )
 from pyfly.eda.adapters.memory import InMemoryEventBus
 
 
 @pytest_asyncio.fixture
-async def repository() -> AsyncIterator[InMemoryWalletRepository]:
-    yield InMemoryWalletRepository()
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """An in-memory SQLite engine + session factory, schema created.
+
+    Mirrors the framework's relational auto-configuration: build the
+    async engine and run Base.metadata.create_all.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def repository(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[WalletRepository]:
+    """The framework WalletRepository, post-processed.
+
+    RepositoryBeanPostProcessor compiles derived-query stubs
+    (e.g. find_by_owner_id) onto the bean — the same step the
+    ApplicationContext runs at startup.
+    """
+    session = session_factory()
+    repo = WalletRepository(WalletEntity, session)
+    RepositoryBeanPostProcessor().after_init(repo, "walletRepository")
+    try:
+        yield repo
+    finally:
+        await session.close()
 
 
 @pytest_asyncio.fixture
 async def event_bus() -> AsyncIterator[InMemoryEventBus]:
-    """A real in-memory EDA bus — same EventPublisher as production."""
+    """A real in-memory EDA bus — the same EventPublisher used in
+    production."""
     yield InMemoryEventBus()
 
 
@@ -244,8 +287,8 @@ async def event_bus() -> AsyncIterator[InMemoryEventBus]:
 async def audit_listener(
     event_bus: InMemoryEventBus,
 ) -> AsyncIterator[WalletAuditListener]:
-    """The wallet audit projection, subscribed to the bus exactly
-    as ApplicationContext auto-wires it at startup."""
+    """The wallet audit projection, subscribed to the bus exactly as the
+    ApplicationContext auto-wires it at startup."""
     listener = WalletAuditListener()
     method = listener.on_wallet_event
     for pattern in method.__pyfly_event_patterns__:
@@ -255,41 +298,62 @@ async def audit_listener(
 
 @pytest_asyncio.fixture
 async def command_bus(
-    repository: InMemoryWalletRepository,
+    repository: WalletRepository,
     event_bus: InMemoryEventBus,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[DefaultCommandBus]:
     registry = HandlerRegistry()
     registry.register_command_handler(
-        OpenWalletHandler(repository=repository, events=event_bus)
+        OpenWalletHandler(
+            repository=repository,
+            events=event_bus,
+            session_factory=session_factory,
+        )
     )
     registry.register_command_handler(
-        DepositFundsHandler(repository=repository, events=event_bus)
+        DepositFundsHandler(
+            repository=repository,
+            events=event_bus,
+            session_factory=session_factory,
+        )
     )
     registry.register_command_handler(
-        WithdrawFundsHandler(repository=repository, events=event_bus)
+        WithdrawFundsHandler(
+            repository=repository,
+            events=event_bus,
+            session_factory=session_factory,
+        )
     )
     yield DefaultCommandBus(registry=registry)
 
 
 @pytest_asyncio.fixture
 async def query_bus(
-    repository: InMemoryWalletRepository,
+    repository: WalletRepository,
 ) -> AsyncIterator[DefaultQueryBus]:
     registry = HandlerRegistry()
     registry.register_query_handler(GetWalletHandler(repository=repository))
     registry.register_query_handler(GetBalanceHandler(repository=repository))
+    registry.register_query_handler(
+        ListWalletsHandler(repository=repository)
+    )
+    registry.register_query_handler(
+        ListRichWalletsHandler(repository=repository)
+    )
     yield DefaultQueryBus(registry=registry)
 :::
 
 Each fixture is declared with `@pytest_asyncio.fixture` (not the bare `@pytest.fixture`) so pytest-asyncio manages the async iterator lifecycle. `asyncio_mode = "auto"` in `pyproject.toml` makes async fixtures and tests work without per-function decorators — but the fixture decorator itself must still be `pytest_asyncio.fixture`.
 
-The `audit_listener` fixture wires itself to the **same** `event_bus` that the `command_bus` handlers publish to. Both receive the same instance because pytest resolves fixtures by name within a test's dependency graph: `command_bus` depends on `event_bus`, and so does `audit_listener` — pytest instantiates `event_bus` once per test and shares it between them.
+The `session_factory` fixture is shared. `repository` and `command_bus` both receive it, so the same in-memory SQLite engine backs reads, writes, and the `@transactional` boundary the handlers open. The `audit_listener` and `command_bus` fixtures both receive `event_bus`; pytest instantiates that once per test and shares it between them, so events published by the command handlers are visible to the listener.
 
 !!! tip "No mocks anywhere"
     Every component in `conftest.py` is the real production implementation.
-    `InMemoryWalletRepository` is the adapter used in development; the
-    `InMemoryEventBus` is the same bus the application uses in non-Kafka
-    deployments. The goal is to test the real code paths, not the wiring.
+    `WalletRepository` is the same class the application boots.
+    `RepositoryBeanPostProcessor` is the same post-processor the
+    `ApplicationContext` runs at startup to compile derived-query stubs.
+    `InMemoryEventBus` is the same bus used in non-Kafka deployments. The
+    goal is to test the real code paths, not the wiring.
 
 ---
 
@@ -396,7 +460,7 @@ async def test_deposit_to_unknown_wallet_is_rejected(
         )
 :::
 
-`test_full_wallet_lifecycle` is the primary smoke test: it sends every command in the natural order and then queries both the full wallet DTO and the balance DTO. The wallet DTO exposes `balance_minor` (integer minor units) and `balance` (major units as a float); both derive from the same `Money` object stored in the repository.
+`test_full_wallet_lifecycle` is the primary smoke test: it sends every command in the natural order and then queries both the full wallet DTO and the balance DTO. The wallet DTO exposes `balance_minor` (integer minor units) and `balance` (major units as a float); both derive from the same `WalletEntity` row stored through the repository.
 
 The error-path tests verify that the bus surfaces domain violations correctly. **`CommandProcessingException`** is the bus's wrapper for any exception raised inside a handler — including `BusinessRuleViolation` from the aggregate. Calling code never sees the raw domain exception; it always sees the bus wrapper.
 
@@ -408,14 +472,17 @@ The error-path tests verify that the bus surfaces domain violations correctly. *
 
 ---
 
-## Testing the SQLite repository adapter
+## Testing the repository adapter
 
-The in-memory repository proves the domain logic; the SQLAlchemy adapter test proves the persistence layer. Lumen uses SQLite + `aiosqlite` — no Docker, no external process, no network. pytest's built-in `tmp_path` fixture provides a temporary directory that is cleaned up automatically after each test.
+The CQRS flow tests prove the full open/deposit/withdraw/query pipeline. The repository adapter tests go one level deeper: they directly exercise the `WalletRepository` API — CRUD, **derived queries** compiled from method names, **`Pageable`/`Page`** pagination, and **`Specification`** predicates — against a temporary SQLite file database. No Docker, no external process, no network. pytest's built-in `tmp_path` fixture provides a temporary directory cleaned up automatically after each test.
 
-::: listing tests/test_sql_wallet_repository.py | Listing 16.5 — SQLite adapter tests with a temporary file database
+The local fixture `_make_repo` mirrors what the `ApplicationContext` does at startup: construct the repository and run `RepositoryBeanPostProcessor.after_init` to compile the derived-query stubs. Without that call, methods like `find_by_owner_id` would raise `NotImplementedError`.
+
+::: listing tests/test_sql_wallet_repository.py | Listing 16.5 — Repository tests: CRUD, derived query, pagination, Specification
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -426,24 +493,51 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from lumen.interfaces.enums.v1.currency import Currency
-from lumen.models.entities.v1.money import Money
-from lumen.models.entities.v1.wallet_entity import Wallet
-from lumen.models.repositories.sql_wallet_repository import (
-    SqlAlchemyWalletRepository,
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories.wallet_repository import (
+    WalletRepository,
+    balance_at_least,
 )
+from pyfly.data import Pageable, Sort
 from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy.post_processor import (
+    RepositoryBeanPostProcessor,
+)
+
+
+def _entity(
+    wid: str,
+    owner: str,
+    minor: int,
+    *,
+    currency: str = "EUR",
+    age_days: int = 0,
+) -> WalletEntity:
+    created = datetime.now(UTC) - timedelta(days=age_days)
+    return WalletEntity(
+        id=wid,
+        owner_id=owner,
+        currency=currency,
+        balance_minor=minor,
+        created_at=created,
+    )
+
+
+def _make_repo(session: AsyncSession) -> WalletRepository:
+    repo = WalletRepository(WalletEntity, session)
+    # Mirror the ApplicationContext: compile derived-query stubs.
+    RepositoryBeanPostProcessor().after_init(repo, "walletRepository")
+    return repo
 
 
 @pytest_asyncio.fixture
-async def sqlite_session(
+async def sqlite_factory(
     tmp_path: Path,
 ) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], str]]:
-    """Temp-file SQLite engine + session factory, schema created.
+    """A temp-file SQLite engine + session factory, schema created.
 
-    Mirrors what PyFly's EngineLifecycle does at startup: build the
-    async engine and run Base.metadata.create_all. Yields the session
-    factory and the database URL so the test can reconnect later.
+    Yields the session factory and the database URL so the test can
+    reconnect with a fresh engine to verify true persistence.
     """
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'wallets.db'}"
     engine = create_async_engine(db_url)
@@ -457,88 +551,132 @@ async def sqlite_session(
 
 
 @pytest.mark.asyncio
-async def test_full_flow_persists_through_sqlite_adapter(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_upsert_inserts_then_updates_and_persists(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, db_url = sqlite_session
+    factory, db_url = sqlite_factory
 
-    # open -> deposit -> withdraw through the SQLite adapter
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
+        repo = _make_repo(session)
+        await repo.upsert(_entity("wlt-1", "owner-42", 0, currency="USD"))
+        # update: same PK, new balance
+        await repo.upsert(_entity("wlt-1", "owner-42", 2500, currency="USD"))
+        await session.commit()
 
-        wallet_id = await repo.next_id()
-        wallet = Wallet.open(wallet_id, owner_id="owner-42", currency=Currency.USD)
-        await repo.add(wallet)
-
-        loaded = await repo.find(wallet_id)
-        assert loaded is not None
-        loaded.deposit(Money(2500, Currency.USD))
-        await repo.add(loaded)
-
-        loaded = await repo.find(wallet_id)
-        assert loaded is not None
-        loaded.withdraw(Money(1000, Currency.USD))
-        await repo.add(loaded)
-
-        got = await repo.find(wallet_id)
+        got = await repo.find_by_id("wlt-1")
         assert got is not None
         assert got.owner_id == "owner-42"
-        assert got.currency is Currency.USD
-        assert got.balance == Money(1500, Currency.USD)
+        assert got.currency == "USD"
+        assert got.balance_minor == 2500
+        assert await repo.count() == 1
 
     # prove persistence: reconnect with a brand-new engine/session
     fresh_engine = create_async_engine(db_url)
     fresh_factory = async_sessionmaker(fresh_engine, expire_on_commit=False)
     try:
         async with fresh_factory() as fresh_session:
-            fresh_repo = SqlAlchemyWalletRepository(session=fresh_session)
-            persisted = await fresh_repo.find(wallet_id)
+            fresh_repo = _make_repo(fresh_session)
+            persisted = await fresh_repo.find_by_id("wlt-1")
             assert persisted is not None, "wallet should survive a reconnect"
-            assert persisted.balance == Money(1500, Currency.USD)
-            assert persisted.owner_id == "owner-42"
-            assert await fresh_repo.all_ids() == [wallet_id]
+            assert persisted.balance_minor == 2500
     finally:
         await fresh_engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_find_unknown_returns_none(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_find_by_id_unknown_returns_none(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, _ = sqlite_session
+    factory, _ = sqlite_factory
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
-        assert await repo.find("wlt-nope") is None
+        repo = _make_repo(session)
+        assert await repo.find_by_id("wlt-nope") is None
 
 
 @pytest.mark.asyncio
-async def test_remove_deletes_the_row(
-    sqlite_session: tuple[async_sessionmaker[AsyncSession], str],
+async def test_derived_find_by_owner_id(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    factory, _ = sqlite_session
+    factory, _ = sqlite_factory
     async with factory() as session:
-        repo = SqlAlchemyWalletRepository(session=session)
-        wallet = Wallet.open(
-            await repo.next_id(), owner_id="o", currency=Currency.EUR
-        )
-        await repo.add(wallet)
-        assert await repo.find(wallet.id) is not None  # type: ignore[arg-type]
+        repo = _make_repo(session)
+        await repo.upsert(_entity("wlt-1", "alice", 100))
+        await repo.upsert(_entity("wlt-2", "alice", 200))
+        await repo.upsert(_entity("wlt-3", "bob", 300))
+        await session.commit()
 
-        await repo.remove(wallet)
-        assert await repo.find(wallet.id) is None  # type: ignore[arg-type]
-        assert await repo.all_ids() == []
+        owned = await repo.find_by_owner_id("alice")
+        assert sorted(w.id for w in owned) == ["wlt-1", "wlt-2"]
+        assert await repo.find_by_owner_id("nobody") == []
+
+
+@pytest.mark.asyncio
+async def test_specification_find_rich_paged_and_sorted(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_factory
+    async with factory() as session:
+        repo = _make_repo(session)
+        # age_days drives created_at so we can assert newest-first ordering.
+        await repo.upsert(_entity("wlt-poor", "a", 50, age_days=3))
+        await repo.upsert(_entity("wlt-mid", "b", 1000, age_days=2))
+        await repo.upsert(_entity("wlt-rich", "c", 5000, age_days=1))
+        await session.commit()
+
+        # Specification: balance_minor >= 1000, newest first, page size 1.
+        newest_first = Sort.by("created_at").descending()
+        page = await repo.find_rich(1000, Pageable.of(1, 1, newest_first))
+        assert page.total == 2          # mid + rich
+        assert page.total_pages == 2
+        assert page.has_next is True
+        assert [w.id for w in page.items] == ["wlt-rich"]
+
+        page2 = await repo.find_rich(1000, Pageable.of(2, 1, newest_first))
+        assert [w.id for w in page2.items] == ["wlt-mid"]
+
+        # The bare predicate also works through find_all_by_spec.
+        rich = await repo.find_all_by_spec(balance_at_least(5000))
+        assert [w.id for w in rich] == ["wlt-rich"]
+
+
+@pytest.mark.asyncio
+async def test_find_paginated_counts_and_pages(
+    sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
+) -> None:
+    factory, _ = sqlite_factory
+    async with factory() as session:
+        repo = _make_repo(session)
+        for i in range(5):
+            await repo.upsert(
+                _entity(f"wlt-{i}", "owner", i * 100, age_days=5 - i)
+            )
+        await session.commit()
+
+        page = await repo.find_paginated(
+            pageable=Pageable.of(1, 2, Sort.by("created_at").descending())
+        )
+        assert page.total == 5
+        assert page.total_pages == 3
+        assert len(page.items) == 2
+        # newest first -> wlt-4 (age 1 day), then wlt-3
+        assert [w.id for w in page.items] == ["wlt-4", "wlt-3"]
 :::
 
-`test_full_flow_persists_through_sqlite_adapter` is the key test: it opens a wallet, deposits, and withdraws — each operation flushed through `repo.add` — then creates a **new** engine from the same file URL and verifies that a fresh repository instance reads back the correct balance. This two-engine pattern proves that data is actually committed, not merely cached in memory.
-
-`Base.metadata.create_all` runs the full DDL — the same `CREATE TABLE` statements that `alembic upgrade head` applies in production — so the schema is always in sync with the SQLAlchemy models.
+Four things to note. First, `_make_repo` calls `RepositoryBeanPostProcessor().after_init(repo, ...)` — without this, `find_by_owner_id` is still a stub and raises `NotImplementedError`. The post-processor compiles the method name into a SQLAlchemy `WHERE owner_id = :owner_id` clause. Second, `upsert` is the repository's insert-or-update; after each batch of upserts, `await session.commit()` flushes to SQLite. Third, `find_rich` takes a minimum balance and a `Pageable`; it delegates to `find_all_by_spec_paged(balance_at_least(min), pageable)`. Fourth, the two-engine pattern in `test_upsert_inserts_then_updates_and_persists` proves true durability: data committed through one engine is readable by a completely fresh engine and session.
 
 !!! spring "Spring parity"
-    This test is the Python equivalent of `@DataJpaTest` with an embedded H2
-    database in Spring Boot. `@DataJpaTest` loads only the JPA layer (entities,
+    This test layer is the Python equivalent of `@DataJpaTest` with an embedded
+    H2 database in Spring Boot. `@DataJpaTest` loads only the JPA layer (entities,
     repositories, Flyway) and wires a fresh in-memory H2 for every test class.
-    The `sqlite_session` fixture does the same: create the schema, run the test,
+    The `sqlite_factory` fixture does the same: create the schema, run the tests,
     dispose the engine. No Docker, no external process.
+
+!!! tip "Derived queries are method-name conventions"
+    `WalletRepository.find_by_owner_id` is declared as a stub
+    (`raise NotImplementedError`). `RepositoryBeanPostProcessor` inspects the
+    method name at startup — `find_by_owner_id` → `WHERE owner_id = :value` —
+    and replaces the stub with a real coroutine. Testing this method therefore
+    also tests that the post-processor convention is working correctly.
 
 ---
 
@@ -632,6 +770,135 @@ async def test_event_type_matches_domain_event_class_names(
 
 ---
 
+## Booted-context integration test
+
+The unit tests, CQRS flow tests, and repository tests each wire one layer of the stack. The booted-context integration test wires everything at once: it starts the real `ApplicationContext` — DI component scan, CQRS auto-configuration, relational auto-configuration, `RepositoryBeanPostProcessor`, `@transactional` seam, EDA event bus — then resolves the `DefaultCommandBus` and `DefaultQueryBus` from the context and drives the full wallet lifecycle.
+
+The database URL is overridden via an environment variable so the test never touches the developer's `lumen.db`.
+
+::: listing tests/test_app_context_integration.py | Listing 16.7 — Booted-context integration: full DI + persistence composition
+from __future__ import annotations
+
+import logging
+import sys
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+_HERE = Path(__file__).resolve().parent
+_SRC = _HERE.parent / "src"
+sys.path.insert(0, str(_SRC))
+
+
+@pytest_asyncio.fixture
+async def booted_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[object]:
+    """Boot the full LumenApplication against an isolated SQLite file."""
+    db_path = tmp_path / "lumen-it.db"
+    monkeypatch.setenv(
+        "PYFLY_DATA_RELATIONAL_URL",
+        f"sqlite+aiosqlite:///{db_path}",
+    )
+    # Silence the pool-GC warning that aiosqlite emits at teardown.
+    logging.getLogger(
+        "sqlalchemy.pool.impl.AsyncAdaptedQueuePool"
+    ).setLevel(logging.CRITICAL)
+
+    from lumen.app import LumenApplication
+    from pyfly.core import PyFlyApplication
+
+    app = PyFlyApplication(
+        LumenApplication,
+        config_path=str(_HERE.parent / "pyfly.yaml"),
+    )
+    await app.startup()
+    try:
+        yield app.context
+    finally:
+        await app.context.get_bean(AsyncSession).close()
+        await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_full_lifecycle_through_booted_context(
+    booted_context: object,
+) -> None:
+    from lumen.core.services.wallets.deposit_funds_command import DepositFunds
+    from lumen.core.services.wallets.get_balance_query import GetBalance
+    from lumen.core.services.wallets.get_wallet_query import GetWallet
+    from lumen.core.services.wallets.list_rich_wallets_query import (
+        ListRichWallets,
+    )
+    from lumen.core.services.wallets.list_wallets_query import ListWallets
+    from lumen.core.services.wallets.open_wallet_command import OpenWallet
+    from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
+    from lumen.interfaces.enums.v1.currency import Currency
+    from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
+    from pyfly.data import Pageable
+
+    ctx = booted_context
+    commands = ctx.get_bean(DefaultCommandBus)
+    queries = ctx.get_bean(DefaultQueryBus)
+
+    # --- open -> deposit -> withdraw, each a committed unit of work -------
+    w1 = await commands.send(OpenWallet(owner_id="u-1", currency=Currency.EUR))
+    w2 = await commands.send(OpenWallet(owner_id="u-2", currency=Currency.EUR))
+    assert w1.startswith("wlt-") and w2.startswith("wlt-")
+
+    assert await commands.send(DepositFunds(wallet_id=w1, amount=5000)) == 5000
+    assert await commands.send(WithdrawFunds(wallet_id=w1, amount=1500)) == 3500
+    assert await commands.send(DepositFunds(wallet_id=w2, amount=100)) == 100
+
+    # --- persistence survived: reload the aggregate via the query side ---
+    reloaded = await queries.query(GetWallet(wallet_id=w1))
+    assert reloaded is not None
+    assert reloaded.owner_id == "u-1"
+    assert reloaded.balance_minor == 3500
+
+    # --- paged list (find_paginated + Page.map) --------------------------
+    page = await queries.query(ListWallets(pageable=Pageable.of(1, 10)))
+    assert page.total == 2
+    assert {w.id for w in page.items} == {w1, w2}
+
+    # --- Specification: only wallets with balance >= 1000 ----------------
+    rich = await queries.query(
+        ListRichWallets(min_minor=1000, pageable=Pageable.of(1, 10))
+    )
+    assert rich.total == 1
+    assert [w.id for w in rich.items] == [w1]
+
+    everyone = await queries.query(
+        ListRichWallets(min_minor=0, pageable=Pageable.of(1, 10))
+    )
+    assert everyone.total == 2
+
+    # --- projection-backed balance ---------------------------------------
+    balance = await queries.query(GetBalance(wallet_id=w1))
+    assert balance is not None
+    assert balance.balance_minor == 3500
+    assert balance.balance == 35.0
+:::
+
+`booted_context` uses pytest's built-in `monkeypatch` fixture to set `PYFLY_DATA_RELATIONAL_URL` before the application boots. The framework reads this environment variable during relational auto-configuration, so the context uses the isolated temp-file SQLite database for the life of the test, then disposes of it when the fixture tears down.
+
+`test_full_lifecycle_through_booted_context` exercises every query type the application exposes: `GetWallet` (aggregate reload), `ListWallets` (paginated list using `find_paginated`), `ListRichWallets` (Specification predicate using `find_all_by_spec_paged`), and `GetBalance` (projection-backed balance). It proves that the `RepositoryBeanPostProcessor`, the `@transactional` boundary around each command handler, and the DI wiring all compose correctly in a single boot.
+
+!!! spring "Spring parity"
+    This test is the Python equivalent of `@SpringBootTest` with an embedded H2
+    database. `@SpringBootTest` loads the full application context, including all
+    auto-configurations and the JPA layer; you set `spring.datasource.url` in
+    `application-test.properties` to redirect to H2. PyFly's environment
+    variable override (`monkeypatch.setenv`) plays the same role. Both
+    approaches prove that the composed application works end to end without any
+    external infrastructure.
+
+---
+
 ## Framework testing helpers
 
 The tests above cover Lumen's full pyramid with standard pytest primitives and PyFly's real production components. For larger applications or teams that prefer more structure, `pyfly.testing` ships higher-level helpers that mirror Spring Boot's testing annotations.
@@ -669,13 +936,15 @@ Lumen does not use these helpers — SQLite covers the persistence layer without
 
 ## What you built {.recap}
 
-Lumen now has 23 passing tests across four files, exercising every layer of the pyramid.
+Lumen now has 41 passing tests across six files, exercising every layer of the pyramid.
 
 At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain model's arithmetic, immutability, and invariant rules. All tests are synchronous, pure Python functions — no fixtures, no DI, no `async`. The `BusinessRuleViolation.rule` attribute makes each assertion specific to the exact violated invariant.
 
-In the middle, `conftest.py` wires the real components — `InMemoryWalletRepository`, `InMemoryEventBus`, all five command and query handlers, and `WalletAuditListener` — into reusable async fixtures that pytest shares automatically across modules. `test_cqrs_flow.py` dispatches commands and queries through the real bus and checks every field of the query DTOs. `test_event_listener.py` proves that the audit listener observes exactly the events produced by successful commands and nothing from rejected ones.
+In the middle, `conftest.py` wires the real components — the framework `WalletRepository` over an in-memory SQLite engine, `InMemoryEventBus`, all five command and query handlers (including `ListWalletsHandler` and `ListRichWalletsHandler`), and `WalletAuditListener` — into reusable async fixtures that pytest shares automatically across modules. The `RepositoryBeanPostProcessor` is applied to the repository fixture exactly as the `ApplicationContext` applies it at startup. `test_cqrs_flow.py` dispatches commands and queries through the real bus and checks every field of the query DTOs. `test_event_listener.py` proves that the audit listener observes exactly the events produced by successful commands and nothing from rejected ones.
 
-At the peak, `test_sql_wallet_repository.py` exercises the SQLAlchemy adapter against a temporary SQLite file, applies the full schema with `Base.metadata.create_all`, then reconnects with a fresh engine to prove true persistence.
+`test_sql_wallet_repository.py` exercises the `WalletRepository` directly against a temporary SQLite file, covering the full CRUD surface, the derived query `find_by_owner_id` (compiled from the method name by `RepositoryBeanPostProcessor`), the `find_paginated` API that returns a `Page` with total count and page metadata, and the `Specification` predicate path via `find_rich` / `find_all_by_spec`. The two-engine reconnect pattern proves true durability.
+
+At the peak, `test_app_context_integration.py` boots the real `LumenApplication` with the database URL overridden to an isolated SQLite file, then drives the full open → deposit → withdraw → list → rich → balance lifecycle through the context-resolved buses. This single test proves that the DI scan, CQRS auto-configuration, `RepositoryBeanPostProcessor`, and `@transactional` boundary all compose correctly.
 
 Concretely, you learned:
 
@@ -686,16 +955,27 @@ Concretely, you learned:
 - **`@pytest_asyncio.fixture`** — async fixture lifecycle managed by
   pytest-asyncio; plain `@pytest.fixture` does not handle async generators.
 - **Shared fixture instances** — when two fixtures request the same fixture
-  name (e.g., `event_bus`), pytest resolves it once per test and shares the
-  instance, making `command_bus` and `audit_listener` write and read from the
-  same bus.
+  name (e.g., `event_bus`, `session_factory`), pytest resolves it once per
+  test and shares the instance.
+- **`RepositoryBeanPostProcessor().after_init(repo, name)`** — must be
+  called in tests that exercise derived queries; without it, the method
+  stubs raise `NotImplementedError`.
+- **Derived queries** (`find_by_owner_id`) — declared as stubs; the
+  post-processor compiles them to `WHERE owner_id = :value` at startup.
+- **`Pageable.of(page, size, sort)` + `Page`** — the `find_paginated`
+  API returns a `Page` with `total`, `total_pages`, `has_next`, and
+  `items`; assert each field for pagination correctness.
+- **`Specification` predicates** — `balance_at_least(n)` is passed to
+  `find_rich` / `find_all_by_spec` to filter by an arbitrary predicate
+  without adding a new derived-query method.
 - **`pending_events()` vs `clear_events()`** — `pending_events()` reads
   without draining; `clear_events()` drains. Always call `clear_events()` in
   arrange steps so assertions only see events from the act step.
 - **`BusinessRuleViolation.rule`** — assert the exact rule string, not just
   the exception class, to prove that the right invariant fired.
-- **SQLite + aiosqlite + `tmp_path`** — a real async relational test with no
-  external infrastructure; the two-engine pattern proves true durability.
+- **`monkeypatch.setenv`** — override configuration before booting the
+  context in integration tests; the framework reads environment variables
+  during auto-configuration.
 - **Framework helpers** (`PyFlyTestCase`, `mock_bean`, `create_test_container`,
   Testcontainers) — available in `pyfly.testing` for projects that need them;
   Lumen keeps things simple with real components.
@@ -725,3 +1005,11 @@ Concretely, you learned:
    returns exactly two entries (`WalletOpened` + `FundsDeposited`) and that
    the payload `amount` values differ. This proves that `entries_for` filters
    by wallet ID, not by event type.
+
+4. **Add a multi-owner pagination test.** In `test_sql_wallet_repository.py`,
+   add a test that inserts ten wallets with two different owners, calls
+   `find_by_owner_id` for each owner, and then calls `find_paginated` with
+   `Pageable.of(1, 3, Sort.by("balance_minor").descending())`. Assert that
+   `page.total == 10`, `page.total_pages == 4`, and that the first item in
+   `page.items` has the highest `balance_minor`. This proves that pagination
+   is independent of the derived-query filter.

@@ -139,19 +139,68 @@ Imports: `from pyfly.web import (Body, PathVar, QueryParam, Valid,`
 
 ## Data Access
 
+Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, Base,`
+`    Specification, transactional, Propagation, Isolation)`
+`from pyfly.data import Page, Pageable, Sort`
+`from pyfly.data.query import query`
+`from pyfly.container import repository`
+
+### Repositories
+
 | Spring Boot | PyFly | Notes |
 |---|---|---|
-| `JpaRepository<T, ID>` | `Repository[T, ID]` | Subclass with concrete type params; `AsyncSession` injected automatically. |
-| `findByStatus(String s)` | `find_by_status(self, s: str)` | Derived-query naming convention; stub body `...` triggers generation at startup. |
-| `@Query("SELECT …")` | `@query("SELECT …")` | Custom SQL on a repository method. |
-| `Specification` | `Specification.where(...).and_where(...)` | Dynamic query predicates. |
-| `Page<T>` / `Pageable` | `Page[T]` / `Pageable(page=0, size=20, sort="created_at:desc")` | `page.content`, `.total_elements`, `.total_pages`. |
-| `@Transactional` | Unit-of-work handled by `AsyncSession` scope | Each request gets its own session via the DI container. |
-| `@Transactional(readOnly = true)` | `with read_only(): session = factory()` | Routes to read replica via `RoutingSessionFactory`. |
+| `JpaRepository<E, ID>` / `CrudRepository` | `Repository[E, ID]` | `from pyfly.data.relational.sqlalchemy import Repository`; decorate with `@repository`. Subclass with concrete type params; `AsyncSession` is injected automatically at startup. |
+| `@Repository interface WalletRepo extends JpaRepository<…>` | `@repository class WalletRepository(Repository[WalletEntity, str])` | Class, not interface; body holds derived-query stubs and custom methods only. |
+| `findByOwnerId(String id)` | `async def find_by_owner_id(self, owner_id: str) -> list[WalletEntity]: ...` | Stub body `...` triggers compilation by `RepositoryBeanPostProcessor` at startup. Prefixes: `find_by_`, `count_by_`, `exists_by_`, `delete_by_`. |
+| `@Query("SELECT u FROM User u WHERE …")` | `@query("SELECT u FROM User u WHERE …")` (JPQL-like) or `@query("SELECT …", native=True)` (raw SQL) | `from pyfly.data.query import query`. Params use `:name` syntax. |
+| `Specification<T>` | `Specification(lambda root, q: q.where(root.status == "ACTIVE"))` | Compose with `&` / `\|` / `~`; run via `repo.find_all_by_spec(spec)` or `repo.find_all_by_spec_paged(spec, pageable)`. |
+
+### Entities
+
+| Spring Boot | PyFly | Notes |
+|---|---|---|
+| `@Entity class Order` | `class Order(Base)` | `from pyfly.data.relational.sqlalchemy import Base`. Registers the table in `Base.metadata`. |
+| `@Entity` + surrogate UUID PK + audit columns | `class Order(BaseEntity)` | `from pyfly.data.relational.sqlalchemy import BaseEntity`. Inherits `id: UUID`, `created_at`, `updated_at`, `created_by`, `updated_by` — all mapped as SQLAlchemy 2.0 `Mapped`/`mapped_column`. |
+| `@Column` / `@Id` | `id: Mapped[str] = mapped_column(String(64), primary_key=True)` | SQLAlchemy 2.0 typed columns. `Base` (no audit) lets the entity own its own PK type, as Lumen's `WalletEntity` does with a `str` id. |
+| `@SoftDelete` (Hibernate 6) | `SoftDeleteMixin` + `SoftDeleteRepository` | `from pyfly.data.relational.sqlalchemy import SoftDeleteMixin`. Adds `deleted_at`; repository filters it automatically. |
+| Optimistic locking `@Version` | `VersionedMixin` | Adds a `version: int` column; SQLAlchemy raises `StaleDataError` on conflict. |
+
+### Pagination & Sorting
+
+| Spring Boot | PyFly | Notes |
+|---|---|---|
+| `Pageable` / `PageRequest.of(page, size, Sort.by(…).descending())` | `Pageable.of(page, size, Sort.by("created_at").descending())` | `from pyfly.data import Pageable, Sort`. `Sort.by(*fields)` returns ascending; `.descending()` flips all. |
+| `Page<T>` | `Page[T]` | `from pyfly.data import Page`. Attributes: `.items`, `.total`, `.page`, `.size`, `.total_pages`, `.has_next`, `.has_previous`. `.map(fn)` transforms items, preserving metadata. |
+| `page.getContent()` / `page.getTotalElements()` | `page.items` / `page.total` | Python naming; `.total_pages` derived as `ceil(total / size)`. |
+| `repo.findAll(pageable)` | `await repo.find_paginated(pageable=pageable)` | Returns `Page[T]`. |
+| `repo.findAll(spec, pageable)` | `await repo.find_all_by_spec_paged(spec, pageable)` | Applies WHERE, ORDER BY, and LIMIT/OFFSET in one call. |
+
+### Transactions & `save`
+
+| Spring Boot | PyFly | Notes |
+|---|---|---|
+| `@Transactional` | `@transactional()` | `from pyfly.data.relational.sqlalchemy import transactional`. Resolves `_session_factory` from `self`, patches injected `Repository` instances, commits on success, rolls back on exception. |
+| `@Transactional(propagation = REQUIRES_NEW)` | `@transactional(propagation=Propagation.REQUIRES_NEW)` | Full `Propagation` enum: `REQUIRED`, `REQUIRES_NEW`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `MANDATORY`. |
+| `@Transactional(isolation = READ_COMMITTED)` | `@transactional(isolation=Isolation.READ_COMMITTED)` | Full `Isolation` enum mirrors JDBC levels. |
+| `@Transactional(readOnly = true)` | `@transactional(read_only=True)` | Routes to read replica via `RoutingSessionFactory` and marks session `read_only`. |
+| `repo.save(entity)` | `await repo.save(entity)` | Calls `session.add` + `flush` + `refresh` — flushes but does **not** commit; the surrounding `@transactional` commits. |
+| `session.merge(entity)` (upsert) | `await repo.upsert(entity)` *(extend)* or `session.merge(entity)` + flush | No built-in `upsert` — add it as a method on your repository (as Lumen's `WalletRepository` does). `session.merge` handles both INSERT and UPDATE keyed on the PK. |
 | `AbstractRoutingDataSource` | `RoutingSessionFactory` | `factory.primary()` / `factory.replica()` to force a side. |
 | Multiple `DataSource` beans | `NamedDataSources` | Config: `pyfly.data.relational.datasources.<name>`; inject `NamedDataSources`, call `.get("<name>")`. |
+
+### Projections & Mapper
+
+| Spring Boot | PyFly | Notes |
+|---|---|---|
+| Interface projection `interface OrderSummary { … }` | `@projection class OrderSummary: id: str; status: str` | `from pyfly.data.projection import projection`. A concrete dataclass (not a `Protocol`), not a JDK proxy; registered with `mapper.register_projection(src, proj)`. |
+| `repo.findAll(cls, Projection.class)` | `mapper.project(entity, OrderSummary)` | `from pyfly.data.mapper import Mapper`. |
+| MapStruct `@Mapper` | `Mapper` + `@mapping` decorator | Runtime reflection; no codegen. `mapper.map(obj, TargetDTO)`, `mapper.map_list(...)`. |
+
+### Migrations
+
+| Spring Boot | PyFly | Notes |
+|---|---|---|
 | Flyway migrations | `pyfly.data.migrations.*` | Same concept: versioned SQL scripts run at startup. |
-| MapStruct `@Mapper` | `Mapper` + `@mapping` | Runtime reflection mapper; no codegen. `mapper.map(obj, TargetDTO)`, `mapper.map_list(...)`. |
 
 ---
 

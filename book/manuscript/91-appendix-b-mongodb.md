@@ -4,13 +4,13 @@
 
 PyFly's document data layer wraps MongoDB through **Beanie ODM** and **Motor** (the
 async MongoDB driver). The API mirrors the relational adapter deliberately — the same
-`RepositoryPort[T, ID]` contract, the same derived query naming convention, the same
+`MongoRepository[T, ID]` base class, the same derived query naming convention, the same
 `Page`/`Pageable`/`Sort` vocabulary — so switching between relational and document
 storage touches only the document class definition and the repository base class, not
 the service layer.
 
 All concrete types live in `pyfly.data.document.mongodb`. Shared types (`Page`,
-`Pageable`, `RepositoryPort`, `Sort`) come from `pyfly.data`.
+`Pageable`, `Sort`) come from `pyfly.data`.
 
 ---
 
@@ -144,6 +144,24 @@ class OrderDocument(BaseDocument):
 
 ---
 
+## Spring Data ↔ MongoRepository mapping
+
+The table below shows how Spring Data MongoDB concepts map to PyFly's document layer.
+The surface is intentionally identical to `Repository[T, ID]` in the relational adapter,
+so the same service-layer patterns apply to both.
+
+| Spring Data MongoDB | PyFly | Notes |
+|---|---|---|
+| `MongoRepository<E, ID>` | `MongoRepository[E, ID]` | `from pyfly.data.document.mongodb import MongoRepository`; decorate with `@repository`. |
+| `@Document class Product` + `@Id` | `class ProductDocument(BaseDocument)` | `from pyfly.data.document.mongodb import BaseDocument`. Inherits `id` (Beanie `PydanticObjectId`), `created_at`, `updated_at`, `created_by`, `updated_by`. Collection name set in `class Settings: name = "products"`. |
+| `findByCategory(String c)` | `async def find_by_category(self, category: str) -> list[ProductDocument]: ...` | Stub body `...` compiled by `MongoRepositoryBeanPostProcessor` at startup. Same prefixes as relational: `find_by_`, `count_by_`, `exists_by_`, `delete_by_`. |
+| `@Query("{ 'status': ?0 }")` | `@query('{"status": ":status"}')` | `from pyfly.data.query import query`. JSON filter or aggregation pipeline; `:param` substitution. |
+| `MongoSpecification` | `MongoSpecification(lambda root, q: {"active": True})` | `from pyfly.data.document.mongodb import MongoSpecification`. Compose with `&` / `\|` / `~`; run via `find_all_by_spec(spec)` or `find_all_by_spec_paged(spec, pageable)`. |
+| `PageRequest.of(page, size, Sort.by(…))` | `Pageable.of(page, size, Sort.by("name").descending())` | `from pyfly.data import Pageable, Sort` — identical to the relational adapter. |
+| `Page<T>` | `Page[T]` | `.items`, `.total`, `.page`, `.size`, `.total_pages`, `.map(fn)` — same as relational. |
+
+---
+
 ## MongoRepository[T, ID]
 
 Subclass `MongoRepository[T, ID]` and annotate with `@repository`. The framework
@@ -201,6 +219,7 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 | `find_all_by_ids(ids)` | `list[T]` | Find all with IDs in a list |
 | `delete_all(ids)` | `int` | Delete all with IDs in a list |
 | `find_all_by_spec(spec)` | `list[T]` | Find matching a `MongoSpecification` |
+| `find_all_by_spec_paged(spec, pageable)` | `Page[T]` | Find matching a `MongoSpecification` with pagination and sort |
 
 `find_all(**filters)` translates keyword arguments into MongoDB equality filters:
 

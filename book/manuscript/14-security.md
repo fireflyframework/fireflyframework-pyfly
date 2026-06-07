@@ -256,28 +256,64 @@ The decorated function must accept `security_context: SecurityContext` as a keyw
 
 ### Role-based protection
 
-Lumen's wallet endpoints (`/api/v1/wallets`) are the natural place to apply `@secure`. The real `WalletController` injects the command and query buses; add `security_context: SecurityContext` to each method that needs protection and stack `@secure` on top.
+Lumen's wallet endpoints (`/api/v1/wallets`) are the natural place to apply
+`@secure`. The real `WalletController` injects the command and query buses;
+add `security_context: SecurityContext` to each method that needs protection
+and stack `@secure` on top.
+
+The controller exposes seven endpoints under `/api/v1/wallets`:
+
+| Method | Path | Handler | Guard |
+|---|---|---|---|
+| POST | `""` | `open_wallet` | USER or ADMIN |
+| POST | `/{wallet_id}/deposit` | `deposit` | USER/ADMIN + `wallet:deposit` |
+| POST | `/{wallet_id}/withdraw` | `withdraw` | USER/ADMIN + `wallet:deposit` |
+| GET | `""` | `list_wallets` | authenticated |
+| GET | `/rich` | `list_rich_wallets` | authenticated |
+| GET | `/{wallet_id}/balance` | `wallet_balance` | USER or ADMIN |
+| GET | `/{wallet_id}` | `wallet_detail` | ADMIN only |
+
+The collection handlers (`list_wallets`, `list_rich_wallets`) are named with
+the `list_` prefix so the framework registers them before the
+`wallet_detail` / `wallet_balance` handlers — Starlette matches
+first-registered-wins, so the literal `/rich` segment is found ahead of the
+`/{wallet_id}` path variable.
 
 ::: listing lumen/web/controllers/wallet_controller.py | Listing 14.5 — Role and permission guards on real Lumen endpoints
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.get_balance_query import GetBalance
 from lumen.core.services.wallets.get_wallet_query import GetWallet
+from lumen.core.services.wallets.list_rich_wallets_query import ListRichWallets
+from lumen.core.services.wallets.list_wallets_query import ListWallets
 from lumen.core.services.wallets.open_wallet_command import OpenWallet
+from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
 from lumen.interfaces.dtos.v1.balance_dto import BalanceDto
 from lumen.interfaces.dtos.v1.deposit_request import DepositRequest
 from lumen.interfaces.dtos.v1.open_wallet_request import OpenWalletRequest
+from lumen.interfaces.dtos.v1.page_dto import PageDto
 from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
 from pyfly.container import rest_controller
 from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
+from pyfly.data import Pageable, Sort
 from pyfly.kernel import ResourceNotFoundException
 from pyfly.security import SecurityContext, secure
-from pyfly.web import Body, PathVar, Valid, get_mapping, post_mapping, request_mapping
+from pyfly.web import (
+    Body,
+    PathVar,
+    QueryParam,
+    Valid,
+    get_mapping,
+    post_mapping,
+    request_mapping,
+)
+
+_NEWEST_FIRST = Sort.by("created_at").descending()
 
 
 @rest_controller
 @request_mapping("/api/v1/wallets")
 class WalletController:
-    """Digital-wallet REST API: open, deposit, withdraw, inspect."""
+    """Digital-wallet REST API: open, deposit, withdraw, list, inspect."""
 
     def __init__(
         self,
@@ -287,7 +323,7 @@ class WalletController:
         self._commands = commands
         self._queries = queries
 
-    # Any authenticated user (USER or ADMIN) may open a wallet.
+    # Any authenticated user may open a wallet.
     @secure(roles=["USER", "ADMIN"])
     @post_mapping("", status_code=201)
     async def open_wallet(
@@ -303,7 +339,7 @@ class WalletController:
         )
         return {"wallet_id": wallet_id}
 
-    # Deposit: USER role plus the wallet:deposit permission.
+    # Deposit: USER/ADMIN role + wallet:deposit permission.
     @secure(roles=["USER", "ADMIN"], permissions=["wallet:deposit"])
     @post_mapping("/{wallet_id}/deposit")
     async def deposit(
@@ -312,21 +348,70 @@ class WalletController:
         request: Valid[Body[DepositRequest]],
         security_context: SecurityContext,
     ) -> dict[str, int | str]:
-        # DepositRequest.amount is in minor units (cents).
         balance = await self._commands.send(
             DepositFunds(wallet_id=wallet_id, amount=request.amount)
         )
         return {"wallet_id": wallet_id, "balance_minor": balance}
 
-    # Read balance: any authenticated user.
+    # Withdraw: same guard as deposit.
+    @secure(roles=["USER", "ADMIN"], permissions=["wallet:deposit"])
+    @post_mapping("/{wallet_id}/withdraw")
+    async def withdraw(
+        self,
+        wallet_id: PathVar[str],
+        request: Valid[Body[DepositRequest]],
+        security_context: SecurityContext,
+    ) -> dict[str, int | str]:
+        balance = await self._commands.send(
+            WithdrawFunds(wallet_id=wallet_id, amount=request.amount)
+        )
+        return {"wallet_id": wallet_id, "balance_minor": balance}
+
+    # Paged list — collection routes registered before /{wallet_id}.
+    @secure(roles=["USER", "ADMIN"])
+    @get_mapping("")
+    async def list_wallets(
+        self,
+        page: QueryParam[int] = 1,
+        size: QueryParam[int] = 20,
+        security_context: SecurityContext = None,
+    ) -> PageDto[WalletDto]:
+        result = await self._queries.query(
+            ListWallets(
+                pageable=Pageable.of(page, size, _NEWEST_FIRST)
+            )
+        )
+        return PageDto.from_page(result)
+
+    # Rich list: wallets filtered by minimum balance.
+    @secure(roles=["USER", "ADMIN"])
+    @get_mapping("/rich")
+    async def list_rich_wallets(
+        self,
+        min_minor: QueryParam[int] = 0,
+        page: QueryParam[int] = 1,
+        size: QueryParam[int] = 20,
+        security_context: SecurityContext = None,
+    ) -> PageDto[WalletDto]:
+        result = await self._queries.query(
+            ListRichWallets(
+                min_minor=min_minor,
+                pageable=Pageable.of(page, size, _NEWEST_FIRST),
+            )
+        )
+        return PageDto.from_page(result)
+
+    # Single-wallet balance: any authenticated user.
     @secure(roles=["USER", "ADMIN"])
     @get_mapping("/{wallet_id}/balance")
-    async def get_balance(
+    async def wallet_balance(
         self,
         wallet_id: PathVar[str],
         security_context: SecurityContext,
     ) -> BalanceDto:
-        result = await self._queries.query(GetBalance(wallet_id=wallet_id))
+        result = await self._queries.query(
+            GetBalance(wallet_id=wallet_id)
+        )
         if result is None:
             raise ResourceNotFoundException(
                 f"Wallet {wallet_id!r} not found",
@@ -338,12 +423,14 @@ class WalletController:
     # Full wallet view: ADMIN only.
     @secure(roles=["ADMIN"])
     @get_mapping("/{wallet_id}")
-    async def get_wallet(
+    async def wallet_detail(
         self,
         wallet_id: PathVar[str],
         security_context: SecurityContext,
     ) -> WalletDto:
-        result = await self._queries.query(GetWallet(wallet_id=wallet_id))
+        result = await self._queries.query(
+            GetWallet(wallet_id=wallet_id)
+        )
         if result is None:
             raise ResourceNotFoundException(
                 f"Wallet {wallet_id!r} not found",
@@ -355,9 +442,20 @@ class WalletController:
 :::
 :::
 
-**How it works.** Stack `@secure` **above** `@post_mapping` / `@get_mapping` so authorisation runs before route binding. The framework injects `security_context` from `request.state.security_context`, which `SecurityMiddleware` already populated.
+**How it works.** Stack `@secure` **above** `@post_mapping` / `@get_mapping`
+so authorisation runs before route binding. The framework injects
+`security_context` from `request.state.security_context`, which
+`SecurityMiddleware` already populated.
 
-When you list multiple roles, the user needs **at least one** (OR semantics). When you list multiple permissions, the user needs **all** of them (AND semantics). When you supply both `roles` and `permissions`, both checks must pass independently.
+When you list multiple roles, the user needs **at least one** (OR semantics).
+When you list multiple permissions, the user needs **all** of them (AND
+semantics). When you supply both `roles` and `permissions`, both checks must
+pass independently.
+
+The collection handlers (`list_wallets`, `list_rich_wallets`) sort
+alphabetically before `wallet_balance` / `wallet_detail`, so the framework
+registers the literal `""` and `/rich` routes first — ensuring Starlette
+resolves `/api/v1/wallets/rich` as a fixed segment rather than as a wallet id.
 
 !!! note "Amounts in minor units"
     `DepositRequest.amount` is an `int` in **minor units** (cents). €10.50 is
@@ -940,9 +1038,14 @@ This chapter opened Part V by closing Lumen's open front door. You:
   covering Lumen's real `/api/v1/wallets/**` tree and the IDP admin routes.
 - Protected Lumen's real wallet endpoints in `WalletController` with
   **`@secure`**, specifying roles, permissions, or full security expressions.
-  Authorization failures raise `SecurityException` (401, code `AUTH_REQUIRED`)
-  for unauthenticated callers and `ForbiddenException` (403, code `FORBIDDEN`)
-  for authenticated callers who lack the required role or permission.
+  The seven routes — `open_wallet`, `deposit`, `withdraw`, `list_wallets`
+  (paged list), `list_rich_wallets` (filtered list), `wallet_balance`, and
+  `wallet_detail` — each carry the minimal guard: USER+ADMIN for most,
+  `wallet:deposit` permission for mutations, ADMIN-only for the full detail
+  view. Authorization failures raise `SecurityException` (401, code
+  `AUTH_REQUIRED`) for unauthenticated callers and `ForbiddenException` (403,
+  code `FORBIDDEN`) for authenticated callers who lack the required role or
+  permission.
 - Hashed passwords with **`BcryptPasswordEncoder`**, the default adapter for the
   `PasswordEncoder` protocol. The cost factor is tunable; the stored hash is
   self-describing; verification is timing-safe.

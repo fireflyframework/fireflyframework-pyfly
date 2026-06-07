@@ -58,7 +58,9 @@ class DailyRollupService:
     @scheduled(cron="0 2 * * *")
     async def run(self) -> None:
         wallets = await self._wallets.find_all()
-        total_minor_units = sum(w.balance.amount for w in wallets)
+        # find_all() returns WalletEntity rows; balance_minor is the
+        # persisted integer (cents).
+        total_minor_units = sum(w.balance_minor for w in wallets)
         # Persist or ship the nightly snapshot; here we log it.
         print(
             f"[rollup] {len(wallets)} wallets, "
@@ -464,9 +466,6 @@ you will pass to `WebhookProcessor.process()`:
 ::: listing lumen/webhooks/payment_listener.py | Listing 17.8 — Payment-provider webhook listener
 from pyfly.container import service
 from pyfly.webhooks import AbstractWebhookEventListener, WebhookEvent
-
-from lumen.models.entities.v1.money import Money
-from lumen.interfaces.enums.v1.currency import Currency
 
 
 @service
