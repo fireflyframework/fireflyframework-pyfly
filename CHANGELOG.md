@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.31 (2026-06-07)
+
+### Added (testing — Testcontainers integration)
+
+Wave 4 (final) — the Spring Boot `@Testcontainers` / `@ServiceConnection` equivalent,
+in `pyfly.testing.testcontainers`.
+
+- **Container factories** (`postgres_container`, `mysql_container`, `redis_container`,
+  `mongodb_container`, `kafka_container`) wrapping `testcontainers` (new optional
+  extra `pyfly[testcontainers]`; lazily imported with a clear install hint).
+- **`@ServiceConnection`-style auto-wiring**: `pyfly_config_for(container)` maps a
+  started container to the right pyfly config keys (Postgres/MySQL → async
+  `pyfly.data.relational.url`; Redis → `pyfly.cache.redis.url` + `pyfly.session.redis.url`;
+  Mongo → `pyfly.data.document.uri`; Kafka → `pyfly.eda.kafka.bootstrap-servers`), and
+  `pyfly_config(*containers)` builds a ready-to-use `Config`.
+- **Graceful skip**: `is_docker_available()` + the `@requires_docker` decorator skip
+  integration tests cleanly when Docker (or the extra) is absent.
+
+All exported from `pyfly.testing`.
+
+---
+
 ## v26.06.30 (2026-06-07)
 
 ### Added (core — SpEL-lite expression evaluation)
