@@ -22,6 +22,7 @@ import threading
 import time
 import types
 import typing
+from collections.abc import Callable
 from typing import Annotated, Any, TypeVar, Union, cast, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
@@ -117,6 +118,11 @@ class Container:
         # one bean would silently vanish from type/list resolution.
         self._all: dict[tuple[type, str], Registration] = {}
         self._lock = threading.RLock()
+        # Installed by ApplicationContext AFTER startup so SINGLETON beans created
+        # lazily (post-startup) still run the full init pipeline (BeanPostProcessors,
+        # @post_construct, AOP weaving). None during startup — the batched startup
+        # passes handle eager beans then (avoids double-initialization).
+        self._post_create_hook: Callable[[Any, Registration], Any] | None = None
 
     @property
     def _resolving(self) -> dict[type, None]:
@@ -303,6 +309,9 @@ class Container:
                     self._ensure_metrics(reg.impl_type).resolution_count += 1
                     return reg.instance
                 instance = self._create_instance(reg)
+                if self._post_create_hook is not None:
+                    # Lazily-created singleton (post-startup): run the full init pipeline.
+                    instance = self._post_create_hook(instance, reg)
                 reg.instance = instance
                 self._ensure_metrics(reg.impl_type).resolution_count += 1
                 return instance
