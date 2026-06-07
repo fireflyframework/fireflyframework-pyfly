@@ -37,4 +37,11 @@ parts:
       - {id: ch11, file: 11-http-clients.md, num: 11, title: "Splitting the Monolith: HTTP Clients & the BFF", opener: art/openers/ch11.svg}
       - {id: ch12, file: 12-sagas.md, num: 12, title: "Distributed Transactions: Sagas, Workflows & TCC", opener: art/openers/ch12.svg}
       - {id: ch13, file: 13-caching-resilience.md, num: 13, title: "Caching & Resilience", opener: art/openers/ch13.svg}
+  - title: "Part V — Secure, Observe & Ship"
+    chapters:
+      - {id: ch14, file: 14-security.md, num: 14, title: "Security, Sessions & Identity", opener: art/openers/ch14.svg}
+      - {id: ch15, file: 15-observability.md, num: 15, title: "Observability & the Admin Dashboard", opener: art/openers/ch15.svg}
+      - {id: ch16, file: 16-testing.md, num: 16, title: "Testing PyFly Applications", opener: art/openers/ch16.svg}
+      - {id: ch17, file: 17-scheduling-notifications.md, num: 17, title: "Scheduling, Notifications, Webhooks & Callbacks", opener: art/openers/ch17.svg}
+      - {id: ch18, file: 18-production.md, num: 18, title: "Extending PyFly & Going to Production", opener: art/openers/ch18.svg}
 back: []
