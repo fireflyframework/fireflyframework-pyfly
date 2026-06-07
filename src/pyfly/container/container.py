@@ -321,6 +321,11 @@ class Container:
             self._ensure_metrics(reg.impl_type).resolution_count += 1
             return instance
 
+        if reg.scope == Scope.SESSION:
+            instance = self._resolve_session_scoped(reg)
+            self._ensure_metrics(reg.impl_type).resolution_count += 1
+            return instance
+
         instance = self._create_instance(reg)
         self._ensure_metrics(reg.impl_type).resolution_count += 1
         return instance
@@ -344,6 +349,37 @@ class Container:
 
         instance = self._create_instance(reg)
         ctx.set(cache_key, instance)
+        return instance
+
+    def _resolve_session_scoped(self, reg: Registration) -> Any:
+        """Resolve a SESSION-scoped bean from the active HttpSession's attributes.
+
+        The bean lives as a session attribute, so (like Spring's session-scoped beans) it
+        is persisted with the session — it must be serializable when a non-memory session
+        store (e.g. Redis) is used.
+        """
+        from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext
+
+        ctx = RequestContext.current()
+        if ctx is None:
+            raise RuntimeError(
+                f"No active request context for SESSION-scoped bean "
+                f"{reg.impl_type.__name__}. Ensure a RequestContextFilter is active."
+            )
+        session = ctx.get(HTTP_SESSION_KEY)
+        if session is None:
+            raise RuntimeError(
+                f"No HTTP session for SESSION-scoped bean {reg.impl_type.__name__}. "
+                f"Ensure the session module (SessionFilter) is enabled."
+            )
+
+        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        existing = session.get_attribute(cache_key)
+        if existing is not None:
+            return existing
+
+        instance = self._create_instance(reg)
+        session.set_attribute(cache_key, instance)
         return instance
 
     def _create_instance(self, reg: Registration) -> Any:

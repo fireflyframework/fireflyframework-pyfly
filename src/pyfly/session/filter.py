@@ -53,6 +53,12 @@ class SessionFilter(OncePerRequestFilter):
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         session = await self._load_or_create_session(request)
         request.state.session = session
+        # Expose the session to the container for SESSION-scoped bean resolution.
+        from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext
+
+        ctx = RequestContext.current()
+        if ctx is not None:
+            ctx.set(HTTP_SESSION_KEY, session)
 
         try:
             response = await call_next(request)
