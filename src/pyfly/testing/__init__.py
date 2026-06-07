@@ -19,6 +19,17 @@ from pyfly.testing.containers import create_test_container
 from pyfly.testing.fixtures import PyFlyTestCase
 from pyfly.testing.mock import mock_bean
 from pyfly.testing.slices import DataTest, ServiceTest, WebTest, get_test_slice
+from pyfly.testing.testcontainers import (
+    is_docker_available,
+    kafka_container,
+    mongodb_container,
+    mysql_container,
+    postgres_container,
+    pyfly_config,
+    pyfly_config_for,
+    redis_container,
+    requires_docker,
+)
 
 __all__ = [
     "DataTest",
@@ -31,5 +42,14 @@ __all__ = [
     "assert_no_events_published",
     "create_test_container",
     "get_test_slice",
+    "is_docker_available",
+    "kafka_container",
     "mock_bean",
+    "mongodb_container",
+    "mysql_container",
+    "postgres_container",
+    "pyfly_config",
+    "pyfly_config_for",
+    "redis_container",
+    "requires_docker",
 ]
