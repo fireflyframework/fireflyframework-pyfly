@@ -90,3 +90,43 @@ h2.recap,h2.exercises{ color:var(--green-deep); border-bottom-color:#cfe0bb;
   display:flex; align-items:center; gap:.5rem; }
 h2.recap::before{ content:"\2713"; color:var(--green); font-size:1.05rem; }
 h2.exercises::before{ content:"\270E"; color:var(--green); font-size:1.05rem; }
+
+/* ============ Table of Contents (Packt style) ============ */
+.toc{ padding:0 0 2.5rem; }
+.toc h1.chtitle{ margin-bottom:1.4rem; }
+.toc-part-group{ margin:1.5rem 0 .4rem; }
+.toc-part-title{                       /* part heading in green, no underline */
+  font-size:1.18rem; font-weight:800; color:var(--green-deep);
+  margin:1.5rem 0 .55rem; padding:0; border:none; letter-spacing:-.005em;
+}
+.toc-part-eyebrow{ color:var(--green); font-weight:800; letter-spacing:.12em;
+  font-size:.74rem; text-transform:uppercase; margin-right:.5rem; }
+ol.toc-chapters{ list-style:none; margin:0; padding:0; }
+ol.toc-chapters > li{ margin:.18rem 0; }
+.toc-link{                             /* readable chapter row; leader fills to the page number */
+  display:block; color:var(--ink); text-decoration:none; font-size:.98rem; line-height:1.75;
+}
+.toc-link:hover{ color:var(--green-deep); }
+
+/* ============ EPUB nav (part-grouped) ============ */
+nav#toc ol{ list-style:none; padding-left:1rem; }
+nav#toc > ol{ padding-left:0; }
+nav#toc li{ margin:.22rem 0; }
+nav#toc li.toc-part > a,
+nav#toc li.toc-part{                    /* part labels stand out in green */
+  color:var(--green-deep); font-weight:800; text-decoration:none;
+}
+nav#toc li.toc-part > ol{ margin-top:.2rem; }
+nav#toc li.toc-part > ol a{ font-weight:400; color:var(--ink); }
+
+/* ============ Part-divider page ============ */
+.part-divider{ padding:0; }
+.part-divider-inner{ text-align:center; }
+.part-eyebrow{                         /* "Part I" */
+  display:block; color:var(--green); font-weight:800; letter-spacing:.22em;
+  font-size:1rem; text-transform:uppercase; margin-bottom:.8rem;
+}
+.part-title{                           /* "Foundations" — centered and large */
+  font-size:2.9rem; line-height:1.1; font-weight:800; color:#15351a;
+  letter-spacing:-.02em; margin:0; border:none; padding:0;
+}

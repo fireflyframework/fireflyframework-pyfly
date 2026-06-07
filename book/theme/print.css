@@ -22,11 +22,33 @@ body{ background:#fff; }
 /* running head from the chapter title */
 h1.chtitle{ string-set: runhead content(text); }
 
-/* keep short blocks intact; let long code/tables flow across pages */
-figure.fig,.admonition{ break-inside:avoid; }
+/* keep blocks intact across page boundaries */
+table,figure.fig,.admonition{ break-inside:avoid; }
+tr{ break-inside:avoid; }                 /* never split a row */
+thead{ display:table-header-group; }      /* repeat header on each page */
 h1,h2,h3{ break-after:avoid; }
 p{ orphans:3; widows:3; }
 
 /* nothing may exceed the text column; code wraps instead of clipping */
 img,svg,table,pre.code{ max-width:100%; }
 pre.code{ white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* ============ Contents page (print) ============ */
+/* start on its own page; suppress the running head (no chtitle here) */
+section.toc{ break-before:page; break-after:page; }
+section.toc h1.chtitle{ string-set:runhead "Contents"; }
+/* dotted leader + the resolved page number of the linked chapter */
+.toc-link{ text-decoration:none; color:var(--ink); }
+.toc-link::after{
+  content: leader('.') ' ' target-counter(attr(href url), page);
+  color:#6b7768;
+}
+
+/* ============ Part-divider page (print) ============ */
+section.part-divider{
+  break-before:page; break-after:page;
+  display:flex; flex-direction:column; justify-content:center;
+  min-height:7.2in; text-align:center;
+}
+/* dividers have no running head or page number of their own */
+section.part-divider{ string-set:runhead ""; }

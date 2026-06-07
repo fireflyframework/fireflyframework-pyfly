@@ -15,6 +15,9 @@ class Doc:
     title: str
     xhtml_body: str
     in_nav: bool = True
+    kind: str = "chapter"        # front | toc | divider | chapter
+    part: str | None = None      # part label (e.g. "Part I — Foundations") for grouping
+    num: int | str | None = None # chapter number, when kind == "chapter"
 
 @dataclass
 class Asset:
@@ -48,15 +51,42 @@ class EpubBuilder:
     def _xhtml(self, d: Doc) -> str:
         links = "\n".join(f'<link rel="stylesheet" href="style{i}.css"/>'
                           for i in range(len(self.css)))
+        sec_class = {"toc": "toc", "divider": "part-divider"}.get(d.kind, "chapter")
         return (f'<?xml version="1.0" encoding="utf-8"?>\n'
                 f'<html xmlns="http://www.w3.org/1999/xhtml" '
                 f'xmlns:epub="http://www.idpf.org/2007/ops" lang="{self.language}">\n'
                 f'<head><meta charset="utf-8"/><title>{escape(d.title)}</title>\n{links}\n</head>\n'
-                f'<body><section class="chapter">{d.xhtml_body}</section></body>\n</html>\n')
+                f'<body><section class="{sec_class}" id="{escape(d.id)}">'
+                f'{d.xhtml_body}</section></body>\n</html>\n')
 
     def _nav(self) -> str:
-        items = "\n".join(f'<li><a href="{d.id}.xhtml">{escape(d.title)}</a></li>'
-                          for d in self.docs if d.in_nav)
+        """Part-grouped TOC: front items first, then each Part as a label
+        whose nested <ol> holds that part's chapters."""
+        # map a part label -> the divider doc id (so the part label can link to it)
+        part_target = {d.part: d.id for d in self.docs
+                       if d.kind == "divider" and d.part}
+        out: list[str] = []
+        cur_part: str | None = None
+        for d in self.docs:
+            if d.kind == "divider" or not d.in_nav:
+                continue  # dividers surface as their part's label, not a row
+            if d.kind == "chapter" and d.part:
+                if d.part != cur_part:
+                    if cur_part is not None:
+                        out.append("</ol></li>")          # close previous part group
+                    cur_part = d.part
+                    tgt = part_target.get(d.part)
+                    label = (f'<a href="{tgt}.xhtml">{escape(d.part)}</a>'
+                             if tgt else escape(d.part))
+                    out.append(f'<li class="toc-part">{label}<ol>')
+                out.append(f'<li><a href="{d.id}.xhtml">{escape(d.title)}</a></li>')
+            else:  # front matter (and any ungrouped doc): flat top-level row
+                if cur_part is not None:
+                    out.append("</ol></li>"); cur_part = None
+                out.append(f'<li><a href="{d.id}.xhtml">{escape(d.title)}</a></li>')
+        if cur_part is not None:
+            out.append("</ol></li>")
+        items = "\n".join(out)
         return ('<?xml version="1.0" encoding="utf-8"?>\n'
                 '<html xmlns="http://www.w3.org/1999/xhtml" '
                 'xmlns:epub="http://www.idpf.org/2007/ops"><head><meta charset="utf-8"/>'

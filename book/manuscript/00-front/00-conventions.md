@@ -45,4 +45,4 @@ Four callout styles appear in the margins and body:
 
 Diagrams are numbered **Figure N.N** and captioned below the image. They are embedded as inline SVG so they render crisply in both screen and print formats.
 
-::: figure art/mascot/sparky.svg | Sparky highlights key ideas.
+::: figure art/mascot/sparky-cut.png | Sparky highlights key ideas.
