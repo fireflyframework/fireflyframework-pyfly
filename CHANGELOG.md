@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.42 (2026-06-07)
+
+### Added (cache — @cacheable condition / unless)
+
+`@cacheable` / `cache` now accept Spring-style predicates (Pythonic callables):
+
+- **`condition`** — a predicate over the call arguments; when it returns ``False`` caching
+  is bypassed entirely (the function runs, nothing is read from or written to the cache).
+- **`unless`** — a predicate over the *result*; when it returns ``True`` the result is
+  returned but not stored (e.g. skip caching empty/None results).
+
 ## v26.06.41 (2026-06-07)
 
 ### Added (context — injectable ApplicationEventPublisher + arbitrary domain events)
