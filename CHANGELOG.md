@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.71 (2026-06-07)
+
+### Added (tests — behavior coverage for external adapters)
+
+Closes the audit gap where several external adapters were only wiring/`isinstance`-tested. Added
+**42 mocked-I/O behavior tests** (no network/Docker) asserting both the outbound request shape
+(URL, verb, payload, auth headers) and the response→domain parsing, for:
+
+- **Notifications**: `ResendEmailProvider`, `TwilioSmsProvider`, `FirebasePushProvider`.
+- **ECM e-signature**: `DocuSignESignatureAdapter`, `AdobeSignESignatureAdapter`, `LogaltyESignatureAdapter`.
+- **ECM storage**: `AwsS3StorageAdapter` (fake injected boto3 client).
+- **IDP**: `KeycloakIdpAdapter`.
+
+Each covers happy-path, error/non-2xx mapping, and key edge cases (sender precedence, attachment
+encoding, multi-token partial success, status mapping, etc.).
+
 ## v26.06.70 (2026-06-07)
 
 ### Performance (notifications/ECM — pooled outbound HTTP clients)
