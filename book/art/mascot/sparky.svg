@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sparky">
+  <circle cx="32" cy="32" r="30" fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <path d="M24 46 C 8 42 12 22 30 21 C 44 20 47 9 35 5" fill="none" stroke="#5fd13a"
+        stroke-width="7" stroke-linecap="round"/>
+  <g transform="translate(35,16)">
+    <ellipse rx="11" ry="9.5" fill="#67d642" stroke="#2f7d1c" stroke-width="1.6"/>
+    <circle cx="-4" cy="-2" r="2.3" fill="#fff"/><circle cx="4" cy="-2" r="2.3" fill="#fff"/>
+    <circle cx="-3.4" cy="-1.4" r="1.1" fill="#16331a"/><circle cx="4.6" cy="-1.4" r="1.1" fill="#16331a"/>
+    <path d="M-3 4 Q 0 6.5 3 4" stroke="#1c5512" stroke-width="1.4" fill="none"/>
+  </g>
+</svg>

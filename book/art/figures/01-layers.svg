@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360"
+     role="img" aria-label="PyFly four-layer architecture: Cross-Cutting, Infrastructure, Application, Foundation"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="640" height="360" fill="#eaf6df"/>
+
+  <!-- Shared layout constants:
+       bands start at y=28, each band h=70, gap=12
+       band 1 y=28   (Cross-Cutting)
+       band 2 y=110  (Infrastructure)
+       band 3 y=192  (Application)
+       band 4 y=274  (Foundation)
+       left margin for bands = 70 (arrow area), band width = 550
+  -->
+
+  <!-- ── "depends on" arrow on left margin ── -->
+  <defs>
+    <marker id="layers-arrowdown" markerWidth="10" markerHeight="8"
+            refX="5" refY="7" orient="auto">
+      <polygon points="0 0, 10 0, 5 8" fill="#43b02a"/>
+    </marker>
+  </defs>
+
+  <!-- Arrow shaft: from top of band1 to bottom of band4 -->
+  <line x1="34" y1="50" x2="34" y2="320"
+        stroke="#43b02a" stroke-width="2.5"
+        marker-end="url(#layers-arrowdown)"/>
+
+  <!-- "depends on" label rotated, centered beside arrow -->
+  <text x="22" y="190" text-anchor="middle"
+        fill="#43b02a" font-size="11" font-weight="600"
+        transform="rotate(-90, 22, 190)">depends on</text>
+
+  <!-- ── Band 1: Cross-Cutting ── -->
+  <rect x="70" y="28" width="550" height="70" rx="12" ry="12"
+        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
+  <!-- Bold label -->
+  <text x="88" y="60" dominant-baseline="middle"
+        fill="#16331a" font-size="15" font-weight="700">Cross-Cutting</text>
+  <!-- Module list -->
+  <text x="88" y="82" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="12">aop · observability · logging · testing</text>
+
+  <!-- ── Band 2: Infrastructure ── -->
+  <rect x="70" y="110" width="550" height="70" rx="12" ry="12"
+        fill="#d8efc6" stroke="#43b02a" stroke-width="2"/>
+  <text x="88" y="142" dominant-baseline="middle"
+        fill="#16331a" font-size="15" font-weight="700">Infrastructure</text>
+  <text x="88" y="164" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="12">web · data · messaging · cache · security</text>
+
+  <!-- ── Band 3: Application ── -->
+  <rect x="70" y="192" width="550" height="70" rx="12" ry="12"
+        fill="#bfe3a6" stroke="#43b02a" stroke-width="2"/>
+  <text x="88" y="224" dominant-baseline="middle"
+        fill="#16331a" font-size="15" font-weight="700">Application</text>
+  <text x="88" y="246" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="12">validation · cqrs · eda</text>
+
+  <!-- ── Band 4: Foundation ── -->
+  <rect x="70" y="274" width="550" height="70" rx="12" ry="12"
+        fill="#a7e76a" stroke="#43b02a" stroke-width="2"/>
+  <text x="88" y="306" dominant-baseline="middle"
+        fill="#16331a" font-size="15" font-weight="700">Foundation</text>
+  <text x="88" y="328" dominant-baseline="middle"
+        fill="#2c5a1f" font-size="12">kernel · core · container · context · config</text>
+
+  <!-- ── Gap tick marks between bands (subtle) ── -->
+  <!-- Between band 1 and 2: y=98..110 -->
+  <!-- Between band 2 and 3: y=180..192 -->
+  <!-- Between band 3 and 4: y=262..274 -->
+  <!-- (gaps are just whitespace; no extra elements needed) -->
+
+</svg>
