@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+     role="img" aria-label="Chapter 7 opener: CQRS — Sparky beside a Bus forking into Command write path and Query read path"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+
+  <!-- Background -->
+  <rect width="720" height="280" fill="#eaf6df"/>
+
+  <!-- ── Sparky (left) ── -->
+  <ellipse cx="160" cy="242" rx="52" ry="10" fill="#b8d9a0" opacity="0.6"/>
+
+  <path d="M170 230 C 90 220 95 160 130 148 C 165 136 168 100 148 78"
+        fill="none" stroke="#5fd13a" stroke-width="22" stroke-linecap="round"/>
+  <path d="M168 232 C 185 238 200 228 190 218"
+        fill="none" stroke="#5fd13a" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <ellipse cx="148" cy="68" rx="28" ry="24" fill="#67d642" stroke="#2f7d1c" stroke-width="3"/>
+  <circle cx="138" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="158" cy="62" r="5.5" fill="#fff"/>
+  <circle cx="139.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="159.5" cy="61" r="2.6" fill="#16331a"/>
+  <circle cx="140.5" cy="59.5" r="1" fill="#fff"/>
+  <circle cx="160.5" cy="59.5" r="1" fill="#fff"/>
+  <path d="M140 76 Q 148 83 156 76" stroke="#1c5512" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M148 80 L 148 86 M 145 86 L 148 86 L 151 86"
+        stroke="#e8334a" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+  <!-- Divider -->
+  <line x1="300" y1="30" x2="300" y2="250" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,6"/>
+
+  <!-- ── CQRS fork diagram ── -->
+  <defs>
+    <filter id="ch07-shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#2c8a1c" flood-opacity="0.25"/>
+    </filter>
+    <marker id="ch07-arrow-green" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    </marker>
+    <marker id="ch07-arrow-muted" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    </marker>
+  </defs>
+
+  <!-- Bus box (center-left) -->
+  <rect x="330" y="112" width="90" height="52" rx="12" ry="12"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#ch07-shadow)"/>
+  <!-- Header -->
+  <rect x="330" y="112" width="90" height="24" rx="12" ry="12" fill="#43b02a"/>
+  <rect x="330" y="124" width="90" height="12" fill="#43b02a"/>
+  <text x="375" y="124" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="12" font-weight="700">Bus</text>
+  <text x="375" y="148" text-anchor="middle" dominant-baseline="middle"
+        fill="#6a7a64" font-size="10">dispatch()</text>
+
+  <!-- Fork lines from Bus -->
+  <!-- Up to Command -->
+  <polyline points="420,138 450,100 490,100"
+            fill="none" stroke="#43b02a" stroke-width="2"
+            marker-end="url(#ch07-arrow-green)"/>
+  <!-- Down to Query -->
+  <polyline points="420,148 450,185 490,185"
+            fill="none" stroke="#8aa07e" stroke-width="2"
+            marker-end="url(#ch07-arrow-muted)"/>
+
+  <!-- Arrow labels on fork -->
+  <text x="449" y="92" text-anchor="middle"
+        fill="#43b02a" font-size="10" font-weight="600">Command</text>
+  <text x="449" y="200" text-anchor="middle"
+        fill="#6a7a64" font-size="10" font-weight="600">Query</text>
+
+  <!-- Write box (top-right) -->
+  <rect x="492" y="76" width="100" height="48" rx="10" ry="10"
+        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
+  <!-- Header -->
+  <rect x="492" y="76" width="100" height="22" rx="10" ry="10" fill="#43b02a"/>
+  <rect x="492" y="88" width="100" height="10" fill="#43b02a"/>
+  <text x="542" y="87" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">write</text>
+  <text x="542" y="112" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="10">handler</text>
+
+  <!-- Read box (bottom-right) -->
+  <rect x="492" y="161" width="100" height="48" rx="10" ry="10"
+        fill="#eaf6df" stroke="#8aa07e" stroke-width="2"/>
+  <!-- Header -->
+  <rect x="492" y="161" width="100" height="22" rx="10" ry="10" fill="#8aa07e"/>
+  <rect x="492" y="173" width="100" height="10" fill="#8aa07e"/>
+  <text x="542" y="172" text-anchor="middle" dominant-baseline="middle"
+        fill="#ffffff" font-size="11" font-weight="700">read</text>
+  <text x="542" y="197" text-anchor="middle" dominant-baseline="middle"
+        fill="#23402a" font-size="10">handler</text>
+
+  <!-- Amber sparkle -->
+  <g transform="translate(620, 90)">
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  </g>
+  <g transform="translate(635, 175)">
+    <path d="M0,-6 L1.5,-1.5 L6,0 L1.5,1.5 L0,6 L-1.5,1.5 L-6,0 L-1.5,-1.5 Z" fill="#ffc24b" opacity="0.8"/>
+  </g>
+
+</svg>
