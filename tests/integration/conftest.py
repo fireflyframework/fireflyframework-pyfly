@@ -21,6 +21,7 @@ guard and ``pytest.skip`` on any startup failure, so the suite degrades to "skip
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator
 
 import pytest
@@ -40,10 +41,8 @@ def redis_url() -> Iterator[str]:
         port = container.get_exposed_port(6379)
         yield f"redis://{host}:{port}/0"
     finally:
-        try:
+        with contextlib.suppress(Exception):
             container.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 @pytest.fixture
@@ -56,7 +55,5 @@ def pg_url() -> Iterator[str]:
     try:
         yield pyfly_config_for(container)["pyfly.data.relational.url"]
     finally:
-        try:
+        with contextlib.suppress(Exception):
             container.stop()
-        except Exception:  # noqa: BLE001
-            pass
