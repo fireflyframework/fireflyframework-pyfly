@@ -38,6 +38,7 @@ from pyfly.context.conditions import (
 )
 from pyfly.core.config import Config
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+from pyfly.data.relational.routing import RoutingSessionFactory
 from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.post_processor import (
     RepositoryBeanPostProcessor,
@@ -126,6 +127,24 @@ class RelationalAutoConfiguration:
     def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
         """Create an ``async_sessionmaker`` factory bound to the engine."""
         return async_sessionmaker(async_engine, expire_on_commit=False)
+
+    @bean
+    def routing_session_factory(
+        self, async_session_factory: async_sessionmaker[AsyncSession], config: Config
+    ) -> RoutingSessionFactory:
+        """Read/write routing session factory — the ``AbstractRoutingDataSource`` equivalent.
+
+        Routes to a read-replica inside a :func:`~pyfly.data.relational.routing.read_only`
+        block when ``pyfly.data.relational.read-replica.url`` is configured; otherwise it
+        always uses the primary (no behavior change).
+        """
+        replica_url = config.get("pyfly.data.relational.read-replica.url")
+        replica_factory: async_sessionmaker[AsyncSession] | None = None
+        if replica_url:
+            echo = bool(config.get("pyfly.data.relational.echo", False))
+            replica_engine = create_async_engine(str(replica_url), echo=echo)
+            replica_factory = async_sessionmaker(replica_engine, expire_on_commit=False)
+        return RoutingSessionFactory(async_session_factory, replica_factory)
 
     @bean
     def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:

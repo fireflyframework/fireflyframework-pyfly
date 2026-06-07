@@ -18,3 +18,7 @@ Import concrete adapter types from the adapter package directly::
 
     from pyfly.data.relational.sqlalchemy import Base, Repository
 """
+
+from pyfly.data.relational.routing import RoutingSessionFactory, is_read_only, read_only
+
+__all__ = ["RoutingSessionFactory", "is_read_only", "read_only"]
