@@ -63,6 +63,9 @@ def cache(
     backend: CacheAdapter,
     key: str,
     ttl: timedelta | None = None,
+    *,
+    condition: Callable[..., bool] | None = None,
+    unless: Callable[[Any], bool] | None = None,
 ) -> Callable[[F], F]:
     """Cache the return value of an async function.
 
@@ -74,6 +77,11 @@ def cache(
         backend: Cache adapter to use.
         key: Key template with {param} placeholders.
         ttl: Optional time-to-live for cached entries.
+        condition: Predicate over the call arguments (same signature as *func*); when it
+            returns ``False`` caching is bypassed entirely (the function runs, nothing is
+            read from or written to the cache). Spring's ``@Cacheable(condition=...)``.
+        unless: Predicate over the *result*; when it returns ``True`` the result is returned
+            but NOT stored. Spring's ``@Cacheable(unless=...)``.
     """
 
     def decorator(func: F) -> F:
@@ -81,6 +89,10 @@ def cache(
 
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # condition=False -> bypass the cache entirely.
+            if condition is not None and not condition(*args, **kwargs):
+                return await func(*args, **kwargs)
+
             resolved_key = _resolve_key(func, key, args, kwargs)
 
             # Check cache. A present-but-None entry is a hit (null caching /
@@ -91,9 +103,10 @@ def cache(
             if await backend.exists(resolved_key):
                 return None
 
-            # Execute and cache
+            # Execute and (unless excluded) cache.
             result = await func(*args, **kwargs)
-            await backend.put(resolved_key, result, ttl=ttl)
+            if unless is None or not unless(result):
+                await backend.put(resolved_key, result, ttl=ttl)
             return result
 
         return wrapper  # type: ignore[return-value]
@@ -105,17 +118,23 @@ def cacheable(
     backend: CacheAdapter,
     key: str,
     ttl: timedelta | None = None,
+    *,
+    condition: Callable[..., bool] | None = None,
+    unless: Callable[[Any], bool] | None = None,
 ) -> Callable[[F], F]:
     """Cache the return value, skip execution on cache hit.
 
-    Equivalent to :func:`cache`.
+    Equivalent to :func:`cache`, with Spring-style ``condition`` (bypass caching) and
+    ``unless`` (don't store certain results) predicates.
 
     Args:
         backend: Cache adapter to use.
         key: Key template with {param} placeholders.
         ttl: Optional time-to-live for cached entries.
+        condition: Predicate over the call arguments; ``False`` bypasses the cache.
+        unless: Predicate over the result; ``True`` returns it without storing.
     """
-    return cache(backend=backend, key=key, ttl=ttl)
+    return cache(backend=backend, key=key, ttl=ttl, condition=condition, unless=unless)
 
 
 def cache_evict(
