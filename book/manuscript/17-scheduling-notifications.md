@@ -4,32 +4,16 @@
 
 ::: figure art/openers/ch17.svg | &nbsp;
 
-In Chapter 16 you gave Lumen a full test harness — unit tests for the
-domain, integration tests for HTTP handlers, and container-managed
-Testcontainers fixtures for the persistence layer. Lumen is now
-well-tested and resilient. But it still lives entirely inside its own
-process: it reacts to requests, but it never reaches out unprompted.
+In Chapter 16 you gave Lumen a full test harness — unit tests for the domain, CQRS flow tests through the real bus, and a SQLite adapter test that proves true persistence. Lumen is now well-tested and resilient. But it still lives entirely inside its own process: it reacts to requests, but it never reaches out unprompted.
 
-Real financial platforms are different. They send nightly account
-statements, fire an SMS the moment funds land, receive payment-status
-webhooks from a payment provider at midnight, and call back partner
-systems to confirm that a disbursement was booked. That is four
-distinct integration patterns — scheduling, notifications, inbound
-webhooks, and outbound callbacks — and this chapter covers all of them.
+Real financial platforms are different. They send nightly account statements, fire an SMS the moment funds land, receive payment-status webhooks from a payment provider at midnight, and call back partner systems to confirm that a disbursement was booked. That is four distinct integration patterns — scheduling, notifications, inbound webhooks, and outbound callbacks — and this chapter covers all of them.
 
 By the end of the chapter Lumen will:
 
-- run a **nightly scheduled job** that tallies daily wallet balances
-  using `@scheduled` with a cron expression;
-- send a **"funds received" email and push notification** via PyFly's
-  pluggable `EmailService` and `PushService` ports, triggered by the
-  real `FundsDeposited` domain event;
-- accept **inbound webhooks** from an illustrative payment provider,
-  verifying the HMAC-SHA256 signature, deduplicating replays, and
-  dispatching to a typed listener;
-- dispatch **outbound callbacks** to partner systems, signing each
-  payload, retrying on transient failures, and recording every
-  delivery attempt.
+- run a **nightly scheduled job** that tallies daily wallet balances using `@scheduled` with a cron expression;
+- send a **"funds received" email and push notification** via PyFly's pluggable `EmailService` and `PushService` ports, triggered by the real `FundsDeposited` domain event;
+- accept **inbound webhooks** from an illustrative payment provider, verifying the HMAC-SHA256 signature, deduplicating replays, and dispatching to a typed listener;
+- dispatch **outbound callbacks** to partner systems, signing each payload, retrying on transient failures, and recording every delivery attempt.
 
 Install the two optional extras before you start:
 
@@ -43,17 +27,9 @@ uv add "pyfly[scheduling,notifications]"
 
 ### Why schedule instead of trigger?
 
-Many operations in a financial platform should not wait for an HTTP
-request to arrive. Nightly reconciliation must run at 02:00 regardless
-of whether any user is active. A cache-warming pass should fire 30
-seconds after startup — before real traffic arrives — not when the
-first slow request triggers a miss. A heartbeat metric should be
-emitted every 10 seconds so that the ops dashboard shows a live
-signal, not a stale reading.
+Many operations in a financial platform cannot wait for an HTTP request to arrive. Nightly reconciliation must run at 02:00 regardless of whether any user is active. A cache-warming pass should fire 30 seconds after startup — before real traffic arrives — not when the first slow request triggers a miss. A heartbeat metric should emit every 10 seconds so the ops dashboard shows a live signal, not a stale reading.
 
-PyFly's scheduling module provides a declarative, decorator-driven way
-to define all three patterns without manually managing threads, event
-loops, or timer wheels.
+PyFly's scheduling module provides a declarative, decorator-driven way to define all three patterns without manually managing threads, event loops, or timer wheels.
 
 ::: figure art/figures/17-integrations.svg | Figure 17.1 — The four\
 integration layers added in this chapter. Scheduled tasks fire\
@@ -62,11 +38,7 @@ arrive from partners; outbound callbacks close the feedback loop.
 
 ### The @scheduled decorator
 
-`@scheduled` marks any `async` method on a `@service` bean for periodic
-execution. It accepts exactly one *trigger*: `fixed_rate`, `fixed_delay`,
-or `cron`. Providing zero or more than one trigger raises a `ValueError`
-at decoration time, so mistakes surface at startup, not silently at
-three in the morning.
+**`@scheduled`** marks any `async` method on a `@service` bean for periodic execution. It accepts exactly one *trigger*: `fixed_rate`, `fixed_delay`, or `cron`. Providing zero or more than one trigger raises a `ValueError` at decoration time, so mistakes surface at startup rather than silently at three in the morning.
 
 ::: listing lumen/ledger/daily_rollup.py | Listing 17.1 — Nightly wallet balance rollup with @scheduled
 from datetime import timedelta
@@ -95,12 +67,9 @@ class DailyRollupService:
         )
 :::
 
-`@scheduled(cron="0 2 * * *")` fires every day at 02:00 UTC. The
-scheduler calculates `seconds_until_next()` via `CronExpression`, sleeps
-exactly that long, then submits the method to the executor.
+**How it works.** `@scheduled(cron="0 2 * * *")` fires every day at 02:00 UTC. The scheduler calculates `seconds_until_next()` via `CronExpression`, sleeps exactly that long, then submits the method to the executor.
 
-That is all the wiring Lumen needs. With `pyfly[scheduling]` installed,
-`SchedulingAutoConfiguration` automatically:
+That is all the wiring Lumen needs. With `pyfly[scheduling]` installed, `SchedulingAutoConfiguration` automatically:
 
 1. registers a `TaskScheduler` bean;
 2. scans every `@service` bean for `@scheduled` methods;
@@ -111,12 +80,7 @@ No `SchedulerManager` required.
 
 ### fixed_rate vs. fixed_delay
 
-`fixed_rate` measures from the **start** of one execution to the start
-of the next. `fixed_delay` measures from the **end** of one execution
-to the start of the next. Use `fixed_rate` for heartbeats and metrics
-where you want a steady cadence regardless of execution time. Use
-`fixed_delay` when you need a guaranteed breathing gap — for example,
-when polling an upstream API that rate-limits on request frequency.
+**`fixed_rate`** measures from the **start** of one execution to the start of the next. **`fixed_delay`** measures from the **end** of one execution to the start of the next. Use `fixed_rate` for heartbeats and metrics where you need a steady cadence regardless of execution time. Use `fixed_delay` when you need a guaranteed breathing gap — for example, when polling an upstream API that rate-limits on request frequency.
 
 ::: listing lumen/health/monitor.py | Listing 17.2 — fixed_rate heartbeat and fixed_delay poll
 from datetime import timedelta
@@ -151,15 +115,11 @@ class ExchangeRatePoller:
         await self._repo.store(rates)
 :::
 
-`initial_delay` postpones the very first run; it is available for both
-`fixed_rate` and `fixed_delay` (ignored for `cron` triggers, which
-always wait for the next matching calendar instant).
+`initial_delay` postpones the first run; it is available for both `fixed_rate` and `fixed_delay` (ignored for `cron` triggers, which always wait for the next matching calendar instant).
 
 ### CronExpression
 
-You can also use `CronExpression` directly — useful when you need to
-display upcoming schedule times in a UI, or to validate a user-supplied
-expression before storing it.
+**`CronExpression`** is also usable directly — convenient when you need to display upcoming schedule times in a UI or validate a user-supplied expression before storing it.
 
 ::: listing lumen/ledger/schedule_preview.py | Listing 17.3 — Using CronExpression standalone
 from pyfly.scheduling import CronExpression
@@ -171,10 +131,7 @@ def preview_rollup_schedule(expression: str, n: int = 5) -> list[str]:
     return [str(t) for t in cron.next_n_fire_times(n)]
 :::
 
-`CronExpression` accepts both the standard 5-field format
-(`min hour dom month dow`) and the Spring-style 6-field format with
-seconds first (`sec min hour dom month dow`). The Spring `?` wildcard is
-also normalised to `*` transparently.
+`CronExpression` accepts both the standard 5-field format (`min hour dom month dow`) and the Spring-style 6-field format with seconds first (`sec min hour dom month dow`). The Spring `?` wildcard is normalised to `*` transparently.
 
 | Expression | Fires |
 |---|---|
@@ -188,8 +145,7 @@ also normalised to `*` transparently.
 
 ### Time-zone-aware cron
 
-By default cron expressions are evaluated in **UTC**. Pass `zone` with
-an IANA time-zone name to evaluate fire times in that zone instead:
+Cron expressions are evaluated in **UTC** by default. Pass `zone` with an IANA time-zone name to evaluate fire times in a specific zone instead:
 
 ```python
 @scheduled(cron="0 2 * * *", zone="America/New_York")
@@ -205,18 +161,11 @@ cron = CronExpression("0 9 * * *", zone="Europe/Madrid")
 next_run = cron.next_fire_time()  # zone-aware datetime
 ```
 
-DST transitions are handled by the `zoneinfo` database — PyFly does not
-require any manual offset adjustment.
+DST transitions are handled by the `zoneinfo` database; no manual offset adjustment is required.
 
 ### Distributed locking
 
-When you run multiple instances of Lumen behind a load balancer, every
-instance schedules the same `@scheduled` methods. Without coordination,
-the nightly rollup would fire once per instance and write duplicate
-statements. The `lock` parameter solves this the same way Spring's
-`@SchedulerLock` (ShedLock) does: before each tick the scheduler tries
-to acquire a named lock, and **skips the run** if the lock is already
-held elsewhere.
+When multiple Lumen instances run behind a load balancer, every instance schedules the same `@scheduled` methods. Without coordination, the nightly rollup fires once per instance and writes duplicate records. The `lock` parameter solves this the same way Spring's `@SchedulerLock` (ShedLock) does: before each tick the scheduler tries to acquire a named lock and **skips the run** if the lock is already held elsewhere.
 
 ```python
 @scheduled(cron="0 2 * * *", lock=True, lock_ttl=timedelta(minutes=5))
@@ -226,14 +175,10 @@ async def run(self) -> None:
 ```
 
 - `lock=True` — derives the lock name from `"ClassName.method_name"`.
-- `lock="shared-name"` — explicit name; useful when two methods must
-  be mutually exclusive.
-- `lock_ttl` — safety-valve TTL; set it comfortably longer than the
-  job's worst-case runtime.
+- `lock="shared-name"` — explicit name; useful when two methods must be mutually exclusive.
+- `lock_ttl` — safety-valve TTL; set it comfortably longer than the job's worst-case runtime.
 
-Out of the box `TaskScheduler` uses `LocalLock`, which always acquires —
-single-instance behaviour is unchanged. For cross-process coordination,
-implement `DistributedLock` and register it as a bean:
+By default `TaskScheduler` uses `LocalLock`, which always acquires — single-instance behaviour is unchanged. For cross-process coordination, implement `DistributedLock` and register it as a bean:
 
 ::: listing lumen/infra/redis_lock.py | Listing 17.4 — Redis-backed DistributedLock
 from pyfly.container import bean, configuration
@@ -267,16 +212,11 @@ class LockConfig:
         return RedisLock(client)
 :::
 
-`SchedulingAutoConfiguration` automatically detects the `DistributedLock`
-bean in the container and passes it to the `TaskScheduler`. Any object
-with conforming `try_acquire` and `release` coroutines satisfies the
-protocol.
+`SchedulingAutoConfiguration` detects the `DistributedLock` bean in the container automatically and passes it to the `TaskScheduler`. Any object with conforming `try_acquire` and `release` coroutines satisfies the protocol.
 
 ### @async_method
 
-`@async_method` marks a method for fire-and-forget execution via the
-`TaskExecutorPort`. The caller returns immediately; the framework routes
-the call through the configured executor in the background:
+**`@async_method`** marks a method for fire-and-forget execution via the `TaskExecutorPort`. The caller returns immediately; the framework routes the coroutine through the configured executor in the background:
 
 ```python
 from pyfly.scheduling import async_method
@@ -291,9 +231,7 @@ class AlertService:
         ...
 ```
 
-Under the hood `@async_method` sets `__pyfly_async__ = True` on the
-function; the framework picks this up and submits the coroutine to the
-`TaskExecutorPort`.
+Under the hood `@async_method` sets `__pyfly_async__ = True` on the function; the framework detects this flag and submits the coroutine to the `TaskExecutorPort`.
 
 !!! spring "Spring parity"
     `@scheduled(fixed_rate=...)` mirrors Spring's
@@ -313,22 +251,15 @@ pyfly:
       max-workers: 4       # threads for ThreadPoolTaskExecutor
 ```
 
-When `enabled` is `false`, `TaskScheduler` will not start any loops and
-all `@scheduled` methods are silently ignored.
+When `enabled` is `false`, `TaskScheduler` starts no loops and all `@scheduled` methods are silently skipped.
 
 ---
 
 ## Notifications
 
-Lumen needs to tell customers that their money has arrived. That means
-email for the balance notification, and optionally an SMS or a mobile
-push for the real-time "funds received" alert.
+Lumen needs to tell customers that their money has arrived — email for the balance confirmation, and optionally an SMS or mobile push for the real-time alert.
 
-PyFly's notifications module defines three **port protocols** and three
-**default services**. Your business logic depends on the protocols; the
-concrete provider adapters — SMTP, SendGrid, Twilio, Firebase — live
-behind the port boundary and can be swapped without touching a single
-line of domain code.
+PyFly's notifications module defines three **port protocols** and three **default services**. Your business logic depends on the protocols; the concrete provider adapters — SMTP, SendGrid, Twilio, Firebase — live behind the port boundary and can be swapped without touching a single line of domain code.
 
 ### The port hierarchy
 
@@ -338,19 +269,11 @@ line of domain code.
 | `SmsProvider` | `DefaultSmsService` | `send(SmsMessage) -> NotificationResult` |
 | `PushProvider` | `DefaultPushService` | `send(PushMessage) -> NotificationResult` |
 
-`DefaultEmailService`, `DefaultSmsService`, and `DefaultPushService` are
-thin wrappers: they delegate to a provider and catch any provider
-exception, returning a structured `NotificationResult` with
-`status=FAILED` and the error string rather than propagating the
-exception. This means a transient SendGrid outage does not take down the
-deposit handler.
+`DefaultEmailService`, `DefaultSmsService`, and `DefaultPushService` are thin wrappers: each delegates to a provider, catches any provider exception, and returns a structured `NotificationResult` with `status=FAILED` and the error string rather than propagating the exception. A transient SendGrid outage does not take down the deposit handler.
 
 ### Messages and results
 
-`FundsDeposited` carries `amount` and `balance` as **integer minor
-units** (cents). The `Money.major_units` property converts them to a
-decimal for display — `Money(25000, Currency.EUR).major_units` is
-`250.0`. Keep that in mind when formatting notification bodies.
+`FundsDeposited` carries `amount` and `balance` as **integer minor units** (cents). The `Money.major_units` property converts them for display — `Money(25000, Currency.EUR).major_units` is `250.0`. Keep that in mind when formatting notification bodies.
 
 ::: listing lumen/notifications/models_overview.py | Listing 17.5 — The core DTOs
 from pyfly.notifications import (
@@ -388,15 +311,11 @@ push = PushMessage(
 )
 :::
 
-`NotificationResult` carries `id`, `provider`, `status`
-(`EmailStatus.SENT | DELIVERED | FAILED | ...`), an optional
-`provider_id` (e.g. the SendGrid message ID), and an optional `error`.
+`NotificationResult` carries `id`, `provider`, `status` (`EmailStatus.SENT | DELIVERED | FAILED | ...`), an optional `provider_id` (e.g. the SendGrid message ID), and an optional `error`.
 
 ### Wiring the SMTP provider
 
-For development and self-hosted deployments, `SmtpEmailProvider` uses
-Python's stdlib `smtplib` from a thread pool, so the async event loop
-is never blocked:
+For development and self-hosted deployments, `SmtpEmailProvider` runs `smtplib` from a thread pool so the async event loop is never blocked:
 
 ::: listing lumen/notifications/config.py | Listing 17.6 — SMTP provider wired as a @bean
 from pyfly.container import bean, configuration
@@ -424,11 +343,7 @@ class NotificationConfig:
         return DefaultEmailService(provider=provider)
 :::
 
-`SmtpEmailProvider` accepts `host`, `port` (default `587`), `username`,
-`password`, and `use_tls` (default `True`). Swap the provider for
-`SendGridEmailProvider` or `ResendEmailProvider` by changing a single
-`@bean` method — `DefaultEmailService` does not care which provider
-sits behind it.
+`SmtpEmailProvider` accepts `host`, `port` (default `587`), `username`, `password`, and `use_tls` (default `True`). Swap it for `SendGridEmailProvider` or `ResendEmailProvider` by changing one `@bean` method — `DefaultEmailService` is indifferent to the provider behind it.
 
 !!! tip "Available providers"
     `pyfly.notifications` ships eight built-in adapters:
@@ -440,15 +355,9 @@ sits behind it.
 
 ### Sending a "funds received" notification
 
-Lumen publishes a `FundsDeposited` domain event every time the
-`deposit()` command succeeds (see Chapter 8). The cleanest place to
-trigger the notification is an EDA listener subscribed to that event —
-not in the command handler itself, which keeps the deposit path free
-of notification concerns.
+Lumen publishes a `FundsDeposited` domain event every time the `deposit()` command succeeds (see Chapter 8). The right place to trigger the notification is an EDA listener subscribed to that event — not the command handler itself, which keeps the deposit path free of notification concerns.
 
-`FundsDeposited` carries `wallet_id: str`, `amount: int` (minor units),
-`currency: str`, and `balance: int` (new balance, minor units). The
-listener converts `amount` to a display string via `amount / 100`:
+`FundsDeposited` carries `wallet_id: str`, `amount: int` (minor units), `currency: str`, and `balance: int` (new balance, minor units). The listener converts `amount` to a display string via `amount / 100`:
 
 ::: listing lumen/wallet/deposit_notification_listener.py | Listing 17.7 — Notifying on FundsDeposited
 from pyfly.container import service
@@ -511,8 +420,7 @@ class DepositNotificationListener:
         ))
 :::
 
-Both calls return a `NotificationResult`; you can inspect the `status`
-field if you want to log failures or schedule retries.
+Both calls return a `NotificationResult`; inspect the `status` field to log failures or schedule retries.
 
 !!! spring "Spring parity"
     `EmailService` / `SmsService` / `PushService` are the Python
@@ -525,13 +433,10 @@ field if you want to log failures or schedule retries.
 
 ## Inbound webhooks
 
-An illustrative payment provider will POST a `payment_intent.succeeded`
-event to Lumen whenever a customer tops up their wallet from a card.
-Lumen must:
+An illustrative payment provider POSTs a `payment_intent.succeeded` event to Lumen whenever a customer tops up their wallet by card. Lumen must:
 
 1. **verify the HMAC-SHA256 signature** to reject forged payloads;
-2. **deduplicate** replays using the idempotency key so a retry does
-   not credit a wallet twice;
+2. **deduplicate** replays using the idempotency key so a retry does not credit a wallet twice;
 3. **dispatch** the verified event to a typed listener.
 
 PyFly's `pyfly.webhooks` module handles all three steps.
@@ -597,13 +502,11 @@ class PaymentWebhookListener(AbstractWebhookEventListener):
         pass
 :::
 
-`on_error` is called when `handle` raises; the default is a no-op. You
-can override it to publish to a dead-letter queue or emit a metric.
+`on_error` is called when `handle` raises; the default is a no-op. Override it to publish to a dead-letter queue or emit a metric.
 
 ### WebhookProcessor — verify, dedupe, dispatch
 
-`WebhookProcessor` wires together a signature validator, an idempotency
-store, and a list of listeners:
+**`WebhookProcessor`** wires together a signature validator, an idempotency store, and a list of listeners:
 
 ::: listing lumen/webhooks/processor_config.py | Listing 17.9 — Assembling WebhookProcessor
 from pyfly.container import bean, configuration
@@ -631,15 +534,11 @@ class WebhookConfig:
         )
 :::
 
-`HmacSignatureValidator` expects the `sha256=<hex>` header format and
-uses `hmac.compare_digest` for a constant-time comparison. The
-`header_prefix` parameter can be changed if your provider uses a
-different prefix.
+`HmacSignatureValidator` expects the `sha256=<hex>` header format and uses `hmac.compare_digest` for a constant-time comparison. Change the `header_prefix` parameter if your provider uses a different scheme.
 
 ### Handling a webhook in an HTTP handler
 
-Call `processor.process()` from your inbound HTTP handler. Pass the raw
-request body (unmodified bytes) for signature verification:
+Call `processor.process()` from your inbound HTTP handler. Pass the raw request body (unmodified bytes) — the validator computes the HMAC over the exact bytes received:
 
 ::: listing lumen/webhooks/payment_handler.py | Listing 17.10 — Inbound payment-provider webhook endpoint
 from pyfly.container import service
@@ -675,24 +574,15 @@ class PaymentWebhookHandler:
         return Response(status=200, body=b"ok")
 :::
 
-The `process()` signature accepts `signature_header` and
-`idempotency_header` keyword arguments to override the default header
-names (`X-Signature` and `X-Idempotency-Key`).
+The `process()` signature accepts `signature_header` and `idempotency_header` keyword arguments to override the default header names (`X-Signature` and `X-Idempotency-Key`).
 
 **What happens inside `process()`:**
 
-1. The validator is looked up by `source`; if none is registered a
-   `NoOpSignatureValidator` is used (always passes — safe for dev but
-   not production).
-2. If signature validation fails, `ValueError` is raised immediately
-   and no listeners are called.
-3. The raw body is decoded as JSON; on failure the raw bytes are stored
-   under `body["_raw"]`.
-4. If `idempotency_key` is present and has already been seen, the
-   event is returned but listeners are **not** called.
-5. Each listener for the source is called in registration order; if
-   one raises, the error is logged and `on_error` is called before
-   continuing to the next listener.
+1. The validator is looked up by `source`; if none is registered, a `NoOpSignatureValidator` is used — always passes, safe for development but not production.
+2. If signature validation fails, `ValueError` is raised immediately and no listeners are called.
+3. The raw body is decoded as JSON; on failure the raw bytes are stored under `body["_raw"]`.
+4. If `idempotency_key` is present and already seen, the event is returned but listeners are **not** called.
+5. Each listener for the source is called in registration order; if one raises, the error is logged and `on_error` is called before continuing to the next listener.
 
 !!! note "In-memory idempotency store"
     The default `InMemoryWebhookEventStore` holds seen keys in a Python
@@ -711,16 +601,11 @@ names (`X-Signature` and `X-Idempotency-Key`).
 
 ## Outbound callbacks
 
-When Lumen books a disbursement to a partner bank, that partner expects
-a `DisbursementSettled` POST to their webhook URL — signed, retried on
-failure, and auditable. PyFly's `pyfly.callbacks` module handles the
-outbound side.
+When Lumen books a disbursement to a partner bank, that partner expects a `DisbursementSettled` POST to their webhook URL — signed, retried on failure, and auditable. PyFly's `pyfly.callbacks` module handles the outbound side.
 
 ### Subscriptions and config
 
-Each partner is modelled as a `CallbackConfig` — a tenant-scoped record
-that holds the webhook secret, the list of event subscriptions, and
-retry policy:
+Each partner is modelled as a **`CallbackConfig`** — a tenant-scoped record that holds the webhook secret, event subscriptions, and retry policy:
 
 ::: listing lumen/callbacks/register_partner.py | Listing 17.11 — Registering a partner callback
 from pyfly.callbacks import (
@@ -757,13 +642,11 @@ async def register_clearance_bank(configs) -> None:
     ))
 :::
 
-`event_type="*"` is a catch-all: every event dispatched for this
-tenant matches. Named types match only the exact event type string.
+`event_type="*"` is a catch-all: every event dispatched for the tenant matches. Named types match only the exact event type string.
 
 ### Dispatching an event
 
-`CallbackDispatcher.dispatch()` fans the event out to every matching
-subscription:
+**`CallbackDispatcher.dispatch()`** fans the event out to every matching subscription:
 
 ::: listing lumen/callbacks/dispatcher_config.py | Listing 17.12 — Wiring and calling CallbackDispatcher
 from pyfly.callbacks import (
@@ -799,8 +682,7 @@ class CallbackConfig_:
         )
 :::
 
-Then in the domain service. Note the payload uses `amount` in minor
-units (cents) — `Money(50000, Currency.EUR)` is EUR 500.00:
+Then in the domain service — note the payload uses `amount` in minor units (cents), so `50_000` is EUR 500.00:
 
 ```python
 results = await dispatcher.dispatch(
@@ -810,14 +692,11 @@ results = await dispatcher.dispatch(
 )
 ```
 
-`dispatch()` returns a list of `CallbackExecution` records — one per
-matching subscription — each with `status`, `attempts`,
-`response_status`, and `delivered_at`.
+`dispatch()` returns one `CallbackExecution` record per matching subscription, each with `status`, `attempts`, `response_status`, and `delivered_at`.
 
 ### HMAC signing and retry logic
 
-When `CallbackConfig.secret` is set, `CallbackDispatcher` signs the
-canonical JSON payload before every POST:
+When `CallbackConfig.secret` is set, `CallbackDispatcher` signs the canonical JSON payload before every POST using HMAC-SHA256:
 
 ```python
 # canonical body — compact, keys sorted
@@ -826,20 +705,15 @@ sig = hmac.new(secret, canonical.encode(), hashlib.sha256).hexdigest()
 headers["X-Pyfly-Signature"] = f"sha256={sig}"
 ```
 
-The recipient can verify the signature using PyFly's own
-`HmacSignatureValidator` (the same class used for inbound webhooks).
+The recipient can verify the signature using PyFly's own `HmacSignatureValidator` — the same class used for inbound webhooks.
 
 **Retry policy:**
 
 - The dispatcher retries up to `max_attempts` times (default `5`).
-- Between retries it applies exponential backoff:
-  `delay = min(backoff_ms * 2^(attempt-1), 300_000) ms`.
-- Only *transient* HTTP status codes trigger a retry:
-  `408`, `429`, `500`, `502`, `503`, `504`, or any `>= 500`.
-- Permanent client errors (`4xx` except `408`/`429`) mark the
-  execution as `FAILED` immediately without retrying.
-- On success (`2xx`) the execution is marked `DELIVERED` and
-  `delivered_at` is stamped.
+- Between retries it applies exponential backoff: `delay = min(backoff_ms * 2^(attempt-1), 300_000) ms`.
+- Only *transient* HTTP status codes trigger a retry: `408`, `429`, `500`, `502`, `503`, `504`, or any `>= 500`.
+- Permanent client errors (`4xx` except `408`/`429`) mark the execution as `FAILED` immediately without retrying.
+- On success (`2xx`) the execution is marked `DELIVERED` and `delivered_at` is stamped.
 
 ::: listing lumen/callbacks/models_overview.py | Listing 17.13 — CallbackExecution status lifecycle
 from pyfly.callbacks import CallbackStatus
@@ -857,11 +731,7 @@ assert execution.last_error is not None
 
 ### SSRF protection — authorized domains
 
-The `authorized_domains` field on `CallbackConfig` acts as an allowlist.
-When set, `CallbackDispatcher` checks that the target URL's hostname
-matches one of the allowed domains before making any HTTP request. A
-URL that fails the check is immediately marked `FAILED` with
-`last_error="Domain not authorized"` — no outbound request is made.
+The `authorized_domains` field on `CallbackConfig` acts as an allowlist. When set, `CallbackDispatcher` checks that the target URL's hostname matches one of the allowed domains before making any outbound request. A URL that fails the check is immediately marked `FAILED` with `last_error="Domain not authorized"` — no HTTP request is made.
 
 ```python
 from pyfly.callbacks import AuthorizedDomain, CallbackConfig
@@ -877,8 +747,7 @@ config = CallbackConfig(
 )
 ```
 
-Subdomains of allowed domains are also accepted
-(e.g. `api.clearancebank.example.com`).
+Subdomains of allowed domains are also accepted (e.g. `api.clearancebank.example.com`).
 
 !!! spring "Spring parity"
     PyFly's `@scheduled` / `CronExpression` / `TaskScheduler` trio
@@ -894,34 +763,15 @@ Subdomains of allowed domains are also accepted
 
 ## What you built {.recap}
 
-You extended Lumen into a connected system that operates independently of
-incoming requests:
+You extended Lumen into a connected system that operates independently of incoming requests:
 
-- **Scheduled tasks** — `@scheduled` with `cron`, `fixed_rate`, and
-  `fixed_delay` triggers run work on a calendar or timer. `CronExpression`
-  drives fire-time calculations, including time-zone-aware scheduling.
-  `lock=True` serialises cluster-wide execution via the `DistributedLock`
-  port. `@async_method` offloads fire-and-forget work to the executor.
+- **Scheduled tasks** — `@scheduled` with `cron`, `fixed_rate`, and `fixed_delay` triggers runs work on a calendar or timer. `CronExpression` drives fire-time calculations, including time-zone-aware scheduling with DST handled automatically. `lock=True` serialises cluster-wide execution via the `DistributedLock` port. `@async_method` offloads fire-and-forget work to the executor.
 
-- **Notifications** — `EmailService`, `SmsService`, and `PushService`
-  port protocols decouple business logic from provider adapters (SMTP,
-  SendGrid, Resend, Twilio, Firebase). `DefaultEmailService` and its
-  siblings catch provider errors and return structured `NotificationResult`
-  values rather than propagating exceptions. The `DepositNotificationListener`
-  subscribes to the real `FundsDeposited` EDA event and converts
-  minor-unit amounts to display strings before sending.
+- **Notifications** — `EmailService`, `SmsService`, and `PushService` port protocols decouple business logic from provider adapters (SMTP, SendGrid, Resend, Twilio, Firebase). `DefaultEmailService` and its siblings catch provider errors and return structured `NotificationResult` values rather than propagating exceptions. `DepositNotificationListener` subscribes to the real `FundsDeposited` EDA event and converts minor-unit amounts to display strings before sending.
 
-- **Inbound webhooks** — `AbstractWebhookEventListener` defines typed
-  consumers. `WebhookProcessor` gates every event with `HmacSignatureValidator`
-  and `WebhookEventStore` before dispatching to listeners.
-  `on_error()` hooks allow DLQ integration without breaking the
-  dispatch loop.
+- **Inbound webhooks** — `AbstractWebhookEventListener` defines typed consumers. `WebhookProcessor` gates every event with `HmacSignatureValidator` and `WebhookEventStore` before dispatching to listeners. `on_error()` hooks allow DLQ integration without breaking the dispatch loop.
 
-- **Outbound callbacks** — `CallbackDispatcher` fans events out to
-  `CallbackSubscription` targets, signs payloads with HMAC-SHA256 under
-  the `X-Pyfly-Signature` header, and retries on transient failures
-  with exponential backoff. `CallbackExecution` records provide a full
-  delivery audit trail. `authorized_domains` prevents SSRF.
+- **Outbound callbacks** — `CallbackDispatcher` fans events out to `CallbackSubscription` targets, signs payloads with HMAC-SHA256 under the `X-Pyfly-Signature` header, and retries on transient failures with exponential backoff. `CallbackExecution` records provide a full delivery audit trail. `authorized_domains` prevents SSRF.
 
 ---
 

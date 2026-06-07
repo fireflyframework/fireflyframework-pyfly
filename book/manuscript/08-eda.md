@@ -4,25 +4,25 @@
 
 ::: figure art/openers/ch08.svg | &nbsp;
 
-Lumen's wallet saves correctly, validates rigorously, and now dispatches every write through a typed command. But look at what the command handlers do after they call `repo.add`: nothing. The domain events that the `Wallet` aggregate buffers — `WalletOpened`, `FundsDeposited`, `FundsWithdrawn` — are drained and discarded. The bus pipeline that Chapter 7 promised would "publish domain events" has nowhere to send them yet.
+Lumen's wallet saves correctly, validates rigorously, and dispatches every write through a typed command. But look at what the command handlers do after `repo.add`: nothing. The domain events that the `Wallet` aggregate buffers — `WalletOpened`, `FundsDeposited`, `FundsWithdrawn` — are drained and discarded. The bus pipeline that Chapter 7 promised would "publish domain events" has nowhere to send them yet.
 
-The gap is real. The team at Lumen wants a balance read model that always stays in sync without reloading the aggregate on every query. They want a welcome notification when a new wallet opens. They want an immutable audit trail of every financial movement for compliance. All three of those features depend on knowing *that something happened* — not who asked for it to happen, and not how it was done.
+The gap matters in practice. Lumen needs a balance read model that stays in sync without reloading the aggregate on every query, a welcome notification when a new wallet opens, and an immutable audit trail of every financial movement for compliance. All three features depend on knowing *that something happened* — not who requested it or how it was handled.
 
-Domain events are the answer. Rather than having the command handler call the notification service directly, or coupling the audit log to the repository, you publish the event — a concise, timestamped, immutable record of a fact — onto an event bus, and every interested party subscribes independently. The handler that saved the wallet does not need to know what the auditor does, or even that the auditor exists. You can add a new subscriber months later without touching a single line of the existing handlers.
+**Domain events** are the answer. Instead of having a command handler call the notification service directly — or coupling the audit log to the repository — you publish the event: a concise, timestamped, immutable record of a fact. Every interested party subscribes independently. The handler that saved the wallet does not need to know what the auditor does, or even that an auditor exists. You can add a new subscriber months later without touching a single line of existing handler code.
 
-This chapter builds the reaction side of Lumen's architecture. You will wire `EventPublisher` into the command handlers, introduce the `publish_domain_events` bridge that drains the aggregate's buffer and hands each event to the bus, and write a `WalletAuditListener` that subscribes to those events using `@event_listener` and maintains two in-memory projections: an immutable audit trail and a running deposit total. By the end of the chapter the write path and the read infrastructure will be fully decoupled — each can evolve without the other noticing.
+This chapter builds the reaction side of Lumen's architecture. You will wire `EventPublisher` into the command handlers, introduce the `publish_domain_events` bridge that drains the aggregate's buffer and forwards each event to the bus, and write a `WalletAuditListener` that subscribes using `@event_listener` and maintains two in-memory projections: an immutable audit trail and a running deposit total. By the end of the chapter the write path and the read infrastructure are fully decoupled — each side evolves without the other noticing.
 
 ---
 
 ## Two kinds of events
 
-Before you touch any code, it helps to be precise about what "event" means in PyFly, because the framework uses the word for two distinct things — and confusing them leads to the wrong bus, the wrong subscription API, and subtle runtime surprises.
+Before touching any code, it is worth being precise about what "event" means in PyFly. The framework uses the word for two distinct things, and confusing them leads to the wrong bus, the wrong subscription API, and subtle runtime surprises.
 
-**Application events** (`pyfly.context.events`) are framework lifecycle notifications: `ContextRefreshedEvent` fires when the dependency-injection container has finished wiring all beans; `ApplicationReadyEvent` fires when the HTTP server is accepting connections; `ContextClosedEvent` fires during shutdown. These events are dispatched by the `ApplicationEventBus`, which matches subscribers by Python class type rather than string name. They are framework plumbing — useful for starting background workers or seeding caches on startup, but deliberately separate from any business concept.
+**Application events** (`pyfly.context.events`) are framework lifecycle notifications. `ContextRefreshedEvent` fires when the DI container finishes wiring; `ApplicationReadyEvent` fires when the HTTP server begins accepting connections; `ContextClosedEvent` fires during shutdown. The `ApplicationEventBus` dispatches them to subscribers matched by Python class type — they are infrastructure plumbing for bootstrapping, deliberately separate from any business concept.
 
-**Domain events** (`pyfly.eda`) are business-level facts: *a wallet was opened*, *funds were deposited*, *a transfer was completed*. These events are wrapped in an `EventEnvelope` that pairs the payload with rich metadata and published through the `EventPublisher` port. Subscriptions are matched by the domain event class name — `"WalletOpened"`, `"FundsDeposited"`, `"FundsWithdrawn"` — so a listener subscribes to named business facts rather than to implementation details. They are the subject of this chapter.
+**Domain events** (`pyfly.eda`) are business-level facts: *a wallet was opened*, *funds were deposited*, *a transfer was completed*. The `EventPublisher` port wraps each payload in an `EventEnvelope` and routes it by the domain event class name — `"WalletOpened"`, `"FundsDeposited"`, `"FundsWithdrawn"` — so listeners subscribe to named business facts rather than implementation details. Domain events are the subject of this chapter.
 
-The distinction matters because the bus you choose changes what you can do with the events. The `ApplicationEventBus` dispatches to Python callables keyed by class; `InMemoryEventBus` routes by the event class name and can be swapped for a Kafka-backed adapter without touching subscriber code. Keep the two worlds separate: use lifecycle events for infrastructure bootstrapping, and domain events for everything that has business meaning.
+The distinction shapes what you can do with each kind. The `ApplicationEventBus` dispatches to callables keyed by class; `InMemoryEventBus` routes by class name and can be swapped for a Kafka-backed adapter without touching subscriber code. The rule is simple: use lifecycle events for infrastructure bootstrapping, domain events for everything with business meaning.
 
 !!! note "Application events are still useful"
     If you need to warm a cache as soon as the application is ready, `@app_event_listener` on `ApplicationReadyEvent` is the right tool. The two systems coexist; you can use both in the same service.
@@ -33,7 +33,7 @@ The distinction matters because the bus you choose changes what you can do with 
 
 ### The EventPublisher port
 
-The first question a new team member usually asks is: "which class do I import to fire an event?" The answer, deliberately, is not a class — it is a protocol. `EventPublisher` is a *port* in the hexagonal-architecture sense: any code that needs to publish an event depends on this interface, and the bus implementation is injected from outside. That design decision is what lets you run `InMemoryEventBus` locally today and swap in a Kafka adapter in production without touching a single handler.
+The first question a new team member usually asks is: "which class do I import to fire an event?" The answer is deliberately not a class — it is a protocol. `EventPublisher` is a **port** in the hexagonal-architecture sense: any code that needs to publish an event depends on this interface, and the bus implementation is injected from outside. That design decision is what lets you run `InMemoryEventBus` locally today and swap in a Kafka adapter in production without touching a single handler.
 
 The protocol exposes two methods:
 
@@ -52,9 +52,9 @@ class EventPublisher(Protocol):
     ) -> None: ...
 ```
 
-`publish` wraps your data in an `EventEnvelope` before delivery; you never construct the envelope manually when calling the publisher. `subscribe` is how you register handlers programmatically — though in practice you will use the `@event_listener` decorator rather than calling `subscribe` directly, because the decorator lets the `ApplicationContext` wire subscriptions automatically at startup.
+`publish` wraps your data in an `EventEnvelope` before delivery — you never construct the envelope yourself. `subscribe` registers handlers programmatically, though in practice you will use the `@event_listener` decorator instead, because it lets the `ApplicationContext` wire subscriptions automatically at startup.
 
-The bus bean exists only when `pyfly.eda.provider` is configured. For Lumen the `pyfly.yaml` sets it to `memory`:
+The bus bean exists only when `pyfly.eda.provider` is configured. For Lumen, `pyfly.yaml` sets it to `memory`:
 
 ::: listing pyfly.yaml | Listing 8.0 — Enabling the in-memory EDA bus in pyfly.yaml
 pyfly:
@@ -67,7 +67,7 @@ Without this line the `EventPublisher` bean is not registered and any handler th
 
 ### The EventEnvelope
 
-Every domain event reaches its listeners wrapped in an `EventEnvelope`. Think of the envelope as the metadata layer that transforms a bare Python dictionary into a traceable, auditable, first-class fact. It is a frozen dataclass — immutable once created — that pairs the payload with the context every listener needs to do its job correctly.
+Every domain event reaches its listeners wrapped in an **`EventEnvelope`**. Think of it as the metadata layer that transforms a bare Python dictionary into a traceable, auditable, first-class fact. It is a frozen dataclass — immutable once created — that pairs the payload with the context every listener needs.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -78,13 +78,13 @@ Every domain event reaches its listeners wrapped in an `EventEnvelope`. Think of
 | `timestamp` | `datetime` | `datetime.now(UTC)` | UTC creation time. |
 | `headers` | `dict[str, str]` | `{}` | Arbitrary metadata: correlation IDs, trace context, and so on. |
 
-Three of those fields deserve special attention. The `event_id` is a stable UUID generated by the bus at publish time — it is your idempotency key for exactly-once semantics, available in every listener with no extra effort. The `timestamp` records when the fact was observed, not when the listener processes it, so it remains accurate even if a listener runs with a delay. The `headers` dict carries cross-cutting concerns such as distributed trace IDs that have nothing to do with the business payload but matter enormously for observability. Because the envelope is frozen, handlers can safely pass it between coroutines without defensive copying.
+Three fields deserve particular attention. `event_id` is a stable UUID generated by the bus at publish time — your **idempotency key** for exactly-once semantics, available in every listener with no extra work. `timestamp` records when the fact was observed, not when the listener processes it, so it stays accurate even if a listener runs with a delay. `headers` carries cross-cutting concerns such as distributed trace IDs — metadata that has nothing to do with the business payload but matters enormously for observability. Because the envelope is frozen, handlers can safely pass it across async boundaries without defensive copying.
 
-The `event_type` field carries the **class name** of the domain event — `"WalletOpened"`, `"FundsDeposited"`, or `"FundsWithdrawn"` — not a dot-separated path. Listeners subscribe by those same class names, which means the subscription contract is defined by the domain model, not by string conventions invented outside it.
+`event_type` holds the **class name** of the domain event — `"WalletOpened"`, `"FundsDeposited"`, or `"FundsWithdrawn"` — not a dot-separated path. Listeners subscribe by those same class names, so the subscription contract is defined by the domain model, not by string conventions invented outside it.
 
 ### The domain events in the Wallet aggregate
 
-The `Wallet` aggregate raises typed, frozen-dataclass domain events. Each event's class name becomes its `event_type` on the bus:
+The `Wallet` aggregate raises typed, frozen-dataclass domain events. Each event's class name becomes its routing `event_type` on the bus:
 
 ::: listing lumen/models/entities/v1/wallet_entity.py | Listing 8.1 — Domain events raised by the Wallet aggregate
 from __future__ import annotations
@@ -138,11 +138,11 @@ class Wallet(AggregateRoot[str]):
     # … open() and withdraw() follow the same pattern
 :::
 
-`DomainEvent` is a base frozen dataclass. Its `event_type` property returns the class name — `type(self).__name__` — which is exactly what the `EventPublisher` uses as the routing key. `raise_event` buffers the event in the aggregate; the repository or command handler drains the buffer by calling `wallet.clear_events()` after a successful persist.
+`DomainEvent` is a base frozen dataclass. Its `event_type` property returns `type(self).__name__` — the class name — which is exactly what `EventPublisher` uses as the routing key. `raise_event` buffers the event in the aggregate; the command handler drains that buffer by calling `wallet.clear_events()` after a successful persist.
 
 ### The publish bridge
 
-Rather than repeating the drain loop in every handler, Lumen extracts it into a single `publish_domain_events` coroutine. The bridge serialises each drained event with `dataclasses.asdict` and calls `publisher.publish` with the class name as `event_type` and `"wallet.events"` as the logical channel:
+Rather than repeating the drain loop in every command handler, Lumen extracts it into a single `publish_domain_events` coroutine. The bridge serialises each drained event with `dataclasses.asdict`, then calls `publisher.publish` with the class name as `event_type` and `"wallet.events"` as the logical channel:
 
 ::: listing lumen/core/services/wallets/event_publishing.py | Listing 8.2 — publish_domain_events bridges drained events to the EDA bus
 from __future__ import annotations
@@ -181,13 +181,13 @@ async def publish_domain_events(
         )
 :::
 
-`WALLET_EVENTS_DESTINATION` is the constant `"wallet.events"` defined in `wallet_audit_listener.py` — the listener and the publisher share it so the channel name cannot drift. `event.event_type` is the class-name property on `DomainEvent`: `"WalletOpened"`, `"FundsDeposited"`, or `"FundsWithdrawn"`.
+`WALLET_EVENTS_DESTINATION` is the constant `"wallet.events"` defined in `wallet_audit_listener.py` and shared by publisher and listener so the channel name cannot drift. `event.event_type` is the class-name property on `DomainEvent`: `"WalletOpened"`, `"FundsDeposited"`, or `"FundsWithdrawn"`.
 
 ### Wiring the publisher into the command handlers
 
-In Chapter 7 the command handlers loaded aggregates, drove domain behaviour, and saved — leaving the buffered events on the floor. Now you close that gap: inject an `EventPublisher` alongside the repository and, after a successful save, drain the aggregate's event buffer and publish each event through the bridge.
+In Chapter 7 the command handlers loaded aggregates, drove domain behaviour, and saved — leaving buffered events on the floor. Now you close that gap. Inject an `EventPublisher` alongside the repository, and after a successful save drain the aggregate's buffer and publish each event through the bridge.
 
-Here is the `DepositFundsHandler` that publishes the wallet's pending events:
+Here is the updated `DepositFundsHandler`:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 8.3 — DepositFundsHandler drains and publishes the aggregate's buffered events
 from __future__ import annotations
@@ -226,7 +226,7 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-There are two design decisions worth noting here. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus`. The DI container injects whichever implementation is registered — the handler never knows or cares which one. Second, the publish call sits *after* `self._repository.add(wallet)`. That ordering is intentional and important: if the save fails, no event is published — listeners never see a fact that did not actually persist. If the publish fails after a successful save you have an at-least-once delivery challenge, which Chapter 10 will address with transactional outbox patterns. For now, the in-memory bus does not fail.
+Two design decisions are worth noting. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus`. The DI container injects whichever implementation is registered — the handler never knows or cares which one. Second, the publish call sits *after* `self._repository.add(wallet)`. That ordering is intentional: if the save fails, no event is published, so listeners never see a fact that never persisted. If the publish fails after a successful save you have an at-least-once delivery challenge — Chapter 10 addresses that with transactional outbox patterns. For now, the in-memory bus never fails.
 
 The `OpenWalletHandler` follows the same pattern:
 
@@ -267,11 +267,11 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         return wallet_id
 :::
 
-Notice that `return wallet_id` comes *after* the publish call. That is deliberate: the handler fulfils its contract (returning the new wallet ID to the caller) only once every fact produced by the operation has been dispatched.
+`return wallet_id` comes *after* the publish call — the handler fulfils its contract only once every fact produced by the operation has been dispatched.
 
 ### The @publish_result shortcut
 
-For simpler cases where a method's return value *is* the event payload — common in lightweight services that have not adopted the full aggregate pattern — `@publish_result` removes the manual publish call entirely:
+In simpler services where a method's return value *is* the event payload — common in code that has not adopted the full aggregate pattern — `@publish_result` removes the manual publish call entirely:
 
 ::: listing lumen/eda/publish_result_example.py | Listing 8.5 — @publish_result auto-publishes the method's return value
 from pyfly.eda import publish_result
@@ -290,7 +290,7 @@ async def transfer_funds(source_id: str, target_id: str, amount: int) -> dict:
     }
 :::
 
-When `transfer_funds` returns, the decorator intercepts the result and calls `bus.publish` with it as the payload — no boilerplate loop required. The event's `destination` and `event_type` are fixed at decoration time, which keeps the business function clean. `@publish_result` also accepts an optional `condition` predicate so the event is only published when the result satisfies a test — useful for conditional workflows where not every successful execution should broadcast.
+When `transfer_funds` returns, the decorator intercepts the result and calls `bus.publish` with it as the payload — no boilerplate loop needed. `destination` and `event_type` are fixed at decoration time, keeping the business function clean. `@publish_result` also accepts an optional `condition` predicate: the event is published only when the result satisfies the test, which is useful for conditional workflows where not every successful execution should broadcast.
 
 ::: figure art/figures/08-eda.svg | Figure 8.1 — One publisher, many independent listeners.
 
@@ -301,9 +301,9 @@ When `transfer_funds` returns, the decorator intercepts the result and calls `bu
 
 ## Reacting with @event_listener
 
-Publishing an event is only half the equation. An event that nobody reacts to is just a log entry. The value of the event-driven model comes from the *reactions* it enables — independent pieces of behaviour that activate in response to the same published fact, each unaware of the others.
+Publishing an event is only half the picture. An event that nobody reacts to is just a log entry. The value of the event-driven model lies in the *reactions* it enables — independent behaviours that activate in response to the same published fact, each unaware of the others.
 
-PyFly's `@event_listener` decorator is the simplest way to register a listener: decorate any async method with the class names it cares about, and the `ApplicationContext` wires the subscription during startup — no bus reference required at decoration time.
+PyFly's **`@event_listener`** decorator is the simplest way to register a reaction. Decorate any async method with the class names it cares about, and `ApplicationContext` wires the subscription during startup — no bus reference needed at decoration time.
 
 ```python
 from pyfly.eda import event_listener, EventEnvelope
@@ -313,11 +313,11 @@ async def on_funds_deposited(envelope: EventEnvelope) -> None:
     ...
 ```
 
-The `event_types` list accepts exact class names. Listeners inside a `@service` class receive an `EventEnvelope` as their sole argument. Because the subscription is matched at the bus level — not inside your function — a single listener method can subscribe to several event types in one declaration.
+`event_types` accepts exact class names. Listeners inside a `@service` class receive an `EventEnvelope` as their sole argument. Because matching happens at the bus level — not inside your function — a single listener method can subscribe to multiple event types in one declaration.
 
 ### WalletAuditListener
 
-The Lumen sample ships one production listener: `WalletAuditListener`. It subscribes to all three wallet domain events and maintains two in-memory read-side projections: an ordered audit trail and a running net-deposit total per wallet.
+Lumen's production listener is `WalletAuditListener`. It subscribes to all three wallet domain events and maintains two in-memory projections: an ordered **audit trail** and a **running net-deposit total** per wallet.
 
 ::: listing lumen/core/services/listeners/wallet_audit_listener.py | Listing 8.6 — WalletAuditListener: audit trail + running-total projection
 from __future__ import annotations
@@ -403,20 +403,20 @@ class WalletAuditListener:
         return self._running_totals.get(wallet_id, 0)
 :::
 
-Walk through what the listener does.
+Here is what the listener does, step by step.
 
-`@event_listener(event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"])` on `on_wallet_event` tells the `ApplicationContext` to subscribe this method to those three class names. It is a `@service` bean, so PyFly discovers it at startup and wires the subscription automatically — you never call `bus.subscribe` by hand.
+`@event_listener(event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"])` tells `ApplicationContext` to subscribe `on_wallet_event` to those three class names. Because the class is a `@service` bean, PyFly discovers it at startup and wires the subscriptions automatically — you never call `bus.subscribe` by hand.
 
-`on_wallet_event` receives an `EventEnvelope`. `envelope.event_type` is the class name of the domain event that was raised (`"WalletOpened"` and so on). `envelope.payload` is the dict produced by `dataclasses.asdict` in the publish bridge, so its keys match the dataclass field names exactly — `wallet_id`, `amount`, `currency`, `balance`.
+`on_wallet_event` receives an `EventEnvelope`. `envelope.event_type` is the class name of the raised domain event. `envelope.payload` is the dict produced by `dataclasses.asdict` in the publish bridge, so its keys match the dataclass field names exactly — `wallet_id`, `amount`, `currency`, `balance`.
 
-The method appends an `AuditEntry` for every event (the audit trail), then branches on `event_type` to update the running total. Look at what is absent: no import of the `Wallet` aggregate, no call to any repository, no knowledge of how the deposit was processed. The projection reacts purely to the published fact.
+The method appends an `AuditEntry` for every event, then branches on `event_type` to update the running total. Notice what is absent: no import of the `Wallet` aggregate, no repository call, no knowledge of how the deposit was processed. The projection reacts purely to the published fact.
 
 !!! tip "Envelope metadata in projections"
     `envelope.timestamp` gives you the authoritative event time — when the fact was recorded, not when the listener ran. Store it in your read model and you get a cheap `occurred_at` column for free, with no clock skew between writer and reader.
 
 ### Testing the listener end-to-end
 
-The test suite exercises the full publish-and-receive path with no mocks. The conftest wires a shared `InMemoryEventBus`, manually mirrors the `@event_listener` discovery step (subscribing `on_wallet_event` to each declared class name), and then registers real command handlers that hold the same bus reference:
+The test suite exercises the full publish-and-receive path with no mocks. The conftest wires a shared `InMemoryEventBus`, mirrors the `@event_listener` discovery step by subscribing `on_wallet_event` to each declared class name, and registers real command handlers that share the same bus reference:
 
 ```python
 # tests/conftest.py (abbreviated)
@@ -435,7 +435,7 @@ async def audit_listener(event_bus: InMemoryEventBus) -> WalletAuditListener:
     yield listener
 ```
 
-With that wiring in place the test sends real commands and asserts on the listener's read models:
+With that wiring in place, the test sends real commands and asserts on the listener's read models:
 
 ::: listing lumen/tests/test_event_listener.py | Listing 8.7 — End-to-end test: commands publish, listener projects
 from __future__ import annotations
@@ -477,19 +477,19 @@ async def test_listener_observes_wallet_events(
     assert audit_listener.running_total(wallet_id) == 1100
 :::
 
-The test proves the full chain: `OpenWalletHandler` → `publish_domain_events` → `InMemoryEventBus` → `WalletAuditListener.on_wallet_event` → `audit_listener.entries_for(...)`. No mocks anywhere. The production code path runs as-is.
+The test proves the full chain: `OpenWalletHandler` → `publish_domain_events` → `InMemoryEventBus` → `WalletAuditListener.on_wallet_event` → `audit_listener.entries_for(...)`. No mocks, no fakes — the production code path runs as written.
 
-What makes the overall design compelling is that adding the listener required zero changes to the command handlers, the `Wallet` aggregate, or the repositories. The `DepositFundsHandler` has no idea that a projection exists. They are entirely independent — each is a consequence of the same published fact, wired together only by the bus.
+What makes this design compelling is that adding the listener required zero changes to the command handlers, the `Wallet` aggregate, or any repository. `DepositFundsHandler` has no idea a projection exists. Both sides are entirely independent — each is a consequence of the same published fact, connected only by the bus.
 
 ---
 
 ## When listeners fail: error strategies
 
-A listener that misbehaves raises a difficult question: should the failure stop the entire delivery chain, or should the bus continue notifying the remaining listeners? The right answer depends on the listener's role, and PyFly gives you explicit control over that choice rather than imposing a single policy for all cases.
+A misbehaving listener raises a pointed question: should the failure stop the entire delivery chain, or should the bus continue notifying the remaining listeners? The right answer depends on the listener's role. PyFly gives you explicit control rather than imposing a single policy.
 
-In the default configuration the `InMemoryEventBus` invokes listeners sequentially and propagates any exception. For most development scenarios that is exactly what you want — a failing listener surfaces loudly. In production you often need finer control.
+By default, `InMemoryEventBus` invokes listeners sequentially and propagates any exception — the right behaviour for development, where a failing listener should surface loudly. In production you usually need finer control.
 
-`ErrorStrategy` is an enum that governs how the bus behaves when a listener raises an exception:
+**`ErrorStrategy`** is an enum that governs how the bus behaves when a listener raises:
 
 ```python
 from pyfly.eda import ErrorStrategy
@@ -513,7 +513,7 @@ from pyfly.eda import ErrorStrategy
 
 ## In-memory today, a broker tomorrow
 
-The `InMemoryEventBus` is the out-of-the-box implementation and the default that the `ApplicationContext` provides when you inject `EventPublisher`. It runs entirely in-process: `publish` is a direct async function call, there is no serialization, and if the process dies any un-delivered events are lost. That is perfectly acceptable for local development, integration tests, and monoliths that do not need cross-process delivery.
+**`InMemoryEventBus`** is the out-of-the-box implementation — the default `EventPublisher` the `ApplicationContext` provides. It runs entirely in-process: `publish` is a direct async call, there is no serialisation, and undelivered events vanish if the process dies. For local development, integration tests, and monoliths that need no cross-process delivery that is perfectly acceptable.
 
 Understanding how the in-memory bus works internally makes it easier to reason about behaviour at the edges — and to appreciate exactly what changes when you swap in a broker.
 
@@ -531,16 +531,16 @@ await bus.publish(
 )
 ```
 
-When you call `publish`, the bus executes four steps in sequence:
+A `publish` call executes four steps in sequence:
 
 1. Wraps the arguments in an `EventEnvelope` with a generated `event_id` and a UTC `timestamp`.
 2. Iterates every registered `(pattern, handler)` pair.
-3. For each pair where `fnmatch.fnmatch(event_type, pattern)` is `True`, invokes the handler with the envelope.
-4. Handlers are called sequentially in subscription order.
+3. For each pair where `fnmatch.fnmatch(event_type, pattern)` is `True`, calls the handler with the envelope.
+4. Handlers run sequentially in subscription order.
 
-Subscriptions use Python's `fnmatch` under the hood, so `"Funds*"` matches `"FundsDeposited"` and `"FundsWithdrawn"`, while `"*"` matches every event type. The sequential invocation in step 4 means listener order is deterministic — useful in tests, but it also means a slow listener delays all subsequent ones. A broker-backed adapter typically dispatches to topic subscribers in parallel; keep that difference in mind when reasoning about throughput.
+Subscriptions use Python's `fnmatch`, so `"Funds*"` matches both `"FundsDeposited"` and `"FundsWithdrawn"`, and `"*"` matches everything. The sequential invocation in step 4 makes listener order deterministic — useful in tests — but it also means a slow listener delays all subsequent ones. Broker-backed adapters typically dispatch in parallel; keep that difference in mind when reasoning about throughput.
 
-Because every listener in Lumen depends on the `EventPublisher` *protocol*, not on `InMemoryEventBus` directly, the implementation can be replaced without touching a single listener. Chapter 10 introduces Kafka and RabbitMQ adapters; swapping in either adapter is a configuration change — the `WalletAuditListener` you wrote in this chapter will keep working without modification.
+Because every listener in Lumen depends on the `EventPublisher` *protocol*, not on `InMemoryEventBus` directly, the implementation swaps without touching a single listener. Chapter 10 introduces Kafka and RabbitMQ adapters; switching either in is a configuration change — `WalletAuditListener` keeps working without modification.
 
 !!! note "InMemoryEventBus and testing"
     `InMemoryEventBus` is also the right tool for tests. Inject a fresh `InMemoryEventBus` as a fixture, subscribe a capturing handler, exercise your command handler, and assert on the `EventEnvelope` objects the handler received — including `event_type`, `payload`, `event_id`, and `timestamp`. No mocking, no fakes, just the real bus with controlled inputs.
@@ -551,13 +551,22 @@ Because every listener in Lumen depends on the `EventPublisher` *protocol*, not 
 
 Part III is open.
 
-This chapter closed the loop that Chapter 7 began. The `Wallet` aggregate raised domain events in Chapter 6; the command handlers published them here; and `WalletAuditListener` reacts to those facts without knowing anything about the command path that triggered them.
+This chapter closed the loop Chapter 7 began. `Wallet` raised domain events in Chapter 6; the command handlers published them here; `WalletAuditListener` reacts to those facts without knowing anything about the command path that triggered them.
 
-The architecture is now genuinely event-driven within a single process. `EventPublisher` is the port — a protocol that any bus implementation can fulfil. `InMemoryEventBus` is the default adapter — entirely in-process, zero configuration, safe for development and tests; it is activated by setting `pyfly.eda.provider: memory` in `pyfly.yaml`. `EventEnvelope` carries the payload alongside `event_id`, `timestamp`, `destination`, and `headers` so every listener has the metadata it needs without querying additional services. `@event_listener(event_types=[...])` is the subscription decorator — pass a list of domain event class names, and the context wires the subscription at startup. `publish_domain_events` is the bridge that drains `wallet.clear_events()`, serialises each event with `dataclasses.asdict`, and calls `publisher.publish` with the class name as `event_type`. `ErrorStrategy` gives you control over what happens when a listener fails, from `IGNORE` to `RETRY` to `DEAD_LETTER`.
+The architecture is genuinely event-driven within a single process. Here is a quick reference to each piece:
 
-Three design principles carry forward: **save before you publish**, so listeners never see uncommitted facts; **design listeners for idempotency**, so retries are safe; **depend on the port, not the adapter**, so the bus can be swapped without listener changes.
+| Piece | Role |
+|---|---|
+| `EventPublisher` | Port — a protocol any bus implementation fulfils |
+| `InMemoryEventBus` | Default adapter — in-process, zero config; activated by `pyfly.eda.provider: memory` |
+| `EventEnvelope` | Carries payload + `event_id`, `timestamp`, `destination`, `headers` |
+| `@event_listener(event_types=[...])` | Subscription decorator — class names; context wires it at startup |
+| `publish_domain_events` | Bridge — drains `wallet.clear_events()`, serialises with `dataclasses.asdict`, calls `publisher.publish` |
+| `ErrorStrategy` | Controls failure handling: `IGNORE`, `LOG_AND_CONTINUE`, `RETRY`, `DEAD_LETTER`, `FAIL_FAST` |
 
-Chapter 9 pushes the event idea further: instead of maintaining a separate read model alongside a mutable aggregate, you store the events themselves as the system of record — event sourcing the Wallet ledger so that every historical balance is computable from first principles.
+Three principles carry forward into the rest of Part III: **save before you publish** — listeners must never see uncommitted facts; **design listeners for idempotency** — retries must be safe; **depend on the port, not the adapter** — the bus can be swapped without touching listener code.
+
+Chapter 9 pushes the event idea further. Instead of maintaining a separate read model alongside a mutable aggregate, you store the events themselves as the system of record — event sourcing the ledger so that every historical balance is computable from first principles.
 
 ---
 

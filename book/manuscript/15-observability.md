@@ -4,41 +4,23 @@
 
 ::: figure art/openers/ch15.svg | &nbsp;
 
-In Chapter 13 you surrounded Lumen's hot paths with caches and wrapped its
-outbound calls in circuit breakers. In Chapter 14 you secured every endpoint
-with session tokens, role guards, and CSRF protection.
+In Chapter 13 you surrounded Lumen's hot paths with caches and wrapped outbound calls in circuit breakers. In Chapter 14 you secured every endpoint with JWT authentication, role guards, and server-side sessions.
 
-Lumen is now fast and safe — but it is still a black box. When a wallet
-deposit takes three seconds in production, you need to know *where* those
-seconds went. When a downstream payment service degrades, you need a dashboard
-that lights up red *before* your on-call engineer gets paged. When a
-compliance auditor asks why a particular transfer was rejected, you need
-structured log records with enough context to reconstruct the decision.
+Lumen is now fast and safe — but it is still a black box. When a wallet deposit takes three seconds in production you need to know *where* those seconds went. When a downstream payment service degrades you need a dashboard that lights up red *before* your on-call engineer gets paged. When a compliance auditor asks why a particular transfer was rejected you need structured log records with enough context to reconstruct the decision.
 
-This chapter adds eyes and ears to Lumen. The three pillars of observability —
-**logging**, **metrics**, and **tracing** — answer three complementary
-questions about a running system:
+This chapter adds eyes and ears to Lumen. The three pillars of observability answer three complementary questions about a running system:
 
 | Pillar | Question | PyFly module |
 |---|---|---|
-| Logging | "What happened, and in what context?" | `pyfly.logging` |
-| Metrics | "How much? How fast? How often?" | `pyfly.observability.metrics` |
-| Tracing | "What path did this request take?" | `pyfly.observability.tracing` |
+| **Logging** | "What happened, and in what context?" | `pyfly.logging` |
+| **Metrics** | "How much? How fast? How often?" | `pyfly.observability.metrics` |
+| **Tracing** | "What path did this request take?" | `pyfly.observability.tracing` |
 
-On top of those three pillars sits the **Actuator** — a set of production
-management endpoints that expose health, bean wiring, environment, and live
-logger levels — and the **Admin Dashboard**, an embedded browser UI that ties
-everything together into a single pane of glass.
+On top of those pillars sits the **Actuator** — production management endpoints that expose health, bean wiring, environment, and live logger levels — and the **Admin Dashboard**, an embedded browser UI that ties everything together in a single pane of glass.
 
-Finally, you will see how **Aspect-Oriented Programming** (AOP) lets you
-apply logging and metrics to every service method declaratively, without
-touching the methods themselves.
+Finally, you will see how **Aspect-Oriented Programming** (AOP) applies logging and metrics to every service method declaratively, without touching the methods themselves.
 
-By the end of the chapter Lumen will produce structured JSON logs with
-correlation IDs and PII automatically masked, emit Prometheus metrics scraped
-by any standard collector, propagate OpenTelemetry trace spans across service
-boundaries, answer Kubernetes liveness and readiness probes, and display all
-of the above in a zero-configuration dashboard reachable at `/admin`.
+By the end of the chapter Lumen will produce structured JSON logs with correlation IDs and automatic PII masking, emit Prometheus metrics scraped by any standard collector, propagate OpenTelemetry trace spans across service boundaries, answer Kubernetes liveness and readiness probes, and display all of the above in a zero-configuration dashboard reachable at `/admin`.
 
 ---
 
@@ -52,20 +34,13 @@ Traditional log lines look like this:
 [INFO] Order ord-123 created for customer acme corp (email: sales@acme.com)
 ```
 
-Searching for `ord-123` in Elasticsearch works — until the format changes. And
-`sales@acme.com` landing in a log file may violate your data protection policy
-without your team even noticing.
+Searching for `ord-123` in Elasticsearch works — until the format changes. And `sales@acme.com` landing in a log file may violate your data-protection policy without your team even noticing.
 
-Structured logging replaces the interpolated string with an event name and
-explicit key-value pairs. The pairs are rendered as JSON in production and as
-readable key=value in development. A log aggregation system ingests JSON
-natively; you query on `wallet_id` or `owner_id` as first-class fields.
+**Structured logging** replaces the interpolated string with an event name and explicit key-value pairs. The pairs render as JSON in production and as readable `key=value` in development. A log aggregation system ingests JSON natively; you query on `wallet_id` or `owner_id` as first-class fields, independent of message format.
 
 ### get_logger
 
-PyFly exposes a single function that returns a structured logger backed by
-`structlog` (when the `observability` extra is installed) or a zero-dependency
-stdlib shim otherwise. Both accept the same call signature:
+PyFly exposes a single factory function that returns a structured logger backed by `structlog` (when the `observability` extra is installed) or a zero-dependency stdlib shim otherwise. Both accept the same call signature:
 
 ::: listing lumen/logging_demo.py | Listing 15.1 — Structured logger usage
 from pyfly.logging import get_logger
@@ -121,11 +96,7 @@ the config key, which is useful for staging builds.
 
 ### Correlation IDs
 
-Correlation IDs link every log line emitted during a single HTTP request. PyFly
-binds a `transaction_id` to the current async context automatically through
-`TransactionIdMiddleware`. Your handlers can bind additional fields — such as
-the authenticated user — to flow through all subsequent log calls without
-passing them explicitly:
+**Correlation IDs** link every log line emitted during a single HTTP request. PyFly binds a `transaction_id` to the current async context automatically through `TransactionIdMiddleware`. Your handlers can bind additional fields — such as the authenticated user — so that those fields flow through all subsequent log calls without being passed explicitly:
 
 ::: listing lumen/wallet/handler.py | Listing 15.2 — Binding correlation context
 import structlog
@@ -150,20 +121,13 @@ async def handle_deposit(wallet_id: str, amount: int, owner_id: str) -> dict:
     return result
 :::
 
-Every `logger.*` call inside `handle_deposit` — including calls deep in
-downstream service methods — carries `wallet_id` and `owner_id` without any
-further plumbing.
+Every `logger.*` call inside `handle_deposit` — including calls deep in downstream service methods — automatically carries `wallet_id` and `owner_id` without any further plumbing.
 
 ### PII redaction
 
-PII redaction is on by default. Before any log record hits an output handler,
-PyFly scans the rendered message for emails, credit-card numbers, IBANs, SSNs,
-JWTs, bearer tokens, and URL credentials. Detected patterns are replaced with
-`<EMAIL>`, `<CREDIT_CARD>`, and so on.
+**PII redaction** is enabled by default. Before any log record reaches an output handler, PyFly scans the rendered message for emails, credit-card numbers, IBANs, SSNs, JWTs, bearer tokens, and URL credentials. Detected patterns are replaced with `<EMAIL>`, `<CREDIT_CARD>`, and so on.
 
-The regex engine ships with every install. The Presidio-backed NER engine —
-which catches free-text names and addresses too — is available via the `[pii]`
-extra and activates automatically when installed:
+The regex engine ships with every install. The Presidio-backed NER engine — which also catches free-text names and addresses — is available via the `[pii]` extra and activates automatically when installed:
 
 ```bash
 uv add "pyfly[observability,pii]"
@@ -188,9 +152,7 @@ pyfly:
         languages: [en, es]
 ```
 
-`deny-fields` lists structured log field *names* whose values are always
-replaced with `<REDACTED>`, regardless of content. Use this for fields like
-`password` where you know the value is sensitive without inspecting it.
+`deny-fields` lists structured log field *names* whose values are unconditionally replaced with `<REDACTED>`. Use it for fields like `password` where you know the value is sensitive without inspecting the content.
 
 !!! spring "Spring parity"
     Spring Boot does not ship built-in PII redaction; teams integrate Logback
@@ -201,7 +163,7 @@ replaced with `<REDACTED>`, regardless of content. Use this for fields like
 
 ### Rolling file appender
 
-For environments where logs go to a file rather than stdout:
+When logs go to a file rather than stdout, configure rotation in `pyfly.yaml`:
 
 ```yaml
 pyfly:
@@ -214,9 +176,7 @@ pyfly:
       max-history: 14
 ```
 
-PyFly creates `./logs/lumen.log` and rotates it when it reaches 50 MB, keeping
-14 rotated files before deleting the oldest. The same PII redaction pass covers
-file output.
+PyFly writes to `./logs/lumen.log` and rotates at 50 MB, keeping 14 rotated files before discarding the oldest. The same PII redaction pass applies to file output.
 
 ---
 
@@ -224,11 +184,7 @@ file output.
 
 ### The MetricsRegistry
 
-`MetricsRegistry` is a thin wrapper around `prometheus_client` that guarantees
-each metric name is registered only once — duplicate calls to `counter()` or
-`histogram()` with the same name return the existing metric rather than raising
-a `ValueError`. Inject it from the DI container (auto-configured when
-`prometheus_client` is installed) or create it manually:
+**`MetricsRegistry`** is a thin wrapper around `prometheus_client` that guarantees each metric name is registered only once. Duplicate calls to `counter()` or `histogram()` with the same name return the existing metric rather than raising a `ValueError`. Inject it from the DI container (auto-configured when `prometheus_client` is installed) or create it manually:
 
 ::: listing lumen/observability/metrics.py | Listing 15.3 — Creating metrics
 from pyfly.observability import MetricsRegistry
@@ -249,10 +205,7 @@ deposit_duration = registry.histogram(
 )
 :::
 
-`counter()` and `histogram()` return native `prometheus_client.Counter` and
-`prometheus_client.Histogram` objects, so every Prometheus ecosystem tool —
-Grafana dashboards, alerting rules, recording rules — works without
-modification.
+`counter()` and `histogram()` return native `prometheus_client.Counter` and `prometheus_client.Histogram` objects, so every Prometheus ecosystem tool — Grafana dashboards, alerting rules, recording rules — works without modification.
 
 | Method | Returns | Use for |
 |---|---|---|
@@ -262,9 +215,7 @@ modification.
 
 ### @timed — automatic duration histogram
 
-The `@timed` decorator records how long an async or sync function takes to run,
-using a labeled histogram. It works on any callable and adds `class`, `method`,
-and `exception` labels automatically:
+**`@timed`** records how long an async or sync function takes to run, using a labeled histogram. It works on any callable and automatically adds `class`, `method`, and `exception` labels:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.4 — @timed on DepositFundsHandler
 from pyfly.container import service
@@ -304,22 +255,13 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-The decorator records `start = time.perf_counter()`, calls the function, and
-in the `finally` block observes the elapsed time on the histogram. The
-`exception` label is `"none"` on success and the exception type name on
-failure, so you can split latency by outcome in Grafana. Two additional
-labels, `class` and `method`, are derived automatically from the function's
-qualified name — no extra configuration required.
+The decorator captures `start = time.perf_counter()`, calls the function, and observes the elapsed time in the `finally` block. The `exception` label is `"none"` on success and the exception type name on failure, so you can split latency by outcome in Grafana. The `class` and `method` labels are derived automatically from the function's qualified name.
 
-The histogram name follows Micrometer dot.case convention.
-`"lumen.deposit.duration"` becomes `lumen_deposit_duration_seconds` in
-Prometheus, with a `_seconds` suffix added if absent.
+Histogram names follow Micrometer dot.case convention: `"lumen.deposit.duration"` becomes `lumen_deposit_duration_seconds` in Prometheus, with a `_seconds` suffix added if absent.
 
 ### @counted — automatic invocation counter
 
-`@counted` increments a counter on every function call. Lumen's
-`GetBalanceHandler` is a natural fit — every balance read increments the
-counter, tagged by outcome:
+**`@counted`** increments a counter on every function call. Lumen's `GetBalanceHandler` is a natural fit — every balance read increments the counter, tagged by outcome:
 
 ::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 15.5 — @counted on GetBalanceHandler
 from pyfly.container import service
@@ -348,14 +290,9 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
         return wallet_to_balance_dto(wallet) if wallet is not None else None
 :::
 
-On success the counter is incremented with labels `class="GetBalanceHandler"`,
-`method="do_handle"`, `result="success"`, and `exception="none"`. On failure
-it uses `result="failure"` and `exception=<TypeName>`, then re-raises the
-original exception. The counter name gets a `_total` suffix in Prometheus
-automatically (per the naming convention).
+On success the counter is incremented with labels `class="GetBalanceHandler"`, `method="do_handle"`, `result="success"`, and `exception="none"`. On failure it uses `result="failure"` and `exception=<TypeName>`, then re-raises the original exception. The counter name receives a `_total` suffix in Prometheus automatically, per the naming convention.
 
-You can stack both decorators on the same method. Here is Lumen's
-`WithdrawFundsHandler` timed and counted simultaneously:
+You can stack both decorators on the same method. The following listing shows Lumen's `WithdrawFundsHandler` timed and counted simultaneously:
 
 ::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listing 15.6 — Stacking @timed and @counted
 from pyfly.container import service
@@ -396,22 +333,16 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
         return wallet.balance.amount
 :::
 
-`amount` is an `int` representing minor units (e.g. 1050 = €10.50) — the
-`Money` value object enforces this. Each invocation produces both a histogram
-observation and a counter increment.
+`amount` is an `int` in minor units (e.g. 1050 = €10.50) — the `Money` value object enforces the type. Each invocation produces both a histogram observation and a counter increment.
 
 ### Prometheus scrape endpoint
 
-Expose the metrics registry for Prometheus scraping through the actuator (see
-the next section). When the actuator is enabled and `prometheus_client` is
-installed, two endpoints are mounted automatically:
+The actuator (covered in the next section) exposes the metrics registry for scraping. When the actuator is enabled and `prometheus_client` is installed, two endpoints are mounted automatically with no additional code:
 
-- `GET /actuator/metrics` — Micrometer-compatible JSON listing metric names
+- `GET /actuator/metrics` — Micrometer-compatible JSON listing all metric names
 - `GET /actuator/prometheus` — standard text-exposition format for scraping
 
-No code is required. Point your Prometheus `scrape_configs` at
-`/actuator/prometheus` and all `MetricsRegistry` metrics appear alongside
-built-in process metrics (CPU, memory, threads, GC).
+Point your Prometheus `scrape_configs` at `/actuator/prometheus` and all `MetricsRegistry` metrics appear alongside built-in process metrics (CPU, memory, threads, GC).
 
 !!! spring "Spring parity"
     `MetricsRegistry` mirrors Spring's `MeterRegistry` from Micrometer.
@@ -425,11 +356,7 @@ built-in process metrics (CPU, memory, threads, GC).
 
 ### @span — OpenTelemetry span decorator
 
-The `@span` decorator wraps an async or sync function in an OpenTelemetry span.
-Every span is a timed, named unit of work. Spans nest automatically through
-OpenTelemetry's context propagation, so calling a `@span`-decorated function
-from inside another `@span`-decorated function produces a parent-child
-relationship in your trace viewer:
+**`@span`** wraps an async or sync function in an OpenTelemetry span. Each span is a timed, named unit of work. Spans nest automatically through OpenTelemetry's context propagation, so a `@span`-decorated function called from inside another `@span`-decorated function produces a parent-child relationship in your trace viewer:
 
 ::: listing lumen/wallet/service.py | Listing 15.7 — @span on CQRS handler methods
 from pyfly.observability import span
@@ -462,12 +389,7 @@ deposit-funds  [120 ms]
   +-- persist-deposit [90 ms]
 ```
 
-`@span` creates a tracer named `"pyfly"` internally using
-`trace.get_tracer("pyfly")`. When the decorated function raises an exception,
-the span automatically records the error: it sets status to `ERROR` with the
-exception message and calls `current_span.record_exception(exc)`, then re-raises
-the original exception so callers see it unmodified. Sync functions are
-supported identically — no `await` needed on the decorated side.
+`@span` creates a tracer named `"pyfly"` via `trace.get_tracer("pyfly")`. When the decorated function raises, the span automatically records the error: it sets status to `ERROR`, calls `current_span.record_exception(exc)`, then re-raises so callers see the original exception unmodified. Sync functions are supported identically — no `await` on the decorated side.
 
 ### OpenTelemetry auto-configuration
 
@@ -507,21 +429,13 @@ Exporter selection rules:
 
 ### Context propagation — inbound and outbound
 
-Spans stay correlated *within* a process automatically. To keep the same trace
-across *multiple* services, Lumen needs to extract the upstream trace context
-from inbound HTTP headers and inject the current context into every outbound
-HTTP call.
+Spans stay correlated *within* a process automatically. Keeping the same trace *across* multiple services requires extracting the upstream trace context from inbound HTTP headers and injecting the current context into every outbound call.
 
 PyFly handles both ends without any per-handler code.
 
 **Inbound — TracingFilter:**
 
-`TracingFilter` is wired into Lumen's filter chain immediately after
-`CorrelationFilter` by `create_app()`. For each request it reads the W3C
-`traceparent` header, opens a SERVER span as a child of the upstream context,
-and keeps that span active for the lifetime of the request. Every `@span`
-created during the request, and every log line, belongs to the caller's
-distributed trace:
+`TracingFilter` is wired into Lumen's filter chain immediately after `CorrelationFilter` by `create_app()`. For each request it reads the W3C `traceparent` header, opens a SERVER span as a child of the upstream context, and keeps that span active for the lifetime of the request. Every `@span` created during the request — and every log line — belongs to the caller's distributed trace:
 
 ```python
 # Simplified view of what TracingFilter does per-request:
@@ -539,8 +453,7 @@ When OpenTelemetry is not installed, the filter is a transparent pass-through.
 
 **Outbound — HttpxClientAdapter:**
 
-`HttpxClientAdapter` calls `inject_headers()` on every outbound request, so
-downstream services can continue the same trace:
+`HttpxClientAdapter` calls `inject_headers()` on every outbound request so downstream services can continue the same trace:
 
 ::: listing lumen/client/inventory_client.py | Listing 15.8 — Trace propagation
 from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
@@ -562,9 +475,7 @@ class InventoryClient:
 
 **Logs carry trace_id and span_id:**
 
-`StructlogAdapter` registers a processor that stamps the active span's IDs onto
-every log record. No code change is required — any `get_logger(…)` call inside
-an active span gains `trace_id` and `span_id` fields automatically:
+`StructlogAdapter` registers a processor that stamps the active span's IDs on every log record. No code change required — any `get_logger(…)` call inside an active span gains `trace_id` and `span_id` fields automatically:
 
 ```json
 {
@@ -579,10 +490,7 @@ an active span gains `trace_id` and `span_id` fields automatically:
 }
 ```
 
-With `trace_id` in every log record, you can jump from a Grafana Loki search
-for `wallet_id=wlt-001` directly to the correlated Tempo trace view, and from
-there to the Prometheus latency charts for that time window — all three pillars
-joined on a single identifier.
+With `trace_id` in every log record you can jump from a Grafana Loki search for `wallet_id=wlt-001` directly to the correlated Tempo trace view, and from there to the Prometheus latency charts for that time window — all three pillars joined on a single identifier.
 
 The low-level propagation helpers are available if you ever need them directly:
 
@@ -601,6 +509,8 @@ from pyfly.observability.propagation import (
 
 ::: figure art/figures/15-observability.svg | Figure 15.1 — The Actuator exposes health, beans, loggers, and Prometheus metrics over HTTP. Kubernetes liveness and readiness probes hit the dedicated sub-paths.
 
+The **Actuator** gives Kubernetes and your ops tooling a stable contract: a set of management endpoints that expose health, bean wiring, environment state, and metric scrapers. You configure it once and every tool from `kubectl` to Grafana can consume it without custom code.
+
 ### Enabling the Actuator
 
 Pass `actuator_enabled=True` to `create_app()`, or set the flag in `pyfly.yaml`:
@@ -616,9 +526,7 @@ pyfly:
     description: Lumen wallet service
 ```
 
-When the actuator is enabled, `create_app()` automatically scans the DI
-container for `HealthIndicator` beans, creates a `HealthAggregator`,
-instantiates all built-in endpoints, and mounts them at `/actuator/*`.
+When enabled, `create_app()` automatically scans the DI container for `HealthIndicator` beans, creates a `HealthAggregator`, instantiates all built-in endpoints, and mounts them at `/actuator/*`.
 
 ### Built-in endpoints
 
@@ -639,10 +547,7 @@ instantiates all built-in endpoints, and mounts them at `/actuator/*`.
 
 ### Custom HealthIndicator
 
-Any `@component` bean with an `async def health(self) -> HealthStatus` method
-is automatically discovered and registered as a health indicator. Lumen's
-`WalletRepository` is a good candidate — a quick `find()` call against a known
-wallet ID exercises the in-memory store or database connection:
+Any `@component` bean with an `async def health(self) -> HealthStatus` method is automatically discovered and registered as a health indicator. Lumen's `WalletRepository` is a good candidate — a lightweight `next_id()` call exercises the in-memory store or database connection without mutating any data:
 
 ::: listing lumen/health/indicators.py | Listing 15.9 — HealthIndicator beans
 from pyfly.actuator import HealthStatus
@@ -695,12 +600,7 @@ class DatabaseHealthIndicator:
             )
 :::
 
-`HealthStatus.status` takes one of four values: `"UP"`, `"DOWN"`,
-`"OUT_OF_SERVICE"`, or `"UNKNOWN"`. The aggregator applies a severity ordering
-(`DOWN > OUT_OF_SERVICE > UP > UNKNOWN`) and returns the worst-case status
-across all indicators. If any indicator's `health()` method raises an exception,
-that indicator is treated as `"DOWN"` with `details={"error": "check failed"}`;
-the exception is logged but does not crash the health endpoint itself.
+`HealthStatus.status` accepts four values: `"UP"`, `"DOWN"`, `"OUT_OF_SERVICE"`, or `"UNKNOWN"`. The aggregator applies a severity ordering (`DOWN > OUT_OF_SERVICE > UP > UNKNOWN`) and returns the worst-case status across all indicators. If any indicator's `health()` method raises, that indicator is treated as `"DOWN"` with `details={"error": "check failed"}`; the exception is logged but does not crash the health endpoint.
 
 A healthy response looks like:
 
@@ -722,9 +622,7 @@ A healthy response looks like:
 
 ### Changing log levels at runtime
 
-The loggers endpoint lets you inspect and change log levels without restarting
-Lumen. Useful when a production issue requires DEBUG-level output for exactly
-one package:
+The loggers endpoint lets you inspect and change log levels without restarting Lumen — invaluable when a production incident needs DEBUG output for exactly one package:
 
 ```bash
 # List all loggers with configured and effective levels
@@ -741,14 +639,11 @@ curl -X POST http://localhost:8080/actuator/loggers/lumen.wallet \
   -d '{"configuredLevel": null}'
 ```
 
-The endpoint uses Spring Boot's level vocabulary (`OFF`, `ERROR`, `WARN`,
-`INFO`, `DEBUG`, `TRACE`) and is drop-in compatible with Spring Boot tooling.
+The endpoint uses Spring Boot's level vocabulary (`OFF`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) and is drop-in compatible with Spring Boot Actuator tooling.
 
 ### Custom actuator endpoint
 
-Implement the `ActuatorEndpoint` protocol and annotate the class with
-`@component` to expose a custom endpoint. PyFly discovers it during context
-startup and mounts it at `/actuator/{endpoint_id}`:
+To expose a custom endpoint, implement the `ActuatorEndpoint` protocol and annotate the class with `@component`. PyFly discovers it during context startup and mounts it at `/actuator/{endpoint_id}` automatically:
 
 ::: listing lumen/actuator/git_info.py | Listing 15.10 — Custom actuator endpoint
 from pyfly.container import component
@@ -781,7 +676,7 @@ class GitInfoEndpoint:
 
 ### Kubernetes probe configuration
 
-Point your pod spec at the dedicated sub-paths:
+Point your pod spec at the dedicated liveness and readiness sub-paths so Kubernetes can make independent restart and traffic decisions:
 
 ```yaml
 livenessProbe:
@@ -798,9 +693,7 @@ readinessProbe:
   periodSeconds: 10
 ```
 
-`/liveness` and `/readiness` are separate sub-paths so you can group indicators
-into different probe groups — an in-flight migration that degrades readiness
-need not trigger a liveness restart.
+The separate sub-paths let you group indicators independently — an in-flight migration that degrades readiness need not trigger a liveness restart and container recreation.
 
 !!! spring "Spring parity"
     PyFly's Actuator mirrors Spring Boot Actuator. `HealthIndicator`,
@@ -818,9 +711,7 @@ need not trigger a liveness restart.
 
 ## The Admin Dashboard
 
-The Admin Dashboard is a zero-build, zero-dependency browser UI served
-directly from the `pyfly.admin` package. Enable it with one configuration
-line and navigate to `/admin` — no separate server, no extra `npm` build step.
+The **Admin Dashboard** is a zero-build, zero-dependency browser UI served directly from the `pyfly.admin` package. One configuration line enables it; navigate to `/admin` — no separate server, no `npm` build step.
 
 ### Enabling the dashboard
 
@@ -833,11 +724,7 @@ pyfly:
     refresh_interval: 5000
 ```
 
-The dashboard auto-discovers beans, health indicators, loggers, scheduled
-tasks, HTTP mappings, caches, CQRS handlers, sagas, and metrics from the
-running `ApplicationContext`. It presents them in **15 built-in views** with
-real-time Server-Sent Event (SSE) updates — no WebSocket, no polling loop in
-your code.
+The dashboard auto-discovers beans, health indicators, loggers, scheduled tasks, HTTP mappings, caches, CQRS handlers, sagas, and metrics from the running `ApplicationContext`. It presents them in **15 built-in views** with real-time Server-Sent Event (SSE) updates — no WebSocket, no polling loop in your code.
 
 ### Built-in views
 
@@ -883,8 +770,7 @@ your code.
 
 ### Real-time SSE streams
 
-The dashboard never polls the backend from JavaScript with `setInterval`. It
-opens an `EventSource` connection and the backend pushes events:
+The dashboard never polls the backend with `setInterval`. It opens a single `EventSource` connection and the server pushes events as they occur:
 
 | SSE endpoint | Event name | What it streams |
 |---|---|---|
@@ -894,22 +780,15 @@ opens an `EventSource` connection and the backend pushes events:
 | `/admin/api/sse/logfile` | `log` | New log records from the in-memory ring buffer |
 | `/admin/api/sse/beans` | `beans` | Bean registry snapshot at each refresh interval |
 
-The log viewer ring buffer holds 2,000 records; the HTTP traces ring buffer
-holds 500. Admin and actuator paths (`/admin/*`, `/actuator/*`) are excluded
-from trace capture automatically.
+The log viewer ring buffer holds 2,000 records; the HTTP traces ring buffer holds 500. Admin and actuator paths (`/admin/*`, `/actuator/*`) are excluded from trace capture automatically so they do not pollute the trace panel.
 
 ### Runtime logger management
 
-The Loggers view in the dashboard uses the same `/admin/api/loggers/{name}`
-endpoint as the actuator. Click a logger row to open an inline level selector
-and submit — the new level takes effect immediately, and the UI re-fetches to
-confirm the change. The Reset button sends `null` to return the logger to
-`NOTSET` (inherit from parent).
+The Loggers view uses the same `/admin/api/loggers/{name}` endpoint as the actuator. Click a logger row to open an inline level selector and submit — the new level takes effect immediately, and the UI re-fetches to confirm the change. The Reset button sends `null` to return the logger to `NOTSET` (inherit from parent).
 
 ### Custom view extension
 
-Implement `AdminViewExtension` and annotate with `@component` to add your own
-sidebar view. The dashboard discovers it automatically:
+To add your own sidebar view, implement `AdminViewExtension` and annotate with `@component`. The dashboard discovers it at startup:
 
 ::: listing lumen/admin/deployment_view.py | Listing 15.11 — Custom admin view
 from pyfly.container import component
@@ -939,14 +818,11 @@ class DeploymentView:
         }
 :::
 
-`view_id` determines the sidebar URL fragment (`#deployments`),
-`display_name` is shown in the sidebar, and `icon` maps to a Feather icon.
-`get_data()` is called by `GET /admin/api/views` and can query the DI
-container, a database, or any external source.
+`view_id` sets the sidebar URL fragment (`#deployments`), `display_name` appears in the sidebar menu, and `icon` maps to a Feather icon. `get_data()` is called by `GET /admin/api/views` and can query the DI container, a database, or any external source.
 
 ### Security
 
-For production, restrict dashboard access to operators:
+Restrict dashboard access to operators in production:
 
 ```yaml
 pyfly:
@@ -958,16 +834,11 @@ pyfly:
       - OPS
 ```
 
-When `require_auth: true`, every `/admin/api/*` route — data, mutation, SSE,
-and instance-registry endpoints — requires an authenticated principal whose
-roles overlap with `allowed_roles`. Unauthenticated requests receive `401`;
-authenticated users missing every listed role receive `403`. The static SPA
-shell remains public so the dashboard can still boot and display the API error.
+When `require_auth: true`, every `/admin/api/*` route — data, mutation, SSE, and instance-registry endpoints — requires an authenticated principal whose roles overlap with `allowed_roles`. Unauthenticated requests receive `401`; authenticated users who lack every listed role receive `403`. The static SPA shell remains public so the dashboard can boot and display the error message.
 
 ### Fleet monitoring — server mode
 
-For a fleet of Lumen instances you can run one dedicated admin-server instance
-and point the others at it:
+For a fleet of Lumen instances, run one dedicated admin-server and point every application instance at it:
 
 ```yaml
 # Admin server instance
@@ -994,10 +865,7 @@ pyfly:
       auto_register: true
 ```
 
-`StaticDiscovery` seeds the registry from the YAML list. `AdminClientRegistration`
-registers the instance on startup and deregisters on shutdown. HTTP calls use
-`httpx` when available, falling back to `urllib.request`; registration errors
-are swallowed so an unreachable admin server never aborts application startup.
+`StaticDiscovery` seeds the registry from the YAML list. `AdminClientRegistration` registers the instance on startup and deregisters on shutdown. HTTP calls use `httpx` when available and fall back to `urllib.request`; registration errors are silently swallowed so an unreachable admin server never aborts application startup.
 
 !!! spring "Spring parity"
     PyFly Admin maps directly to Spring Boot Admin. `server.enabled: true`
@@ -1015,11 +883,7 @@ are swallowed so an unreachable admin server never aborts application startup.
 
 ### What is AOP?
 
-Aspect-Oriented Programming separates cross-cutting concerns — logging, metrics,
-security, auditing — from business logic. Without AOP, every service method
-begins with `logger.info("entering %s", method_name)` and ends with
-`metrics.increment(…)`. With AOP, you write that logic once in an `@aspect`
-class and apply it to every matching method via a pointcut expression.
+**Aspect-Oriented Programming** separates cross-cutting concerns — logging, metrics, security, auditing — from business logic. Without AOP, every service method begins with `logger.info(...)` and ends with `metrics.increment(...)`. With AOP, you write that logic once in an `@aspect` class and apply it to every matching method via a pointcut expression — the methods themselves stay clean.
 
 PyFly's AOP module ships five advice types:
 
@@ -1033,9 +897,7 @@ PyFly's AOP module ships five advice types:
 
 ### @aspect — declaring an aspect
 
-`@aspect` marks a class as a PyFly aspect. The class is automatically
-registered in the DI container as a singleton and can receive injected
-dependencies via `__init__`. No explicit inheritance is required:
+**`@aspect`** marks a class as a PyFly aspect. The class is automatically registered in the DI container as a singleton and receives injected dependencies via `__init__`. No explicit base class is required:
 
 ::: listing lumen/aspects/logging_aspect.py | Listing 15.12 — A logging aspect
 from pyfly.aop import aspect, before, after_returning, after_throwing, JoinPoint
@@ -1076,15 +938,9 @@ class AuditLoggingAspect:
         )
 :::
 
-The pointcut `"service.*.*"` matches every public method on every
-`@service`-stereotype bean. `*` matches exactly one dot-separated segment;
-`**` matches one or more segments. Partial globs are supported within a
-segment (`"service.*.do_handle"` matches all `do_handle` methods on all
-service-stereotype handlers).
+The pointcut `"service.*.*"` matches every public method on every `@service`-stereotype bean. `*` matches exactly one dot-separated segment; `**` matches one or more. Partial globs are supported within a segment: `"service.*.do_handle"` matches all `do_handle` methods on all service-stereotype handlers.
 
-Qualified names follow the pattern `"{stereotype}.{ClassName}.{method_name}"`,
-so a `@service` class `DepositFundsHandler` with method `do_handle` has the
-qualified name `service.DepositFundsHandler.do_handle`.
+Qualified names follow the pattern `"{stereotype}.{ClassName}.{method_name}"`, so `service.DepositFundsHandler.do_handle` uniquely identifies the `do_handle` method on `DepositFundsHandler`.
 
 !!! tip "`@before` handlers must be synchronous"
     `@before`, `@after_returning`, `@after_throwing`, and `@after` handlers
@@ -1093,9 +949,7 @@ qualified name `service.DepositFundsHandler.do_handle`.
 
 ### @around — metrics without decorators
 
-`@around` is the most powerful advice type. It wraps the entire method
-execution; you call `await jp.proceed()` to invoke the original method (or
-the next around in the chain) and can add behaviour before and after:
+**`@around`** is the most powerful advice type. It wraps the entire method execution; call `await jp.proceed()` to invoke the original method (or the next advice in the chain) and add behaviour on either side:
 
 ::: listing lumen/aspects/metrics_aspect.py | Listing 15.13 — @around metrics aspect
 import time
@@ -1132,26 +986,17 @@ class MetricsAspect:
             histogram.labels(exception=exc_name).observe(elapsed)
 :::
 
-`@order(-50)` on `AuditLoggingAspect` and `@order(50)` on `MetricsAspect`
-ensure the logging aspect fires before the metrics aspect in the advice chain.
-`HIGHEST_PRECEDENCE = -(2^31)` runs first; `LOWEST_PRECEDENCE = 2^31 - 1`
-runs last.
+`@order(-50)` on `AuditLoggingAspect` and `@order(50)` on `MetricsAspect` ensure the logging aspect fires first in the advice chain. `HIGHEST_PRECEDENCE = -(2^31)` runs earliest; `LOWEST_PRECEDENCE = 2^31 - 1` runs last.
 
 ### Automatic weaving — AspectBeanPostProcessor
 
-In production you do not call `weave_bean()` manually. `AopAutoConfiguration`
-registers `AspectBeanPostProcessor` unconditionally. During context startup the
-post-processor:
+In production you never call `weave_bean()` manually. `AopAutoConfiguration` registers **`AspectBeanPostProcessor`** unconditionally. During context startup the post-processor:
 
-1. Collects every bean whose class has `__pyfly_aspect__ = True` into an
-   `AspectRegistry`.
-2. For every non-aspect bean, checks whether any registered pointcut matches
-   any public method.
-3. Wraps matching methods in-place with the full advice chain via
-   `weave_bean()`.
+1. Collects every bean whose class has `__pyfly_aspect__ = True` into an `AspectRegistry`.
+2. For every non-aspect bean, checks whether any registered pointcut matches any public method.
+3. Wraps matching methods in-place with the full advice chain via `weave_bean()`.
 
-The result is zero-configuration AOP: define aspects, define services, start
-the application, and the weaver wires them together.
+The result is zero-configuration AOP: define aspects, define services, start the application — the weaver wires them together.
 
 ### JoinPoint reference
 
@@ -1169,8 +1014,7 @@ Every advice handler receives a `JoinPoint` dataclass:
 
 ### Putting it together — full observability on DepositFundsHandler
 
-Here is Lumen's deposit handler with all three pillars applied cleanly — no
-observability code inside the business logic at all:
+Lumen's deposit handler with all three observability pillars applied — zero observability code inside the business logic:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.14 — DepositFundsHandler with full observability
 from pyfly.container import service
@@ -1224,20 +1068,11 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-`@span` opens an OpenTelemetry span. `@timed` records the `do_handle` duration.
-`@counted` increments the call counter. `AuditLoggingAspect` fires `@before`
-and `@after_returning` on every service method. `MetricsAspect` adds its
-own `@around` histogram. PII redaction strips sensitive values from log output.
-The actuator exposes `/actuator/health`, `/actuator/prometheus`, and
-`/actuator/loggers`. The Admin Dashboard shows live traces and log records.
+**How it works.** `@span` opens an OpenTelemetry span. `@timed` records the `do_handle` duration. `@counted` increments the call counter. `AuditLoggingAspect` fires `@before` and `@after_returning` on every service method. `MetricsAspect` adds its own `@around` histogram. PII redaction strips sensitive values from log output automatically. The actuator exposes `/actuator/health`, `/actuator/prometheus`, and `/actuator/loggers`. The Admin Dashboard shows live traces and log records.
 
-`command.amount` is an `int` — minor units enforced by the `DepositFunds`
-command's validator (`amount > 0`). The `Money` value object wraps it with the
-wallet's `Currency`, preventing any cross-currency arithmetic at the domain
-boundary.
+`command.amount` is an `int` in minor units — enforced by the `DepositFunds` command's validator (`amount > 0`). The `Money` value object wraps it with the wallet's `Currency`, preventing cross-currency arithmetic at the domain boundary.
 
-Seven lines of decorators and one `get_logger` call — and Lumen's deposit path
-is fully observable.
+Seven lines of decorators and one `get_logger` call — and Lumen's deposit path is fully observable.
 
 ---
 

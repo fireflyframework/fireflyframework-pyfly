@@ -4,32 +4,17 @@
 
 ::: figure art/openers/ch14.svg | &nbsp;
 
-In Chapter 13 you made Lumen fast and fault-tolerant with caching and resilience
-decorators. Lumen's API now handles high concurrency without breaking under
-pressure — but it is wide open. Any caller can create wallets, read balances, or
-trigger deposits. Before you can ship Part V's remaining production concerns, you
-need to close that door.
+In Chapter 13 you made Lumen fast and fault-tolerant with caching and resilience decorators. Lumen's API now handles high concurrency without breaking under pressure — but it is wide open. Any caller can create wallets, read balances, or trigger deposits. Before you can ship Part V's remaining production concerns, you need to close that door.
 
 This chapter locks Lumen down. You will:
 
-- **Authenticate** every request with a signed JWT, using `JWTService` to issue
-  and validate tokens and `SecurityMiddleware` to propagate the `SecurityContext`
-  across the request scope.
-- **Authorise** individual handlers and commands with the `@secure` decorator,
-  specifying roles, permissions, or full security expressions.
-- **Hash passwords** safely with `BcryptPasswordEncoder` so your user store is
-  never a liability.
-- **Manage server-side sessions** with `HttpSession`, a pluggable `SessionStore`,
-  and a Redis backend for horizontal scaling.
-- **Federate identity** to an external provider — Keycloak, AWS Cognito, or
-  Azure AD — through the `IdpAdapter` port without changing a line of
-  business logic.
+- **Authenticate** every request with a signed JWT, using `JWTService` to issue and validate tokens and `SecurityMiddleware` to propagate the `SecurityContext` across the request scope.
+- **Authorise** individual handlers and commands with the `@secure` decorator, specifying roles, permissions, or full security expressions.
+- **Hash passwords** safely with `BcryptPasswordEncoder` so your user store is never a liability.
+- **Manage server-side sessions** with `HttpSession`, a pluggable `SessionStore`, and a Redis backend for horizontal scaling.
+- **Federate identity** to an external provider — Keycloak, AWS Cognito, or Azure AD — through the `IdpAdapter` port without changing a line of business logic.
 
-The path mirrors what you would do in Spring Boot: start with a
-`SecurityFilterChain`, add method-level annotations, and swap the
-`UserDetailsService` for an IDP. PyFly calls them
-`SecurityMiddleware + HttpSecurity`, `@secure`, and `IdpAdapter`, but the
-concepts are identical.
+If you have worked with Spring Security before, the shape will feel familiar: configure a filter chain, annotate individual methods, and swap the user-detail source for an IDP. PyFly calls those pieces `SecurityMiddleware + HttpSecurity`, `@secure`, and `IdpAdapter`, but the concepts map one-to-one.
 
 ::: figure art/figures/14-security.svg | Figure 14.1 — Lumen's security layers. A JWT filter populates the SecurityContext; HttpSecurity enforces URL-level rules; @secure enforces handler-level rules; the IDP port delegates identity to an external provider.
 
@@ -39,15 +24,9 @@ concepts are identical.
 
 ### Why JSON Web Tokens?
 
-Lumen is a reactive, stateless API. HTTP sessions would require sticky routing
-or a shared session store for every request. JWT tokens let each service
-validate credentials independently — no shared state, no coordination between
-replicas, horizontal scaling by default.
+Lumen is a stateless API. HTTP sessions would require sticky routing or a shared session store on every replica. JWT tokens let each service validate credentials independently — no shared state, no coordination, horizontal scaling by default.
 
-A JWT is a signed JSON payload. Lumen's auth service issues a token on login;
-every subsequent request carries that token in the `Authorization` header; the
-`SecurityMiddleware` validates the signature and unpacks the token into a
-`SecurityContext` that the rest of the request can read.
+A **JWT** is a signed JSON payload. Lumen's auth service issues a token on login; every subsequent request carries that token in the `Authorization` header; `SecurityMiddleware` validates the signature and unpacks the token into a `SecurityContext` that the rest of the request can read.
 
 ### JWTService
 
@@ -120,19 +99,11 @@ def _permissions_for(role: str) -> list[str]:
 :::
 :::
 
-**How it works.** `login` fetches the user record and uses
-`BcryptPasswordEncoder.verify` to compare the supplied password with the stored
-hash. On success it calls `jwt.encode`, which auto-appends an `exp` claim
-`expiration_seconds` seconds from now (default `3600` — one hour). There is no
-need to import `datetime`: the service adds a Unix-timestamp `exp` using
-`int(time.time()) + expiration_seconds` internally. The caller receives a
-compact, self-contained token string.
+**How it works.** `login` fetches the user record and calls `BcryptPasswordEncoder.verify` to compare the supplied password against the stored hash. On success it calls `jwt.encode`, which auto-appends an `exp` claim `expiration_seconds` seconds from now (default `3600` — one hour). You never import `datetime`: the service computes the Unix-timestamp expiry as `int(time.time()) + expiration_seconds`. The caller receives a compact, self-contained token string.
 
 ### The SecurityContext
 
-`SecurityContext` is a frozen dataclass that holds authentication and
-authorisation data for one request. The middleware creates it from a token; your
-handlers receive it as an injected parameter.
+**`SecurityContext`** is a frozen dataclass that carries authentication and authorisation data for a single request. The middleware creates it from the validated token; your handlers receive it as an injected parameter.
 
 | Field | Type | Description |
 |---|---|---|
@@ -153,22 +124,15 @@ Key methods:
 
 ### The security filter
 
-The `SecurityMiddleware` (canonical location
-`pyfly.web.adapters.starlette.security_middleware`, re-exported from
-`pyfly.security`) sits at the Starlette middleware layer. On every request it:
+**`SecurityMiddleware`** (canonical location `pyfly.web.adapters.starlette.security_middleware`, re-exported from `pyfly.security`) sits at the Starlette middleware layer. For every request it:
 
-1. Checks whether the path is in `exclude_paths`; if so, sets an anonymous
-   context and continues.
-2. Reads the `Authorization` header; strips the `Bearer ` prefix.
+1. Checks whether the path is in `exclude_paths`; if so, sets an anonymous context and continues.
+2. Reads the `Authorization` header and strips the `Bearer ` prefix.
 3. Calls `jwt_service.to_security_context(token)`.
-4. On success sets `request.state.security_context` to the authenticated
-   context.
-5. On any `SecurityException` (expired, tampered, missing `exp`) logs at DEBUG
-   and sets an anonymous context.
+4. On success, stores the authenticated context in `request.state.security_context`.
+5. On any `SecurityException` (expired, tampered, or missing `exp`), logs at DEBUG and sets an anonymous context instead.
 
-The middleware **never rejects requests** — that is the job of `@secure` and
-`HttpSecurity`. A handler that needs the user can choose to require
-authentication; a health-check endpoint can ignore it entirely.
+The middleware **never rejects requests** — rejection is the job of `@secure` and `HttpSecurity`. An endpoint that requires the user can enforce it; a health-check endpoint can ignore the context entirely.
 
 ::: listing lumen/app.py | Listing 14.2 — Adding the security middleware
 from pyfly.security import JWTService, SecurityMiddleware
@@ -194,17 +158,11 @@ def build_app(context):
 :::
 :::
 
-**How it works.** `exclude_paths` contains paths where no token is expected —
-the login and register endpoints cannot require authentication because the token
-does not exist yet. Docs paths are excluded so your API explorer works without
-credentials. Every other path goes through token validation.
+**How it works.** `exclude_paths` lists the paths where no token is expected. Login and register cannot require authentication because the token does not exist yet; docs paths are excluded so the API explorer works without credentials. Every other path goes through token validation.
 
 ### URL-level rules with HttpSecurity
 
-`@secure` guards individual handler methods. `HttpSecurity` guards whole URL
-subtrees at the filter layer — before the route dispatcher even runs. The two
-are complementary: `HttpSecurity` provides fast, central policy; `@secure`
-provides fine-grained, per-handler policy.
+`@secure` guards individual handler methods. **`HttpSecurity`** guards whole URL subtrees at the filter layer — before the route dispatcher runs. The two are complementary: `HttpSecurity` provides fast, broad policy at the edge; `@secure` adds fine-grained, per-handler enforcement behind it.
 
 ::: listing lumen/config/security_config.py | Listing 14.3 — HttpSecurity DSL
 from pyfly.container import bean, configuration
@@ -230,14 +188,7 @@ class SecurityConfig:
 :::
 :::
 
-**How it works.** Rules are evaluated in declaration order — first match wins.
-The `HttpSecurityFilter` runs at `HIGHEST_PRECEDENCE + 350`, after
-authentication filters have populated `request.state.security_context`, so the
-role and permission checks have a fully hydrated context to inspect. The
-`has_role`, `has_any_role`, `has_permission`, `authenticated`, `permit_all`, and
-`deny_all` terminal methods cover every common policy; unsatisfied rules return
-RFC 7807 problem-detail JSON (`application/problem+json`) with the appropriate
-HTTP status.
+**How it works.** Rules are evaluated in declaration order — first match wins. The `HttpSecurityFilter` runs at `HIGHEST_PRECEDENCE + 350`, after authentication filters have populated `request.state.security_context`, so every role and permission check has a fully hydrated context to inspect. The terminal methods — `has_role`, `has_any_role`, `has_permission`, `authenticated`, `permit_all`, and `deny_all` — cover every common policy; unsatisfied rules return RFC 7807 problem-detail JSON (`application/problem+json`) with the appropriate HTTP status.
 
 !!! note "Two-layer defense"
     `HttpSecurity` provides fast URL-level policy before routes are even
@@ -252,8 +203,7 @@ HTTP status.
 
 ## Auto-configuration
 
-You do not need to register `JWTService` or `BcryptPasswordEncoder` by hand.
-Add two properties to `pyfly.yaml` and auto-configuration wires everything:
+You do not need to register `JWTService` or `BcryptPasswordEncoder` manually. Add the relevant properties to `pyfly.yaml` and auto-configuration wires everything:
 
 ::: listing lumen/resources/pyfly.yaml | Listing 14.4 — Security auto-configuration
 pyfly:
@@ -290,10 +240,7 @@ pyfly:
 
 ## Authorization with @secure
 
-`@secure` is a function decorator that enforces authentication and authorisation
-on individual handlers and commands. It reads the `security_context` keyword
-argument that the middleware has already injected and evaluates role, permission,
-and expression checks before the function body runs.
+**`@secure`** is a function decorator that enforces authentication and authorisation on individual handlers and commands. It reads the `security_context` keyword argument that the middleware has already injected, then evaluates role, permission, and expression checks before the function body runs.
 
 ### Signature
 
@@ -305,15 +252,11 @@ def secure(
 ) -> Callable: ...
 ```
 
-The decorated function must accept `security_context: SecurityContext` as a
-keyword argument — that is how `@secure` accesses the current user.
+The decorated function must accept `security_context: SecurityContext` as a keyword argument — that is how `@secure` reaches the current user.
 
 ### Role-based protection
 
-Lumen's wallet endpoints (`/api/v1/wallets`) are the natural place to apply
-`@secure`. The real `WalletController` injects the command and query buses; you
-add `security_context: SecurityContext` to each method that needs protection
-and stack `@secure` on top.
+Lumen's wallet endpoints (`/api/v1/wallets`) are the natural place to apply `@secure`. The real `WalletController` injects the command and query buses; add `security_context: SecurityContext` to each method that needs protection and stack `@secure` on top.
 
 ::: listing lumen/web/controllers/wallet_controller.py | Listing 14.5 — Role and permission guards on real Lumen endpoints
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
@@ -412,16 +355,9 @@ class WalletController:
 :::
 :::
 
-**How it works.** `@secure` is stacked **above** `@post_mapping` /
-`@get_mapping` so authorization runs before the route binding. The decorated
-method must accept `security_context: SecurityContext` as a keyword argument —
-the framework injects it from `request.state.security_context`, which
-`SecurityMiddleware` already populated.
+**How it works.** Stack `@secure` **above** `@post_mapping` / `@get_mapping` so authorisation runs before route binding. The framework injects `security_context` from `request.state.security_context`, which `SecurityMiddleware` already populated.
 
-When multiple roles are listed, the user needs **at least one** (OR semantics).
-When multiple permissions are listed the user needs **all** of them (AND
-semantics). When both `roles` and `permissions` are supplied, both checks must
-pass.
+When you list multiple roles, the user needs **at least one** (OR semantics). When you list multiple permissions, the user needs **all** of them (AND semantics). When you supply both `roles` and `permissions`, both checks must pass independently.
 
 !!! note "Amounts in minor units"
     `DepositRequest.amount` is an `int` in **minor units** (cents). €10.50 is
@@ -431,9 +367,7 @@ pass.
 
 ### Expression-based authorization
 
-For policies that cannot be expressed with a flat role list, use the
-`expression` parameter. PyFly evaluates the expression with safe AST parsing —
-no `eval()` or `exec()` is used anywhere in the chain.
+For policies that cannot be expressed with a flat role list, use the `expression` parameter. PyFly evaluates expressions via safe AST parsing — no `eval()` or `exec()` is involved anywhere in the chain.
 
 ::: listing lumen/web/controllers/wallet_controller.py | Listing 14.6 — Security expressions on wallet endpoints
 from pyfly.security import SecurityContext, secure
@@ -490,10 +424,7 @@ Supported expression vocabulary (full set):
 
 ### Applying @secure to CQRS handlers
 
-`@secure` is not limited to REST controllers. You can protect CQRS command
-handlers in exactly the same way — it fires before the handler body runs
-because the DI container injects `security_context` from
-`request.state.security_context` when it resolves the handler:
+`@secure` is not limited to REST controllers. You can protect CQRS command handlers in exactly the same way — it fires before the handler body because the DI container injects `security_context` from `request.state.security_context` when it resolves the handler:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 14.7 — @secure on a CQRS command handler
 from pyfly.cqrs import command_handler
@@ -517,9 +448,7 @@ class DepositFundsHandler:
 :::
 :::
 
-The check fires before any business logic because the DI container injects
-`security_context` from `request.state.security_context` when it resolves the
-handler.
+The check fires before any business logic runs.
 
 ---
 
@@ -527,16 +456,11 @@ handler.
 
 ### Why bcrypt?
 
-MD5 and SHA-256 are designed to be fast — ideal for data integrity, catastrophic
-for passwords. An attacker who steals your user table can try billions of SHA-256
-guesses per second on commodity hardware. Bcrypt is designed to be slow and
-adjustably expensive: the cost factor (rounds) lets you tune the algorithm so
-that an attack requires orders of magnitude more time.
+MD5 and SHA-256 are engineered to be fast — ideal for data integrity, catastrophic for passwords. An attacker who steals your user table can test billions of SHA-256 guesses per second on commodity hardware. **Bcrypt** is deliberately slow and adjustably expensive: the cost factor (rounds) lets you tune the algorithm so that an attack requires orders of magnitude more time, without meaningfully affecting normal login latency.
 
 ### BcryptPasswordEncoder
 
-`BcryptPasswordEncoder` implements the `PasswordEncoder` protocol (a
-`runtime_checkable` Protocol with `hash` and `verify` methods):
+**`BcryptPasswordEncoder`** implements the `PasswordEncoder` protocol (a `runtime_checkable` Protocol with `hash` and `verify` methods):
 
 ::: listing lumen/auth/password_service.py | Listing 14.8 — Hashing and verifying passwords
 from pyfly.security import BcryptPasswordEncoder
@@ -560,20 +484,11 @@ is_match = encoder.verify("wrong-password", hashed)
 |---|---|---|
 | `rounds` | `12` | Each increment doubles hashing time. 12 is the recommended production default. |
 
-**How it works.** `hash` calls `bcrypt.gensalt(rounds=self._rounds)` to
-generate a new random salt, then `bcrypt.hashpw` to produce the hash. Both the
-salt and the hash are encoded in the returned string — the `$2b$12$…` prefix
-encodes the algorithm version and the cost factor, so the stored hash is fully
-self-describing. `verify` calls `bcrypt.checkpw`, which re-derives the hash from
-the raw password and the embedded salt and compares with a timing-safe equality
-check to prevent timing-oracle attacks.
+**How it works.** `hash` calls `bcrypt.gensalt(rounds=self._rounds)` to generate a fresh random salt, then `bcrypt.hashpw` to produce the hash. Both salt and hash are embedded in the returned string — the `$2b$12$…` prefix encodes the algorithm version and cost factor, making every stored hash self-describing. `verify` calls `bcrypt.checkpw`, which re-derives the hash from the raw password and the embedded salt and compares the result with a timing-safe equality check, preventing timing-oracle attacks.
 
 ### The PasswordEncoder protocol
 
-`PasswordEncoder` is a `runtime_checkable` Protocol. Any class that implements
-`hash(raw: str) -> str` and `verify(raw: str, hashed: str) -> bool` satisfies
-it — including `BcryptPasswordEncoder`. This lets you swap in argon2 or scrypt
-for future-proofing without touching any service code:
+`PasswordEncoder` is a `runtime_checkable` Protocol. Any class that implements `hash(raw: str) -> str` and `verify(raw: str, hashed: str) -> bool` satisfies it — including `BcryptPasswordEncoder`. You can swap in argon2 or scrypt at any time without touching service code:
 
 ```python
 from pyfly.security import PasswordEncoder
@@ -597,20 +512,13 @@ isinstance(Argon2PasswordEncoder(), PasswordEncoder)  # True
 
 ### Why server-side sessions?
 
-JWT tokens are stateless — once issued, they cannot be revoked before they
-expire. If a user logs out, their token is still valid until `exp`. For many
-APIs that trade-off is acceptable. For browser-facing applications — Lumen's
-admin dashboard, for example — you want the server to be the authoritative
-source: log out means log out.
+JWT tokens are stateless — once issued, they cannot be revoked before they expire. If a user logs out, their token is still valid until `exp`. For many APIs that trade-off is acceptable. For browser-facing applications — Lumen's admin dashboard, for example — you need the server to be the authoritative source: log out must mean log out.
 
-Server-side sessions give you that control. A `SessionStore` holds the session
-data keyed by a random session id. The browser receives only the session id in
-a cookie. The server can revoke a session instantly by deleting its store entry.
+**Server-side sessions** give you that control. A `SessionStore` holds session data keyed by a random session ID. The browser receives only the session ID in a cookie. The server revokes a session instantly by deleting its store entry.
 
 ### HttpSession
 
-`HttpSession` wraps a session's data dictionary with typed accessors and tracks
-mutation state so the filter knows when to persist:
+**`HttpSession`** wraps a session's data dictionary with typed accessors and tracks mutation state so the filter knows when to persist:
 
 | Property / Method | Description |
 |---|---|
@@ -656,12 +564,7 @@ async def logout(session: HttpSession) -> dict:
 :::
 :::
 
-**How it works.** `rotate_id()` generates a new UUID session id and stores the
-old id in `session.previous_id`. When `SessionFilter` persists the session at
-the end of the request it deletes the old store entry (the previous id can no
-longer resolve to this session) and saves the new one. An attacker who obtained
-the pre-auth session id cannot ride it into the authenticated session — the
-classic session-fixation mitigation.
+**How it works.** `rotate_id()` generates a fresh UUID session ID and records the old one in `session.previous_id`. When `SessionFilter` persists the session at the end of the request, it deletes the old store entry (the previous ID can no longer resolve to this session) and saves the new one. An attacker who obtained the pre-auth session ID cannot carry it into the authenticated session — the classic **session-fixation** mitigation.
 
 ### The SessionStore protocol
 
@@ -693,17 +596,13 @@ Two adapters ship out of the box:
 
 ### SessionFilter
 
-`SessionFilter` is an `OncePerRequestFilter` ordered at
-`HIGHEST_PRECEDENCE + 150`. It runs before every authentication filter and after
-every response:
+**`SessionFilter`** is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 150`. It bookends every request:
 
 1. Reads the session cookie (`PYFLY_SESSION` by default).
 2. Loads the session from the store, or creates a new one.
 3. Attaches it to `request.state.session`.
 4. Calls `call_next(request)` — the rest of the filter chain and the handler run.
-5. On response, persists a modified or new session, deletes an invalidated one,
-   and re-issues the cookie with a rolling `max_age` (the TTL slides forward on
-   every request).
+5. On the way back, persists a modified or new session, deletes an invalidated one, and re-issues the cookie with a rolling `max_age` (the TTL slides forward on every request).
 
 Cookie attributes set by `SessionFilter`:
 
@@ -749,13 +648,7 @@ class SessionConfig:
 :::
 :::
 
-**How it works.** `RedisSessionStore.save` JSON-serializes the session
-dictionary (including any dataclass attributes such as `SecurityContext`, which
-are round-tripped via an allowlisted type-tag mechanism) and calls
-`client.set(key, raw, ex=ttl)` — the TTL is managed entirely by Redis, so
-expired sessions disappear server-side with zero cleanup overhead. Keys use the
-prefix `pyfly:session:` for namespace isolation. Reading back deserializes only
-types on the allowlist, eliminating arbitrary-object instantiation risks.
+**How it works.** `RedisSessionStore.save` JSON-serialises the session dictionary (including dataclass attributes such as `SecurityContext`, round-tripped via an allowlisted type-tag mechanism) and calls `client.set(key, raw, ex=ttl)`. The TTL is managed entirely by Redis, so expired sessions disappear server-side with zero cleanup overhead. Keys use the prefix `pyfly:session:` for namespace isolation. On read, only types on the allowlist are deserialised, eliminating arbitrary-object instantiation risks.
 
 !!! tip "Auto-configuration"
     Add `pyfly.session.enabled: true` and `pyfly.session.store: redis` to
@@ -779,15 +672,9 @@ types on the allowlist, eliminating arbitrary-object instantiation risks.
 
 ### The problem with managing identity in-house
 
-Lumen currently stores credentials in its own database. That means Lumen must
-implement password resets, MFA, email verification, account lockout, GDPR
-deletion, social login, and SSO — all undifferentiated work that exists in every
-service. The industry answer is to delegate identity to a dedicated provider:
-Keycloak for on-premises, AWS Cognito for AWS-native, Azure AD for Microsoft
-environments.
+Lumen currently stores credentials in its own database, which means Lumen must implement password resets, MFA, email verification, account lockout, GDPR deletion, social login, and SSO — undifferentiated work that every service eventually needs. The industry answer is to delegate identity to a dedicated provider: Keycloak for on-premises, AWS Cognito for AWS-native stacks, Azure AD for Microsoft environments.
 
-PyFly's `IdpAdapter` port makes that delegation pluggable behind a single
-interface. Swap the adapter and the business layer never knows.
+PyFly's **`IdpAdapter`** port makes that delegation pluggable behind a single interface. Swap the adapter and the business layer never knows.
 
 ### IdpAdapter — the port
 
@@ -871,12 +758,7 @@ class IdpConfig:
 :::
 :::
 
-**How it works.** `KeycloakIdpAdapter` talks to Keycloak's Admin REST API
-(`/admin/realms/{realm}/users`) and token endpoint
-(`/realms/{realm}/protocol/openid-connect/token`) via `httpx`. It caches a
-`client_credentials` admin token internally, re-fetching it within a ten-second
-safety margin of expiry — Keycloak's default client-credentials TTL is 60 s,
-so without this cache every admin call would make two network round trips.
+**How it works.** `KeycloakIdpAdapter` communicates with Keycloak's Admin REST API (`/admin/realms/{realm}/users`) and token endpoint (`/realms/{realm}/protocol/openid-connect/token`) via `httpx`. It caches the `client_credentials` admin token internally and re-fetches it within a ten-second safety margin of expiry — Keycloak's default client-credentials TTL is 60 s, so without this cache every admin call would require two network round trips.
 
 ### Using the IDP in a service
 
@@ -940,15 +822,11 @@ class IdpAuthService:
 :::
 :::
 
-**How it works.** `IdpAuthService` depends only on `IdpAdapter` — the DI
-container resolves the concrete `KeycloakIdpAdapter` at startup. The service
-layer never imports Keycloak, Cognito, or Azure-specific code. Switch provider
-by changing one line in `IdpConfig`; the service stays identical.
+**How it works.** `IdpAuthService` depends only on `IdpAdapter` — the DI container resolves the concrete `KeycloakIdpAdapter` at startup. The service layer never imports Keycloak, Cognito, or Azure-specific code. Switch provider by changing one line in `IdpConfig`; the service is untouched.
 
 ### Auto-configuration and the built-in HTTP routes
 
-Enable the IDP subsystem in `pyfly.yaml` and PyFly wires the adapter and a
-REST controller automatically:
+Enable the IDP subsystem in `pyfly.yaml` and PyFly wires the adapter and a ready-made REST controller automatically:
 
 ::: listing lumen/resources/pyfly.yaml | Listing 14.13 — IDP auto-configuration
 pyfly:
@@ -971,8 +849,7 @@ pyfly:
 | `cognito` / `aws-cognito` | `AwsCognitoIdpAdapter` |
 | `azure-ad` / `azuread` / `entra` | `AzureAdIdpAdapter` |
 
-When Starlette is present, `IdpAutoConfiguration` also registers an
-`IdpController` bean that exposes the full IDP over HTTP under `/idp`:
+When Starlette is present, `IdpAutoConfiguration` also registers an `IdpController` bean that exposes the full IDP API under `/idp`:
 
 | Route | Method | Description |
 |---|---|---|
@@ -1004,8 +881,7 @@ When Starlette is present, `IdpAutoConfiguration` also registers an
 
 ## Putting it together — Lumen's auth layer
 
-Here is the complete wiring for Lumen using the IDP adapter, the JWT filter,
-URL-level rules, and a Redis session store for the admin dashboard:
+The listing below shows the complete wiring: IDP adapter, JWT filter, URL-level rules, and a Redis session store for the admin dashboard.
 
 ::: listing lumen/config/security_full.py | Listing 14.14 — Full security configuration
 from pyfly.container import bean, configuration
@@ -1045,11 +921,7 @@ class LumenSecurityConfig:
 :::
 :::
 
-With `pyfly.security.enabled=true`, `pyfly.session.enabled=true` and
-`pyfly.session.store=redis` in `pyfly.yaml`, auto-configuration handles
-`JWTService`, `BcryptPasswordEncoder`, `SessionFilter`, and `RedisSessionStore`.
-The `@configuration` class above only supplies what auto-configuration cannot
-know: the Keycloak coordinates and the URL policy.
+With `pyfly.security.enabled=true`, `pyfly.session.enabled=true`, and `pyfly.session.store=redis` in `pyfly.yaml`, auto-configuration handles `JWTService`, `BcryptPasswordEncoder`, `SessionFilter`, and `RedisSessionStore`. The `@configuration` class above provides only what auto-configuration cannot infer: the Keycloak coordinates and the URL-level policy.
 
 ---
 

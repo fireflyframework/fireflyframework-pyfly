@@ -4,34 +4,74 @@
 
 ::: figure art/openers/ch12.svg | &nbsp;
 
-Chapter 10 sent Lumen's wallet events across process boundaries through Kafka. Chapter 11 split the application into co-operating services and showed how to call them over HTTP. Both steps unlocked scale and ownership, but they also uncovered a new kind of danger: you can now have multiple aggregates — or multiple services — that all need to change state as part of the same business operation, with no distributed ACID transaction to protect you.
+Chapter 10 sent Lumen's wallet events across process boundaries through
+Kafka. Chapter 11 split the application into co-operating services and
+showed how to call them over HTTP. Both steps unlocked scale and team
+autonomy, but they also exposed a new class of danger: multiple aggregates
+— or multiple services — may all need to change state as part of one
+business operation, with no distributed ACID transaction to protect you.
 
-Imagine a Lumen wallet transfer. You debit the source wallet. Then you credit the destination wallet. If the source is debited and the credit fails — wrong currency, missing wallet — the source owner has lost money with nothing deposited on the other side. You cannot wrap two independent repository calls in a single `BEGIN … COMMIT` when each aggregate owns its own consistency boundary, and two-phase commit across independent aggregates is operationally fragile.
+Picture a Lumen wallet transfer. You debit the source wallet, then credit
+the destination. If the source is debited and the credit fails — wrong
+currency, missing wallet — the source owner loses money with nothing
+deposited on the other side. You cannot wrap two independent repository
+calls in a single `BEGIN … COMMIT` when each aggregate owns its own
+consistency boundary, and two-phase commit across independent aggregates
+is operationally fragile.
 
-The answer is **eventual consistency with explicit compensation**. You accept that each step commits to its own store independently, and you design a recovery path — a *compensating transaction* — for every step that could succeed before a later one fails. When the whole sequence succeeds you have your business result. When any step fails, the engine walks back the steps that already completed, calling each one's compensation to restore consistent state. This chapter shows you how to build that with PyFly's `pyfly.transactional` module.
+The answer is **eventual consistency with explicit compensation**. Each
+step commits to its own store independently, and you design a recovery
+path — a **compensating transaction** — for every step that could succeed
+before a later one fails. When the whole sequence succeeds you have your
+business result; when any step fails, the engine walks back the completed
+steps in reverse, calling each compensation to restore consistent state.
+This chapter shows you how to build that with PyFly's
+`pyfly.transactional` module.
 
-You will model the money transfer as an **orchestrated saga** — a central class that declares each step and its compensation, using a DAG (directed acyclic graph) of dependencies so the engine can run independent steps in parallel. You will then look at compensation in depth, the **Workflow** pattern for long-running or human-in-the-loop flows, and **TCC (Try-Confirm-Cancel)** as a reservation-based alternative. Finally you will see how pluggable persistence lets the engine survive a process crash and resume stale executions automatically.
+You will model the money transfer as an **orchestrated saga** — a central
+class that declares each step and its compensation, organised in a DAG
+(directed acyclic graph) so the engine can run independent steps in
+parallel. You will then explore compensation in depth, the **Workflow**
+pattern for long-running or human-in-the-loop flows, and **TCC
+(Try-Confirm-Cancel)** as a reservation-based alternative. A closing
+section shows how pluggable persistence lets the engine survive a process
+crash and automatically resume stale executions.
 
 ---
 
 ## The problem with distributed writes
 
-Before writing any code it is worth making the failure modes concrete.
+Before writing any code, make the failure modes concrete.
 
 ### Two aggregates, no safety net
 
-Lumen's wallet transfer operates on two `Wallet` aggregates that are stored in the same PostgreSQL schema but are independent domain objects — each is loaded, mutated, and saved in its own round trip. Consider the steps:
+Lumen's wallet transfer operates on two `Wallet` aggregates stored in the
+same PostgreSQL schema but treated as independent domain objects — each is
+loaded, mutated, and saved in its own round trip. The two steps are:
 
 1. **Debit the source** — withdraw `amount` from the source `Wallet` (enforces `balance >= 0`).
 2. **Credit the destination** — deposit `amount` into the destination `Wallet` (enforces currency match).
 
-In a monolith these two writes could share a single database transaction. In the real Lumen domain service each step is an independent repository call. A currency mismatch on the destination wallet, or a missing wallet id, can cause step 2 to fail after step 1 has already committed — leaving the source wallet debited and the destination unchanged. The user loses money.
+In a monolith, both writes could share one database transaction. In the
+Lumen domain service each step is an independent repository call. A
+currency mismatch on the destination, or a missing wallet ID, causes step 2
+to fail after step 1 has already committed — leaving the source wallet
+debited and the destination unchanged. The user loses money.
 
-Retrying the whole operation is not safe: you might debit the source twice. Skipping the failed step silently leaves balances inconsistent. You need a principled pattern that commits each step independently and rolls back all completed steps consistently on failure.
+Retrying the whole operation is unsafe: you might debit the source twice.
+Silently skipping the failed step leaves balances inconsistent. You need a
+principled pattern that commits each step independently and rolls back every
+completed step consistently on failure.
 
 ### Eventual consistency and compensation
 
-A **saga** decomposes the operation into a sequence of local transactions, each of which commits to its own store independently. If a step fails, the engine runs **compensating transactions** in reverse order for each step that has already completed. Compensations are not rollbacks in the database sense; they are *semantic undos* — new forward operations that reverse the effect. "Re-credit the source wallet" is not a rollback; it is a new deposit operation that restores the original balance.
+A **saga** decomposes the operation into a sequence of local transactions,
+each committing to its own store independently. When a step fails, the
+engine runs **compensating transactions** in reverse order for every
+completed step. Compensations are not database rollbacks; they are
+*semantic undos* — new forward operations that reverse the effect.
+"Re-credit the source wallet" is a new deposit operation that restores the
+original balance, not a rollback.
 
 !!! note "Sagas are eventually consistent"
     A saga does not give you serializability or isolation. Between the moment the source wallet is debited and the moment the destination wallet is credited, another request could read the source wallet and see a balance that is lower than it will ultimately be. This is the trade-off you accept when you choose to operate across independent aggregates without a distributed lock. Sagas give you *consistency in the end* — either all forward steps committed or all are compensated — not *consistency at every point*.
@@ -40,11 +80,17 @@ A **saga** decomposes the operation into a sequence of local transactions, each 
 
 ## An orchestrated saga
 
-PyFly's `pyfly.transactional` module provides the `@saga` and `@saga_step` decorators. You declare one class per saga, annotate each method as a step with its compensation, and declare the dependency ordering. The engine discovers the class via the DI container, builds a validated DAG at startup, and drives execution asynchronously.
+PyFly's `pyfly.transactional` module provides the `@saga` and
+`@saga_step` decorators. You declare one class per saga, annotate each
+method as a step with its compensation, and declare the dependency
+ordering. The engine discovers the class through the DI container, builds
+a validated DAG at startup, and drives execution asynchronously.
 
 ### Enabling the engine
 
-The transactional engine is activated by the `@enable_domain_stack` starter decorator on your application class, together with one YAML property that turns the engine on. In Lumen:
+The transactional engine is activated by the `@enable_domain_stack`
+starter decorator on your application class, together with a single YAML
+property. In Lumen:
 
 ::: listing lumen/app.py | Listing 12.1 — Enabling the transactional engine via the domain stack
 from pyfly.core import pyfly_application
@@ -72,11 +118,23 @@ pyfly:
     enabled: true
 ```
 
-**How it works:** `@enable_domain_stack` imports `TransactionalEngineAutoConfiguration`, which is guarded by `@conditional_on_property("pyfly.transactional.enabled", having_value="true")`. When the property is set, the auto-configuration wires every engine component — `SagaEngine`, `TccEngine`, `WorkflowEngine`, `SagaRegistry`, `InMemoryPersistenceAdapter`, and `LoggerEventsAdapter` — into the DI container. The `OrchestrationBeanPostProcessor` then scans every bean produced during startup: any bean carrying `__pyfly_saga__` metadata is registered into the `SagaRegistry` automatically. You never call `registry.register_from_bean()` yourself in production code.
+**How it works:** `@enable_domain_stack` imports
+`TransactionalEngineAutoConfiguration`, guarded by
+`@conditional_on_property("pyfly.transactional.enabled", having_value="true")`.
+When the property is set, the auto-configuration wires every engine
+component — `SagaEngine`, `TccEngine`, `WorkflowEngine`, `SagaRegistry`,
+`InMemoryPersistenceAdapter`, and `LoggerEventsAdapter` — into the DI
+container. The `OrchestrationBeanPostProcessor` then scans every bean
+produced at startup: any bean carrying `__pyfly_saga__` metadata is
+registered into `SagaRegistry` automatically. You never call
+`registry.register_from_bean()` in production code.
 
 ### Declaring the transfer saga
 
-Lumen's wallet transfer is a two-step saga: debit the source wallet, then credit the destination. If the credit fails (wrong currency, missing wallet), the engine compensates by re-crediting the source — so both balances return to their original values.
+Lumen's wallet transfer is a two-step saga: debit the source wallet, then
+credit the destination. If the credit fails — wrong currency or missing
+wallet — the engine compensates by re-crediting the source, returning both
+balances to their original values.
 
 ::: listing lumen/core/services/transfers/money_transfer_saga.py | Listing 12.2 — MoneyTransferSaga: debit → credit, with compensation
 from __future__ import annotations
@@ -171,19 +229,40 @@ class MoneyTransferSaga:
 
 **How it works — step by step:**
 
-`@saga(name=MONEY_TRANSFER_SAGA)` stamps `__pyfly_saga__` on the class with the saga name. The decorator only attaches metadata — it does not wrap the class or create any proxy. The **critical requirement** is that `@saga` must be stacked *on top of* `@service`. The `@service` annotation causes the DI container to instantiate and scan the bean during application startup; the `OrchestrationBeanPostProcessor.after_init()` hook then sees `__pyfly_saga__` on the bean and calls `SagaRegistry.register_from_bean()`. Without `@service`, the class is never scanned and the saga cannot be executed by name.
+`@saga(name=MONEY_TRANSFER_SAGA)` stamps `__pyfly_saga__` on the class
+with the saga name. The decorator only attaches metadata — it does not
+wrap the class or create a proxy. **The critical requirement** is that
+`@saga` must be stacked *on top of* `@service`. The `@service` annotation
+causes the DI container to instantiate and scan the bean at startup; the
+`OrchestrationBeanPostProcessor.after_init()` hook then sees
+`__pyfly_saga__` on the bean and calls `SagaRegistry.register_from_bean()`.
+Without `@service`, the class is never scanned and the saga cannot be
+executed by name.
 
-`@saga_step` attaches `__pyfly_saga_step__` metadata directly to the async method — no wrapper, no proxy. `inspect.iscoroutinefunction` keeps returning `True` so the engine correctly `await`s the call. The `compensate="recredit_source"` parameter names the *method on the same class* to call when rolling back this step. Omitting `depends_on` (or passing `[]`) means the step can run as soon as the engine starts.
+`@saga_step` attaches `__pyfly_saga_step__` metadata directly to the
+async method — no wrapper, no proxy — so `inspect.iscoroutinefunction`
+keeps returning `True` and the engine correctly `await`s the call. The
+`compensate="recredit_source"` parameter names the *method on the same
+class* to invoke when rolling back this step. Omitting `depends_on` (or
+passing `[]`) means the step can run as soon as the engine starts.
 
-Parameter injection uses `typing.Annotated` with **marker instances**, not bare classes:
+Parameter injection uses `typing.Annotated` with **marker instances**, not
+bare classes:
 
-- `Annotated[TransferRequest, Input()]` — the `Input()` is an instance (note the parentheses); bare `Input` without `()` does not resolve.
-- `Annotated[DebitResult, FromStep("debit-source")]` — reads the result that step `"debit-source"` stored in the `SagaContext` when it completed.
+- `Annotated[TransferRequest, Input()]` — `Input()` is an instance (note
+  the parentheses); bare `Input` without `()` does not resolve.
+- `Annotated[DebitResult, FromStep("debit-source")]` — reads the result
+  that step `"debit-source"` stored in `SagaContext` when it completed.
 - `ctx: SagaContext` — injected by type; no `Annotated` marker needed.
 
-The resolver inspects type hints at runtime via `typing.get_type_hints(func, include_extras=True)`.
+The resolver inspects type hints at runtime via
+`typing.get_type_hints(func, include_extras=True)`.
 
-**Compensation methods do not receive the saga input.** `recredit_source` takes `Annotated[DebitResult, FromStep("debit-source")]` — the result the forward step returned — rather than the `TransferRequest`. This is the correct pattern: the compensation always reads from `ctx.step_results` via `FromStep`, never from the original input.
+**Compensation methods do not receive the saga input.** `recredit_source`
+takes `Annotated[DebitResult, FromStep("debit-source")]` — the value the
+forward step returned — not the `TransferRequest`. Compensations always
+read from `ctx.step_results` via `FromStep`, never from the original
+input.
 
 ### The step DAG
 
@@ -197,7 +276,11 @@ Layer 0:  debit-source
 Layer 1:  credit-destination
 ```
 
-Because `credit-destination` depends on `debit-source`, they must run sequentially. A more complex saga — for example, a fraud check and a KYC check that are independent, both feeding a capture step — would put the two checks in the same layer and run them with `asyncio.gather`.
+Because `credit-destination` depends on `debit-source`, they run
+sequentially. A more complex saga — a fraud check and a KYC check that are
+independent of each other but both feed a capture step — would place the
+two checks in the same layer and run them concurrently with
+`asyncio.gather`.
 
 ### Executing the saga
 
@@ -246,14 +329,21 @@ class TransferService:
         }
 :::
 
-**How it works:** `saga_engine.execute()` resolves `MoneyTransferSaga` from the registry by name, creates a `SagaContext` with an auto-generated UUID `correlation_id`, and starts executing layers. On success, `SagaResult.success` is `True` and `result_of("debit-source")` returns the `DebitResult` the forward step produced. On failure, `result.failed_steps()` returns a dict of step id to `StepOutcome` for every step that failed after all retries; `result.compensated_steps()` returns the steps that were successfully rolled back.
+**How it works:** `saga_engine.execute()` resolves `MoneyTransferSaga`
+from the registry by name, creates a `SagaContext` with an auto-generated
+UUID `correlation_id`, and starts executing layers. On success,
+`SagaResult.success` is `True` and `result_of("debit-source")` returns the
+`DebitResult` the forward step produced. On failure, `result.failed_steps()`
+returns a dict of step ID to `StepOutcome` for every step that exhausted
+its retries; `result.compensated_steps()` returns the steps that were
+successfully rolled back.
 
 `SagaResult` is an immutable frozen dataclass. Its key members:
 
 - `result.success` — `True` when every forward step completed.
-- `result.result_of(step_id)` — the value returned by that step, or `None`.
-- `result.failed_steps()` — dict of step id → `StepOutcome` for failed steps.
-- `result.compensated_steps()` — dict of step id → `StepOutcome` for compensated steps.
+- `result.result_of(step_id)` — the value that step returned, or `None`.
+- `result.failed_steps()` — dict of step ID → `StepOutcome` for failed steps.
+- `result.compensated_steps()` — dict of step ID → `StepOutcome` for compensated steps.
 - `result.correlation_id` — UUID to correlate logs and traces across services.
 - `result.error` — the exception that stopped the saga, or `None` on success.
 
@@ -264,24 +354,39 @@ class TransferService:
 
 ## Compensation in depth
 
-The happy path is straightforward: every step succeeds and the saga commits. The interesting design challenge is the unhappy path. Understanding what happens on failure, and why compensation must be designed carefully, is what separates a reliable saga from a brittle one.
+The happy path is straightforward: every step succeeds and the saga
+commits. The real design challenge is the unhappy path. Understanding what
+happens on failure — and why compensation must be designed carefully — is
+what separates a reliable saga from a brittle one.
 
 ### What runs on failure
 
-When a step fails after all retries, the engine switches to *compensation mode*. It inspects the `SagaContext` to find every step whose status is `DONE`, then calls their compensation methods in reverse completion order under the default `STRICT_SEQUENTIAL` policy. In `MoneyTransferSaga`, the destination wallet not existing causes `credit-destination` to raise `AggregateNotFound`. The engine then compensates the step that already completed:
+When a step fails after all retries, the engine enters *compensation mode*.
+It inspects `SagaContext` for every step whose status is `DONE`, then calls
+their compensation methods in reverse completion order under the default
+`STRICT_SEQUENTIAL` policy. In `MoneyTransferSaga`, a missing destination
+wallet causes `credit-destination` to raise `AggregateNotFound`. The engine
+then compensates the step that already completed:
 
 ```
 Forward path:  debit-source ✓  →  credit-destination ✗
 Compensation:  recredit_source (for debit-source)
 ```
 
-The net effect: the source wallet is back to its original balance and the destination wallet was never touched — as if the transfer never happened.
+The net effect: the source wallet is restored to its original balance and
+the destination wallet was never touched — as if the transfer never
+happened.
 
-Compensation methods receive their arguments through the same injection system as forward steps. `Annotated[DebitResult, FromStep("debit-source")]` reads the `DebitResult` that `debit_source` stored in the context when it completed — so you always compensate with the actual data that was committed, never with an approximation.
+Compensation methods receive their arguments through the same injection
+system as forward steps. `Annotated[DebitResult, FromStep("debit-source")]`
+reads the `DebitResult` that `debit_source` stored in the context when it
+completed — so you always compensate with the actual committed data, never
+an approximation.
 
 ### Compensation policies
 
-Five policies control how the engine runs compensations. Set the global default in YAML or override per-execution:
+Five policies govern how the engine runs compensations. Set the global
+default in YAML or override it per execution:
 
 ```yaml
 pyfly:
@@ -303,7 +408,8 @@ pyfly:
 
 ### Per-step compensation configuration
 
-Override retry and timeout specifically for compensation without changing forward-step behaviour:
+You can override retry count and timeout for a compensation step without
+changing forward-step behaviour:
 
 ::: listing lumen/transfer/transfer_saga_hardened.py | Listing 12.4 — Per-step compensation retry and timeout
 from pyfly.container import service
@@ -331,11 +437,17 @@ class HardenedTransferSaga:
     async def refund_wallet(self, *args: object) -> None: ...
 :::
 
-**How it works:** `compensation_retry=5` gives the compensation five attempts of its own, independent of the three forward retries. `compensation_critical=True` means that if the compensation itself exhausts all its retries and still fails, the engine raises the exception from the compensation — this surfaces a *compensation failure* as an observable error rather than silently swallowing it.
+**How it works:** `compensation_retry=5` gives the compensation five
+attempts of its own, independent of the three forward-step retries.
+`compensation_critical=True` means that if the compensation exhausts all
+its retries and still fails, the engine raises that exception — surfacing
+the *compensation failure* as an observable error rather than silently
+swallowing it.
 
 ### External compensation steps
 
-When the compensation logic is complex enough to warrant its own class, or when it lives in a different module:
+When compensation logic is complex enough to warrant its own class, or when
+it lives in a different module, move it out entirely:
 
 ::: listing lumen/transfer/compensation_steps.py | Listing 12.5 — External compensation step class
 from typing import Annotated
@@ -365,13 +477,20 @@ class SourceRecreditCompensation:
         ...
 :::
 
-The `SagaRegistry` discovers `@compensation_step` classes at startup alongside `@saga` classes and wires them into the saga's step definitions automatically. Note the `for_step_id` parameter matches the step's `id` string exactly.
+The `SagaRegistry` discovers `@compensation_step` classes at startup
+alongside `@saga` classes and wires them into their step definitions
+automatically. The `for_step_id` parameter must match the step's `id`
+string exactly.
 
 ---
 
 ## Workflows and signals
 
-`@saga` is the right tool when you know all the steps upfront and the whole operation should complete within minutes. Some business processes are inherently long-running — a loan approval that waits for a human to review documentation, a multi-step onboarding that waits for an email click, a payment flow that needs a cooldown timer before settling. These fit the **Workflow** pattern.
+`@saga` is the right tool when all steps are known upfront and the
+operation completes within minutes. Some business processes are inherently
+longer — a loan approval waiting on a compliance officer, a multi-step
+onboarding blocked on an email click, a payment that needs a cooldown
+before settling. These fit the **Workflow** pattern.
 
 ### How workflows differ from sagas
 
@@ -450,11 +569,23 @@ class LargeTransferWorkflow:
         pass   # alert on-call
 :::
 
-**How it works:** The decorator stack follows the same rule as sagas: `@workflow` on top of `@service`. `@workflow(id=...)` takes keyword-only arguments — `id` is required; all others are optional. `@wait_for_signal("approved", timeout_ms=82_800_000)` stacks on top of `@workflow_step` and tells the engine to suspend execution at that step until someone delivers a signal named `"approved"`. The engine persists the `ExecutionContext` to the configured `ExecutionPersistenceProvider`. If the process restarts, the engine re-hydrates the context and resumes from the last completed layer.
+**How it works:** The decorator stack follows the same rule as sagas:
+`@workflow` on top of `@service`. `@workflow(id=...)` takes keyword-only
+arguments — `id` is required; all others are optional.
+`@wait_for_signal("approved", timeout_ms=82_800_000)` stacks on top of
+`@workflow_step` and tells the engine to suspend at that step until a
+signal named `"approved"` is delivered. The engine persists the
+`ExecutionContext` to the configured `ExecutionPersistenceProvider`; if
+the process restarts, it re-hydrates the context and resumes from the
+last completed layer.
 
-`@compensation_step(for_step="compliance-review")` uses the keyword argument `for_step` (not positional). It registers `release_review` as the compensation handler for the `compliance-review` step.
+`@compensation_step(for_step="compliance-review")` uses the keyword
+argument `for_step` (not positional) and registers `release_review` as
+the compensation handler for the `compliance-review` step.
 
-`@workflow_query(name="status")` marks a method as a read-side query handler. You can call it while the workflow is suspended without advancing execution.
+`@workflow_query(name="status")` marks a method as a read-side query
+handler — callable while the workflow is suspended without advancing
+execution.
 
 ### Driving the workflow engine
 
@@ -491,13 +622,22 @@ class TransferApprovalService:
         return await self._wf.query(correlation_id, "status")
 :::
 
-**How it works:** `workflow_engine.start(workflow_id, input=payload)` runs the first layer (`enrich-request`) synchronously, then suspends at `compliance-review` because of the `@wait_for_signal` annotation. It returns a `WorkflowResult` immediately with `correlation_id` — the caller stores this id and polls later. Later, `deliver_signal()` resumes the workflow; the `settle-transfer` layer then runs to completion.
+**How it works:** `workflow_engine.start(workflow_id, input=payload)` runs
+the first layer (`enrich-request`) synchronously, then suspends at
+`compliance-review` because of `@wait_for_signal`. It returns a
+`WorkflowResult` immediately with a `correlation_id` — the caller stores
+this ID and polls later. When `deliver_signal()` is called, the workflow
+resumes and `settle-transfer` runs to completion.
 
-`WorkflowResult` carries: `workflow_id`, `correlation_id`, `status` (an `ExecutionStatus` enum), `duration_ms`, `step_results` (dict), and `variables`. The boolean `result.successful` is `True` when `status` is `COMPLETED` or `CONFIRMED`.
+`WorkflowResult` carries: `workflow_id`, `correlation_id`, `status` (an
+`ExecutionStatus` enum), `duration_ms`, `step_results` (dict), and
+`variables`. The boolean `result.successful` is `True` when `status` is
+`COMPLETED` or `CONFIRMED`.
 
 ### The programmatic builder
 
-When you need to construct a workflow dynamically — from a database configuration or a rules engine — use `WorkflowBuilder`:
+When you need to construct a workflow dynamically — from a database
+configuration or a rules engine — use `WorkflowBuilder`:
 
 ::: listing lumen/transfer/dynamic_workflow.py | Listing 12.8 — Building a workflow programmatically
 from pyfly.transactional.workflow.builder import WorkflowBuilder
@@ -530,21 +670,32 @@ definition: WorkflowDefinition = (
 )
 :::
 
-`WorkflowBuilder.step(step_id, handler, *, depends_on, timeout_ms, max_retries, ...)` accepts a callable and keyword arguments for dependencies, timeouts, and retries. `wait_signal(step_id, signal, *, depends_on, timeout_ms)` inserts a signal-gate step without requiring a real handler — it creates an internal no-op coroutine that the engine replaces with the signal-wait logic. `build()` returns a `WorkflowDefinition` you can register directly with `WorkflowEngine`.
+`WorkflowBuilder.step(step_id, handler, *, depends_on, timeout_ms, max_retries, ...)` accepts a callable and keyword arguments for dependencies, timeouts, and retries. `wait_signal(step_id, signal, *, depends_on, timeout_ms)` inserts a signal-gate step without a real handler — it creates an internal no-op coroutine that the engine replaces with signal-wait logic. `build()` returns a `WorkflowDefinition` you register directly with `WorkflowEngine`.
 
 ---
 
 ## TCC: Try-Confirm-Cancel
 
-The saga pattern works by running steps forward and compensating backwards. **TCC (Try-Confirm-Cancel)** takes a different approach: all participants first *tentatively reserve* their resources without committing (Try), then either all *commit* those reservations (Confirm) or all *release* them (Cancel). The distinction matters when you want strong all-or-nothing semantics across participants without a distributed lock.
+The saga pattern runs steps forward and compensates backwards. **TCC
+(Try-Confirm-Cancel)** takes a different approach: all participants first
+*tentatively reserve* their resources without committing (Try), then either
+all *commit* those reservations (Confirm) or all *release* them (Cancel).
+This gives you strong all-or-nothing semantics across participants without
+a distributed lock.
 
-TCC is a good fit when each participant can cheaply hold a reservation — for example, pre-authorising a payment card hold rather than immediately charging it.
+TCC suits scenarios where each participant can cheaply hold a reservation
+— for example, pre-authorising a payment card hold rather than immediately
+charging it.
 
 ### The three phases
 
-1. **Try** — every participant reserves resources. The reservation is visible internally but not yet final. If any Try fails, all participants that succeeded cancel their reservations.
-2. **Confirm** — if all Try phases succeeded, the coordinator instructs every participant to commit its reservation.
-3. **Cancel** — if any Try phase failed, the coordinator instructs all participants that completed Try to release their reservations.
+1. **Try** — every participant reserves resources. Reservations are visible
+   internally but not final. If any Try fails, participants that succeeded
+   cancel their reservations.
+2. **Confirm** — if all Try phases succeed, the coordinator instructs every
+   participant to commit its reservation.
+3. **Cancel** — if any Try phase fails, the coordinator instructs every
+   participant that completed Try to release its reservation.
 
 ### Declaring a TCC transaction
 
@@ -644,9 +795,17 @@ class WalletTransferTcc:
             await self._payments.void_auth(auth_id)
 :::
 
-**How it works:** `@tcc_participant(order=1)` tells the TCC engine to run `WalletParticipant`'s Try phase before `PaymentParticipant`'s (lower `order` = earlier). `FromTry()` is the TCC equivalent of `FromStep` — it injects the value returned by the same participant's `@try_method` into its `@confirm_method` and `@cancel_method`.
+**How it works:** `@tcc_participant(order=1)` tells the TCC engine to run
+`WalletParticipant`'s Try phase before `PaymentParticipant`'s — lower
+`order` means earlier. **`FromTry()`** is TCC's equivalent of `FromStep`:
+it injects the value returned by the same participant's `@try_method`
+into its `@confirm_method` and `@cancel_method`.
 
-The engine runs all participants' Try phases in `order` sequence. If every Try succeeds, it runs all Confirm methods. If any Try fails, it runs Cancel for every participant that completed its Try — again in the declared order. An `optional=True` participant that fails its Try does not trigger a global Cancel; its failure is logged and skipped.
+The engine runs all participants' Try phases in `order` sequence. If every
+Try succeeds, it runs all Confirm methods. If any Try fails, it runs Cancel
+for every participant that completed its Try — again in declared order. An
+`optional=True` participant that fails its Try does not trigger a global
+Cancel; its failure is logged and skipped.
 
 ### Executing a TCC transaction
 
@@ -692,6 +851,8 @@ class TccTransferService:
 
 ### TCC vs Saga: choosing the right pattern
 
+Use this table to choose between the two approaches:
+
 | Question | Saga | TCC |
 |----------|------|-----|
 | Steps run independently? | Yes — each commits locally | No — all Try phases must succeed first |
@@ -703,16 +864,22 @@ class TccTransferService:
 
 ## Persistence: surviving a crash
 
-The engine stores saga and TCC state through the `TransactionalPersistencePort` protocol. The default adapter keeps state in memory — fast for development, but lost on process restart. Production deployments wire a durable adapter.
+The engine stores saga and TCC state through the
+`TransactionalPersistencePort` protocol. The default adapter keeps state
+in memory — fast for development, but lost on process restart. Production
+deployments swap in a durable adapter.
 
 ### How state flows
 
-Every time a step completes (successfully or otherwise), the engine calls:
+Every time a step completes — successfully or otherwise — the engine calls:
 
 1. `persistence_port.update_step_status(correlation_id, step_id, status)` — record the step outcome.
 2. `persistence_port.mark_completed(correlation_id, successful)` — record the saga's final result.
 
-On startup, the `SagaRecoveryService` queries `persistence_port.get_stale(before)` to find executions that started but never completed. For each stale saga still in `IN_FLIGHT` status, it marks the saga as `FAILED` and emits lifecycle events so observability systems can alert on-call.
+On startup, `SagaRecoveryService` queries `persistence_port.get_stale(before)`
+to find executions that started but never completed. For each stale saga
+still in `IN_FLIGHT` status, it marks the saga `FAILED` and emits lifecycle
+events so observability systems can alert on-call.
 
 ### Configuration
 
@@ -727,11 +894,18 @@ pyfly:
       cleanup_older_than_hours: 24
 ```
 
-With `recovery_enabled: true`, the framework runs `SagaRecoveryService.recover_stale()` on a background task every `recovery_interval_seconds` seconds. Sagas last updated more than `stale_threshold_seconds` seconds ago are considered stuck and marked failed — surfacing them for manual investigation or automatic retry at the application level.
+With `recovery_enabled: true`, the framework runs
+`SagaRecoveryService.recover_stale()` on a background task every
+`recovery_interval_seconds` seconds. Sagas last updated more than
+`stale_threshold_seconds` seconds ago are considered stuck, marked failed,
+and surfaced for manual investigation or automatic retry.
 
 ### Implementing a custom persistence adapter
 
-To persist to a real database, implement `TransactionalPersistencePort` and register your implementation as a `@bean` or `@component`. The auto-configuration detects your bean at startup and uses it in preference to `InMemoryPersistenceAdapter`:
+To persist to a real database, implement `TransactionalPersistencePort` and
+register your implementation as a `@bean` or `@component`. The
+auto-configuration detects your bean at startup and uses it in preference to
+`InMemoryPersistenceAdapter`:
 
 ::: listing lumen/infra/persistence/saga_postgres_adapter.py | Listing 12.11 — Skeleton of a PostgreSQL persistence adapter
 from __future__ import annotations
@@ -791,7 +965,9 @@ class SagaPostgresAdapter(TransactionalPersistencePort):
 
 ## The programmatic saga builder
 
-When you want to build a saga from dynamic configuration — perhaps loading step definitions from a rules database or a configuration file — `SagaBuilder` gives you the full fluent API without any decorators:
+When you need to build a saga from dynamic configuration — loading step
+definitions from a rules database or a configuration file — `SagaBuilder`
+gives you the full fluent API without any decorators:
 
 ::: listing lumen/transfer/dynamic_saga.py | Listing 12.12 — Building a saga programmatically with SagaBuilder
 from __future__ import annotations
@@ -833,15 +1009,40 @@ saga_def = (
 )
 :::
 
-**How it works:** Each `.step(step_id)` call returns a `StepBuilder`. You chain configuration methods — `.handler()`, `.compensate()`, `.depends_on()`, `.retry()`, `.backoff_ms()`, `.timeout_ms()`, `.jitter()` — then call `.add()` to finalise the step and return the parent `SagaBuilder`. `.build()` runs the same DAG validation as the decorator path: missing handlers, nonexistent `depends_on` references, and cycles all raise `SagaValidationError` immediately.
+**How it works:** Each `.step(step_id)` call returns a `StepBuilder`. Chain
+configuration methods — `.handler()`, `.compensate()`, `.depends_on()`,
+`.retry()`, `.backoff_ms()`, `.timeout_ms()`, `.jitter()` — then call
+`.add()` to finalise the step and return the parent `SagaBuilder`.
+`.build()` runs the same DAG validation as the decorator path: missing
+handlers, nonexistent `depends_on` references, and cycles all raise
+`SagaValidationError` immediately at registration time.
 
 ---
 
 ## What you built {.recap}
 
-You started with the insight that a wallet transfer across two separate database aggregates cannot use a single database transaction. You declared `MoneyTransferSaga` by stacking `@saga` on `@service`, so the `OrchestrationBeanPostProcessor` registers it into the auto-configured `SagaEngine` at startup. Each step uses `Annotated[T, Input()]` and `Annotated[T, FromStep("step-id")]` marker instances (not bare classes) for parameter injection, and `ctx: SagaContext` is injected by type. The compensation method `recredit_source` does not receive the saga input — it pulls the forward step's `DebitResult` via `FromStep("debit-source")` from `SagaContext`. When `credit-destination` raises `AggregateNotFound`, the engine auto-runs `recredit_source`, leaving both balances unchanged.
+You began with a concrete problem: a wallet transfer across two independent
+aggregates cannot use a single database transaction. You declared
+`MoneyTransferSaga` by stacking `@saga` on `@service`, causing the
+`OrchestrationBeanPostProcessor` to register it into the auto-configured
+`SagaEngine` at startup. Each step uses `Annotated[T, Input()]` and
+`Annotated[T, FromStep("step-id")]` marker instances — not bare classes —
+for parameter injection; `ctx: SagaContext` is injected by type. The
+compensation method `recredit_source` does not receive the saga input; it
+pulls the forward step's `DebitResult` via `FromStep("debit-source")`. When
+`credit-destination` raises `AggregateNotFound`, the engine automatically
+runs `recredit_source`, leaving both balances unchanged.
 
-You explored compensation in depth: five policies from strict sequential to best-effort parallel, per-step compensation retries and timeouts, and the critical requirement that all compensations be idempotent. You saw how `@workflow(id=...) @service` and `@wait_for_signal` suspend a long-running workflow until a human delivers a signal, and how `WorkflowResult.successful` reports the final state. You walked through TCC as a reservation-based alternative that locks resources across all participants before committing any. Finally you wired a custom `TransactionalPersistencePort` and configured `SagaRecoveryService` to detect and surface stale executions after a crash.
+You explored compensation in depth: five policies ranging from strict
+sequential to best-effort parallel, per-step compensation retries and
+timeouts, and the non-negotiable requirement that all compensations be
+idempotent. You saw how `@workflow(id=...) @service` and `@wait_for_signal`
+suspend a long-running workflow until a human delivers a signal, and how
+`WorkflowResult.successful` reports the final state. You walked through TCC
+as a reservation-based alternative that locks resources across all
+participants before committing any. Finally you wired a custom
+`TransactionalPersistencePort` and configured `SagaRecoveryService` to
+detect and surface stale executions after a crash.
 
 Key concepts to carry forward:
 
@@ -849,8 +1050,8 @@ Key concepts to carry forward:
 - **Marker instances** — `Input()`, `FromStep("step-id")` must be instances (with parentheses), not bare classes.
 - **Compensation via `FromStep`** — compensation methods receive the forward step's result, never the saga input.
 - **`SagaEngine.execute(saga_name, input_data)`** — the single call that returns `SagaResult` with `.success`, `.result_of()`, `.failed_steps()`, `.compensated_steps()`.
-- **`@workflow(id=...) @service` / `@wait_for_signal`** — signal-driven, long-running alternative; `WorkflowResult.successful` for success check.
-- **`@tcc` on `@service` / `@tcc_participant`** — reservation-based coordination; `FromTry()` (instance) injects the try-result into confirm/cancel methods.
+- **`@workflow(id=...) @service` / `@wait_for_signal`** — signal-driven, long-running alternative; check `WorkflowResult.successful` for the final state.
+- **`@tcc` on `@service` / `@tcc_participant`** — reservation-based coordination; `FromTry()` (instance) injects the try-result into confirm and cancel methods.
 - **`TransactionalPersistencePort`** — implement and register this protocol to give the engine durable state and crash recovery.
 
 ---

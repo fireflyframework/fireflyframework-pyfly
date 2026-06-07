@@ -4,36 +4,13 @@
 
 ::: figure art/openers/ch10.svg | &nbsp;
 
-Lumen's wallet service is genuinely event-driven. Commands flow through
-typed handlers; domain events publish to an in-process bus; listeners
-react independently without coupling themselves to the write path. In
-Chapter 8 you built `WalletAuditListener` — a service that reacts to
-`WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` events without
-knowing the command handlers. In Chapter 9 you went further, storing
-those events *as the source of truth* so every historical balance is
-computable from first principles.
+Lumen's wallet service is genuinely event-driven. Commands flow through typed handlers; domain events publish to an in-process bus; listeners react independently without coupling to the write path. In Chapter 8 you built `WalletAuditListener` — a service that reacts to `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` events without knowing the command handlers. In Chapter 9 you went further, storing those events *as the source of truth* so every historical balance is computable from first principles.
 
-There is one boundary neither chapter crossed: the network.
-`InMemoryEventBus` lives inside the Python process. The moment you want
-another service — a future `PaymentsService` that settles transfers, or a
-`NotificationsService` that sends push alerts across channels — to react
-to Lumen's facts, you need a message broker: an independent infrastructure
-component that stores events durably, routes them to subscribers in other
-processes, and replays them when a consumer restarts after a crash.
+There is one boundary neither chapter crossed: the network. `InMemoryEventBus` lives inside the Python process. The moment another service — a future `PaymentsService` that settles transfers, or a `NotificationsService` that sends push alerts — needs to react to Lumen's facts, you need a **message broker**: an independent infrastructure component that stores events durably, routes them to subscribers in other processes, and replays them when a consumer restarts after a crash.
 
-This chapter takes Lumen's event-driven foundation across that boundary.
-You will learn how PyFly wraps the complexity of Apache Kafka and RabbitMQ
-behind a single clean abstraction — `MessageBrokerPort` — so that your
-application code never knows which broker is running beneath it. You will
-publish Lumen's wallet events to real topics, consume them with the
-`@message_listener` decorator, choose the right serialization format for
-your schema-evolution requirements, handle poisoned messages with
-dead-letter queues built into the decorator, and protect your service
-against broker outages with circuit breakers and retries.
+This chapter takes Lumen's event-driven foundation across that boundary. You will see how PyFly wraps the complexity of Apache Kafka and RabbitMQ behind a single clean abstraction — `MessageBrokerPort` — so that application code never knows which broker is running beneath it. You will publish Lumen's wallet events to real topics, consume them with the `@message_listener` decorator, choose the right serialisation format for your schema-evolution requirements, handle poisoned messages with dead-letter queues built into the decorator, and protect your service against broker outages with circuit breakers and retries.
 
-By the end of the chapter, Lumen's integration events will flow across
-process and service boundaries, ready for the Part IV services that will
-consume them.
+By the end of the chapter Lumen's integration events flow across process boundaries, ready for the Part IV services that will consume them.
 
 ---
 
@@ -41,32 +18,15 @@ consume them.
 
 ### Why an abstraction matters
 
-Before you write a single line of Kafka or RabbitMQ code, it is worth
-asking: why does PyFly introduce an abstraction layer at all? After all,
-`aiokafka` and `aio-pika` both expose perfectly usable async APIs. The
-answer is the same reason you depend on `EventPublisher` rather than on
-`InMemoryEventBus` — the abstraction is what lets you swap infrastructure
-without touching business logic.
+Before writing a line of Kafka or RabbitMQ code, it is worth asking: why does PyFly introduce an abstraction layer at all? `aiokafka` and `aio-pika` both expose perfectly usable async APIs. The answer is the same reason you depend on `EventPublisher` rather than `InMemoryEventBus` — the abstraction is what lets you swap infrastructure without touching business logic.
 
-Without an abstraction, every service that produces or consumes a message
-imports Kafka-specific or RabbitMQ-specific types. Switching brokers — or
-running Kafka in production and an in-memory broker in CI — requires
-changing import paths, constructor signatures, and consumer-loop
-boilerplate across every affected file. With `MessageBrokerPort`, the swap
-is a configuration file change. The listeners and publishers that make up
-your business logic never change.
+Without an abstraction, every service that produces or consumes a message imports Kafka-specific or RabbitMQ-specific types. Switching brokers — or running Kafka in production and an in-memory broker in CI — means changing import paths, constructor signatures, and consumer-loop boilerplate across every affected file. With `MessageBrokerPort`, the swap is a YAML change. The listeners and publishers that make up your business logic never change.
 
-That same abstraction pays dividends in testing. The
-`InMemoryMessageBroker` satisfies the port protocol. You can inject it
-anywhere `MessageBrokerPort` is expected and write fast, deterministic
-tests with no Docker dependency. Chapter 11 will make this concrete.
+The abstraction pays dividends in testing too. `InMemoryMessageBroker` satisfies the port protocol. Inject it wherever `MessageBrokerPort` is expected and write fast, deterministic tests with no Docker dependency. Chapter 16 makes this concrete.
 
 ### The MessageBrokerPort protocol
 
-`MessageBrokerPort` is a `@runtime_checkable Protocol`. That means you
-can use it as a type hint throughout your code, and you can call
-`isinstance(obj, MessageBrokerPort)` at runtime if you ever need to
-verify that an injected bean satisfies the contract.
+**`MessageBrokerPort`** is a `@runtime_checkable Protocol`. Use it as a type hint throughout your code; call `isinstance(obj, MessageBrokerPort)` at runtime if you need to verify that an injected bean satisfies the contract.
 
 The protocol defines four methods:
 
@@ -95,37 +55,19 @@ class MessageBrokerPort(Protocol):
     async def stop(self) -> None: ...
 ```
 
-**How it works — the four methods:**
+**The four methods:**
 
-`publish` sends a single message to the named topic. `value` is raw
-bytes — the protocol deliberately does not choose a serialization format
-for you; you encode the payload before calling `publish` and decode it
-inside your handler. `key` and `headers` are keyword-only, so callers
-cannot accidentally swap them with positional arguments. `key` drives
-Kafka partition assignment for ordering guarantees; RabbitMQ ignores it.
-`headers` carry cross-cutting metadata such as `event-type` and
-correlation IDs.
+`publish` sends a single message to the named topic. `value` is raw bytes — the protocol deliberately leaves serialisation to you; encode the payload before calling `publish` and decode it inside your handler. `key` and `headers` are keyword-only so callers cannot accidentally transpose them. `key` drives Kafka partition assignment for ordering guarantees; RabbitMQ ignores it. `headers` carry cross-cutting metadata such as `event-type` and correlation IDs.
 
-`subscribe` registers an async callable — a `MessageHandler` — for a
-topic. The optional `group` parameter maps to Kafka consumer groups and
-RabbitMQ competing-consumer queues: if you deploy three instances of a
-service and all three subscribe with the same `group`, only one instance
-processes each message. If you omit `group`, every subscriber receives
-every message (broadcast semantics), which is useful for fanout scenarios
-such as analytics that need a copy of every event.
+`subscribe` registers an async `MessageHandler` for a topic. The optional `group` parameter maps to Kafka consumer groups and RabbitMQ competing-consumer queues. Deploy three instances of a service, all subscribing with the same `group`, and only one instance processes each message. Omit `group` for broadcast semantics — every subscriber receives every message — which is useful for analytics that need a copy of every event.
 
-`start` creates connections and begins consuming. Register all your
-subscriptions *before* calling `start`, then call `start` once during
-application startup.
+`start` creates connections and begins consuming. Register all subscriptions *before* calling `start`, then call it once during application startup.
 
-`stop` drains in-flight messages and closes connections cleanly. PyFly's
-application lifecycle calls `stop` automatically during shutdown, so you
-rarely need to invoke it manually.
+`stop` drains in-flight messages and closes connections cleanly. PyFly's application lifecycle calls `stop` automatically during shutdown, so you rarely need to invoke it manually.
 
 ### The Message dataclass
 
-Every handler receives a `Message` — a frozen dataclass that carries the
-full envelope of a received message:
+Every handler receives a **`Message`** — a frozen dataclass carrying the full envelope of a received message:
 
 ```python
 from pyfly.messaging import Message
@@ -145,16 +87,11 @@ msg = Message(
 | `key` | `bytes \| None` | `None` | Partition or routing key. Kafka uses it for partition assignment. |
 | `headers` | `dict[str, str]` | `{}` | String metadata attached by the publisher. |
 
-The dataclass is frozen: once the broker hands you a `Message`, its
-fields are immutable. That makes it safe to pass across async boundaries
-without defensive copying, and it prevents accidental mutation inside
-handlers.
+The dataclass is frozen: once the broker hands you a `Message` its fields are immutable — safe to pass across async boundaries without defensive copying, and immune to accidental mutation inside handlers.
 
 ### Kafka vs RabbitMQ — choosing the right broker
 
-Before looking at adapter configuration, it helps to understand where
-each broker fits. The table below summarises the key trade-offs; neither
-choice is universally correct.
+Before diving into configuration, it helps to understand where each broker fits. The table below summarises the key trade-offs; neither choice is universally correct.
 
 ::: figure art/figures/10-messaging.svg | Figure 10.1 — MessageBrokerPort sits between application code and the broker adapters.
 
@@ -169,11 +106,7 @@ choice is universally correct.
 | **When to choose** | Event streaming, audit logs, replay, high throughput | Task queues, RPC patterns, per-message routing with complex bindings |
 | **PyFly extra** | `uv add "pyfly[kafka]"` | `uv add "pyfly[rabbitmq]"` |
 
-For Lumen, Kafka is the natural fit: wallet events form an ordered stream
-per wallet, are worth replaying when a new consumer comes online, and will
-eventually feed high-throughput analytics. However, the examples in this
-chapter show both adapters interchangeably — because from your code's
-perspective, the choice is a configuration detail.
+For Lumen, Kafka is the natural fit: wallet events form an ordered stream per wallet, are worth replaying when a new consumer comes online, and will eventually feed high-throughput analytics. The examples in this chapter show both adapters interchangeably — from your code's perspective, the choice is a configuration detail.
 
 !!! note "Installing both adapters"
     If you want to support either broker in one install,
@@ -188,8 +121,7 @@ perspective, the choice is a configuration detail.
 
 ### Kafka
 
-Add `pyfly[kafka]` to your project and declare the broker in
-`pyfly.yaml`:
+Add `pyfly[kafka]` to your project and declare the broker in `pyfly.yaml`:
 
 ```yaml
 pyfly:
@@ -199,10 +131,7 @@ pyfly:
       bootstrap-servers: "kafka-1:9092,kafka-2:9092"
 ```
 
-That is all PyFly needs to auto-configure a `KafkaAdapter` and register
-it as the `MessageBrokerPort` bean. If you need advanced producer options,
-construct the adapter manually as a `@bean` inside a `@configuration`
-class — but for most services the YAML is sufficient.
+That is all PyFly needs to auto-configure a `KafkaAdapter` and register it as the `MessageBrokerPort` bean. For most services the YAML is sufficient; if you need advanced producer options, construct the adapter manually as a `@bean` inside a `@configuration` class.
 
 ### RabbitMQ
 
@@ -214,8 +143,7 @@ pyfly:
       url: "amqp://user:password@rabbitmq-host:5672/"
 ```
 
-The `RabbitMQAdapter` uses a durable direct exchange named `"pyfly"` by
-default. To customise the exchange name, construct the adapter manually:
+`RabbitMQAdapter` uses a durable direct exchange named `"pyfly"` by default. To customise the exchange name, construct the adapter manually:
 
 ::: listing lumen/messaging/config.py | Listing 10.1 — Custom RabbitMQ exchange name via @bean
 from pyfly.container import configuration, bean
@@ -235,19 +163,11 @@ class BrokerConfig:
         )
 :::
 
-**How it works:** `@configuration` marks the class as a PyFly
-configuration class — equivalent to a factory that the DI container calls
-during startup. `@bean` on `broker` tells the container to call
-`broker()` once, cache the result, and inject it wherever
-`MessageBrokerPort` is requested. Any `@service` class that declares a
-`MessageBrokerPort` parameter in its constructor receives this instance
-automatically, with no import of `RabbitMQAdapter` required in the
-consumer class.
+**How it works.** `@configuration` marks the class as a factory that the DI container calls during startup. `@bean` on `broker` tells the container to call `broker()` once, cache the result, and inject it wherever `MessageBrokerPort` is requested. Any `@service` that declares `MessageBrokerPort` in its constructor receives this instance automatically — no import of `RabbitMQAdapter` required in the consumer class.
 
 ### Auto-detection
 
-When `provider` is set to `"memory"` (the default) — or changed to
-`"auto"` — PyFly probes the installed packages in order:
+When `provider` is `"memory"` (the default) or `"auto"`, PyFly probes installed packages in order:
 
 | Priority | Library checked | Adapter selected |
 |---|---|---|
@@ -255,9 +175,7 @@ When `provider` is set to `"memory"` (the default) — or changed to
 | 2 | `aio_pika` | `RabbitMQAdapter` |
 | 3 | *(fallback)* | `InMemoryMessageBroker` |
 
-This means you can set `provider: "memory"` in `pyfly-test.yaml` and
-`provider: "kafka"` in `pyfly-prod.yaml`, and every test and production
-run uses the appropriate adapter without code changes.
+Set `provider: "memory"` in `pyfly-test.yaml` and `provider: "kafka"` in `pyfly-prod.yaml`, and every test and production run uses the appropriate adapter without code changes.
 
 ---
 
@@ -265,31 +183,15 @@ run uses the appropriate adapter without code changes.
 
 ### From in-process events to integration events
 
-In Chapter 8, Lumen's command handlers drained the `Wallet` aggregate's
-event buffer with `wallet.clear_events()` and published each domain event
-through `EventPublisher`. The `WalletAuditListener` subscribed to those
-events using `@event_listener` and reacted within the same process.
+In Chapter 8, Lumen's command handlers drained the `Wallet` aggregate's event buffer with `wallet.clear_events()` and published each domain event through `EventPublisher`. `WalletAuditListener` subscribed using `@event_listener` and reacted within the same process.
 
-The integration event pattern crosses the process boundary. Where a
-*domain event* describes what happened inside an aggregate (a private
-fact, available to same-process listeners), an *integration event* is a
-sanitised, public representation of the same fact — designed for external
-consumers, stable across versions, and serialised to bytes for transport
-over a broker.
+The **integration event** pattern crosses the process boundary. Where a *domain event* describes what happened inside an aggregate — a private fact, available to same-process listeners — an integration event is a sanitised, public representation of the same fact: designed for external consumers, stable across versions, and serialised to bytes for transport over a broker.
 
-For Lumen, the integration event for a deposit carries only the fields an
-external consumer needs: the wallet identifier, the amount in minor units,
-the currency code, and the resulting balance. It does not expose the
-aggregate's internal implementation details.
+For Lumen, the integration event for a deposit carries only what an external consumer needs: the wallet identifier, the amount in minor units, the currency code, and the resulting balance. It does not expose the aggregate's internal implementation details.
 
 ### How Lumen drains events to the broker
 
-Lumen separates the publish bridge from the command handlers so every
-handler publishes events identically. The helper
-`publish_domain_events` (in
-`lumen/core/services/wallets/event_publishing.py`) iterates the drained
-events, converts each frozen dataclass to a dict, and calls
-`EventPublisher.publish`:
+Lumen separates the publish bridge from the command handlers so every handler publishes events identically. `publish_domain_events` (in `lumen/core/services/wallets/event_publishing.py`) iterates the drained events, converts each frozen dataclass to a dict, and calls `EventPublisher.publish`:
 
 ```python
 # lumen/core/services/wallets/event_publishing.py  (real Lumen code)
@@ -322,13 +224,9 @@ async def publish(
 ) -> None: ...
 ```
 
-`destination` is the logical channel name (`"wallet.events"`). `event_type`
-is the domain event class name — `"WalletOpened"`, `"FundsDeposited"`, or
-`"FundsWithdrawn"` — which is exactly what `@event_listener` subscribers
-filter on.
+`destination` is the logical channel name (`"wallet.events"`). `event_type` is the domain event class name — `"WalletOpened"`, `"FundsDeposited"`, or `"FundsWithdrawn"` — which is exactly what `@event_listener` subscribers filter on.
 
-Every command handler wires in `EventPublisher` through the constructor
-and calls `publish_domain_events` after persisting:
+Every command handler wires in `EventPublisher` via the constructor and calls `publish_domain_events` after persisting:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 10.2 — DepositFundsHandler drains events via EventPublisher
 from __future__ import annotations
@@ -375,22 +273,13 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-**How it works — the key design decisions:**
+**Key design decisions:**
 
-`events: EventPublisher` is the port, not the adapter. The DI container
-injects whichever bus is configured — in-memory in tests, a broker-backed
-bus in production. This handler never mentions Kafka or RabbitMQ.
+`events: EventPublisher` is the port, not the adapter. The DI container injects whichever bus is configured — in-memory in tests, a broker-backed bus in production. This handler never mentions Kafka or RabbitMQ.
 
-`command.amount` is the deposit in integer minor units (e.g. `5000` means
-€50.00 for a EUR wallet). The `DepositFunds` command carries `wallet_id`
-and `amount`; there is no `amount_cents` field. The `FundsDeposited`
-domain event records the same `amount` field, plus `currency` (a string
-like `"EUR"`) and `balance` (the new balance in minor units).
+`command.amount` is the deposit in integer minor units (e.g. `5000` means €50.00 for a EUR wallet). The `FundsDeposited` domain event records the same `amount` field, plus `currency` (a string like `"EUR"`) and `balance` (the new balance in minor units).
 
-`wallet.clear_events()` drains the aggregate's pending events list and
-returns them. Calling `clear_events` *after* `repository.add` ensures the
-events describe a fact that persisted. Publishing before saving would
-create phantom events — facts about things that did not happen.
+`wallet.clear_events()` drains the aggregate's pending events list and returns them. Calling it *after* `repository.add` ensures the events describe a fact that persisted. Publishing before saving would create phantom events — facts about things that never happened.
 
 The domain events raised during a deposit are instances of:
 
@@ -403,18 +292,11 @@ class FundsDeposited(DomainEvent):
     balance: int = 0     # new balance after deposit, minor units
 ```
 
-When `publish_domain_events` publishes this event, `event_type` is the
-class name `"FundsDeposited"` — *not* a dotted string like
-`"wallet.fundsdeposited"`.
+When `publish_domain_events` publishes this event, `event_type` is the class name `"FundsDeposited"` — *not* a dotted string like `"wallet.fundsdeposited"`.
 
 ### Publishing an integration event directly to the broker
 
-When a *separate* service (running in a different process) needs to
-receive Lumen's wallet events, the EDA bus must be backed by a real
-broker adapter. The payload flowing over the wire is the same dict the
-in-process listeners see. A dedicated `OutboxRelay` (covered in the
-resilience section) or a broker-backed `EventPublisher` handles the
-transport:
+When a separate service running in a different process needs to receive Lumen's wallet events, the EDA bus must be backed by a real broker adapter. The payload flowing over the wire is the same dict the in-process listeners see. A dedicated `OutboxRelay` (covered in the resilience section) or a broker-backed `EventPublisher` handles the transport:
 
 ::: listing lumen/messaging/deposit_publisher.py | Listing 10.3 — Publishing a wallet integration event to a Kafka topic
 from __future__ import annotations
@@ -448,23 +330,13 @@ async def publish_deposit_event(
     )
 :::
 
-**How it works — the key design decisions:**
+**Key design decisions:**
 
-`broker: MessageBrokerPort` is the port, not the adapter. The DI
-container injects whichever adapter is configured — Kafka in production,
-the in-memory broker in tests.
+`broker: MessageBrokerPort` is the port, not the adapter. The DI container injects whichever adapter is configured — Kafka in production, the in-memory broker in tests.
 
-`key=wallet_id.encode()` is the routing key. On Kafka, all messages
-sharing the same key land on the same partition, which means they are
-delivered to consumers in the order they were published — critical for a
-ledger where `deposit before withdraw` must be preserved. On RabbitMQ the
-key is ignored (routing uses the exchange binding), so this field is safe
-to include regardless of which broker is running.
+`key=wallet_id.encode()` is the routing key. On Kafka, all messages sharing the same key land on the same partition, delivering them to consumers in publication order — critical for a ledger where deposit before withdraw must be preserved. On RabbitMQ the key is ignored (routing uses the exchange binding), so this field is safe to include regardless of which broker is running.
 
-`headers={"event-type": "FundsDeposited"}` uses the domain event class
-name — not a dotted path like `"wallet.fundsdeposited"`. Consumers can
-inspect the event type without decoding the payload, useful for routing
-and filtering without full deserialization.
+`headers={"event-type": "FundsDeposited"}` uses the domain event class name — not a dotted path like `"wallet.fundsdeposited"`. Consumers can inspect the event type without decoding the payload, which is useful for routing and filtering without full deserialisation.
 
 !!! warning "Publish after save, not before"
     Always drain and publish events *after* `repository.add(wallet)`. If
@@ -481,22 +353,11 @@ and filtering without full deserialization.
 
 ### The problem with polling
 
-Before brokers, services that needed to react to another service's state
-changes polled a shared database or a REST endpoint. Polling adds latency
-(the reaction is delayed until the next poll interval), wastes resources
-(most polls find nothing new), and couples consumer to producer at the
-API level. A message listener eliminates all three problems: the broker
-pushes the event to the consumer as soon as it is available, idle
-connections consume negligible CPU, and the consumer depends only on the
-message schema — not on the producer's internal API.
+Before brokers, services reacted to another service's state changes by polling a shared database or a REST endpoint. Polling adds latency (the reaction waits until the next poll interval), wastes resources (most polls find nothing new), and couples consumer to producer at the API level. A message listener eliminates all three problems: the broker pushes the event as soon as it is available, idle connections consume negligible CPU, and the consumer depends only on the message schema — not on the producer's internal API.
 
 ### Declarative listeners with @message_listener
 
-`@message_listener` is the declarative subscription decorator. You
-decorate any async function or method with the topic it should consume,
-and PyFly wires the subscription during application startup — no bus
-reference, no `subscribe()` call, no lifecycle management required in
-your code.
+**`@message_listener`** is the declarative subscription decorator. Decorate any async function or method with the topic it should consume, and PyFly wires the subscription during application startup — no bus reference, no `subscribe()` call, no lifecycle management in your code.
 
 The decorator signature is:
 
@@ -544,33 +405,15 @@ async def on_wallet_event(msg: Message) -> None:
         )
 :::
 
-**How it works:** The decorator stores six metadata attributes on the
-wrapped function — `__pyfly_message_listener__ = True`,
-`__pyfly_listener_topic__`, `__pyfly_listener_group__`,
-`__pyfly_listener_retries__`, `__pyfly_listener_retry_delay__`, and
-`__pyfly_listener_dlq__`. During application startup, the framework scans
-all registered beans, finds functions carrying
-`__pyfly_message_listener__ = True`, and calls
-`broker.subscribe(topic, handler, group)` automatically. You never call
-`subscribe()` manually.
+**How it works.** The decorator stores six metadata attributes on the wrapped function — `__pyfly_message_listener__ = True`, plus `__pyfly_listener_topic__`, `__pyfly_listener_group__`, `__pyfly_listener_retries__`, `__pyfly_listener_retry_delay__`, and `__pyfly_listener_dlq__`. During startup the framework scans all registered beans, finds functions carrying `__pyfly_message_listener__ = True`, and calls `broker.subscribe(topic, handler, group)` automatically. You never call `subscribe()` manually.
 
-`group="payments-service"` places this consumer in a consumer group. If
-you scale to multiple instances of the payments service, only one instance
-processes each message — the broker distributes load across the group.
-Omit `group` for broadcast semantics where every instance receives every
-message.
+`group="payments-service"` places the consumer in a consumer group. Scale to multiple instances of the payments service and only one processes each message — the broker distributes load across the group. Omit `group` for broadcast semantics where every instance receives every message.
 
-Inside the handler, `msg.headers.get("event-type", "unknown")` inspects
-the envelope metadata before touching the payload. The header value is the
-domain event class name — `"FundsDeposited"`, `"WalletOpened"`, or
-`"FundsWithdrawn"` — matching what Lumen sets on the publisher side.
+Inside the handler, `msg.headers.get("event-type", "unknown")` inspects the envelope metadata before touching the payload. The header value is the domain event class name — `"FundsDeposited"`, `"WalletOpened"`, or `"FundsWithdrawn"` — matching what Lumen sets on the publisher side.
 
 ### Listeners on service classes
 
-When your listener needs collaborators — a repository, another service —
-declare it as a method on a `@service` class. PyFly injects the
-dependencies through the constructor and wires the listener subscription
-after the bean is initialised:
+When a listener needs collaborators — a repository, another service — declare it as a method on a `@service` class. PyFly injects the dependencies through the constructor and wires the listener subscription after the bean is initialised:
 
 ::: listing lumen/messaging/notifications_consumer.py | Listing 10.5 — @message_listener on a @service method with dependencies
 from __future__ import annotations
@@ -607,21 +450,9 @@ class WalletNotificationConsumer:
         )
 :::
 
-**How it works:** `@service` registers `WalletNotificationConsumer` in
-the DI container. The constructor receives `smtp_client` through
-injection — you do not `new` it yourself. After the bean is created, the
-framework detects `on_wallet_event` carrying
-`__pyfly_message_listener__ = True` and registers it as a bound method
-listener. The `self` reference is already captured, so every invocation
-of `on_wallet_event` has full access to `self._smtp`.
+**How it works.** `@service` registers `WalletNotificationConsumer` in the DI container. The constructor receives `smtp_client` through injection. After the bean is created, the framework detects `on_wallet_event` carrying `__pyfly_message_listener__ = True` and registers it as a bound-method listener — `self` is already captured, so every invocation has full access to `self._smtp`.
 
-The early return on `event_type != "WalletOpened"` is a filtering guard.
-Because a single topic (`wallet.events`) carries multiple event types
-(`WalletOpened`, `FundsDeposited`, `FundsWithdrawn`), each listener
-filters for the types it cares about. This is simpler than maintaining a
-separate topic per event type — though for very high-volume or
-high-cardinality event streams, topic-per-type is a legitimate design
-trade-off.
+The early return on `event_type != "WalletOpened"` is a filtering guard. A single topic (`wallet.events`) carries multiple event types, so each listener filters for the ones it cares about. This is simpler than maintaining a separate topic per event type, though for very high-volume streams, topic-per-type is a legitimate design trade-off.
 
 !!! tip "Consumer group semantics at a glance"
     Two services with *different* group names each receive every message —
@@ -634,21 +465,13 @@ trade-off.
 
 ---
 
-## Serialization and schema evolution
+## Serialisation and schema evolution
 
 ### Why bytes, and why this matters
 
-`MessageBrokerPort.publish` accepts raw `bytes`. That was a deliberate
-design choice. A broker adaptor that forced a single serialization format
-would be convenient for simple cases and painful for anything else —
-schema evolution, multi-language consumers, compliance requirements, and
-throughput constraints all push in different directions. By leaving
-serialization to you, PyFly stays out of the way.
+`MessageBrokerPort.publish` accepts raw `bytes`. That is a deliberate choice. A broker adaptor that forced a single serialisation format would be convenient for simple cases and painful for everything else — schema evolution, multi-language consumers, compliance requirements, and throughput constraints all push in different directions. By leaving serialisation to you, PyFly stays out of the way.
 
-There are three formats worth knowing: JSON for simplicity, Avro for
-schema-registry-backed evolution, and Protobuf for performance-critical
-or multi-language environments. The table below summarises the
-trade-offs:
+Three formats are worth knowing: JSON for simplicity, Avro for schema-registry-backed evolution, and Protobuf for performance-critical or multi-language environments:
 
 | Format | Human-readable | Schema enforcement | Schema evolution | Multi-language | PyFly encoding |
 |---|---|---|---|---|---|
@@ -658,9 +481,7 @@ trade-offs:
 
 ### JSON — start here
 
-JSON is the right default. It requires no tooling beyond the standard
-library, every language can parse it, and the payload is readable in
-broker monitoring UIs. The encoding pattern is two lines:
+JSON is the right default. It requires no tooling beyond the standard library, every language can parse it, and the payload is readable in broker monitoring UIs. The encoding pattern is two lines:
 
 ```python
 import json
@@ -682,20 +503,11 @@ Decoding in the consumer:
 data: dict = json.loads(msg.value)
 ```
 
-The weakness of JSON is that there is no enforcement of the schema. If
-the publisher adds a required field and the consumer has not been
-updated, the consumer breaks silently. For Lumen's internal events where
-producer and consumer are deployed together, this is manageable. For
-events shared with external teams or long-lived topics, you need
-stronger guarantees.
+JSON's weakness is that the schema is unenforced. If a publisher adds a required field and the consumer has not been updated, the consumer breaks silently. For Lumen's internal events where producer and consumer are deployed together, this is manageable. For events shared with external teams or long-lived topics, you need stronger guarantees.
 
 ### Avro — schema-registry-backed evolution
 
-Avro schemas are JSON documents that describe the shape of a message. A
-Schema Registry (Confluent's is the most common, but open-source
-alternatives exist) stores those schemas and enforces compatibility rules
-when producers register new versions. The `fastavro` library encodes and
-decodes the binary payload:
+Avro schemas are JSON documents describing the shape of a message. A Schema Registry (Confluent's is the most common, but open-source alternatives exist) stores those schemas and enforces compatibility rules when producers register new versions. The `fastavro` library encodes and decodes the binary payload:
 
 ::: listing lumen/messaging/avro_publisher.py | Listing 10.6 — Publishing a wallet event with Avro encoding
 from __future__ import annotations
@@ -746,25 +558,13 @@ async def publish_deposit_avro(
     )
 :::
 
-**How it works:** `fastavro.parse_schema` compiles the JSON schema
-document once at module load time — do not parse it inside the publish
-function or you pay the compilation cost on every call.
-`fastavro.schemaless_writer` serializes the record into the `BytesIO`
-buffer without embedding the schema in every message (the registry
-provides the schema on the consumer side). `buf.getvalue()` extracts the
-bytes for `broker.publish`.
+**How it works.** `fastavro.parse_schema` compiles the JSON schema document once at module load time — never parse it inside the publish function or you pay the compilation cost on every call. `fastavro.schemaless_writer` serialises the record into the `BytesIO` buffer without embedding the schema in each message (the registry provides the schema on the consumer side). `buf.getvalue()` extracts the bytes for `broker.publish`.
 
-The `headers={"content-type": "avro/binary", "event-type":
-"FundsDeposited"}` headers signal to consumers that they should use Avro
-decoding, and carry the event type for routing — consistent with the
-JSON convention.
+The `headers={"content-type": "avro/binary", "event-type": "FundsDeposited"}` headers signal to consumers that Avro decoding is required and carry the event type for routing — consistent with the JSON convention.
 
 ### Protobuf — performance and polyglot
 
-Protocol Buffers compile a `.proto` file into a generated class. They
-produce smaller messages than JSON and Avro, and the generated code is
-available in every major language — making Protobuf the right choice when
-the consumer is a Go or Java service.
+Protocol Buffers compile a `.proto` file into a generated class. They produce smaller messages than JSON or Avro, and the generated code is available in every major language — making Protobuf the right choice when the consumer is a Go or Java service.
 
 ```python
 # Assumes a generated class lumen_pb2.FundsDeposited
@@ -810,25 +610,13 @@ event.ParseFromString(msg.value)
 
 ### The inevitable bad message
 
-Even a well-designed consumer will eventually encounter a message it
-cannot process. A downstream database might be unavailable. The payload
-might violate an assumption the consumer relied on. A transient network
-error might interrupt a third-party API call mid-handler. The question is
-not whether a consumer will fail — it is what happens when it does.
+Even a well-designed consumer will eventually encounter a message it cannot process. A downstream database may be unavailable. The payload may violate an assumption the consumer relied on. A transient network error may interrupt a third-party API call mid-handler. The question is not whether a consumer will fail — it is what happens when it does.
 
-Without a dead-letter strategy, a failed consumer either drops the
-message (losing data) or re-queues it indefinitely (creating an infinite
-retry loop that blocks all subsequent messages, known as a *poison pill*).
-A dead-letter queue (DLQ) is the structured answer: a separate topic or
-queue where messages that cannot be processed after a configurable number
-of attempts are parked for inspection and manual reprocessing.
+Without a dead-letter strategy, a failed consumer either drops the message (data loss) or re-queues it indefinitely, creating an infinite retry loop that blocks all subsequent messages — a *poison pill*. A **dead-letter queue** (DLQ) is the structured answer: a separate topic or queue where messages that cannot be processed after a configurable number of attempts are parked for inspection and manual reprocessing.
 
 ### Decorator-native retry and DLQ
 
-In PyFly, retry and dead-letter routing are built into `@message_listener`
-itself — you do not need to write try/except scaffolding or publish to the
-DLQ manually. Declare `retries` and `dead_letter_topic` directly on the
-decorator:
+In PyFly, retry and dead-letter routing are built into `@message_listener` — no try/except scaffolding, no manual publish to the DLQ. Declare `retries` and `dead_letter_topic` directly on the decorator:
 
 ::: listing lumen/messaging/resilient_consumer.py | Listing 10.7 — Retry and DLQ wired through @message_listener
 from __future__ import annotations
@@ -869,35 +657,24 @@ class ResilientWalletConsumer:
         raise NotImplementedError("replace with real payment logic")
 :::
 
-**How it works — the three parameters:**
+**The three parameters:**
 
-`retries=3` re-invokes `on_wallet_event` up to three more times after
-the first failure. Retries are appropriate for *transient* failures (a
-single database node restarting); keep the count low and let the DLQ
-handle sustained failures.
+`retries=3` re-invokes `on_wallet_event` up to three more times after the first failure. Retries are appropriate for *transient* failures (a single database node restarting); keep the count low and let the DLQ handle sustained failures.
 
-`retry_delay=0.5` applies linear backoff: attempt 1 waits 0.5 s, attempt
-2 waits 1.0 s, attempt 3 waits 1.5 s. With `retry_delay=0.0` (the
-default), retries happen immediately.
+`retry_delay=0.5` applies linear back-off: attempt 1 waits 0.5 s, attempt 2 waits 1.0 s, attempt 3 waits 1.5 s. With `retry_delay=0.0` (the default), retries are immediate.
 
-`dead_letter_topic="wallet.events.DLQ"` is the safety net. When all
-retries are exhausted, the framework re-publishes the original message to
-the DLQ topic, preserving the original `value` and `key`, and adds two
-diagnostic headers:
+`dead_letter_topic="wallet.events.DLQ"` is the safety net. When all retries are exhausted, the framework re-publishes the original message to the DLQ topic, preserving the original `value` and `key`, and adds two diagnostic headers:
 
 | Header | Value |
 |---|---|
 | `x-original-topic` | The topic the message was originally consumed from. |
 | `x-exception` | The exception class name (e.g. `RuntimeError`). |
 
-The exception is then swallowed so the consumer keeps running — the
-message is parked, not lost, and the next message on the topic can be
-processed.
+The exception is then swallowed so the consumer keeps running — the message is parked, not lost, and the next message on the topic is processed normally.
 
 ### Monitoring the DLQ
 
-Subscribe to the DLQ topic like any other listener to observe and alert
-on dead-lettered messages:
+Subscribe to the DLQ topic like any other listener to observe and alert on dead-lettered messages:
 
 ::: listing lumen/messaging/dlq_monitor.py | Listing 10.8 — Subscribing to the DLQ topic
 from __future__ import annotations
@@ -941,25 +718,11 @@ async def on_dead_letter(msg: Message) -> None:
 
 ### Protecting Lumen from a broker outage
 
-A healthy broker is not guaranteed. Network partitions, rolling upgrades,
-and resource exhaustion can all make the broker temporarily unavailable.
-If the command handler that publishes the wallet event calls
-`broker.publish(...)` and the broker is down, you have two choices without
-a resilience layer: fail the entire command (refusing to deposit funds
-because the broker is unreachable) or silently drop the event (the
-deposit succeeds but the integration event is lost).
+A healthy broker is not guaranteed. Network partitions, rolling upgrades, and resource exhaustion can all make the broker temporarily unavailable. If the command handler calls `broker.publish(...)` and the broker is down, you face two bad choices without a resilience layer: fail the entire command (refusing to deposit funds because the broker is unreachable) or silently drop the event (the deposit succeeds but the integration event is lost).
 
-Neither is acceptable. The transactional outbox (Chapter 9) is the atomic
-solution — the event is captured in the database and a relay publishes it
-asynchronously, so a broker outage only adds latency, not data loss.
-Alongside the outbox, circuit breakers and retries protect the relay and
-any other broker-calling code from cascading failures.
+Neither is acceptable. The transactional outbox (Chapter 9) is the atomic solution — the event is captured in the database and a relay publishes it asynchronously, so a broker outage adds only latency, not data loss. Alongside the outbox, **circuit breakers** and **retries** protect the relay and any broker-calling code from cascading failures.
 
-PyFly's resilience module (`pyfly.resilience`) provides both primitives.
-The circuit breaker opens after a configurable failure threshold and
-blocks calls to the broker for a cool-down period, preventing a
-thundering-herd reconnection storm. The retry decorator handles transient
-errors with configurable back-off:
+PyFly's resilience module (`pyfly.resilience`) provides both primitives. The circuit breaker opens after a configurable failure threshold and blocks calls to the broker during a cool-down period, preventing a thundering-herd reconnection storm. The retry decorator handles transient errors with configurable back-off:
 
 ::: listing lumen/messaging/resilient_publisher.py | Listing 10.9 — Resilient broker publishing with retry and circuit breaker
 from __future__ import annotations
@@ -1005,29 +768,11 @@ class OutboxRelay:
         )
 :::
 
-**How it works — the two decorators:**
+**The two decorators:**
 
-`@retry(max_attempts=3, delay=1.0, backoff=2.0)` wraps `forward` in a
-retry loop of up to three attempts. After the first failure it waits
-`delay` seconds (1 s); after the second it waits `delay * backoff` (2 s)
-— the wait grows as `delay * backoff ** attempt`. If the third attempt
-still fails, the exception propagates to the caller. Retries are
-appropriate for *transient* failures (a single broker node restarting);
-they are counterproductive for *permanent* failures (a misconfigured
-topic that will never accept messages), so keep `max_attempts` low and
-let the circuit breaker handle sustained outages.
+`@retry(max_attempts=3, delay=1.0, backoff=2.0)` wraps `forward` in a retry loop of up to three attempts. After the first failure it waits `delay` seconds (1 s); after the second it waits `delay * backoff` (2 s) — the wait grows as `delay * backoff ** attempt`. If the third attempt still fails, the exception propagates. Retries suit *transient* failures (a single broker node restarting); they are counterproductive for *permanent* failures (a misconfigured topic). Keep `max_attempts` low and let the circuit breaker handle sustained outages.
 
-`@circuit_breaker(CircuitBreaker(failure_threshold=5, recovery_timeout=30))`
-guards `forward` with a shared `CircuitBreaker` instance that tracks
-consecutive failures across every call. When the count reaches
-`failure_threshold`, the circuit *opens* and subsequent calls fail
-immediately with a `CircuitBreakerException` instead of reaching for an
-unreachable broker — protecting it from a reconnection storm. After
-`recovery_timeout` seconds, the circuit enters a *half-open* state: the
-next call is allowed through as a probe. If it succeeds, the circuit
-closes; if it fails, it re-opens. Decorator order matters: `@retry` is
-the outer decorator, so all three attempts of one logical call happen
-before the circuit breaker registers a single failure.
+`@circuit_breaker(CircuitBreaker(failure_threshold=5, recovery_timeout=30))` guards `forward` with a shared `CircuitBreaker` instance that tracks consecutive failures across all calls. When the count reaches `failure_threshold`, the circuit *opens* and subsequent calls fail immediately with `CircuitBreakerException` rather than attempting to reach an unreachable broker — preventing a reconnection storm. After `recovery_timeout` seconds the circuit enters a *half-open* state: the next call is allowed through as a probe. If it succeeds, the circuit closes; if it fails, it re-opens. Decorator order matters: `@retry` is the outer decorator, so all three attempts of one logical call happen before the circuit breaker registers a single failure.
 
 !!! spring "Spring parity"
     `MessageBrokerPort` with `KafkaAdapter` is PyFly's counterpart of
@@ -1051,35 +796,13 @@ before the circuit breaker registers a single failure.
 
 Part III is complete.
 
-Lumen is now fully event-driven, event-sourced, and broker-connected.
-Here is where each chapter left things.
+Lumen is now fully event-driven, event-sourced, and broker-connected. Here is where each chapter left things.
 
-**Chapter 8** introduced the two-bus model: `ApplicationEventBus` for
-framework lifecycle events, `InMemoryEventBus` for domain events. You
-wired `EventPublisher` into the command handlers so every aggregate
-mutation produced a fact that independent listeners —
-`WalletAuditListener` among them — could react to without knowing each
-other. Subscriptions use `@event_listener(event_types=["WalletOpened",
-"FundsDeposited", "FundsWithdrawn"])` and handlers receive an
-`EventEnvelope` whose `event_type` is the domain event class name.
+**Chapter 8** introduced the two-bus model: `ApplicationEventBus` for framework lifecycle events, `InMemoryEventBus` for domain events. `EventPublisher` was wired into the command handlers so every aggregate mutation produced a fact that independent listeners — `WalletAuditListener` among them — could react to without knowing each other. Subscriptions use `@event_listener(event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"])`; handlers receive an `EventEnvelope` whose `event_type` is the domain event class name.
 
-**Chapter 9** replaced the mutable aggregate-plus-read-model approach
-with event sourcing. Every financial movement is an immutable event
-appended to the ledger. The current balance is computed by replaying the
-event stream. The `EventEnvelope` you met in Chapter 8 became the unit
-of storage, and snapshots kept replay times bounded.
+**Chapter 9** replaced the mutable aggregate-plus-read-model approach with event sourcing. Every financial movement is an immutable event appended to the ledger. The current balance is computed by replaying the event stream. `EventEnvelope` became the unit of storage, and snapshots kept replay times bounded.
 
-**This chapter** crossed the network boundary. `MessageBrokerPort` is the
-single abstraction that stands in front of Kafka, RabbitMQ, or the
-in-memory broker. Swapping adapters is a configuration change — no
-business code changes. `@message_listener` gives you declarative,
-zero-boilerplate subscriptions on both standalone functions and `@service`
-methods. The `retries` and `dead_letter_topic` parameters handle poisoned
-messages without any manual try/except scaffolding. You encoded payloads
-as JSON bytes, with Avro and Protobuf available when schema enforcement or
-binary efficiency matters more than simplicity. `@retry` and
-`@circuit_breaker` protect the publish path from transient and sustained
-broker failures.
+**This chapter** crossed the network boundary. `MessageBrokerPort` is the single abstraction in front of Kafka, RabbitMQ, or the in-memory broker. Swapping adapters is a configuration change — no business code changes. `@message_listener` gives declarative, zero-boilerplate subscriptions on both standalone functions and `@service` methods. The `retries` and `dead_letter_topic` parameters handle poisoned messages without manual try/except scaffolding. Payloads were encoded as JSON bytes, with Avro and Protobuf available when schema enforcement or binary efficiency matters more than simplicity. `@retry` and `@circuit_breaker` protect the publish path from transient and sustained broker failures.
 
 The domain events flowing through all three chapters are:
 
@@ -1096,17 +819,11 @@ class name — `"FundsDeposited"` — never a dotted path.
 
 Three principles carry forward into Part IV:
 
-- **Depend on the port, not the adapter.** `MessageBrokerPort` is
-  injected; `KafkaAdapter` is a configuration detail.
-- **Design consumers for idempotency.** Brokers deliver *at least once*.
-  Guard against duplicate processing with a stable message identifier.
-- **Capture events atomically.** The transactional outbox ensures that an
-  event is never lost even if the broker is unavailable at write time.
+- **Depend on the port, not the adapter.** `MessageBrokerPort` is injected; `KafkaAdapter` is a configuration detail.
+- **Design consumers for idempotency.** Brokers deliver *at least once*. Guard against duplicate processing with a stable message identifier.
+- **Capture events atomically.** The transactional outbox ensures an event is never lost even when the broker is unavailable at write time.
 
-Part IV introduces the `PaymentsService` and `NotificationsService`. Both
-services subscribe to `wallet.events`. The adapter and configuration
-choices you made in this chapter are all they need to start receiving
-Lumen's facts the moment they connect.
+Part IV introduces the `PaymentsService` and `NotificationsService`. Both subscribe to `wallet.events`. The adapter and configuration choices made in this chapter are all they need to start receiving Lumen's facts the moment they connect.
 
 ---
 

@@ -4,15 +4,15 @@
 
 ::: figure art/openers/ch05.svg | &nbsp;
 
-Lumen has a wallet API that works — but every wallet disappears the moment you restart the process. The `InMemoryWalletRepository` you met in Chapter 2 was the right design for getting something running quickly: it let the command handlers depend on a clean **port**, not an implementation, so you could focus on wiring and HTTP before thinking about databases.
+Lumen has a wallet API that works — but every wallet disappears the moment you restart the process. The `InMemoryWalletRepository` you met in Chapter 2 was the right design for getting something running quickly: it let the command handlers depend on a clean **port**, not an implementation, so you could focus on wiring and HTTP before worrying about databases.
 
-That investment pays off now. The port is the contract, and the contract has not changed — so adding a second adapter that persists to SQLite is purely additive. This chapter shows exactly how Lumen does it. You will read the real port definition, the in-memory adapter that ships as the default, the SQLAlchemy/SQLite adapter as a swappable alternative, and the framework configuration that ties everything together. The command handlers from Chapters 2–4 stay exactly as they are.
+That investment pays off now. The port is the contract, and the contract has not changed — so adding a second adapter that persists to SQLite is purely additive. This chapter walks through exactly how Lumen does it: the real port definition, the in-memory adapter that ships as the default, the SQLAlchemy/SQLite adapter as a swappable alternative, and the framework configuration that ties everything together. The command handlers from Chapters 2–4 stay exactly as they are.
 
 ---
 
 ## Ports and adapters: the hexagonal approach
 
-PyFly's DI container binds types by their Python Protocol ports. Every injectable dependency has a **port** (a `@runtime_checkable` Protocol) and one or more **adapters** (concrete classes that explicitly inherit the port). The container scans for adapters at startup, resolves port-typed constructor parameters to the matching adapter, and never exposes the concrete type to the caller.
+PyFly's DI container binds types by their Python Protocol **ports**. Every injectable dependency has a **port** — a `@runtime_checkable` Protocol — and one or more **adapters** — concrete classes that explicitly inherit the port. The container scans for adapters at startup, resolves port-typed constructor parameters to the matching adapter, and never exposes the concrete type to the caller.
 
 For the wallet repository that design looks like this:
 
@@ -24,7 +24,7 @@ The key rule is that **a `@repository` adapter must explicitly inherit its Proto
 
 ## The repository port
 
-The port is a `@runtime_checkable` Protocol that describes the four operations the core needs:
+The port describes the four operations the core needs — nothing more. Because it is a `@runtime_checkable` Protocol, PyFly's container can verify adapter satisfaction at startup using `isinstance` without requiring any framework base class.
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.1 — WalletRepository: the hexagonal port
 from __future__ import annotations
@@ -45,15 +45,13 @@ class WalletRepository(Protocol):
     async def next_id(self) -> str: ...
 :::
 
-Four async methods — nothing more. No SQLAlchemy, no session, no import from `pyfly.data`. A command handler that receives a `WalletRepository` can call `add`, `find`, `remove`, and `next_id` without knowing whether it is talking to a dict or a database. That boundary is worth preserving: swap the adapter and nothing in the core changes.
-
-`@runtime_checkable` makes the Protocol usable with `isinstance` checks at runtime, which is what PyFly's container uses to verify that an adapter truly satisfies the port before registering the binding.
+Four async methods — nothing more. No SQLAlchemy, no session, no import from `pyfly.data`. A command handler that receives a `WalletRepository` can call `add`, `find`, `remove`, and `next_id` without knowing whether it talks to a dict or a database. That boundary is worth preserving: swap the adapter and nothing in the core changes.
 
 ---
 
 ## The in-memory adapter
 
-The first adapter is a concurrent dictionary that lives in RAM. It is marked `@primary` so the application boots on it by default — no database required:
+Before reaching for a database, consider how far a simple dictionary can take you. The in-memory adapter gives every command handler a fully functional repository without any infrastructure — ideal for local development and fast unit tests. It is marked `@primary` so the application boots on it by default:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.2 — InMemoryWalletRepository: the default @primary adapter
 @primary
@@ -89,7 +87,7 @@ class InMemoryWalletRepository(WalletRepository):
         return f"wlt-{uuid.uuid4()}"
 :::
 
-Three things to notice. First, `InMemoryWalletRepository` **explicitly inherits `WalletRepository`** — that single `(WalletRepository)` in the class signature is what tells the container to bind this adapter to the port. Drop it and the container has no binding, the handlers fail at startup. Second, `@primary` wins over any other adapter registered against the same port. Third, the `asyncio.Lock` makes concurrent `add` and `remove` calls safe — important even in the in-memory case because ASGI servers handle requests concurrently.
+Three things are worth noticing. First, `InMemoryWalletRepository` **explicitly inherits `WalletRepository`** — that single `(WalletRepository)` in the class signature is what tells the container to bind this adapter to the port. Drop it and the container has no binding; handlers fail at startup. Second, `@primary` beats any other adapter registered against the same port. Third, the `asyncio.Lock` keeps concurrent `add` and `remove` calls safe — important even in the in-memory case, because ASGI servers handle requests concurrently.
 
 !!! tip "Port-first, adapter-later"
     Starting with an in-memory adapter is the recommended PyFly workflow. Write the port, wire the handlers against the port, and build the full feature. When you need real persistence, add the SQL adapter as a second concrete class — no handler changes required.
@@ -98,7 +96,7 @@ Three things to notice. First, `InMemoryWalletRepository` **explicitly inherits 
 
 ## The SQLAlchemy/SQLite adapter
 
-The second adapter persists wallets to a relational database through PyFly's SQLAlchemy data layer. It consists of two parts: a **row class** that maps the aggregate to a table, and a **repository class** that implements the port by reading and writing those rows.
+The second adapter persists wallets to a relational database through PyFly's SQLAlchemy data layer. It has two parts: a **row class** that maps the aggregate to a table, and a **repository class** that implements the port by reading and writing those rows. Neither part appears in the core — handlers stay blissfully ignorant of both.
 
 ### The persistence row
 
@@ -143,15 +141,15 @@ class WalletRow(Base):
     )
 :::
 
-`WalletRow` inherits `Base` — **not** `BaseEntity`. `Base` is PyFly's declarative base for domain-owned tables; it leaves the primary key entirely up to you. Here the PK is the aggregate's string id (`wlt-…`), which keeps the row and the object in natural sync. `BaseEntity` forces a UUID primary key plus audit columns — useful in some services, wrong here because the `Wallet` aggregate owns its own id.
+`WalletRow` inherits `Base` — **not** `BaseEntity`. `Base` is PyFly's declarative base for domain-owned tables; it leaves the primary key entirely up to you. Here the PK is the aggregate's string id (`wlt-…`), which keeps the row and the object in natural sync. `BaseEntity` forces a UUID primary key plus audit columns — useful in some services, but wrong here because the `Wallet` aggregate owns its own id.
 
-The `Mapped[T]` / `mapped_column` syntax is SQLAlchemy 2.0 style: the type annotation drives both the Python attribute type and the generated DDL column type, so there is a single source of truth.
+The `Mapped[T]` / `mapped_column` syntax is SQLAlchemy 2.0 style: the type annotation drives both the Python attribute type and the generated DDL column type, giving a single source of truth for each column.
 
-Amounts are stored as `balance_minor` — integer minor units (cents). Floating-point columns lose precision over millions of transactions; integer arithmetic is exact. A `Money(2500, Currency.USD)` value is stored as `2500` and means $25.00.
+Amounts live in `balance_minor` — integer minor units (cents). Floating-point columns lose precision over millions of transactions; integer arithmetic is exact. `Money(2500, Currency.USD)` stores as `2500` and means $25.00.
 
 ### The repository adapter
 
-The adapter explicitly inherits the port and takes an `AsyncSession` in its constructor:
+With the row type in place, the repository adapter can do the real work. It explicitly inherits the port and receives an `AsyncSession` from the DI container — no manual wiring required:
 
 ::: listing lumen/models/repositories/sql_wallet_repository.py | Listing 5.4 — SqlAlchemyWalletRepository: the relational adapter
 @repository
@@ -224,9 +222,9 @@ class SqlAlchemyWalletRepository(WalletRepository):
         return list(result.scalars().all())
 :::
 
-Walk through `add`. It calls `session.get` to check whether the row already exists. If not, it constructs a fresh `WalletRow` and hands it to the session with `session.add`. If the row is there, it updates the mutable columns in-place. Either way, `await session.commit()` flushes the change to the database. The `find` path runs the reverse mapping through `_to_aggregate`, reconstructing a fully functional `Wallet` aggregate from the stored columns.
+`add` works as an upsert: it calls `session.get` to check whether the row already exists. If not, it constructs a fresh `WalletRow` and hands it to the session with `session.add`. If the row is there, it updates the mutable columns in place. Either way, `await session.commit()` flushes the change to the database. `find` runs the reverse journey through `_to_aggregate`, reconstructing a fully functional `Wallet` aggregate from the stored columns.
 
-Notice that `SqlAlchemyWalletRepository` is not marked `@primary`. Both adapters satisfy the same `WalletRepository` port, but `InMemoryWalletRepository` wins the default binding because it carries `@primary`. The SQL adapter is registered and resolvable; it just does not win the default race. To make the SQL adapter the boot default, move `@primary` from the in-memory class to this one.
+Notice that `SqlAlchemyWalletRepository` is not marked `@primary`. Both adapters satisfy the same `WalletRepository` port, but `InMemoryWalletRepository` wins the default binding because it carries `@primary`. The SQL adapter is registered and resolvable; it simply does not win the default race. To make it the boot default, move `@primary` from the in-memory class to this one.
 
 !!! spring "Spring parity"
     This two-adapter design maps directly to Spring Data JPA's port/implementation split. The `WalletRepository` Protocol is the equivalent of a `JpaRepository<Wallet, String>` interface; `InMemoryWalletRepository` is the test-double / fake; `SqlAlchemyWalletRepository` is the JPA implementation. `@primary` maps to `@Primary` in Spring — exactly the same semantics: mark one bean to win when multiple beans satisfy the same dependency.
@@ -235,9 +233,9 @@ Notice that `SqlAlchemyWalletRepository` is not marked `@primary`. Both adapters
 
 ## Rehydration: aggregate from row
 
-The `_to_aggregate` mapping deserves a closer look. The `Wallet` aggregate enforces invariants — `balance >= 0`, currency consistency — through its constructor and methods. Those checks must not re-fire when loading an already-valid wallet from the database: the database row reflects a state the aggregate already accepted.
+Loading a wallet from the database is not the same as creating a new one. The `Wallet` aggregate enforces invariants — `balance >= 0`, currency consistency — through its factory and behaviour methods. Those checks must not re-fire when rehydrating a row that already represents a valid, committed state.
 
-PyFly's standard approach is to call the aggregate's constructor directly rather than going through the factory method (`Wallet.open`). The constructor sets fields without raising domain events or checking business rules beyond basic type safety. The factory method `Wallet.open` is for *new* wallets; the constructor is for rehydration:
+PyFly's convention is to call the aggregate's constructor directly rather than the factory method (`Wallet.open`). The constructor sets fields without raising domain events or re-applying business rules. The factory `Wallet.open` is for *new* wallets; the constructor is for rehydration:
 
 ```python
 return Wallet(
@@ -248,13 +246,13 @@ return Wallet(
 )
 ```
 
-The resulting `Wallet` is indistinguishable from one that was just created in memory — same `balance`, same `currency`, same `owner_id` — but no `WalletOpened` event was raised, because opening already happened in the past.
+The resulting `Wallet` is indistinguishable from one freshly created in memory — same `balance`, same `currency`, same `owner_id` — but no `WalletOpened` event was raised, because the wallet was opened in the past.
 
 ---
 
 ## Enabling the relational stack
 
-Two configuration changes activate the SQLAlchemy adapter.
+Two configuration changes are all it takes to activate the SQLAlchemy adapter: declare the extra dependency and add a block to `pyfly.yaml`.
 
 ### pyproject.toml — add the data-relational extra
 
@@ -268,7 +266,7 @@ dependencies = [
 ]
 :::
 
-`pyfly[data-relational]` pulls in `sqlalchemy[asyncio]` and `aiosqlite`. Those two packages are the entire dependency footprint for SQLite persistence — no database server, no separate driver install. The lumen sample runs with zero external infrastructure for exactly this reason.
+`pyfly[data-relational]` pulls in `sqlalchemy[asyncio]` and `aiosqlite`. Those two packages are the entire dependency footprint for SQLite persistence — no database server, no separate driver install. That is why the Lumen sample runs with zero external infrastructure.
 
 ### pyfly.yaml — configure the relational layer
 
@@ -281,12 +279,12 @@ pyfly:
       ddl-auto: create
 :::
 
-`enabled: true` activates PyFly's `EngineLifecycle` bean, which builds the async SQLAlchemy engine and session factory on startup. `url` is the standard SQLAlchemy connection string — SQLite with aiosqlite for development, a PostgreSQL URL (`postgresql+asyncpg://…`) for production. `ddl-auto: create` tells the framework to call `Base.metadata.create_all` on startup, creating any missing tables automatically. The `WalletRow` table is discovered because `WalletRow` inherits `Base` — no further registration needed.
+`enabled: true` activates PyFly's `EngineLifecycle` bean, which builds the async SQLAlchemy engine and session factory at startup. `url` is the standard SQLAlchemy connection string — SQLite with aiosqlite for development, `postgresql+asyncpg://…` for production. `ddl-auto: create` calls `Base.metadata.create_all` on startup, creating any missing tables. The `WalletRow` table is discovered automatically because `WalletRow` inherits `Base` — no further registration required.
 
 !!! tip "Schema lifecycle"
     `ddl-auto: create` is appropriate for development and for sample applications like Lumen. It creates the schema if it does not exist and leaves existing tables untouched. For production services you would set `ddl-auto: none` and manage the schema with a migration tool such as Alembic, which generates versioned scripts from the difference between `Base.metadata` and the live schema.
 
-The full `pyfly.yaml` for Lumen also configures CQRS, EDA, event sourcing, and observability — the relational block is only one section among several. Here is the complete file for reference:
+Lumen's full `pyfly.yaml` also configures CQRS, EDA, event sourcing, and observability — the relational block is just one section among several. Here is the complete file for reference:
 
 ::: listing pyfly.yaml | Listing 5.7 — Complete pyfly.yaml for the Lumen sample
 pyfly:
@@ -325,14 +323,14 @@ pyfly:
 
 ## Two adapters, one port: what the container does
 
-When the application starts, PyFly's container scans all packages declared in `pyfly.yaml`. It finds two classes annotated with `@repository` that both inherit `WalletRepository`:
+It is worth pausing to see what PyFly's container does with two adapters behind a single port. At startup it scans all packages declared in `pyfly.yaml` and finds two `@repository`-annotated classes that both inherit `WalletRepository`:
 
 1. `InMemoryWalletRepository(WalletRepository)` — marked `@primary`
 2. `SqlAlchemyWalletRepository(WalletRepository)` — not marked `@primary`
 
-Both are registered. When a command handler requests a `WalletRepository` in its constructor, the container resolves the `@primary` adapter — `InMemoryWalletRepository` — because there are two candidates and primary wins ties. The `SqlAlchemyWalletRepository` is registered and available by name or type for explicit resolution; it simply does not win the default binding.
+Both are registered. When a command handler requests a `WalletRepository`, the container resolves the `@primary` adapter — `InMemoryWalletRepository` — because there are two candidates and primary wins. `SqlAlchemyWalletRepository` remains registered and resolvable by name or type; it simply does not win the default.
 
-The command handlers never change. `OpenWalletHandler`, `DepositFundsHandler`, `WithdrawFundsHandler` all receive a `WalletRepository` in their constructors:
+The command handlers never change. `OpenWalletHandler`, `DepositFundsHandler`, and `WithdrawFundsHandler` all receive a `WalletRepository` in their constructors:
 
 ```python
 class OpenWalletHandler(CommandHandler[OpenWallet, str]):
@@ -344,13 +342,13 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         self._events = events
 ```
 
-That single `WalletRepository` annotation is the entire persistence contract from the handler's perspective. Whether it resolves to a dictionary or a database file is decided at startup by `@primary` — not by the handler.
+That single `WalletRepository` annotation is the entire persistence contract from the handler's perspective. Whether it resolves to a dictionary or a database file is a startup decision made by `@primary` — not by the handler.
 
 ---
 
 ## Testing the SQL adapter directly
 
-Because the SQL adapter satisfies the same port, you can test it in isolation without starting the full application. The test creates a temporary SQLite database, builds `Base.metadata`, and exercises the adapter's full lifecycle:
+Because the SQL adapter satisfies the same port, you can exercise it in complete isolation — no application context, no HTTP layer. The test spins up a temporary SQLite database, creates the schema via `Base.metadata`, and drives the adapter through its full lifecycle:
 
 ::: listing lumen/tests/test_sql_wallet_repository.py | Listing 5.8 — SQLite adapter test: open, deposit, withdraw, prove persistence
 from __future__ import annotations
@@ -442,9 +440,9 @@ async def test_full_flow_persists_through_sqlite_adapter(
         await fresh_engine.dispose()
 :::
 
-The test proves two things. Within the first session it exercises the full lifecycle — open, deposit, withdraw, read back — verifying that `add` behaves as an upsert and that `find` returns a properly rehydrated aggregate with the expected balance. Then it opens a completely independent engine with a fresh session and loads the same wallet again. If the data survived the reconnect, the adapter is actually writing to disk and the rehydration logic is correct.
+The test proves two things. Within the first session it drives the full lifecycle — open, deposit, withdraw, read back — confirming that `add` behaves as an upsert and that `find` returns a properly rehydrated aggregate. Then it opens a completely independent engine with a fresh session and loads the same wallet again. If the data survives the reconnect, the adapter genuinely writes to disk and the rehydration logic is correct.
 
-The fixture mirrors exactly what PyFly's `EngineLifecycle` does at application startup: it creates the engine, runs `Base.metadata.create_all` inside a `begin()` context (so the DDL is committed), and hands back a session factory. Your tests therefore exercise the same table structure the application creates in production.
+The fixture mirrors exactly what PyFly's `EngineLifecycle` does at startup: it creates the engine, runs `Base.metadata.create_all` inside a `begin()` context (so the DDL is committed), and hands back a session factory. Your tests therefore exercise the same table structure the application creates in production.
 
 !!! spring "Spring parity"
     `Base.metadata.create_all` is the Python equivalent of `spring.jpa.hibernate.ddl-auto=create`. The test fixture pattern — build a real in-process database and test the repository directly — maps to Spring's `@DataJpaTest` slice, which spins up an H2 in-memory database and the JPA layer in isolation. Both approaches verify the adapter without starting the full application context.
@@ -453,9 +451,13 @@ The fixture mirrors exactly what PyFly's `EngineLifecycle` does at application s
 
 ## What you built {.recap}
 
-Lumen now has two repository adapters behind a single port.
+Lumen now has two repository adapters behind a single port:
 
-The port (`WalletRepository`) is a `@runtime_checkable` Protocol — four async method signatures, nothing else. The first adapter (`InMemoryWalletRepository`) is a concurrent dictionary, marked `@primary` so the application boots on it with zero external infrastructure. The second adapter (`SqlAlchemyWalletRepository`) maps the `Wallet` aggregate onto a `WalletRow(Base)` table using SQLAlchemy 2.0 `Mapped`/`mapped_column` syntax, stores amounts as integer minor units, and commits after every write. Both adapters explicitly inherit `WalletRepository` — the registration contract that lets the container bind them to the port. `ddl-auto: create` in `pyfly.yaml` tells the framework to create the schema from `Base.metadata` on startup; no migration tool is needed for a sample that starts fresh.
+- **Port** — `WalletRepository`, a `@runtime_checkable` Protocol with four async method signatures and no infrastructure imports.
+- **In-memory adapter** — `InMemoryWalletRepository`, a concurrent dictionary marked `@primary` so the application boots with zero external infrastructure.
+- **SQL adapter** — `SqlAlchemyWalletRepository`, which maps the `Wallet` aggregate onto a `WalletRow(Base)` table using SQLAlchemy 2.0 `Mapped`/`mapped_column` syntax, stores amounts as integer minor units, and commits after every write.
+
+Both adapters explicitly inherit `WalletRepository` — the registration contract the container requires. `ddl-auto: create` in `pyfly.yaml` builds the schema from `Base.metadata` on startup; no migration tool is needed for a sample that starts fresh.
 
 The command handlers never changed. That is the hexagonal payoff.
 

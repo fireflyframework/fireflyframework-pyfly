@@ -4,24 +4,11 @@
 
 ::: figure art/openers/ch18.svg | &nbsp;
 
-Lumen is no longer a toy. Over the past seventeen chapters you built
-a wallet service from a single annotated class to a full event-driven
-microservice with CQRS, sagas, EDA, HTTP clients, caching,
-resilience, observability, security, and a test suite backed by
-real containers. You know how to run it, debug it, and deploy it.
+Lumen is no longer a toy. Over the past seventeen chapters you built a wallet service from a single annotated class to a full event-driven microservice — CQRS, sagas, EDA, HTTP clients, caching, resilience, observability, security, and a test suite backed by real containers. You know how to run it, debug it, and deploy it.
 
-This final chapter is about the space between "it works on my
-laptop" and "it runs reliably for real users." That space has three
-concerns. First: extensibility — the ability to add behaviour without
-forking the framework. Second: the missing features your domain
-might need right now (a rules engine, centralised config, multiple
-languages, live updates, a CLI). Third: the operational habits that
-separate a weekend project from a production service.
+This final chapter is about the distance between "it works on my laptop" and "it runs reliably for real users." That distance has three dimensions. First: **extensibility** — the ability to add behaviour without forking the framework. Second: the features your domain may need right now — a rules engine, centralised config, multiple languages, real-time push, a CLI. Third: the operational habits that separate a weekend project from a production service.
 
-You will move quickly. Every section picks one topic, shows the
-minimal working API, and connects it to Lumen. By the end you will
-have a complete picture of the PyFly ecosystem and a production
-checklist you can tape to your monitor.
+You will move quickly. Every section picks one topic, shows the minimal working API, and connects it to Lumen. By the end you will have a complete picture of the PyFly ecosystem and a production checklist worth keeping close.
 
 ---
 
@@ -29,15 +16,9 @@ checklist you can tape to your monitor.
 
 ### Why a plugin system?
 
-The core framework is intentionally small. Features that are optional
-— formatters, audit sinks, notification channels — should be
-pluggable so that teams can compose only what they need and ship their
-own additions without touching framework internals.
+The core framework is intentionally small. Optional features — formatters, audit sinks, notification channels — should be pluggable so teams can compose only what they need and ship additions without touching framework internals.
 
-PyFly's `pyfly.plugins` module mirrors Spring's plugin registry: you
-declare an **extension point** (a named slot), **extensions**
-(concrete contributions), and bundle them into a **plugin** with a
-lifecycle.
+PyFly's `pyfly.plugins` module mirrors Spring's plugin registry: you declare an **extension point** (a named slot), **extensions** (concrete contributions), and bundle them into a **plugin** with a lifecycle.
 
 ::: listing lumen/plugins/audit.py | Listing 18.1 — Declaring an audit-sink plugin
 from pyfly.plugins import (
@@ -72,17 +53,7 @@ class ConsoleAuditPlugin:
         print("ConsoleAuditPlugin stopped")
 :::
 
-**How it works.**
-
-1. `@extension_point(id="audit-sinks")` registers a named slot and
-   declares the interface type every contribution must implement.
-2. `@plugin(id="console-audit", version="1.0.0")` declares a
-   plugin class with a mandatory `id` and `version`.
-3. `@extension(point="audit-sinks", priority=10)` marks an inner
-   class as a contribution to that slot. The inner class must
-   inherit the extension-point interface so the registry can
-   validate it. Higher priority wins first position when you iterate
-   the results.
+**How it works.** `@extension_point(id="audit-sinks")` registers a named slot and declares the interface every contribution must implement. `@plugin(id="console-audit", version="1.0.0")` declares a plugin class with a mandatory `id` and `version`. `@extension(point="audit-sinks", priority=10)` marks an inner class as a contribution to that slot; the inner class must inherit the extension-point interface so the registry can validate it. Higher priority wins first position when iterating results.
 
 Loading and running the plugin:
 
@@ -109,12 +80,7 @@ async def main() -> None:
 asyncio.run(main())
 :::
 
-`PluginManager.add()` inspects the class for nested
-`@extension_point` declarations first, then registers each
-`@extension` contribution. `start_all()` invokes each plugin's
-`init` then `start` hooks in dependency order; `stop_all()` reverses
-the sequence, calling `stop` then `unload`. Circular dependencies
-raise `PluginResolutionError` before any code runs.
+`PluginManager.add()` inspects the class for nested `@extension_point` declarations, then registers each `@extension` contribution. `start_all()` invokes each plugin's `init` then `start` hooks in dependency order; `stop_all()` reverses the sequence, calling `stop` then `unload`. Circular dependencies raise `PluginResolutionError` before any code runs.
 
 | Method | Description |
 |---|---|
@@ -135,16 +101,13 @@ raise `PluginResolutionError` before any code runs.
 
 ## Business rules with the Rule Engine
 
-Most real-world services have logic that belongs to the business, not
-the code: "flag orders over 500,000 cents", "block shipments to
-sanctioned regions", "apply a surcharge after hours." Hard-coding
-those thresholds in Python means a rebuild every time the business
-changes its mind.
+Most real-world services carry logic that belongs to the business, not the code: "flag orders over 500,000 cents", "block shipments to sanctioned regions", "apply a surcharge after hours." Hard-coding those thresholds in Python means a rebuild every time the business changes its mind.
 
-PyFly's `pyfly.rule_engine` gives product owners a YAML dial they
-can turn without touching source code.
+PyFly's `pyfly.rule_engine` gives product owners a YAML dial they can turn without touching source code.
 
 ### Defining rules in YAML
+
+Rules live in a separate YAML file that any team member can review. The evaluator parses this file once at startup — or on each fetch if you hot-reload from a Config Server (see the next section).
 
 ::: listing lumen/rules/transaction_rules.yaml | Listing 18.3 — Fraud and daily-limit rules (amounts in minor units)
 id: transaction-rules
@@ -189,18 +152,14 @@ rules:
         value: true
 :::
 
-Each rule has a `when` condition and a list of `then` actions.
-Amounts in Lumen are always **integer minor units** (cents), so
-`100000` is €1,000.00. Conditions use these operators:
+Each rule has a `when` condition and a list of `then` actions. Amounts are always **integer minor units** (cents), so `100000` is €1,000.00. Conditions use these operators:
 
 | Comparison | Logical |
 |---|---|
 | `eq`, `ne`, `gt`, `ge`, `lt`, `le` | `and`, `or`, `not` |
 | `in`, `not_in`, `regex` | (with `conditions: [...]`) |
 
-Actions are `set` (write a context path), `increment`, or `log`.
-Subclass `RuleEvaluator` and override `_execute_action` to add
-`call`, `calculate`, or any custom verb.
+Actions are `set` (write to a context path), `increment`, or `log`. Subclass `RuleEvaluator` and override `_execute_action` to add `call`, `calculate`, or any custom verb.
 
 ### Evaluating rules in a service
 
@@ -240,14 +199,7 @@ class RiskService:
         return ctx["flags"]
 :::
 
-`RuleSetLoader.from_yaml(text)` parses the YAML into an AST.
-`RuleSetEvaluator.evaluate(ruleset, ctx)` walks every rule in
-priority order, evaluates the `when` clause, and applies matching
-`then` actions — mutating `ctx` in place and returning a
-`list[EvaluationResult]`. The `flags` dict is the authoritative
-output — a downstream handler can reject, queue, or flag the
-transaction based on whatever keys are set. `amount` and
-`daily_total` are in minor units (cents) to match the Lumen domain.
+**How it works.** `RuleSetLoader.from_yaml(text)` parses the YAML into an AST. `RuleSetEvaluator.evaluate(ruleset, ctx)` walks every rule in priority order, evaluates the `when` clause, and applies matching `then` actions — mutating `ctx` in place and returning a `list[EvaluationResult]`. The `flags` dict is the authoritative output: a downstream handler rejects, queues, or flags the transaction based on whatever keys are set. `amount` and `daily_total` are in minor units (cents) to match the Lumen domain.
 
 ::: figure art/figures/18-production.svg | Figure 18.1 — Rule evaluation at the service boundary. YAML rules are parsed once at startup; each transaction passes through the evaluator as a mutable context dict.
 
@@ -260,10 +212,7 @@ transaction based on whatever keys are set. `amount` and
 
 ## Centralised config (Config Server)
 
-As Lumen grows to multiple services, each one carries its own copy
-of database URLs, timeouts, and feature flags. The Config Server
-module removes that duplication: one service owns the truth;
-everyone else fetches on startup.
+As Lumen grows to multiple services, each carries its own copy of database URLs, timeouts, and feature flags. The Config Server module removes that duplication: one service owns the truth; every other service fetches on startup.
 
 ### Running the server
 
@@ -277,8 +226,7 @@ pyfly:
       root: /etc/lumen/config
 ```
 
-That is all. PyFly auto-configures a `ConfigServer` backed by a
-`FilesystemConfigBackend` and mounts HTTP routes automatically:
+That is all. PyFly auto-configures a `ConfigServer` backed by a `FilesystemConfigBackend` and mounts the HTTP routes automatically:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -287,10 +235,9 @@ That is all. PyFly auto-configures a `ConfigServer` backed by a
 | `POST` | `/{app}/{profile}` | Save a config bundle |
 | `GET` | `/_list` | List all stored bundles |
 
-The response shape is Spring-Cloud-Config-compatible, so an existing
-Spring service can consume the same endpoint without changes.
+The response shape is Spring Cloud Config-compatible, so an existing Spring service can consume the same endpoint without changes.
 
-### Saving and fetching programmatically
+### Saving and fetching config programmatically
 
 ::: listing lumen/config/seed.py | Listing 18.5 — Seeding and reading a config bundle
 import asyncio
@@ -319,7 +266,7 @@ async def seed() -> None:
 asyncio.run(seed())
 :::
 
-Client services bootstrap with:
+Client services fetch on startup with:
 
 ::: listing lumen/config/bootstrap.py | Listing 18.6 — Fetching remote config at startup
 from pyfly.config_server import ConfigClient
@@ -335,14 +282,7 @@ async def load_remote() -> dict:
     return await client.fetch()
 :::
 
-`ConfigClient.fetch()` GETs
-`{url}/{application}/{profile}/{label}`, merges the
-`propertySources` array (highest priority first), and returns a flat
-`{dotted_key: value}` dict. In normal operation you never call
-`ConfigClient` directly — set `pyfly.cloud.config.uri` in
-`pyfly.yaml` and `PyFlyApplication` calls it automatically during
-bootstrap, merging the result into the application `Config` as a
-high-precedence source.
+`ConfigClient.fetch()` GETs `{url}/{application}/{profile}/{label}`, merges the `propertySources` array (highest priority first), and returns a flat `{dotted_key: value}` dict. In normal operation you never call `ConfigClient` directly — set `pyfly.cloud.config.uri` in `pyfly.yaml` and `PyFlyApplication` calls it automatically during bootstrap, merging the result into the application `Config` as a high-precedence source.
 
 !!! note "Fallback priority"
     The server assembles up to four overlay layers:
@@ -355,9 +295,7 @@ high-precedence source.
 
 ## Internationalisation (i18n)
 
-Lumen's error messages and notifications currently live as Python
-string literals. When users speak different languages that approach
-does not scale.
+Lumen's error messages and notifications currently live as Python string literals. When users speak different languages, that approach does not scale.
 
 Enable the i18n subsystem with a single flag:
 
@@ -383,13 +321,9 @@ wallet:
   limit_exceeded: "Se superó el límite diario. El máximo es {0} unidades menores."
 ```
 
-`ResourceBundleMessageSource` resolves keys with dot notation and
-substitutes `{n}` placeholders (zero-based) following
-`MessageFormat` semantics. Missing codes fall back to
-`default-locale`; if they are absent there too, `get_message` raises
-`KeyError`.
+**`ResourceBundleMessageSource`** resolves keys with dot notation and substitutes `{n}` placeholders (zero-based) following `MessageFormat` semantics. Missing codes fall back to `default-locale`; if they are absent there too, `get_message` raises `KeyError`.
 
-### Injecting MessageSource into a service
+### Using MessageSource in a service
 
 ::: listing lumen/i18n/notification_service.py | Listing 18.7 — Locale-aware notification service
 from pyfly.container import service
@@ -423,12 +357,7 @@ class NotificationService:
         )
 :::
 
-`AcceptHeaderLocaleResolver` parses the `Accept-Language` header and
-returns the highest-`q` primary subtag. Override with
-`FixedLocaleResolver` for single-language deployments or tests. Auto-
-configuration registers both when `pyfly.i18n.enabled: true`;
-inject `MessageSource` (the port protocol) or the concrete
-`ResourceBundleMessageSource` — both work.
+`AcceptHeaderLocaleResolver` parses the `Accept-Language` header and returns the highest-`q` primary subtag. Use `FixedLocaleResolver` for single-language deployments or tests. Auto-configuration registers both when `pyfly.i18n.enabled: true`; inject either `MessageSource` (the port protocol) or the concrete `ResourceBundleMessageSource` — both work.
 
 !!! spring "Spring parity"
     `MessageSource`, `ResourceBundleMessageSource`,
@@ -441,9 +370,7 @@ inject `MessageSource` (the port protocol) or the concrete
 
 ## Real-time updates with WebSocket
 
-The Lumen admin dashboard currently polls for balance changes. A
-WebSocket endpoint eliminates the poll: the server pushes an update
-the instant a deposit commits.
+The Lumen admin dashboard currently polls for balance changes. A WebSocket endpoint eliminates the poll — the server pushes an update the instant a deposit commits.
 
 ::: listing lumen/web/balance_ws_controller.py | Listing 18.8 — Live balance feed via WebSocket
 import asyncio
@@ -481,10 +408,7 @@ class BalanceFeedController:
         self._clients.discard(session)
 :::
 
-`@websocket_mapping("/balance/{wallet_id}")` mounts the endpoint at
-`ws://<host>/ws/balance/{wallet_id}`. The full path is the
-controller's `@request_mapping` base (`/ws`) concatenated with the
-decorator's path.
+**How it works.** `@websocket_mapping("/balance/{wallet_id}")` mounts the endpoint at `ws://<host>/ws/balance/{wallet_id}`. The full path is the controller's `@request_mapping` base (`/ws`) concatenated with the decorator's path.
 
 `WebSocketSession` exposes the connection lifecycle:
 
@@ -497,15 +421,9 @@ decorator's path.
 | `await receive_json()` | Block until a JSON message arrives |
 | `await close(code=1000, reason=None)` | Close the connection cleanly |
 
-`session.path_params`, `session.query_params`, and
-`session.headers` expose connection metadata. WebSocket routes are
-auto-discovered alongside HTTP routes — no extra configuration is
-needed.
+`session.path_params`, `session.query_params`, and `session.headers` expose connection metadata. WebSocket routes are auto-discovered alongside HTTP routes — no extra configuration required.
 
-The optional `on_disconnect` method is invoked automatically by the
-registrar after the `@websocket_mapping` handler returns or the
-client closes the connection (but only if the connection was accepted
-first), giving controllers a safe place to release resources.
+The optional `on_disconnect` method is invoked automatically by the registrar after the `@websocket_mapping` handler returns or the client closes the connection (only if the connection was accepted first), giving controllers a safe place to release resources.
 
 !!! tip "Broadcasting"
     Keep a `set[WebSocketSession]` on the controller and fan out
@@ -517,11 +435,7 @@ first), giving controllers a safe place to release resources.
 
 ## Shell commands and startup runners
 
-Not every feature of Lumen lives behind an HTTP endpoint. Database
-seed scripts, one-time data migrations, and scheduled batch jobs are
-better expressed as CLI commands that live inside the same DI
-container — sharing services, configuration, and repositories with
-the main application.
+Not every feature lives behind an HTTP endpoint. Database seed scripts, one-time data migrations, and scheduled batch jobs are better expressed as CLI commands that run inside the same DI container — sharing services, configuration, and repositories with the main application.
 
 ### @shell_component and @shell_method
 
@@ -565,8 +479,7 @@ pyfly:
     enabled: true
 ```
 
-PyFly auto-configures a `ClickShellAdapter` and wires every
-`@shell_method` on startup. The group name becomes a sub-command:
+PyFly auto-configures a `ClickShellAdapter` and wires every `@shell_method` at startup. The group name becomes a sub-command:
 
 ```bash
 python -m lumen wallet deposit w-001 --amount 500
@@ -576,8 +489,7 @@ python -m lumen        # no args → drops into REPL mode
 
 ### CommandLineRunner — one-shot post-startup tasks
 
-For tasks that run once at startup (seeding, warm-up, connection
-checks), implement `CommandLineRunner`:
+For tasks that run once at startup — seeding, warm-up, connection checks — implement **`CommandLineRunner`**:
 
 ::: listing lumen/runners/seed_runner.py | Listing 18.10 — Post-startup database seeder
 from pyfly.container import service
@@ -597,12 +509,7 @@ class SeedRunner(CommandLineRunner):
             print("Default wallet ensured.")
 :::
 
-Any bean whose class implements `async def run(self, args: list[str])
--> None` structurally satisfies the `CommandLineRunner` protocol.
-The framework detects it via `isinstance()` (the protocol is
-`@runtime_checkable`) after `ApplicationReadyEvent` fires and invokes
-it with the raw CLI arguments. Use `@order(n)` to control execution
-order when multiple runners coexist.
+Any bean whose class implements `async def run(self, args: list[str]) -> None` structurally satisfies the `CommandLineRunner` protocol. The framework detects it via `isinstance()` (the protocol is `@runtime_checkable`) after `ApplicationReadyEvent` fires, then invokes it with the raw CLI arguments. Use `@order(n)` to control execution order when multiple runners coexist.
 
 !!! spring "Spring parity"
     `@shell_component`, `@shell_method`, `@shell_option`,
@@ -617,24 +524,15 @@ order when multiple runners coexist.
 
 ## Generating an SDK from the OpenAPI spec
 
-When Lumen exposes an HTTP API, downstream services should call it
-via a generated client — not hand-written `httpx` calls that drift
-out of sync. PyFly builds and serves an OpenAPI 3.1 spec
-automatically at `/openapi.json`.
+When Lumen exposes an HTTP API, downstream services should call it via a generated client — not hand-written `httpx` calls that drift out of sync. PyFly builds and serves an OpenAPI 3.1 spec automatically at `/openapi.json`.
 
-The spec is assembled by `OpenAPIGenerator` from the route metadata
-collected by `ControllerRegistrar`:
+`OpenAPIGenerator` assembles the spec from route metadata collected by `ControllerRegistrar`:
 
-- **Info** — populated from `title`, `version`, and `description`
-  in `create_app()`.
-- **Paths** — one operation per `@get_mapping` / `@post_mapping`
-  etc., with parameters inferred from `PathVar[T]`, `QueryParam[T]`,
-  `Header[T]`, and `Body[BaseModel]` type hints.
-- **Schemas** — Pydantic models registered in `components.schemas`
-  via `model_json_schema()` and referenced with `$ref`.
+- **Info** — populated from `title`, `version`, and `description` passed to `create_app()`.
+- **Paths** — one operation per `@get_mapping` / `@post_mapping` etc., with parameters inferred from `PathVar[T]`, `QueryParam[T]`, `Header[T]`, and `Body[BaseModel]` type hints.
+- **Schemas** — Pydantic models registered in `components.schemas` via `model_json_schema()` and referenced with `$ref`.
 
-With the spec in hand, generate a Python client in one command using
-the [OpenAPI Generator](https://openapi-generator.tech) tool:
+With the spec available, generate a Python client in one command:
 
 ```bash
 # Download the spec from a running instance
@@ -648,9 +546,7 @@ openapi-generator-cli generate \
   --package-name lumen_client
 ```
 
-The generated `lumen_client` package contains typed models and a
-`DefaultApi` with one method per operation. Consumer services add it
-as a dependency and call it without knowing anything about HTTP:
+The generated `lumen_client` package contains typed models and a `DefaultApi` with one method per operation. Consumer services add it as a dependency and call it without knowing anything about HTTP:
 
 ::: listing payment/services/wallet_client.py | Listing 18.11 — Consuming the generated Lumen SDK
 from lumen_client import ApiClient, Configuration, DefaultApi
@@ -681,8 +577,7 @@ class WalletGateway:
 
 ### Packaging with Docker
 
-`pyfly new` generates a `Dockerfile` for every archetype. For a web
-service it looks like this after minor production hardening:
+`pyfly new` generates a `Dockerfile` for every archetype. For a web service it looks like this after production hardening:
 
 ```dockerfile
 FROM python:3.12-slim
@@ -701,15 +596,11 @@ CMD ["pyfly", "run", "--host", "0.0.0.0", \
      "--port", "8080", "--server", "granian", "--workers", "2"]
 ```
 
-Install only the extras your service actually needs — the `full`
-meta-extra pulls in Kafka, RabbitMQ, and MongoDB drivers even when
-you use none of them.
+Install only the extras your service actually uses — the `full` meta-extra pulls in Kafka, RabbitMQ, and MongoDB drivers even when you need none of them.
 
 ### Environment variables and secrets
 
-Never bake secrets into `pyfly.yaml`. PyFly resolves `${ENV_VAR}`
-placeholders anywhere in configuration, so a `pyfly.yaml` fragment
-like:
+Never bake secrets into `pyfly.yaml`. PyFly resolves `${ENV_VAR}` placeholders anywhere in configuration:
 
 ```yaml
 pyfly:
@@ -722,17 +613,11 @@ pyfly:
       secret: ${JWT_SECRET}
 ```
 
-reads the actual values from the container environment at startup.
-In Kubernetes, back those variables with a `Secret`; in Docker
-Compose, use an `.env` file that is never committed. The
-`pyfly doctor` command checks that required tools are present, but
-does not validate secrets — that is your responsibility.
+PyFly reads the actual values from the container environment at startup. In Kubernetes, back those variables with a `Secret`; in Docker Compose, use an `.env` file that is never committed. The `pyfly doctor` command checks that required tools are present but does not validate secrets — that responsibility remains yours.
 
 ### Graceful shutdown
 
-PyFly honours graceful shutdown by default. Set
-`pyfly.server.graceful-timeout` (seconds) to control how long the
-server waits for in-flight requests to complete before forcing exit:
+PyFly honours graceful shutdown by default. Set `pyfly.server.graceful-timeout` (seconds) to control how long the server waits for in-flight requests to complete before forcing exit:
 
 ```yaml
 pyfly:
@@ -740,11 +625,7 @@ pyfly:
     graceful-timeout: 30
 ```
 
-SIGTERM triggers the shutdown sequence: the server stops accepting
-new connections, the `ApplicationContext.stop()` runs
-`@pre_destroy` hooks and `stop_all()` for plugins, and the process
-exits cleanly. In Kubernetes set `terminationGracePeriodSeconds` to
-at least five seconds more than `graceful-timeout`.
+SIGTERM triggers the shutdown sequence: the server stops accepting new connections, `ApplicationContext.stop()` runs `@pre_destroy` hooks and `stop_all()` for plugins, and the process exits cleanly. In Kubernetes set `terminationGracePeriodSeconds` to at least five seconds more than `graceful-timeout`.
 
 ### Server selection
 
@@ -756,16 +637,13 @@ The ASGI server is selected by priority at runtime:
 | 2 | Uvicorn | `web` (default) |
 | 3 | Hypercorn | `hypercorn` |
 
-For production, prefer Granian — it delivers roughly 3× the
-throughput of Uvicorn with native HTTP/2. Pair it with uvloop on
-Linux for an additional 2–4× event-loop speedup:
+For production, prefer Granian — it delivers roughly 3× the throughput of Uvicorn with native HTTP/2. Pair it with uvloop on Linux for an additional 2–4× event-loop speedup:
 
 ```bash
 uv add "pyfly[web-fast]"   # granian + uvloop in one shot
 ```
 
-Force the choice in YAML to avoid surprises on servers where
-multiple servers happen to be installed:
+Pin the choice in YAML to avoid surprises on machines where multiple servers happen to be installed:
 
 ```yaml
 pyfly:
@@ -778,7 +656,7 @@ pyfly:
 
 ### Health endpoints
 
-PyFly exposes Spring-Boot-style actuator endpoints out of the box:
+PyFly exposes Spring Boot-style actuator endpoints out of the box:
 
 | Endpoint | Purpose |
 |---|---|
@@ -787,7 +665,7 @@ PyFly exposes Spring-Boot-style actuator endpoints out of the box:
 | `GET /actuator/health/readiness` | Kubernetes readiness probe |
 | `GET /actuator/metrics` | Prometheus-compatible metrics |
 
-Add them to `pyfly.yaml`:
+Configure them in `pyfly.yaml`:
 
 ```yaml
 pyfly:
@@ -843,95 +721,36 @@ readinessProbe:
 
 ## What you built {.recap}
 
-Seventeen chapters ago you typed `@pyfly_application` and watched
-the DI container wire your first `@service`. Today that same
-container powers a production wallet platform.
+Seventeen chapters ago you typed `@pyfly_application` and watched the DI container wire your first `@service`. Today that same container powers a production wallet platform. Here is what you constructed along the way.
 
-Here is what you constructed along the way.
+**Chapters 1–3** gave you the foundation: a first-class DI container, flexible configuration (YAML, env, profiles, SpEL expressions), and a complete HTTP layer with request mapping, filters, content negotiation, and a JSON serialisation layer you can replace without touching a single controller.
 
-**Chapters 1–3** gave you the foundation: a first-class DI
-container, flexible configuration (YAML, env, profiles, SpEL
-expressions), and a complete HTTP layer with request mapping,
-filters, content negotiation, and a JSON serialization layer you can
-replace without touching a single controller.
+**Chapters 4–6** introduced persistence. You mapped entities with SQLAlchemy, managed schema evolution with Alembic, and structured the domain with DDD tactical patterns — aggregates, value objects, and repositories that keep business logic out of infrastructure.
 
-**Chapters 4–6** introduced persistence. You mapped entities with
-SQLAlchemy, managed schema evolution with Alembic, and structured
-your domain with DDD tactical patterns — aggregates, value objects,
-and repositories that keep business logic out of infrastructure.
+**Chapters 7–9** brought the architecture alive. CQRS split reads from writes at the handler level. EDA let services react to events without polling. Event sourcing made every state change a first-class fact — replayable, auditable, and the foundation for projections.
 
-**Chapters 7–9** brought the architecture alive. CQRS split reads
-from writes at the handler level. EDA let services react to events
-without polling. Event sourcing made every state change a first-class
-fact — replayable, auditable, and the foundation for projections.
+**Chapters 10–12** taught Lumen to leave its own process. Resilient HTTP clients called downstream services without cascading failures. Sagas orchestrated multi-step transactions across service boundaries with automatic compensation when any step went wrong.
 
-**Chapters 10–12** taught Lumen to leave its own process. Resilient
-HTTP clients called downstream services without cascading failures.
-Sagas orchestrated multi-step transactions across service boundaries
-with automatic compensation when any step went wrong.
+**Chapters 13–15** hardened the platform. Caching cut database pressure. Rate limiters, bulkheads, timeouts, and circuit breakers turned every dependency into a controlled blast radius. Distributed tracing, structured logging, and a live admin dashboard gave you eyes inside the system at every layer.
 
-**Chapters 13–15** hardened the platform. Caching cut database
-pressure. Rate limiters, bulkheads, timeouts, and circuit breakers
-turned every dependency into a controlled blast radius. Distributed
-tracing, structured logging, and a live admin dashboard gave you eyes
-inside the system.
+**Chapters 16–17** closed the feedback loop. A structured test suite — unit, integration, and Testcontainers-backed persistence tests — made the platform safe to change. Scheduled tasks, push notifications, webhooks, and callbacks let Lumen reach out to the world on its own schedule.
 
-**Chapters 16–17** closed the feedback loop. A structured test suite
-— unit, integration, and Testcontainers-backed contract tests — made
-the platform safe to change. Scheduled tasks, push notifications,
-webhooks, and callbacks let Lumen reach out to the world on its own
-schedule.
+**Chapter 18** showed you what lies beyond the core: a plugin system for open extension, a YAML rule engine for business-owned logic, a Config Server for fleet-wide configuration, i18n for global audiences, WebSocket for real-time UX, a Shell module for operational tooling, an OpenAPI spec that generates typed client SDKs automatically, and the production habits that keep all of it running.
 
-**Chapter 18** showed you what lies beyond the core: a plugin system
-for open extension, a YAML rule engine for business-owned logic, a
-Config Server for fleet-wide configuration, i18n for global
-audiences, WebSocket for real-time UX, a Shell module for
-operational tooling, an OpenAPI spec that generates typed client SDKs
-for free, and the production habits that keep all of it running.
+PyFly is not magic. Every abstraction in this book has a cost, and you now understand what that cost is: a DI container that starts in milliseconds but requires you to think about bean scopes; an async HTTP server that handles thousands of concurrent connections but requires you to avoid blocking calls; a saga engine that survives partial failures but requires you to write compensating transactions.
 
-PyFly is not magic. Every abstraction in this book has a cost, and
-you now understand what that cost is: a DI container that starts in
-milliseconds but requires you to think about bean scopes; a reactive
-HTTP server that handles thousands of concurrent connections but
-requires you to avoid blocking; a saga engine that survives partial
-failures but requires you to write compensating transactions.
-
-Understanding the cost is what separates a practitioner from a
-copier. You are now a practitioner.
+Understanding the cost is what separates a practitioner from a reader who merely copies patterns. You are now a practitioner.
 
 ---
 
 ## Try it yourself {.exercises}
 
-1. **Add a custom plugin.** Implement an `AuditPlugin` that
-   contributes an extension to an `"audit-sinks"` extension point.
-   The extension class must inherit the `AuditSink` interface and
-   write each event to a file.
-   In a test, use `PluginManager.registry.get("audit-sinks")` to
-   assert that your extension is returned with the expected `name`.
+1. **Add a custom plugin.** Implement an `AuditPlugin` that contributes an extension to an `"audit-sinks"` extension point. The extension class must implement an `AuditSink` interface and write each event to a file. In a test, call `PluginManager.registry.get("audit-sinks")` and assert that your extension is returned with the expected `name`.
 
-2. **Ship a rules change without redeployment.** Store
-   `transaction_rules.yaml` in the Config Server
-   (`pyfly.config-server.enabled: true`). Write a `RiskService`
-   that fetches the YAML from a `ConfigClient` on each call to
-   `assess()` (or caches it with a short TTL). Update the `value`
-   threshold in the YAML through the `POST /{app}/{profile}` route
-   and verify that `assess()` picks up the new threshold without a
-   restart.
+2. **Ship a rules change without redeployment.** Store `transaction_rules.yaml` in the Config Server (`pyfly.config-server.enabled: true`). Write a `RiskService` that fetches the YAML via `ConfigClient` on each call to `assess()` (or caches it with a short TTL). Update the `value` threshold through the `POST /{app}/{profile}` route and verify that `assess()` picks up the new value without restarting the service.
 
-3. **Localise a rejection message.** Add `wallet.limit_exceeded`
-   to `i18n/messages_en.yaml` and `i18n/messages_es.yaml`. Wire a
-   `NotificationService` that reads the locale from the
-   `Accept-Language` header and returns the correct string. Write
-   two tests — one with `Accept-Language: en`, one with
-   `Accept-Language: es` — and assert the correct message is
-   returned for each.
+3. **Localise a rejection message.** Add `wallet.limit_exceeded` to `i18n/messages_en.yaml` and `i18n/messages_es.yaml`. Wire a `NotificationService` that reads the locale from the `Accept-Language` header and returns the correct string. Write two tests — one with `Accept-Language: en`, one with `Accept-Language: es` — and assert each returns the right message.
 
 ---
 
-Lumen is ready for production. For what comes next — new modules,
-community plugins, and release notes — visit the framework
-documentation at
-[github.com/fireflyframework/fireflyframework-pyfly](https://github.com/fireflyframework/fireflyframework-pyfly).
-Every concept in this book lives in that repository; the source is
-the ultimate reference.
+Lumen is ready for production. For what comes next — new modules, community plugins, and release notes — visit the framework documentation at [github.com/fireflyframework/fireflyframework-pyfly](https://github.com/fireflyframework/fireflyframework-pyfly). Every concept in this book lives in that repository; the source is the ultimate reference.

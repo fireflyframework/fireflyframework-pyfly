@@ -5,12 +5,11 @@
 ::: figure art/openers/ch02.svg | &nbsp;
 
 In the previous chapter you gave Lumen its application entry point
-and watched the container start with zero beans. Now you will declare
-Lumen's first real components — a `WalletRepository` port with an
-in-memory implementation, and a CQRS handler that depends on both the
-repository and an event publisher — and let PyFly wire them together
-from nothing but type hints. No factories, no manual `new`, no glue
-code.
+and watched the container start. Now you will declare Lumen's first
+real components — a `WalletRepository` **port** with an in-memory
+implementation, and a CQRS handler that depends on both the repository
+and an event publisher — and let PyFly wire them together from nothing
+but type hints. No factories, no manual `new`, no glue code.
 
 Before a single line of Lumen code appears, it is worth pausing on
 *why* that matters. In a conventional Python project you would write
@@ -24,25 +23,25 @@ handler = DepositFundsHandler(
 ```
 
 somewhere near the startup path. That one line seems harmless, but it
-makes every decision — which repository class, which event bus —
-permanent at the point where the objects are created. Swap the
-repository for a Postgres adapter and you have to find every
-construction site. Add a test double and you need to restructure the
-wiring. Dependency injection inverts this relationship: classes
-*declare* what they need, and the container *decides* what to provide.
-The result is code that is open to extension but closed to modification
-— the `DepositFundsHandler` you write today will accept a production
-database adapter in Part II without a single change to its source.
+locks every decision — which repository class, which event bus — at the
+point of construction. Swap the repository for a Postgres adapter and
+you must find every construction site. Add a test double and you need
+to restructure the wiring. **Dependency injection** inverts this
+relationship: classes *declare* what they need, and the container
+*decides* what to provide. The result is code that is open to extension
+but closed to modification — the `DepositFundsHandler` you write today
+will accept a production database adapter in Part II without a single
+change to its source.
 
 ---
 
 ## Stereotypes: declaring your beans
 
-A **bean** is any object that the container creates, wires, and
-manages. The container cannot manage what it does not know about, so
-your first task is to make your classes visible to it. You do that by
-applying a **stereotype decorator** — a thin annotation that registers
-the class with the container and signals its architectural role.
+Before the container can wire anything, it needs to know which classes
+to manage. A **bean** is any object the container creates, wires, and
+owns. You make a class visible to the container by applying a
+**stereotype decorator** — a thin annotation that registers the class
+and signals its architectural role.
 
 PyFly ships five stereotypes:
 
@@ -54,15 +53,15 @@ PyFly ships five stereotypes:
 | `@configuration` | Configuration class that can contain `@bean` factory methods. |
 | `@rest_controller` | HTTP layer: handles requests and returns JSON responses. |
 
-Semantics aside, all five stereotypes are **container-equivalent**.
-They are all produced by the same internal `_make_stereotype()` factory,
-and they all accept the same optional keyword arguments (`name`, `scope`,
-`profile`, `condition`). The only meaningful differences are the
-`__pyfly_stereotype__` label — used by the web layer to find controllers
-and by the context to find `@configuration` classes — and the
-architectural clarity they bring to readers of your code. Choosing
-`@repository` over `@component` costs nothing technically, but it tells
-every future reader exactly what the class is for.
+All five stereotypes are **container-equivalent**: they share the same
+internal `_make_stereotype()` factory and accept the same optional
+keyword arguments (`name`, `scope`, `profile`, `condition`). The
+meaningful differences are the `__pyfly_stereotype__` label — used by
+the web layer to discover controllers and by the context to find
+`@configuration` classes — and the architectural clarity each name
+brings to readers of your code. Choosing `@repository` over `@component`
+costs nothing technically but tells every future reader exactly what
+the class is for.
 
 Both bare and parenthesised forms work:
 
@@ -78,8 +77,8 @@ class NamedService:
 
 ### The scan_packages bootstrap
 
-The container only discovers beans that live in packages it is told
-to scan. In `lumen/app.py`, `@pyfly_application` lists every subpackage
+The container only discovers beans in packages it has been told to
+scan. In `lumen/app.py`, `@pyfly_application` lists every subpackage
 the container should introspect for stereotype declarations:
 
 ::: listing lumen/app.py | Listing 2.1 — Application entry point with scan_packages
@@ -109,12 +108,12 @@ class LumenApplication:
 **How it works.** `@pyfly_application` registers `LumenApplication` as
 the application root and seeds the container with framework
 auto-configurations. `scan_packages` is the exact list of Python
-package paths the container will walk at startup, collecting every
-class decorated with a stereotype. Packages not listed here are
-invisible to the container — a common source of "why is my bean not
-found?" questions when adding new subpackages. `@enable_domain_stack`
+package paths the container walks at startup, collecting every class
+decorated with a stereotype. Any package not listed here is invisible
+to the container — the most common source of "why is my bean not
+found?" confusion when adding new subpackages. `@enable_domain_stack`
 activates the CQRS, transactional engine, event sourcing, relational
-data, and rule-engine auto-configurations as a single line.
+data, and rule-engine auto-configurations in a single line.
 
 !!! spring "Spring parity"
     `scan_packages` is the equivalent of Spring's
@@ -124,8 +123,9 @@ data, and rule-engine auto-configurations as a single line.
 
 ### The repository port and its adapter
 
-For Lumen, the first beans to declare are the `WalletRepository` port
-and its in-memory implementation:
+Hexagonal architecture separates the *what* (a port) from the *how*
+(an adapter). For Lumen, the first beans to declare are the
+`WalletRepository` port and its in-memory adapter:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 2.2 — The repository port and its in-memory adapter
 from __future__ import annotations
@@ -185,22 +185,22 @@ class InMemoryWalletRepository(WalletRepository):
 
 **How it works.** `WalletRepository` is a plain Python `Protocol` —
 not a PyFly construct. Marking it `@runtime_checkable` lets the
-container verify at registration time that an implementation actually
-satisfies the interface, rather than discovering the mismatch at the
-first method call.
+container verify at registration time that an implementation satisfies
+the interface, rather than discovering the mismatch only at the first
+method call.
 
-The implementation, `InMemoryWalletRepository`, carries two
-decorators: `@repository` tells the container to manage it, and
-`@primary` tells it to prefer this class when more than one
-implementation of `WalletRepository` is registered.
+`InMemoryWalletRepository` carries two decorators. `@repository` tells
+the container to manage the class; `@primary` tells it to prefer this
+class when more than one implementation of `WalletRepository` is
+registered.
 
-There is one critical rule here: **the adapter must explicitly
-inherit the port** (`class InMemoryWalletRepository(WalletRepository):`).
-The container uses `isinstance()` checks against `@runtime_checkable`
-Protocols to discover which beans satisfy a given type. An adapter
-that does *not* inherit the port will not be found when the container
-tries to inject `WalletRepository`, resulting in a `NoSuchBeanError`
-at startup. Writing the inheritance is the contract made explicit.
+There is one critical rule: **the adapter must explicitly inherit the
+port** (`class InMemoryWalletRepository(WalletRepository):`). The
+container uses `isinstance()` checks against `@runtime_checkable`
+Protocols to discover which beans satisfy a given type. An adapter that
+does *not* inherit the port will not be found when the container tries
+to inject `WalletRepository`, producing a `NoSuchBeanError` at startup.
+Writing the inheritance makes the contract explicit.
 
 !!! spring "Spring parity"
     `@service`, `@component`, `@repository`, and `@configuration` map
@@ -213,34 +213,30 @@ at startup. Writing the inheritance is the contract made explicit.
 
 ## Constructor injection
 
-With the repository declared, you need a handler that uses it — and
-that is where the container's most important trick becomes visible.
-The most important thing to understand about PyFly's DI system is
-that you never call constructors yourself. You declare what a class
-*needs* as `__init__` parameters with type annotations, and the
-container fills them in automatically. This is **constructor
-injection**, and it is the recommended approach for all mandatory
-dependencies.
+With the repository declared, you need a handler that uses it. That
+is where the container's most important capability becomes visible: you
+never call constructors yourself. You declare what a class *needs* as
+`__init__` parameters with type annotations, and the container fills
+them in automatically. This is **constructor injection**, and it is the
+recommended approach for all mandatory dependencies.
 
-The mental model is simple: treat `__init__` parameters as a wishlist.
-You list the types you need; the container delivers the right
-instances. If a dependency does not exist at startup, you get a clear
-`NoSuchBeanError` immediately — not a cryptic `AttributeError` three
-call frames deep at runtime.
+The mental model is a simple wishlist: list the types you need; the
+container delivers the right instances. If a dependency does not exist
+at startup, you get a clear `NoSuchBeanError` immediately — not a
+cryptic `AttributeError` three call frames deep at runtime.
 
 ### Stacking handler decorators on @service
 
 In Lumen's CQRS design, every write-side handler carries two
 decorators: `@command_handler` (or `@query_handler`) **stacked on
-`@service`**. This is the required pattern: `@service` is the
-decorator that registers the class as a bean. The CQRS-specific
-decorator only adds routing metadata (`__pyfly_command_type__` or
-`__pyfly_query_type__`) so the command/query bus can dispatch to the
-right handler. If you forget `@service`, the container never knows the
-handler exists, and the bus will raise a `NoHandlerError` at dispatch
-time.
+`@service`**. The pattern is non-negotiable: `@service` registers the
+class as a bean; the CQRS decorator adds only routing metadata
+(`__pyfly_command_type__` or `__pyfly_query_type__`) so the
+command/query bus can dispatch to the right handler. Without `@service`,
+the container never sees the class and the bus raises `NoHandlerError`
+at dispatch time.
 
-The `DepositFundsHandler` from Lumen shows the pattern in full:
+The `DepositFundsHandler` shows the pattern in full:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 2.3 — DepositFundsHandler: @command_handler + @service stacked
 from __future__ import annotations
@@ -279,28 +275,27 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-**How it works.** Starting from the top:
+**How it works.** Four decisions are visible in this listing:
 
-- `@service` registers the class with the container as a singleton
-  bean. This is non-negotiable — without it, the container never sees
-  the class.
-- `@command_handler` (above `@service`, so it runs *after* registration)
-  reads the first generic argument of `CommandHandler[DepositFunds, int]`
-  and records that this bean handles `DepositFunds` commands.
-- The `__init__` signature is the entire wiring specification.
-  `repository: WalletRepository` is the port type, so the container
-  resolves the `@primary` adapter (`InMemoryWalletRepository`);
-  `events: EventPublisher` is resolved automatically by the CQRS
-  auto-configuration (the `@enable_domain_stack` on the application
-  class activates it).
+- `@service` registers the class as a singleton bean. Without it, the
+  container never sees the class.
+- `@command_handler` (applied above `@service`, so it runs *after*
+  registration) reads the first generic argument of
+  `CommandHandler[DepositFunds, int]` and records that this bean
+  handles `DepositFunds` commands.
+- The `__init__` signature is the complete wiring specification.
+  `repository: WalletRepository` resolves to the `@primary` adapter
+  (`InMemoryWalletRepository`); `events: EventPublisher` is resolved
+  automatically by the CQRS auto-configuration activated via
+  `@enable_domain_stack`.
 - `DepositFundsHandler` imports neither concrete class — it knows only
-  about the interfaces.
+  the interfaces.
 
 The business method follows the standard CQRS/DDD sequence: load the
 aggregate from the repository, mutate it through a domain method that
 enforces invariants, persist the new state, drain the events the
-aggregate raised, and publish them on the EDA bus. That ordering is
-deliberate — the wallet is saved *before* events are published, so a
+aggregate raised, and publish them on the EDA bus. The ordering is
+deliberate — the wallet is saved *before* events are published, so any
 listener that queries the repository always finds the updated record.
 
 A read-side handler uses the same stacking pattern, only with
@@ -325,10 +320,10 @@ class GetWalletHandler(QueryHandler[GetWallet, WalletDto | None]):
 ```
 
 The container resolves dependencies **recursively**. When it constructs
-`DepositFundsHandler` it will also construct `InMemoryWalletRepository`
-(because that is the `@primary` implementation bound to
-`WalletRepository`) and the `EventPublisher` adapter — neither of which
-the handler needs to know about.
+`DepositFundsHandler` it also constructs `InMemoryWalletRepository`
+(the `@primary` implementation bound to `WalletRepository`) and the
+`EventPublisher` adapter — none of which the handler needs to know
+about.
 
 ::: figure art/figures/02-di.svg | Figure 2.1 — The container injects dependencies from type hints.
 
@@ -352,14 +347,10 @@ the handler needs to know about.
 
 ## The Container and the ApplicationContext
 
-Understanding the two-layer architecture of PyFly's DI system will
-save you considerable debugging time. The layers are cleanly
-separated: one handles object graphs, the other handles the full
-application lifecycle. Conflating them is a common source of
-confusion, so it is worth being explicit about where each
-responsibility lives.
-
-PyFly's DI system has two layers.
+PyFly's DI system has two layers, and understanding the boundary
+between them will save you real debugging time. One layer handles
+object graphs; the other handles the full application lifecycle.
+Conflating them is a common source of confusion.
 
 **`Container`** (from `pyfly.container`) is the low-level DI engine.
 It stores `Registration` objects, resolves types by constructor hints,
@@ -368,13 +359,13 @@ manages scopes, applies `@primary` disambiguation, and handles
 is a pure "give me a `T`" machine.
 
 **`ApplicationContext`** (from `pyfly.context`) is the high-level
-orchestrator. It wraps `Container` and adds the startup sequence:
+orchestrator. It wraps `Container` and adds the full startup sequence:
 profile filtering, condition evaluation, `@configuration`/`@bean`
 processing, `BeanPostProcessor` weaving, `@post_construct` /
 `@pre_destroy` hooks, event publishing, and auto-configuration. You
 interact with the `ApplicationContext` in application code; the raw
-`Container` is mostly an implementation detail (accessible via
-`ctx.container` as an escape hatch).
+`Container` is an implementation detail, accessible via `ctx.container`
+as an escape hatch.
 
 Think of it this way: `Container` is the factory floor — it knows how
 to build things. `ApplicationContext` is the production manager — it
@@ -383,31 +374,30 @@ factory opens or closes.
 
 ### Resolution rules
 
-When the container needs to resolve a type `T`, it follows this order:
+When the container needs to resolve a type `T`, it applies four rules
+in strict priority order:
 
 1. **Direct registration** — if `T` is registered directly, resolve it.
-2. **Interface binding** — if `T` is a `Protocol` or ABC with bound
-   implementations, and exactly one is bound, resolve that
-   implementation.
+2. **Interface binding** — if `T` is a `Protocol` or ABC with exactly
+   one bound implementation, resolve that implementation.
 3. **`@primary` disambiguation** — if multiple implementations are
    bound, the one decorated with `@primary` wins.
-4. **Error** — `NoSuchBeanError` if nothing matches;
-   `NoUniqueBeanError` if multiple candidates exist with no `@primary`.
+4. **Error** — `NoSuchBeanError` when nothing matches;
+   `NoUniqueBeanError` when multiple candidates exist with no `@primary`.
 
-These rules run in strict priority order. Step 4 is deliberately loud:
-a missing or ambiguous dependency is a configuration error, and
-surfacing it at startup rather than burying it in a runtime traceback
-is one of the key guarantees the container provides.
+Step 4 is deliberately loud. A missing or ambiguous dependency is a
+configuration error, and surfacing it at startup rather than burying it
+in a runtime traceback is one of the container's key guarantees.
 
 ### @primary
 
 `@primary` resolves ambiguity when several beans satisfy the same
-interface. Place it on the implementation you want to be the default.
+interface. Place it on the implementation you want as the default.
 Lumen registers two adapters for `WalletRepository`:
 `InMemoryWalletRepository` (marked `@primary`) and
 `SqlAlchemyWalletRepository` (no `@primary`). The application boots on
-the in-memory store; swapping to the SQL adapter for production means
-reassigning `@primary` — nothing in the handlers changes.
+the in-memory store; switching to the SQL adapter for production means
+moving `@primary` — nothing in the handlers changes.
 
 ```python
 from pyfly.container import repository, primary
@@ -419,8 +409,8 @@ class InMemoryWalletRepository(WalletRepository):
     ...
 ```
 
-Without `@primary`, resolving `WalletRepository` when two
-implementations are registered raises:
+Without `@primary`, resolving `WalletRepository` with two registered
+implementations raises:
 
 ```
 NoUniqueBeanError: Multiple beans of type 'WalletRepository' found
@@ -428,21 +418,19 @@ NoUniqueBeanError: Multiple beans of type 'WalletRepository' found
   Candidates: ['InMemoryWalletRepository', 'SqlAlchemyWalletRepository']
 ```
 
-This error message is intentionally informative: it names every
-competing candidate so you can make an explicit decision rather than
-guessing which one the container picked.
+The message names every competing candidate so you can make a deliberate
+decision rather than guessing which one the container would have picked.
 
 ### @order
 
-The container initializes singleton beans eagerly during startup. By
-default the order is undefined, but some beans genuinely must be ready
-before others — a security filter that must wrap every inbound request,
-or a schema migrator that must run before any repository is touched.
-`@order` gives you explicit control.
+The container initialises singleton beans eagerly during startup, but
+some beans genuinely must be ready before others — a security filter
+that must wrap every inbound request, or a schema migrator that must
+run before any repository is touched. `@order` gives you explicit
+control over initialisation sequence.
 
-`@order` controls initialization order. Lower values are resolved
-first during the eager startup pass. The constants
-`HIGHEST_PRECEDENCE` (`-(2**31)`) and `LOWEST_PRECEDENCE`
+Lower values are resolved first during the eager startup pass. The
+constants `HIGHEST_PRECEDENCE` (`-(2**31)`) and `LOWEST_PRECEDENCE`
 (`2**31 - 1`) mark the extremes:
 
 ```python
@@ -456,22 +444,20 @@ class SecurityInitializer:
     ...
 ```
 
-Ordering affects singleton resolution during startup, the sequence in
+`@order` affects singleton resolution during startup, the sequence in
 which `BeanPostProcessor` instances run, and the ordering of
 `get_beans_of_type()` results.
 
 ### Qualifier — named bean resolution
 
-Type-based injection covers most scenarios, but occasionally you
+Type-based injection covers most scenarios. Occasionally, though, you
 genuinely need a particular *instance* rather than any satisfying
-implementation. The classic case is a configuration class that
-produces two beans of the same type — say, a primary and a
-read-replica database connection — where a downstream service needs
-to be specific about which one it receives.
+implementation — the classic case being a `@configuration` class that
+produces two beans of the same type (say, a primary and a read-replica
+database connection) where a downstream service must receive a specific
+one.
 
-When you need to select a specific bean by name — most common when
-`@bean` factory methods produce multiple instances of the same type —
-use `Annotated[T, Qualifier("name")]`:
+Select a specific bean by name with `Annotated[T, Qualifier("name")]`:
 
 ```python
 from typing import Annotated
@@ -488,27 +474,26 @@ class ReportService:
 ```
 
 The container calls `resolve_by_name("analytics_db", expected_type=T)`
-and verifies assignability — a mistyped name pointing at the wrong
-type raises `NoSuchBeanError` with a clear message instead of silently
+and verifies assignability — a mistyped name pointing at the wrong type
+raises `NoSuchBeanError` with a clear message rather than silently
 injecting the wrong object.
 
 ---
 
 ## Bean factories: @configuration and @bean
 
-Stereotype decorators work beautifully for your own classes, but not
+Stereotype decorators work beautifully for classes you own, but not
 every dependency is a class you control. Third-party clients need
-constructor arguments that only become known at runtime. Pairs of
-related beans share configuration state. Some beans are best expressed
-as a single factory that makes several things at once. For all of
-these situations, PyFly provides the `@configuration` / `@bean`
-pattern — a way to write explicit factory code while still
-participating fully in the container's resolution and lifecycle
+constructor arguments known only at runtime; related beans share
+configuration state; some families of beans are most clearly expressed
+as a single factory. For all of these situations, PyFly provides the
+`@configuration` / `@bean` pattern — explicit factory code that still
+participates fully in the container's resolution and lifecycle
 machinery.
 
 A `@configuration` class acts as a factory. Its `@bean` methods are
 called during the startup sequence, and each method's return value is
-registered as a bean whose type is derived from the method's return
+registered as a bean whose type comes from the method's return
 annotation:
 
 ::: listing lumen/infra_config.py | Listing 2.4 — Producing an EventPublisher bean via @configuration
@@ -527,21 +512,20 @@ class LumenInfraConfig:
 :::
 
 **How it works.** `@configuration` tells the context to scan
-`LumenInfraConfig` for `@bean` methods during startup — before any
-stereotype beans are constructed. The `event_publisher` method's
-return annotation, `EventPublisher`, is the key: the context reads it
-and registers the produced `InMemoryEventBus` instance *as* an
-`EventPublisher`, not as an `InMemoryEventBus`. That distinction
-matters — when `DepositFundsHandler` later asks the container for an
-`EventPublisher`, it gets the `InMemoryEventBus` instance without
-knowing or caring about the concrete type.
+`LumenInfraConfig` for `@bean` methods during startup, before any
+stereotype beans are constructed. The return annotation `EventPublisher`
+is the key: the context reads it and registers the produced
+`InMemoryEventBus` instance *as* an `EventPublisher`, not as an
+`InMemoryEventBus`. That distinction matters — when `DepositFundsHandler`
+later asks for an `EventPublisher`, it receives the `InMemoryEventBus`
+instance without knowing or caring about the concrete type.
 
-Swapping to a Kafka adapter in production means replacing
-`InMemoryEventBus()` with `KafkaEventPublisher(settings.kafka_url)`
-in a single method. The rest of the codebase is untouched.
+Swapping to a Kafka adapter for production means replacing
+`InMemoryEventBus()` with `KafkaEventPublisher(settings.kafka_url)` in
+a single method. The rest of the codebase is untouched.
 
-`@bean` methods can also declare constructor parameters; the container
-resolves them automatically:
+`@bean` methods can also declare parameters; the container resolves
+them automatically:
 
 ```python
 @configuration
@@ -572,21 +556,20 @@ class MessagingConfig:
 
 ## Scopes
 
-Every bean has a scope that controls how long its instance lives.
+Every bean has a **scope** that controls how long its instance lives.
 Getting scope right is less about performance and more about
-correctness: sharing a stateful object that was designed for
-single-use will produce race conditions; creating a new singleton on
-every resolution wastes resources and defeats caching. The `Scope`
-enum defines three values that cover the vast majority of real-world
-needs.
+correctness: sharing a stateful object designed for single-use produces
+race conditions; re-creating a singleton on every resolution wastes
+resources and defeats caching. The `Scope` enum defines three values
+that cover the vast majority of real-world needs.
 
-**`Scope.SINGLETON`** (default) — a single instance is created on
-first resolution and reused forever. Singletons are instantiated
-eagerly during `ApplicationContext.start()`, sorted by `@order`.
-Almost all application beans should be singletons.
+**`Scope.SINGLETON`** (default) — one instance is created on first
+resolution and reused for the life of the application. Singletons are
+instantiated eagerly during `ApplicationContext.start()`, sorted by
+`@order`. Almost all application beans should be singletons.
 
-**`Scope.TRANSIENT`** — a fresh instance is created on every
-resolution. Use this for stateful, non-shareable objects:
+**`Scope.TRANSIENT`** — a fresh instance is created on every resolution.
+Use this for stateful, non-shareable objects:
 
 ::: listing lumen/contexts.py | Listing 2.5 — A transient bean for per-operation context
 from pyfly.container import component, Scope
@@ -601,13 +584,13 @@ class TransferContext:
         self.rolled_back: bool = False
 :::
 
-**How it works.** `TransferContext` is an accumulator: it collects the
-steps of a multi-hop transfer so that a saga can roll them back in
-reverse if anything fails. Sharing a single instance across concurrent
-requests would mix their state; `Scope.TRANSIENT` ensures every
-resolution yields a fresh, empty `TransferContext`. The container
-still manages the class — it will be injected, profiled, and
-potentially post-processed — but it will never be cached.
+**How it works.** `TransferContext` accumulates the steps of a
+multi-hop transfer so that a saga can roll them back in reverse order
+if anything fails. Sharing a single instance across concurrent requests
+would blend their state; `Scope.TRANSIENT` ensures every resolution
+produces a fresh, empty `TransferContext`. The container still manages
+the class — injecting it, profiling it, post-processing it — but never
+caches the result.
 
 **`Scope.REQUEST`** — scoped to a single HTTP request. A new instance
 is created when a request arrives and discarded when it completes. Use
@@ -624,36 +607,34 @@ class CurrentUser:
     roles: list[str] = []
 ```
 
-A quick rule of thumb for choosing scope:
+A quick rule of thumb:
 
-- **SINGLETON** — the bean is stateless, or its state is safe to
-  share across all callers (connection pools, caches, service objects).
+- **SINGLETON** — the bean is stateless, or its state is safe to share
+  across all callers (connection pools, caches, service objects).
 - **TRANSIENT** — the bean accumulates per-operation state that must
   not bleed between operations (sagas, builders, context carriers).
 - **REQUEST** — the bean carries per-HTTP-request state that must be
   isolated between concurrent requests (authenticated user,
-  request-scoped trace).
+  request-scoped trace ID).
 
 ---
 
 ## Lifecycle and conditions
 
-Constructing an object and wiring its dependencies is only half the
-story. Real infrastructure beans need to *do* something after they
-are built — reserve a thread pool, pre-load a cache, subscribe to a
-message queue — and they need to *undo* those actions cleanly when
-the application shuts down. PyFly gives you two hooks for this, plus
-a family of conditional decorators that let you decide whether a bean
-should exist at all based on runtime configuration.
+Construction and wiring are only half the story. Real infrastructure
+beans need to *act* after they are built — reserving a thread pool,
+pre-loading a cache, subscribing to a message queue — and they need to
+*undo* those actions cleanly on shutdown. PyFly gives you two lifecycle
+hooks for this, plus a family of conditional decorators that control
+whether a bean participates in the container at all.
 
 ### @post_construct and @pre_destroy
 
-Once the container has constructed a bean and injected all its
-dependencies, you often need to perform one-time initialisation —
-opening a connection pool, warming a cache, registering a listener.
-Mark a method with `@post_construct` and the context will call it
-after construction is complete. Both synchronous and `async` methods
-are supported:
+Once the container constructs a bean and injects all its dependencies,
+you often need one-time initialisation — opening a connection pool,
+warming a cache, registering a listener. Mark a method `@post_construct`
+and the context calls it after construction completes. Both synchronous
+and `async` methods are supported:
 
 ::: listing lumen/wallet_audit_listener.py | Listing 2.6 — Lifecycle hooks on a @service bean
 from pyfly.container import service
@@ -678,35 +659,28 @@ class WalletAuditListenerWithLifecycle:
 :::
 
 **How it works.** `on_start` fires *after* the constructor returns and
-all injected dependencies have been set. This makes it safe to issue
-repository queries, open connections, or publish an application event
-from inside `@post_construct`. `on_stop` mirrors it: called during
-`ApplicationContext.stop()`, with dependencies still intact, so the
-service can flush state, drain queues, or publish a shutdown event
-before the container discards it.
+all injected dependencies are set — making it safe to issue repository
+queries, open connections, or publish an application event. The `async`
+keyword works without any extra setup: the context calls
+`await on_start()` when it detects a coroutine, and falls back to a
+direct call for synchronous methods.
 
-The `async` keyword works without any extra setup. The context calls
-`await on_start()` when it detects a coroutine function, and falls
-back to a direct call for synchronous methods.
-
-`@pre_destroy` is the counterpart: called during
+`@pre_destroy` is the counterpart, called during
 `ApplicationContext.stop()` before the bean is discarded. Beans are
-destroyed in **reverse** initialization order, so if a listener
-started after the repository, it will be stopped before it.
+destroyed in **reverse** initialisation order, so a listener started
+after the repository is stopped before it.
 
 ::: figure art/figures/02-lifecycle.svg | Figure 2.2 — A bean's lifecycle.
 
 ### Conditional beans
 
-Conditions answer the question: *should this bean exist at all, given
-the current environment?* That turns out to be one of the most
-powerful abstractions in a framework. It is how you make the same
-codebase work in development (with cheap in-memory adapters), in CI
-(with testcontainers), and in production (with real infrastructure) —
-without `if` statements scattered through your service code.
+Conditions answer a powerful question: *should this bean exist at all,
+given the current environment?* They are how the same codebase works
+in development (cheap in-memory adapters), in CI (Testcontainers), and
+in production (real infrastructure) — without a single `if` statement
+in your service code.
 
-Conditional decorators control whether a bean participates in the
-container at all. They are evaluated in a two-pass strategy during
+Conditional decorators are evaluated in a two-pass strategy during
 `ApplicationContext.start()`:
 
 **Pass 1** (before user `@configuration` is processed) evaluates:
@@ -722,16 +696,15 @@ container at all. They are evaluated in a two-pass strategy during
 - `@conditional_on_missing_bean(SomeType)` — only register if no
   bean of that type exists yet.
 
-The two-pass design is not accidental. Pass 1 conditions depend only
-on external facts (configuration files, installed packages) that are
-knowable before any beans are constructed. Pass 2 conditions depend
-on *which beans got registered* — information that is only available
-after Pass 1 has settled. Processing them in order ensures each
-condition evaluates against a stable, predictable view of the world.
+The two-pass design is deliberate. Pass 1 conditions depend on external
+facts — configuration files and installed packages — that are knowable
+before any beans are constructed. Pass 2 conditions depend on *which
+beans got registered*, information available only after Pass 1 settles.
+Processing them in order ensures each condition evaluates against a
+stable, predictable view of the container.
 
-The most powerful pattern is **"default with override"**: ship a
-fallback in your own code that yields to any user-provided
-implementation:
+The most powerful pattern is **"default with override"** — ship a
+fallback that automatically yields to any user-provided implementation:
 
 ::: listing lumen/notifications.py | Listing 2.7 — Default-with-override using @conditional_on_missing_bean
 from pyfly.container import service
@@ -764,20 +737,19 @@ class LoggingNotificationFallback:
         logger.info("notification_fallback owner=%s", owner_id)
 :::
 
-**How it works.** Read the two service classes as a chain of intent.
-`SmtpNotificationAdapter` is the production implementation — it only
-activates when `lumen.smtp.host` is present in configuration, keeping
-development environments free of half-configured mail clients.
-`LoggingNotificationFallback` picks up whenever no real
-`NotificationPort` implementation is registered — in practice,
-whenever SMTP is not configured. The fallback does not check *why* the
-real adapter is absent; it simply fills the gap.
+**How it works.** Read the two classes as a chain of intent.
+`SmtpNotificationAdapter` activates only when `lumen.smtp.host` is
+present in configuration, keeping development environments free of
+half-configured mail clients. `LoggingNotificationFallback` activates
+whenever no real `NotificationPort` is registered — in practice, any
+environment where SMTP is not configured. The fallback does not check
+*why* the real adapter is absent; it simply fills the gap.
 
-Any handler that injects `NotificationPort` therefore always gets
-*something* — no `NoSuchBeanError`, no `None` guard. In development
-and CI you get structured log output. In production you get real
-email. The choice is made entirely in configuration, with no code
-change and no branch in service logic.
+Any handler that injects `NotificationPort` therefore always receives
+*something* — no `NoSuchBeanError`, no `None` guard. In development and
+CI you get structured log output; in production you get real email. The
+choice is made entirely in configuration, with no code change and no
+branch in service logic.
 
 !!! tip "Tip"
     The `@conditional_on_missing_bean` / `@conditional_on_property`
@@ -790,24 +762,22 @@ change and no branch in service logic.
 
 ## What you built {.recap}
 
-Lumen now has a `WalletRepository` port backed by an in-memory
-adapter (with explicit inheritance of the port Protocol), a
-`DepositFundsHandler` wired to both repository and event publisher by
-type hints, and the scan_packages bootstrap that makes the container
-discover all of it. You saw how `@command_handler` and `@query_handler`
-**must be stacked on `@service`** — the CQRS decorators add metadata
-but `@service` is what registers the bean. You also saw how `@primary`
-resolves ambiguity when two adapters compete, how `@post_construct` /
-`@pre_destroy` bracket a bean's life, and how
-`@conditional_on_missing_bean` enables defaults that give way to real
-implementations.
+Lumen now has a `WalletRepository` port backed by an in-memory adapter,
+a `DepositFundsHandler` wired to both the repository and the event
+publisher by type hints alone, and the `scan_packages` bootstrap that
+makes the container discover all of it. You saw why `@command_handler`
+and `@query_handler` **must be stacked on `@service`** — the CQRS
+decorators add routing metadata, but `@service` is what registers the
+bean. You also saw how `@primary` resolves ambiguity when two adapters
+compete, how `@post_construct` / `@pre_destroy` bracket a bean's life,
+and how `@conditional_on_missing_bean` enables defaults that automatically
+yield to real implementations.
 
-The through-line across every feature in this chapter is the same:
-you declare intent with annotations and type hints; PyFly provides the
-instances. That separation means you can test each class in isolation,
-swap adapters without touching business logic, and configure the full
-application from a YAML file — all of which become essential as Lumen
-grows through the rest of the book.
+The through-line is consistent: you declare intent with decorators and
+type hints; PyFly provides the instances. That separation lets you test
+each class in isolation, swap adapters without touching business logic,
+and drive the full application configuration from a YAML file — all of
+which become essential as Lumen grows through the rest of the book.
 
 ---
 
