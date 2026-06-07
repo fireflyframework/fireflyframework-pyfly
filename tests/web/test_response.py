@@ -13,8 +13,10 @@
 # limitations under the License.
 """Tests for return value handler."""
 
+import json
+
 from pydantic import BaseModel
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse
 
 from pyfly.web.adapters.starlette.response import handle_return_value
 
@@ -28,8 +30,9 @@ class TestHandleReturnValue:
     def test_pydantic_model(self):
         item = ItemResponse(id="1", name="Widget")
         response = handle_return_value(item)
-        assert isinstance(response, JSONResponse)
+        assert response.media_type == "application/json"
         assert response.status_code == 200
+        assert json.loads(response.body) == {"id": "1", "name": "Widget"}
 
     def test_pydantic_model_custom_status(self):
         item = ItemResponse(id="1", name="Widget")
@@ -38,8 +41,9 @@ class TestHandleReturnValue:
 
     def test_dict(self):
         response = handle_return_value({"key": "value"})
-        assert isinstance(response, JSONResponse)
+        assert response.media_type == "application/json"
         assert response.status_code == 200
+        assert json.loads(response.body) == {"key": "value"}
 
     def test_none_returns_no_content(self):
         response = handle_return_value(None)
@@ -56,8 +60,10 @@ class TestHandleReturnValue:
 
     def test_list(self):
         response = handle_return_value([1, 2, 3])
-        assert isinstance(response, JSONResponse)
+        assert response.media_type == "application/json"
+        assert json.loads(response.body) == [1, 2, 3]
 
     def test_string(self):
         response = handle_return_value("hello")
-        assert isinstance(response, JSONResponse)
+        assert response.media_type == "application/json"
+        assert json.loads(response.body) == "hello"

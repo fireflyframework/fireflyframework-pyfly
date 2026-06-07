@@ -525,6 +525,23 @@ def create_app(
             json_registry = context.get_bean(JsonSerializers)
         except Exception:  # noqa: BLE001 - registry bean is optional; default when absent
             json_registry = JsonSerializers()
-    app.state.pyfly_json_serializer = PyFlyJsonSerializer(json_props, json_registry)
+    serializer = PyFlyJsonSerializer(json_props, json_registry)
+    app.state.pyfly_json_serializer = serializer
+
+    # HTTP message converters (the HttpMessageConverter chain): JSON + XML by default,
+    # both backed by the serializer above. A user MessageConverterRegistry bean fully
+    # overrides (e.g. to add CBOR or reorder); content negotiation honors Accept/Content-Type.
+    from pyfly.web.message_converters import MessageConverterRegistry, default_message_converters
+
+    fail_on_unknown = json_props.fail_on_unknown_properties if json_props is not None else False
+    message_converters = default_message_converters(serializer, fail_on_unknown=fail_on_unknown)
+    if context is not None:
+        try:
+            override = context.get_bean(MessageConverterRegistry)
+        except Exception:  # noqa: BLE001 - override bean is optional; default when absent
+            override = None
+        if override is not None:
+            message_converters = override
+    app.state.pyfly_message_converters = message_converters
 
     return app

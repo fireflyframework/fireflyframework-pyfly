@@ -19,12 +19,13 @@ from typing import Any
 
 from starlette.responses import JSONResponse, Response
 
-from pyfly.web.converters import dict_to_xml
 from pyfly.web.json import PyFlyJsonSerializer
+from pyfly.web.message_converters import MessageConverterRegistry, default_message_converters
 
-# Module-level default (as-is config). create_app stashes a config-driven serializer
-# on app.state and threads it in; this default applies when none is provided.
+# Module-level defaults (as-is config). create_app stashes config-driven instances on
+# app.state and threads them in; these apply when none is provided.
 _DEFAULT_SERIALIZER = PyFlyJsonSerializer()
+_DEFAULT_REGISTRY = default_message_converters()
 
 
 class XMLResponse(Response):
@@ -55,17 +56,18 @@ def handle_return_value(
     result: Any,
     status_code: int = 200,
     accept: str | None = None,
-    serializer: PyFlyJsonSerializer | None = None,
+    converters: MessageConverterRegistry | None = None,
 ) -> Response:
     """Convert a handler's return value into a Starlette Response.
 
     - ``None`` -> empty response (204 unless status_code explicitly set)
     - ``Response`` -> passed through unchanged
-    - ``BaseModel`` -> JSON (or XML when *accept* contains ``application/xml``)
-    - ``dict``, ``list``, ``str``, etc. -> JSON (or XML)
+    - otherwise the value is serialized by the message converter negotiated from
+      *accept* (q-value ordered; JSON or XML by default, extensible).
 
-    *serializer* applies global ``pyfly.web.json.*`` config (camelCase / exclude-none /
-    custom type encoders); when omitted an as-is default is used.
+    *converters* carries the global ``pyfly.web.json.*`` config (via its JSON
+    converter's serializer) and any user-registered formats; when omitted a default
+    JSON+XML registry is used.
     """
     if result is None:
         actual_status = status_code if status_code != 200 else 204
@@ -74,8 +76,9 @@ def handle_return_value(
     if isinstance(result, Response):
         return result
 
-    if _wants_xml(accept):
-        xml_body = dict_to_xml(result)
-        return XMLResponse(content=xml_body, status_code=status_code)
-
-    return JSONResponse(_to_json_data(result, serializer), status_code=status_code)
+    registry = converters or _DEFAULT_REGISTRY
+    writer = registry.find_writer(accept)
+    if writer is None:  # pragma: no cover - registry always has JSON
+        return JSONResponse(_to_json_data(result), status_code=status_code)
+    body, content_type = writer.write(result)
+    return Response(body, status_code=status_code, media_type=content_type)
