@@ -188,6 +188,14 @@ class Lvl3:
     def __init__(self, x: Lvl2) -> None: ...
 
 
+class Lvl4:
+    def __init__(self, x: Lvl3) -> None: ...
+
+
+class Lvl5:
+    def __init__(self, x: Lvl4) -> None: ...
+
+
 def _di_benchmarks() -> list[Result]:
     from pyfly.container.container import Container
     from pyfly.container.types import Scope
@@ -207,9 +215,11 @@ def _di_benchmarks() -> list[Result]:
     for target in (Deps1, Deps3, Deps5, Deps10):
         width.register(target, scope=Scope.TRANSIENT)
 
-    # Depth: a fully-transient chain Lvl3 -> Lvl2 -> Lvl1 -> A1 (every level constructed).
+    # Depth: a fully-transient chain Lvl5 -> Lvl4 -> ... -> Lvl1 -> A1 (every level constructed).
+    # Unlike width (cached-singleton leaves), each level here is itself a transient resolve+build,
+    # so the per-node cost is the transient-construction rate, not the cheap cached-lookup rate.
     depth = Container()
-    for cls in (A1, Lvl1, Lvl2, Lvl3):
+    for cls in (A1, Lvl1, Lvl2, Lvl3, Lvl4, Lvl5):
         depth.register(cls, scope=Scope.TRANSIENT)
 
     return [
@@ -219,7 +229,9 @@ def _di_benchmarks() -> list[Result]:
         _bench("container.resolve transient + 3 deps", lambda: width.resolve(Deps3), 100_000),
         _bench("container.resolve transient + 5 deps", lambda: width.resolve(Deps5), 100_000),
         _bench("container.resolve transient + 10 deps", lambda: width.resolve(Deps10), 50_000),
+        _bench("container.resolve nested depth-1 (transient)", lambda: depth.resolve(Lvl1), 100_000),
         _bench("container.resolve nested depth-3 (transient)", lambda: depth.resolve(Lvl3), 50_000),
+        _bench("container.resolve nested depth-5 (transient)", lambda: depth.resolve(Lvl5), 50_000),
     ]
 
 

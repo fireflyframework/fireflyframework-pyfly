@@ -14,11 +14,16 @@ A critical audit of `benchmarks/run.py` to measure what actually matters and kee
 
 - **Baseline de-inflated.** The old "bare Starlette ~436µs/req" was ~99% `TestClient`/httpx
   round-trip artifact. Request benchmarks now drive the ASGI app **directly** (one event loop,
-  no httpx) — real bare-ASGI handling is **~4.8µs/req**. PyFly's filter-chain overhead is now
-  reported as an **absolute ~+43µs/req** over that real base (not a % of an inflated number);
+  no httpx) — real bare-ASGI handling is **~5µs/req**. PyFly's filter-chain overhead is now
+  reported as an **absolute ~+44µs/req** over that real base (not a % of an inflated number);
   the TestClient cost is called out and excluded.
-- **DI coverage expanded** to transient with 1/3/5/10 dependencies + a nested depth-3 graph — the
-  data shows resolution is **linear** (~+0.4µs/dependency), no superlinear or hidden per-bean cost.
+- **DI coverage expanded** to transient with 1/3/5/10 dependencies + nested depth-1/3/5 graphs —
+  the data shows resolution is **linear** in both width (~+0.4µs/cached dependency) and depth
+  (~+2.7µs/node, the transient-construction rate), with no superlinear or hidden per-bean cost.
+- **Request overhead reconciles.** The +~44µs is the sum of all **seven** default filters
+  (including the default-on `MetricsFilter` + `HttpExchangeRecorderFilter`, not just the explicit
+  web filters); the README per-filter decomposition sums to it, and the zero-filter chain
+  machinery is confirmed free (+0.2µs vs bare ASGI).
 - **Dependency baselines labelled.** `pydantic v2 model_dump_json` is tagged `[dep]` (measures
   Pydantic, not PyFly); bare Starlette is tagged `[base]`.
 - **Naming fixed.** `TransactionIdFilter` is documented as an MDC-style `X-Transaction-Id`
