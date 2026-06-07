@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.72 (2026-06-07)
+
+### Added (observability — metrics recording port)
+
+- **`MetricsRecorder`** protocol port (`pyfly.observability`) — the abstraction instrumentation
+  depends on, so code is not hard-coupled to Prometheus. `MetricsRegistry` is now a nominal
+  `MetricsRecorder` (the Prometheus adapter), and **`NoOpMetricsRecorder`** is a dependency-free
+  adapter for tests and metrics-disabled deployments (every metric op is an inert no-op handle).
+  (Tracing exporters were already config-swappable via `pyfly.observability.tracing.exporter`;
+  a full multi-backend metrics abstraction would be YAGNI, so this stays a lightweight port + a
+  real second adapter.)
+
 ## v26.06.71 (2026-06-07)
 
 ### Added (tests — behavior coverage for external adapters)

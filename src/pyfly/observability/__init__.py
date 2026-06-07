@@ -33,10 +33,13 @@ from pyfly.observability.correlation import (
     set_tracestate,
     unbind_correlation_context,
 )
+from pyfly.observability.ports import MetricsRecorder, NoOpMetricsRecorder
 from pyfly.observability.tracing import span
 
 __all__ = [
     "CORRELATION_ID_HEADER",
+    "MetricsRecorder",
+    "NoOpMetricsRecorder",
     "REQUEST_ID_HEADER",
     "TENANT_ID_HEADER",
     "TRACEPARENT_HEADER",
