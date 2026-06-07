@@ -505,6 +505,13 @@ def create_app(
     from pyfly.web.converters import build_exception_converter_service
 
     app.state.pyfly_exception_converter_service = build_exception_converter_service(context)
+    # RFC 7807 problem+json error responses — opt-in (Spring Boot 3 parity:
+    # spring.mvc.problemdetails.enabled). Default off preserves the {"error": {...}} envelope.
+    app.state.pyfly_problem_details = (
+        str(context.config.get("pyfly.web.problem-details.enabled", "false")).lower() in ("true", "1", "yes")
+        if context is not None
+        else False
+    )
     app.add_exception_handler(Exception, global_exception_handler)
 
     return app

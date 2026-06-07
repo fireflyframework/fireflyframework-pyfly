@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from http import HTTPStatus
 from typing import Any
 
 from starlette.requests import Request
@@ -132,8 +133,29 @@ def _try_convert(request: Request, exc: Exception) -> PyFlyException | None:
         return None
 
 
+def _reason_phrase(status: int) -> str:
+    """The HTTP reason phrase for *status* (used as the RFC 7807 ``title``)."""
+    try:
+        return HTTPStatus(status).phrase
+    except ValueError:
+        return "Error"
+
+
+def _problem_details_enabled(request: Request) -> bool:
+    """Whether RFC 7807 responses are enabled (``request.app`` raises if absent)."""
+    try:
+        return bool(getattr(request.app.state, "pyfly_problem_details", False))
+    except (KeyError, AttributeError):
+        return False
+
+
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle all exceptions with structured JSON responses."""
+    """Handle all exceptions with structured JSON responses.
+
+    Emits the ``{"error": {...}}`` envelope by default; when
+    ``pyfly.web.problem-details.enabled`` is set, emits RFC 7807
+    ``application/problem+json`` instead (Spring Boot 3 parity).
+    """
     transaction_id = getattr(request.state, "transaction_id", str(uuid.uuid4()))
     timestamp = datetime.now(UTC).isoformat()
 
@@ -146,29 +168,41 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
     if isinstance(exc, PyFlyException):
         status = _get_status_code(exc)
-        body: dict[str, Any] = {
-            "error": {
-                "message": str(exc),
-                "code": exc.code or type(exc).__name__,
-                "transaction_id": transaction_id,
-                "timestamp": timestamp,
-                "status": status,
-                "path": request.url.path,
-            }
-        }
-        if exc.context:
-            body["error"]["context"] = _json_safe(exc.context)
+        message = str(exc)
+        code = exc.code or type(exc).__name__
+        context = _json_safe(exc.context) if exc.context else None
     else:
         status = 500
-        body = {
-            "error": {
-                "message": "Internal server error",
-                "code": "INTERNAL_ERROR",
-                "transaction_id": transaction_id,
-                "timestamp": timestamp,
-                "status": status,
-                "path": request.url.path,
-            }
-        }
+        message = "Internal server error"
+        code = "INTERNAL_ERROR"
+        context = None
 
+    if _problem_details_enabled(request):
+        # RFC 7807 problem+json (extension members: code/transactionId/timestamp/context).
+        problem: dict[str, Any] = {
+            "type": "about:blank",
+            "title": _reason_phrase(status),
+            "status": status,
+            "detail": message,
+            "instance": request.url.path,
+            "code": code,
+            "transactionId": transaction_id,
+            "timestamp": timestamp,
+        }
+        if context is not None:
+            problem["context"] = context
+        return JSONResponse(problem, status_code=status, media_type="application/problem+json")
+
+    body: dict[str, Any] = {
+        "error": {
+            "message": message,
+            "code": code,
+            "transaction_id": transaction_id,
+            "timestamp": timestamp,
+            "status": status,
+            "path": request.url.path,
+        }
+    }
+    if context is not None:
+        body["error"]["context"] = context
     return JSONResponse(body, status_code=status)

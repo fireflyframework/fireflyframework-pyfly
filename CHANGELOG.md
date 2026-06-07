@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.25 (2026-06-07)
+
+### Added (web — RFC 7807 Problem Details)
+
+Spring-parity work, wave 4 (broader features):
+
+- **Opt-in RFC 7807 `application/problem+json` error responses.** When
+  `pyfly.web.problem-details.enabled` is set, the global exception handler emits a
+  standard problem detail (`type`/`title`/`status`/`detail`/`instance`, plus
+  `code`/`transactionId`/`timestamp`/`context` as extension members) with the
+  `application/problem+json` content type. **Default off** — the existing
+  `{"error": {...}}` envelope is preserved — mirroring Spring Boot 3's opt-in
+  `spring.mvc.problemdetails.enabled`. Applies to both the Starlette and FastAPI
+  adapters (they share the handler).
+
+---
+
 ## v26.06.24 (2026-06-07)
 
 ### Improved (`pyfly.data.Mapper` — the MapStruct equivalent)
