@@ -24,18 +24,23 @@ extras.
 
 from pyfly.security.context import SecurityContext
 from pyfly.security.decorators import secure
+from pyfly.security.expression import get_role_hierarchy, set_role_hierarchy
 from pyfly.security.http_security import AccessRule, AccessRuleType, HttpSecurity, SecurityRule
 from pyfly.security.method_security import post_authorize, pre_authorize
+from pyfly.security.role_hierarchy import RoleHierarchy
 
 __all__ = [
     "AccessRule",
     "AccessRuleType",
     "HttpSecurity",
+    "RoleHierarchy",
     "SecurityContext",
     "SecurityRule",
+    "get_role_hierarchy",
     "post_authorize",
     "pre_authorize",
     "secure",
+    "set_role_hierarchy",
 ]
 
 try:

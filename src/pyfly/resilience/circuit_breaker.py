@@ -19,6 +19,7 @@ import functools
 import inspect
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
@@ -37,9 +38,11 @@ class CircuitState(Enum):
 class CircuitBreaker:
     """A thread-safe circuit breaker.
 
-    Trips OPEN after *failure_threshold* consecutive failures; after
-    *recovery_timeout* seconds it moves to HALF_OPEN and allows a trial call —
-    success closes the circuit, failure re-opens it.
+    Opens either after *failure_threshold* consecutive failures (the default) or, when
+    *failure_rate_threshold* is set, once the failure rate over the last *window_size*
+    calls reaches that fraction (Resilience4j COUNT_BASED window). After *recovery_timeout*
+    seconds it moves to HALF_OPEN and admits up to *half_open_max_calls* trial calls —
+    that many successes close the circuit; any failure re-opens it.
     """
 
     def __init__(
@@ -47,13 +50,23 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 30.0,
         expected: tuple[type[BaseException], ...] = (Exception,),
+        *,
+        failure_rate_threshold: float | None = None,
+        window_size: int = 10,
+        half_open_max_calls: int = 1,
     ) -> None:
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.expected = expected
+        self.failure_rate_threshold = failure_rate_threshold
+        self.window_size = window_size
+        self.half_open_max_calls = max(1, half_open_max_calls)
         self._failures = 0
+        self._window: deque[bool] = deque(maxlen=window_size)  # True=success, False=failure
         self._state = CircuitState.CLOSED
         self._opened_at = 0.0
+        self._half_open_calls = 0
+        self._half_open_successes = 0
         self._lock = threading.Lock()
 
     @property
@@ -65,25 +78,53 @@ class CircuitBreaker:
     def _maybe_half_open(self) -> None:
         if self._state is CircuitState.OPEN and (time.monotonic() - self._opened_at) >= self.recovery_timeout:
             self._state = CircuitState.HALF_OPEN
+            self._half_open_calls = 0
+            self._half_open_successes = 0
+
+    def _tripped(self) -> bool:
+        """Whether the failure threshold (consecutive count or windowed rate) is reached."""
+        if self.failure_rate_threshold is not None:
+            if len(self._window) < self.window_size:
+                return False  # require a full window before judging the rate
+            return (self._window.count(False) / len(self._window)) >= self.failure_rate_threshold
+        return self._failures >= self.failure_threshold
 
     def before_call(self) -> None:
-        """Raise :class:`CircuitBreakerException` when the circuit is open."""
+        """Raise :class:`CircuitBreakerException` when the circuit is open or the half-open
+        probe budget is exhausted."""
         with self._lock:
             self._maybe_half_open()
             if self._state is CircuitState.OPEN:
                 raise CircuitBreakerException("Circuit breaker is open")
+            if self._state is CircuitState.HALF_OPEN:
+                if self._half_open_calls >= self.half_open_max_calls:
+                    raise CircuitBreakerException("Circuit breaker is half-open (probe limit reached)")
+                self._half_open_calls += 1
 
     def on_success(self) -> None:
         with self._lock:
-            self._failures = 0
-            self._state = CircuitState.CLOSED
+            self._window.append(True)
+            if self._state is CircuitState.HALF_OPEN:
+                self._half_open_successes += 1
+                if self._half_open_successes >= self.half_open_max_calls:
+                    self._close()
+            else:
+                self._failures = 0
 
     def on_failure(self) -> None:
         with self._lock:
+            self._window.append(False)
             self._failures += 1
-            if self._state is CircuitState.HALF_OPEN or self._failures >= self.failure_threshold:
+            if self._state is CircuitState.HALF_OPEN or self._tripped():
                 self._state = CircuitState.OPEN
                 self._opened_at = time.monotonic()
+
+    def _close(self) -> None:
+        self._state = CircuitState.CLOSED
+        self._failures = 0
+        self._half_open_calls = 0
+        self._half_open_successes = 0
+        self._window.clear()
 
 
 def circuit_breaker(breaker: CircuitBreaker) -> Callable[[Callable[..., Any]], Callable[..., Any]]:

@@ -24,6 +24,7 @@ from starlette.routing import Route
 from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
 from pyfly.actuator.endpoints.loggers_endpoint import LoggersEndpoint
 from pyfly.actuator.endpoints.prometheus_endpoint import PrometheusEndpoint
+from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
 from pyfly.actuator.registry import ActuatorRegistry
 
 
@@ -65,6 +66,8 @@ def make_starlette_actuator_routes(
             routes.extend(_make_loggers_routes(ep, bp))
         elif isinstance(ep, PrometheusEndpoint):
             routes.append(_make_prometheus_route(ep, bp))
+        elif isinstance(ep, RefreshEndpoint):
+            routes.extend(_make_refresh_routes(ep, bp))
         else:
             routes.extend(_make_generic_routes(eid, ep, bp))
 
@@ -154,6 +157,16 @@ def _make_loggers_routes(ep: LoggersEndpoint, bp: str) -> list[Route]:
         Route(f"{bp}/loggers/{{name}}", get_named_handler, methods=["GET"]),
         Route(f"{bp}/loggers/{{name}}", post_named_handler, methods=["POST"]),
     ]
+
+
+def _make_refresh_routes(ep: RefreshEndpoint, bp: str) -> list[Route]:
+    """Refresh endpoint — ``POST /actuator/refresh`` -> ``{"refreshed": [keys]}``."""
+
+    async def post_handler(request: Request) -> JSONResponse:
+        result = await ep.handle()
+        return JSONResponse(result)
+
+    return [Route(f"{bp}/refresh", post_handler, methods=["POST"])]
 
 
 def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:

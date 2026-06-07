@@ -29,6 +29,9 @@ a multi-layer application where every component is managed, wired, and lifecycle
    - [SINGLETON](#singleton)
    - [TRANSIENT](#transient)
    - [REQUEST](#request)
+   - [SESSION](#session)
+   - [Custom scopes (ScopeHandler SPI)](#custom-scopes-scopehandler-spi)
+   - [@refresh_scope (Spring Cloud parity)](#refresh_scope-spring-cloud-parity)
 5. [@bean and @configuration](#bean-and-configuration)
 6. [@primary](#primary)
 7. [@order](#order)
@@ -53,6 +56,9 @@ a multi-layer application where every component is managed, wired, and lifecycle
     - [@conditional_on_class](#conditional_on_class)
     - [@conditional_on_bean](#conditional_on_bean)
     - [@conditional_on_missing_bean](#conditional_on_missing_bean)
+    - [@conditional_on_single_candidate](#conditional_on_single_candidate)
+    - [@conditional_on_web_application](#conditional_on_web_application)
+    - [@conditional_on_resource](#conditional_on_resource)
     - [@auto_configuration](#auto_configuration)
     - [Two-Pass Evaluation](#two-pass-evaluation)
 18. [Application Events](#application-events)
@@ -115,7 +121,7 @@ dependencies, and injects them — first via the constructor, then into `Autowir
 | **Container** | Low-level DI container that stores registrations and resolves instances. |
 | **ApplicationContext** | High-level orchestrator that wraps the Container and adds lifecycle, events, conditions, and bean factory support. |
 | **Stereotype** | A decorator (`@service`, `@component`, etc.) that marks a class as container-managed. |
-| **Scope** | How long an instance lives: `SINGLETON`, `TRANSIENT`, or `REQUEST`. |
+| **Scope** | How long an instance lives: `SINGLETON`, `TRANSIENT`, `REQUEST`, `SESSION`, or a custom/`"refresh"` string scope. |
 | **Bean** | Any object managed by the container. |
 | **Autowired** | A field descriptor that marks a class attribute for injection after construction. |
 
@@ -418,7 +424,12 @@ class Scope(Enum):
     SINGLETON = auto()
     TRANSIENT = auto()
     REQUEST = auto()
+    SESSION = auto()
 ```
+
+A scope can also be a **string** naming a custom scope registered via
+`Container.register_scope()` — the `scope=` parameter accepts `ScopeSpec = Scope | str`
+everywhere a `Scope` is accepted.
 
 ### SINGLETON
 
@@ -458,6 +469,140 @@ afterward. This scope is intended for web-layer beans that carry request-specifi
 class CurrentUser:
     ...
 ```
+
+### SESSION
+
+`Scope.SESSION` creates **one instance per HTTP session**. The instance is stored as an
+attribute on the active `HttpSession`, so it persists across requests within the same
+session (and is discarded when the session ends). Resolution reads the session from the
+active request context.
+
+```python
+from pyfly.container import component, Scope
+
+@component(scope=Scope.SESSION)
+class ShoppingCart:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+```
+
+This requires the session module to be enabled (a `SessionFilter` populating the request
+context's `HttpSession`). Resolving a `SESSION`-scoped bean outside an active session (no
+request context, or no session) raises `RuntimeError`. Because the instance lives as a
+session attribute, it must be serializable when a non-memory session store (e.g. Redis) is
+used.
+
+### Custom scopes (ScopeHandler SPI)
+
+PyFly exposes Spring's custom-scope SPI: register a handler under a name with
+`Container.register_scope(name, handler)`, then declare beans with that scope string. A
+handler implements the `ScopeHandler` protocol from `pyfly.container.types`:
+
+```python
+from collections.abc import Callable
+from typing import Any
+
+class ScopeHandler(Protocol):
+    def get(self, name: str, object_factory: Callable[[], Any]) -> Any: ...
+    def remove(self, name: str) -> Any | None: ...
+```
+
+- `get(name, object_factory)` returns the cached instance for `name`, or calls
+  `object_factory()` (at most once), caches the result, and returns it.
+- `remove(name)` evicts `name`, returning the removed instance or `None`.
+
+```python
+from collections.abc import Callable
+from typing import Any
+from pyfly.container import Container, component
+
+class ThreadScope:
+    """A trivial per-instance cache; a real handler might key by thread id."""
+    def __init__(self) -> None:
+        self._cache: dict[str, Any] = {}
+
+    def get(self, name: str, object_factory: Callable[[], Any]) -> Any:
+        if name not in self._cache:
+            self._cache[name] = object_factory()
+        return self._cache[name]
+
+    def remove(self, name: str) -> Any | None:
+        return self._cache.pop(name, None)
+
+container = Container()
+container.register_scope("thread", ThreadScope())
+
+@component(scope="thread")          # string scope name
+class PerThreadState:
+    ...
+
+container.register(PerThreadState)  # scope picked up from the decorator
+```
+
+`register_scope()` rejects an empty name and refuses to override the built-in scope names
+(`"singleton"`, `"transient"`, `"request"`, `"session"`), raising `ValueError`.
+`unregister_scope(name)` removes a custom scope (no-op if absent). Resolving a bean whose
+string scope has no registered handler raises `RuntimeError` naming the missing scope.
+
+### @refresh_scope (Spring Cloud parity)
+
+`@refresh_scope` (or `scope="refresh"`) marks a bean as **refresh-scoped**: it is cached
+like a singleton, but a *refresh* evicts every refresh-scoped instance so the next
+resolution rebuilds it — re-running constructor/field injection and re-reading `@Value`
+placeholders against the live `Config`. This mirrors Spring Cloud's `@RefreshScope`.
+
+The `"refresh"` scope is **built in**: `ApplicationContext` registers a `RefreshScope`
+handler under that name during construction, so no `register_scope()` call is needed.
+
+```python
+from pyfly.container import component, refresh_scope
+from pyfly.core.value import Value
+
+@refresh_scope            # must be the OUTER (top) decorator
+@component
+class FeatureFlags:
+    # re-read from the live Config every time the bean is rebuilt after a refresh
+    enabled: bool = Value("${features.checkout.enabled:false}")
+```
+
+`refresh_scope`, `RefreshScope`, and `REFRESH_SCOPE_NAME` (`= "refresh"`) live in
+`pyfly.container.refresh_scope` (`refresh_scope` and `RefreshScope` are also re-exported
+from `pyfly.container`). The decorator sets `__pyfly_scope__ = "refresh"` on the class.
+
+> **Decorator order matters.** A stereotype like `@component` always assigns its own
+> `scope=` (default `SINGLETON`), so it must run **before** (i.e. be listed *below*)
+> `@refresh_scope`. Equivalently, skip the marker and write the scope inline:
+> `@component(scope="refresh")`.
+
+#### Triggering a refresh — ContextRefresher
+
+`ApplicationContext` also registers a singleton `ContextRefresher` (from `pyfly.context`)
+that you can inject. Calling its async `refresh()` evicts all refresh-scoped beans, resets
+`@config_properties` beans (so they re-bind from the live `Config` on next resolution),
+and publishes a `RefreshScopeRefreshedEvent`. It returns the cache keys that were evicted.
+
+```python
+from pyfly.context import ContextRefresher, app_event_listener, RefreshScopeRefreshedEvent
+from pyfly.container import service
+
+@service
+class ConfigAdmin:
+    def __init__(self, refresher: ContextRefresher) -> None:
+        self.refresher = refresher
+
+    async def reload(self) -> list[str]:
+        # rebuilds refresh-scoped + @config_properties beans against the live Config
+        return await self.refresher.refresh()
+
+@service
+class RefreshLogger:
+    @app_event_listener
+    async def on_refresh(self, event: RefreshScopeRefreshedEvent) -> None:
+        print("refreshed beans:", event.refreshed)
+```
+
+`RefreshScopeRefreshedEvent` (in `pyfly.context`) carries a `refreshed: list[str]` of the
+evicted cache keys.
 
 ---
 
@@ -1193,6 +1338,55 @@ exists. This is the key mechanism for "default with override" patterns: auto-con
 provides a default that is automatically skipped when the user provides their own
 implementation.
 
+### @conditional_on_single_candidate
+
+```python
+from pyfly.context import conditional_on_single_candidate
+
+@conditional_on_single_candidate(DataSource)
+@service
+class DefaultTransactionManager:
+    """Only activate when there is exactly one DataSource candidate."""
+    ...
+```
+
+Mirrors Spring Boot's `@ConditionalOnSingleCandidate`: the bean is registered when exactly
+**one** bean assignable to `bean_type` exists, **or** when several exist but exactly one is
+marked `@primary`. Counting is purely type/registration-based — it never resolves or
+instantiates a candidate bean. Like `@conditional_on_bean`, it is bean-dependent and so is
+evaluated in **pass 2**.
+
+### @conditional_on_web_application
+
+```python
+from pyfly.context import conditional_on_web_application
+
+@conditional_on_web_application()
+@service
+class WebOnlyMetrics:
+    """Only activate when a web stack (Starlette or FastAPI) is present."""
+    ...
+```
+
+Mirrors Spring Boot's `@ConditionalOnWebApplication`. The bean is registered only when
+`starlette` or `fastapi` is importable. Note the trailing `()` — this is a factory that
+returns the decorator. It checks no beans, so it is evaluated in **pass 1**.
+
+### @conditional_on_resource
+
+```python
+from pyfly.context import conditional_on_resource
+
+@conditional_on_resource("/etc/myapp/license.key")
+@service
+class LicensedFeature:
+    """Only activate when the file at the given path exists."""
+    ...
+```
+
+Mirrors Spring Boot's `@ConditionalOnResource`. The bean is registered only when the
+filesystem path passed to the decorator exists (`os.path.exists`). Evaluated in **pass 1**.
+
 ### @auto_configuration
 
 ```python
@@ -1247,8 +1441,8 @@ The `ConditionEvaluator` uses a two-pass strategy to handle ordering dependencie
 
 | Pass | Conditions Evaluated | When |
 |---|---|---|
-| **Pass 1** | `@conditional_on_property`, `@conditional_on_class`, stereotype `condition` callable | Before any `@configuration` classes are processed. |
-| **Pass 2** | `@conditional_on_bean`, `@conditional_on_missing_bean` | After user `@configuration` classes are processed but before `@auto_configuration`. |
+| **Pass 1** | `@conditional_on_property`, `@conditional_on_class`, `@conditional_on_expression`, `@conditional_on_web_application`, `@conditional_on_resource`, stereotype `condition` callable | Before any `@configuration` classes are processed. |
+| **Pass 2** | `@conditional_on_bean`, `@conditional_on_missing_bean`, `@conditional_on_single_candidate` | After user `@configuration` classes are processed but before `@auto_configuration`. |
 
 This ensures that bean-dependent conditions see the full set of user-provided beans but
 not yet the auto-configured defaults. The separation prevents auto-configuration from

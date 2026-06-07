@@ -26,15 +26,25 @@ def scheduled(
     fixed_rate: timedelta | None = None,
     fixed_delay: timedelta | None = None,
     initial_delay: timedelta | None = None,
+    zone: str | None = None,
+    lock: str | bool | None = None,
+    lock_ttl: timedelta | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a method to be scheduled for periodic execution.
 
     Exactly one of cron, fixed_rate, or fixed_delay must be provided.
 
-    - cron: 5-field cron expression (e.g., "0 0 * * *" for midnight)
+    - cron: 5- or 6-field cron expression (e.g., "0 0 * * *" for midnight)
     - fixed_rate: Run at fixed intervals regardless of execution time
     - fixed_delay: Wait delay after previous run completes
     - initial_delay: Optional delay before first execution
+    - zone: IANA time zone for ``cron`` evaluation (e.g. "America/New_York");
+      defaults to UTC. Spring's ``@Scheduled(zone=...)``.
+    - lock: distributed lock so only one instance per cluster runs a tick
+      (ShedLock / Spring ``@SchedulerLock``). ``True`` auto-derives the name
+      ``"Class.method"``; a string sets an explicit shared name; ``None`` disables.
+      Requires a ``DistributedLock`` bean for cross-process coordination.
+    - lock_ttl: max time the lock is held before auto-expiry (default 60s).
     """
     triggers = sum(x is not None for x in (cron, fixed_rate, fixed_delay))
     if triggers != 1:
@@ -46,6 +56,9 @@ def scheduled(
         func.__pyfly_scheduled_fixed_rate__ = fixed_rate  # type: ignore[attr-defined]
         func.__pyfly_scheduled_fixed_delay__ = fixed_delay  # type: ignore[attr-defined]
         func.__pyfly_scheduled_initial_delay__ = initial_delay  # type: ignore[attr-defined]
+        func.__pyfly_scheduled_zone__ = zone  # type: ignore[attr-defined]
+        func.__pyfly_scheduled_lock__ = lock  # type: ignore[attr-defined]
+        func.__pyfly_scheduled_lock_ttl__ = lock_ttl.total_seconds() if lock_ttl else None  # type: ignore[attr-defined]
         return func
 
     return decorator

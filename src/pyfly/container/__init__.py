@@ -25,6 +25,7 @@ from pyfly.container.exceptions import (
 from pyfly.container.lazy import lazy
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, LOWEST_PRECEDENCE, order
 from pyfly.container.provider import Provider
+from pyfly.container.refresh_scope import RefreshScope, refresh_scope
 from pyfly.container.stereotypes import (
     component,
     configuration,
@@ -34,7 +35,7 @@ from pyfly.container.stereotypes import (
     rest_controller,
     service,
 )
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeHandler
 
 __all__ = [
     "Autowired",
@@ -47,8 +48,11 @@ __all__ = [
     "NoUniqueBeanError",
     "Provider",
     "Qualifier",
+    "RefreshScope",
     "Scope",
+    "ScopeHandler",
     "bean",
+    "refresh_scope",
     "component",
     "configuration",
     "controller",

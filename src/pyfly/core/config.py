@@ -19,6 +19,7 @@ import dataclasses
 import importlib.resources
 import os
 import re
+import threading
 import tomllib
 import types
 from collections.abc import Callable
@@ -163,6 +164,10 @@ class Config:
         # Each entry is (source_name, raw_dict). Populated by the from_* loaders;
         # empty for dict-constructed instances (a synthetic source is derived).
         self._source_data: list[tuple[str, dict[str, Any]]] = []
+        # Construction params recorded by from_sources so reload_from_sources() can replay
+        # the exact merge; None for dict-constructed instances (reload is then a no-op).
+        self._reload_params: tuple[Path, list[str], bool, dict[str, Any] | None] | None = None
+        self._reload_lock = threading.Lock()
 
     @property
     def loaded_sources(self) -> list[str]:
@@ -267,6 +272,23 @@ class Config:
         6. Environment variables (handled at read time in get())
         """
         base_dir = Path(base_dir)
+        data, sources, source_data = cls._load_sources(base_dir, active_profiles, load_defaults, starter_defaults)
+        instance = cls(data)
+        instance._loaded_sources = sources
+        instance._source_data = source_data
+        # Record params so reload_from_sources() can replay the exact merge at runtime.
+        instance._reload_params = (base_dir, list(active_profiles or []), load_defaults, starter_defaults)
+        return instance
+
+    @classmethod
+    def _load_sources(
+        cls,
+        base_dir: Path,
+        active_profiles: list[str] | None,
+        load_defaults: bool,
+        starter_defaults: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[str], list[tuple[str, dict[str, Any]]]]:
+        """Merge all config sources for *base_dir* — returns (data, source_names, source_data)."""
         data: dict[str, Any] = {}
         sources: list[str] = []
         source_data: list[tuple[str, dict[str, Any]]] = []
@@ -305,10 +327,26 @@ class Config:
                     if candidate.is_file():
                         _add(f"{candidate} (profile: {profile})", cls._load_config_data(candidate))
 
-        instance = cls(data)
-        instance._loaded_sources = sources
-        instance._source_data = source_data
-        return instance
+        return data, sources, source_data
+
+    def reload_from_sources(self) -> bool:
+        """Re-read the original config sources and atomically swap in the merged result.
+
+        Picks up file/profile changes at runtime (Spring Cloud config refresh). Returns
+        ``True`` if a reload happened, ``False`` for instances not built via
+        :meth:`from_sources` (e.g. dict-constructed) where there is nothing to reload.
+        ``get()`` reads ``_data`` (a single atomic rebind), so concurrent readers always
+        see a consistent snapshot.
+        """
+        if self._reload_params is None:
+            return False
+        base_dir, active_profiles, load_defaults, starter_defaults = self._reload_params
+        with self._reload_lock:
+            data, sources, source_data = self._load_sources(base_dir, active_profiles, load_defaults, starter_defaults)
+            self._data = data
+            self._loaded_sources = sources
+            self._source_data = source_data
+        return True
 
     @classmethod
     def from_file(

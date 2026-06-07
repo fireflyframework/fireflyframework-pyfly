@@ -38,6 +38,7 @@ from pyfly.context.environment import Environment
 from pyfly.context.events import (
     ApplicationEvent,
     ApplicationEventBus,
+    ApplicationEventPublisher,
     ApplicationReadyEvent,
     ContextClosedEvent,
     ContextRefreshedEvent,
@@ -76,10 +77,20 @@ class ApplicationContext:
         self._wiring_counts: dict[str, int] = {}
 
         # Register config and container as singleton beans (injectable like Spring's ApplicationContext)
-        self._container.register(Config, scope=Scope.SINGLETON)
-        self._container._registrations[Config].instance = config
-        self._container.register(Container, scope=Scope.SINGLETON)
-        self._container._registrations[Container].instance = self._container
+        self._container.register_instance(Config, config)
+        self._container.register_instance(Container, self._container)
+        # Injectable event publisher (Spring ApplicationEventPublisher) — beans can fire
+        # lifecycle or arbitrary domain events into the bus.
+        self._container.register_instance(ApplicationEventPublisher, ApplicationEventPublisher(self._event_bus))
+        # Built-in "refresh" scope + injectable ContextRefresher (Spring Cloud @RefreshScope).
+        from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, RefreshScope
+        from pyfly.context.refresh import ContextRefresher
+
+        refresh_scope = RefreshScope()
+        self._container.register_scope(REFRESH_SCOPE_NAME, refresh_scope)
+        self._container.register_instance(
+            ContextRefresher, ContextRefresher(self._container, refresh_scope, self._event_bus, self._config)
+        )
 
     # ------------------------------------------------------------------
     # Bean registration
@@ -688,13 +699,15 @@ class ApplicationContext:
                 # return annotation must not be mistaken for the event (audit #119).
                 hints = typing.get_type_hints(method)
                 hints.pop("return", None)
-                event_type: type[ApplicationEvent] | None = None
+                # The first type-annotated parameter is the event type — any type, so a
+                # listener can subscribe to arbitrary domain events, not only ApplicationEvent.
+                event_type: type = ApplicationEvent
                 for param_type in hints.values():
-                    if isinstance(param_type, type) and issubclass(param_type, ApplicationEvent):
+                    # A concrete class (not typing.Any, which is a class in 3.11+ but is
+                    # the "untyped" catch-all here) becomes the subscribed event type.
+                    if isinstance(param_type, type) and param_type is not typing.Any:
                         event_type = param_type
                         break
-                if event_type is None:
-                    event_type = ApplicationEvent
                 self._event_bus.subscribe(event_type, method, owner_cls=type(reg.instance))
                 count += 1
         self._wiring_counts["event_listeners"] = count
@@ -721,8 +734,18 @@ class ApplicationContext:
                         return
                 topic = getattr(method, "__pyfly_listener_topic__", "")
                 group = getattr(method, "__pyfly_listener_group__", None)
+                # Apply retry + dead-letter handling (adapter-agnostic) when configured.
+                from pyfly.messaging.error_handling import wrap_listener
+
+                handler = wrap_listener(
+                    method,
+                    broker,
+                    retries=getattr(method, "__pyfly_listener_retries__", 0),
+                    retry_delay=getattr(method, "__pyfly_listener_retry_delay__", 0.0),
+                    dead_letter_topic=getattr(method, "__pyfly_listener_dlq__", None),
+                )
                 # MessageBrokerPort.subscribe is async; defer via create_task
-                task = asyncio.get_running_loop().create_task(broker.subscribe(topic, method, group=group))
+                task = asyncio.get_running_loop().create_task(broker.subscribe(topic, handler, group=group))
                 self._background_tasks.append(task)
                 count += 1
         self._wiring_counts["message_listeners"] = count

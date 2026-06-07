@@ -25,6 +25,7 @@ guide covers both in depth.
 10. [Application Events](#application-events)
     - [Built-in Lifecycle Events](#built-in-lifecycle-events)
     - [ApplicationEventBus](#applicationeventbus)
+    - [ApplicationEventPublisher (injectable)](#applicationeventpublisher-injectable)
     - [@app_event_listener](#app_event_listener)
 11. [Events vs. Messaging: When to Use Which](#events-vs-messaging-when-to-use-which)
 12. [Complete Example: Order Domain Events](#complete-example-order-domain-events)
@@ -462,6 +463,42 @@ bus.subscribe(
 )
 ```
 
+### ApplicationEventPublisher (injectable)
+
+*(v26.06.41)* You rarely need to touch the `ApplicationEventBus` directly. The
+`ApplicationContext` registers an `ApplicationEventPublisher` as a singleton
+bean wired to the same bus, so any bean can fire application events simply by
+injecting it -- the Spring `ApplicationEventPublisher` equivalent.
+
+```python
+from pyfly.container import service
+from pyfly.context import ApplicationEventPublisher
+
+
+@service
+class OrderService:
+    def __init__(self, events: ApplicationEventPublisher) -> None:
+        self._events = events
+
+    async def place(self, order_id: str) -> None:
+        # ... persist the order ...
+        await self._events.publish(OrderPlacedEvent(order_id))
+```
+
+The publisher exposes a single async method:
+
+```python
+async def publish(self, event: object) -> None: ...
+```
+
+`publish()` accepts **any object** -- a built-in lifecycle event
+(`ApplicationReadyEvent`, etc.) or an arbitrary domain event of your own. It
+delegates straight to the underlying `ApplicationEventBus`, which dispatches
+to every listener whose subscribed type matches the event via `isinstance`.
+
+`ApplicationEventPublisher` is importable from either `pyfly.context` or
+`pyfly.context.events`.
+
 ### @app_event_listener
 
 The `@app_event_listener` decorator marks a method as an application event
@@ -493,10 +530,53 @@ class LifecycleManager:
 
 The framework inspects the type annotation on the `event` parameter (e.g.,
 `ApplicationReadyEvent`) and automatically subscribes the method to that event
-type on the `ApplicationEventBus`.
+type on the `ApplicationEventBus`. The first type-annotated parameter wins; the
+return annotation is ignored.
 
 You can define **multiple** `@app_event_listener` methods in the same class,
 each listening for a different event type.
+
+#### Listening for arbitrary events
+
+*(v26.06.41)* The inferred event type does **not** have to be an
+`ApplicationEvent` subclass. The annotated parameter type may be any class, and
+the listener is invoked whenever the published object satisfies `isinstance`.
+Combined with the injectable `ApplicationEventPublisher`, this lets you use the
+context event bus as a lightweight, in-process domain-event dispatcher:
+
+```python
+from dataclasses import dataclass
+
+from pyfly.container import service
+from pyfly.context import ApplicationEventPublisher
+from pyfly.context.events import app_event_listener
+
+
+@dataclass
+class OrderPlacedEvent:  # a plain object, not an ApplicationEvent subclass
+    order_id: str
+
+
+@service
+class FulfillmentService:
+
+    @app_event_listener
+    async def on_order_placed(self, event: OrderPlacedEvent) -> None:
+        print(f"Fulfilling order {event.order_id}")
+
+
+@service
+class OrderService:
+    def __init__(self, events: ApplicationEventPublisher) -> None:
+        self._events = events
+
+    async def place(self, order_id: str) -> None:
+        await self._events.publish(OrderPlacedEvent(order_id))
+```
+
+> Note: listeners may also be plain (non-`async`) methods -- the bus awaits the
+> result only when it is awaitable, so a synchronous `def` listener will not
+> break startup.
 
 ---
 

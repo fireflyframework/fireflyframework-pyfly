@@ -36,7 +36,7 @@ from pyfly.container.metrics import BeanMetrics
 from pyfly.container.ordering import get_order
 from pyfly.container.provider import Provider
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeHandler, ScopeSpec
 
 T = TypeVar("T")
 
@@ -106,6 +106,8 @@ class Container:
         self._registrations: dict[type, Registration] = {}
         self._named: dict[str, Registration] = {}
         self._bindings: dict[type, list[type]] = {}
+        # Custom bean scopes registered via register_scope() (Spring's registerScope).
+        self._custom_scopes: dict[str, ScopeHandler] = {}
         # Per-thread in-creation set for cycle detection — thread-local so
         # concurrent TRANSIENT/REQUEST resolution (which does not hold the lock)
         # can't race on a shared dict or raise spurious circular-dependency errors.
@@ -133,10 +135,26 @@ class Container:
             self._resolving_local.stack = stack
         return stack
 
+    def register_scope(self, name: str, handler: ScopeHandler) -> None:
+        """Register a custom bean scope (Spring's ``ConfigurableBeanFactory.registerScope``).
+
+        Beans declared with ``scope=name`` are resolved through *handler*. Built-in scope
+        names are reserved and cannot be overridden.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("Custom scope name must be a non-empty string")
+        if name in ("singleton", "transient", "request", "session"):
+            raise ValueError(f"Cannot override built-in scope name: {name!r}")
+        self._custom_scopes[name] = handler
+
+    def unregister_scope(self, name: str) -> None:
+        """Remove a previously registered custom scope (no-op if absent)."""
+        self._custom_scopes.pop(name, None)
+
     def register(
         self,
         cls: type,
-        scope: Scope = Scope.SINGLETON,
+        scope: ScopeSpec = Scope.SINGLETON,
         condition: Any = None,
         name: str = "",
     ) -> None:
@@ -153,6 +171,43 @@ class Container:
         self._all[(cls, bean_name)] = reg
         if bean_name:
             self._named[bean_name] = reg
+
+    # ------------------------------------------------------------------
+    # Public introspection / registration SPI
+    # ------------------------------------------------------------------
+
+    def register_instance(self, cls: type, instance: Any, *, name: str = "") -> None:
+        """Register an already-constructed object as a SINGLETON bean.
+
+        The supported way to install a pre-built instance (Spring's
+        ``registerSingleton``) — preferred over mutating registration internals.
+        """
+        self.register(cls, scope=Scope.SINGLETON, name=name)
+        self._registrations[cls].instance = instance
+
+    def contains_type(self, cls: type) -> bool:
+        """Whether a bean registered under exactly *cls* exists."""
+        return cls in self._registrations
+
+    def get_registration(self, cls: type) -> Registration | None:
+        """Return the :class:`Registration` for *cls*, or ``None`` if unregistered."""
+        return self._registrations.get(cls)
+
+    def registered_types(self) -> list[type]:
+        """Snapshot of all registered bean types."""
+        return list(self._registrations)
+
+    def reset_instance(self, cls: type) -> Any | None:
+        """Drop the cached SINGLETON instance of *cls* so it is rebuilt on next resolve.
+
+        Returns the evicted instance (or ``None``). Used by refresh/config-reload to force
+        re-creation without reaching into registration internals.
+        """
+        reg = self._registrations.get(cls)
+        if reg is None:
+            return None
+        previous, reg.instance = reg.instance, None
+        return previous
 
     def bind(self, interface: type, implementation: type) -> None:
         """Bind an interface/base class to a concrete implementation."""
@@ -321,6 +376,16 @@ class Container:
             self._ensure_metrics(reg.impl_type).resolution_count += 1
             return instance
 
+        if reg.scope == Scope.SESSION:
+            instance = self._resolve_session_scoped(reg)
+            self._ensure_metrics(reg.impl_type).resolution_count += 1
+            return instance
+
+        if isinstance(reg.scope, str):
+            instance = self._resolve_custom_scoped(reg)
+            self._ensure_metrics(reg.impl_type).resolution_count += 1
+            return instance
+
         instance = self._create_instance(reg)
         self._ensure_metrics(reg.impl_type).resolution_count += 1
         return instance
@@ -345,6 +410,49 @@ class Container:
         instance = self._create_instance(reg)
         ctx.set(cache_key, instance)
         return instance
+
+    def _resolve_session_scoped(self, reg: Registration) -> Any:
+        """Resolve a SESSION-scoped bean from the active HttpSession's attributes.
+
+        The bean lives as a session attribute, so (like Spring's session-scoped beans) it
+        is persisted with the session — it must be serializable when a non-memory session
+        store (e.g. Redis) is used.
+        """
+        from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext
+
+        ctx = RequestContext.current()
+        if ctx is None:
+            raise RuntimeError(
+                f"No active request context for SESSION-scoped bean "
+                f"{reg.impl_type.__name__}. Ensure a RequestContextFilter is active."
+            )
+        session = ctx.get(HTTP_SESSION_KEY)
+        if session is None:
+            raise RuntimeError(
+                f"No HTTP session for SESSION-scoped bean {reg.impl_type.__name__}. "
+                f"Ensure the session module (SessionFilter) is enabled."
+            )
+
+        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        existing = session.get_attribute(cache_key)
+        if existing is not None:
+            return existing
+
+        instance = self._create_instance(reg)
+        session.set_attribute(cache_key, instance)
+        return instance
+
+    def _resolve_custom_scoped(self, reg: Registration) -> Any:
+        """Resolve a bean through a custom :class:`ScopeHandler` registered by name."""
+        handler = self._custom_scopes.get(cast(str, reg.scope))
+        if handler is None:
+            raise RuntimeError(
+                f"Custom scope {reg.scope!r} is not registered for bean "
+                f"{reg.impl_type.__name__}. Available: {sorted(self._custom_scopes)}. "
+                f"Call container.register_scope({reg.scope!r}, handler) first."
+            )
+        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        return handler.get(cache_key, lambda: self._create_instance(reg))
 
     def _create_instance(self, reg: Registration) -> Any:
         """Create an instance, resolving constructor and field dependencies."""

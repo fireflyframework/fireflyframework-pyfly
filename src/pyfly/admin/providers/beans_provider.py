@@ -21,6 +21,7 @@ import typing
 from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
+from pyfly.container.types import scope_name
 
 if TYPE_CHECKING:
     from pyfly.context.application_context import ApplicationContext
@@ -231,7 +232,7 @@ class BeansProvider:
                 {
                     "name": bean_name,
                     "type": f"{cls.__module__}.{cls.__qualname__}",
-                    "scope": reg.scope.name,
+                    "scope": scope_name(reg.scope),
                     "stereotype": stereotype,
                     "category": category,
                     "primary": primary,
@@ -340,7 +341,7 @@ class BeansProvider:
                     "type": f"{cls.__module__}.{cls.__qualname__}",
                     "stereotype": stereotype,
                     "category": category,
-                    "scope": reg.scope.name,
+                    "scope": scope_name(reg.scope),
                     "initialized": reg.instance is not None,
                     "order": getattr(cls, "__pyfly_order__", None),
                     "resolution_count": metrics["resolution_count"],
@@ -401,7 +402,7 @@ class BeansProvider:
         return {
             "name": reg.name or cls.__name__,
             "type": f"{cls.__module__}.{cls.__qualname__}",
-            "scope": reg.scope.name,
+            "scope": scope_name(reg.scope),
             "stereotype": stereotype,
             "category": category,
             "module": cls.__module__,

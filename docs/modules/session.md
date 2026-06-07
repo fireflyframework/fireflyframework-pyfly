@@ -169,6 +169,10 @@ Two auto-configuration classes activate when `pyfly.session.enabled=true`:
 | `SessionStoreAutoConfiguration` | `session_store` | `SessionStore` bean not already present |
 | `SessionFilterAutoConfiguration` | `session_filter` | always (when enabled) |
 
+A third class, `SessionConcurrencyAutoConfiguration`, activates independently
+when `pyfly.session.concurrency.enabled=true` — see
+[Concurrency Control](#concurrency-control).
+
 `SessionStoreAutoConfiguration` checks `pyfly.session.store`:
 
 - `redis` → `RedisSessionStore` (requires `redis.asyncio`; falls back to memory if unavailable)
@@ -188,6 +192,123 @@ HP+150) reads this attribute and restores the `SecurityContext` onto
 
 This means browser-based OAuth2 login works without any extra wiring: enable
 sessions, enable OAuth2 login, and the two filters cooperate automatically.
+
+---
+
+## Concurrency Control
+
+Mirroring Spring Security's `maximumSessions`, PyFly can cap the number of
+concurrent sessions per authenticated principal. The cap is enforced at the
+single point where a principal becomes bound to a session — OAuth2 login —
+after the session id has been rotated. With no cap configured, the registry is
+unused and behavior is unchanged.
+
+### Configuration
+
+```yaml
+pyfly:
+  session:
+    concurrency:
+      enabled: true
+      max-sessions: 1            # -1 = unlimited (default)
+      strategy: evict-oldest     # evict-oldest (default) | reject-new
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pyfly.session.concurrency.enabled` | — | Must be `true` to activate concurrency control |
+| `pyfly.session.concurrency.max-sessions` | `-1` | Maximum live sessions per principal; `-1` means unlimited |
+| `pyfly.session.concurrency.strategy` | `evict-oldest` | What to do when the cap is exceeded: `evict-oldest` or `reject-new` |
+
+**Strategies**
+
+- `evict-oldest` — the new login succeeds; the oldest session(s) for that
+  principal are removed from the registry and deleted from the session store.
+- `reject-new` — the new login is refused. The handler invalidates the
+  pending session and responds with HTTP `401` and body
+  `{"error": "max_sessions", ...}`.
+
+### Auto-Configuration
+
+When `pyfly.session.concurrency.enabled=true`,
+`SessionConcurrencyAutoConfiguration` registers a
+`SessionConcurrencyController` bean backed by an `InMemorySessionRegistry`.
+The OAuth2 login auto-configuration resolves this bean (if present) and passes
+it to `OAuth2LoginHandler`, so no manual wiring is required:
+
+| Class | Bean | Condition |
+|---|---|---|
+| `SessionConcurrencyAutoConfiguration` | `session_concurrency_controller` | `pyfly.session.concurrency.enabled=true` |
+
+The controller's `session_deleter` is wired to `SessionStore.delete`, so an
+evicted session is purged from whichever store backend is active (memory or
+Redis).
+
+### Key APIs
+
+```python
+from pyfly.session import (
+    ConcurrencyControlPolicy,
+    InMemorySessionRegistry,
+    SessionConcurrencyController,
+    SessionRegistry,
+)
+```
+
+`ConcurrencyControlPolicy` is a frozen dataclass holding the cap configuration:
+
+```python
+policy = ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new")
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `max_sessions` | `-1` | Cap per principal; `-1` (negative) means unlimited |
+| `strategy` | `"evict-oldest"` | `"evict-oldest"` or `"reject-new"` |
+
+`SessionRegistry` is a `runtime_checkable` Protocol — a per-principal index of
+live session ids, kept separate from the `SessionStore`:
+
+```python
+class SessionRegistry(Protocol):
+    async def register(self, principal: str, session_id: str, created_at: float) -> None: ...
+    async def deregister(self, principal: str, session_id: str) -> None: ...
+    async def list_sessions(self, principal: str) -> list[tuple[str, float]]: ...  # oldest first
+    async def count(self, principal: str) -> int: ...
+```
+
+`InMemorySessionRegistry` is the in-process implementation (guarded by an
+`asyncio.Lock`), the default used by auto-configuration. Provide your own
+`SessionRegistry` implementation for a distributed registry.
+
+`SessionConcurrencyController` enforces the policy:
+
+| Method | Description |
+|---|---|
+| `__init__(registry, policy, *, session_deleter=None)` | `session_deleter` is an `async (session_id) -> None` callable used to evict store entries |
+| `on_login(principal, session_id, created_at)` | Registers the session, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise |
+| `on_logout(principal, session_id)` | Deregisters the session |
+
+Constructing a controller manually:
+
+```python
+from pyfly.session import (
+    ConcurrencyControlPolicy,
+    InMemorySessionRegistry,
+    SessionConcurrencyController,
+)
+from pyfly.session.adapters.memory import InMemorySessionStore
+
+store = InMemorySessionStore()
+controller = SessionConcurrencyController(
+    InMemorySessionRegistry(),
+    ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new"),
+    session_deleter=store.delete,
+)
+
+# allowed is False once the cap is exceeded under "reject-new"
+allowed = await controller.on_login("alice", session_id="abc123", created_at=1717000000.0)
+```
 
 ---
 

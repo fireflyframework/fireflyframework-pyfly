@@ -6,6 +6,301 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.60 (2026-06-07)
+
+### Fixed (auto-configuration discovery)
+
+- **Session concurrency control now actually auto-wires.** `SessionConcurrencyAutoConfiguration`
+  (v26.06.55) was missing its `pyfly.auto_configuration` entry point, so it was never discovered
+  at startup and the `SessionConcurrencyController` bean was never created. Added the entry point.
+
+### Added (guardrail)
+
+- A test that AST-scans every `@auto_configuration` class and asserts each is reachable via an
+  entry point — so a forgotten entry point fails CI instead of silently disabling a feature.
+
+## v26.06.59 (2026-06-07)
+
+### Added (distributed primitives — Redis adapters, hexagonal)
+
+The clustering features shipped in v26.06.53/55 now have real cross-process backends. All
+adapters are hexagonal — the async Redis client is injected; **no adapter imports redis**, and
+the only gated lazy ``import redis.asyncio`` lives in the auto-config composition roots:
+
+- **`RedisDistributedLock`** (`pyfly.scheduling.adapters.redis_lock`) — `SET NX PX` acquire +
+  owner-token compare-and-delete release (an instance only releases a lock it still owns).
+  Selected via `pyfly.scheduling.lock.provider=redis`.
+- **`InProcessDistributedLock`** (`pyfly.scheduling`) — real single-process mutual exclusion
+  with TTL self-heal (`provider=memory`); `none` (default) stays the no-op `LocalLock`.
+- **`RedisSessionRegistry`** (`pyfly.session.adapters.redis_registry`) — a sorted set per
+  principal (oldest-first), for cross-process session concurrency control. Selected via
+  `pyfly.session.concurrency.registry=redis`.
+
+Verified by an adversarial review against the installed redis-py (signatures + token/ordering
+semantics) — `@scheduled(lock=...)` and `maximumSessions` now actually coordinate across a cluster.
+
+## v26.06.58 (2026-06-07)
+
+### Added (config — runtime reload, completing @RefreshScope)
+
+- **`Config.reload_from_sources()`** — re-reads the original config files/profiles (the exact
+  merge `from_sources` performed) and atomically swaps in the result, so file/profile changes
+  are picked up at runtime. Returns `False` (no-op) for dict-constructed configs. `get()` reads
+  a single atomically-rebound dict, so concurrent readers always see a consistent snapshot.
+- **`ContextRefresher.refresh()`** now reloads config first, so a refresh (or
+  `POST /actuator/refresh`) rebuilds refresh-scoped and `@config_properties` beans against the
+  freshly-read config — not just the live environment. This closes the v26.06.52 follow-up.
+
+## v26.06.57 (2026-06-07)
+
+### Added (container — public registration/introspection SPI)
+
+Promotes the previously-internal `Container._registrations` mutation pattern to a supported
+public API (no more reaching into registration internals across modules):
+
+- **`register_instance(cls, instance, *, name="")`** — register an already-constructed object
+  as a singleton bean (Spring's `registerSingleton`).
+- **`contains_type(cls)`**, **`get_registration(cls)`**, **`registered_types()`** — read-only
+  introspection.
+- **`reset_instance(cls)`** — drop a singleton's cached instance so it rebuilds on next resolve.
+
+`ApplicationContext`, test slices, and `ContextRefresher` now use this SPI instead of
+mutating `_registrations` directly.
+
+## v26.06.56 (2026-06-07)
+
+### Docs (parity documentation for v26.06.37–55)
+
+Documented every feature shipped in v26.06.37–55 across 14 docs files (verified — all
+referenced imports/config keys resolve against the released source):
+
+- **dependency-injection**: custom-scope SPI, `@RefreshScope`, `Scope.SESSION`,
+  `@conditional_on_single_candidate` / `@conditional_on_web_application` / `@conditional_on_resource`
+- **security**: full method-security SpEL, role hierarchy, OAuth2 PKCE
+- **observability**: OpenTelemetry distributed-trace propagation
+- **configuration**: profile boolean expressions (`& | ! ()`)
+- **events**: injectable `ApplicationEventPublisher` + arbitrary domain events
+- **caching**: `@cacheable` condition / unless
+- **resilience**: `@retry` jitter, circuit-breaker failure-rate window & half-open tuning
+- **scheduling**: `@scheduled` time zones + distributed lock
+- **messaging**: `@message_listener` retry + dead-letter routing
+- **data-relational**: multiple named datasources
+- **testing**: functional test slices
+- **session**: session concurrency control
+- **actuator**: `POST /actuator/refresh`
+- **spring-comparison**: parity rows for all of the above (and corrected stale resilience API examples)
+
+## v26.06.55 (2026-06-07)
+
+### Added (session — concurrency control)
+
+Spring Security's `maximumSessions` — limit concurrent sessions per authenticated principal:
+
+- **`SessionConcurrencyController`** + **`ConcurrencyControlPolicy`** (`max_sessions`,
+  `strategy`) + a **`SessionRegistry`** port with an `InMemorySessionRegistry`
+  (`pyfly.session`). On login, an over-cap principal is either **rejected** (`reject-new`)
+  or the **oldest session is evicted** (`evict-oldest`, also deleted from the session store);
+  logout deregisters.
+- Wired into the OAuth2 login flow (the one point where a principal binds to a session) and
+  auto-configured (gated, opt-in) via `pyfly.session.concurrency.enabled` /
+  `.max-sessions` / `.strategy`. Unlimited by default — behavior unchanged when not enabled.
+
+## v26.06.54 (2026-06-07)
+
+### Added (security — OAuth2 authorization_code PKCE)
+
+The OAuth2 login flow (`OAuth2LoginHandler`) gained **PKCE** (RFC 7636, S256):
+
+- **`ClientRegistration(use_pkce=True)`** — when enabled, the authorization redirect carries a
+  `code_challenge` + `code_challenge_method=S256` (the one-time verifier is stashed in the
+  session), and the callback sends the `code_verifier` on the token exchange. Recommended for
+  public clients; harmless and more secure for confidential clients.
+- Default `use_pkce=False` preserves the existing flow byte-for-byte.
+
+## v26.06.53 (2026-06-07)
+
+### Added (scheduling — @scheduled distributed lock)
+
+- **`@scheduled(..., lock=..., lock_ttl=...)`** (ShedLock / Spring `@SchedulerLock` parity) —
+  when a job declares a lock, the scheduler acquires it before each run and **skips the tick**
+  if held elsewhere, so only one instance per cluster runs the job. `lock=True` auto-derives
+  the name `"Class.method"`; a string sets an explicit shared name; `lock_ttl` (a `timedelta`,
+  default 60s) bounds the hold so a crashed instance self-heals.
+- New **`DistributedLock`** protocol (`try_acquire`/`release`) + default **`LocalLock`**
+  (always acquires — single-instance behavior unchanged). Register a `DistributedLock` bean
+  (e.g. Redis-backed) and the scheduler auto-wires it for cross-process coordination.
+- The lock is always released in `finally` once the body completes.
+
+## v26.06.52 (2026-06-07)
+
+### Added (context — @RefreshScope + ContextRefresher + POST /actuator/refresh)
+
+Spring Cloud's refresh scope, built on the v26.06.50 custom-scope SPI:
+
+- **`@refresh_scope`** (`pyfly.container`) / `scope="refresh"` — a bean is cached like a
+  singleton but evicted on refresh, so the next resolution rebuilds it (re-running injection
+  and re-reading `@Value`/env placeholders against the live `Config`). The `"refresh"` scope
+  and `RefreshScope` handler are built in (always available).
+- **`ContextRefresher`** (`pyfly.context`, injectable) — `await refresher.refresh()` evicts all
+  refresh-scoped beans, resets `@config_properties` beans so they re-bind from the live config,
+  and publishes a **`RefreshScopeRefreshedEvent`**.
+- **`POST /actuator/refresh`** — triggers a refresh and returns the refreshed bean keys
+  (web-exposed only when opted in via `management.endpoints.web.exposure.include`).
+
+Config *source* reload (re-reading files) remains a follow-up; this release rebinds beans
+against the live `Config` (which already re-reads env vars + `${...}` placeholders).
+
+## v26.06.51 (2026-06-07)
+
+### Added (testing — functional test slices)
+
+- **`web_slice(*controllers, ...)`**, **`service_slice(...)`**, **`data_slice(...)`**, and the
+  generic **`slice_context(*beans, ...)`** (`pyfly.testing`) — build a minimal, *started*
+  ApplicationContext containing only the beans you pass, with collaborators supplied via an
+  `overrides={Interface: fake_or_class}` map (Spring's `@WebMvcTest`/`@DataJpaTest` slices).
+  `web_slice` additionally wraps the context in a `PyFlyTestClient` via `create_app(context=...)`.
+  Each builder returns an async context manager that stops the context on exit, and **fails
+  fast**: the slice's beans are resolved at build time, so a missing collaborator raises
+  immediately rather than on first request.
+
+## v26.06.50 (2026-06-07)
+
+### Added (container — custom bean-scope SPI)
+
+- **`Container.register_scope(name, handler)`** / **`unregister_scope(name)`** plus the
+  **`ScopeHandler`** protocol (`get(name, object_factory)` / `remove(name)`) — Spring's
+  `ConfigurableBeanFactory.registerScope` + `Scope` SPI. Declare a bean with a custom scope
+  via `register(cls, scope="my-scope")` or `__pyfly_scope__ = "my-scope"`, and the container
+  resolves it through the registered handler. Built-in scope names are reserved; resolving an
+  unregistered scope raises a clear error.
+- Back-compat: `SINGLETON` / `TRANSIENT` / `REQUEST` / `SESSION` dispatch is byte-for-byte
+  unchanged (the new branch is a single `isinstance(reg.scope, str)` check after them).
+  `Registration.scope` is widened to `Scope | str`; admin/actuator bean views render the
+  scope via a `scope_name()` helper.
+
+## v26.06.49 (2026-06-07)
+
+### Added (context — @ConditionalOnSingleCandidate)
+
+- **`@conditional_on_single_candidate(bean_type)`** — register the bean only when exactly one
+  candidate assignable to *bean_type* exists, or when several exist but exactly one is
+  `@primary` (Spring Boot's `@ConditionalOnSingleCandidate`). Evaluated in pass 2 and purely
+  type/registration-based (never resolves or instantiates a bean). Interface-alias
+  registrations are deduped so one implementation of an interface counts once, not twice.
+
+## v26.06.48 (2026-06-07)
+
+### Added (data — multiple named datasources)
+
+- **`NamedDataSources`** — configure secondary datasources under
+  `pyfly.data.relational.datasources.<name>.url` (+ optional `echo`); inject `NamedDataSources`
+  and call `.get("<name>")` for that datasource's `async_sessionmaker` (Spring's multiple
+  `DataSource` beans). `.names()` lists them; `await .dispose()` closes their engines. The
+  primary datasource keeps its dedicated beans unchanged; the registry is empty when none
+  are configured.
+
+## v26.06.47 (2026-06-07)
+
+### Added (messaging — @message_listener retry + dead-letter routing)
+
+`@message_listener` gained resilience options (Spring Kafka `@RetryableTopic` /
+`DefaultErrorHandler` parity), applied adapter-agnostically (Kafka, RabbitMQ, in-memory):
+
+- **`retries`** — re-invoke the handler N times on failure, with linear `retry_delay`
+  backoff (attempt N waits `retry_delay * N`).
+- **`dead_letter_topic`** — a message still failing after `retries` is re-published there
+  with `x-original-topic` / `x-exception` headers, instead of propagating.
+
+With no options set, the handler is wired unchanged (zero overhead). The wrapper lives in
+`pyfly.messaging.error_handling.wrap_listener` and is applied during listener wiring.
+
+## v26.06.46 (2026-06-07)
+
+### Added (container — SESSION bean scope)
+
+- **`Scope.SESSION`** — register a bean with `scope=Scope.SESSION` to get one instance per
+  HTTP session (Spring's session scope). The instance lives as an `HttpSession` attribute, so
+  the `SessionFilter` must be active; it is persisted with the session, so it must be
+  serializable when a non-memory session store (e.g. Redis) is used.
+- The `SessionFilter` now exposes the active `HttpSession` to the container via the
+  `RequestContext`, mirroring how `REQUEST`-scoped beans are resolved.
+
+(A general custom-scope SPI remains on the roadmap; this adds the concrete SESSION scope.)
+
+## v26.06.45 (2026-06-07)
+
+### Added (security — role hierarchy)
+
+- **`RoleHierarchy`** (`pyfly.security`) — declare `ADMIN > MANAGER`, `MANAGER > USER` so a
+  higher role implies every authority of the lower ones (Spring Security's `RoleHierarchy`).
+  `RoleHierarchy.from_string(...)` parses `HIGHER > LOWER` rules; `.expand(roles)` returns the
+  transitive closure.
+- **`set_role_hierarchy(...)` / `get_role_hierarchy()`** install the process-wide hierarchy
+  consulted by `hasRole` / `hasAnyRole` / `hasAuthority` in all method-security expressions
+  (`@pre_authorize` / `@post_authorize` / `@secure`). With no hierarchy set, behavior is
+  unchanged (no implicit roles).
+
+## v26.06.44 (2026-06-07)
+
+### Added (scheduling — @scheduled time zones)
+
+- **`@scheduled(cron=..., zone="America/New_York")`** — cron expressions are now evaluated
+  in the given IANA time zone (Spring's `@Scheduled(zone=...)`); defaults to UTC.
+  `CronExpression` gained a `zone` argument and computes fire times in that zone.
+
+## v26.06.43 (2026-06-07)
+
+### Added (resilience — tuning)
+
+Completes the v26.06.36 resilience decorators toward Resilience4j parity:
+
+- **`@retry(jitter=...)`** — a randomization fraction in ``[0, 1]`` applied to each backoff
+  wait (``±jitter * wait``), to avoid thundering-herd retries.
+- **`CircuitBreaker` failure-rate window** — set `failure_rate_threshold` (+ `window_size`)
+  to open on the failure *rate* over the last N calls (Resilience4j COUNT_BASED) instead of
+  consecutive failures.
+- **`CircuitBreaker(half_open_max_calls=...)`** — admit N trial calls in HALF_OPEN; that
+  many successes close the circuit, any failure re-opens it.
+
+Existing consecutive-failure behavior is unchanged when these options are not set.
+
+## v26.06.42 (2026-06-07)
+
+### Added (cache — @cacheable condition / unless)
+
+`@cacheable` / `cache` now accept Spring-style predicates (Pythonic callables):
+
+- **`condition`** — a predicate over the call arguments; when it returns ``False`` caching
+  is bypassed entirely (the function runs, nothing is read from or written to the cache).
+- **`unless`** — a predicate over the *result*; when it returns ``True`` the result is
+  returned but not stored (e.g. skip caching empty/None results).
+
+## v26.06.41 (2026-06-07)
+
+### Added (context — injectable ApplicationEventPublisher + arbitrary domain events)
+
+- **`ApplicationEventPublisher`** is now an injectable singleton bean (Spring's
+  `ApplicationEventPublisher`): inject it into any bean and `await publisher.publish(event)`
+  to fire events into the context event bus.
+- **Arbitrary domain events** — the event bus and `@app_event_listener` no longer require
+  events to subclass `ApplicationEvent`; any object can be published, and a listener whose
+  parameter type matches (by `isinstance`) receives it (an untyped/`Any` parameter still
+  falls back to the catch-all `ApplicationEvent`).
+
+`ApplicationEventPublisher` is exported from `pyfly.context`.
+
+## v26.06.40 (2026-06-07)
+
+### Added (context — more @ConditionalOn* conditions)
+
+- **`@conditional_on_web_application()`** — registers the bean only when a web stack
+  (Starlette or FastAPI) is importable (Spring `@ConditionalOnWebApplication`).
+- **`@conditional_on_resource(path)`** — registers only when the filesystem resource at
+  *path* exists (Spring `@ConditionalOnResource`).
+
+Both exported from `pyfly.context`. (`@ConditionalOnSingleCandidate` remains on the
+roadmap — it needs careful bean-counting around interface-alias registrations.)
+
 ## v26.06.39 (2026-06-07)
 
 ### Added (config — Spring Boot 2.4+ profile expressions)

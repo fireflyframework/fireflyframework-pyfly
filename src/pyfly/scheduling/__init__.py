@@ -20,9 +20,13 @@ Import concrete adapter types from the adapter package::
 """
 
 from pyfly.scheduling.decorators import async_method, scheduled
+from pyfly.scheduling.lock import DistributedLock, InProcessDistributedLock, LocalLock
 from pyfly.scheduling.ports.outbound import TaskExecutorPort
 
 __all__ = [
+    "DistributedLock",
+    "InProcessDistributedLock",
+    "LocalLock",
     "TaskExecutorPort",
     "async_method",
     "scheduled",

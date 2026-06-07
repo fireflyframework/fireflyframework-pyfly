@@ -18,6 +18,7 @@ from pyfly.testing.client import PyFlyTestClient, TestResponse
 from pyfly.testing.containers import create_test_container
 from pyfly.testing.fixtures import PyFlyTestCase
 from pyfly.testing.mock import mock_bean
+from pyfly.testing.slice_context import data_slice, service_slice, slice_context, web_slice
 from pyfly.testing.slices import DataTest, ServiceTest, WebTest, get_test_slice
 from pyfly.testing.testcontainers import (
     is_docker_available,
@@ -41,6 +42,7 @@ __all__ = [
     "assert_event_published",
     "assert_no_events_published",
     "create_test_container",
+    "data_slice",
     "get_test_slice",
     "is_docker_available",
     "kafka_container",
@@ -52,4 +54,7 @@ __all__ = [
     "pyfly_config_for",
     "redis_container",
     "requires_docker",
+    "service_slice",
+    "slice_context",
+    "web_slice",
 ]

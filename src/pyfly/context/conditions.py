@@ -134,6 +134,54 @@ def conditional_on_bean(bean_type: type) -> Callable[[F], F]:
     return decorator
 
 
+def conditional_on_single_candidate(bean_type: type) -> Callable[[F], F]:
+    """Only register this bean when exactly one candidate of *bean_type* exists.
+
+    Mirrors Spring Boot's ``@ConditionalOnSingleCandidate``: matches when there is exactly
+    one bean assignable to *bean_type*, OR when several exist but exactly one is marked
+    ``@primary``. Evaluated in pass 2 (after bean registration). Counting is purely
+    type/registration-based, so it never resolves or instantiates a bean.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_single_candidate", "bean_type": bean_type})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
+def conditional_on_web_application() -> Callable[[F], F]:
+    """Only register this bean when a web stack is present (Starlette or FastAPI).
+
+    Mirrors Spring Boot's ``@ConditionalOnWebApplication``.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_web_application"})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
+def conditional_on_resource(path: str) -> Callable[[F], F]:
+    """Only register this bean when the filesystem resource at *path* exists.
+
+    Mirrors Spring Boot's ``@ConditionalOnResource``.
+    """
+
+    def decorator(cls: F) -> F:
+        conditions = list(cls.__dict__.get("__pyfly_conditions__", []))
+        conditions.append({"type": "on_resource", "path": path})
+        cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
 def auto_configuration(cls: T) -> T:
     """Mark a @configuration class as auto-configuration.
 

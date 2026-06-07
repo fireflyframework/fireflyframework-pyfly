@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import secrets
 from typing import Any
@@ -32,8 +34,17 @@ logger = logging.getLogger(__name__)
 
 _OAUTH2_STATE_KEY = "oauth2_state"
 _OAUTH2_NONCE_KEY = "oauth2_nonce"
+_OAUTH2_PKCE_VERIFIER_KEY = "oauth2_pkce_verifier"
 _SECURITY_CONTEXT_KEY = "SECURITY_CONTEXT"
 _REDIRECT_URI_KEY = "oauth2_redirect_uri"
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """Return a (code_verifier, code_challenge) pair for PKCE S256 (RFC 7636)."""
+    verifier = secrets.token_urlsafe(64)  # 43–128 unreserved chars
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 class OAuth2LoginHandler:
@@ -52,8 +63,13 @@ class OAuth2LoginHandler:
         client_repository: Repository to look up client registrations.
     """
 
-    def __init__(self, client_repository: ClientRegistrationRepository) -> None:
+    def __init__(
+        self,
+        client_repository: ClientRegistrationRepository,
+        concurrency: Any = None,
+    ) -> None:
         self._client_repository = client_repository
+        self._concurrency = concurrency  # optional SessionConcurrencyController
 
     def routes(self) -> list[Route]:
         """Return the Starlette routes for the OAuth2 login flow."""
@@ -93,6 +109,12 @@ class OAuth2LoginHandler:
             "state": state,
             "nonce": nonce,
         }
+        # PKCE (RFC 7636): stash the verifier in the session, send only the S256 challenge.
+        if getattr(registration, "use_pkce", False):
+            verifier, challenge = _generate_pkce()
+            session.set_attribute(_OAUTH2_PKCE_VERIFIER_KEY, verifier)
+            params["code_challenge"] = challenge
+            params["code_challenge_method"] = "S256"
         authorization_url = f"{registration.authorization_uri}?{urlencode(params)}"
 
         logger.debug("Redirecting to OAuth2 provider: %s", registration.provider_name or registration_id)
@@ -146,8 +168,14 @@ class OAuth2LoginHandler:
                 status_code=400,
             )
 
+        # PKCE: retrieve and consume the one-time verifier stashed at authorization time.
+        code_verifier = None
+        if getattr(registration, "use_pkce", False):
+            code_verifier = session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+            session.remove_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+
         # Exchange authorization code for tokens
-        token_response = await self._exchange_code(registration, code)
+        token_response = await self._exchange_code(registration, code, code_verifier)
         access_token = token_response.get("access_token")
         if not access_token:
             logger.error("Token exchange did not return an access_token for %s", registration_id)
@@ -190,6 +218,17 @@ class OAuth2LoginHandler:
         session.rotate_id()
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
 
+        # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
+        # is now bound to the (rotated) session id, so this is the one correct enforcement point.
+        if self._concurrency is not None:
+            allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            if not allowed:
+                session.invalidate()
+                return JSONResponse(
+                    {"error": "max_sessions", "message": "Maximum concurrent sessions for this user reached"},
+                    status_code=401,
+                )
+
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
 
         redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
@@ -203,6 +242,11 @@ class OAuth2LoginHandler:
     async def _handle_logout(self, request: Request) -> Response:
         """Invalidate the session and redirect to the root."""
         session: HttpSession = request.state.session
+        if self._concurrency is not None:
+            principal = session.get_attribute(_SECURITY_CONTEXT_KEY)
+            user_id = getattr(principal, "user_id", None)
+            if user_id is not None:
+                await self._concurrency.on_logout(user_id, session.id)
         session.invalidate()
         return RedirectResponse(url="/", status_code=302)
 
@@ -210,7 +254,7 @@ class OAuth2LoginHandler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _exchange_code(self, registration: Any, code: str) -> dict[str, Any]:
+    async def _exchange_code(self, registration: Any, code: str, code_verifier: str | None = None) -> dict[str, Any]:
         """Exchange an authorization code for tokens via the token endpoint."""
         data = {
             "grant_type": "authorization_code",
@@ -219,6 +263,8 @@ class OAuth2LoginHandler:
             "client_id": registration.client_id,
             "client_secret": registration.client_secret,
         }
+        if code_verifier:  # PKCE proof of possession
+            data["code_verifier"] = code_verifier
 
         import httpx
 

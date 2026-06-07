@@ -13,8 +13,12 @@ PyFly scheduling module.
    - [fixed_delay](#fixed_delay)
    - [cron](#cron)
    - [initial_delay](#initial_delay)
+   - [zone (time-zone-aware cron)](#zone-time-zone-aware-cron)
+   - [lock (distributed locking)](#lock-distributed-locking)
 3. [CronExpression](#cronexpression)
    - [5-Field Format](#5-field-format)
+   - [6-Field (Spring) Format](#6-field-spring-format)
+   - [Time Zones](#time-zones)
    - [next_fire_time()](#next_fire_time)
    - [previous_fire_time()](#previous_fire_time)
    - [next_n_fire_times()](#next_n_fire_times)
@@ -28,10 +32,11 @@ PyFly scheduling module.
 5. [TaskExecutorPort](#taskexecutorport)
 6. [AsyncIOTaskExecutor](#asynciotaskexecutor)
 7. [ThreadPoolTaskExecutor](#threadpooltaskexecutor)
-8. [The @async_method Decorator](#the-async_method-decorator)
-9. [Configuration](#configuration)
-10. [Auto-Configuration](#auto-configuration)
-11. [Complete Example](#complete-example)
+8. [Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock)
+9. [The @async_method Decorator](#the-async_method-decorator)
+10. [Configuration](#configuration)
+11. [Auto-Configuration](#auto-configuration)
+12. [Complete Example](#complete-example)
 
 ---
 
@@ -64,6 +69,8 @@ from pyfly.scheduling import (
     CronExpression,
     TaskScheduler,
     TaskExecutorPort,
+    DistributedLock,
+    LocalLock,
 )
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
@@ -123,9 +130,10 @@ sleeps for the interval, then fires again.
 
 ### cron
 
-Runs the method according to a standard 5-field cron expression. The scheduler
-calculates `seconds_until_next()` via `CronExpression`, sleeps that long, then
-executes the method.
+Runs the method according to a cron expression. The scheduler calculates
+`seconds_until_next()` via `CronExpression`, sleeps that long, then executes
+the method. Both the standard 5-field format and the Spring-style 6-field
+(seconds-first) format are accepted.
 
 ```python
 class ReportGenerator:
@@ -148,6 +156,66 @@ class CacheWarmer:
         await self.preload_hot_keys()
 ```
 
+### zone (time-zone-aware cron)
+
+By default, `cron` expressions are evaluated in **UTC**. Pass `zone` with an
+IANA time-zone name to evaluate fire times in that zone instead (this mirrors
+Spring's `@Scheduled(zone=...)`). DST transitions are handled by the underlying
+`zoneinfo` database.
+
+```python
+class BillingService:
+    # 02:00 every day in New York local time, regardless of server TZ
+    @scheduled(cron="0 2 * * *", zone="America/New_York")
+    async def run_nightly_billing(self):
+        await self.close_books()
+```
+
+`zone` only affects `cron` triggers; it is ignored for `fixed_rate` and
+`fixed_delay` (which measure elapsed wall-clock time, not calendar instants).
+
+### lock (distributed locking)
+
+When you run multiple instances of the same service, every instance schedules
+the same `@scheduled` method — so without coordination a midnight job would
+fire once *per instance*. The `lock` parameter provides ShedLock / Spring
+`@SchedulerLock` parity: before each tick the scheduler tries to acquire a
+named lock, and **skips the run** if it is already held elsewhere, so only one
+instance executes the job per fire. The lock is always released when the body
+finishes (the `lock_ttl` is the safety valve if an instance crashes mid-run).
+
+```python
+class ReportService:
+    # lock=True auto-derives the name "ReportService.daily_rollup"
+    @scheduled(cron="0 0 * * *", lock=True)
+    async def daily_rollup(self):
+        await self.aggregate_yesterday()
+```
+
+- `lock=True` — derives the lock name from the class and method as
+  `"ClassName.method_name"`.
+- `lock="some-name"` — uses an explicit shared name (useful when two different
+  methods must be mutually exclusive across the cluster).
+- `lock=None` (default) — no locking.
+- `lock_ttl` — a `timedelta` for the maximum time the lock may be held before
+  it auto-expires. Defaults to 60 seconds. Set it comfortably longer than the
+  job's worst-case runtime.
+
+```python
+from datetime import timedelta
+
+class ImportService:
+    @scheduled(fixed_rate=timedelta(minutes=5), lock="upstream-import", lock_ttl=timedelta(minutes=10))
+    async def import_batch(self):
+        await self.pull_and_load()
+```
+
+`lock` works with all three trigger types (`cron`, `fixed_rate`,
+`fixed_delay`). Out of the box the scheduler uses an in-process `LocalLock`
+that always acquires — so single-instance behavior is unchanged. For true
+cross-process coordination you must register a `DistributedLock` bean; see
+[Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock).
+
 ### Decorator Metadata
 
 Under the hood, `@scheduled` attaches metadata attributes to the decorated
@@ -160,8 +228,13 @@ function:
 | `__pyfly_scheduled_fixed_rate__` | The `timedelta`, or `None` |
 | `__pyfly_scheduled_fixed_delay__` | The `timedelta`, or `None` |
 | `__pyfly_scheduled_initial_delay__` | The `timedelta`, or `None` |
+| `__pyfly_scheduled_zone__` | The IANA zone string, or `None` |
+| `__pyfly_scheduled_lock__` | `True`, the lock-name string, or `None` |
+| `__pyfly_scheduled_lock_ttl__` | The TTL in seconds (`float`), or `None` |
 
-The `TaskScheduler` reads these attributes during its discovery phase.
+The `TaskScheduler` reads these attributes during its discovery phase. A
+`lock=True` value is resolved to the `"ClassName.method"` name at discovery
+time.
 
 ---
 
@@ -196,6 +269,51 @@ Invalid expressions raise `ValueError` during construction:
 ```python
 CronExpression("invalid")  # ValueError: Invalid cron expression: invalid
 ```
+
+### 6-Field (Spring) Format
+
+`CronExpression` also accepts the Spring-style 6-field format, where the first
+field is **seconds**. The field count is detected automatically:
+
+```
+ +---------------- second       (0-59)
+ |  +------------- minute       (0-59)
+ |  |  +---------- hour         (0-23)
+ |  |  |  +------- day of month (1-31)
+ |  |  |  |  +---- month        (1-12)
+ |  |  |  |  |  +- day of week  (0-6)
+ *  *  *  *  *  *
+```
+
+```python
+from pyfly.scheduling import CronExpression
+
+# Every day at 12:00:00 (Spring 6-field, seconds-first)
+cron = CronExpression("0 0 12 * * *")
+```
+
+The Spring `?` "no specific value" placeholder is also accepted in the
+day-of-month and day-of-week fields (it is normalized to `*`):
+
+```python
+CronExpression("0 0 12 ? * *")  # noon every day
+```
+
+### Time Zones
+
+By default fire times are computed in **UTC**. Pass `zone` with an IANA
+time-zone name to compute them in that zone instead; the returned `datetime`
+values are zone-aware:
+
+```python
+from pyfly.scheduling import CronExpression
+
+cron = CronExpression("0 9 * * *", zone="America/New_York")
+next_run = cron.next_fire_time()
+print(next_run.tzinfo)  # America/New_York
+```
+
+This is the same `zone` value accepted by `@scheduled(cron=..., zone=...)`.
 
 ### next_fire_time()
 
@@ -274,16 +392,20 @@ from pyfly.scheduling import TaskScheduler
 
 ### Creating a TaskScheduler
 
-The constructor takes an optional `TaskExecutorPort`. If none is provided, it
-defaults to `AsyncIOTaskExecutor`:
+The constructor takes an optional `executor: TaskExecutorPort` (defaults to
+`AsyncIOTaskExecutor`) and an optional `lock: DistributedLock` (defaults to
+`LocalLock`, used for `@scheduled(lock=...)` coordination):
 
 ```python
-# Default: uses AsyncIOTaskExecutor
+# Default: AsyncIOTaskExecutor + in-process LocalLock
 scheduler = TaskScheduler()
 
 # Custom: use ThreadPoolTaskExecutor for CPU-bound tasks
 from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 scheduler = TaskScheduler(executor=ThreadPoolTaskExecutor(max_workers=8))
+
+# Cross-process locking for @scheduled(lock=...) — see Distributed Locking below
+scheduler = TaskScheduler(lock=RedisLock(redis_client))
 ```
 
 ### Discovering Scheduled Methods
@@ -411,6 +533,95 @@ task = executor.submit_sync(cpu_heavy_function, arg1, arg2)
 
 - **start()**: No-op (ready after construction).
 - **stop()**: Waits for all pending tasks, clears task set, shuts down the thread pool.
+
+---
+
+## Distributed Locking with DistributedLock
+
+The `@scheduled(lock=...)` feature ([above](#lock-distributed-locking)) relies
+on a lock implementation supplied to the `TaskScheduler`. There are two pieces:
+
+```python
+from pyfly.scheduling import DistributedLock, LocalLock
+```
+
+- **`DistributedLock`** — a `runtime_checkable` `Protocol` describing a
+  best-effort, TTL-bounded named lock:
+
+  ```python
+  @runtime_checkable
+  class DistributedLock(Protocol):
+      async def try_acquire(self, name: str, ttl: float) -> bool: ...
+      async def release(self, name: str) -> None: ...
+  ```
+
+- **`LocalLock`** — the default in-process implementation whose `try_acquire`
+  **always returns `True`**. It performs no cross-process coordination, so a
+  single-instance deployment behaves exactly as if no lock were declared.
+
+The `TaskScheduler` accepts the lock via its constructor; if none is given it
+falls back to `LocalLock`:
+
+```python
+from pyfly.scheduling import TaskScheduler, LocalLock
+
+scheduler = TaskScheduler(lock=LocalLock())  # default behavior
+```
+
+### Cross-Process Coordination
+
+To actually serialize a job across instances, implement `DistributedLock`
+against a shared store (Redis, a database row, etc.) and pass it to the
+scheduler. Any object with conforming `try_acquire` / `release` coroutines
+satisfies the protocol:
+
+```python
+from pyfly.scheduling import DistributedLock, TaskScheduler
+
+
+class RedisLock:
+    """Best-effort lock backed by Redis SET NX PX."""
+
+    def __init__(self, redis):
+        self._redis = redis
+
+    async def try_acquire(self, name: str, ttl: float) -> bool:
+        # SET key value NX PX <ttl-ms> returns None when the key already exists.
+        ok = await self._redis.set(f"pyfly:lock:{name}", "1", nx=True, px=int(ttl * 1000))
+        return ok is True
+
+    async def release(self, name: str) -> None:
+        await self._redis.delete(f"pyfly:lock:{name}")
+
+
+scheduler = TaskScheduler(lock=RedisLock(redis_client))
+```
+
+### Registering a DistributedLock Bean
+
+With auto-configuration, the auto-wired `TaskScheduler` automatically looks up a
+`DistributedLock` bean from the container and uses it for `@scheduled(lock=...)`
+coordination. If none is registered, it falls back to `LocalLock`. Just declare
+your implementation as a bean of type `DistributedLock`:
+
+```python
+from pyfly.container.bean import bean
+from pyfly.container import configuration
+from pyfly.scheduling import DistributedLock
+
+
+@configuration
+class LockConfig:
+    @bean
+    def distributed_lock(self) -> DistributedLock:
+        return RedisLock(redis_client)
+```
+
+The scheduler will then skip any locked tick whose lock is already held by
+another instance, giving you cluster-wide single-firing of scheduled jobs.
+
+**Source:** `src/pyfly/scheduling/lock.py`, `src/pyfly/scheduling/task_scheduler.py`,
+`src/pyfly/scheduling/auto_configuration.py`
 
 ---
 
