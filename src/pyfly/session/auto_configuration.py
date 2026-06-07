@@ -23,6 +23,7 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+from pyfly.session.concurrency import SessionConcurrencyController
 from pyfly.session.filter import SessionFilter
 from pyfly.session.ports.outbound import SessionStore
 
@@ -62,3 +63,21 @@ class SessionFilterAutoConfiguration:
         ttl = int(config.get("pyfly.session.ttl", 1800))
         secure = str(config.get("pyfly.session.cookie.secure", "false")).lower() in ("true", "1", "yes")
         return SessionFilter(store=session_store, cookie_name=cookie_name, ttl=ttl, secure=secure)
+
+
+@auto_configuration
+@conditional_on_property("pyfly.session.concurrency.enabled", having_value="true")
+class SessionConcurrencyAutoConfiguration:
+    """Auto-configures per-principal session concurrency control (Spring maximumSessions)."""
+
+    @bean
+    def session_concurrency_controller(
+        self, config: Config, session_store: SessionStore
+    ) -> SessionConcurrencyController:
+        from pyfly.session.concurrency import ConcurrencyControlPolicy, InMemorySessionRegistry
+
+        policy = ConcurrencyControlPolicy(
+            max_sessions=int(config.get("pyfly.session.concurrency.max-sessions", -1)),
+            strategy=str(config.get("pyfly.session.concurrency.strategy", "evict-oldest")),
+        )
+        return SessionConcurrencyController(InMemorySessionRegistry(), policy, session_deleter=session_store.delete)

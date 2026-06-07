@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.55 (2026-06-07)
+
+### Added (session — concurrency control)
+
+Spring Security's `maximumSessions` — limit concurrent sessions per authenticated principal:
+
+- **`SessionConcurrencyController`** + **`ConcurrencyControlPolicy`** (`max_sessions`,
+  `strategy`) + a **`SessionRegistry`** port with an `InMemorySessionRegistry`
+  (`pyfly.session`). On login, an over-cap principal is either **rejected** (`reject-new`)
+  or the **oldest session is evicted** (`evict-oldest`, also deleted from the session store);
+  logout deregisters.
+- Wired into the OAuth2 login flow (the one point where a principal binds to a session) and
+  auto-configured (gated, opt-in) via `pyfly.session.concurrency.enabled` /
+  `.max-sessions` / `.strategy`. Unlimited by default — behavior unchanged when not enabled.
+
 ## v26.06.54 (2026-06-07)
 
 ### Added (security — OAuth2 authorization_code PKCE)
