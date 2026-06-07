@@ -42,6 +42,8 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
 - [Read/Write Routing (Read Replicas)](#readwrite-routing-read-replicas)
+- [Multiple Named Datasources](#multiple-named-datasources)
+  - [NamedDataSources](#nameddatasources)
 - [Data Auditing](#data-auditing)
   - [AuditingEntityListener](#auditingentitylistener)
   - [How Auditing Works](#how-auditing-works)
@@ -631,6 +633,61 @@ class UserService:
 Outside any `read_only()` block, `factory()` always returns a primary session. Inside one, it returns a replica session **only if** a replica is configured; otherwise it falls back to the primary, so the same code runs unchanged in environments without a replica.
 
 **Source:** `src/pyfly/data/relational/routing.py` · bean: `RelationalAutoConfiguration.routing_session_factory`
+
+---
+
+## Multiple Named Datasources
+
+In addition to the primary datasource, PyFly can configure any number of **secondary datasources** — the equivalent of Spring declaring multiple `DataSource` beans. Each named datasource gets its own engine and `async_sessionmaker`, kept separate from the primary's dedicated beans.
+
+Declare each one under `pyfly.data.relational.datasources.<name>`; only `url` is required (`echo` is optional and defaults to `false`):
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+asyncpg://user:pass@primary:5432/app   # primary (unchanged)
+      datasources:
+        reporting:
+          url: postgresql+asyncpg://user:pass@reporting:5432/reports
+          echo: false
+        analytics:
+          url: postgresql+asyncpg://user:pass@analytics:5432/warehouse
+```
+
+`RelationalAutoConfiguration` builds a `NamedDataSources` registry bean from this config. Inject it and call `.get("<name>")` to retrieve that datasource's `async_sessionmaker`:
+
+```python
+from pyfly.container import service
+from pyfly.data.relational.named_datasources import NamedDataSources
+from sqlalchemy import text
+
+
+@service
+class ReportingService:
+    def __init__(self, datasources: NamedDataSources) -> None:
+        # async_sessionmaker for the "reporting" datasource
+        self._reporting = datasources.get("reporting")
+
+    async def daily_total(self) -> int:
+        async with self._reporting() as session:        # AsyncSession on the reporting DB
+            result = await session.execute(text("SELECT COUNT(*) FROM orders"))
+            return int(result.scalar_one())
+```
+
+### NamedDataSources
+
+| Member | Returns | Description |
+|--------|---------|-------------|
+| `get(name)` | `async_sessionmaker[AsyncSession]` | Session factory for `name`; raises `KeyError` if unknown. |
+| `names()` | `list[str]` | Sorted names of all configured secondary datasources. |
+| `dispose()` | `None` (await) | Disposes every secondary engine — call on shutdown. |
+| `name in datasources` | `bool` | Whether a datasource is configured (`__contains__`). |
+| `len(datasources)` | `int` | Number of configured secondary datasources. |
+
+The primary datasource keeps its own `async_session_factory` / `async_session` beans and is **not** part of this registry. When no `datasources` are configured, the bean is still registered but empty (`len(...) == 0`), so existing apps are unaffected.
+
+**Source:** `src/pyfly/data/relational/named_datasources.py` · bean: `RelationalAutoConfiguration.named_data_sources` *(v26.06.48)*
 
 ---
 

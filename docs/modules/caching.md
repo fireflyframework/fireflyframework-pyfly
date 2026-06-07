@@ -18,6 +18,7 @@ with pluggable backends. Following the hexagonal architecture pattern, a
 6. [Declarative Caching Decorators](#declarative-caching-decorators)
    - [@cache](#cache)
    - [@cacheable](#cacheable)
+     - [Conditional Caching: condition and unless](#conditional-caching-condition-and-unless)
    - [@cache_put](#cache_put)
    - [@cache_evict](#cache_evict)
 7. [Key Templates](#key-templates)
@@ -293,6 +294,58 @@ async def get_order(order_id: str) -> dict:
 
 Use whichever name reads better in your codebase. `@cacheable` may feel more
 natural if you are coming from Spring Framework.
+
+#### Conditional Caching: `condition` and `unless`
+
+Both `@cache` and `@cacheable` accept two keyword-only predicates that mirror
+Spring's `@Cacheable(condition=..., unless=...)`:
+
+* **`condition`** — a callable with the **same signature as the decorated
+  function**, evaluated on the call arguments *before* the cache is touched.
+  When it returns `False`, caching is bypassed entirely: the function runs and
+  nothing is read from or written to the cache.
+* **`unless`** — a callable that receives the **result**, evaluated *after* the
+  function executes. When it returns `True`, the result is returned to the
+  caller but **not stored**.
+
+```python
+from pyfly.cache import cacheable
+
+@cacheable(
+    backend=backend,
+    key="user:{user_id}",
+    ttl=timedelta(minutes=10),
+    condition=lambda user_id, include_drafts=False: not include_drafts,
+    unless=lambda result: result is None,
+)
+async def get_user(user_id: str, include_drafts: bool = False) -> dict | None:
+    return await database.find_user(user_id, include_drafts)
+
+# include_drafts=True  -> condition False, cache bypassed (always executes)
+await get_user("123", include_drafts=True)
+
+# result is None       -> unless True, returned but not stored
+await get_user("missing")
+
+# normal call          -> cached; second call is a hit (body not executed)
+await get_user("123")
+await get_user("123")
+```
+
+> **Note:** `condition` is called with the *same positional and keyword
+> arguments* as the wrapped function, so for methods it also receives `self` as
+> the first argument. Accept it explicitly (e.g. `lambda self, user_id: ...`)
+> when decorating instance methods.
+
+#### Parameters
+
+| Parameter   | Type                          | Default    | Description |
+|-------------|-------------------------------|------------|-------------|
+| `backend`   | `CacheAdapter`                | *required* | The cache backend to use. |
+| `key`       | `str`                         | *required* | Key template with `{param}` placeholders. |
+| `ttl`       | `timedelta \| None`           | `None`     | Time-to-live. `None` means the entry never expires. |
+| `condition` | `Callable[..., bool] \| None` | `None`     | Keyword-only. Predicate over the call arguments; returning `False` bypasses the cache (no read or write). |
+| `unless`    | `Callable[[Any], bool] \| None` | `None`   | Keyword-only. Predicate over the result; returning `True` returns the value without storing it. |
 
 ### @cache_put
 

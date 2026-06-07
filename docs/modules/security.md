@@ -46,6 +46,12 @@ The PyFly security module provides a complete authentication and authorization s
   - [Access Rule Types](#access-rule-types)
   - [HttpSecurityFilter](#httpsecurityfilter)
   - [Integration with create_app()](#integration-with-create_app-1)
+- [Method-Level Security](#method-level-security)
+  - [@pre_authorize](#pre_authorize--check-before-execution)
+  - [@post_authorize](#post_authorize--check-after-execution)
+  - [Expression Vocabulary](#expression-vocabulary)
+  - [Method Arguments and returnObject](#method-arguments-and-returnobject)
+  - [Role Hierarchy](#role-hierarchy)
 - [OAuth2](#oauth2)
   - [OAuth2 Resource Server (JWKS)](#oauth2-resource-server-jwks)
   - [OAuth2 Client Registration](#oauth2-client-registration)
@@ -564,16 +570,25 @@ async def delete_order(order_id: str, security_context: SecurityContext) -> None
 
 **Supported expressions:**
 
+The `expression` parameter shares the full SpEL-subset vocabulary documented under [Method-Level Security](#method-level-security). The most common functions:
+
 | Expression | Description | Example |
 |---|---|---|
-| `hasRole('X')` | User has role X | `hasRole('ADMIN')` |
+| `hasRole('X')` | User has role X (honours the [role hierarchy](#role-hierarchy)) | `hasRole('ADMIN')` |
 | `hasAnyRole('X', 'Y')` | User has at least one of the roles | `hasAnyRole('ADMIN', 'MANAGER')` |
+| `hasAuthority('X')` | User has role **or** permission X | `hasAuthority('order:read')` |
+| `hasAnyAuthority('X', 'Y')` | User has at least one role/permission | `hasAnyAuthority('ADMIN', 'order:read')` |
 | `hasPermission('X')` | User has permission X | `hasPermission('user:read')` |
 | `isAuthenticated` | User is authenticated | `isAuthenticated` |
+| `isAnonymous` | User is **not** authenticated | `isAnonymous` |
+| `permitAll` / `denyAll` | Always allow / always deny | `denyAll` |
+| `principal` / `authentication` | The current `SecurityContext` | `principal.user_id == 'system'` |
 | `and` | Boolean AND | `hasRole('ADMIN') and hasPermission('write')` |
 | `or` | Boolean OR | `hasRole('ADMIN') or hasRole('MANAGER')` |
 | `not` | Boolean NOT | `not hasRole('GUEST')` |
 | `(...)` | Grouping | `(hasRole('ADMIN') or hasRole('MANAGER')) and hasPermission('write')` |
+
+Each function is usable bare (`isAuthenticated`) or called (`isAuthenticated()`). `@secure` does not bind method arguments, so `#paramName` and `returnObject` references are only available on `@pre_authorize` / `@post_authorize`.
 
 **Complex expression examples:**
 
@@ -831,18 +846,87 @@ class OrderService:
         return await self.repo.find_by_id(order_id)
 ```
 
-#### Supported Expressions
+#### Expression Vocabulary
+
+`@pre_authorize`, `@post_authorize`, and `@secure(expression=...)` all share the same Spring Security SpEL subset, evaluated by `pyfly.security.expression.evaluate_security_expression`. Every function can be written bare (`isAuthenticated`) or called (`isAuthenticated()`).
 
 | Expression | Description |
 |-----------|-------------|
-| `isAuthenticated` | User is authenticated |
-| `hasRole('ADMIN')` | User has the ADMIN role |
-| `hasAnyRole('ADMIN', 'MANAGER')` | User has at least one role |
-| `hasPermission('order:read')` | User has the permission |
+| `isAuthenticated` | User is authenticated (`user_id` is set) |
+| `isAnonymous` | User is **not** authenticated |
+| `permitAll` | Always `True` |
+| `denyAll` | Always `False` |
+| `hasRole('ADMIN')` | User has the ADMIN role (consults the [role hierarchy](#role-hierarchy)) |
+| `hasAnyRole('ADMIN', 'MANAGER')` | User has at least one of the listed roles |
+| `hasAuthority('order:read')` | User has the authority as a **role or a permission** |
+| `hasAnyAuthority('ADMIN', 'order:read')` | User has at least one of the listed roles/permissions |
+| `hasPermission('order:read')` | User has the permission. The 2-arg `hasPermission(target, 'perm')` form is also accepted; the last argument is the permission (target-based ACLs are not modelled) |
+| `principal` / `authentication` | The current `SecurityContext` (e.g. `principal.user_id`, `authentication.roles`) |
 | `and` / `or` / `not` | Boolean operators |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in` | Comparisons |
 | `(...)` | Grouping |
 
-Both decorators raise `UnauthorizedException` (401) when no `SecurityContext` is available, and `ForbiddenException` (403) when the expression evaluates to `False`.
+```python
+@pre_authorize("isAnonymous or hasAuthority('order:read')")
+async def read_order(self, order_id: str) -> Order: ...
+
+@pre_authorize("principal.user_id == 'system' and not isAnonymous")
+async def run_batch(self) -> None: ...
+```
+
+The expression is parsed with `ast` and walked against a whitelist of node types — `eval`/`exec` are never used, only the security functions are callable, and attribute names beginning with `_` are rejected. Unsafe or unparseable expressions raise `SecurityException` with code `"INVALID_EXPRESSION"`.
+
+#### Method Arguments and returnObject
+
+Unlike `@secure`, the method-security decorators bind the wrapped call's arguments so expressions can reference them. Use `#paramName` to reference an argument by name, and `returnObject` (in `@post_authorize` only) to reference the method's return value:
+
+```python
+@service
+class DocumentService:
+
+    # Owners may delete their own document; ADMINs may delete any.
+    @pre_authorize("hasRole('ADMIN') or #owner_id == principal.user_id")
+    async def delete_document(self, doc_id: str, owner_id: str) -> None:
+        ...
+
+    # Only return the document if the caller owns it (checked after load).
+    @post_authorize("returnObject.owner_id == principal.user_id")
+    async def get_document(self, doc_id: str) -> Document:
+        return await self._repo.find_by_id(doc_id)
+```
+
+Arguments are bound by name via `inspect.signature(...).bind_partial`, so positional and keyword calls both resolve. `returnObject` is `None` for `@pre_authorize`.
+
+Both decorators raise `UnauthorizedException` (401) when no `SecurityContext` is available on the current `RequestContext`, and `ForbiddenException` (403, code `"FORBIDDEN"`) when the expression evaluates to `False`.
+
+#### Role Hierarchy
+
+A `RoleHierarchy` declares that higher roles imply lower ones — an `ADMIN` automatically has every authority of a `USER`. When a hierarchy is installed, `hasRole`, `hasAnyRole`, and `hasAuthority` expand the principal's roles transitively before checking.
+
+```python
+from pyfly.security import RoleHierarchy, set_role_hierarchy, get_role_hierarchy
+
+# One "HIGHER > LOWER" rule per line (or ';'-separated):
+hierarchy = RoleHierarchy.from_string("ADMIN > MANAGER\nMANAGER > USER")
+
+hierarchy.expand(["ADMIN"])   # {"ADMIN", "MANAGER", "USER"}
+
+# Install process-wide at startup (Spring's RoleHierarchy bean):
+set_role_hierarchy(hierarchy)
+get_role_hierarchy()          # -> the installed RoleHierarchy
+set_role_hierarchy(None)      # disable
+```
+
+With the hierarchy above installed, a principal holding only `ADMIN` satisfies `hasRole('USER')`:
+
+```python
+@pre_authorize("hasRole('USER')")   # ADMIN passes via ADMIN > MANAGER > USER
+async def list_orders(self) -> list[Order]: ...
+```
+
+`set_role_hierarchy()` sets a single process-wide hierarchy consulted by all method-security and `@secure` role checks; call it once during startup. With no hierarchy installed (the default), role checks are exact-match only.
+
+**Source:** `src/pyfly/security/method_security.py`, `src/pyfly/security/expression.py`, `src/pyfly/security/role_hierarchy.py`
 
 ---
 
@@ -954,6 +1038,33 @@ registration = ClientRegistration(
 | `jwks_uri` | `str` | `""` | Provider's JWKS endpoint |
 | `issuer_uri` | `str` | `""` | Provider's issuer URI |
 | `provider_name` | `str` | `""` | Human-readable provider name |
+| `use_pkce` | `bool` | `False` | Enable PKCE (RFC 7636, S256) on the `authorization_code` flow |
+
+##### PKCE (Proof Key for Code Exchange)
+
+Setting `use_pkce=True` enables PKCE (RFC 7636) on the `authorization_code` login flow. Recommended for public clients (no `client_secret`), and harmless — more secure — for confidential clients too.
+
+```python
+from pyfly.security.oauth2 import ClientRegistration
+
+registration = ClientRegistration(
+    registration_id="my-app",
+    client_id="public-client-id",
+    authorization_grant_type="authorization_code",
+    redirect_uri="https://myapp.com/login/oauth2/code/my-app",
+    authorization_uri="https://provider.com/authorize",
+    token_uri="https://provider.com/token",
+    use_pkce=True,
+)
+```
+
+When enabled, `OAuth2LoginHandler` (see [OAuth2 Login Flow](#oauth2-login-flow)) automatically:
+
+1. Generates a high-entropy `code_verifier` and its SHA-256 `code_challenge`.
+2. Adds `code_challenge` and `code_challenge_method=S256` to the authorization redirect, stashing the one-time `code_verifier` in the session.
+3. Sends the stored `code_verifier` when exchanging the authorization code for tokens.
+
+No additional wiring is required — toggling `use_pkce` is sufficient. The built-in `google()`, `github()`, and `keycloak()` factories default to `use_pkce=False`.
 
 #### Built-in Provider Factories
 
@@ -1138,7 +1249,7 @@ from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityF
 **Authorization flow:**
 
 1. The user visits `/oauth2/authorization/google` (or any registration ID).
-2. The handler looks up the `ClientRegistration`, generates a random `state` token, stores it in the session, and redirects the browser to the provider's `authorization_uri` with `response_type=code`, `client_id`, `redirect_uri`, `scope`, and `state` parameters.
+2. The handler looks up the `ClientRegistration`, generates a random `state` token, stores it in the session, and redirects the browser to the provider's `authorization_uri` with `response_type=code`, `client_id`, `redirect_uri`, `scope`, and `state` parameters. If the registration has [`use_pkce=True`](#pkce-proof-key-for-code-exchange), a `code_challenge` (`code_challenge_method=S256`) is also added and the matching `code_verifier` is stored in the session for the token exchange.
 3. The provider authenticates the user and redirects back to `/login/oauth2/code/google?code=...&state=...`.
 4. The callback handler validates the `state` parameter (CSRF protection), exchanges the authorization code for tokens via the provider's `token_uri`, fetches user info from `user_info_uri`, builds a `SecurityContext`, and stores it in the session.
 5. The user is redirected to the original page (or `/`).

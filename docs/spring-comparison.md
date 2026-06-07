@@ -30,6 +30,7 @@ If you're coming from the Java/Spring Boot ecosystem, this guide shows you how e
 - [Distributed Transactions](#distributed-transactions)
 - [Server Abstraction](#server-abstraction)
 - [Integration Testing with Containers](#integration-testing-with-containers)
+- [More Spring-parity features (v26.06.37–55)](#more-spring-parity-features-v260637-55)
 - [Quick Reference Table](#quick-reference-table)
 
 ---
@@ -1108,13 +1109,13 @@ public Order getOrder(Long id) { }
 ### PyFly
 
 ```python
-from pyfly.resilience import rate_limiter, fallback
+from pyfly.resilience import RateLimiter, rate_limiter, fallback
 from pyfly.client import service_client, get
 
-# Rate limiting
-limiter = rate_limiter(max_calls=100, period=60.0)
+# Rate limiting — construct a RateLimiter, then apply the decorator
+limiter = RateLimiter(max_tokens=100, refill_rate=100 / 60)
 
-@limiter
+@rate_limiter(limiter)
 async def get_order(self, id: int) -> Order: ...
 
 # Circuit breaker + retry (declarative client)
@@ -1129,7 +1130,7 @@ class OrderClient:
     async def get_order(self, id: int) -> Order: ...
 
 # Fallback
-@fallback(fallback_fn=get_cached_order)
+@fallback(fallback_method=get_cached_order)
 async def get_order(self, id: int) -> Order: ...
 ```
 
@@ -1137,12 +1138,12 @@ async def get_order(self, id: int) -> Order: ...
 
 | Pattern | Spring (Resilience4j) | PyFly |
 |---------|----------------------|-------|
-| Rate Limiter | `@RateLimiter` | `rate_limiter(max_calls, period)` |
-| Circuit Breaker | `@CircuitBreaker` | `CircuitBreaker(failure_threshold, recovery_timeout)` |
-| Bulkhead | `@Bulkhead` | `bulkhead(max_concurrent)` |
-| Time Limiter | `@TimeLimiter` | `time_limiter(timeout)` |
-| Retry | `@Retry` | `RetryPolicy(max_retries, backoff)` |
-| Fallback | `fallbackMethod` | `@fallback(fallback_fn)` |
+| Rate Limiter | `@RateLimiter` | `RateLimiter(max_tokens, refill_rate)` + `@rate_limiter(limiter)` |
+| Circuit Breaker | `@CircuitBreaker` | `CircuitBreaker(failure_threshold, recovery_timeout)` + `@circuit_breaker(breaker)` |
+| Bulkhead | `@Bulkhead` | `Bulkhead(max_concurrent)` + `@bulkhead(bh)` |
+| Time Limiter | `@TimeLimiter` | `@time_limiter(timeout=timedelta(...))` |
+| Retry | `@Retry` | `@retry(max_attempts, *, delay, backoff, jitter, ...)` |
+| Fallback | `fallbackMethod` | `@fallback(fallback_method=...)` / `@fallback(fallback_value=...)` |
 
 ---
 
@@ -1422,6 +1423,128 @@ Requires the extra and a running Docker daemon: `pip install 'pyfly[testcontaine
 
 ---
 
+## More Spring-parity features (v26.06.37–55)
+
+This wave closed several remaining gaps with Spring / Spring Cloud. Each feature is
+covered in depth in its module guide; the table below maps the Spring concept to its
+PyFly equivalent.
+
+### Scopes and refresh (DI)
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@SessionScope` / `scope="session"` | `@component(scope=Scope.SESSION)` | One instance per `HttpSession`, stored as a session attribute; needs the session module enabled. See [DI Guide](modules/dependency-injection.md#session). |
+| Custom `Scope` SPI (`registerScope`) | `Container.register_scope(name, handler)` + `scope="<name>"` | Implement the `ScopeHandler` protocol (`get` / `remove`); built-in names are reserved. |
+| `@RefreshScope` (Spring Cloud) | `@refresh_scope` / `scope="refresh"` | Refresh-scoped beans are evicted and rebuilt on refresh; the `"refresh"` scope is built in. |
+| `ContextRefresher.refresh()` + `RefreshScopeRefreshedEvent` | `ContextRefresher.refresh()` (injectable) + `RefreshScopeRefreshedEvent` | Evicts refresh-scoped beans, resets `@config_properties`, returns/publishes the evicted keys. |
+
+```python
+from pyfly.container import component, refresh_scope, Scope
+from pyfly.context import ContextRefresher
+
+@refresh_scope          # OUTER decorator
+@component
+class FeatureFlags: ...
+
+@component(scope=Scope.SESSION)
+class ShoppingCart: ...
+```
+
+### More conditional beans
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@ConditionalOnSingleCandidate` | `@conditional_on_single_candidate(T)` | Registers when exactly one candidate of `T` exists (or one is `@primary`). Evaluated in pass 2. |
+| `@ConditionalOnWebApplication` | `@conditional_on_web_application()` | Registers only when `starlette` or `fastapi` is importable. Evaluated in pass 1. |
+| `@ConditionalOnResource` | `@conditional_on_resource(path)` | Registers only when a filesystem path exists. Evaluated in pass 1. |
+
+### Boolean profile expressions
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@Profile("prod & cloud")` / `&` `\|` `!` `()` | `profile="prod & cloud"` (and on `@bean`) | Spring Boot 2.4+ boolean operators plus grouping, via `Environment.accepts_profiles()`. The legacy comma-OR form still works. Parsed with `ast`, never `eval`. See [Configuration Guide](modules/configuration.md#boolean-profile-expressions). |
+
+### Application events
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `ApplicationEventPublisher` (injectable) | `ApplicationEventPublisher` (injectable) | A singleton bean wired to the `ApplicationEventBus`; `await publisher.publish(event)`. |
+| `@EventListener` on arbitrary objects | `@app_event_listener` on any annotated type | The event type need not subclass `ApplicationEvent`; dispatch is by `isinstance`, and sync listeners are allowed. See [Events Guide](modules/events.md#applicationeventpublisher-injectable). |
+
+### Method-level security
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@PreAuthorize` / `@PostAuthorize` SpEL | `@pre_authorize` / `@post_authorize` | Share the SpEL subset (`hasRole`, `hasAnyRole`, `hasAuthority`, `hasAnyAuthority`, `hasPermission`, `isAuthenticated`, `isAnonymous`, `permitAll`, `denyAll`, `principal`, `authentication`), bare or called, with comparisons and `and`/`or`/`not`. AST-walked, no `eval`. |
+| `#paramName` / `returnObject` | `#paramName` / `returnObject` | Method args are bound by name; `returnObject` is available in `@post_authorize`. (`@secure` does not bind args.) |
+| `RoleHierarchy` bean | `RoleHierarchy` + `set_role_hierarchy()` / `get_role_hierarchy()` | `RoleHierarchy.from_string("ADMIN > USER")`, `expand(roles)`; one process-wide hierarchy consulted by `hasRole`/`hasAnyRole`/`hasAuthority`. See [Security Guide](modules/security.md#method-level-security). |
+
+### OAuth2 PKCE
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `ClientRegistration` PKCE (`code_challenge`/S256) | `ClientRegistration(use_pkce=True)` | Toggling `use_pkce` makes `OAuth2LoginHandler` generate a `code_verifier`/`code_challenge` (S256) on the `authorization_code` flow. No extra wiring. See [Security Guide](modules/security.md#pkce-proof-key-for-code-exchange). |
+
+### Distributed trace propagation (OTel)
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| Sleuth / Micrometer Tracing W3C propagation | `TracingFilter` (inbound) + `HttpxClientAdapter` (outbound) | W3C `traceparent` is extracted into a SERVER span and injected on outbound httpx calls; logs gain `trace_id`/`span_id` via the `StructlogAdapter`. Safe no-op without OpenTelemetry. See [Observability Guide](modules/observability.md#distributed-trace-propagation). |
+| MDC `traceId`/`spanId` | `trace_id` / `span_id` log fields | Stamped automatically by `get_logger(...)`. |
+
+### Conditional caching
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@Cacheable(condition=…, unless=…)` | `@cacheable(..., condition=…, unless=…)` | `condition` (over call args) bypasses the cache; `unless` (over the result) returns without storing. Keyword-only. See [Caching Guide](modules/caching.md#conditional-caching-condition-and-unless). |
+
+### Resilience tuning
+
+| Spring (Resilience4j) | PyFly | Notes |
+|-----------------------|-------|-------|
+| `@Retry` (backoff, jitter, retryExceptions) | `@retry(max_attempts, *, delay, backoff, max_delay, jitter, exceptions)` | Sync + async; exponential backoff with optional cap and jitter; only listed exceptions retry. |
+| `@CircuitBreaker` (count- / rate-based, half-open) | `CircuitBreaker(...)` + `@circuit_breaker(breaker)` | `failure_threshold` (consecutive) or `failure_rate_threshold`+`window_size` (rate over window); `half_open_max_calls` trial calls; raises `CircuitBreakerException` from `before_call()`. See [Resilience Guide](modules/resilience.md#retry). |
+
+### Scheduling: zones and distributed locking
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@Scheduled(cron=…, zone=…)` | `@scheduled(cron=…, zone="America/New_York")` | IANA zone, UTC default; ignored for `fixed_rate`/`fixed_delay`. `CronExpression` also accepts the 6-field (seconds-first) Spring form and `?`. |
+| ShedLock / `@SchedulerLock` | `@scheduled(..., lock=True\|"name", lock_ttl=…)` + `DistributedLock` bean | Skips a tick when the named lock is held elsewhere; defaults to in-process `LocalLock`; register a `DistributedLock` (e.g. Redis) for cross-process single-firing. See [Scheduling Guide](modules/scheduling.md#lock-distributed-locking). |
+
+### Messaging: retry and dead-letter
+
+| Spring (Spring Kafka) | PyFly | Notes |
+|-----------------------|-------|-------|
+| `@RetryableTopic` / `DefaultErrorHandler` DLT | `@message_listener(..., retries=, retry_delay=, dead_letter_topic=)` | Adapter-agnostic linear-backoff retry; on exhaustion the message is re-published to the DLQ with `x-original-topic` / `x-exception` headers. See [Messaging Guide](modules/messaging.md#retry-and-dead-letter-routing). |
+
+### Multiple named datasources
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| Multiple `DataSource` beans | `NamedDataSources` registry | Declare under `pyfly.data.relational.datasources.<name>`; inject `NamedDataSources` and call `.get("<name>")` for that datasource's `async_sessionmaker`. The primary keeps its own beans. See [Relational Data Guide](modules/data-relational.md#multiple-named-datasources). |
+
+### Test slices
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| `@WebMvcTest` | `web_slice(*controllers, overrides=…)` → `(context, client)` | Starts a minimal context + `PyFlyTestClient`. |
+| `@DataJpaTest` / `@SpringBootTest` slices | `data_slice(...)` / `service_slice(...)` → `context` | Intent-named aliases of `slice_context`; `overrides` accept a class or a pre-built instance; fail-fast on missing collaborators. See [Testing Guide](modules/testing.md#functional-slices-web_slice--service_slice--data_slice). |
+
+### Session concurrency control
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| `maximumSessions` / `SessionRegistry` | `ConcurrencyControlPolicy` + `SessionRegistry` / `InMemorySessionRegistry` + `SessionConcurrencyController` | Caps concurrent sessions per principal at OAuth2 login; `evict-oldest` or `reject-new`. Enable with `pyfly.session.concurrency.enabled=true`. See [Session Guide](modules/session.md#concurrency-control). |
+
+### Actuator refresh endpoint
+
+| Spring Cloud | PyFly | Notes |
+|--------------|-------|-------|
+| `POST /actuator/refresh` | `POST /actuator/refresh` | Triggers a context refresh (evicts refresh-scoped beans, resets `@config_properties`), returns the refreshed bean keys. Opt-in via `pyfly.management.endpoints.web.exposure.include`. See [Actuator Guide](modules/actuator.md#refresh-endpoint). |
+
+---
+
 ## Quick Reference Table
 
 A complete mapping of Spring Boot concepts to PyFly equivalents:
@@ -1441,11 +1564,19 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `ObjectFactory<T>` / `Provider<T>` | `Provider[T]` | Deferred / fresh resolution |
 | `Map<String, T>` | `dict[str, T]` | Inject all named beans by name |
 | `@Lazy` | `@lazy` | Lazy-initialized bean |
+| `@SessionScope` | `@component(scope=Scope.SESSION)` | One instance per HTTP session |
+| Custom `Scope` SPI | `Container.register_scope(name, handler)` | `ScopeHandler` protocol + `scope="<name>"` |
+| `@RefreshScope` (Spring Cloud) | `@refresh_scope` / `scope="refresh"` | Evict + rebuild on refresh |
+| `ContextRefresher` / `RefreshScopeRefreshedEvent` | `ContextRefresher` / `RefreshScopeRefreshedEvent` | Trigger + observe a refresh |
 | `@Bean @Profile("dev")` | `@bean(profile="dev")` | Profile-scoped factory bean |
+| `@Profile("a & b")` boolean ops | `profile="a & b"` (`& \| ! ()`) | Spring Boot 2.4+ profile expressions |
 | `@ConditionalOnProperty` | `@conditional_on_property` | Config-based activation |
 | `@ConditionalOnClass` | `@conditional_on_class` | Library detection |
 | `@ConditionalOnMissingBean` | `@conditional_on_missing_bean` | Missing bean check |
 | `@ConditionalOnBean` | `@conditional_on_bean` | Bean presence check |
+| `@ConditionalOnSingleCandidate` | `@conditional_on_single_candidate` | Exactly one candidate (or `@primary`) |
+| `@ConditionalOnWebApplication` | `@conditional_on_web_application` | Web stack present |
+| `@ConditionalOnResource` | `@conditional_on_resource` | Filesystem resource exists |
 | `@ConditionalOnExpression` | `@conditional_on_expression` | SpEL-lite expression check |
 | `@PostConstruct` | `@post_construct` | Initialization hook |
 | `@PreDestroy` | `@pre_destroy` | Cleanup hook |
@@ -1464,13 +1595,20 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `@RequestHeader` | `Header[T]` | HTTP header value |
 | `@ControllerAdvice` | `@exception_handler` | Exception handling |
 | RFC 7807 `problem+json` | `pyfly.web.problem-details.enabled` | RFC 7807 error responses |
+| `@PreAuthorize` / `@PostAuthorize` | `@pre_authorize` / `@post_authorize` | Method-level SpEL security |
+| SpEL `#param` / `returnObject` | `#param` / `returnObject` | Bound method args / return value in expressions |
+| `RoleHierarchy` bean | `RoleHierarchy` + `set_role_hierarchy()` | Transitive role expansion |
+| `ClientRegistration` PKCE | `ClientRegistration(use_pkce=True)` | OAuth2 PKCE (RFC 7636, S256) |
 | Jackson `ObjectMapper` | `PyFlyJsonSerializer` + `pyfly.web.json.*` | Global JSON config |
 | Jackson serializer/module | `JsonSerializers.register(...)` | Non-Pydantic type encoders |
 | `@JsonNaming` (camelCase) | `CamelModel` | Opt-in camelCase model base |
 | `HttpMessageConverter` | `MessageConverter` / `MessageConverterRegistry` | Body read/write + negotiation |
 | `@Scheduled(fixedRate)` | `@scheduled(fixed_rate)` | Periodic tasks |
-| `@Scheduled(cron)` | `@scheduled(cron)` | Cron-based scheduling |
+| `@Scheduled(cron)` | `@scheduled(cron)` | Cron-based scheduling (5- or 6-field) |
+| `@Scheduled(zone=…)` | `@scheduled(cron=…, zone=…)` | IANA time-zone-aware cron |
+| ShedLock / `@SchedulerLock` | `@scheduled(lock=…, lock_ttl=…)` + `DistributedLock` | Cluster-wide single-firing |
 | `@Cacheable` | `@cacheable` | Method caching |
+| `@Cacheable(condition=…, unless=…)` | `@cacheable(condition=…, unless=…)` | Conditional caching (keyword-only) |
 | `@CacheEvict` | `@cache_evict` | Cache eviction |
 | `@CachePut` | `@cache_put` | Cache update |
 | `@Aspect` | `@aspect` | AOP aspect |
@@ -1488,18 +1626,24 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | MapStruct `@Mapper` | `Mapper` / `@mapping` | Entity ↔ DTO mapping |
 | `AbstractRoutingDataSource` | `RoutingSessionFactory` | Read/write datasource routing |
 | `@Transactional(readOnly=true)` | `read_only()` context | Route to read replica |
+| Multiple `DataSource` beans | `NamedDataSources` | Secondary datasources by name |
 | Actuator `/health` | Actuator `/actuator/health` | Health checks |
 | Actuator `/info` | Actuator `/actuator/info` | App metadata |
 | Actuator `/beans` | Actuator `/actuator/beans` | Bean registry |
+| `POST /actuator/refresh` (Spring Cloud) | `POST /actuator/refresh` | Reload config + refresh-scoped beans |
+| Sleuth / Micrometer Tracing (W3C) | `TracingFilter` + `HttpxClientAdapter` | W3C `traceparent` in/out + `trace_id`/`span_id` in logs |
 | `CircuitBreaker` | `CircuitBreaker` | Resilience pattern |
 | `@RateLimiter` | `rate_limiter` | Rate limiting |
 | `@Bulkhead` | `bulkhead` | Concurrency limiting |
 | `@TimeLimiter` | `time_limiter` | Operation timeout |
-| `@Retry` | `RetryPolicy` | Retry with backoff |
+| `@Retry` (backoff / jitter) | `@retry(max_attempts, *, delay, backoff, max_delay, jitter, exceptions)` | Retry with exponential backoff + jitter |
+| `@CircuitBreaker` (rate / half-open) | `CircuitBreaker(...)` + `@circuit_breaker` | Count- or rate-based tripping, half-open recovery |
 | `KafkaTemplate` | `MessageBrokerPort` | Message publishing |
 | `@KafkaListener` | `@message_listener` | Message consumption |
+| `@RetryableTopic` / DLT | `@message_listener(retries=, retry_delay=, dead_letter_topic=)` | Listener retry + dead-letter routing |
 | `ApplicationEvent` | `EventEnvelope` | Domain events |
 | `@EventListener` | `@event_listener` | Event handling |
+| `ApplicationEventPublisher` | `ApplicationEventPublisher` | Injectable lifecycle/arbitrary-event publisher |
 | Micrometer `@Timed` | `@timed` | Method timing |
 | Micrometer `@Counted` | `@counted` | Invocation counting |
 | `@Saga` | `@saga` | Saga orchestration class |
@@ -1532,6 +1676,10 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `TracingAutoConfiguration` | `TracingAutoConfiguration` | Auto-configured when `opentelemetry` is installed |
 | `ActuatorAutoConfiguration` | `ActuatorAutoConfiguration` + `MetricsActuatorAutoConfiguration` | Split by optional dependency |
 | `WebServerFactoryAutoConfiguration` | `ServerAutoConfiguration` | Auto-detects Granian > Uvicorn > Hypercorn |
+| `@WebMvcTest` | `web_slice(*controllers)` | Web slice → `(context, client)` |
+| `@DataJpaTest` | `data_slice(*beans)` | Data slice → `context` |
+| `@SpringBootTest` (focused slice) | `service_slice(*beans)` / `slice_context(...)` | Minimal started context |
+| `maximumSessions` / `SessionRegistry` | `SessionConcurrencyController` + `SessionRegistry` | Per-principal session cap |
 | `@Testcontainers` | `postgres_container()` (context-managed) | Container lifecycle |
 | `@ServiceConnection` | `pyfly_config()` / `pyfly_config_for()` | Wire container into config |
 | `@DynamicPropertySource` | `pyfly_config(*containers, base=...)` | Build a Config from containers |

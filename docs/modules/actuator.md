@@ -47,11 +47,12 @@ automatically discovered from the DI container.
     - [POST /actuator/loggers/{name}](#post-actuatorloggersname)
 17. [Metrics Endpoint](#metrics-endpoint)
 18. [Thread Dump Endpoint](#thread-dump-endpoint)
-19. [Custom Actuator Endpoints](#custom-actuator-endpoints)
-20. [make_starlette_actuator_routes()](#make_starlette_actuator_routes)
-21. [Auto-Configuration](#auto-configuration)
-22. [Configuration](#configuration)
-23. [Complete Example](#complete-example)
+19. [Refresh Endpoint](#refresh-endpoint)
+20. [Custom Actuator Endpoints](#custom-actuator-endpoints)
+21. [make_starlette_actuator_routes()](#make_starlette_actuator_routes)
+22. [Auto-Configuration](#auto-configuration)
+23. [Configuration](#configuration)
+24. [Complete Example](#complete-example)
 
 ---
 
@@ -990,6 +991,62 @@ to the bare `co_name` on older Python versions. Stack frames are listed oldest
 first, matching `traceback.extract_stack()` order.
 
 **Source:** `src/pyfly/actuator/endpoints/threaddump_endpoint.py`
+
+---
+
+## Refresh Endpoint
+
+**Endpoint:** `POST /actuator/refresh`
+
+The refresh endpoint mirrors Spring Cloud's `POST /actuator/refresh`. It triggers a
+context refresh — evicting all refresh-scoped beans and resetting
+`@config_properties` beans so they re-bind against the live `Config` (which
+re-reads environment variables and `${...}` placeholders) on next resolution.
+A `RefreshScopeRefreshedEvent` is published, and the response lists the cache keys
+of the beans that were refreshed:
+
+```json
+{
+    "refreshed": ["FeatureFlags-singleton", "PricingProperties-singleton"]
+}
+```
+
+When no refresh-scoped beans are registered, the list is empty:
+
+```json
+{
+    "refreshed": []
+}
+```
+
+**Exposure (opt-in).** Like Spring Boot, the actuator is secure-by-default: only
+`health` and `info` are reachable over HTTP. The `refresh` endpoint is registered
+whenever the actuator is enabled with a `context`, but it is **not mounted** until
+you add it to the exposure include list:
+
+```yaml
+pyfly:
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: "health,info,refresh"   # or "*" to expose every enabled endpoint
+```
+
+The config key is `pyfly.management.endpoints.web.exposure.include` (a CSV string;
+`*` exposes all). `exclude` always wins over `include`. With the default
+`health,info`, a request to `/actuator/refresh` returns `404`.
+
+**Example with curl:**
+
+```bash
+# Reload configuration at runtime (no restart)
+curl -X POST http://localhost:8080/actuator/refresh
+# {"refreshed": ["FeatureFlags-singleton"]}
+```
+
+**Source:** `src/pyfly/actuator/endpoints/refresh_endpoint.py`,
+`src/pyfly/actuator/adapters/starlette.py`
 
 ---
 
