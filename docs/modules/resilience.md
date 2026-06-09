@@ -340,8 +340,10 @@ limiter = RateLimiter(
 )
 ```
 
-Thread safety is ensured via an `asyncio.Lock` that serializes access to the
-token count during `acquire()`.
+Thread safety is ensured via a `threading.Lock` that serializes access to the
+token count during `acquire()`. A `threading.Lock` (not `asyncio.Lock`) is used
+deliberately so that the same `RateLimiter` instance can be shared safely between
+async tasks and synchronous/threaded callers without risk of desynchronisation.
 
 ### @rate_limiter Decorator
 
@@ -708,43 +710,102 @@ async def func():  -- 5. The actual operation
 
 ## Configuration
 
-Resilience settings can be configured in `pyfly.yaml`:
+Resilience settings can be configured in `pyfly.yaml`. Each resilience type
+supports any number of named instances. PyFly automatically materialises a
+`ResilienceRegistry` bean from these keys; inject it wherever you need named
+instances.
 
 ```yaml
 pyfly:
   resilience:
+    circuit-breaker:
+      payment-api:
+        failure-threshold: 5          # consecutive failures before opening
+        recovery-timeout: 30s         # how long to stay open before half-open
+        failure-rate-threshold: 0.5   # optional: rate-based tripping (0–1)
+        window-size: 10               # calls in the sliding window
+        half-open-max-calls: 2        # probe calls allowed in HALF_OPEN
     rate-limiter:
       default:
         max-tokens: 100
         refill-rate: 50.0
-    bulkhead:
-      default:
-        max-concurrent: 20
-    time-limiter:
-      default:
-        timeout: 5s
-```
-
-| Key | Description | Default |
-|---|---|---|
-| `pyfly.resilience.rate-limiter.default.max-tokens` | Default bucket capacity | `10` |
-| `pyfly.resilience.rate-limiter.default.refill-rate` | Default tokens/second | `10.0` |
-| `pyfly.resilience.bulkhead.default.max-concurrent` | Default max concurrency | `10` |
-| `pyfly.resilience.time-limiter.default.timeout` | Default timeout duration | `30s` |
-
-Named configurations can be created for different services:
-
-```yaml
-pyfly:
-  resilience:
-    rate-limiter:
       payment-api:
         max-tokens: 10
         refill-rate: 2.0
       search-api:
         max-tokens: 200
         refill-rate: 100.0
+    bulkhead:
+      default:
+        max-concurrent: 20
+      db-pool:
+        max-concurrent: 5
+    time-limiter:
+      default:
+        timeout: 5s
+      slow-report:
+        timeout: 30s
 ```
+
+Duration values accept `ms` (milliseconds), `s` (seconds), `m` (minutes), and
+`h` (hours) as unit suffixes (e.g. `500ms`, `5s`, `2m`). A bare number is
+treated as seconds.
+
+### Config-key → constructor parameter mapping
+
+| Section | Config key | Constructor param | Default |
+|---|---|---|---|
+| `circuit-breaker.<name>` | `failure-threshold` | `failure_threshold` | `5` |
+| `circuit-breaker.<name>` | `recovery-timeout` | `recovery_timeout` | `30s` |
+| `circuit-breaker.<name>` | `failure-rate-threshold` | `failure_rate_threshold` | *(none)* |
+| `circuit-breaker.<name>` | `window-size` | `window_size` | `10` |
+| `circuit-breaker.<name>` | `half-open-max-calls` | `half_open_max_calls` | `1` |
+| `rate-limiter.<name>` | `max-tokens` | `max_tokens` | `10` |
+| `rate-limiter.<name>` | `refill-rate` | `refill_rate` | `10.0` |
+| `bulkhead.<name>` | `max-concurrent` | `max_concurrent` | `10` |
+| `time-limiter.<name>` | `timeout` | *(stored as `timedelta`)* | `30s` |
+
+### Injecting the ResilienceRegistry
+
+The `ResilienceRegistry` bean is auto-configured and injectable by type:
+
+```python
+from datetime import timedelta
+
+from pyfly.container import service
+from pyfly.resilience import ResilienceRegistry, circuit_breaker, rate_limiter, time_limiter
+
+
+@service
+class PaymentService:
+    def __init__(self, registry: ResilienceRegistry) -> None:
+        self._cb = registry.circuit_breaker("payment-api")
+        self._rl = registry.rate_limiter("payment-api")
+        self._timeout: timedelta = registry.time_limiter("payment-api")
+
+    @circuit_breaker(...)  # pass the instance from the registry
+    async def charge(self, amount: float) -> dict:
+        ...
+```
+
+You can also look up instances directly at call site:
+
+```python
+cb = registry.circuit_breaker("payment-api")
+rl = registry.rate_limiter("search-api")
+bh = registry.bulkhead("db-pool")
+timeout = registry.time_limiter("slow-report")   # timedelta
+```
+
+An unknown name raises `KeyError` with a message listing available names.
+The registry is always-on — when no `pyfly.resilience.*` keys are configured,
+it starts empty (no error).
+
+> **Sync time-limiter note**: when `@time_limiter` wraps a synchronous function,
+> the call runs in a `ThreadPoolExecutor` worker thread and the calling thread
+> blocks until the timeout expires. This avoids the SIGALRM limitations (which
+> truncated sub-second timeouts to whole seconds and could not be used off the
+> main thread).
 
 ---
 

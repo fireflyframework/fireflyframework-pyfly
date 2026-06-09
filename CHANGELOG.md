@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.86 (2026-06-09)
+
+### Added / Fixed (resilience config + callbacks/webhooks production-readiness — parity initiative SP-6)
+
+- **Resilience config layer.** The `pyfly.resilience.*` config keys the docs advertised now actually work:
+  a new `ResilienceRegistry` materializes named `CircuitBreaker` / `RateLimiter` / `Bulkhead` /
+  `TimeLimiter` instances from `pyfly.resilience.{circuit-breaker,rate-limiter,bulkhead,time-limiter}.<name>.<param>`
+  (Resilience4j-style), injectable and looked up by name. Fixed the docs (`RateLimiter`/`Bulkhead` use
+  `threading.Lock`, not `asyncio.Lock`).
+- **Callbacks actually deliver.** Replaced the shipped **no-op** callback sender (outbound callbacks
+  silently did nothing) with a real `httpx`-backed `HttpSender`, auto-wired when the `[client]` extra is
+  present, wrapped in a `pyfly.resilience` circuit breaker + per-request timeout. HMAC signing
+  (`X-Pyfly-Signature`) and the SSRF authorized-domains allowlist are documented. respx round-trip tests.
+- **Webhook idempotency is now distributable.** New `RedisWebhookEventStore` (SETNX/TTL) selectable via
+  `pyfly.webhooks.idempotency.provider=redis`, so dedup survives restarts and is shared across workers
+  (fixed a bug where the provider could never be selected — the config param was map-injected, not the
+  `Config`). New provider-specific signature validators: `StripeSignatureValidator` (`t=`/`v1=` HMAC with
+  replay window), `GitHubSignatureValidator`, and a standalone `TwilioSignatureValidator` (URL/param-based).
+
 ## v26.06.85 (2026-06-09)
 
 ### Added / Fixed (durable adapters wave — parity initiative SP-5)

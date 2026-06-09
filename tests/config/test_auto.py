@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 42
+        assert len(classes) == 43
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -61,8 +61,8 @@ class TestDiscoverAutoConfigurations:
             )
 
     def test_all_classes_have_conditions(self):
-        # AopAutoConfiguration is unconditional (always active) — skip it
-        unconditional = {"AopAutoConfiguration"}
+        # AopAutoConfiguration and ResilienceAutoConfiguration are unconditional (always active) — skip them
+        unconditional = {"AopAutoConfiguration", "ResilienceAutoConfiguration"}
         for cls in discover_auto_configurations():
             if cls.__name__ in unconditional:
                 continue
@@ -103,6 +103,7 @@ class TestDiscoverAutoConfigurations:
             "PluginsAutoConfiguration",
             "RelationalAutoConfiguration",
             "MigrationAutoConfiguration",
+            "ResilienceAutoConfiguration",
             "RuleEngineAutoConfiguration",
             "SchedulingAutoConfiguration",
             "ServerAutoConfiguration",
