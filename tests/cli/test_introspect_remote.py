@@ -53,3 +53,8 @@ def test_actuator_passthrough_remote(stub_client) -> None:
     result = CliRunner().invoke(introspect_cmds.actuator_cmd, ["info", "--url", "http://h:8080", "--json"])
     assert result.exit_code == 0, result.output
     assert stub_client["endpoint"] == "info"
+
+
+def test_actuator_requires_url() -> None:
+    result = CliRunner().invoke(introspect_cmds.actuator_cmd, ["info"])
+    assert result.exit_code != 0

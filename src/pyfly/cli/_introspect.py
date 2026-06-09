@@ -23,7 +23,7 @@ import os
 import sys
 from typing import Any
 
-from pyfly.cli.console import console
+from pyfly.cli.console import err_console
 
 
 def run_async(coro: Any) -> Any:
@@ -38,38 +38,57 @@ def _discover_app_class() -> type:
     _ensure_src_on_path()
     app_path = _discover_app()
     if app_path is None:
-        console.print("[error]✗[/error] No application found. Run inside a PyFly project or pass --url.")
+        err_console.print("[error]✗[/error] No application found. Run inside a PyFly project or pass --url.")
         raise SystemExit(1)
     module_name = app_path.split(":")[0]
     module = importlib.import_module(module_name)
     for value in vars(module).values():
         if isinstance(value, type) and getattr(value, "__pyfly_application__", False):
             return value
-    console.print(f"[error]✗[/error] No @pyfly_application class found in {module_name}.")
+    err_console.print(f"[error]✗[/error] No @pyfly_application class found in {module_name}.")
     raise SystemExit(1)
+
+
+@contextlib.contextmanager
+def _quiet_startup_env() -> Any:
+    """Suppress the banner + startup logs DURING boot, restoring process env after.
+
+    The framework reads these env vars while configuring logging at startup; we set
+    them only for the duration of the boot and then restore the prior values, so a
+    short-lived CLI invocation never leaks global state into the rest of the process
+    (which would, e.g., break logging tests that boot a context).
+    """
+    quiet = {"_PYFLY_BANNER_PRINTED": "1", "PYFLY_LOGGING_LEVEL_ROOT": "CRITICAL"}
+    saved = {k: os.environ.get(k) for k in quiet}
+    for key, value in quiet.items():
+        os.environ.setdefault(key, value)  # respect a user's explicit override
+    try:
+        yield
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 def boot_context(*, app_class: type | None = None) -> Any:
     """Boot the application context offline (no HTTP server) and return it.
 
-    Startup is run *quietly*: the framework banner is suppressed and stdout is
-    captured, so a command's ``--json`` output stays clean and pipeable
-    (e.g. ``pyfly routes --json | jq``). Startup output is only surfaced if
-    startup fails.
+    Startup runs *quietly* (banner suppressed, logs silenced, stdout captured) so a
+    command's ``--json`` output stays clean and pipeable (e.g. ``pyfly routes
+    --json | jq``). Captured startup output is only surfaced if startup fails.
     """
     from pyfly.core.application import PyFlyApplication
 
     cls = app_class or _discover_app_class()
-    # Keep startup quiet so a command's output (especially --json) stays clean:
-    #  - skip the framework banner (the sentinel ``run`` uses for worker processes),
-    #  - silence startup log records (structlog writes to the real stdout, bypassing
-    #    the redirect below — only a log-level bump reliably suppresses them).
-    os.environ.setdefault("_PYFLY_BANNER_PRINTED", "1")
-    os.environ.setdefault("PYFLY_LOGGING_LEVEL_ROOT", "CRITICAL")
-    app = PyFlyApplication(cls)
     captured = io.StringIO()
     try:
-        with contextlib.redirect_stdout(captured):
+        # The env must be set BEFORE constructing PyFlyApplication — the constructor
+        # configures logging from the env, so the quiet level has to be in place
+        # before then (not just before startup()).
+        with _quiet_startup_env(), contextlib.redirect_stdout(captured):
+            app = PyFlyApplication(cls)
             run_async(app.startup())
     except Exception:
         # On failure, replay whatever startup printed so the error has context.
@@ -89,10 +108,14 @@ class ActuatorClient:
         try:
             import httpx
         except ImportError:
-            console.print("[error]✗[/error] httpx is required for --url mode. Install pyfly[client].")
+            err_console.print("[error]✗[/error] httpx is required for --url mode. Install pyfly[client].")
             raise SystemExit(1) from None
         url = f"{self._base}/actuator/{endpoint.lstrip('/')}"
-        with httpx.Client(timeout=self._timeout) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            return resp.json()
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as exc:
+            err_console.print(f"[error]✗[/error] Request to {url} failed: {exc}")
+            raise SystemExit(1) from None

@@ -21,7 +21,7 @@ from typing import Any
 import click
 
 from pyfly.cli._introspect import ActuatorClient, boot_context, run_async
-from pyfly.cli.console import console
+from pyfly.cli.console import console, err_console
 
 
 def _emit(data: Any, *, as_json: bool, title: str) -> None:
@@ -125,13 +125,14 @@ def metrics_cmd(name: str | None, url: str | None, as_json: bool) -> None:
     if url:
         data = ActuatorClient(url).get(f"metrics/{name}" if name else "metrics")
     else:
+        from pyfly.actuator.endpoints import metrics_endpoint as _metrics_mod
         from pyfly.actuator.endpoints.metrics_endpoint import MetricsEndpoint
 
-        try:
-            data = run_async(MetricsEndpoint().handle())
-        except ImportError:
-            console.print("[error]✗[/error] metrics require prometheus_client (install pyfly[observability]).")
-            raise SystemExit(1) from None
+        if getattr(_metrics_mod, "REGISTRY", None) is None:
+            err_console.print("[error]✗[/error] metrics require prometheus_client (install pyfly[observability]).")
+            raise SystemExit(1)
+        selector = {"selector": name} if name else None
+        data = run_async(MetricsEndpoint().handle(selector))
     _emit(data, as_json=as_json, title="Metrics")
 
 
@@ -141,7 +142,7 @@ def metrics_cmd(name: str | None, url: str | None, as_json: bool) -> None:
 def actuator_cmd(endpoint: str, url: str | None, as_json: bool) -> None:
     """GET an arbitrary actuator endpoint (remote-only; requires --url)."""
     if not url:
-        console.print("[error]✗[/error] 'actuator' requires --url (it queries a running app).")
+        err_console.print("[error]✗[/error] 'actuator' requires --url (it queries a running app).")
         raise SystemExit(1)
     data = ActuatorClient(url).get(endpoint)
     _emit(data, as_json=as_json, title=f"actuator/{endpoint}")

@@ -15,9 +15,7 @@
 
 from __future__ import annotations
 
-import io
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -46,22 +44,6 @@ def _build_spec(ctx: Any) -> dict[str, Any]:
     return generator.generate(route_metadata or None)
 
 
-def _boot_quiet() -> Any:
-    """Boot the application context while suppressing startup noise on stdout.
-
-    The startup sequence prints a banner and structured-log lines to stdout,
-    which would contaminate a JSON-to-stdout pipeline.  We swap ``sys.stdout``
-    for a temporary buffer during boot so only the final spec reaches the
-    caller's stdout.
-    """
-    old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
-    try:
-        return boot_context()
-    finally:
-        sys.stdout = old_stdout
-
-
 @click.command("openapi")
 @click.option(
     "--format",
@@ -80,7 +62,7 @@ def _boot_quiet() -> Any:
 )
 def openapi_cmd(fmt: str, output: str | None) -> None:
     """Export the OpenAPI schema for this application."""
-    ctx = _boot_quiet()
+    ctx = boot_context()
     spec = _build_spec(ctx)
     if fmt == "yaml":
         import yaml  # type: ignore[import-untyped]
