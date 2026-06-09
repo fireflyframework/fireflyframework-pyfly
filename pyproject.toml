@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.6.88"
+version = "26.6.89"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -88,6 +88,12 @@ cache = [
 client = [
     "httpx>=0.28.1",
 ]
+grpc = [
+    "grpcio>=1.60.0",
+]
+websocket = [
+    "websockets>=12.0",
+]
 idp-azure = [
     "httpx>=0.28.1",
 ]
@@ -141,7 +147,7 @@ web-fastapi = [
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 full = [
-    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito]",
+    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito]",
 ]
 
 [dependency-groups]
@@ -164,6 +170,8 @@ messaging = "pyfly.messaging.auto_configuration:MessagingAutoConfiguration"
 eda = "pyfly.eda.auto_configuration:EdaAutoConfiguration"
 eda-health = "pyfly.eda.auto_configuration:EdaHealthAutoConfiguration"
 client = "pyfly.client.auto_configuration:ClientAutoConfiguration"
+grpc-client = "pyfly.client.auto_configuration:GrpcClientAutoConfiguration"
+websocket-client = "pyfly.client.auto_configuration:WebSocketClientAutoConfiguration"
 document = "pyfly.data.document.auto_configuration:DocumentAutoConfiguration"
 relational = "pyfly.data.relational.auto_configuration:RelationalAutoConfiguration"
 migrations = "pyfly.data.relational.auto_configuration:MigrationAutoConfiguration"

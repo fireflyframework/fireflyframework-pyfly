@@ -31,6 +31,11 @@ module, featuring circuit breakers, retry policies, and declarative clients.
    - [Custom Client Factory](#custom-client-factory)
 6. [Configuration](#configuration)
 7. [Complete Example](#complete-example)
+8. [Protocol Clients](#protocol-clients)
+   - [GraphQL Client](#graphql-client)
+   - [WebSocket Client](#websocket-client)
+   - [gRPC Client](#grpc-client)
+   - [SOAP Client](#soap-client)
 
 ---
 
@@ -651,3 +656,355 @@ never make real HTTP calls, yet they exercise the full client interface.
 ## Adapters
 
 - [HTTPX Adapter](../adapters/httpx.md) — Setup, configuration reference, and adapter-specific features for the HTTPX HTTP client backend
+
+---
+
+## Protocol Clients
+
+In addition to the declarative REST client, PyFly ships four protocol-specific
+clients for GraphQL, WebSocket, gRPC, and SOAP. Each is opt-in: the relevant
+transport library is imported lazily, so it only becomes a hard dependency when
+you actually call it.
+
+All four types are exported from the `pyfly.client.protocols` package:
+
+```python
+from pyfly.client.protocols import (
+    GraphQLClient,
+    GraphQLClientBuilder,
+    WebSocketClient,
+    WebSocketClientBuilder,
+    GrpcClientBuilder,
+    SoapClient,
+    SoapClientBuilder,
+)
+```
+
+---
+
+### GraphQL Client
+
+**Underlying library**: `httpx` (included in `pyfly[client]`)
+
+`GraphQLClient` POSTs GraphQL operations to a single endpoint. It constructs
+the standard `{ query, variables, operationName }` JSON envelope, unpacks the
+`data` field on success, and raises `RuntimeError` when the response contains a
+top-level `errors` key.
+
+#### Quick-start
+
+```python
+from pyfly.client.protocols import GraphQLClientBuilder
+
+client = (
+    GraphQLClientBuilder()
+    .with_endpoint("https://api.example.com/graphql")
+    .with_header("Authorization", "Bearer <token>")
+    .with_timeout(10.0)
+    .build()
+)
+
+data = await client.execute(
+    "query GetUser($id: ID!) { user(id: $id) { name email } }",
+    variables={"id": "42"},
+    operation_name="GetUser",
+)
+# data == {"user": {"name": "Alice", "email": "alice@example.com"}}
+```
+
+#### `GraphQLClient.execute()`
+
+```python
+async def execute(
+    self,
+    query: str,
+    *,
+    variables: dict[str, Any] | None = None,
+    operation_name: str | None = None,
+) -> dict[str, Any]:
+    ...
+```
+
+Returns the `data` field from the GraphQL response. `variables` and
+`operation_name` are omitted from the request body when `None`. Raises
+`RuntimeError` if the response contains an `errors` key.
+
+#### Builder API
+
+| Method | Description |
+|---|---|
+| `with_endpoint(value)` | Set the GraphQL endpoint URL (required) |
+| `with_header(name, value)` | Add a request header |
+| `with_timeout(seconds)` | Override the default 30 s request timeout |
+| `build()` | Return a configured `GraphQLClient` |
+
+#### Required extra
+
+```
+pip install "pyfly[client]"
+```
+
+#### Testing
+
+`GraphQLClient` creates a fresh `httpx.AsyncClient` per call. Tests intercept
+it with `respx` global mock — no Docker or real server required.
+
+---
+
+### WebSocket Client
+
+**Underlying library**: `websockets` (`pyfly[websocket]`)
+
+`WebSocketClient` wraps the `websockets` library with a minimal async API. It
+exposes two complementary interfaces: `connect()` for direct access to the
+underlying connection object, and `stream()` for an async-generator that sends
+messages and yields incoming frames.
+
+#### Quick-start
+
+```python
+from pyfly.client.protocols import WebSocketClientBuilder
+
+client = (
+    WebSocketClientBuilder()
+    .with_url("wss://stream.example.com/ws")
+    .with_header("Authorization", "Bearer <token>")
+    .build()
+)
+
+# Consume a live stream
+async for message in client.stream(send=["SUBSCRIBE events"]):
+    print(message)
+```
+
+#### `WebSocketClient.connect()`
+
+```python
+async def connect(self) -> Any:
+    ...
+```
+
+Opens the WebSocket connection and returns the raw `websockets` connection
+object. Use this when you need full control over sending, receiving, and
+closing.
+
+#### `WebSocketClient.stream()`
+
+```python
+async def stream(self, send: list[str] | None = None) -> AsyncIterator[Any]:
+    ...
+```
+
+Convenience async generator that:
+
+1. Opens the connection with `connect()`.
+2. Sends each string in `send` (if any) in order.
+3. Yields every incoming frame until the server closes.
+4. Closes the connection in a `finally` block.
+
+#### Builder API
+
+| Method | Description |
+|---|---|
+| `with_url(value)` | Set the WebSocket URL (required) |
+| `with_header(name, value)` | Add a handshake header |
+| `build()` | Return a configured `WebSocketClient` |
+
+`WebSocketClientBuilder` also exposes a `ping_interval` field (default `20.0`
+seconds) that is forwarded to `websockets.connect()`.
+
+#### Auto-wiring
+
+When `websockets` is installed, PyFly's auto-configuration registers a
+`WebSocketClientBuilder` bean automatically. Inject it wherever you need it:
+
+```python
+from pyfly.client.protocols import WebSocketClientBuilder
+
+@service
+class LiveFeedConsumer:
+    def __init__(self, ws_builder: WebSocketClientBuilder):
+        self._ws = ws_builder
+
+    async def subscribe(self, topic: str) -> None:
+        client = self._ws.with_url("wss://feed.example.com/ws").build()
+        async for message in client.stream(send=[f"SUBSCRIBE {topic}"]):
+            ...
+```
+
+#### Required extra
+
+```
+pip install "pyfly[websocket]"
+```
+
+#### Testing
+
+The WebSocket transport test suite spins up a real in-process echo server with
+`websockets.serve` — no mocking or network access required.
+
+---
+
+### gRPC Client
+
+**Underlying library**: `grpcio` (`pyfly[grpc]`)
+
+`GrpcClientBuilder` creates an `grpc.aio.Channel`. PyFly deliberately returns
+the channel rather than a specific stub so that you can pair it with any stub
+class generated from your `.proto` files via `protoc` or `grpcio-tools`.
+
+#### Quick-start
+
+`GrpcClientBuilder` returns a `grpc.aio` **channel** (not a wrapped client) — there is
+no `build()` method; call `channel()` to materialise the connection, then hand it to
+your generated stub:
+
+```python
+channel = (
+    GrpcClientBuilder()
+    .with_target("greeter-service:50051")
+    .secured()                         # TLS via ssl_channel_credentials()
+    .with_option("grpc.max_receive_message_length", 4 * 1024 * 1024)
+    .channel()                         # returns grpc.aio.Channel
+)
+
+stub = greeter_pb2_grpc.GreeterStub(channel)
+response = await stub.SayHello(greeter_pb2.HelloRequest(name="World"))
+```
+
+#### `GrpcClientBuilder.channel()`
+
+```python
+def channel(self) -> grpc.aio.Channel:
+    ...
+```
+
+Returns an `aio.insecure_channel` when `secure=False` (default) or an
+`aio.secure_channel` backed by `ssl_channel_credentials()` when `secure=True`.
+Raises `ValueError` if `target` is empty, `ImportError` if `grpcio` is not
+installed.
+
+#### Builder API
+
+| Method | Description |
+|---|---|
+| `with_target(value)` | Set the `host:port` target (required) |
+| `secured(value=True)` | Enable TLS (`ssl_channel_credentials()`) |
+| `with_option(name, value)` | Append a gRPC channel option |
+| `channel()` | Build and return the `grpc.aio.Channel` |
+
+#### Auto-wiring and configuration
+
+When `grpcio` is installed, PyFly registers a `GrpcClientBuilder` bean
+automatically. If `pyfly.client.grpc.target` is set in your configuration, the
+builder is pre-populated with that value:
+
+```yaml
+pyfly:
+  client:
+    grpc:
+      target: "greeter-service:50051"
+```
+
+Inject the builder and call `.channel()` when you need the connection:
+
+```python
+@service
+class GreeterGateway:
+    def __init__(self, grpc_builder: GrpcClientBuilder):
+        self._channel = grpc_builder.channel()
+```
+
+#### Required extra
+
+```
+pip install "pyfly[grpc]"
+```
+
+You will also need `grpcio-tools` (or `protoc`) to generate stubs from your
+`.proto` files — PyFly does not depend on a specific generated stub.
+
+#### Testing
+
+The gRPC test suite runs a real in-process `grpc.aio` server that handles
+actual RPC calls — no Docker or external services needed.
+
+---
+
+### SOAP Client
+
+**Underlying library**: `httpx` (included in `pyfly[client]`)
+
+`SoapClient` is a minimalist SOAP 1.1 client. It wraps your XML body in a
+standard envelope, sets the `Content-Type: text/xml` and optional `SOAPAction`
+headers, and returns the raw response XML as a string. It covers the common
+case of calling a known SOAP endpoint without a WSDL; for full WSDL support use
+[zeep](https://docs.python-zeep.org/).
+
+#### Quick-start
+
+```python
+from pyfly.client.protocols import SoapClientBuilder
+
+client = (
+    SoapClientBuilder()
+    .with_endpoint("https://soap.example.com/AccountService")
+    .with_action("GetAccount")
+    .with_timeout(30.0)
+    .build()
+)
+
+response_xml: str = await client.call(
+    "<GetAccount><accountId>12345</accountId></GetAccount>"
+)
+# response_xml is the raw XML returned by the server
+```
+
+#### `SoapClient.call()`
+
+```python
+async def call(self, body_xml: str) -> str:
+    ...
+```
+
+Wraps `body_xml` in a SOAP 1.1 envelope:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Header/>
+  <soap:Body><!-- your body_xml here --></soap:Body>
+</soap:Envelope>
+```
+
+Posts the envelope to the configured endpoint and returns `response.text`. Any
+non-2xx status raises `httpx.HTTPStatusError`.
+
+#### Builder API
+
+| Method | Description |
+|---|---|
+| `with_endpoint(value)` | Set the SOAP endpoint URL (required) |
+| `with_action(value)` | Set the `SOAPAction` header |
+| `with_header(name, value)` | Add an arbitrary HTTP header |
+| `with_timeout(seconds)` | Override the default 60 s request timeout |
+| `build()` | Return a configured `SoapClient` |
+
+#### Required extra
+
+```
+pip install "pyfly[client]"
+```
+
+#### Testing
+
+`SoapClient` uses the same `httpx` transport as `GraphQLClient`. Tests
+intercept it with `respx` global mock, asserting that the envelope structure
+and `SOAPAction` header are correct without making real network calls.
+
+#### Note on production WSDL support
+
+`SoapClient` does not parse WSDL schemas or perform type mapping. For
+endpoints where you need full WSDL-driven serialisation, use
+[zeep](https://docs.python-zeep.org/) as the transport layer and keep
+`SoapClient` only for lightweight, schema-free calls.
