@@ -88,6 +88,15 @@ cache = [
 client = [
     "httpx>=0.28.1",
 ]
+idp-azure = [
+    "httpx>=0.28.1",
+]
+idp-keycloak = [
+    "httpx>=0.28.1",
+]
+idp-cognito = [
+    "boto3>=1.34.0",
+]
 ecm-aws = [
     "boto3>=1.34.0",
 ]
@@ -131,7 +140,7 @@ web-fastapi = [
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 full = [
-    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn]",
+    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito]",
 ]
 
 [dependency-groups]

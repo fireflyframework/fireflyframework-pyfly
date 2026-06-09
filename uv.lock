@@ -2143,6 +2143,15 @@ granian = [
 hypercorn = [
     { name = "hypercorn" },
 ]
+idp-azure = [
+    { name = "httpx" },
+]
+idp-cognito = [
+    { name = "boto3" },
+]
+idp-keycloak = [
+    { name = "httpx" },
+]
 kafka = [
     { name = "aiokafka" },
 ]
@@ -2228,6 +2237,7 @@ requires-dist = [
     { name = "bcrypt", marker = "extra == 'security'", specifier = ">=5.0.0" },
     { name = "beanie", marker = "extra == 'data-document'", specifier = ">=2.1.0" },
     { name = "boto3", marker = "extra == 'ecm-aws'", specifier = ">=1.34.0" },
+    { name = "boto3", marker = "extra == 'idp-cognito'", specifier = ">=1.34.0" },
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.3.3" },
     { name = "click", marker = "extra == 'shell'", specifier = ">=8.3.3" },
     { name = "croniter", marker = "extra == 'scheduling'", specifier = ">=6.2.2" },
@@ -2235,6 +2245,8 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.136.1" },
     { name = "granian", marker = "extra == 'granian'", specifier = ">=2.7.4" },
     { name = "httpx", marker = "extra == 'client'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'idp-azure'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'idp-keycloak'", specifier = ">=0.28.1" },
     { name = "hypercorn", marker = "extra == 'hypercorn'", specifier = ">=0.18.0" },
     { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1.6" },
     { name = "jsonpath-ng", marker = "extra == 'testing'", specifier = ">=1.8.0" },
@@ -2247,7 +2259,7 @@ requires-dist = [
     { name = "prometheus-client", marker = "extra == 'observability'", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyfly", extras = ["fastapi", "granian"], marker = "extra == 'web-fastapi'" },
-    { name = "pyfly", extras = ["web", "data-relational", "data-document", "postgresql", "eda", "cache", "client", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn"], marker = "extra == 'full'" },
+    { name = "pyfly", extras = ["web", "data-relational", "data-document", "postgresql", "eda", "cache", "client", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn", "idp-azure", "idp-keycloak", "idp-cognito"], marker = "extra == 'full'" },
     { name = "pyfly", extras = ["web", "granian"], marker = "extra == 'web-fast'" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'security'", specifier = ">=2.12.1" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.27" },
@@ -2264,7 +2276,7 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fast'", specifier = ">=0.22.1" },
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fastapi'", specifier = ">=0.22.1" },
 ]
-provides-extras = ["web", "data-relational", "testing", "testcontainers", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "cli", "shell", "web-fast", "web-fastapi", "full"]
+provides-extras = ["web", "data-relational", "testing", "testcontainers", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "cli", "shell", "web-fast", "web-fastapi", "full"]
 
 [package.metadata.requires-dev]
 dev = [
