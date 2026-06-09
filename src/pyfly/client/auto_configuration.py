@@ -19,6 +19,8 @@ from typing import Any
 
 from pyfly.client.ports.outbound import HttpClientPort
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
+from pyfly.client.protocols.grpc_client import GrpcClientBuilder
+from pyfly.client.protocols.websocket_client import WebSocketClientBuilder
 from pyfly.container.bean import bean
 from pyfly.context.conditions import (
     auto_configuration,
@@ -72,3 +74,37 @@ class ClientAutoConfiguration:
             default_retry=default_retry,
             default_circuit_breaker=default_cb,
         )
+
+
+@auto_configuration
+@conditional_on_class("grpc")
+@conditional_on_missing_bean(GrpcClientBuilder)
+class GrpcClientAutoConfiguration:
+    """Auto-configures a :class:`~pyfly.client.protocols.grpc_client.GrpcClientBuilder`.
+
+    Active only when ``grpcio`` is installed.  Reads ``pyfly.client.grpc.target``
+    from the config if set; otherwise returns a bare builder that the caller
+    can further configure.
+    """
+
+    @bean
+    def grpc_client_builder(self, config: Config) -> GrpcClientBuilder:
+        builder = GrpcClientBuilder()
+        target = config.get("pyfly.client.grpc.target")
+        if isinstance(target, str) and target:
+            builder = builder.with_target(target)
+        return builder
+
+
+@auto_configuration
+@conditional_on_class("websockets")
+@conditional_on_missing_bean(WebSocketClientBuilder)
+class WebSocketClientAutoConfiguration:
+    """Auto-configures a :class:`~pyfly.client.protocols.websocket_client.WebSocketClientBuilder`.
+
+    Active only when ``websockets`` is installed.
+    """
+
+    @bean
+    def websocket_client_builder(self) -> WebSocketClientBuilder:
+        return WebSocketClientBuilder()
