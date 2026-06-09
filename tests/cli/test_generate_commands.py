@@ -154,3 +154,14 @@ class TestSaga:
         assert '@saga(name="money-transfer")' in text
         assert "@saga_step(" in text
         assert "compensate=" in text
+
+
+class TestScheduled:
+    def test_scheduled(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["scheduled", "ReportJob"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "jobs" / "report_job_job.py").read_text()
+        assert "from pyfly.scheduling import scheduled" in text
+        assert "@scheduled(" in text
+        assert "async def run" in text

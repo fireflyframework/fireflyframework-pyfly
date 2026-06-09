@@ -301,3 +301,12 @@ def event_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None
 def saga_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
     """Generate a saga orchestration skeleton."""
     _simple_generate(ctx, name, subdir="sagas", suffix="_saga", template="saga.py.j2", force=force, dry_run=dry_run)
+
+
+@generate_group.command("scheduled")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def scheduled_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a scheduled job."""
+    _simple_generate(ctx, name, subdir="jobs", suffix="_job", template="scheduled.py.j2", force=force, dry_run=dry_run)
