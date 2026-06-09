@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.87 (2026-06-09)
+
+### Added / Tested (security & IDP depth — parity initiative SP-7)
+
+- **IDP provider test depth.** Real behavior tests for the previously-untested `AzureAdIdpAdapter`
+  (was zero coverage) and an expanded `AwsCognitoIdpAdapter` suite (via its `client=` injection seam),
+  each exercising the real request/response code paths against fake httpx/boto3 clients. New
+  real-Redis integration test for `RedisSessionStore` (round-trips a `SecurityContext` through the
+  type-tagged serialization + TTL expiry).
+- **`IdpAdapter` port extended toward Java parity**: `get_user_info(access_token)`,
+  `register_user(user, password)` (public self-registration), `get_roles(user_id)`, and TOTP MFA
+  (`mfa_challenge` / `mfa_verify`). `InternalDbIdpAdapter` fully implements MFA via **pyotp** — when a
+  user has MFA enabled, `login()` returns `mfa_required=True` + a single-use challenge (no token
+  issued) until `mfa_verify` succeeds; this wires the previously-dead `MfaChallenge` / `mfa_required`
+  DTOs. Keycloak/Cognito/Azure implement userinfo/roles/register and raise a clear `NotImplementedError`
+  for `mfa_*` (those providers manage MFA natively).
+- New per-provider extras: `pyfly[idp-cognito]` (boto3), `pyfly[idp-azure]` / `pyfly[idp-keycloak]`
+  (httpx); `pyotp` added to the `security` extra. Docs updated (`idp.md`).
+
+> Note: a live Keycloak testcontainer integration test is deferred (heavy realm bootstrap); the
+> Keycloak adapter is covered by fake-httpx behavior tests. `listSessions`/`revokeSession`/`createScope`
+> are intentionally deferred to the session registry / authorization server.
+
 ## v26.06.86 (2026-06-09)
 
 ### Added / Fixed (resilience config + callbacks/webhooks production-readiness — parity initiative SP-6)
