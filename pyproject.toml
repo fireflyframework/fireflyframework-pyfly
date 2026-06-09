@@ -193,7 +193,13 @@ packages = ["src/pyfly"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+# Integration tests (tests/integration/, marker auto-applied) are deselected by default so the
+# fast suite stays mock/fake-based. Run them explicitly with: pytest -m integration
+addopts = "-v --tb=short -m 'not integration'"
+markers = [
+    "integration: real-backend test via testcontainers or a real transport; needs Docker. Deselected by default — run with -m integration.",
+    "docker: alias for 'integration' (requires a Docker daemon).",
+]
 
 [tool.ruff]
 target-version = "py312"
