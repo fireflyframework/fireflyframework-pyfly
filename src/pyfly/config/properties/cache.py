@@ -29,4 +29,5 @@ class CacheProperties:
     enabled: bool = False
     provider: str = "auto"
     redis: dict[str, Any] = field(default_factory=lambda: {"url": "redis://localhost:6379/0"})
+    postgres: dict[str, Any] = field(default_factory=lambda: {"url": "postgresql+asyncpg://localhost:5432/cache"})
     ttl: int = 300

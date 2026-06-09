@@ -55,6 +55,15 @@ class CacheAutoConfiguration:
             client = aioredis.from_url(url)  # type: ignore[no-untyped-call,unused-ignore]
             return RedisCacheAdapter(client=client)
 
+        if provider == "postgres" and AutoConfiguration.is_available("sqlalchemy.ext.asyncio"):
+            from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found,unused-ignore]
+
+            from pyfly.cache.adapters.postgres import PostgresCacheAdapter
+
+            url = str(config.get("pyfly.cache.postgres.url", "postgresql+asyncpg://localhost:5432/cache"))
+            engine = create_async_engine(url)
+            return PostgresCacheAdapter(engine=engine)
+
         from pyfly.cache.adapters.memory import InMemoryCache
 
         raw_max_size = config.get("pyfly.cache.max-size", None)
