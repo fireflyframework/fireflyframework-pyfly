@@ -1010,6 +1010,74 @@ from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePo
 | `cleanup(older_than)` | Delete old completed records. Returns count. |
 | `is_healthy()` | Health check for the storage backend. |
 
+### Persistence Providers
+
+The orchestration engine selects its `ExecutionPersistenceProvider` from
+configuration. Set `pyfly.transactional.persistence.provider` to one of
+the values below:
+
+| Value | Provider class | Durable across restarts | Extra dependencies |
+|-------|---------------|-------------------------|--------------------|
+| `memory` | `InMemoryPersistenceProvider` | No | None (default) |
+| `redis` | `RedisPersistenceProvider` | Yes | `redis[hiredis]` |
+| `sqlalchemy` | `SqlAlchemyPersistenceProvider` | Yes | `sqlalchemy[asyncio]` + async driver |
+| `cache` | `CachePersistenceProvider` | Depends on backend | Active `CacheAdapter` bean |
+
+The `memory` provider is the default and requires no additional packages.
+The `redis`, `sqlalchemy`, and `cache` providers are **durable**: they survive
+process restarts because execution state is held outside the Python process.
+
+#### Redis provider
+
+```yaml
+pyfly:
+  transactional:
+    persistence:
+      provider: redis
+      redis:
+        url: redis://localhost:6379/0   # default
+```
+
+`pyfly.transactional.persistence.redis.url` defaults to
+`redis://localhost:6379/0`. The adapter requires the `redis` package
+(`pip install redis[hiredis]`). An error is raised at startup if the
+package is absent.
+
+#### SQLAlchemy provider
+
+```yaml
+pyfly:
+  transactional:
+    persistence:
+      provider: sqlalchemy
+      sqlalchemy:
+        url: postgresql+asyncpg://user:pass@host/db
+```
+
+Config key `pyfly.transactional.persistence.sqlalchemy.url` is used when
+set; otherwise the adapter falls back to `pyfly.data.relational.url`. A
+`ValueError` is raised if neither key is configured. The adapter creates
+the table `pyfly_orchestration_state` on first use and requires
+`sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres,
+`aiosqlite` for SQLite).
+
+#### Cache provider
+
+```yaml
+pyfly:
+  transactional:
+    persistence:
+      provider: cache
+```
+
+Delegates to the application's configured `CacheAdapter` bean (e.g. Redis
+or Postgres-backed). This reuses the app's existing cache infrastructure
+with no additional connection. The `CachePersistenceProvider` enumerates
+execution state from the cache backend — there is no in-process index, so
+it is suitable only when the underlying cache adapter supports key scanning.
+A `ValueError` is raised at startup if no `CacheAdapter` bean is present
+(enable `pyfly.cache`, for example by setting `pyfly.cache.provider=memory`).
+
 ### InMemoryPersistenceAdapter
 
 The default adapter stores all state in a Python `dict`. All state is lost
@@ -1127,6 +1195,13 @@ pyfly:
   transactional:
     enabled: true
 
+    persistence:
+      provider: memory          # memory | redis | sqlalchemy | cache
+      redis:
+        url: redis://localhost:6379/0
+      sqlalchemy:
+        url: postgresql+asyncpg://user:pass@host/db
+
     saga:
       enabled: true
       compensation_policy: STRICT_SEQUENTIAL
@@ -1157,6 +1232,14 @@ pyfly:
       success_threshold: 2
       wait_duration_ms: 60000
 ```
+
+### Persistence Provider Properties
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `pyfly.transactional.persistence.provider` | `str` | `memory` | Persistence backend: `memory`, `redis`, `sqlalchemy`, or `cache`. |
+| `pyfly.transactional.persistence.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL (only used when provider is `redis`). |
+| `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). Falls back to `pyfly.data.relational.url`. |
 
 ### Saga Properties
 
@@ -1215,7 +1298,8 @@ DI container:
 | `saga_engine_properties` | `SagaEngineProperties` | Saga configuration. |
 | `tcc_engine_properties` | `TccEngineProperties` | TCC configuration. |
 | `backpressure_properties` | `BackpressureProperties` | Backpressure configuration. |
-| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Default in-memory persistence. |
+| `orchestration_persistence` | `ExecutionPersistenceProvider` | Provider selected by `pyfly.transactional.persistence.provider` (`InMemoryPersistenceProvider`, `RedisPersistenceProvider`, `SqlAlchemyPersistenceProvider`, or `CachePersistenceProvider`). |
+| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat). |
 | `logger_events_adapter` | `LoggerEventsAdapter` | Default logging events adapter. |
 | `saga_argument_resolver` | `ArgumentResolver` | Parameter injection resolver. |
 | `saga_step_invoker` | `StepInvoker` | Saga step and compensation invoker. |
