@@ -272,3 +272,23 @@ def query_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None
     artifacts.append(Artifact("handler", out / f"{n.snake}_handler.py", _render("query_handler.py.j2", context)))
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("event")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def event_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a domain event and a sample listener."""
+    info = _resolve_info(ctx)
+    context = _context(info, name)
+    n: Names = context["names"]
+    out = info.package_dir / "events"
+    artifacts: list[Artifact] = []
+    init = _ensure_init(out, dry_run=dry_run)
+    if init:
+        artifacts.append(init)
+    artifacts.append(Artifact("event", out / f"{n.snake}_event.py", _render("event.py.j2", context)))
+    artifacts.append(Artifact("listener", out / f"{n.snake}_listener.py", _render("event_listener.py.j2", context)))
+    actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
+    _report(info, actions, dry_run=dry_run)

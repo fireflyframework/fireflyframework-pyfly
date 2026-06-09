@@ -130,3 +130,16 @@ class TestCqrs:
         assert "class GetWallet(Query[dict | None])" in q
         assert "class GetWalletHandler(QueryHandler[GetWallet, dict | None])" in h
         assert "@query_handler" in h
+
+
+class TestEvent:
+    def test_event_and_listener(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["event", "OrderPlaced"], tmp_path)
+        assert result.exit_code == 0, result.output
+        ev = (tmp_path / "src" / "shop" / "events" / "order_placed_event.py").read_text()
+        ls = (tmp_path / "src" / "shop" / "events" / "order_placed_listener.py").read_text()
+        assert "class OrderPlaced(DomainEvent)" in ev
+        assert "from pyfly.domain import DomainEvent" in ev
+        assert '@event_listener(event_types=["OrderPlaced"])' in ls
+        assert "EventEnvelope" in ls
