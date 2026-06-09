@@ -52,7 +52,7 @@ def _read_yaml(root: Path) -> dict[str, object]:
     try:
         import yaml  # type: ignore[import-untyped]
 
-        with open(path) as f:  # noqa: PTH123
+        with open(path) as f:
             result = yaml.safe_load(f)
             if isinstance(result, dict):
                 return result

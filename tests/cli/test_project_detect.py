@@ -58,3 +58,36 @@ class TestDetectProject:
         flags = feature_flags(info)
         assert flags["has_data"] is True
         assert flags["has_mongodb"] is False
+
+
+class TestArchetypeInference:
+    def _scaffold_no_archetype(self, root: Path, package: str, subdir: str | None) -> None:
+        pkg = root / "src" / package
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        if subdir:
+            (pkg / subdir).mkdir()
+        (root / "tests").mkdir()
+        (root / "pyproject.toml").write_text(f'[project]\nname = "{package}"\n')
+        # pyfly.yaml present but WITHOUT archetype so inference kicks in
+        (root / "pyfly.yaml").write_text(f"pyfly:\n  app:\n    name: {package}\n")
+
+    def test_infers_hexagonal_from_domain(self, tmp_path: Path) -> None:
+        self._scaffold_no_archetype(tmp_path, "shop", "domain")
+        assert detect_project(tmp_path).archetype == "hexagonal"
+
+    def test_infers_web_from_templates(self, tmp_path: Path) -> None:
+        self._scaffold_no_archetype(tmp_path, "shop", "templates")
+        assert detect_project(tmp_path).archetype == "web"
+
+    def test_infers_web_api_from_controllers(self, tmp_path: Path) -> None:
+        self._scaffold_no_archetype(tmp_path, "shop", "controllers")
+        assert detect_project(tmp_path).archetype == "web-api"
+
+    def test_infers_cli_from_commands(self, tmp_path: Path) -> None:
+        self._scaffold_no_archetype(tmp_path, "shop", "commands")
+        assert detect_project(tmp_path).archetype == "cli"
+
+    def test_defaults_to_core(self, tmp_path: Path) -> None:
+        self._scaffold_no_archetype(tmp_path, "shop", None)
+        assert detect_project(tmp_path).archetype == "core"
