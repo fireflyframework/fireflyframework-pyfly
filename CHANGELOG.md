@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `pyfly generate` (alias `g`) command family: scaffold controllers, services, repositories, entities, DTOs, aggregates, CQRS commands/queries with handlers, domain events with listeners, sagas, scheduled jobs, shell commands, a database migration passthrough, and a composite `resource` CRUD stack. Supports `--dry-run` and `--force`.
 - `pyfly.app.archetype` is now recorded in generated `pyfly.yaml` so generators emit archetype-appropriate code.
+- `pyfly run` gains `--profile/-p`, `-D/--define KEY=VALUE` (config overrides), `--env KEY=VALUE`, `--debug` (debug logging), and `--watch` (extra reload dirs).
+- `pyfly db` gains `current`, `history`, `show`, `heads`, `revision`, `stamp`, `merge`, and `reset`.
+- `pyfly new` gains `--list` (show archetypes/features), `--git` (init repo), and `--no-input` (CI-friendly).
 
 ---
 

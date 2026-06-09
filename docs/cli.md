@@ -22,6 +22,14 @@ The PyFly CLI provides command-line tools for project scaffolding, application m
   - [pyfly db migrate](#pyfly-db-migrate)
   - [pyfly db upgrade](#pyfly-db-upgrade)
   - [pyfly db downgrade](#pyfly-db-downgrade)
+  - [pyfly db current](#pyfly-db-current)
+  - [pyfly db history](#pyfly-db-history)
+  - [pyfly db heads](#pyfly-db-heads)
+  - [pyfly db show](#pyfly-db-show)
+  - [pyfly db revision](#pyfly-db-revision)
+  - [pyfly db stamp](#pyfly-db-stamp)
+  - [pyfly db merge](#pyfly-db-merge)
+  - [pyfly db reset](#pyfly-db-reset)
   - [Running Migrations on Startup](#running-migrations-on-startup)
 - [pyfly license](#pyfly-license)
 - [pyfly sbom](#pyfly-sbom)
@@ -53,14 +61,22 @@ pyfly
 │   ├── shell-command — @shell_component command
 │   ├── migration     — Database migration (delegates to pyfly db migrate)
 │   └── resource      — Full CRUD stack (entity + dto + repo + service + controller + test)
-├── run       — Start the application server
+├── run       — Start the application server  [--profile/-p, -D/--define, --env, --debug, --watch]
 ├── info      — Display framework information
 ├── doctor    — Diagnose environment
 ├── db        — Database migration commands
 │   ├── init      — Initialize Alembic
 │   ├── migrate   — Generate migration
 │   ├── upgrade   — Apply migrations
-│   └── downgrade — Revert migrations
+│   ├── downgrade — Revert migrations
+│   ├── current   — Show current revision
+│   ├── history   — List migration history
+│   ├── heads     — Show head revision(s)
+│   ├── show      — Show details of a revision
+│   ├── revision  — Create a new revision
+│   ├── stamp     — Stamp DB without running migrations
+│   ├── merge     — Merge multiple heads
+│   └── reset     — Downgrade to base then upgrade to head
 ├── license   — Display the Apache 2.0 license
 └── sbom      — Software Bill of Materials
 ```
@@ -148,6 +164,9 @@ The project name is converted to a valid Python package name: `my-service` becom
 | `--archetype` | `core` | Project archetype (see below) |
 | `--features` | Per archetype | Comma-separated PyFly extras (e.g. `web,data-relational,cache`) |
 | `--directory` | `.` | Parent directory where the project folder will be created |
+| `--list` | — | Print available archetypes and features, then exit |
+| `--git` | `false` | Initialize a git repository with an initial commit after scaffolding |
+| `--no-input` | `false` | Never prompt; fail if a required name is missing (CI-friendly) |
 
 ### Archetypes
 
@@ -466,6 +485,15 @@ pyfly new common-utils --archetype library
 # Create in a specific directory
 pyfly new payment-service --directory /projects
 
+# List all archetypes and features, then exit
+pyfly new --list
+
+# Scaffold and initialize a git repo with an initial commit
+pyfly new order-service --git
+
+# CI-friendly: fail fast if name is missing (no prompts)
+pyfly new order-service --archetype web-api --no-input
+
 # Interactive mode
 pyfly new
 ```
@@ -528,6 +556,11 @@ pyfly run [OPTIONS]
 | `--workers` | From config or `0` | Number of worker processes (`0` = `cpu_count`) |
 | `--reload` | `false` | Enable auto-reload on code changes (for development) |
 | `--app` | Auto-discovered | Application import path (e.g., `myapp.main:app`) |
+| `--profile, -p <name>` | — | Activate a named profile (sets `PYFLY_PROFILES_ACTIVE`); repeatable or comma-separated |
+| `-D, --define KEY=VALUE` | — | Override a config value at runtime (e.g. `-D web.port=9000`); the `pyfly.` prefix may be included or omitted; repeatable |
+| `--env KEY=VALUE` | — | Set a raw environment variable for the app process; repeatable |
+| `--debug` | `false` | Enable debug logging (sets `pyfly.logging.level.root=DEBUG`) |
+| `--watch <dir>` | — | Extra directory to watch in reload mode (implies `--reload`); repeatable |
 
 ### Path Setup
 
@@ -591,6 +624,29 @@ pyfly run --app my_service.app:Application
 
 # Production binding with Granian on all cores
 pyfly run --host 0.0.0.0 --port 80 --server granian --workers 0
+
+# Activate a profile (sets PYFLY_PROFILES_ACTIVE=staging)
+pyfly run --profile staging
+
+# Activate multiple profiles
+pyfly run -p prod -p cloud
+# or comma-separated
+pyfly run --profile prod,cloud
+
+# Override config values at runtime
+pyfly run -D web.port=9000 -D logging.level.root=INFO
+
+# Pass raw environment variables to the app process
+pyfly run --env DATABASE_URL=postgresql://localhost/mydb --env FEATURE_X=1
+
+# Enable debug logging
+pyfly run --debug
+
+# Watch extra directories in reload mode (implies --reload)
+pyfly run --watch src/templates --watch src/static
+
+# Combined: staging profile, debug, watch templates
+pyfly run -p staging --debug --watch src/templates
 ```
 
 ---
@@ -807,6 +863,156 @@ pyfly db downgrade REVISION
 pyfly db downgrade -1       # Revert one migration step
 pyfly db downgrade abc123   # Revert to specific revision
 pyfly db downgrade base     # Revert all migrations
+```
+
+### pyfly db current
+
+Show the current revision of the database.
+
+```bash
+pyfly db current [-v]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v`, `--verbose` | Show full revision details |
+
+**Examples:**
+```bash
+pyfly db current       # Show current revision identifier
+pyfly db current -v    # Show current revision with full details
+```
+
+### pyfly db history
+
+List the migration history.
+
+```bash
+pyfly db history [-v]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v`, `--verbose` | Show full details for each revision |
+
+**Examples:**
+```bash
+pyfly db history       # List all revisions
+pyfly db history -v    # List with full details
+```
+
+### pyfly db heads
+
+Show the current head revision(s). Multiple heads indicate a branched migration graph.
+
+```bash
+pyfly db heads [-v]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v`, `--verbose` | Show full revision details |
+
+**Examples:**
+```bash
+pyfly db heads       # Show head revision(s)
+pyfly db heads -v    # Show with full details
+```
+
+### pyfly db show
+
+Show the details of a specific revision.
+
+```bash
+pyfly db show REVISION
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `revision` | Yes | Revision identifier to inspect |
+
+**Examples:**
+```bash
+pyfly db show abc123   # Show details of revision abc123
+pyfly db show head     # Show details of the current head
+```
+
+### pyfly db revision
+
+Create a new migration revision. By default creates an empty revision; use `--autogenerate` to diff your SQLAlchemy models against the database.
+
+```bash
+pyfly db revision [-m MSG] [--autogenerate]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-m`, `--message` | Revision message describing the change |
+| `--autogenerate` | Diff models against the database to generate upgrade/downgrade functions |
+
+**Note:** `pyfly db migrate` is a shortcut for `pyfly db revision --autogenerate`. Use `pyfly db revision` directly when you need an empty revision with custom upgrade/downgrade logic.
+
+**Examples:**
+```bash
+pyfly db revision -m "add index on users.email"           # Empty revision
+pyfly db revision -m "add order table" --autogenerate     # Model-diff revision
+```
+
+### pyfly db stamp
+
+Stamp the database with a specific revision without running any migration SQL. Useful for marking an existing database as being at a known state.
+
+```bash
+pyfly db stamp REVISION
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `revision` | Yes | Revision to stamp (e.g. `head`, or a specific revision ID) |
+
+**Examples:**
+```bash
+pyfly db stamp head     # Mark the DB as at the current head
+pyfly db stamp abc123   # Mark the DB as at a specific revision
+```
+
+### pyfly db merge
+
+Merge two or more migration heads into a single new revision. Required when the migration graph has diverged and `pyfly db heads` shows multiple heads.
+
+```bash
+pyfly db merge <rev>... [-m MSG]
+```
+
+| Argument/Option | Required | Description |
+|-----------------|----------|-------------|
+| `rev...` | Yes | Two or more revision identifiers to merge |
+| `-m`, `--message` | No | Merge revision message |
+
+**Examples:**
+```bash
+pyfly db merge abc123 def456                       # Merge two heads
+pyfly db merge abc123 def456 -m "merge branches"   # With a message
+```
+
+### pyfly db reset
+
+Destructive: downgrade the database all the way to `base` (removing all applied migrations), then upgrade back to `head`. Prompts for confirmation unless `--yes` is passed.
+
+```bash
+pyfly db reset [--yes]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--yes` | Skip the confirmation prompt (for scripted/CI use) |
+
+> **Warning:** This drops and re-applies all migrations. All data will be lost unless your downgrade functions preserve it. Use with care.
+
+**Examples:**
+```bash
+pyfly db reset          # Prompt before resetting
+pyfly db reset --yes    # Reset without prompting (CI/scripts)
 ```
 
 ### Running Migrations on Startup
