@@ -13,6 +13,7 @@ The PyFly CLI provides command-line tools for project scaffolding, application m
 - [Overview](#overview)
 - [Global Options](#global-options)
 - [pyfly new](#pyfly-new)
+- [pyfly generate](#pyfly-generate-alias-g)
 - [pyfly run](#pyfly-run)
 - [pyfly info](#pyfly-info)
 - [pyfly doctor](#pyfly-doctor)
@@ -37,6 +38,21 @@ All commands are organized as a Click group under the `pyfly` entry point:
 ```
 pyfly
 ├── new       — Create a new project
+├── generate  — Scaffold individual artifacts (alias: g)
+│   ├── controller    — REST or web/SSR controller + test
+│   ├── service       — @service class + test
+│   ├── repository    — Repository (SQL / Mongo / in-memory)
+│   ├── entity        — Model/entity (Pydantic + ORM)
+│   ├── dto           — Request/response DTOs
+│   ├── aggregate     — DDD aggregate root with domain events
+│   ├── command       — CQRS command + handler
+│   ├── query         — CQRS query + handler
+│   ├── event         — Domain event + listener
+│   ├── saga          — Saga orchestration skeleton
+│   ├── scheduled     — Scheduled job
+│   ├── shell-command — @shell_component command
+│   ├── migration     — Database migration (delegates to pyfly db migrate)
+│   └── resource      — Full CRUD stack (entity + dto + repo + service + controller + test)
 ├── run       — Start the application server
 ├── info      — Display framework information
 ├── doctor    — Diagnose environment
@@ -455,6 +471,40 @@ pyfly new
 ```
 
 After creation, the CLI displays a Rich tree panel showing all created files and a hint to navigate into the project.
+
+---
+
+## pyfly generate (alias `g`)
+
+Scaffold individual artifacts into the current project. The generator detects the
+project package and archetype automatically (from `pyfly.yaml` / `src/` layout).
+
+| Subcommand | Creates |
+|---|---|
+| `generate controller <Name>` | A REST controller (or web/SSR controller for the `web` archetype) + test |
+| `generate service <Name>` | A `@service` class + test |
+| `generate repository <Name>` | A repository (SQLAlchemy / Mongo / in-memory, data-aware) |
+| `generate entity <Name>` | A model/entity (Pydantic + ORM when data is enabled) |
+| `generate dto <Name>` | Request/response DTOs |
+| `generate aggregate <Name>` | A DDD aggregate root with domain events |
+| `generate command <Name>` | A CQRS command + handler |
+| `generate query <Name>` | A CQRS query + handler |
+| `generate event <Name>` | A domain event + listener |
+| `generate saga <Name>` | A saga orchestration skeleton |
+| `generate scheduled <Name>` | A scheduled job |
+| `generate shell-command <Name>` | A `@shell_component` command |
+| `generate migration` | A database migration (delegates to `pyfly db migrate`) |
+| `generate resource <Name>` | Full CRUD stack: entity + dto + repository + service + controller + test |
+
+Common flags: `--dry-run` (show planned files without writing), `--force` (overwrite existing files).
+
+### Examples
+
+```bash
+pyfly g service Pricing
+pyfly g resource Product
+pyfly g command OpenWallet --dry-run
+```
 
 ---
 
