@@ -1,0 +1,7 @@
+"""Tests for {{ names.pascal }}Service."""
+
+from {{ package_name }}.services.{{ names.snake }}_service import {{ names.pascal }}Service
+
+
+def test_{{ names.snake }}_service_ping() -> None:
+    assert {{ names.pascal }}Service().ping() == "{{ names.snake }} ok"

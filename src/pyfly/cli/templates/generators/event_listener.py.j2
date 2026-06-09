@@ -1,0 +1,15 @@
+"""Listener for the {{ names.pascal }} event."""
+
+from __future__ import annotations
+
+from pyfly.container import service
+from pyfly.eda import EventEnvelope, event_listener
+
+
+@service
+class {{ names.pascal }}Listener:
+    @event_listener(event_types=["{{ names.pascal }}"])
+    async def on_{{ names.snake }}(self, envelope: EventEnvelope) -> None:
+        payload = dict(envelope.payload)
+        # TODO: handle {{ names.human }}
+        _ = payload

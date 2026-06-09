@@ -1,0 +1,14 @@
+"""{{ names.pascal }} domain event."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from pyfly.domain import DomainEvent
+
+
+@dataclass(frozen=True)
+class {{ names.pascal }}(DomainEvent):
+    """Raised when {{ names.human }} occurs."""
+
+    # TODO: add event payload fields (defaults required — DomainEvent has defaulted fields)

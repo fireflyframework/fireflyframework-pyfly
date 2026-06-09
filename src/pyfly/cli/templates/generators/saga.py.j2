@@ -1,0 +1,29 @@
+"""{{ names.pascal }} saga orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Annotated
+
+from pyfly.container import service
+from pyfly.transactional.saga.annotations import Input, saga, saga_step
+
+
+@dataclass(frozen=True)
+class {{ names.pascal }}Request:
+    """Input to the {{ names.human }} saga."""
+
+    # TODO: add request fields
+
+
+@saga(name="{{ names.kebab }}")
+@service
+class {{ names.pascal }}Saga:
+    @saga_step(id="step-one", compensate="undo_step_one")
+    async def step_one(self, request: Annotated[{{ names.pascal }}Request, Input()]) -> dict:
+        """Forward action for step one."""
+        raise NotImplementedError("Implement step_one")
+
+    async def undo_step_one(self, request: Annotated[{{ names.pascal }}Request, Input()]) -> None:
+        """Compensation for step one."""
+        raise NotImplementedError("Implement undo_step_one")

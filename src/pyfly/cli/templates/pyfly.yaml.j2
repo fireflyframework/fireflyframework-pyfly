@@ -1,6 +1,7 @@
 pyfly:
   app:
     name: {{ name }}
+    archetype: {{ archetype }}
 {% if archetype not in ("library", "cli") %}
     module: {{ package_name }}.main:app
 {% endif %}

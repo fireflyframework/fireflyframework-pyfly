@@ -1,0 +1,45 @@
+"""{{ names.pascal }} model."""
+
+from pydantic import BaseModel, Field
+{% if has_data %}
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from pyfly.data.relational.sqlalchemy import Base
+{% endif %}
+{% if has_mongodb %}
+from pyfly.data.document.mongodb import BaseDocument
+{% endif %}
+
+
+class {{ names.pascal }}Create(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class {{ names.pascal }}Response(BaseModel):
+    id: {% if has_data %}int{% else %}str{% endif %}
+
+    name: str
+{% if has_data %}
+
+
+class {{ names.pascal }}(Base):
+    __tablename__ = "{{ names.snake_plural }}"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200))
+{% elif has_mongodb %}
+
+
+class {{ names.pascal }}(BaseDocument):
+    name: str
+
+    class Settings:
+        name = "{{ names.snake_plural }}"
+{% else %}
+
+
+class {{ names.pascal }}(BaseModel):
+    id: str
+    name: str
+{% endif %}

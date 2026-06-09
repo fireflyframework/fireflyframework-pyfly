@@ -1,0 +1,32 @@
+"""{{ names.pascal }} aggregate root."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+
+from pyfly.domain import DomainEvent
+
+
+@dataclass(frozen=True)
+class {{ names.pascal }}Created(DomainEvent):
+    {{ names.snake }}_id: str = ""
+
+
+@dataclass
+class {{ names.pascal }}:
+    """Aggregate root for {{ names.human }}."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    _events: list[DomainEvent] = field(default_factory=list, repr=False)
+
+    @classmethod
+    def create(cls) -> {{ names.pascal }}:
+        instance = cls()
+        instance._events.append({{ names.pascal }}Created({{ names.snake }}_id=instance.id))
+        return instance
+
+    def clear_events(self) -> list[DomainEvent]:
+        events = list(self._events)
+        self._events.clear()
+        return events

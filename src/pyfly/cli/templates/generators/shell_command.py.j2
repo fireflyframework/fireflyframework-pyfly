@@ -1,0 +1,12 @@
+"""{{ names.pascal }} shell commands."""
+
+from pyfly.shell import shell_component, shell_method
+
+
+@shell_component
+class {{ names.pascal }}Command:
+    """{{ names.human|capitalize }} commands."""
+
+    @shell_method(key="{{ names.kebab }}", help="{{ names.human|capitalize }} command")
+    def {{ names.snake }}(self, name: str = "World") -> str:
+        return f"{{ names.pascal }}: {name}"

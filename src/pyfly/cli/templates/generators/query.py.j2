@@ -1,0 +1,14 @@
+"""{{ names.pascal }} query."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from pyfly.cqrs import Query
+
+
+@dataclass(frozen=True)
+class {{ names.pascal }}(Query[dict | None]):
+    """Query to {{ names.human }}."""
+
+    # TODO: add query fields

@@ -264,11 +264,29 @@ def _prompt_interactive() -> tuple[str, str, str, list[str]]:
     default=".",
     help="Parent directory for the new project.",
 )
-def new_command(name: str | None, archetype: str | None, features_str: str | None, directory: str) -> None:
+@click.option("--list", "list_archetypes", is_flag=True, help="List archetypes and features, then exit.")
+@click.option("--git", "init_git", is_flag=True, help="Initialize a git repository with an initial commit.")
+@click.option("--no-input", "no_input", is_flag=True, help="Never prompt; fail if required info is missing.")
+def new_command(
+    name: str | None,
+    archetype: str | None,
+    features_str: str | None,
+    directory: str,
+    list_archetypes: bool,
+    init_git: bool,
+    no_input: bool,
+) -> None:
     """Create a new PyFly project."""
+    if list_archetypes:
+        _print_catalog()
+        return
+
     # Interactive mode when no name provided
     pkg: str | None = None
     if name is None:
+        if no_input:
+            console.print("[error]A project name is required with --no-input.[/error]")
+            raise SystemExit(1)
         name, pkg, archetype, features = _prompt_interactive()
     else:
         # Validate name in non-interactive mode
@@ -332,3 +350,47 @@ def new_command(name: str | None, archetype: str | None, features_str: str | Non
     console.print()
     print_post_generation_tips(features)
     console.print()
+
+    if init_git:
+        _init_git_repo(project_dir)
+
+
+def _print_catalog() -> None:
+    """Print the archetype table and the feature catalog, then return."""
+    print_archetype_table()
+    console.print("  [info]Features:[/info]")
+    for feat in AVAILABLE_FEATURES:
+        short = FEATURE_DETAILS.get(feat, {}).get("short", "")
+        console.print(f"    [success]{feat:16s}[/success] [dim]{short}[/dim]")
+    console.print()
+
+
+def _init_git_repo(project_dir: Path) -> None:
+    """Initialize a git repo in the new project with an initial commit."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        console.print("[warning]git not found — skipping repository initialization.[/warning]")
+        return
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=project_dir, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=project_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=PyFly",
+                "-c",
+                "user.email=pyfly@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "Initial commit from pyfly new",
+            ],
+            cwd=project_dir,
+            check=True,
+        )
+        console.print("  [success]✓[/success] Initialized git repository.")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        console.print(f"[warning]git initialization failed: {exc}[/warning]")

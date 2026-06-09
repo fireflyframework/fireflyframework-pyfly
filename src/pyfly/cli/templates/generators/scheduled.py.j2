@@ -1,0 +1,18 @@
+"""{{ names.pascal }} scheduled job."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+from pyfly.container import component
+from pyfly.scheduling import scheduled
+
+
+@component
+class {{ names.pascal }}:
+    """Scheduled job: {{ names.human }}."""
+
+    @scheduled(fixed_rate=timedelta(minutes=5))
+    async def run(self) -> None:
+        # TODO: implement the scheduled task
+        ...
