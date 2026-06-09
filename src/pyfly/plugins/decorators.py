@@ -14,6 +14,8 @@ class Plugin:
     version: str = "0.0.0"
     depends_on: tuple[str, ...] = ()
     description: str = ""
+    name: str = ""  # defaults to id if empty; see @plugin decorator
+    author: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,11 +31,22 @@ class Extension:
 
 
 def plugin(
-    *, id: str, version: str = "0.0.0", depends_on: tuple[str, ...] = (), description: str = ""
+    *,
+    id: str,
+    version: str = "0.0.0",
+    depends_on: tuple[str, ...] = (),
+    description: str = "",
+    name: str = "",
+    author: str = "",
 ) -> Callable[[type], type]:
     def decorator(cls: type) -> type:
         cls.__pyfly_plugin__ = Plugin(  # type: ignore[attr-defined]
-            id=id, version=version, depends_on=depends_on, description=description
+            id=id,
+            version=version,
+            depends_on=depends_on,
+            description=description,
+            name=name or id,
+            author=author,
         )
         return cls
 

@@ -198,3 +198,29 @@ class GatewayTimeoutException(ExternalServiceException):
 
 class QuotaExceededException(RateLimitException):
     """API or resource quota has been exceeded."""
+
+
+# =============================================================================
+# Plugin Exceptions
+# =============================================================================
+
+
+class PluginException(PyFlyException):
+    """Base exception for all plugin system errors."""
+
+
+class PluginLoadError(PluginException):
+    """A plugin could not be loaded or registered."""
+
+
+class PluginStartError(PluginException):
+    """A plugin's start/init hook raised an error."""
+
+
+class PluginStopError(PluginException):
+    """A plugin's stop/unload hook raised an error."""
+
+
+class PluginStateError(PluginException):
+    """An operation was attempted on a plugin in an incompatible state
+    (e.g. starting an already-started plugin, or referencing an unknown id)."""

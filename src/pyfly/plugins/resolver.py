@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from collections import deque
 
+from pyfly.kernel.exceptions import PluginException
 from pyfly.plugins.decorators import Plugin
 
 
-class PluginResolutionError(Exception):
+class PluginResolutionError(PluginException):
     pass
 
 

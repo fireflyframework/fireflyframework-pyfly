@@ -34,6 +34,11 @@ from pyfly.kernel.exceptions import (
     NotImplementedException,
     OperationTimeoutException,
     PayloadTooLargeException,
+    PluginException,
+    PluginLoadError,
+    PluginStartError,
+    PluginStateError,
+    PluginStopError,
     PreconditionFailedException,
     PyFlyException,
     QuotaExceededException,
@@ -100,4 +105,10 @@ __all__ = [
     "BadGatewayException",
     "GatewayTimeoutException",
     "QuotaExceededException",
+    # Plugin
+    "PluginException",
+    "PluginLoadError",
+    "PluginStartError",
+    "PluginStopError",
+    "PluginStateError",
 ]
