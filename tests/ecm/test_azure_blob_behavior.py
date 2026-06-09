@@ -48,7 +48,6 @@ class _FakeBlobClient:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._download_payload = download_payload
         self._delete_raises = delete_raises
-        # Expose a fake URL property (set by _FakeBlobServiceClient after creation)
         self.url: str = "https://x.blob.core.windows.net/container/blob"
 
     def upload_blob(self, data: bytes, /, **kwargs: Any) -> dict[str, Any]:
