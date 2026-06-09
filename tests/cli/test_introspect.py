@@ -116,3 +116,13 @@ class TestJsonIsClean:
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)  # raises if stdout was contaminated
         assert "contexts" in parsed
+
+
+class TestRegistered:
+    def test_new_commands_in_root_help(self) -> None:
+        from pyfly.cli.main import cli
+
+        result = CliRunner().invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        for name in ("routes", "beans", "env", "health", "metrics", "conditions", "actuator", "shell", "openapi"):
+            assert name in result.output, f"{name} missing from root help"

@@ -33,6 +33,16 @@ The PyFly CLI provides command-line tools for project scaffolding, application m
   - [Running Migrations on Startup](#running-migrations-on-startup)
 - [pyfly license](#pyfly-license)
 - [pyfly sbom](#pyfly-sbom)
+- [App Introspection](#app-introspection)
+  - [pyfly routes](#pyfly-routes)
+  - [pyfly beans](#pyfly-beans)
+  - [pyfly env](#pyfly-env)
+  - [pyfly health](#pyfly-health)
+  - [pyfly metrics](#pyfly-metrics)
+  - [pyfly conditions](#pyfly-conditions)
+  - [pyfly actuator](#pyfly-actuator)
+- [pyfly shell](#pyfly-shell)
+- [pyfly openapi](#pyfly-openapi)
 - [Development Workflow](#typical-development-workflow)
 
 ---
@@ -78,7 +88,16 @@ pyfly
 │   ├── merge     — Merge multiple heads
 │   └── reset     — Downgrade to base then upgrade to head
 ├── license   — Display the Apache 2.0 license
-└── sbom      — Software Bill of Materials
+├── sbom      — Software Bill of Materials
+├── routes    — List HTTP route mappings (offline or --url)
+├── beans     — List container beans (offline or --url)
+├── env       — Show resolved config and active profiles (offline or --url)
+├── health    — Show application health (offline or --url)
+├── metrics   — List metrics or a single metric detail (offline or --url)
+├── conditions — Show auto-configuration condition report (offline or --url)
+├── actuator  — GET any actuator endpoint of a running app (--url required)
+├── shell     — Interactive REPL with the booted application context
+└── openapi   — Export the OpenAPI schema (--format json|yaml, -o FILE)
 ```
 
 ### Architecture
@@ -1086,6 +1105,266 @@ pyfly sbom
 
 # Export as JSON
 pyfly sbom --json
+```
+
+---
+
+## App Introspection
+
+PyFly ships six commands for inspecting a running or offline application context. Each command is **dual-mode**:
+
+- **Offline** (default): boots the application from source using `PYFLY_APP` (or auto-detected from `pyfly.yaml` / `src/`) and introspects the in-process context directly.
+- **Remote** (`--url http://host:port`): queries the `/actuator/<endpoint>` HTTP endpoint of an already-running application — no local boot required.
+
+All six commands accept `--json` to emit raw JSON suitable for piping or scripting. Without `--json`, output is rendered via Rich for human readability.
+
+### pyfly routes
+
+List HTTP route mappings registered in the application.
+
+```bash
+pyfly routes [--url URL] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Query a running app's `/actuator/mappings` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+# Offline: boot the app and list routes
+pyfly routes
+
+# Remote: query a running instance
+pyfly routes --url http://localhost:8080
+
+# Raw JSON for scripting
+pyfly routes --json | jq '.contexts[].mappings.dispatcherServlets'
+```
+
+---
+
+### pyfly beans
+
+List all beans registered in the DI container.
+
+```bash
+pyfly beans [--url URL] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Query a running app's `/actuator/beans` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+pyfly beans
+pyfly beans --url http://localhost:8080 --json
+```
+
+---
+
+### pyfly env
+
+Show the resolved configuration environment — active profiles, property sources, and individual property values.
+
+```bash
+pyfly env [--url URL] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Query a running app's `/actuator/env` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+pyfly env
+pyfly env --url http://staging:8080 --json | jq '.activeProfiles'
+```
+
+---
+
+### pyfly health
+
+Show the application health status (analogous to Spring Boot's `/actuator/health`).
+
+```bash
+pyfly health [--url URL] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Query a running app's `/actuator/health` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+pyfly health
+pyfly health --url http://localhost:8080
+```
+
+---
+
+### pyfly metrics
+
+List all available metrics names, or show the detail of a single metric.
+
+```bash
+pyfly metrics [NAME] [--url URL] [--json]
+```
+
+| Argument/Option | Description |
+|-----------------|-------------|
+| `NAME` | Optional metric name to fetch the detail for |
+| `--url URL` | Query a running app's `/actuator/metrics` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+# List all metric names (offline)
+pyfly metrics
+
+# Show detail for a specific metric (remote)
+pyfly metrics http.server.requests --url http://localhost:8080
+
+# Raw JSON
+pyfly metrics --json
+```
+
+---
+
+### pyfly conditions
+
+Show the auto-configuration condition report — which conditions passed or failed and why.
+
+```bash
+pyfly conditions [--url URL] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Query a running app's `/actuator/conditions` instead of booting locally |
+| `--json` | Output raw JSON |
+
+**Examples:**
+
+```bash
+pyfly conditions
+pyfly conditions --url http://localhost:8080 --json
+```
+
+---
+
+### pyfly actuator
+
+GET any arbitrary actuator endpoint from a **running** application. This command is **remote-only** — `--url` is required.
+
+```bash
+pyfly actuator <endpoint> --url URL [--json]
+```
+
+| Argument/Option | Required | Description |
+|-----------------|----------|-------------|
+| `endpoint` | Yes | Actuator path segment (e.g. `info`, `loggers`, `threaddump`) |
+| `--url URL` | Yes | Base URL of the running application |
+| `--json` | No | Output raw JSON (implied when the endpoint returns JSON) |
+
+**Examples:**
+
+```bash
+# Fetch /actuator/info from a running app
+pyfly actuator info --url http://localhost:8080
+
+# Fetch /actuator/loggers and filter with jq
+pyfly actuator loggers --url http://prod:8080 --json | jq '.loggers | keys'
+
+# Inspect thread dump
+pyfly actuator threaddump --url http://localhost:8080
+```
+
+---
+
+## pyfly shell
+
+Open an interactive Python REPL with the **booted application context** pre-loaded. Useful for ad-hoc inspection, one-off data operations, and debugging beans interactively.
+
+```bash
+pyfly shell [-c EXPR] [--app APP]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-c EXPR` | Execute a single Python expression and exit (non-interactive one-shot mode) |
+| `--app APP` | Application import path (e.g. `myapp.main:App`); auto-detected from `pyfly.yaml` if omitted |
+
+### REPL Namespace
+
+The following names are available in the shell without any import:
+
+| Name | Description |
+|------|-------------|
+| `ctx` | The booted `ApplicationContext` |
+| `container` | The DI container (`ctx.container`) |
+| `bean(key)` | Shorthand for `ctx.get_bean(key)` — resolve any bean by type or name |
+
+### Examples
+
+```bash
+# Interactive shell
+pyfly shell
+
+# One-shot: print the active profile
+pyfly shell -c "print(ctx.environment.active_profiles)"
+
+# Resolve a bean and inspect it
+pyfly shell -c "svc = bean('UserService'); print(svc)"
+
+# Point at a specific app
+pyfly shell --app myapp.app:Application
+```
+
+---
+
+## pyfly openapi
+
+Export the application's OpenAPI schema to stdout or a file.
+
+```bash
+pyfly openapi [--format FORMAT] [-o FILE] [--app APP]
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--format FORMAT` | `json` | Output format: `json` or `yaml` |
+| `-o FILE` | stdout | Write the schema to FILE instead of stdout |
+| `--app APP` | Auto-detected | Application import path (e.g. `myapp.main:App`) |
+
+### Examples
+
+```bash
+# Print the JSON schema to stdout
+pyfly openapi
+
+# Save as YAML
+pyfly openapi --format yaml -o openapi.yaml
+
+# Pipe into a validator
+pyfly openapi | npx @redocly/cli lint /dev/stdin
+
+# Export JSON to a file
+pyfly openapi --format json -o docs/openapi.json
 ```
 
 ---

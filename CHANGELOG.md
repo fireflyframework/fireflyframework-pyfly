@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `pyfly routes/beans/env/health/metrics/conditions` — app-context introspection, offline (boots the app) or against a running app via `--url`, with `--json`.
+- `pyfly actuator <endpoint> --url ...` — query any actuator endpoint of a running app.
+- `pyfly shell` — interactive REPL with the booted application context (`ctx`, `container`, `bean()`); `-c` runs one statement.
+- `pyfly openapi` — export the application's OpenAPI schema (`--format json|yaml`, `-o`).
+
+---
+
 ## v26.06.80 (2026-06-09)
 
 ### Added
