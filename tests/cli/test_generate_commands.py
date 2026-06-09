@@ -178,6 +178,24 @@ class TestShellCommand:
         assert "@shell_method(" in text
 
 
+class TestArchetypePersisted:
+    def test_new_writes_archetype(self, tmp_path: Path) -> None:
+        from pyfly.cli.templates import generate_project
+
+        generate_project("shop", tmp_path / "shop", "fastapi-api", ["fastapi"])
+        text = (tmp_path / "shop" / "pyfly.yaml").read_text()
+        assert "archetype: fastapi-api" in text
+
+    def test_generate_uses_persisted_archetype(self, tmp_path: Path) -> None:
+        from pyfly.cli.templates import generate_project
+
+        generate_project("shop", tmp_path / "shop", "web", ["web"])
+        result = run(["controller", "Page"], tmp_path / "shop")
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "shop" / "src" / "shop" / "controllers" / "page_controller.py").read_text()
+        assert "@controller" in text  # web archetype -> SSR controller
+
+
 class TestGenerateRegistered:
     def test_generate_in_root_help(self) -> None:
         from pyfly.cli.main import cli
