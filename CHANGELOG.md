@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.79 (2026-06-09)
+
+### Tested / Added (adapter quick wins — parity initiative SP-2)
+
+Building on the SP-1 integration foundation, the first wave of real-backend coverage + small
+adapter gaps:
+
+- **Cache** — a real-Redis integration test for `RedisCacheAdapter` exercising the paths mocks
+  can't reach: SCAN-based `evict_by_prefix`/`get_keys`, `SET NX` `put_if_absent`, real TTL
+  expiry, `FLUSHDB` `clear`, and the `PING` on `start()`.
+- **ECM** — `AzureBlobStorageAdapter` gains a `service=` constructor injection seam (mirroring
+  `AwsS3StorageAdapter`'s `client=`), with a full behavior test of upload/download/delete against
+  a fake `BlobServiceClient` (previously the only storage adapter with zero behavior coverage).
+- **ECM** — new optional-dependency extras `ecm-aws` (`boto3`) and `ecm-azure`
+  (`azure-storage-blob`), so the S3/Azure adapters install cleanly instead of raising at runtime;
+  both folded into the `full` extra.
+- **ECM** — the Logalty behavior test no longer imports `httpx` at module top level
+  (`pytest.importorskip`), so it can never break base-suite collection when `httpx` is absent.
+
 ## v26.06.78 (2026-06-09)
 
 ### Tested (real-backend integration foundation — parity initiative SP-1)

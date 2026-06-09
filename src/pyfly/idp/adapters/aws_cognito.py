@@ -68,7 +68,7 @@ class AwsCognitoIdpAdapter:
         if self._client is not None:
             return self._client
         try:
-            import boto3  # type: ignore[import-not-found, unused-ignore]
+            import boto3  # type: ignore[import-untyped, import-not-found, unused-ignore]
         except ImportError as exc:  # noqa: BLE001
             msg = "AwsCognitoIdpAdapter requires boto3 — `pip install boto3`"
             raise ImportError(msg) from exc
