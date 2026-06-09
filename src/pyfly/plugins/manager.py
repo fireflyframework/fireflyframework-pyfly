@@ -9,7 +9,7 @@ import datetime
 import inspect
 from typing import Any
 
-from pyfly.kernel.exceptions import PluginStartError, PluginStateError, PluginStopError
+from pyfly.kernel.exceptions import PluginLoadError, PluginStartError, PluginStateError, PluginStopError
 from pyfly.plugins.decorators import Plugin
 from pyfly.plugins.models import PluginDescriptor, PluginState
 from pyfly.plugins.registry import ExtensionRegistry
@@ -36,7 +36,7 @@ class PluginManager:
         meta = getattr(plugin_class, "__pyfly_plugin__", None)
         if meta is None:
             msg = f"{plugin_class.__qualname__} is not @plugin-decorated"
-            raise ValueError(msg)
+            raise PluginLoadError(msg)
         instance = plugin_class()
         now = datetime.datetime.now(tz=datetime.UTC)
         descriptor = PluginDescriptor(
@@ -201,6 +201,10 @@ class PluginManager:
                 return
             order = PluginDependencyResolver.order(self._plugins)
         for pid in order:
+            # Skip plugins already started via an earlier start_plugin() call so
+            # their init/start hooks don't run twice on a mixed start path.
+            if self._descriptors[pid].state == PluginState.STARTED:
+                continue
             instance = self._instances[pid]
             for hook in ("init", "start"):
                 fn = getattr(instance, hook, None)
