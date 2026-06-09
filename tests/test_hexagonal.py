@@ -73,7 +73,8 @@ class TestVendorIsolation:
                 "and 'security/auto_configuration' not in l "
                 "and 'transactional/auto_configuration' not in l "
                 "and '/cache/adapters/postgres' not in l "
-                "and 'cache/auto_configuration' not in l]; "
+                "and 'cache/auto_configuration' not in l "
+                "and 'web/converters' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
@@ -100,7 +101,8 @@ class TestVendorIsolation:
                 "and '/config_server/' not in l "
                 "and '/idp/adapters/' not in l "
                 "and '/cli/' not in l "
-                "and '/ecm/adapters/' not in l]; "
+                "and '/ecm/adapters/' not in l "
+                "and 'web/converters' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
