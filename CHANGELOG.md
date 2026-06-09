@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.90 (2026-06-10)
+
+### Added / Fixed / Tested (notifications completeness — parity initiative SP-10)
+
+- **Template engine**: a `NotificationTemplateEngine` Protocol + `Jinja2TemplateEngine` (autoescaped)
+  with render-then-send wired into `DefaultEmailService` — an injected engine renders `template_id`
+  locally into `body_html`; without one the provider's native template routing (e.g. SendGrid Dynamic
+  Templates) is used. New `pyfly[notifications]` extra (jinja2).
+- **Per-channel opt-out**: a `NotificationPreferenceService` + `InMemoryPreferenceService`. Opt-out is
+  enforced **per recipient across every address** — email `to`+`cc`+`bcc` and every push device token
+  are checked and opted-out recipients are pruned so the provider never delivers to them; a `SUPPRESSED`
+  result is returned only when *all* recipients opted out. Preference keys are normalized
+  (case-insensitive email/token; SMS formatting stripped). *(Fixes an opt-out bypass where only the first
+  recipient was checked — flagged by the automated commit security review.)*
+- **Metrics**: the services emit `pyfly_notifications_sent_total` / `_failed_total` (labels channel,
+  provider) and `_suppressed_total` (label channel) when a `MetricsRecorder` is present.
+- **Tests**: a real SendGrid send-path behavior test (fake-http via the `_http` seam) and a real SMTP test
+  running `SmtpEmailProvider` against an in-process `aiosmtpd` (replacing the prior MIME-reimplementing
+  test). Docs updated.
+
 ## v26.06.89 (2026-06-10)
 
 ### Added / Tested (client subsystem maturation — parity initiative SP-9)
