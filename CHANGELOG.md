@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.78 (2026-06-09)
+
+### Tested (real-backend integration foundation — parity initiative SP-1)
+
+The foundation for testing every adapter against a *real* backend (testcontainers) so "it works"
+is provable, not assumed — the first sub-project of the PyFly↔Spring-Boot hexagonal-parity drive.
+
+- **pytest markers** — `integration` and `docker` are registered; the default/fast suite excludes
+  integration (`addopts = -m 'not integration'`), and everything under `tests/integration/` is
+  auto-marked. Run the real-backend suite with `pytest -m integration`.
+- **Backend fixtures** — session-scoped `mysql_url` / `mongo_url` / `kafka_url` / `amqp_url` (alongside
+  the existing `redis_url` / `pg_url`), each starting a testcontainer or honoring a `PYFLY_IT_*` env
+  override so a `docker compose up` stack works too. Added a `rabbitmq_container()` helper and a
+  RabbitMQ `pyfly_config_for` mapping; `pika` added to the `testcontainers` extra (its
+  `RabbitMqContainer` readiness probe needs it).
+- **Fail-hard gate** — `PYFLY_INTEGRATION_REQUIRE_DOCKER=1` flips a missing-backend *skip* into a
+  *failure* so it cannot masquerade as passing. Used by the new CI `integration` job (manual
+  dispatch + nightly; **not** a PR merge gate — the fast unit suite remains the gate).
+- **Smoke tests** — real round-trip coverage for the Mongo / Kafka / RabbitMQ fixtures.
+- **Local DX** — `docker-compose.yml` (Postgres/MySQL/Redis/MongoDB/Kafka/RabbitMQ/Keycloak) and a
+  `docs/modules/integration-testing.md` contributor guide.
+
 ## v26.06.77 (2026-06-08)
 
 ### Docs (feature sync — v26.06.57-76 are now documented)

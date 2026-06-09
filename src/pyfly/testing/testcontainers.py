@@ -101,6 +101,11 @@ def kafka_container(image: str = "confluentinc/cp-kafka:7.6.0", **kwargs: Any) -
     return _load("testcontainers.kafka", "KafkaContainer")(image, **kwargs)
 
 
+def rabbitmq_container(image: str = "rabbitmq:3.13-alpine", **kwargs: Any) -> Any:
+    """A ``testcontainers`` RabbitMqContainer."""
+    return _load("testcontainers.rabbitmq", "RabbitMqContainer")(image, **kwargs)
+
+
 def _async_db_url(url: str, replacements: dict[str, str]) -> str:
     for sync_prefix, async_prefix in replacements.items():
         if url.startswith(sync_prefix):
@@ -138,6 +143,11 @@ def pyfly_config_for(container: Any) -> dict[str, Any]:
         return {"pyfly.data.document.uri": container.get_connection_url()}
     if "Kafka" in name:
         return {"pyfly.eda.kafka.bootstrap-servers": container.get_bootstrap_server()}
+    if "RabbitMq" in name or "RabbitMQ" in name:
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(5672)
+        url = f"amqp://guest:guest@{host}:{port}/"
+        return {"pyfly.eda.rabbitmq.url": url, "pyfly.messaging.rabbitmq.url": url}
     raise ValueError(f"No pyfly config mapping for container type {name!r}")
 
 

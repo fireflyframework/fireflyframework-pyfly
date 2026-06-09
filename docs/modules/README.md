@@ -171,6 +171,7 @@ Cross-cutting concerns, testing patterns, and aspect-oriented programming.
 |-------|-------------------|
 | [AOP](aop.md) | `@aspect`, `@before`, `@after`, `@around`, `@after_returning`, `@after_throwing`, `AspectBeanPostProcessor`, pointcut expressions |
 | [Testing](testing.md) | `PyFlyTestCase`, `create_test_container`, event assertions, mock repositories, integration testing patterns, async test helpers |
+| [Integration Testing](integration-testing.md) | Running adapter tests against real backends (testcontainers, docker-compose, CI) |
 
 ---
 
