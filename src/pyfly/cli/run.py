@@ -25,6 +25,48 @@ import click
 from pyfly.cli.console import console
 
 
+def _to_env_key(key: str) -> str:
+    """Map a config key (with or without the ``pyfly.`` prefix) to its env-var name.
+
+    Mirrors ``pyfly.core.config.Config._env_key``: strip ``pyfly.``, uppercase,
+    replace ``.`` and ``-`` with ``_``, prepend ``PYFLY_``.
+    """
+    base = key.removeprefix("pyfly.")
+    return "PYFLY_" + base.upper().replace(".", "_").replace("-", "_")
+
+
+def _build_launch_env(
+    profiles: tuple[str, ...],
+    defines: tuple[str, ...],
+    env_vars: tuple[str, ...],
+    *,
+    debug: bool,
+) -> dict[str, str]:
+    """Build the environment overrides to apply before the app boots."""
+    out: dict[str, str] = {}
+
+    flat_profiles = [p.strip() for chunk in profiles for p in chunk.split(",") if p.strip()]
+    if flat_profiles:
+        out["PYFLY_PROFILES_ACTIVE"] = ",".join(flat_profiles)
+
+    for item in defines:
+        if "=" not in item:
+            raise click.BadParameter(f"-D expects key=value, got {item!r}")
+        key, value = item.split("=", 1)
+        out[_to_env_key(key.strip())] = value
+
+    for item in env_vars:
+        if "=" not in item:
+            raise click.BadParameter(f"--env expects KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        out[key.strip()] = value
+
+    if debug:
+        out["PYFLY_LOGGING_LEVEL_ROOT"] = "DEBUG"
+
+    return out
+
+
 def _ensure_src_on_path() -> None:
     """Add ``src/`` to sys.path when running from a src-layout project.
 
@@ -45,6 +87,20 @@ def _ensure_src_on_path() -> None:
 @click.option("--app", "app_path", default=None, help="Application import path (e.g. 'myapp.main:app').")
 @click.option("--server", "server_type", default=None, help="Server type: granian|uvicorn|hypercorn.")
 @click.option("--workers", "workers", default=None, type=int, help="Number of worker processes.")
+@click.option("--profile", "-p", "profiles", multiple=True, help="Active profile(s); repeatable or comma-separated.")
+@click.option(
+    "--define", "-D", "defines", multiple=True, metavar="KEY=VALUE",
+    help="Override a config value (e.g. -D web.port=9000).",
+)
+@click.option(
+    "--env", "env_vars", multiple=True, metavar="KEY=VALUE",
+    help="Set a raw environment variable for the app process.",
+)
+@click.option("--debug", "debug", is_flag=True, help="Enable debug logging (sets pyfly.logging.level.root=DEBUG).")
+@click.option(
+    "--watch", "watch", multiple=True, type=click.Path(),
+    help="Extra directories to watch in --reload mode (repeatable).",
+)
 def run_command(
     host: str,
     port: int | None,
@@ -52,9 +108,21 @@ def run_command(
     app_path: str | None,
     server_type: str | None,
     workers: int | None,
+    profiles: tuple[str, ...],
+    defines: tuple[str, ...],
+    env_vars: tuple[str, ...],
+    debug: bool,
+    watch: tuple[str, ...],
 ) -> None:
     """Start the PyFly application server."""
     _ensure_src_on_path()
+
+    os.environ.update(_build_launch_env(profiles, defines, env_vars, debug=debug))
+
+    # --watch implies reload (extra dirs only matter when a watcher is running)
+    if watch and not use_reload:
+        console.print("[dim]--watch enables --reload[/dim]")
+        use_reload = True
 
     if app_path is None:
         app_path = _discover_app()
@@ -68,7 +136,7 @@ def run_command(
 
     # --reload falls back to uvicorn (only server with a built-in file watcher)
     if use_reload:
-        _run_with_uvicorn_reload(app_path, host, port)
+        _run_with_uvicorn_reload(app_path, host, port, list(watch))
         return
 
     # Resolve server and event loop
@@ -266,14 +334,17 @@ def _load_server_properties() -> Any:
     return ServerProperties()
 
 
-def _run_with_uvicorn_reload(app_path: str, host: str, port: int) -> None:
+def _run_with_uvicorn_reload(app_path: str, host: str, port: int, reload_dirs: list[str] | None = None) -> None:
     """Run with uvicorn in reload mode (development only)."""
     try:
         import uvicorn
     except ImportError:
         console.print("[error]uvicorn is required for --reload mode.[/error]")
         raise SystemExit(1) from None
-    uvicorn.run(app_path, host=host, port=port, reload=True, log_level="warning")
+    kwargs: dict[str, object] = {"host": host, "port": port, "reload": True, "log_level": "warning"}
+    if reload_dirs:
+        kwargs["reload_dirs"] = reload_dirs
+    uvicorn.run(app_path, **kwargs)
 
 
 # ---------------------------------------------------------------------------
