@@ -1429,3 +1429,62 @@ def generate_command(entity_name: str) -> None:
 
 cli.add_command(generate_command, name="generate")
 ```
+
+---
+
+## Tooling & Ecosystem
+
+### Quality wrappers
+
+Thin wrappers over the project's own tools (exit code is passed through):
+
+```bash
+pyfly test [pytest args…]     # run the test suite (pytest)
+pyfly lint [ruff args…]       # ruff check
+pyfly format [--check] [paths…]   # ruff format
+pyfly typecheck [mypy args…]  # mypy (defaults to src/)
+```
+
+### Feature management
+
+Manage PyFly feature extras in an existing project's `pyproject.toml`:
+
+```bash
+pyfly features                # list features and which are enabled here
+pyfly add cache security      # add extras to the pyfly[...] dependency
+pyfly remove cache --yes      # remove extras (‑‑yes skips the prompt)
+```
+
+After `add`/`remove`, run `uv sync` to install. `add` also prints feature-specific tips.
+
+### Build & packaging
+
+```bash
+pyfly build wheel             # uv build --wheel
+pyfly build sdist             # uv build --sdist
+pyfly build info -o build-info.json   # git SHA + timestamp for /actuator/info
+pyfly build image --tag app:1 --builder pack    # OCI image via Cloud Native Buildpacks
+pyfly build image --tag app:1 --builder docker  # OCI image via Docker
+```
+
+### Shell completion & self-upgrade
+
+```bash
+eval "$(pyfly completion bash)"   # or zsh; for fish: pyfly completion fish | source
+pyfly upgrade                     # upgrade the installed pyfly package (uv/pip)
+```
+
+### CLI plugins
+
+Third-party packages can publish CLI subcommands under the `pyfly.cli_plugins`
+entry-point group; they are auto-registered on the `pyfly` CLI.
+
+```toml
+# in a plugin package's pyproject.toml
+[project.entry-points."pyfly.cli_plugins"]
+mycmd = "my_pkg.cli:mycmd"   # a click.Command/Group
+```
+
+```bash
+pyfly plugins list            # show discovered CLI plugins
+```

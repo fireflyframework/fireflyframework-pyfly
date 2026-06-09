@@ -35,8 +35,11 @@ def cli() -> None:
 
 
 # Import and register commands (lazy to avoid heavy imports)
+from pyfly.cli.build import build_group  # noqa: E402
+from pyfly.cli.completion import completion_cmd, upgrade_cmd  # noqa: E402
 from pyfly.cli.db import db_group  # noqa: E402
 from pyfly.cli.doctor import doctor_command  # noqa: E402
+from pyfly.cli.features import add_cmd, features_cmd, remove_cmd  # noqa: E402
 from pyfly.cli.generate import generate_group  # noqa: E402
 from pyfly.cli.info import info_command  # noqa: E402
 from pyfly.cli.introspect_cmds import (  # noqa: E402
@@ -51,6 +54,8 @@ from pyfly.cli.introspect_cmds import (  # noqa: E402
 from pyfly.cli.license import license_command  # noqa: E402
 from pyfly.cli.new import new_command  # noqa: E402
 from pyfly.cli.openapi import openapi_cmd  # noqa: E402
+from pyfly.cli.plugins import discover_cli_plugins, plugins_group  # noqa: E402
+from pyfly.cli.quality import format_cmd, lint_cmd, test_cmd, typecheck_cmd  # noqa: E402
 from pyfly.cli.run import run_command  # noqa: E402
 from pyfly.cli.sbom import sbom_command  # noqa: E402
 from pyfly.cli.shell import shell_cmd  # noqa: E402
@@ -73,3 +78,18 @@ cli.add_command(conditions_cmd, name="conditions")
 cli.add_command(actuator_cmd, name="actuator")
 cli.add_command(shell_cmd, name="shell")
 cli.add_command(openapi_cmd, name="openapi")
+cli.add_command(test_cmd, name="test")
+cli.add_command(lint_cmd, name="lint")
+cli.add_command(format_cmd, name="format")
+cli.add_command(typecheck_cmd, name="typecheck")
+cli.add_command(features_cmd, name="features")
+cli.add_command(add_cmd, name="add")
+cli.add_command(remove_cmd, name="remove")
+cli.add_command(build_group, name="build")
+cli.add_command(completion_cmd, name="completion")
+cli.add_command(upgrade_cmd, name="upgrade")
+cli.add_command(plugins_group, name="plugins")
+
+# Third-party CLI plugins (entry-point group 'pyfly.cli_plugins').
+for _name, _command in discover_cli_plugins():
+    cli.add_command(_command, name=_name)

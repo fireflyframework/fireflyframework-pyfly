@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `pyfly test/lint/format/typecheck` — thin wrappers over pytest/ruff/mypy that honor the project's config and mirror the tool's exit code.
+- `pyfly add/remove <feature>` and `pyfly features` — manage PyFly feature extras in an existing project's `pyproject.toml`.
+- `pyfly build wheel|sdist|info|image` — package the app (uv build), stamp `build-info.json`, or build an OCI image (Cloud Native Buildpacks `pack`, or Docker).
+- `pyfly completion bash|zsh|fish` — print the shell completion script; `pyfly upgrade` — upgrade the installed package.
+- `pyfly plugins` — discover/list third-party CLI subcommands published under the `pyfly.cli_plugins` entry-point group (auto-registered on the root CLI).
+
+---
+
 ## v26.06.83 (2026-06-09)
 
 ### Added
