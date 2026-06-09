@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.88 (2026-06-09)
+
+### Added / Fixed / Tested (web + CQRS — parity initiative SP-8)
+
+- **HTTP idempotency** (Java-parity enterprise capability): a new `IdempotencyWebFilter` (opt-in via
+  `pyfly.web.idempotency.enabled`) replays the stored response for repeat mutating requests carrying the
+  same `Idempotency-Key` header (keyed by method+path+key, `Idempotency-Replayed: true` on replay,
+  `pyfly.web.idempotency.ttl-seconds` TTL). It does NOT cache 5xx (so retries re-execute), passes
+  streaming responses through uncached, and a handler can opt out with `@disable_idempotency`.
+- **Exception converters**: added the Python-relevant set to the conversion chain — SQLAlchemy
+  `IntegrityError` → 409, httpx errors → 502 (504 on timeout), open circuit breaker → 503 — all
+  lazy-loaded (active only when the library is installed) and auto-discovered.
+- **CQRS cache/event bridges**: `QueryCacheAdapter` is now the single `:cqrs:` prefix layer (fixing a
+  double-prefix that silently broke cache invalidation); the `EdaCacheInvalidationBridge` now actually
+  evicts bus-cached query results in response to domain events on the `pyfly.eda` bus (verified
+  end-to-end), and the command bus honors `@publish_domain_event(destination=...)`. Replaced fake-only
+  coverage with real `InMemoryCache` + real in-memory-EDA tests.
+- **Tests**: live-socket smoke tests for the Uvicorn + Hypercorn servers (Granian deferred — its
+  thread-pool `serve_async` can't install signal handlers in-process), real WebSocket + SSE end-to-end
+  tests via `TestClient`/ASGI transport, and OAuth2/HttpSecurity filter chain tests. Docs updated.
+
 ## v26.06.87 (2026-06-09)
 
 ### Added / Tested (security & IDP depth — parity initiative SP-7)
