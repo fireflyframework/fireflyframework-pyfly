@@ -21,7 +21,10 @@ subsystem, TCC subsystem, REST controllers, health indicator.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
+from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_property
 from pyfly.core.config import Config
@@ -143,7 +146,76 @@ class TransactionalEngineAutoConfiguration:
     # -- Core persistence + DLQ + recovery + scheduler + validator ----------
 
     @bean
-    def orchestration_persistence(self) -> ExecutionPersistenceProvider:
+    def orchestration_persistence(
+        self,
+        config: Config,
+        cache_adapter: CacheAdapter | None = None,
+    ) -> ExecutionPersistenceProvider:
+        """Select an :class:`ExecutionPersistenceProvider` from config.
+
+        Keyed on ``pyfly.transactional.persistence.provider`` (default ``memory``):
+
+        * ``memory``     — :class:`InMemoryPersistenceProvider` (default, no deps).
+        * ``redis``      — :class:`RedisPersistenceProvider`; requires ``redis.asyncio``.
+        * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy.
+        * ``cache``      — :class:`CachePersistenceProvider`; delegates to the
+                          app-configured :class:`CacheAdapter` bean.
+        """
+        provider = str(config.get("pyfly.transactional.persistence.provider", "memory")).lower()
+
+        if provider == "redis":
+            if not AutoConfiguration.is_available("redis.asyncio"):
+                msg = (
+                    "pyfly.transactional.persistence.provider=redis requires the 'redis' "
+                    "package.  Install it with: pip install redis[hiredis]"
+                )
+                raise ValueError(msg)
+            import redis.asyncio as aioredis  # type: ignore[import-not-found, unused-ignore]
+
+            from pyfly.transactional.persistence.redis_adapter import RedisPersistenceProvider
+
+            url = str(config.get("pyfly.transactional.persistence.redis.url", "redis://localhost:6379/0"))
+            client: Any = aioredis.from_url(url)
+            return RedisPersistenceProvider(client)
+
+        if provider == "sqlalchemy":
+            if not AutoConfiguration.is_available("sqlalchemy"):
+                msg = (
+                    "pyfly.transactional.persistence.provider=sqlalchemy requires the "
+                    "'sqlalchemy' and 'aiosqlite'/'asyncpg' packages.  "
+                    "Install with: pip install sqlalchemy[asyncio] aiosqlite"
+                )
+                raise ValueError(msg)
+            from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found, unused-ignore]
+
+            from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
+
+            sqlalchemy_url = config.get("pyfly.transactional.persistence.sqlalchemy.url")
+            if sqlalchemy_url is None:
+                sqlalchemy_url = config.get("pyfly.data.relational.url")
+            if sqlalchemy_url is None:
+                msg = (
+                    "pyfly.transactional.persistence.provider=sqlalchemy requires either "
+                    "'pyfly.transactional.persistence.sqlalchemy.url' or "
+                    "'pyfly.data.relational.url' to be configured."
+                )
+                raise ValueError(msg)
+            engine: Any = create_async_engine(str(sqlalchemy_url))
+            return SqlAlchemyPersistenceProvider(engine)
+
+        if provider == "cache":
+            if cache_adapter is None:
+                msg = (
+                    "pyfly.transactional.persistence.provider=cache requires a CacheAdapter "
+                    "bean to be present in the application context.  "
+                    "Enable pyfly.cache (e.g. pyfly.cache.provider=memory)."
+                )
+                raise ValueError(msg)
+            from pyfly.transactional.persistence.cache_adapter import CachePersistenceProvider
+
+            return CachePersistenceProvider(cache_adapter)
+
+        # default: memory
         return InMemoryPersistenceProvider()
 
     @bean
