@@ -208,15 +208,13 @@ class TestRabbitMqEventBus:
 
         fake_message = MagicMock()
         fake_message.body = raw_body
-        fake_message.process = MagicMock(return_value=AsyncMock().__aenter__.return_value)
-        # Make process() work as an async context manager
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=None)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        fake_message.process = MagicMock(return_value=cm)
+        fake_message.ack = AsyncMock()
+        fake_message.reject = AsyncMock()
 
         await on_message(fake_message)
         assert received == ["order.created"]
+        fake_message.ack.assert_awaited_once()
+        fake_message.reject.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_message_handler_does_not_dispatch_non_matching(self) -> None:
@@ -250,13 +248,12 @@ class TestRabbitMqEventBus:
 
         fake_message = MagicMock()
         fake_message.body = raw_body
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=None)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        fake_message.process = MagicMock(return_value=cm)
+        fake_message.ack = AsyncMock()
+        fake_message.reject = AsyncMock()
 
         await on_message(fake_message)
         assert received == []
+        fake_message.ack.assert_awaited_once()  # no matching handler is not a failure -> ack
 
     @pytest.mark.asyncio
     async def test_deserialization_error_is_logged_not_raised(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -274,12 +271,43 @@ class TestRabbitMqEventBus:
 
         fake_message = MagicMock()
         fake_message.body = b"not-valid-json"
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=None)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        fake_message.process = MagicMock(return_value=cm)
+        fake_message.ack = AsyncMock()
+        fake_message.reject = AsyncMock()
 
         with caplog.at_level(logging.ERROR, logger="pyfly.eda.adapters.rabbitmq"):
             await on_message(fake_message)
 
         assert any("Failed to deserialize" in r.message for r in caplog.records)
+        fake_message.reject.assert_awaited_once_with(requeue=False)  # dropped, no poison loop
+        fake_message.ack.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handler_failure_rejects_with_requeue(self) -> None:
+        """A handler that raises rejects-with-requeue (at-least-once), never ack."""
+        bus = RabbitMqEventBus(destinations=["orders"])
+        mock_connection, mock_channel, mock_exchange, mock_queue = _make_mocks()
+
+        async def bad_handler(envelope):  # type: ignore[no-untyped-def]
+            raise RuntimeError("boom")
+
+        bus.subscribe("order.*", bad_handler)
+
+        with patch("aio_pika.connect_robust", return_value=mock_connection):
+            await bus.start()
+
+        on_message = mock_queue.consume.await_args.args[0]
+
+        from pyfly.eda.serializers import JsonEventSerializer
+        from pyfly.eda.types import EventEnvelope
+
+        raw_body = JsonEventSerializer().serialize(
+            EventEnvelope(event_type="order.created", payload={"id": 1}, destination="orders")
+        )
+        fake_message = MagicMock()
+        fake_message.body = raw_body
+        fake_message.ack = AsyncMock()
+        fake_message.reject = AsyncMock()
+
+        await on_message(fake_message)
+        fake_message.reject.assert_awaited_once_with(requeue=True)
+        fake_message.ack.assert_not_awaited()

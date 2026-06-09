@@ -606,11 +606,11 @@ PyFly provides both an EDA module (`pyfly.eda`) and a messaging module
 
 | Criterion | Domain Events (`pyfly.eda`) | Messaging (`pyfly.messaging`) |
 |-----------|----------------------------|-------------------------------|
-| **Scope** | In-process (same Python process). | Cross-process, cross-service, distributed. |
-| **Transport** | `InMemoryEventBus` -- direct function calls. | Kafka, RabbitMQ, or other external brokers. |
+| **Scope** | In-process by default; also distributed via the broker buses. | Cross-process, cross-service, distributed. |
+| **Transport** | `InMemoryEventBus` (direct calls) or a broker-backed bus: Kafka, Redis Streams, Postgres, RabbitMQ. | Kafka, RabbitMQ, or other external brokers. |
 | **Payload** | `EventEnvelope` with typed `dict` payload. | Raw `bytes` -- you choose the serialization format. |
 | **Pattern** | Glob-matched event types (`"order.*"`). | Topic-based with consumer groups. |
-| **Durability** | None -- if the process dies, events are lost. | Broker-dependent (Kafka retains messages, RabbitMQ can persist). |
+| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Postgres outbox, Redis Streams, RabbitMQ). | Broker-dependent (Kafka retains messages, RabbitMQ can persist). |
 | **Use case** | Decoupling domain services within a monolith. | Decoupling microservices across network boundaries. |
 
 **Rule of thumb**: If the producer and consumer live in the same process, use

@@ -25,6 +25,7 @@ or ``pip install pyfly[eda]``).
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import logging
 from typing import Any
@@ -118,14 +119,21 @@ class RabbitMqEventBus:
             return
         import aio_pika
 
-        self._connection = await aio_pika.connect_robust(self._url)
-        self._channel = await self._connection.channel()
-        self._exchange = await self._channel.declare_exchange(
-            self._exchange_name, aio_pika.ExchangeType.DIRECT, durable=True
-        )
-
-        for destination in self._destinations:
-            await self._start_consumer(destination)
+        try:
+            self._connection = await aio_pika.connect_robust(self._url)
+            self._channel = await self._connection.channel()
+            self._exchange = await self._channel.declare_exchange(
+                self._exchange_name, aio_pika.ExchangeType.DIRECT, durable=True
+            )
+            for destination in self._destinations:
+                await self._start_consumer(destination)
+        except Exception:
+            # Don't leak a half-open connection if a consumer/exchange declare fails.
+            if self._connection is not None:
+                with contextlib.suppress(Exception):
+                    await self._connection.close()
+            self._connection = self._channel = self._exchange = None
+            raise
 
         self._started = True
 
@@ -139,25 +147,35 @@ class RabbitMqEventBus:
             message: Any,
             _destination: str = destination,
         ) -> None:
-            async with message.process():
-                try:
-                    envelope = self._serializer.deserialize(message.body)
-                except Exception:
-                    logger.exception(
-                        "Failed to deserialize message from destination=%s",
-                        _destination,
-                    )
-                    return
-                for pattern, handler in self._handlers:
-                    if fnmatch.fnmatch(envelope.event_type, pattern):
-                        try:
-                            await handler(envelope)
-                        except Exception:
-                            logger.exception(
-                                "Handler for pattern=%s raised on event_type=%s",
-                                pattern,
-                                envelope.event_type,
-                            )
+            # Manual ack/nack for at-least-once delivery (parity with the Redis Streams and
+            # Postgres buses): a handler failure rejects-with-requeue so the event is
+            # redelivered, while an undeserializable message is dropped (requeue=False) to
+            # avoid an unbreakable poison loop.
+            try:
+                envelope = self._serializer.deserialize(message.body)
+            except Exception:
+                logger.exception(
+                    "Failed to deserialize message from destination=%s",
+                    _destination,
+                )
+                await message.reject(requeue=False)
+                return
+            failed = False
+            for pattern, handler in self._handlers:
+                if fnmatch.fnmatch(envelope.event_type, pattern):
+                    try:
+                        await handler(envelope)
+                    except Exception:
+                        failed = True
+                        logger.exception(
+                            "Handler for pattern=%s raised on event_type=%s",
+                            pattern,
+                            envelope.event_type,
+                        )
+            if failed:
+                await message.reject(requeue=True)
+            else:
+                await message.ack()
 
         await queue.consume(on_message)
 
