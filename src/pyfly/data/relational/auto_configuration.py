@@ -38,6 +38,7 @@ from pyfly.context.conditions import (
 )
 from pyfly.core.config import Config
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+from pyfly.data.relational.metrics import SqlAlchemyQueryMetrics
 from pyfly.data.relational.migrations import MigrationRunner
 from pyfly.data.relational.named_datasources import NamedDataSources, build_named_data_sources
 from pyfly.data.relational.routing import RoutingSessionFactory
@@ -46,7 +47,32 @@ from pyfly.data.relational.sqlalchemy.post_processor import (
     RepositoryBeanPostProcessor,
 )
 
+try:
+    from pyfly.observability.metrics import MetricsRegistry
+except ImportError:
+    MetricsRegistry = object  # type: ignore[misc,assignment]
+
 _logger = logging.getLogger(__name__)
+
+
+class QueryMetricsLifecycle:
+    """Lifecycle adapter that wires :class:`SqlAlchemyQueryMetrics` on startup.
+
+    Implements ``start()`` / ``stop()`` so the ``ApplicationContext``
+    auto-discovers it as an infrastructure adapter.  ``start()`` attaches the
+    SQLAlchemy event listeners; ``stop()`` is a no-op (listeners live for the
+    duration of the engine).
+    """
+
+    def __init__(self, engine: AsyncEngine, recorder: Any) -> None:
+        self._metrics = SqlAlchemyQueryMetrics(engine, recorder)
+
+    async def start(self) -> None:
+        """Attach query-metrics event listeners to the engine."""
+        self._metrics.attach()
+
+    async def stop(self) -> None:
+        """No-op — listeners are passive and need no teardown."""
 
 
 class EngineLifecycle:
@@ -197,6 +223,22 @@ class RelationalAutoConfiguration:
         listener = AuditingEntityListener()
         listener.register()
         return listener
+
+    @bean
+    def query_metrics(
+        self, async_engine: AsyncEngine, registry: MetricsRegistry | None = None
+    ) -> QueryMetricsLifecycle | None:
+        """Lifecycle bean that attaches query-duration/count/error metrics to the engine.
+
+        Created only when a :class:`~pyfly.observability.metrics.MetricsRegistry` bean
+        is present (i.e. when ``prometheus_client`` is installed and the observability
+        auto-configuration is active).  When the registry is absent the relational
+        module continues to work unchanged — this bean simply returns ``None`` and is
+        skipped by the context lifecycle machinery.
+        """
+        if registry is None:
+            return None
+        return QueryMetricsLifecycle(async_engine, registry)
 
 
 @auto_configuration
