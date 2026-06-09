@@ -58,7 +58,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     has_integration = False
     for item in items:
         item_path = Path(str(getattr(item, "path", item.fspath))).resolve()
-        if _INTEGRATION_DIR == item_path or _INTEGRATION_DIR in item_path.parents:
+        if item_path == _INTEGRATION_DIR or _INTEGRATION_DIR in item_path.parents:
             item.add_marker(pytest.mark.integration)
             if "test_foundation_wiring.py" not in item_path.name and "test_marker" not in item_path.name:
                 has_integration = True
