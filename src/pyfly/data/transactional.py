@@ -22,7 +22,7 @@ backend-specific and selected at call time from what the service exposes:
 
 The backend adapters provide the execution (``run_relational_transaction`` /
 ``run_mongo_transaction``); they are imported lazily so this core module pulls in neither
-SQLAlchemy nor Motor.
+SQLAlchemy nor pymongo.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def transactional(
       applies ``propagation`` / ``isolation`` / ``read_only``, commits on success and rolls back
       per ``rollback_for`` / ``no_rollback_for``, and patches the service's repositories onto the
       active session.
-    - **Document** (``self._motor_client`` is an ``AsyncIOMotorClient``): opens a Mongo session +
+    - **Document** (``self._motor_client`` is a pymongo ``AsyncMongoClient``): opens a Mongo session +
       transaction, injects it as the ``session`` kwarg, commits on success and aborts per
       ``rollback_for`` / ``no_rollback_for``. (``propagation`` / ``isolation`` / ``read_only`` are
       relational concepts and are ignored on the document backend.)
@@ -112,7 +112,7 @@ def transactional(
             raise RuntimeError(
                 f"{fn.__qualname__}: @transactional found no transaction manager on the service. "
                 "Expose a relational '_session_factory' (async_sessionmaker) or a document "
-                "'_motor_client' (AsyncIOMotorClient)."
+                "'_motor_client' (pymongo AsyncMongoClient)."
             )
 
         wrapper.__pyfly_transactional__ = True  # type: ignore[attr-defined]

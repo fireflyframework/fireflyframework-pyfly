@@ -206,7 +206,9 @@ class TestAutoConfigurationClasses:
         pp = instance.http_client_post_processor(config)
         assert isinstance(pp, HttpClientBeanPostProcessor)
 
-    def test_document_auto_config_produces_motor_client(self):
+    def test_document_auto_config_produces_mongo_client(self):
+        from pymongo import AsyncMongoClient
+
         from pyfly.data.document.auto_configuration import DocumentAutoConfiguration
 
         config = Config(
@@ -222,10 +224,8 @@ class TestAutoConfigurationClasses:
             }
         )
         instance = DocumentAutoConfiguration()
-        client = instance.motor_client(config)
-        from motor.motor_asyncio import AsyncIOMotorClient
-
-        assert isinstance(client, AsyncIOMotorClient)
+        client = instance.mongo_client(config)
+        assert isinstance(client, AsyncMongoClient)
 
     def test_document_auto_config_produces_post_processor(self):
         from pyfly.data.document.auto_configuration import DocumentAutoConfiguration

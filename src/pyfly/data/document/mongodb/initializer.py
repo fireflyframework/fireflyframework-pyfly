@@ -15,10 +15,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from motor.motor_asyncio import AsyncIOMotorClient
+    import pymongo
 
     from pyfly.container.container import Container
     from pyfly.core.config import Config
@@ -28,12 +28,12 @@ class BeanieInitializer:
     """Lifecycle bean that initializes Beanie ODM during infrastructure startup.
 
     Scans the container for BaseDocument subclasses and calls
-    ``init_beanie()`` with the Motor database and discovered models.
+    ``init_beanie()`` with the pymongo AsyncMongoClient database and discovered models.
     """
 
     def __init__(
         self,
-        motor_client: AsyncIOMotorClient[Any],
+        motor_client: pymongo.AsyncMongoClient,  # type: ignore[type-arg]
         config: Config,
         container: Container,
     ) -> None:
@@ -75,9 +75,9 @@ class BeanieInitializer:
             from beanie import init_beanie
 
             await init_beanie(
-                database=self._motor_client[db_name],  # type: ignore[arg-type]
+                database=self._motor_client[db_name],
                 document_models=document_models,
             )
 
     async def stop(self) -> None:
-        self._motor_client.close()
+        await self._motor_client.close()
