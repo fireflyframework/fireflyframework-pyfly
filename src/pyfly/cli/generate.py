@@ -214,3 +214,21 @@ def repository_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) ->
         force=force,
         dry_run=dry_run,
     )
+
+
+@generate_group.command("dto")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def dto_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate request/response DTOs."""
+    _simple_generate(ctx, name, subdir="dto", suffix="_dto", template="dto.py.j2", force=force, dry_run=dry_run)
+
+
+@generate_group.command("aggregate")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def aggregate_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a DDD aggregate root."""
+    _simple_generate(ctx, name, subdir="domain", suffix="", template="aggregate.py.j2", force=force, dry_run=dry_run)

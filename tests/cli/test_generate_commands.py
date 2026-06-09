@@ -88,3 +88,21 @@ class TestEntityRepository:
         text = (tmp_path / "src" / "shop" / "repositories" / "product_repository.py").read_text()
         assert "class ProductRepository(Repository[Product, int])" in text
         assert "@repository" in text
+
+
+class TestDtoAggregate:
+    def test_dto(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["dto", "Order"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "dto" / "order_dto.py").read_text()
+        assert "class OrderCreateRequest(BaseModel)" in text
+        assert "class OrderResponse(BaseModel)" in text
+
+    def test_aggregate(self, tmp_path: Path) -> None:
+        scaffold(tmp_path, archetype="hexagonal")
+        result = run(["aggregate", "Wallet"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "domain" / "wallet.py").read_text()
+        assert "class Wallet" in text
+        assert "_events" in text

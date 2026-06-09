@@ -1,0 +1,12 @@
+"""Request / response DTOs for {{ names.human }}."""
+
+from pydantic import BaseModel, Field
+
+
+class {{ names.pascal }}CreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class {{ names.pascal }}Response(BaseModel):
+    id: str
+    name: str
