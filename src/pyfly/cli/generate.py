@@ -354,3 +354,13 @@ def resource_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> N
     )
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("migration")
+@click.option("--message", "-m", "message", default=None, help="Revision message.")
+@click.pass_context
+def migration_cmd(ctx: click.Context, message: str | None) -> None:
+    """Generate a database migration (delegates to 'pyfly db migrate')."""
+    from pyfly.cli.db import migrate_cmd
+
+    ctx.invoke(migrate_cmd, message=message)

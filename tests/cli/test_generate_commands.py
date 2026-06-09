@@ -176,3 +176,24 @@ class TestShellCommand:
         assert "from pyfly.shell import shell_component, shell_method" in text
         assert "@shell_component" in text
         assert "@shell_method(" in text
+
+
+class TestGenerateRegistered:
+    def test_generate_in_root_help(self) -> None:
+        from pyfly.cli.main import cli
+
+        result = CliRunner().invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "generate" in result.output
+
+    def test_g_alias_runs(self, tmp_path: Path) -> None:
+        from pyfly.cli.main import cli
+
+        scaffold(tmp_path)
+        result = CliRunner().invoke(cli, ["g", "service", "Pricing", "--dry-run"], obj={"cwd": tmp_path})
+        assert result.exit_code == 0, result.output
+
+    def test_migration_subcommand_listed(self) -> None:
+        result = CliRunner().invoke(generate_group, ["--help"])
+        assert result.exit_code == 0
+        assert "migration" in result.output

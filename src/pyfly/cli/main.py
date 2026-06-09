@@ -37,6 +37,7 @@ def cli() -> None:
 # Import and register commands (lazy to avoid heavy imports)
 from pyfly.cli.db import db_group  # noqa: E402
 from pyfly.cli.doctor import doctor_command  # noqa: E402
+from pyfly.cli.generate import generate_group  # noqa: E402
 from pyfly.cli.info import info_command  # noqa: E402
 from pyfly.cli.license import license_command  # noqa: E402
 from pyfly.cli.new import new_command  # noqa: E402
@@ -45,6 +46,8 @@ from pyfly.cli.sbom import sbom_command  # noqa: E402
 
 cli.add_command(new_command, name="new")
 cli.add_command(db_group, name="db")
+cli.add_command(generate_group, name="generate")
+cli.add_command(generate_group, name="g")
 cli.add_command(info_command, name="info")
 cli.add_command(run_command, name="run")
 cli.add_command(doctor_command, name="doctor")
