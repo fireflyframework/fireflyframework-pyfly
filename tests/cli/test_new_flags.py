@@ -56,6 +56,7 @@ class TestNewGit:
         assert (tmp_path / "svc" / ".git").is_dir()
         log = subprocess.run(
             ["git", "-C", str(tmp_path / "svc"), "log", "--oneline"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         assert log.returncode == 0 and log.stdout.strip()

@@ -27,9 +27,7 @@ def scaffold(root: Path, package: str = "shop", archetype: str = "web-api") -> N
     (root / "src" / package / "__init__.py").write_text("")
     (root / "tests").mkdir()
     (root / "pyproject.toml").write_text(f'[project]\nname = "{package}"\n')
-    (root / "pyfly.yaml").write_text(
-        f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n"
-    )
+    (root / "pyfly.yaml").write_text(f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n")
 
 
 def run(args: list[str], cwd: Path):
@@ -68,8 +66,7 @@ class TestEntityRepository:
     def test_entity_sqlalchemy_when_data(self, tmp_path: Path) -> None:
         scaffold(tmp_path, archetype="web-api")
         (tmp_path / "pyfly.yaml").write_text(
-            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n"
-            "  data:\n    relational:\n      enabled: true\n"
+            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n  data:\n    relational:\n      enabled: true\n"
         )
         result = run(["entity", "Product"], tmp_path)
         assert result.exit_code == 0, result.output
@@ -80,8 +77,7 @@ class TestEntityRepository:
     def test_repository_data(self, tmp_path: Path) -> None:
         scaffold(tmp_path, archetype="web-api")
         (tmp_path / "pyfly.yaml").write_text(
-            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n"
-            "  data:\n    relational:\n      enabled: true\n"
+            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n  data:\n    relational:\n      enabled: true\n"
         )
         result = run(["repository", "Product"], tmp_path)
         assert result.exit_code == 0, result.output

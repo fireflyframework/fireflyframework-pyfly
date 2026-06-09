@@ -379,9 +379,14 @@ def _init_git_repo(project_dir: Path) -> None:
         subprocess.run(
             [
                 "git",
-                "-c", "user.name=PyFly",
-                "-c", "user.email=pyfly@example.com",
-                "commit", "-q", "-m", "Initial commit from pyfly new",
+                "-c",
+                "user.name=PyFly",
+                "-c",
+                "user.email=pyfly@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "Initial commit from pyfly new",
             ],
             cwd=project_dir,
             check=True,

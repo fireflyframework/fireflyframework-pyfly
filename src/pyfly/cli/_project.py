@@ -40,9 +40,7 @@ def _find_root(start: Path) -> Path:
     for candidate in (current, *current.parents):
         if (candidate / "pyproject.toml").is_file():
             return candidate
-    raise ProjectNotFoundError(
-        "No pyproject.toml found. Run 'pyfly generate' inside a PyFly project."
-    )
+    raise ProjectNotFoundError("No pyproject.toml found. Run 'pyfly generate' inside a PyFly project.")
 
 
 def _read_yaml(root: Path) -> dict[str, object]:
@@ -73,11 +71,7 @@ def _detect_package(root: Path, data: dict[str, object]) -> str:
         return module.split(".")[0]
     src = root / "src"
     if src.is_dir():
-        pkgs = [
-            p.name
-            for p in sorted(src.iterdir())
-            if p.is_dir() and (p / "__init__.py").exists()
-        ]
+        pkgs = [p.name for p in sorted(src.iterdir()) if p.is_dir() and (p / "__init__.py").exists()]
         if pkgs:
             return pkgs[0]
     raise ProjectNotFoundError("Could not determine the project package under src/.")

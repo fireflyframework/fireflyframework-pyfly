@@ -36,9 +36,7 @@ class Artifact:
     content: str
 
 
-def write_artifacts(
-    artifacts: list[Artifact], *, force: bool, dry_run: bool
-) -> list[tuple[str, Path]]:
+def write_artifacts(artifacts: list[Artifact], *, force: bool, dry_run: bool) -> list[tuple[str, Path]]:
     """Write artifacts, skipping existing files unless ``force``. Returns planned actions."""
     actions: list[tuple[str, Path]] = []
     for art in artifacts:

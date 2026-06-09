@@ -27,9 +27,7 @@ def _scaffold(root: Path, package: str = "shop", archetype: str = "web-api") -> 
     (root / "src" / package / "__init__.py").write_text("")
     (root / "tests").mkdir()
     (root / "pyproject.toml").write_text(f'[project]\nname = "{package}"\n')
-    (root / "pyfly.yaml").write_text(
-        f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n"
-    )
+    (root / "pyfly.yaml").write_text(f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n")
 
 
 class TestEngine:

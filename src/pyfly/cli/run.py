@@ -89,16 +89,26 @@ def _ensure_src_on_path() -> None:
 @click.option("--workers", "workers", default=None, type=int, help="Number of worker processes.")
 @click.option("--profile", "-p", "profiles", multiple=True, help="Active profile(s); repeatable or comma-separated.")
 @click.option(
-    "--define", "-D", "defines", multiple=True, metavar="KEY=VALUE",
+    "--define",
+    "-D",
+    "defines",
+    multiple=True,
+    metavar="KEY=VALUE",
     help="Override a config value (e.g. -D web.port=9000).",
 )
 @click.option(
-    "--env", "env_vars", multiple=True, metavar="KEY=VALUE",
+    "--env",
+    "env_vars",
+    multiple=True,
+    metavar="KEY=VALUE",
     help="Set a raw environment variable for the app process.",
 )
 @click.option("--debug", "debug", is_flag=True, help="Enable debug logging (sets pyfly.logging.level.root=DEBUG).")
 @click.option(
-    "--watch", "watch", multiple=True, type=click.Path(),
+    "--watch",
+    "watch",
+    multiple=True,
+    type=click.Path(),
     help="Extra directories to watch in --reload mode (repeatable).",
 )
 def run_command(
@@ -341,10 +351,14 @@ def _run_with_uvicorn_reload(app_path: str, host: str, port: int, reload_dirs: l
     except ImportError:
         console.print("[error]uvicorn is required for --reload mode.[/error]")
         raise SystemExit(1) from None
-    kwargs: dict[str, object] = {"host": host, "port": port, "reload": True, "log_level": "warning"}
-    if reload_dirs:
-        kwargs["reload_dirs"] = reload_dirs
-    uvicorn.run(app_path, **kwargs)
+    uvicorn.run(
+        app_path,
+        host=host,
+        port=port,
+        reload=True,
+        reload_dirs=reload_dirs or None,
+        log_level="warning",
+    )
 
 
 # ---------------------------------------------------------------------------

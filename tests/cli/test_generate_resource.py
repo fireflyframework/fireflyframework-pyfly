@@ -27,9 +27,7 @@ def scaffold(root: Path, package: str = "shop", archetype: str = "web-api") -> N
     (root / "src" / package / "__init__.py").write_text("")
     (root / "tests").mkdir()
     (root / "pyproject.toml").write_text(f'[project]\nname = "{package}"\n')
-    (root / "pyfly.yaml").write_text(
-        f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n"
-    )
+    (root / "pyfly.yaml").write_text(f"pyfly:\n  app:\n    name: {package}\n    archetype: {archetype}\n")
 
 
 class TestResource:
@@ -47,8 +45,6 @@ class TestResource:
 
     def test_resource_dry_run(self, tmp_path: Path) -> None:
         scaffold(tmp_path)
-        result = CliRunner().invoke(
-            generate_group, ["resource", "Product", "--dry-run"], obj={"cwd": tmp_path}
-        )
+        result = CliRunner().invoke(generate_group, ["resource", "Product", "--dry-run"], obj={"cwd": tmp_path})
         assert result.exit_code == 0, result.output
         assert not (tmp_path / "src" / "shop" / "models" / "product.py").exists()
