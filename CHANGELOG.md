@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.89 (2026-06-10)
+
+### Added / Tested (client subsystem maturation — parity initiative SP-9)
+
+- **Real-transport tests for every protocol client** (previously builder-field-only): `HttpxClientAdapter`
+  and `GraphQLClient`/`SoapClient` via `respx` (real httpx wire calls + envelope/error-path assertions);
+  `WebSocketClient` against a live in-process `websockets.serve` echo server; `GrpcClientBuilder.channel()`
+  against an in-process `grpc.aio` server with a generic unary-unary handler (no proto codegen).
+- **New extras** `pyfly[grpc]` (grpcio) and `pyfly[websocket]` (websockets), folded into `full`. The
+  `GrpcClientBuilder` and `WebSocketClientBuilder` are now auto-wired as beans when their library is present
+  (`@conditional_on_class`), with `GrpcClientBuilder` reading `pyfly.client.grpc.target`.
+- **Docs**: documented the GraphQL / WebSocket / gRPC / SOAP protocol clients (wire methods, builders,
+  required extras) in `client.md` — they were public+exported but undocumented.
+
 ## v26.06.88 (2026-06-09)
 
 ### Added / Fixed / Tested (web + CQRS — parity initiative SP-8)
