@@ -64,6 +64,19 @@ wheels = [
 ]
 
 [[package]]
+name = "aiosmtpd"
+version = "1.4.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "atpublic" },
+    { name = "attrs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/ca/b2b7cc880403ef24be77383edaadfcf0098f5d7b9ddbf3e2c17ef0a6af0d/aiosmtpd-1.4.6.tar.gz", hash = "sha256:5a811826e1a5a06c25ebc3e6c4a704613eb9a1bcf6b78428fbe865f4f6c9a4b8", size = 152775, upload-time = "2024-05-18T11:37:50.029Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/39/d401756df60a8344848477d54fdf4ce0f50531f6149f3b8eaae9c06ae3dc/aiosmtpd-1.4.6-py3-none-any.whl", hash = "sha256:72c99179ba5aa9ae0abbda6994668239b64a5ce054471955fe75f581d2592475", size = 154263, upload-time = "2024-05-18T11:37:47.877Z" },
+]
+
+[[package]]
 name = "aiosqlite"
 version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
@@ -211,6 +224,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/7a/15e37d45e7f7c94facc1e9148c0e455e8f33c08f0b8a0b1deb2c5171771b/asyncpg-0.31.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:8df714dba348efcc162d2adf02d213e5fab1bd9f557e1305633e851a61814a7a", size = 3429426, upload-time = "2025-11-24T23:26:41.032Z" },
     { url = "https://files.pythonhosted.org/packages/13/d5/71437c5f6ae5f307828710efbe62163974e71237d5d46ebd2869ea052d10/asyncpg-0.31.0-cp314-cp314t-win32.whl", hash = "sha256:1b41f1afb1033f2b44f3234993b15096ddc9cd71b21a42dbd87fc6a57b43d65d", size = 614495, upload-time = "2025-11-24T23:26:42.659Z" },
     { url = "https://files.pythonhosted.org/packages/3c/d7/8fb3044eaef08a310acfe23dae9a8e2e07d305edc29a53497e52bc76eca7/asyncpg-0.31.0-cp314-cp314t-win_amd64.whl", hash = "sha256:bd4107bb7cdd0e9e65fae66a62afd3a249663b844fa34d479f6d5b3bef9c04c3", size = 706062, upload-time = "2025-11-24T23:26:44.086Z" },
+]
+
+[[package]]
+name = "atpublic"
+version = "7.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/05/e2e131a0debaf0f01b8a1b586f5f11713f6affc3e711b406f15f11eafc92/atpublic-7.0.0.tar.gz", hash = "sha256:466ef10d0c8bbd14fd02a5fbd5a8b6af6a846373d91106d3a07c16d72d96b63e", size = 17801, upload-time = "2025-11-29T05:56:45.45Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/96/c0/271f3e1e3502a8decb8ee5c680dbed2d8dc2cd504f5e20f7ed491d5f37e1/atpublic-7.0.0-py3-none-any.whl", hash = "sha256:6702bd9e7245eb4e8220a3e222afcef7f87412154732271ee7deee4433b72b4b", size = 6421, upload-time = "2025-11-29T05:56:44.604Z" },
+]
+
+[[package]]
+name = "attrs"
+version = "26.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
 ]
 
 [[package]]
@@ -2202,6 +2233,9 @@ idp-keycloak = [
 kafka = [
     { name = "aiokafka" },
 ]
+notifications = [
+    { name = "jinja2" },
+]
 observability = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-instrumentation-starlette" },
@@ -2264,6 +2298,7 @@ websocket = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiosmtpd" },
     { name = "coverage" },
     { name = "jsonpath-ng" },
     { name = "mongomock-motor" },
@@ -2301,6 +2336,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'idp-keycloak'", specifier = ">=0.28.1" },
     { name = "hypercorn", marker = "extra == 'hypercorn'", specifier = ">=0.18.0" },
     { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1.6" },
+    { name = "jinja2", marker = "extra == 'notifications'", specifier = ">=3.1.6" },
     { name = "jsonpath-ng", marker = "extra == 'testing'", specifier = ">=1.8.0" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.41.1" },
     { name = "opentelemetry-instrumentation-starlette", marker = "extra == 'observability'", specifier = ">=0.62b1" },
@@ -2311,7 +2347,7 @@ requires-dist = [
     { name = "prometheus-client", marker = "extra == 'observability'", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyfly", extras = ["fastapi", "granian"], marker = "extra == 'web-fastapi'" },
-    { name = "pyfly", extras = ["web", "data-relational", "data-document", "postgresql", "eda", "cache", "client", "grpc", "websocket", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn", "idp-azure", "idp-keycloak", "idp-cognito"], marker = "extra == 'full'" },
+    { name = "pyfly", extras = ["web", "data-relational", "data-document", "postgresql", "eda", "cache", "client", "grpc", "websocket", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn", "idp-azure", "idp-keycloak", "idp-cognito", "notifications"], marker = "extra == 'full'" },
     { name = "pyfly", extras = ["web", "granian"], marker = "extra == 'web-fast'" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'security'", specifier = ">=2.12.1" },
     { name = "pyotp", marker = "extra == 'security'", specifier = ">=2.9.0" },
@@ -2330,10 +2366,11 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fastapi'", specifier = ">=0.22.1" },
     { name = "websockets", marker = "extra == 'websocket'", specifier = ">=12.0" },
 ]
-provides-extras = ["web", "data-relational", "testing", "testcontainers", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "cli", "shell", "web-fast", "web-fastapi", "full"]
+provides-extras = ["web", "data-relational", "testing", "testcontainers", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "notifications", "cli", "shell", "web-fast", "web-fastapi", "full"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiosmtpd", specifier = ">=1.4" },
     { name = "coverage", extras = ["toml"], specifier = ">=7.13.5" },
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },

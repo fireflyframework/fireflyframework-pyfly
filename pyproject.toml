@@ -129,6 +129,9 @@ security = [
     "cryptography>=48.0.0",
     "pyotp>=2.9.0",
 ]
+notifications = [
+    "jinja2>=3.1.6",
+]
 cli = [
     "click>=8.3.3",
     "rich>=15.0.0",
@@ -147,7 +150,7 @@ web-fastapi = [
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 full = [
-    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito]",
+    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito,notifications]",
 ]
 
 [dependency-groups]
@@ -161,6 +164,7 @@ dev = [
     "mongomock-motor>=0.0.36",
     "jsonpath-ng>=1.8.0",
     "respx>=0.21.0",
+    "aiosmtpd>=1.4",
 ]
 
 [project.entry-points."pyfly.auto_configuration"]
