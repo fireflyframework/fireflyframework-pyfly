@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
 import pytest
+
+httpx = pytest.importorskip("httpx", reason="httpx not installed (install pyfly[client])")
 
 from pyfly.ecm.adapters.logalty import LogaltyESignatureAdapter
 from pyfly.ecm.models import (

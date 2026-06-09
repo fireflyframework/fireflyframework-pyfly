@@ -25,13 +25,14 @@ class AzureBlobStorageAdapter:
         account_url: str | None = None,
         credential: Any | None = None,
         key_prefix: str = "",
+        service: Any | None = None,
     ) -> None:
         self._container = container
         self._connection_string = connection_string
         self._account_url = account_url
         self._credential = credential
         self._prefix = key_prefix.rstrip("/") + "/" if key_prefix else ""
-        self._service: Any | None = None
+        self._service: Any | None = service
 
     def _ensure_service(self) -> Any:
         if self._service is not None:

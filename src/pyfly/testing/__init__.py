@@ -28,6 +28,7 @@ from pyfly.testing.testcontainers import (
     postgres_container,
     pyfly_config,
     pyfly_config_for,
+    rabbitmq_container,
     redis_container,
     requires_docker,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "postgres_container",
     "pyfly_config",
     "pyfly_config_for",
+    "rabbitmq_container",
     "redis_container",
     "requires_docker",
     "service_slice",

@@ -1,0 +1,57 @@
+# Local backends for PyFly integration tests (alternative to testcontainers auto-start).
+#   docker compose up -d
+#   export PYFLY_IT_POSTGRES_URL=postgresql+asyncpg://pyfly:pyfly@localhost:5432/pyfly
+#   export PYFLY_IT_MYSQL_URL=mysql+aiomysql://root:pyfly@localhost:3306/pyfly
+#   export PYFLY_IT_REDIS_URL=redis://localhost:6379/0
+#   export PYFLY_IT_MONGO_URI=mongodb://localhost:27017
+#   export PYFLY_IT_KAFKA_BOOTSTRAP=localhost:9092
+#   export PYFLY_IT_AMQP_URL=amqp://guest:guest@localhost:5672/
+#   uv run pytest -m integration tests/integration
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pyfly
+      POSTGRES_PASSWORD: pyfly
+      POSTGRES_DB: pyfly
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pyfly"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: pyfly
+      MYSQL_DATABASE: pyfly
+    ports: ["3306:3306"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  mongodb:
+    image: mongo:7
+    ports: ["27017:27017"]
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports: ["5672:5672", "15672:15672"]
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    environment:
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk  # valid 22-char url-safe base64 16-byte UUID (KRaft requirement)
+    ports: ["9092:9092"]
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports: ["8080:8080"]

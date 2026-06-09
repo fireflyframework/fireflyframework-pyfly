@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## v26.06.80 (2026-06-09)
 
 ### Added
 
@@ -16,7 +16,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pyfly db` gains `current`, `history`, `show`, `heads`, `revision`, `stamp`, `merge`, and `reset`.
 - `pyfly new` gains `--list` (show archetypes/features), `--git` (init repo), and `--no-input` (CI-friendly).
 
----
+## v26.06.79 (2026-06-09)
+
+### Tested / Added (adapter quick wins — parity initiative SP-2)
+
+Building on the SP-1 integration foundation, the first wave of real-backend coverage + small
+adapter gaps:
+
+- **Cache** — a real-Redis integration test for `RedisCacheAdapter` exercising the paths mocks
+  can't reach: SCAN-based `evict_by_prefix`/`get_keys`, `SET NX` `put_if_absent`, real TTL
+  expiry, `FLUSHDB` `clear`, and the `PING` on `start()`.
+- **ECM** — `AzureBlobStorageAdapter` gains a `service=` constructor injection seam (mirroring
+  `AwsS3StorageAdapter`'s `client=`), with a full behavior test of upload/download/delete against
+  a fake `BlobServiceClient` (previously the only storage adapter with zero behavior coverage).
+- **ECM** — new optional-dependency extras `ecm-aws` (`boto3`) and `ecm-azure`
+  (`azure-storage-blob`), so the S3/Azure adapters install cleanly instead of raising at runtime;
+  both folded into the `full` extra.
+- **ECM** — the Logalty behavior test no longer imports `httpx` at module top level
+  (`pytest.importorskip`), so it can never break base-suite collection when `httpx` is absent.
+
+## v26.06.78 (2026-06-09)
+
+### Tested (real-backend integration foundation — parity initiative SP-1)
+
+The foundation for testing every adapter against a *real* backend (testcontainers) so "it works"
+is provable, not assumed — the first sub-project of the PyFly↔Spring-Boot hexagonal-parity drive.
+
+- **pytest markers** — `integration` and `docker` are registered; the default/fast suite excludes
+  integration (`addopts = -m 'not integration'`), and everything under `tests/integration/` is
+  auto-marked. Run the real-backend suite with `pytest -m integration`.
+- **Backend fixtures** — session-scoped `mysql_url` / `mongo_url` / `kafka_url` / `amqp_url` (alongside
+  the existing `redis_url` / `pg_url`), each starting a testcontainer or honoring a `PYFLY_IT_*` env
+  override so a `docker compose up` stack works too. Added a `rabbitmq_container()` helper and a
+  RabbitMQ `pyfly_config_for` mapping; `pika` added to the `testcontainers` extra (its
+  `RabbitMqContainer` readiness probe needs it).
+- **Fail-hard gate** — `PYFLY_INTEGRATION_REQUIRE_DOCKER=1` flips a missing-backend *skip* into a
+  *failure* so it cannot masquerade as passing. Used by the new CI `integration` job (manual
+  dispatch + nightly; **not** a PR merge gate — the fast unit suite remains the gate).
+- **Smoke tests** — real round-trip coverage for the Mongo / Kafka / RabbitMQ fixtures.
+- **Local DX** — `docker-compose.yml` (Postgres/MySQL/Redis/MongoDB/Kafka/RabbitMQ/Keycloak) and a
+  `docs/modules/integration-testing.md` contributor guide.
 
 ## v26.06.77 (2026-06-08)
 
