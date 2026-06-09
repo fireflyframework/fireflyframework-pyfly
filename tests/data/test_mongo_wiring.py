@@ -22,8 +22,8 @@ from pyfly.core.config import Config
 
 
 class TestDocumentAutoConfiguration:
-    def test_produces_motor_client(self) -> None:
-        from motor.motor_asyncio import AsyncIOMotorClient
+    def test_produces_mongo_client(self) -> None:
+        from pymongo import AsyncMongoClient
 
         from pyfly.data.document.auto_configuration import DocumentAutoConfiguration
 
@@ -41,8 +41,8 @@ class TestDocumentAutoConfiguration:
             }
         )
         instance = DocumentAutoConfiguration()
-        client = instance.motor_client(config)
-        assert isinstance(client, AsyncIOMotorClient)
+        client = instance.mongo_client(config)
+        assert isinstance(client, AsyncMongoClient)
 
     def test_produces_post_processor(self) -> None:
         from pyfly.data.document.auto_configuration import DocumentAutoConfiguration
@@ -63,8 +63,8 @@ class TestDocumentAutoConfiguration:
         assert "on_property" in types
 
     def test_context_registers_motor_and_pp(self) -> None:
-        """Auto-configuration registers Motor client + post-processor in the container."""
-        from motor.motor_asyncio import AsyncIOMotorClient
+        """Auto-configuration registers pymongo AsyncMongoClient + post-processor in the container."""
+        from pymongo import AsyncMongoClient
 
         from pyfly.context.application_context import ApplicationContext
         from pyfly.data.document.mongodb.initializer import BeanieInitializer
@@ -95,9 +95,9 @@ class TestDocumentAutoConfiguration:
         ctx._evaluate_bean_conditions()
         ctx._process_configurations(auto=True)
 
-        motor_client = ctx.get_bean(AsyncIOMotorClient)
-        assert motor_client is not None
-        assert isinstance(motor_client, AsyncIOMotorClient)
+        mongo_client = ctx.get_bean(AsyncMongoClient)
+        assert mongo_client is not None
+        assert isinstance(mongo_client, AsyncMongoClient)
 
         pp = ctx.get_bean(MongoRepositoryBeanPostProcessor)
         assert pp is not None
@@ -109,7 +109,7 @@ class TestDocumentAutoConfiguration:
 
     @pytest.mark.asyncio
     async def test_skips_when_disabled(self) -> None:
-        from motor.motor_asyncio import AsyncIOMotorClient
+        from pymongo import AsyncMongoClient
 
         from pyfly.context.application_context import ApplicationContext
 
@@ -118,7 +118,7 @@ class TestDocumentAutoConfiguration:
         await ctx.start()
         try:
             with pytest.raises(NoSuchBeanError):
-                ctx.get_bean(AsyncIOMotorClient)
+                ctx.get_bean(AsyncMongoClient)
         finally:
             await ctx.stop()
 
@@ -143,7 +143,7 @@ class TestBeanieInitializer:
                 }
             }
         )
-        motor_client = instance.motor_client(config)
+        motor_client = instance.mongo_client(config)
 
         from pyfly.container.container import Container
 

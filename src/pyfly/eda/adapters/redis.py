@@ -133,7 +133,7 @@ class RedisStreamsEventBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._consume_task
             self._consume_task = None
-        await self._client.close()
+        await self._client.aclose()
 
     async def _consume_loop(self) -> None:
         streams: dict[Any, Any] = {s: ">" for s in self._streams}

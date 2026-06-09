@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.6.80"
+version = "26.6.83"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -55,7 +55,6 @@ testcontainers = [
     "pika>=1.3.0",  # testcontainers' RabbitMqContainer imports pika for its readiness probe
 ]
 data-document = [
-    "motor>=3.7.1",
     "beanie>=2.1.0",
 ]
 postgresql = [

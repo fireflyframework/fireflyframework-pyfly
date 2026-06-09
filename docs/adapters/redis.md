@@ -2,7 +2,7 @@
 
 > **Module:** Caching — [Module Guide](../modules/caching.md)
 > **Package:** `pyfly.cache.adapters.redis`
-> **Backend:** redis 5.0+ (with hiredis C parser)
+> **Backend:** redis 7.4+ (with hiredis C parser)
 
 ## Quick Start
 
@@ -31,12 +31,15 @@ pyfly:
 
 ```python
 from pyfly.cache import cacheable, cache_evict
+from pyfly.cache.adapters.redis import RedisCacheAdapter
 
-@cacheable(key="order:{id}")
+cache = RedisCacheAdapter(url="redis://localhost:6379/0")
+
+@cacheable(backend=cache, key="order:{id}")
 async def find_by_id(self, id: int) -> Order:
     return await self._repo.find_by_id(id)
 
-@cache_evict(key="order:{id}")
+@cache_evict(backend=cache, key="order:{id}")
 async def delete_order(self, id: int) -> None:
     await self._repo.delete(id)
 ```
@@ -52,7 +55,7 @@ async def delete_order(self, id: int) -> None:
 | `pyfly.cache.redis.url` | `str` | `"redis://localhost:6379/0"` | Redis connection URL |
 | `pyfly.cache.ttl` | `int` | `300` | Default TTL in seconds |
 
-When `provider` is `"auto"`, PyFly uses Redis if the `redis` library is installed, otherwise falls back to `MemoryCacheAdapter`.
+When `provider` is `"auto"`, PyFly uses Redis if the `redis` library is installed, otherwise falls back to `InMemoryCache`.
 
 ---
 
@@ -78,7 +81,7 @@ Implements `CacheAdapter` using `redis.asyncio.Redis`.
 
 ### In-Memory Fallback
 
-When Redis is not available, `MemoryCacheAdapter` (`pyfly.cache.adapters.memory`) provides the same `CacheAdapter` interface using an in-process dict with TTL support. This is auto-configured when the `redis` library is not installed.
+When Redis is not available, `InMemoryCache` (`pyfly.cache.adapters.memory`) provides the same `CacheAdapter` interface using an in-process dict with TTL support. This is auto-configured when the `redis` library is not installed.
 
 ---
 

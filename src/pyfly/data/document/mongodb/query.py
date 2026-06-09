@@ -139,10 +139,10 @@ class MongoQueryExecutor:
     ) -> Callable[..., Coroutine[Any, Any, Any]]:
         """Build an async callable that executes an aggregation pipeline.
 
-        Uses the underlying Motor collection directly (via
+        Uses the underlying pymongo async collection directly (via
         ``get_pymongo_collection()``) instead of Beanie's
         ``.aggregate()`` wrapper, because aggregation pipelines return
-        raw dicts (not document instances) and the Motor-level API is
+        raw dicts (not document instances) and the driver-level API is
         more reliable across async mock drivers.
         """
         template = json.loads(query_string)

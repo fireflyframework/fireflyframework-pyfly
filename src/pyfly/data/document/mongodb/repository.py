@@ -34,7 +34,7 @@ class MongoRepository(Generic[T, ID]):
 
     Mirrors ``Repository[T, ID]`` from the SQLAlchemy adapter but operates
     against MongoDB via Beanie ODM. No session injection — Beanie uses a
-    globally initialised Motor client.
+    globally initialised pymongo async client.
 
     Type Parameters:
         T: The document type (Beanie Document subclass).
