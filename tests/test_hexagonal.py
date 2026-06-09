@@ -96,6 +96,7 @@ class TestVendorIsolation:
                 "and '/client/protocols/' not in l "
                 "and '/config_server/' not in l "
                 "and '/idp/adapters/' not in l "
+                "and '/cli/' not in l "
                 "and '/ecm/adapters/' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",

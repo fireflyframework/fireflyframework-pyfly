@@ -32,6 +32,10 @@ PYFLY_THEME = Theme(
 
 console = Console(theme=PYFLY_THEME)
 
+# A stderr-bound console for diagnostics/errors, so they never contaminate
+# machine-readable stdout (e.g. `pyfly routes --json | jq`).
+err_console = Console(theme=PYFLY_THEME, stderr=True)
+
 
 def print_banner() -> None:
     """Print the PyFly ASCII banner with colors."""

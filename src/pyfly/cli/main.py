@@ -39,10 +39,21 @@ from pyfly.cli.db import db_group  # noqa: E402
 from pyfly.cli.doctor import doctor_command  # noqa: E402
 from pyfly.cli.generate import generate_group  # noqa: E402
 from pyfly.cli.info import info_command  # noqa: E402
+from pyfly.cli.introspect_cmds import (  # noqa: E402
+    actuator_cmd,
+    beans_cmd,
+    conditions_cmd,
+    env_cmd,
+    health_cmd,
+    metrics_cmd,
+    routes_cmd,
+)
 from pyfly.cli.license import license_command  # noqa: E402
 from pyfly.cli.new import new_command  # noqa: E402
+from pyfly.cli.openapi import openapi_cmd  # noqa: E402
 from pyfly.cli.run import run_command  # noqa: E402
 from pyfly.cli.sbom import sbom_command  # noqa: E402
+from pyfly.cli.shell import shell_cmd  # noqa: E402
 
 cli.add_command(new_command, name="new")
 cli.add_command(db_group, name="db")
@@ -53,3 +64,12 @@ cli.add_command(run_command, name="run")
 cli.add_command(doctor_command, name="doctor")
 cli.add_command(license_command, name="license")
 cli.add_command(sbom_command, name="sbom")
+cli.add_command(routes_cmd, name="routes")
+cli.add_command(beans_cmd, name="beans")
+cli.add_command(env_cmd, name="env")
+cli.add_command(health_cmd, name="health")
+cli.add_command(metrics_cmd, name="metrics")
+cli.add_command(conditions_cmd, name="conditions")
+cli.add_command(actuator_cmd, name="actuator")
+cli.add_command(shell_cmd, name="shell")
+cli.add_command(openapi_cmd, name="openapi")
