@@ -52,6 +52,7 @@ testing = [
 ]
 testcontainers = [
     "testcontainers>=4.0.0",
+    "pika>=1.3.0",  # testcontainers' RabbitMqContainer imports pika for its readiness probe
 ]
 data-document = [
     "motor>=3.7.1",
