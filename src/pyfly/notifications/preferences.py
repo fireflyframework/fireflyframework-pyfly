@@ -18,6 +18,22 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 
+def _normalize(recipient: str, channel: str) -> str:
+    """Canonicalize a recipient so opt-out records and lookups match regardless of
+    casing/formatting (otherwise ``Alice@X.com`` could opt out yet still be emailed
+    when a send targets ``alice@x.com``).
+
+    Email addresses and push tokens are stripped + lower-cased; SMS numbers
+    additionally have non-digit formatting removed (keeping a leading ``+``).
+    Callers handling SMS at scale should pass already-E.164-normalized numbers.
+    """
+    value = recipient.strip().lower()
+    if channel == "sms":
+        digits = "".join(ch for ch in value if ch.isdigit())
+        value = ("+" + digits) if value.startswith("+") else digits
+    return value
+
+
 @runtime_checkable
 class NotificationPreferenceService(Protocol):
     """Port for querying per-recipient, per-channel notification preferences."""
@@ -59,12 +75,12 @@ class InMemoryPreferenceService:
 
     def opt_out(self, recipient: str, channel: str) -> None:
         """Record that *recipient* has opted out of *channel*."""
-        self._opted_out.add((recipient, channel))
+        self._opted_out.add((_normalize(recipient, channel), channel))
 
     def opt_in(self, recipient: str, channel: str) -> None:
         """Remove the opt-out record for *recipient* / *channel*."""
-        self._opted_out.discard((recipient, channel))
+        self._opted_out.discard((_normalize(recipient, channel), channel))
 
     async def is_opted_in(self, recipient: str, channel: str) -> bool:
         """Return ``True`` unless the recipient has explicitly opted out."""
-        return (recipient, channel) not in self._opted_out
+        return (_normalize(recipient, channel), channel) not in self._opted_out

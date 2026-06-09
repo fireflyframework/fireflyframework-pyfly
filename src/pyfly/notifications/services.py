@@ -21,9 +21,12 @@ Precedence when ``template_engine`` is injected:
 
 Opt-out / suppression
 ^^^^^^^^^^^^^^^^^^^^^^
-If a ``preference_service`` is injected and the primary recipient has opted out
-of the relevant channel, a :data:`~pyfly.notifications.models.EmailStatus.SUPPRESSED`
-result is returned immediately **without** calling the provider.
+If a ``preference_service`` is injected, EVERY recipient is checked against the
+relevant channel — for email this is the full ``to`` + ``cc`` + ``bcc`` set, for
+push it is every device token. Opted-out recipients are pruned from the message so
+the provider never delivers to them; only when *all* recipients have opted out is a
+:data:`~pyfly.notifications.models.EmailStatus.SUPPRESSED` result returned without
+calling the provider (each pruned recipient still increments the suppressed counter).
 
 Metrics
 ^^^^^^^
@@ -71,6 +74,22 @@ async def _send_safely(provider: Any, message: Any) -> NotificationResult:
         )
 
 
+async def _filter_opted_in(preference_service: Any, suppressed: Any, addresses: list[str], channel: str) -> list[str]:
+    """Return only the addresses that are opted IN to *channel*.
+
+    Opted-out addresses are dropped (so the provider never delivers to them) and,
+    when a suppressed-counter handle is supplied, counted. This filters EVERY
+    recipient — not just the first — closing the cc/bcc / multi-token opt-out bypass.
+    """
+    kept: list[str] = []
+    for addr in addresses:
+        if await preference_service.is_opted_in(addr, channel):
+            kept.append(addr)
+        elif suppressed is not None:
+            suppressed.labels(channel=channel).inc()
+    return kept
+
+
 class DefaultEmailService:
     def __init__(
         self,
@@ -108,14 +127,15 @@ class DefaultEmailService:
 
     async def send(self, message: EmailMessage) -> NotificationResult:
         # ------------------------------------------------------------------
-        # 1. Opt-out check
+        # 1. Per-recipient opt-out filtering (to + cc + bcc — NOT just the first)
         # ------------------------------------------------------------------
-        if self._preference_service is not None and message.to:
-            recipient = message.to[0]
-            opted_in: bool = await self._preference_service.is_opted_in(recipient, "email")
-            if not opted_in:
-                if self._suppressed is not None:
-                    self._suppressed.labels(channel="email").inc()
+        if self._preference_service is not None:
+            had_recipients = bool(message.to or message.cc or message.bcc)
+            message.to = await _filter_opted_in(self._preference_service, self._suppressed, message.to, "email")
+            message.cc = await _filter_opted_in(self._preference_service, self._suppressed, message.cc, "email")
+            message.bcc = await _filter_opted_in(self._preference_service, self._suppressed, message.bcc, "email")
+            if had_recipients and not (message.to or message.cc or message.bcc):
+                # Every recipient opted out — suppress the whole send.
                 return NotificationResult(
                     id=message.id,
                     provider=getattr(self._provider, "name", "unknown"),
@@ -235,11 +255,12 @@ class DefaultPushService:
             self._suppressed = None
 
     async def send(self, message: PushMessage) -> NotificationResult:
+        # Per-token opt-out filtering (every device token, not just the first).
         if self._preference_service is not None and message.device_tokens:
-            opted_in = await self._preference_service.is_opted_in(message.device_tokens[0], "push")
-            if not opted_in:
-                if self._suppressed is not None:
-                    self._suppressed.labels(channel="push").inc()
+            message.device_tokens = await _filter_opted_in(
+                self._preference_service, self._suppressed, message.device_tokens, "push"
+            )
+            if not message.device_tokens:
                 return NotificationResult(
                     id=message.id,
                     provider=getattr(self._provider, "name", "unknown"),
