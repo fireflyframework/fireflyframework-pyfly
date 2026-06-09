@@ -20,6 +20,7 @@ Tests skip cleanly when websockets is not installed.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 
 import pytest
 
@@ -38,18 +39,13 @@ async def _echo_handler(websocket: object) -> None:
 
 
 @pytest.fixture()
-async def echo_server() -> asyncio.tasks.Task[None]:  # type: ignore[type-arg]
-    """Start a local echo WebSocket server on an ephemeral port; yield its port."""
-    import socket as _socket
-
-    # Pick a free port by binding to port 0.
-    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-
-    server = await serve(_echo_handler, "127.0.0.1", port)
+async def echo_server() -> AsyncGenerator[int, None]:
+    """Start a local echo WebSocket server on an OS-assigned ephemeral port; yield its port."""
+    # Bind to port 0 and let the server keep the socket (no release-then-rebind TOCTOU window).
+    server = await serve(_echo_handler, "127.0.0.1", 0)
+    port: int = server.sockets[0].getsockname()[1]
     try:
-        yield port  # type: ignore[misc]
+        yield port
     finally:
         server.close()
         await server.wait_closed()
