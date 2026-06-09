@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.81 (2026-06-09)
+
+### Added / Tested (EDA broker correctness — parity initiative SP-3)
+
+- **EDA** — new `RabbitMqEventBus` adapter (aio-pika) implementing the `EventPublisher` port, at
+  parity with the Java `eda-rabbitmq` module: DIRECT-exchange routing by `destination`, dispatch by
+  `event_type` glob, and **at-least-once delivery** (manual ack on success, reject-with-requeue on
+  handler failure — matching the Redis Streams and Postgres buses). Wired into auto-config via
+  `pyfly.eda.provider=rabbitmq` (`pyfly.eda.rabbitmq.url` / `exchange-name`).
+- **EDA / messaging** — real-backend (testcontainers) round-trip integration tests for every event
+  bus (Kafka, Redis Streams, Postgres, RabbitMQ) and both message brokers (Kafka, RabbitMQ),
+  including the subscribe-after-start lifecycle; previously these were validated only against mocks.
+- **EDA / messaging** — parametrized `detect_provider()` coverage (incl. the new rabbitmq case).
+- **EDA** — `RedisStreamsEventBus.stop()` now uses `aclose()` (the deprecated `close()` is removed).
+- **Docs** — `events.md` no longer documents the non-existent `EventConsumer` protocol, labels all
+  implemented buses, and documents the provider/config keys; `redis.md` cache-doc errors fixed
+  (redis 7.4+, `backend=` decorator args, `InMemoryCache` not `MemoryCacheAdapter`).
+
 ## v26.06.80 (2026-06-09)
 
 ### Added
