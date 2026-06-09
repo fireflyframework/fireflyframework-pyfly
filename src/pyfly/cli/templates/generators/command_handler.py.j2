@@ -10,9 +10,9 @@ from {{ package_name }}.cqrs.{{ names.snake }}_command import {{ names.pascal }}
 
 @command_handler
 @service
-class {{ names.pascal }}Handler(CommandHandler[{{ names.pascal }}, str]):
+class {{ names.pascal }}CommandHandler(CommandHandler[{{ names.pascal }}, str]):
     def __init__(self) -> None:
         super().__init__()
 
     async def do_handle(self, command: {{ names.pascal }}) -> str:
-        raise NotImplementedError("Implement {{ names.pascal }}Handler.do_handle")
+        raise NotImplementedError("Implement {{ names.pascal }}CommandHandler.do_handle")

@@ -54,29 +54,22 @@ def write_artifacts(
     return actions
 
 
-def add_init_export(init_path: Path, statement: str, *, dry_run: bool) -> None:
-    """Append an import line to an __init__.py if not already present."""
-    existing = init_path.read_text() if init_path.exists() else ""
-    if statement in existing:
-        return
-    if dry_run:
-        return
-    init_path.parent.mkdir(parents=True, exist_ok=True)
-    sep = "" if existing.endswith("\n") or not existing else "\n"
-    init_path.write_text(existing + sep + statement + "\n")
-
-
 def _render(template_name: str, context: dict[str, Any]) -> str:
     from pyfly.cli.templates import _get_env
 
     return _get_env().get_template(f"generators/{template_name}").render(context)
 
 
-def _ensure_init(directory: Path, *, dry_run: bool) -> Artifact | None:
+def _ensure_init(directory: Path) -> Artifact | None:
     init = directory / "__init__.py"
     if init.exists():
         return None
     return Artifact("init", init, "")
+
+
+def _stem(snake: str, suffix: str) -> str:
+    """Append suffix unless the name already ends with it (avoid e.g. report_job_job)."""
+    return snake if suffix and snake.endswith(suffix) else f"{snake}{suffix}"
 
 
 def _context(info: ProjectInfo, raw_name: str) -> dict[str, Any]:
@@ -126,10 +119,10 @@ def _simple_generate(
     n: Names = context["names"]
     out_dir = info.package_dir / subdir
     artifacts: list[Artifact] = []
-    init = _ensure_init(out_dir, dry_run=dry_run)
+    init = _ensure_init(out_dir)
     if init:
         artifacts.append(init)
-    artifacts.append(Artifact(subdir, out_dir / f"{n.snake}{suffix}.py", _render(template, context)))
+    artifacts.append(Artifact(subdir, out_dir / f"{_stem(n.snake, suffix)}.py", _render(template, context)))
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
 
@@ -156,7 +149,7 @@ def service_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> No
     n: Names = context["names"]
     svc_dir = info.package_dir / "services"
     artifacts: list[Artifact] = []
-    init = _ensure_init(svc_dir, dry_run=dry_run)
+    init = _ensure_init(svc_dir)
     if init:
         artifacts.append(init)
     artifacts.append(Artifact("service", svc_dir / f"{n.snake}_service.py", _render("service.py.j2", context)))
@@ -179,7 +172,7 @@ def controller_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) ->
     template = "controller_web.py.j2" if info.archetype == "web" else "controller_rest.py.j2"
     ctrl_dir = info.package_dir / "controllers"
     artifacts: list[Artifact] = []
-    init = _ensure_init(ctrl_dir, dry_run=dry_run)
+    init = _ensure_init(ctrl_dir)
     if init:
         artifacts.append(init)
     artifacts.append(Artifact("controller", ctrl_dir / f"{n.snake}_controller.py", _render(template, context)))
@@ -245,11 +238,13 @@ def command_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> No
     n: Names = context["names"]
     out = info.package_dir / "cqrs"
     artifacts: list[Artifact] = []
-    init = _ensure_init(out, dry_run=dry_run)
+    init = _ensure_init(out)
     if init:
         artifacts.append(init)
     artifacts.append(Artifact("command", out / f"{n.snake}_command.py", _render("command.py.j2", context)))
-    artifacts.append(Artifact("handler", out / f"{n.snake}_handler.py", _render("command_handler.py.j2", context)))
+    artifacts.append(
+        Artifact("handler", out / f"{n.snake}_command_handler.py", _render("command_handler.py.j2", context))
+    )
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
 
@@ -265,11 +260,11 @@ def query_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None
     n: Names = context["names"]
     out = info.package_dir / "cqrs"
     artifacts: list[Artifact] = []
-    init = _ensure_init(out, dry_run=dry_run)
+    init = _ensure_init(out)
     if init:
         artifacts.append(init)
     artifacts.append(Artifact("query", out / f"{n.snake}_query.py", _render("query.py.j2", context)))
-    artifacts.append(Artifact("handler", out / f"{n.snake}_handler.py", _render("query_handler.py.j2", context)))
+    artifacts.append(Artifact("handler", out / f"{n.snake}_query_handler.py", _render("query_handler.py.j2", context)))
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
 
@@ -285,7 +280,7 @@ def event_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None
     n: Names = context["names"]
     out = info.package_dir / "events"
     artifacts: list[Artifact] = []
-    init = _ensure_init(out, dry_run=dry_run)
+    init = _ensure_init(out)
     if init:
         artifacts.append(init)
     artifacts.append(Artifact("event", out / f"{n.snake}_event.py", _render("event.py.j2", context)))
@@ -345,7 +340,7 @@ def resource_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> N
     artifacts: list[Artifact] = []
     for subdir, suffix, template in specs:
         out_dir = pkg / subdir
-        init = _ensure_init(out_dir, dry_run=dry_run)
+        init = _ensure_init(out_dir)
         if init:
             artifacts.append(init)
         artifacts.append(Artifact(subdir, out_dir / f"{n.snake}{suffix}.py", _render(template, context)))

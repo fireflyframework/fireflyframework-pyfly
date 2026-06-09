@@ -114,10 +114,10 @@ class TestCqrs:
         result = run(["command", "OpenWallet"], tmp_path)
         assert result.exit_code == 0, result.output
         cmd = (tmp_path / "src" / "shop" / "cqrs" / "open_wallet_command.py").read_text()
-        handler = (tmp_path / "src" / "shop" / "cqrs" / "open_wallet_handler.py").read_text()
+        handler = (tmp_path / "src" / "shop" / "cqrs" / "open_wallet_command_handler.py").read_text()
         assert "class OpenWallet(Command[str])" in cmd
         assert "from pyfly.cqrs import Command" in cmd
-        assert "class OpenWalletHandler(CommandHandler[OpenWallet, str])" in handler
+        assert "class OpenWalletCommandHandler(CommandHandler[OpenWallet, str])" in handler
         assert "@command_handler" in handler
         assert "async def do_handle" in handler
 
@@ -126,9 +126,9 @@ class TestCqrs:
         result = run(["query", "GetWallet"], tmp_path)
         assert result.exit_code == 0, result.output
         q = (tmp_path / "src" / "shop" / "cqrs" / "get_wallet_query.py").read_text()
-        h = (tmp_path / "src" / "shop" / "cqrs" / "get_wallet_handler.py").read_text()
+        h = (tmp_path / "src" / "shop" / "cqrs" / "get_wallet_query_handler.py").read_text()
         assert "class GetWallet(Query[dict | None])" in q
-        assert "class GetWalletHandler(QueryHandler[GetWallet, dict | None])" in h
+        assert "class GetWalletQueryHandler(QueryHandler[GetWallet, dict | None])" in h
         assert "@query_handler" in h
 
 
@@ -161,7 +161,7 @@ class TestScheduled:
         scaffold(tmp_path)
         result = run(["scheduled", "ReportJob"], tmp_path)
         assert result.exit_code == 0, result.output
-        text = (tmp_path / "src" / "shop" / "jobs" / "report_job_job.py").read_text()
+        text = (tmp_path / "src" / "shop" / "jobs" / "report_job.py").read_text()
         assert "from pyfly.scheduling import scheduled" in text
         assert "@scheduled(" in text
         assert "async def run" in text

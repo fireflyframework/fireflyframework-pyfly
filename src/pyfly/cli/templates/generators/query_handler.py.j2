@@ -10,9 +10,9 @@ from {{ package_name }}.cqrs.{{ names.snake }}_query import {{ names.pascal }}
 
 @query_handler
 @service
-class {{ names.pascal }}Handler(QueryHandler[{{ names.pascal }}, dict | None]):
+class {{ names.pascal }}QueryHandler(QueryHandler[{{ names.pascal }}, dict | None]):
     def __init__(self) -> None:
         super().__init__()
 
     async def do_handle(self, query: {{ names.pascal }}) -> dict | None:
-        raise NotImplementedError("Implement {{ names.pascal }}Handler.do_handle")
+        raise NotImplementedError("Implement {{ names.pascal }}QueryHandler.do_handle")
