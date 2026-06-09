@@ -310,3 +310,14 @@ def saga_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
 def scheduled_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
     """Generate a scheduled job."""
     _simple_generate(ctx, name, subdir="jobs", suffix="_job", template="scheduled.py.j2", force=force, dry_run=dry_run)
+
+
+@generate_group.command("shell-command")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def shell_command_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a @shell_component with a command."""
+    _simple_generate(
+        ctx, name, subdir="commands", suffix="_command", template="shell_command.py.j2", force=force, dry_run=dry_run
+    )

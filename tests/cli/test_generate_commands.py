@@ -165,3 +165,14 @@ class TestScheduled:
         assert "from pyfly.scheduling import scheduled" in text
         assert "@scheduled(" in text
         assert "async def run" in text
+
+
+class TestShellCommand:
+    def test_shell_command(self, tmp_path: Path) -> None:
+        scaffold(tmp_path, archetype="cli")
+        result = run(["shell-command", "Report"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "commands" / "report_command.py").read_text()
+        assert "from pyfly.shell import shell_component, shell_method" in text
+        assert "@shell_component" in text
+        assert "@shell_method(" in text
