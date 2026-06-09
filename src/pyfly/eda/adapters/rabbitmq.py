@@ -79,9 +79,10 @@ class RabbitMqEventBus:
     def subscribe(self, event_type_pattern: str, handler: EventHandler) -> None:
         """Register a handler for events matching *event_type_pattern*.
 
-        If the bus has already been started, a consumer for every configured
-        destination is bound immediately so the new handler starts receiving
-        messages without a restart.
+        Handlers may be registered before or after :meth:`start`: each running
+        consumer reads the current handler list on every message, so a handler
+        added after start begins receiving matching events immediately — no
+        restart and no extra consumer.
         """
         self._handlers.append((event_type_pattern, handler))
 
