@@ -189,6 +189,7 @@ session-concurrency = "pyfly.session.auto_configuration:SessionConcurrencyAutoCo
 oauth2-login = "pyfly.security.auto_configuration:OAuth2LoginAutoConfiguration"
 csrf-filter = "pyfly.web.security_filters_auto_configuration:CsrfFilterAutoConfiguration"
 http-security-filter = "pyfly.web.security_filters_auto_configuration:HttpSecurityFilterAutoConfiguration"
+resilience = "pyfly.resilience.auto_configuration:ResilienceAutoConfiguration"
 
 [project.scripts]
 pyfly = "pyfly.cli.main:cli"
