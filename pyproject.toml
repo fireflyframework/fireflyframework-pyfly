@@ -55,7 +55,6 @@ testcontainers = [
     "pika>=1.3.0",  # testcontainers' RabbitMqContainer imports pika for its readiness probe
 ]
 data-document = [
-    "motor>=3.7.1",
     "beanie>=2.1.0",
 ]
 postgresql = [

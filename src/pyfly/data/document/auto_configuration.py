@@ -17,9 +17,9 @@
 # must resolve return types at runtime for @bean method registration.
 
 try:
-    from motor.motor_asyncio import AsyncIOMotorClient
+    from pymongo import AsyncMongoClient
 except ImportError:
-    AsyncIOMotorClient = object  # type: ignore[misc,assignment]
+    AsyncMongoClient = object  # type: ignore[misc,assignment]
 
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
@@ -39,12 +39,12 @@ from pyfly.data.document.mongodb.post_processor import (
 @conditional_on_class("beanie")
 @conditional_on_property("pyfly.data.document.enabled", having_value="true")
 class DocumentAutoConfiguration:
-    """Auto-configures Motor client, Beanie initializer, and Mongo repository post-processor."""
+    """Auto-configures pymongo AsyncMongoClient, Beanie initializer, and Mongo repository post-processor."""
 
     @bean
-    def motor_client(self, config: Config) -> AsyncIOMotorClient:  # type: ignore[type-arg]
+    def mongo_client(self, config: Config) -> AsyncMongoClient:  # type: ignore[type-arg]
         uri = str(config.get("pyfly.data.document.uri", "mongodb://localhost:27017"))
-        return AsyncIOMotorClient(uri)
+        return AsyncMongoClient(uri)
 
     @bean
     def mongo_post_processor(self) -> MongoRepositoryBeanPostProcessor:
@@ -55,10 +55,10 @@ class DocumentAutoConfiguration:
         self,
         config: Config,
         container: Container,
-        motor_client: AsyncIOMotorClient,  # type: ignore[type-arg]
+        mongo_client: AsyncMongoClient,  # type: ignore[type-arg]
     ) -> BeanieInitializer:
         return BeanieInitializer(
-            motor_client=motor_client,
+            motor_client=mongo_client,
             config=config,
             container=container,
         )

@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Integration tests: MongoRepository against a real MongoDB (Motor/Beanie).
+"""Integration tests: MongoRepository against a real MongoDB (pymongo AsyncMongoClient/Beanie).
 
 These tests exercise behaviour that mongomock cannot fully replicate:
-  - Real Motor async I/O with actual network round-trips
+  - Real pymongo async I/O with actual network round-trips
   - ``$regex`` filter queries executed by a live MongoDB
   - ``save_all`` + ``find_all_by_ids`` batch operations
   - Pagination total counts from a real aggregation pipeline
@@ -31,8 +31,8 @@ import uuid
 
 import pytest
 from beanie import init_beanie
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import Field
+from pymongo import AsyncMongoClient
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
@@ -70,7 +70,7 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
     """Full MongoRepository smoke-test on real MongoDB: CRUD, pagination, spec, batch ops."""
     # Each run gets its own database to avoid cross-test contamination
     db_name = f"pyfly_it_{uuid.uuid4().hex[:12]}"
-    client: AsyncIOMotorClient = AsyncIOMotorClient(mongo_url)  # type: ignore[type-arg]
+    client: AsyncMongoClient = AsyncMongoClient(mongo_url)  # type: ignore[type-arg]
     try:
         await init_beanie(database=client[db_name], document_models=[Article])
         repo: MongoRepository[Article, str] = MongoRepository(Article)
@@ -155,11 +155,13 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
 
         # count reflects deletion
         new_count = await repo.count()
-        assert new_count == total_count + 6 - 1  # +10 bulk + 3 explicit - 1 deleted; + 2 python; +4 batch
+        # total_count=13 (3 explicit + 10 bulk); +3 regex articles (step 4); +4 batch (step 5); -1 deleted (step 6)
+        assert new_count == total_count + 6  # +3 python/js articles + 4 batch - 1 deleted = net +6
 
         # --- 7. exists -------------------------------------------------------
         assert await repo.exists(saved_batch[1].id) is True
-        assert await repo.exists("nonexistent_fake_id") is False
+        # Use a valid ObjectId format that does not exist in the collection
+        assert await repo.exists("000000000000000000000000") is False
 
         # --- 8. spec + pagination (find_all_by_spec_paged) -------------------
         author_spec: MongoSpecification[Article] = MongoSpecification(lambda root, f: {**f, "author": "batch_author"})
@@ -172,4 +174,4 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         # Drop the unique test database to keep MongoDB clean
         with contextlib.suppress(Exception):
             await client.drop_database(db_name)
-        client.close()
+        await client.close()
