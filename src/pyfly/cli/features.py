@@ -23,20 +23,29 @@ import click
 from pyfly.cli.console import console, err_console
 from pyfly.cli.templates import AVAILABLE_FEATURES, FEATURE_DETAILS, FEATURE_TIPS
 
-_PYFLY_DEP_RE = re.compile(r'"pyfly(?:\[(?P<extras>[^\]]*)\])?"')
+# Matches a quoted ``pyfly`` requirement: optional ``[extras]`` and an optional
+# trailing version/marker (which must start with a PEP 508 separator so we never
+# match a *different* package like ``"pyfly-extensions"``). The trailing part is
+# preserved when rewriting extras.
+_PYFLY_DEP_RE = re.compile(r'"pyfly(?:\[(?P<extras>[^\]]*)\])?(?P<rest>(?:[<>=!~;\s][^"]*)?)"')
 
 
 def _update_pyfly_extras(dep: str, *, add: list[str] | None = None, remove: list[str] | None = None) -> str:
-    """Return the ``"pyfly[...]"`` dependency string with extras added/removed."""
+    """Return the ``"pyfly[...]"`` dependency string with extras added/removed.
+
+    Any trailing version specifier / environment marker (e.g. ``>=26.0``) is
+    preserved.
+    """
     match = _PYFLY_DEP_RE.fullmatch(dep.strip())
     if not match:
         return dep
     extras = {e.strip() for e in (match.group("extras") or "").split(",") if e.strip()}
     extras |= set(add or [])
     extras -= set(remove or [])
+    rest = match.group("rest") or ""
     if not extras:
-        return '"pyfly"'
-    return f'"pyfly[{",".join(sorted(extras))}]"'
+        return f'"pyfly{rest}"'
+    return f'"pyfly[{",".join(sorted(extras))}]{rest}"'
 
 
 def _project_root(ctx: click.Context) -> Path:

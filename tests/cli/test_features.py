@@ -77,3 +77,22 @@ class TestFeaturesCommands:
         result = run(remove_cmd, ["cache", "--yes"], tmp_path)
         assert result.exit_code == 0, result.output
         assert "pyfly[web]" in (tmp_path / "pyproject.toml").read_text()
+
+
+class TestExtraEditingVersionPin:
+    def test_preserves_version_specifier(self) -> None:
+        assert _update_pyfly_extras('"pyfly[web]>=26.0"', add=["cache"]) == '"pyfly[cache,web]>=26.0"'
+
+    def test_add_to_versioned_bare(self) -> None:
+        assert _update_pyfly_extras('"pyfly>=26.0"', add=["cache"]) == '"pyfly[cache]>=26.0"'
+
+    def test_does_not_match_other_package(self) -> None:
+        # A different package that merely starts with 'pyfly' must be left alone.
+        assert _update_pyfly_extras('"pyfly-extensions"', add=["cache"]) == '"pyfly-extensions"'
+
+
+class TestNoPyflyDep:
+    def test_add_errors_when_no_pyfly_dep(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = ["requests"]\n')
+        result = run(add_cmd, ["cache"], tmp_path)
+        assert result.exit_code != 0

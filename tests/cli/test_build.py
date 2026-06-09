@@ -67,3 +67,16 @@ class TestBuild:
         result = CliRunner().invoke(build.build_group, ["image", "--tag", "app:1", "--builder", "docker"])
         assert result.exit_code == 0, result.output
         assert fake_run[-1][0] == "docker"
+
+
+class TestBuildMissingTool:
+    def test_wheel_missing_uv(self, monkeypatch) -> None:
+        monkeypatch.setattr(build.shutil, "which", lambda t: None)
+        result = CliRunner().invoke(build.build_group, ["wheel"])
+        assert result.exit_code != 0
+        assert "uv" in (result.output + (result.stderr or "")).lower()
+
+    def test_image_missing_pack(self, monkeypatch) -> None:
+        monkeypatch.setattr(build.shutil, "which", lambda t: None)
+        result = CliRunner().invoke(build.build_group, ["image", "--builder", "pack"])
+        assert result.exit_code != 0
