@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.82 (2026-06-09)
+
+### Fixed / Tested (data fidelity — parity initiative SP-4)
+
+- **MongoDB now works against a real server.** `beanie>=2.1` dropped Motor for pymongo's native
+  async driver; PyFly was still building a Motor `AsyncIOMotorClient`, which crashed Beanie's
+  `init_beanie` against a real MongoDB (`append_metadata`). Switched the production client to
+  `pymongo.AsyncMongoClient` (auto-config + initializer), fixed `@transactional`'s Mongo arm
+  (pymongo's `start_session()` is synchronous — removed an erroneous `await`), and dropped `motor`
+  from the `data-document` extra. *(Previously only ever exercised against the mongomock fake.)*
+- **Real-backend repository integration tests** (testcontainers): the SQLAlchemy `Repository` now
+  runs against real **Postgres** (UUID PK, `TIMESTAMPTZ`, `ILIKE`, pagination, specifications,
+  soft-delete — paths aiosqlite can't faithfully exercise), and `MongoRepository` against real
+  **MongoDB** (CRUD, pagination, `$regex`, batch ops).
+- **DB-query metrics** — a new `SqlAlchemyQueryMetrics` adapter (parity with Java `R2dbcMetrics`)
+  records `pyfly_db_query_duration_seconds`, `pyfly_db_queries_total`, and
+  `pyfly_db_query_errors_total` (labelled by `operation`) via SQLAlchemy cursor-execute listeners,
+  auto-enabled when the observability `MetricsRecorder` is present.
+- **Health/lifecycle unit tests** — `SqlAlchemyHealthIndicator` UP/DOWN and `EngineLifecycle`
+  `ddl-auto` create/none/create-drop, with real create/drop verification.
+- **Docs** — `data.md`: `find_all_paged` → `find_paginated`; documented the health indicator and the
+  new DB-query metrics.
+
+> Note: the optional health-status→metrics gauge bridge (parity with Java `HealthMetricsBridge`) is
+> deferred to a later observability pass (it needs an auto-refresh/scrape mechanism).
+
 ## v26.06.81 (2026-06-09)
 
 ### Added / Tested (EDA broker correctness — parity initiative SP-3)
