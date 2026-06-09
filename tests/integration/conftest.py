@@ -19,6 +19,7 @@ starts no container. Failures normally ``skip`` so the suite degrades cleanly wh
 absent; setting ``PYFLY_INTEGRATION_REQUIRE_DOCKER=1`` (the CI integration job) flips skip -> FAIL
 so missing backends cannot masquerade as "passing".
 """
+
 from __future__ import annotations
 
 import contextlib

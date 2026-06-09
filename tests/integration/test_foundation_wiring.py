@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wiring tests for the SP-1 integration foundation (do NOT require Docker)."""
+
 from __future__ import annotations
 
 import pytest

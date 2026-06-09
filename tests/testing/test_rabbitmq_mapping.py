@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Unit test: pyfly_config_for maps a RabbitMQ container to pyfly config keys."""
+
 from __future__ import annotations
 
 from pyfly.testing import pyfly_config_for
