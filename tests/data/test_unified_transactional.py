@@ -97,7 +97,7 @@ async def test_relational_rolls_back_on_exception() -> None:
 
 # --------------------------------------------------------------------------- document dispatch
 class _FakeTxn:
-    """Mimics motor's session.start_transaction() async CM: commit on clean exit, abort on error."""
+    """Mimics pymongo's AsyncClientSession.start_transaction() async CM: commit on clean exit, abort on error."""
 
     def __init__(self, session: _FakeMongoSession) -> None:
         self._session = session
@@ -128,16 +128,18 @@ class _FakeMongoSession:
         return _FakeTxn(self)
 
 
-class _FakeMotorClient:
+class _FakeMongoClient:
     def __init__(self, session: _FakeMongoSession) -> None:
         self._session = session
 
-    async def start_session(self) -> _FakeMongoSession:
+    def start_session(self) -> _FakeMongoSession:
+        # pymongo AsyncMongoClient.start_session() is SYNC (returns an async-CM session) — NOT a
+        # coroutine like Motor's. Keep this sync so the test enforces the real driver contract.
         return self._session
 
 
 def _document_service(session: _FakeMongoSession) -> Any:
-    client = _FakeMotorClient(session)
+    client = _FakeMongoClient(session)
 
     class Svc:
         def __init__(self) -> None:

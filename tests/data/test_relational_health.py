@@ -19,6 +19,8 @@ an unreachable/invalid URL to exercise the DOWN path.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import String as SAString
 from sqlalchemy import text
@@ -155,62 +157,54 @@ class TestEngineLifecycleDdlCreate:
             await lifecycle.stop()
 
     @pytest.mark.asyncio
-    async def test_stop_does_not_drop_tables_for_create_mode(self) -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        session: AsyncSession = session_factory()
+    async def test_stop_does_not_drop_tables_for_create_mode(self, tmp_path: Path) -> None:
+        # File-based SQLite so the DB survives engine.dispose() and we can re-inspect it.
+        url = f"sqlite+aiosqlite:///{tmp_path / 'ddl_create.db'}"
+        engine = create_async_engine(url)
+        session: AsyncSession = async_sessionmaker(engine, expire_on_commit=False)()
 
         lifecycle = EngineLifecycle(engine, session, ddl_auto="create")
         await lifecycle.start()
+        await lifecycle.stop()  # "create" mode must NOT drop on stop
 
-        # stop() must NOT drop for "create"
-        await lifecycle.stop()
-
-        # Engine is disposed after stop — create a fresh one to verify the table
-        # was not dropped (in-memory SQLite is gone anyway, but we verified start created it)
-        # This test mainly checks stop() doesn't raise.
+        verify = create_async_engine(url)
+        try:
+            async with verify.connect() as conn:
+                # Table must STILL exist — stop() did not drop it.
+                result = await conn.execute(text("SELECT 1 FROM canary_lifecycle_test LIMIT 1"))
+                assert result is not None
+        finally:
+            await verify.dispose()
 
 
 class TestEngineLifecycleDdlCreateDrop:
     """ddl-auto='create-drop' — tables created on start(), dropped on stop()."""
 
     @pytest.mark.asyncio
-    async def test_stop_drops_tables(self) -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        session: AsyncSession = session_factory()
+    async def test_stop_drops_tables(self, tmp_path: Path) -> None:
+        # File-based SQLite so the DB survives engine.dispose() and we can prove drop_all ran.
+        url = f"sqlite+aiosqlite:///{tmp_path / 'ddl_create_drop.db'}"
+        engine = create_async_engine(url)
+        session: AsyncSession = async_sessionmaker(engine, expire_on_commit=False)()
 
         lifecycle = EngineLifecycle(engine, session, ddl_auto="create-drop")
         await lifecycle.start()
 
-        # Table must exist after start
+        # Table must exist after start.
         async with engine.connect() as conn:
             result = await conn.execute(text("SELECT 1 FROM canary_lifecycle_test LIMIT 1"))
             assert result is not None
 
-        # stop() must drop all tables — afterwards the table must be gone
-        # We need a separate engine because stop() disposes the original one.
-        engine2 = create_async_engine("sqlite+aiosqlite:///:memory:")
-        session2: AsyncSession = async_sessionmaker(engine2, expire_on_commit=False)()
-        lifecycle2 = EngineLifecycle(engine2, session2, ddl_auto="create-drop")
-        await lifecycle2.start()
+        await lifecycle.stop()  # disposes the engine AND drops all tables
 
-        # Confirm table exists before drop
-        async with engine2.connect() as conn:
-            r = await conn.execute(text("SELECT 1 FROM canary_lifecycle_test LIMIT 1"))
-            assert r is not None
-
-        await lifecycle2.stop()
-
-        # After dispose the engine connection pool is closed; the in-memory DB is gone —
-        # a fresh engine shows no table (it's a new :memory: DB each time).
-        engine3 = create_async_engine("sqlite+aiosqlite:///:memory:")
+        # Reconnect to the SAME database file — the table must now be GONE.
+        verify = create_async_engine(url)
         try:
-            async with engine3.connect() as conn:
+            async with verify.connect() as conn:
                 with pytest.raises(OperationalError):
                     await conn.execute(text("SELECT 1 FROM canary_lifecycle_test LIMIT 1"))
         finally:
-            await engine3.dispose()
+            await verify.dispose()
 
 
 class TestEngineLifecycleDdlNone:

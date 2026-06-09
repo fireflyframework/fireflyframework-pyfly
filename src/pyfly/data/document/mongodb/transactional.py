@@ -36,25 +36,29 @@ async def run_mongo_transaction(
 ) -> Any:
     """Execute *func* inside a MongoDB transaction (the document arm of ``@transactional``).
 
-    Resolves the Motor client from ``self._motor_client``, opens a session + transaction, injects
-    the session as the ``session`` keyword argument, and commits on success. On error it aborts —
+    Resolves the Mongo client (pymongo ``AsyncMongoClient``) from ``self._motor_client``, opens a
+    session + transaction, injects the session as the ``session`` keyword argument, and commits on
+    success. On error it aborts —
     except for exception types in ``no_rollback_for`` (or any ``Exception`` not in ``rollback_for``),
     which commit and then re-raise, mirroring the relational ``@transactional`` semantics. A
     ``BaseException`` that is not an ``Exception`` (cancellation/shutdown) always aborts.
     """
     self_arg = args[0] if args else None
-    motor_client = getattr(self_arg, "_motor_client", None)
-    if motor_client is None:
+    mongo_client = getattr(self_arg, "_motor_client", None)
+    if mongo_client is None:
         raise RuntimeError(
-            f"{func.__qualname__}: cannot resolve Motor client. Ensure the service has a '_motor_client' attribute."
+            f"{func.__qualname__}: cannot resolve the Mongo client (pymongo AsyncMongoClient). "
+            "Ensure the service has a '_motor_client' attribute."
         )
 
-    async with await motor_client.start_session() as session:
+    # pymongo's AsyncMongoClient.start_session() is synchronous (returns an AsyncClientSession that
+    # is itself an async context manager) — unlike Motor's coroutine variant, so no `await` here.
+    async with mongo_client.start_session() as session:
         kwargs["session"] = session
         # session.start_transaction() commits on a clean context exit and aborts when an exception
         # escapes it. To honour no_rollback_for we let such exceptions exit cleanly (commit) and
         # re-raise them afterwards, rather than driving abort/commit manually (which would depend
-        # on Motor's lazy-vs-eager start_transaction semantics).
+        # on the driver's lazy-vs-eager start_transaction semantics).
         deferred: BaseException | None = None
         result: Any = None
         async with session.start_transaction():
