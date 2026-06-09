@@ -708,14 +708,26 @@ For non-`PyFlyException` errors, the global handler **first runs the
 `ExceptionConverterService`** (`pyfly.web.converters`) to translate known library
 exceptions into PyFly exceptions before deciding the status:
 
-| Library Exception                       | Converted To                | HTTP |
-|-----------------------------------------|-----------------------------|------|
-| `pydantic.ValidationError`              | `ValidationException`       | 422  |
-| `json.JSONDecodeError`                  | `InvalidRequestException`   | 400  |
-| `TimeoutError` / `asyncio.TimeoutError` | `OperationTimeoutException` | 504  |
+| Converter | Library Exception | Converted To | HTTP |
+|---|---|---|---|
+| `PydanticExceptionConverter` | `pydantic.ValidationError` | `ValidationException` | 422 |
+| `JSONExceptionConverter` | `json.JSONDecodeError` | `InvalidRequestException` | 400 |
+| `TimeoutExceptionConverter` | `TimeoutError` / `asyncio.TimeoutError` | `OperationTimeoutException` | 504 |
+| `SQLAlchemyIntegrityExceptionConverter` | `sqlalchemy.exc.IntegrityError` | `ConflictException` | 409 |
+| `HttpxExceptionConverter` | `httpx.TimeoutException` (and subclasses) | `GatewayTimeoutException` | 504 |
+| `HttpxExceptionConverter` | other `httpx.HTTPError` subclasses | `BadGatewayException` | 502 |
+| `CircuitBreakerExceptionConverter` | `CircuitBreakerException` (open circuit) | `ServiceUnavailableException` | 503 |
 
-User-registered `ExceptionConverter` beans are appended to this chain. If no converter
-matches, the handler returns a generic `500` response without leaking internal details.
+The SQLAlchemy, httpx, and circuit-breaker converters are **lazy-loaded**: each
+converter's `can_handle()` method performs its own `import` at check time, so the
+converter silently returns `False` (and is a no-op) when the corresponding library
+is not installed. No optional dependency is required for the other three converters
+(`pydantic`, `json`, and stdlib `TimeoutError`).
+
+All six built-in converters are auto-discovered and registered via
+`default_exception_converters()`. User-registered `ExceptionConverter` beans are
+appended to the chain after the built-ins. If no converter matches, the handler
+returns a generic `500` response without leaking internal details.
 
 ---
 

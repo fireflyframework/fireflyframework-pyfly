@@ -20,6 +20,7 @@ overhead and enabling centralized ordering and URL-pattern matching.
    - [OAuth2SessionSecurityFilter](#oauth2sessionsecurityfilter)
    - [SecurityFilter](#securityfilter)
    - [HttpSecurityFilter](#httpsecurityfilter)
+   - [IdempotencyWebFilter](#idempotencywebfilter)
 5. [Filter Ordering with @order](#filter-ordering-with-order)
 6. [URL Pattern Matching](#url-pattern-matching)
 7. [Creating Custom Filters](#creating-custom-filters)
@@ -47,6 +48,7 @@ WebFilterChainMiddleware (pure ASGI middleware)
    +-- RequestLoggingFilter          (@order HIGHEST_PRECEDENCE + 200)
    +-- SecurityFilter                (@order HIGHEST_PRECEDENCE + 220, opt-in JWT auth)
    +-- OAuth2SessionSecurityFilter   (@order HIGHEST_PRECEDENCE + 225, opt-in)
+   +-- IdempotencyWebFilter          (@order HIGHEST_PRECEDENCE + 230, opt-in)
    +-- SecurityHeadersFilter         (@order HIGHEST_PRECEDENCE + 300)
    +-- HttpSecurityFilter            (@order HIGHEST_PRECEDENCE + 350, opt-in)
    +-- CsrfFilter                    (__pyfly_order__ = -50, opt-in)
@@ -337,6 +339,89 @@ class HttpSecurityFilter(OncePerRequestFilter):
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/http_security_filter.py`
 
+### IdempotencyWebFilter
+
+Prevents duplicate processing of mutating HTTP requests that carry an
+`Idempotency-Key` request header.
+
+```python
+class IdempotencyWebFilter(OncePerRequestFilter):
+    __pyfly_order__ = HIGHEST_PRECEDENCE + 230
+    exclude_patterns = ["/actuator/*", "/health", "/ready"]
+
+    def __init__(self, cache: CacheAdapter, ttl_seconds: int = 86400) -> None:
+        ...
+
+    async def do_filter(self, request, call_next):
+        # Safe methods (GET, HEAD, OPTIONS, TRACE): pass through
+        # No Idempotency-Key header present: pass through
+        # Idempotency-Key present on mutating method:
+        #   cache hit  → replay stored response + Idempotency-Replayed: true
+        #   cache miss → execute handler, cache non-5xx response
+        ...
+```
+
+**How it works:**
+
+| Condition | Behaviour |
+|---|---|
+| Safe method (`GET`, `HEAD`, `OPTIONS`, `TRACE`) | Pass through — never cached |
+| No `Idempotency-Key` header | Pass through unchanged |
+| Mutating method + key, **cache hit** | Reconstruct and return the stored response immediately with `Idempotency-Replayed: true` header |
+| Mutating method + key, **cache miss** | Execute the handler; cache the response (unless opted-out or 5xx); return the live response |
+| Handler annotated with `@disable_idempotency` | Execute the handler; response is **never** stored |
+| Handler returns a 5xx status | Execute the handler; response is **never** stored (retries re-execute the handler) |
+| Streaming / empty response body | Pass through without caching |
+
+**Cache key format:** `idem:{METHOD}:{path}:{Idempotency-Key}` — scoped to the
+HTTP method, request path, and the client-supplied key value, so the same key on
+different paths/methods is treated independently.
+
+**Mutating methods subject to idempotency caching:** `POST`, `PUT`, `PATCH`, `DELETE`.
+
+**Enabling the filter (opt-in):**
+
+```yaml
+pyfly:
+  web:
+    idempotency:
+      enabled: true          # required — filter is inactive by default
+      ttl-seconds: 86400     # optional — default 86400 (24 hours)
+  cache:
+    enabled: true            # a CacheAdapter bean must be present
+```
+
+A `CacheAdapter` bean must be present in the DI container. If
+`pyfly.web.idempotency.enabled=true` is set but no cache adapter is available,
+startup fails with a descriptive `RuntimeError`.
+
+**Opting a route out with `@disable_idempotency`:**
+
+```python
+from pyfly.web.idempotency import disable_idempotency
+
+@post_mapping("/payment")
+@disable_idempotency
+async def create_payment(self, ...) -> ...:
+    """This handler's responses are never stored in the idempotency cache."""
+    ...
+```
+
+The `@disable_idempotency` decorator sets a sentinel attribute
+(`__pyfly_disable_idempotency__`) on the handler function. After routing, the
+filter inspects `request.scope["endpoint"]` for this attribute; if present the
+response is passed through and **not** written to the cache.
+
+**Preserved response headers on replay:** `content-type`, `cache-control`,
+`etag`, `last-modified`, `location`, `x-request-id`, `x-correlation-id`,
+`x-transaction-id`. Transport-level headers (`transfer-encoding`,
+`content-length`) are intentionally excluded.
+
+**Source:**
+- `src/pyfly/web/adapters/starlette/filters/idempotency_filter.py`
+- `src/pyfly/web/idempotency.py` (`disable_idempotency` decorator)
+- `src/pyfly/web/idempotency_auto_configuration.py`
+
 ---
 
 ## Filter Ordering with @order
@@ -354,6 +439,7 @@ from pyfly.container.ordering import order, HIGHEST_PRECEDENCE
 # RequestLoggingFilter:          HIGHEST_PRECEDENCE + 200
 # SecurityFilter:                HIGHEST_PRECEDENCE + 220   (opt-in, JWT authentication)
 # OAuth2SessionSecurityFilter:   HIGHEST_PRECEDENCE + 225   (opt-in)
+# IdempotencyWebFilter:          HIGHEST_PRECEDENCE + 230   (opt-in)
 # SecurityHeadersFilter:         HIGHEST_PRECEDENCE + 300
 # HttpSecurityFilter:            HIGHEST_PRECEDENCE + 350   (opt-in)
 # CsrfFilter:                    -50                        (opt-in)
@@ -582,6 +668,7 @@ TransactionIdFilter           (HIGHEST_PRECEDENCE + 100)
 RequestLoggingFilter          (HIGHEST_PRECEDENCE + 200)
 SecurityFilter                (HIGHEST_PRECEDENCE + 220)   [if registered]
 OAuth2SessionSecurityFilter   (HIGHEST_PRECEDENCE + 225)   [if registered]
+IdempotencyWebFilter          (HIGHEST_PRECEDENCE + 230)   [if pyfly.web.idempotency.enabled=true]
 SecurityHeadersFilter         (HIGHEST_PRECEDENCE + 300)
 HttpSecurityFilter            (HIGHEST_PRECEDENCE + 350)   [if registered]
 CsrfFilter                    (-50)                        [if registered]

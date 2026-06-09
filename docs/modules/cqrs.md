@@ -481,7 +481,8 @@ from pyfly.cqrs.tracing.correlation import CorrelationContext
 ## Caching
 
 `QueryCacheAdapter` bridges pyfly's cache module with CQRS, prefixing all
-keys with `:cqrs:`. Without an underlying cache, operations are silent no-ops.
+keys with `:cqrs:`. Without an underlying `CacheAdapter` bean, all operations
+are silent no-ops (the query bus still works — results are just not cached).
 
 ```python
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
@@ -494,11 +495,58 @@ adapter = QueryCacheAdapter(cache=my_cache_instance)
 | `put(key, value, ttl)` | Store with optional `timedelta` TTL. |
 | `evict(key)` | Remove a key. |
 | `clear()` | Remove all entries. |
-| `is_available` | Whether cache is configured. |
+| `is_available` | Whether an underlying cache is configured. |
 
-Enable caching: `@query_handler(cacheable=True, cache_ttl=600)`. The query
-must have `is_cacheable()` return `True` (the default). Invalidate via
-`await query_bus.clear_cache("key")` or `await query_bus.clear_all_cache()`.
+Enable caching on a handler: `@query_handler(cacheable=True, cache_ttl=600)`.
+The query must also have `is_cacheable()` return `True` (the default). Invalidate
+programmatically via `await query_bus.clear_cache("key")` or
+`await query_bus.clear_all_cache()`.
+
+When `pyfly.cqrs.enabled=true` and a `CacheAdapter` bean is present, the
+`query_cache_adapter` bean is wired automatically by `CqrsAutoConfiguration`
+and injected into the `DefaultQueryBus`. No extra configuration is required.
+
+### EDA-driven cache invalidation
+
+When an EDA `EventPublisher` bean is present, `CqrsAutoConfiguration`
+also creates an **`EdaCacheInvalidationBridge`** bean and subscribes it to the
+bus as a wildcard listener. The bridge evicts `QueryCacheAdapter` entries in
+response to domain events arriving on the `pyfly.eda` bus.
+
+Register invalidation rules on the bridge after startup (or inject the bean):
+
+```python
+from pyfly.cqrs.cache.eda_bridge import EdaCacheInvalidationBridge
+
+# Inject the bridge bean (None when EDA is not configured)
+bridge: EdaCacheInvalidationBridge | None
+
+if bridge:
+    # Evict "order:<order_id>" whenever an "order.updated" event arrives
+    bridge.register("order.updated", "order:{order_id}")
+    # Evict "customer:<customer_id>" on "customer.profile-changed"
+    bridge.register("customer.profile-changed", "customer:{customer_id}")
+```
+
+**How rules work:**
+
+- `event_type` is matched against the `event_type` field of the incoming
+  `EventEnvelope`.
+- `cache_key_pattern` may contain `{field}` placeholders that are resolved
+  from the envelope's `payload` dict at eviction time.
+- Multiple patterns can be registered for the same event type by calling
+  `register()` more than once.
+- Unresolvable placeholders are left as-is and a warning is logged; eviction
+  still proceeds for resolvable keys.
+
+The full prefixed cache key evicted is `:cqrs:<resolved_pattern>` (the
+`QueryCacheAdapter` applies the `:cqrs:` prefix transparently).
+
+> **Prior behaviour (corrected):** Before SP-8 the `QueryCacheAdapter` never
+> received a real `CacheAdapter` at startup, so `@cacheable` queries were
+> silently never cached. The EDA-driven invalidation bridge existed in source but
+> was never wired. Both are now fully operational when the respective beans are
+> present.
 
 ---
 
@@ -515,13 +563,49 @@ from pyfly.cqrs.event.publisher import CommandEventPublisher, NoOpEventPublisher
 |-------|-------------|
 | `CommandEventPublisher` | Protocol: `async def publish(event, *, destination=None)`. |
 | `NoOpEventPublisher` | Silent no-op (default when no EDA is configured). |
-| `EdaCommandEventPublisher` | Delegates to pyfly's messaging `Producer`. |
+| `EdaCommandEventPublisher` | Delegates to pyfly's EDA `EventPublisher` port. |
 
 ```python
 from pyfly.cqrs.event.publisher import EdaCommandEventPublisher
-publisher = EdaCommandEventPublisher(producer=kafka_producer, default_destination="cqrs.events")
+publisher = EdaCommandEventPublisher(producer=eda_publisher, default_destination="cqrs.events")
 bus = DefaultCommandBus(registry=registry, event_publisher=publisher)
 ```
+
+`EdaCommandEventPublisher` derives the `event_type` from the event's
+`event_type` attribute when present, otherwise falls back to the class name.
+The payload is serialized via `dataclasses.asdict` for dataclass events, or
+`__dict__` for plain objects.
+
+### @publish_domain_event decorator
+
+Apply `@publish_domain_event` to a command handler class to control which
+destination the bus uses when publishing that handler's domain events:
+
+```python
+from pyfly.cqrs.event.decorators import publish_domain_event
+from pyfly.cqrs.decorators import command_handler
+
+@publish_domain_event(destination="orders.events")
+@command_handler
+class CreateOrderHandler(CommandHandler[CreateOrderCommand, OrderId]):
+    async def do_handle(self, command: CreateOrderCommand) -> OrderId:
+        ...
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `destination` | `str \| None` | `None` | Target topic/queue. `None` uses the publisher's default (`cqrs.events`). |
+| `message_format` | `str` | `"json"` | Message format (`"json"` or `"avro"`). |
+
+The decorator sets `__pyfly_publish_event__ = True` and
+`__pyfly_event_destination__` on the handler class. The `DefaultCommandBus`
+reads `__pyfly_event_destination__` at event-publish time and passes it as the
+`destination` keyword argument to `CommandEventPublisher.publish()`.
+
+> **SP-8 change:** `@publish_domain_event(destination=...)` was previously
+> parsed but never read by the command bus; event publishing always fell back
+> to the publisher's default destination. The bus now honours the decorator's
+> `destination` value.
 
 ---
 
@@ -613,18 +697,20 @@ Properties are bound via `@config_properties(prefix="pyfly.cqrs")` to `CqrsPrope
 `CqrsAutoConfiguration` activates when `pyfly.cqrs.enabled=true` and wires
 these beans into the DI container:
 
-| Bean | Type |
-|------|------|
-| `cqrs_properties` | `CqrsProperties` |
-| `correlation_context` | `CorrelationContext` |
-| `auto_validation_processor` | `AutoValidationProcessor` |
-| `command_validation_service` | `CommandValidationService` |
-| `cqrs_metrics_service` | `CqrsMetricsService` |
-| `authorization_service` | `AuthorizationService` |
-| `handler_registry` | `HandlerRegistry` |
-| `command_bus` | `DefaultCommandBus` |
-| `query_cache_adapter` | `QueryCacheAdapter` |
-| `query_bus` | `DefaultQueryBus` |
+| Bean | Type | Notes |
+|------|------|-------|
+| `cqrs_properties` | `CqrsProperties` | |
+| `correlation_context` | `CorrelationContext` | |
+| `auto_validation_processor` | `AutoValidationProcessor` | |
+| `command_validation_service` | `CommandValidationService` | |
+| `cqrs_metrics_service` | `CqrsMetricsService` | Optionally injects `MetricsRegistry` |
+| `authorization_service` | `AuthorizationService` | |
+| `handler_registry` | `HandlerRegistry` | |
+| `command_event_publisher` | `CommandEventPublisher` | `EdaCommandEventPublisher` when an EDA `EventPublisher` bean is present; `NoOpEventPublisher` otherwise |
+| `command_bus` | `DefaultCommandBus` | |
+| `query_cache_adapter` | `QueryCacheAdapter` | Injects `CacheAdapter` when available; no-op otherwise |
+| `eda_cache_invalidation_bridge` | `EdaCacheInvalidationBridge \| None` | Created and subscribed to the EDA bus when an `EventPublisher` bean is present; `None` otherwise |
+| `query_bus` | `DefaultQueryBus` | |
 
 `cqrs_metrics_service` optionally injects a `MetricsRegistry` bean from the
 observability module; when no registry is present all recording methods are

@@ -172,16 +172,27 @@ class DefaultCommandBus:
                 CorrelationContext.set_correlation_id(previous_cid)
 
     async def _try_publish_events(self, command: Any, result: Any) -> None:
-        """Publish domain events if the handler/command produced any."""
+        """Publish domain events if the handler/command produced any.
+
+        The destination is resolved from the matched handler's
+        ``__pyfly_event_destination__`` attribute (set by
+        ``@publish_domain_event(destination=...)``).  When absent the
+        publisher falls back to its own default.
+        """
         publisher = self._event_publisher
         if publisher is None:
             return
         events = getattr(result, "domain_events", None) or getattr(command, "domain_events", None)
         if events:
+            # Resolve the optional destination from the handler's decorator
+            # metadata so the bus honours @publish_domain_event(destination=…).
+            handler = self._registry.find_command_handler(type(command))
+            destination: str | None = getattr(handler, "__pyfly_event_destination__", None)
+
             failed_events: list[tuple[Any, Exception]] = []
             for event in events:
                 try:
-                    await publisher.publish(event)
+                    await publisher.publish(event, destination=destination)
                 except Exception as exc:
                     _logger.error("Failed to publish domain event %s: %s", type(event).__name__, exc)
                     failed_events.append((event, exc))
