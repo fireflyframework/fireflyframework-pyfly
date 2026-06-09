@@ -188,3 +188,29 @@ def controller_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) ->
     )
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("entity")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def entity_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a model/entity (data-aware)."""
+    _simple_generate(ctx, name, subdir="models", suffix="", template="entity.py.j2", force=force, dry_run=dry_run)
+
+
+@generate_group.command("repository")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def repository_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a repository (data-aware)."""
+    _simple_generate(
+        ctx,
+        name,
+        subdir="repositories",
+        suffix="_repository",
+        template="repository.py.j2",
+        force=force,
+        dry_run=dry_run,
+    )

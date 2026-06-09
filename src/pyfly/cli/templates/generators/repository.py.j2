@@ -1,0 +1,51 @@
+{% if has_data %}
+"""{{ names.pascal }} repository — relational."""
+
+from pyfly.container import repository
+from pyfly.data.relational.sqlalchemy import Repository
+
+from {{ package_name }}.models.{{ names.snake }} import {{ names.pascal }}
+
+
+@repository
+class {{ names.pascal }}Repository(Repository[{{ names.pascal }}, int]):
+    """Inherits full CRUD. Add derived queries by declaring stub methods."""
+{% elif has_mongodb %}
+"""{{ names.pascal }} repository — document."""
+
+from pyfly.container import repository
+from pyfly.data.document.mongodb import MongoRepository
+
+from {{ package_name }}.models.{{ names.snake }} import {{ names.pascal }}
+
+
+@repository
+class {{ names.pascal }}Repository(MongoRepository[{{ names.pascal }}, str]):
+    """Inherits full CRUD. Add derived queries by declaring stub methods."""
+{% else %}
+"""{{ names.pascal }} repository — in-memory."""
+
+from pyfly.container import repository
+
+from {{ package_name }}.models.{{ names.snake }} import {{ names.pascal }}
+
+
+@repository
+class {{ names.pascal }}Repository:
+    """In-memory store. Replace with a database-backed implementation."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, {{ names.pascal }}] = {}
+
+    def save(self, key: str, value: {{ names.pascal }}) -> None:
+        self._store[key] = value
+
+    def find_by_id(self, key: str) -> {{ names.pascal }} | None:
+        return self._store.get(key)
+
+    def find_all(self) -> list[{{ names.pascal }}]:
+        return list(self._store.values())
+
+    def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+{% endif %}

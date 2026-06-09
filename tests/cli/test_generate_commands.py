@@ -55,3 +55,36 @@ class TestControllerGenerator:
         text = (tmp_path / "src" / "shop" / "controllers" / "page_controller.py").read_text()
         assert "@controller" in text
         assert "Jinja2Templates" in text
+
+
+class TestEntityRepository:
+    def test_entity_plain_when_no_data(self, tmp_path: Path) -> None:
+        scaffold(tmp_path, archetype="web-api")
+        result = run(["entity", "Product"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "models" / "product.py").read_text()
+        assert "class Product(BaseModel)" in text
+
+    def test_entity_sqlalchemy_when_data(self, tmp_path: Path) -> None:
+        scaffold(tmp_path, archetype="web-api")
+        (tmp_path / "pyfly.yaml").write_text(
+            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n"
+            "  data:\n    relational:\n      enabled: true\n"
+        )
+        result = run(["entity", "Product"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "models" / "product.py").read_text()
+        assert "class Product(Base)" in text
+        assert '__tablename__ = "products"' in text
+
+    def test_repository_data(self, tmp_path: Path) -> None:
+        scaffold(tmp_path, archetype="web-api")
+        (tmp_path / "pyfly.yaml").write_text(
+            "pyfly:\n  app:\n    name: shop\n    archetype: web-api\n"
+            "  data:\n    relational:\n      enabled: true\n"
+        )
+        result = run(["repository", "Product"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "repositories" / "product_repository.py").read_text()
+        assert "class ProductRepository(Repository[Product, int])" in text
+        assert "@repository" in text
