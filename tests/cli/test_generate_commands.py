@@ -143,3 +143,14 @@ class TestEvent:
         assert "from pyfly.domain import DomainEvent" in ev
         assert '@event_listener(event_types=["OrderPlaced"])' in ls
         assert "EventEnvelope" in ls
+
+
+class TestSaga:
+    def test_saga(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["saga", "MoneyTransfer"], tmp_path)
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "src" / "shop" / "sagas" / "money_transfer_saga.py").read_text()
+        assert '@saga(name="money-transfer")' in text
+        assert "@saga_step(" in text
+        assert "compensate=" in text

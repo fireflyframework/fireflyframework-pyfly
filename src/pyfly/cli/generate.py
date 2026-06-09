@@ -292,3 +292,12 @@ def event_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None
     artifacts.append(Artifact("listener", out / f"{n.snake}_listener.py", _render("event_listener.py.j2", context)))
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("saga")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def saga_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a saga orchestration skeleton."""
+    _simple_generate(ctx, name, subdir="sagas", suffix="_saga", template="saga.py.j2", force=force, dry_run=dry_run)
