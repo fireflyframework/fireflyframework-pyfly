@@ -1,0 +1,18 @@
+"""Handler for the {{ names.pascal }} command."""
+
+from __future__ import annotations
+
+from pyfly.container import service
+from pyfly.cqrs import CommandHandler, command_handler
+
+from {{ package_name }}.cqrs.{{ names.snake }}_command import {{ names.pascal }}
+
+
+@command_handler
+@service
+class {{ names.pascal }}Handler(CommandHandler[{{ names.pascal }}, str]):
+    def __init__(self) -> None:
+        super().__init__()
+
+    async def do_handle(self, command: {{ names.pascal }}) -> str:
+        raise NotImplementedError("Implement {{ names.pascal }}Handler.do_handle")

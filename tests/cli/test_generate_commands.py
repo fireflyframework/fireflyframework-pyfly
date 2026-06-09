@@ -106,3 +106,27 @@ class TestDtoAggregate:
         text = (tmp_path / "src" / "shop" / "domain" / "wallet.py").read_text()
         assert "class Wallet" in text
         assert "_events" in text
+
+
+class TestCqrs:
+    def test_command_and_handler(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["command", "OpenWallet"], tmp_path)
+        assert result.exit_code == 0, result.output
+        cmd = (tmp_path / "src" / "shop" / "cqrs" / "open_wallet_command.py").read_text()
+        handler = (tmp_path / "src" / "shop" / "cqrs" / "open_wallet_handler.py").read_text()
+        assert "class OpenWallet(Command[str])" in cmd
+        assert "from pyfly.cqrs import Command" in cmd
+        assert "class OpenWalletHandler(CommandHandler[OpenWallet, str])" in handler
+        assert "@command_handler" in handler
+        assert "async def do_handle" in handler
+
+    def test_query_and_handler(self, tmp_path: Path) -> None:
+        scaffold(tmp_path)
+        result = run(["query", "GetWallet"], tmp_path)
+        assert result.exit_code == 0, result.output
+        q = (tmp_path / "src" / "shop" / "cqrs" / "get_wallet_query.py").read_text()
+        h = (tmp_path / "src" / "shop" / "cqrs" / "get_wallet_handler.py").read_text()
+        assert "class GetWallet(Query[dict | None])" in q
+        assert "class GetWalletHandler(QueryHandler[GetWallet, dict | None])" in h
+        assert "@query_handler" in h

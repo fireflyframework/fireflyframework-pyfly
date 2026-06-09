@@ -232,3 +232,43 @@ def dto_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
 def aggregate_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
     """Generate a DDD aggregate root."""
     _simple_generate(ctx, name, subdir="domain", suffix="", template="aggregate.py.j2", force=force, dry_run=dry_run)
+
+
+@generate_group.command("command")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def command_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a CQRS command and its handler."""
+    info = _resolve_info(ctx)
+    context = _context(info, name)
+    n: Names = context["names"]
+    out = info.package_dir / "cqrs"
+    artifacts: list[Artifact] = []
+    init = _ensure_init(out, dry_run=dry_run)
+    if init:
+        artifacts.append(init)
+    artifacts.append(Artifact("command", out / f"{n.snake}_command.py", _render("command.py.j2", context)))
+    artifacts.append(Artifact("handler", out / f"{n.snake}_handler.py", _render("command_handler.py.j2", context)))
+    actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
+    _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("query")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def query_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a CQRS query and its handler."""
+    info = _resolve_info(ctx)
+    context = _context(info, name)
+    n: Names = context["names"]
+    out = info.package_dir / "cqrs"
+    artifacts: list[Artifact] = []
+    init = _ensure_init(out, dry_run=dry_run)
+    if init:
+        artifacts.append(init)
+    artifacts.append(Artifact("query", out / f"{n.snake}_query.py", _render("query.py.j2", context)))
+    artifacts.append(Artifact("handler", out / f"{n.snake}_handler.py", _render("query_handler.py.j2", context)))
+    actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
+    _report(info, actions, dry_run=dry_run)

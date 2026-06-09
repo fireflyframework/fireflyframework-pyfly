@@ -1,0 +1,14 @@
+"""{{ names.pascal }} command."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from pyfly.cqrs import Command
+
+
+@dataclass(frozen=True)
+class {{ names.pascal }}(Command[str]):
+    """Command to {{ names.human }}."""
+
+    # TODO: add command fields
