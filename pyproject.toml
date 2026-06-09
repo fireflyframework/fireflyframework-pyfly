@@ -198,7 +198,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not integration'"
 markers = [
     "integration: real-backend test via testcontainers or a real transport; needs Docker. Deselected by default — run with -m integration.",
-    "docker: alias for 'integration' (requires a Docker daemon).",
+    "docker: informational marker for Docker-backed tests; apply ALONGSIDE 'integration' (it does not by itself control default selection).",
 ]
 
 [tool.ruff]

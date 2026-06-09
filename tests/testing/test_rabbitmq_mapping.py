@@ -18,10 +18,7 @@ from __future__ import annotations
 from pyfly.testing import pyfly_config_for
 
 
-class _FakeRabbitMq:  # mimics testcontainers RabbitMqContainer surface we use
-    def __init__(self) -> None:
-        self.__class__.__name__ = "RabbitMqContainer"
-
+class _FakeRabbitMqContainer:  # name drives pyfly_config_for dispatch (matches sibling fakes)
     def get_container_host_ip(self) -> str:
         return "127.0.0.1"
 
@@ -31,6 +28,6 @@ class _FakeRabbitMq:  # mimics testcontainers RabbitMqContainer surface we use
 
 
 def test_pyfly_config_for_maps_rabbitmq() -> None:
-    cfg = pyfly_config_for(_FakeRabbitMq())
+    cfg = pyfly_config_for(_FakeRabbitMqContainer())
     assert cfg["pyfly.eda.rabbitmq.url"] == "amqp://guest:guest@127.0.0.1:55672/"
     assert cfg["pyfly.messaging.rabbitmq.url"] == "amqp://guest:guest@127.0.0.1:55672/"

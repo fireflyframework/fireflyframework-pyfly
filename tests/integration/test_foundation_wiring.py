@@ -36,5 +36,10 @@ def test_unavailable_helper_fails_when_required(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.parametrize("name", ["redis_url", "pg_url", "mysql_url", "mongo_url", "kafka_url", "amqp_url"])
-def test_backend_fixture_is_registered(request: pytest.FixtureRequest, name: str) -> None:
-    assert name in request.fixturenames or request._fixturemanager.getfixturedefs(name, request.node) is not None
+def test_backend_fixture_is_defined(name: str) -> None:
+    # The fixtures are module-level functions in conftest; their presence as attributes proves
+    # they are defined (no public pytest API exposes "is this fixture registered" without
+    # requesting it, which would start a container).
+    import tests.integration.conftest as it
+
+    assert hasattr(it, name)

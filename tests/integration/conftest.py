@@ -44,6 +44,10 @@ from pyfly.testing import (
 _INTEGRATION_DIR = Path(__file__).resolve().parent
 REQUIRE_DOCKER = os.environ.get("PYFLY_INTEGRATION_REQUIRE_DOCKER") == "1"
 
+# Files under tests/integration/ that get the `integration` marker but do NOT need a real backend,
+# so they must not trip the PYFLY_INTEGRATION_REQUIRE_DOCKER fail-hard gate.
+_DOCKER_GATE_EXEMPT = {"test_foundation_wiring.py"}
+
 
 def unavailable(reason: str) -> NoReturn:
     """Skip the test — unless PYFLY_INTEGRATION_REQUIRE_DOCKER=1, then fail hard (CI gate)."""
@@ -58,10 +62,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     then (if Docker is required but unreachable) abort the whole run so the CI job fails."""
     has_integration = False
     for item in items:
-        item_path = Path(str(getattr(item, "path", item.fspath))).resolve()
+        item_path = item.path.resolve()  # pytest >= 7 guarantees Node.path (a pathlib.Path)
         if item_path == _INTEGRATION_DIR or _INTEGRATION_DIR in item_path.parents:
             item.add_marker(pytest.mark.integration)
-            if "test_foundation_wiring.py" not in item_path.name and "test_marker" not in item_path.name:
+            if item_path.name not in _DOCKER_GATE_EXEMPT:
                 has_integration = True
     if REQUIRE_DOCKER and has_integration and not is_docker_available():
         raise pytest.UsageError("PYFLY_INTEGRATION_REQUIRE_DOCKER=1 but no Docker daemon is reachable")
@@ -107,6 +111,8 @@ def pg_url() -> Iterator[str]:
             container.stop()
 
 
+# The fixtures below are session-scoped: one container is shared for the whole run (fast to start
+# once). Tests using them must namespace their data (unique keys/topics/tables) — state is shared.
 @pytest.fixture(scope="session")
 def mysql_url() -> Iterator[str]:
     env = os.environ.get("PYFLY_IT_MYSQL_URL")
