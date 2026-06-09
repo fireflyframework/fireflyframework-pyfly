@@ -321,3 +321,36 @@ def shell_command_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool)
     _simple_generate(
         ctx, name, subdir="commands", suffix="_command", template="shell_command.py.j2", force=force, dry_run=dry_run
     )
+
+
+@generate_group.command("resource")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def resource_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a full CRUD stack: entity + dto + repository + service + controller + test."""
+    info = _resolve_info(ctx)
+    context = _context(info, name)
+    n: Names = context["names"]
+    pkg = info.package_dir
+    controller_tmpl = "controller_web.py.j2" if info.archetype == "web" else "controller_rest.py.j2"
+
+    specs = [
+        ("models", "", "entity.py.j2"),
+        ("dto", "_dto", "dto.py.j2"),
+        ("repositories", "_repository", "repository.py.j2"),
+        ("services", "_service", "service.py.j2"),
+        ("controllers", "_controller", controller_tmpl),
+    ]
+    artifacts: list[Artifact] = []
+    for subdir, suffix, template in specs:
+        out_dir = pkg / subdir
+        init = _ensure_init(out_dir, dry_run=dry_run)
+        if init:
+            artifacts.append(init)
+        artifacts.append(Artifact(subdir, out_dir / f"{n.snake}{suffix}.py", _render(template, context)))
+    artifacts.append(
+        Artifact("test", info.tests_dir / f"test_{n.snake}_service.py", _render("test_service.py.j2", context))
+    )
+    actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
+    _report(info, actions, dry_run=dry_run)
