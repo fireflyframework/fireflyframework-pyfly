@@ -80,3 +80,66 @@ def conditions_cmd(url: str | None, as_json: bool) -> None:
         ctx = boot_context()
         data = run_async(ConditionsEndpoint(ctx).handle())
     _emit(data, as_json=as_json, title="Conditions")
+
+
+@click.command("env")
+@_url_option
+def env_cmd(url: str | None, as_json: bool) -> None:
+    """Show resolved configuration and active profiles."""
+    if url:
+        data = ActuatorClient(url).get("env")
+    else:
+        from pyfly.actuator.endpoints.env_endpoint import EnvEndpoint
+
+        ctx = boot_context()
+        data = run_async(EnvEndpoint(ctx).handle())
+    _emit(data, as_json=as_json, title="Environment")
+
+
+@click.command("health")
+@_url_option
+def health_cmd(url: str | None, as_json: bool) -> None:
+    """Show application health."""
+    if url:
+        data = ActuatorClient(url).get("health")
+    else:
+        from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
+        from pyfly.actuator.health import HealthAggregator
+
+        ctx = boot_context()
+        try:
+            aggregator = ctx.get_bean(HealthAggregator)
+        except Exception:  # noqa: BLE001 — actuator may be disabled; use a fresh aggregator
+            aggregator = HealthAggregator()
+        data = run_async(HealthEndpoint(aggregator).handle())
+    _emit(data, as_json=as_json, title="Health")
+
+
+@click.command("metrics")
+@click.argument("name", required=False)
+@_url_option
+def metrics_cmd(name: str | None, url: str | None, as_json: bool) -> None:
+    """List metrics (or one metric's detail)."""
+    if url:
+        data = ActuatorClient(url).get(f"metrics/{name}" if name else "metrics")
+    else:
+        from pyfly.actuator.endpoints.metrics_endpoint import MetricsEndpoint
+
+        try:
+            data = run_async(MetricsEndpoint().handle())
+        except ImportError:
+            console.print("[error]✗[/error] metrics require prometheus_client (install pyfly[observability]).")
+            raise SystemExit(1) from None
+    _emit(data, as_json=as_json, title="Metrics")
+
+
+@click.command("actuator")
+@click.argument("endpoint")
+@_url_option
+def actuator_cmd(endpoint: str, url: str | None, as_json: bool) -> None:
+    """GET an arbitrary actuator endpoint (remote-only; requires --url)."""
+    if not url:
+        console.print("[error]✗[/error] 'actuator' requires --url (it queries a running app).")
+        raise SystemExit(1)
+    data = ActuatorClient(url).get(endpoint)
+    _emit(data, as_json=as_json, title=f"actuator/{endpoint}")

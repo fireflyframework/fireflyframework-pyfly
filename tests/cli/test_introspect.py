@@ -86,3 +86,21 @@ class TestConditions:
         _boot(monkeypatch, fixture_app)
         result = CliRunner().invoke(conditions_cmd, [])
         assert result.exit_code == 0, result.output
+
+
+class TestEnvHealth:
+    def test_env_offline(self, monkeypatch, fixture_app) -> None:
+        from pyfly.cli.introspect_cmds import env_cmd
+
+        _boot(monkeypatch, fixture_app)
+        result = CliRunner().invoke(env_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        assert "activeProfiles" in result.output or "propertySources" in result.output
+
+    def test_health_offline(self, monkeypatch, fixture_app) -> None:
+        from pyfly.cli.introspect_cmds import health_cmd
+
+        _boot(monkeypatch, fixture_app)
+        result = CliRunner().invoke(health_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "UP" in result.output or "status" in result.output.lower()
