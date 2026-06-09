@@ -171,6 +171,12 @@ class SqlAlchemyEventStore:
                     evt.aggregate_id = aggregate_id
                     evt.aggregate_type = aggregate_type
                     evt.sequence = expected_version + i
+                    # Strip tzinfo for TIMESTAMP columns — asyncpg rejects
+                    # tz-aware datetimes against TIMESTAMP WITHOUT TIME ZONE.
+                    # Full tz info is preserved in the JSON payload and restored
+                    # on deserialisation (mirrors orchestration SqlAlchemy adapter).
+                    _oa = evt.occurred_at
+                    occurred = _oa.replace(tzinfo=None) if _oa.tzinfo is not None else _oa
                     await conn.execute(
                         text(
                             """
@@ -188,7 +194,7 @@ class SqlAlchemyEventStore:
                             "etype": evt.event_type,
                             "payload": evt.to_json(),
                             "meta": "{}",
-                            "occurred": evt.occurred_at,
+                            "occurred": occurred,
                             "ver": evt.version,
                             "tenant": evt.tenant_id,
                         },

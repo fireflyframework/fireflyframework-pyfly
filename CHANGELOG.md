@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.85 (2026-06-09)
+
+### Added / Fixed (durable adapters wave — parity initiative SP-5)
+
+- **Orchestration persistence is now durable + config-selectable.** `pyfly.transactional.persistence.provider`
+  ∈ `memory` (default) | `redis` | `sqlalchemy` | `cache` chooses where orchestration execution state is
+  stored (previously only in-memory was auto-wired). Fixed the `CachePersistenceProvider` — it kept a
+  non-durable in-process index and called a non-existent `set()` method; it now uses the `CacheAdapter`
+  port correctly and enumerates state from the cache backend, so it is durable across processes/restarts.
+- **Event sourcing durability.** New `SqlAlchemySnapshotStore` (table `pyfly_snapshots`, sequence-guarded
+  upsert) and config-selectable event/snapshot stores (`pyfly.eventsourcing.store.provider` /
+  `…snapshot.provider` = `memory` | `sqlalchemy`). New `EventSourcingPublisher` bridges stored events onto
+  the `pyfly.eda` bus when an `EventPublisher` is present (`pyfly.eventsourcing.eda.destination`). Fixed a
+  timezone bug in `SqlAlchemyEventStore.append` for asyncpg, and added a real-Postgres integration test
+  covering append/load/stream_all/latest_version + snapshots.
+- **PostgreSQL cache adapter** (`PostgresCacheAdapter`, parity with Java `PostgresCacheAdapter`): a durable
+  SQL cache (`pyfly_cache_entries`, BYTEA value, `TIMESTAMPTZ` expiry, `ON CONFLICT` upsert, LIKE-prefix
+  evict) selectable via `pyfly.cache.provider=postgres` / `pyfly.cache.postgres.url`.
+- Real-backend (testcontainers) integration tests for all of the above (orchestration Redis/Postgres,
+  event-store/snapshot Postgres, Postgres cache), plus unit coverage and docs.
+
+> Note: a fully durable SQL transactional **outbox** with a relay loop (replacing the in-memory outbox) is
+> deferred to a later pass; the snapshot store + EDA publisher bridge land the core durability + integration.
+
 ## v26.06.84 (2026-06-09)
 
 ### Added

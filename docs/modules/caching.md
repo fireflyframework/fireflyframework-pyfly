@@ -14,18 +14,19 @@ with pluggable backends. Following the hexagonal architecture pattern, a
 2. [CacheAdapter Protocol](#cacheadapter-protocol)
 3. [InMemoryCache](#inmemorycache)
 4. [RedisCacheAdapter](#rediscacheadapter)
-5. [CacheManager: Failover and Resilience](#cachemanager-failover-and-resilience)
-6. [Declarative Caching Decorators](#declarative-caching-decorators)
+5. [PostgresCacheAdapter](#postgrescacheadapter)
+6. [CacheManager: Failover and Resilience](#cachemanager-failover-and-resilience)
+7. [Declarative Caching Decorators](#declarative-caching-decorators)
    - [@cache](#cache)
    - [@cacheable](#cacheable)
      - [Conditional Caching: condition and unless](#conditional-caching-condition-and-unless)
    - [@cache_put](#cache_put)
    - [@cache_evict](#cache_evict)
-7. [Key Templates](#key-templates)
-8. [Auto-Configuration](#auto-configuration)
-9. [Configuration Reference](#configuration-reference)
-10. [Complete Example: Product Catalog Service](#complete-example-product-catalog-service)
-11. [Testing with InMemoryCache](#testing-with-inmemorycache)
+8. [Key Templates](#key-templates)
+9. [Auto-Configuration](#auto-configuration)
+10. [Configuration Reference](#configuration-reference)
+11. [Complete Example: Product Catalog Service](#complete-example-product-catalog-service)
+12. [Testing with InMemoryCache](#testing-with-inmemorycache)
 
 ---
 
@@ -37,8 +38,9 @@ Application Code (decorators / direct calls)
           v
     CacheAdapter  (protocol / port)
           |
-          +-- InMemoryCache       (dev / test, single-process)
-          +-- RedisCacheAdapter   (production, via redis.asyncio)
+          +-- InMemoryCache         (dev / test, single-process)
+          +-- RedisCacheAdapter     (production, via redis.asyncio)
+          +-- PostgresCacheAdapter  (production, via SQLAlchemy async + asyncpg)
           |
           v
     CacheManager  (optional: primary + fallback with auto-failover)
@@ -190,6 +192,111 @@ removed server-side without any lazy-deletion overhead.
 > **Note:** When using auto-configuration, `start()` and `stop()` are called automatically
 > by the `ApplicationContext` during startup and shutdown. You only need to call them
 > manually if you create a cache adapter outside the DI container.
+
+---
+
+## PostgresCacheAdapter
+
+The `PostgresCacheAdapter` is a **durable, production-grade** cache backend
+backed by a PostgreSQL table via an async SQLAlchemy engine. It is suited for
+environments where Redis is not available but PostgreSQL already is, or when
+cache durability across process restarts is required.
+
+**Install:** `uv add "pyfly[data-relational,postgresql]"` (this pulls in
+`sqlalchemy[asyncio]` and `asyncpg`). A clear `ValueError` is raised at
+startup if `sqlalchemy.ext.asyncio` is not importable.
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+from pyfly.cache.adapters.postgres import PostgresCacheAdapter
+
+engine = create_async_engine("postgresql+asyncpg://user:pass@host/db")
+cache = PostgresCacheAdapter(engine=engine)
+
+# The adapter creates the table on first use (lazy DDL):
+await cache.start()
+
+# Store a value with a 10-minute TTL
+from datetime import timedelta
+await cache.put("user:123", {"name": "Alice"}, ttl=timedelta(minutes=10))
+
+# Retrieve (deserialized automatically)
+user = await cache.get("user:123")   # {"name": "Alice"}
+
+# Evict a single key
+await cache.evict("user:123")
+
+# Evict all keys sharing a prefix
+count = await cache.evict_by_prefix("user:")
+
+# Clear everything
+await cache.clear()
+```
+
+### Constructor
+
+| Parameter | Type          | Description |
+|-----------|---------------|-------------|
+| `engine`  | `AsyncEngine` | An SQLAlchemy async engine. The adapter does not dispose it on `stop()` because the engine lifecycle belongs to the caller. |
+
+### Table schema
+
+`PostgresCacheAdapter` creates the table `pyfly_cache_entries` on `start()`
+(or lazily on the first operation if `start()` was not awaited):
+
+```sql
+CREATE TABLE IF NOT EXISTS pyfly_cache_entries (
+    cache_key   TEXT PRIMARY KEY,
+    value       BYTEA NOT NULL,
+    expires_at  TIMESTAMPTZ NULL
+)
+```
+
+Values are serialized to bytes before storage and deserialized on retrieval,
+so any serializable Python object can be cached transparently.
+
+### TTL and expiry
+
+When `ttl` is provided the adapter computes an absolute UTC timestamp and
+stores it in the `expires_at` column. Expiry is enforced at **read time**:
+the `WHERE expires_at IS NULL OR expires_at > :now` clause filters expired
+rows on `get()`, `exists()`, and `get_keys()`. There is no background
+eviction process — expired rows linger until the key is accessed or
+`clear()` is called.
+
+### Write semantics
+
+`put()` issues an `INSERT ... ON CONFLICT (cache_key) DO UPDATE` statement
+(upsert), so concurrent writers are safe against unique-key violations.
+`put_if_absent()` uses `ON CONFLICT DO NOTHING` and returns `True` only if
+a row was actually inserted.
+
+Prefix eviction (`evict_by_prefix`) translates the prefix to a SQL `LIKE`
+pattern and deletes all matching rows in a single statement.
+
+### Additional methods
+
+| Method | Description |
+|--------|-------------|
+| `get_keys(pattern, limit)` | Return up to `limit` non-expired keys matching a glob pattern (`*` / `?`). |
+| `get_stats()` | Return a `dict` with `size`, `type`, `requests`, `hits`, `misses`, `evictions`, `hit_rate`. |
+
+### Auto-configuration
+
+Set `pyfly.cache.provider=postgres` and supply the connection URL:
+
+```yaml
+pyfly:
+  cache:
+    enabled: true
+    provider: postgres
+    postgres:
+      url: postgresql+asyncpg://user:pass@host/db
+```
+
+If `sqlalchemy.ext.asyncio` is not installed, a `ValueError` is raised
+immediately at startup with a message directing you to install
+`pyfly[data-relational,postgresql]`.
 
 ---
 
@@ -463,15 +570,25 @@ class ProductService:
 
 ## Auto-Configuration
 
-When using automatic configuration, PyFly detects the available cache library
-and selects the appropriate adapter:
+When using automatic configuration, PyFly selects the cache adapter based on
+the `pyfly.cache.provider` setting (default `auto`). When `auto` is selected,
+the best available adapter is detected at startup:
 
-| Detection Order | Library Checked    | Adapter Selected      |
-|-----------------|--------------------|-----------------------|
-| 1               | `redis.asyncio`    | `RedisCacheAdapter`   |
-| 2               | *(fallback)*       | `InMemoryCache`       |
+| Detection Order | Library Checked         | Adapter Selected        |
+|-----------------|-------------------------|-------------------------|
+| 1               | `redis.asyncio`         | `RedisCacheAdapter`     |
+| 2               | *(fallback)*            | `InMemoryCache`         |
 
-When Redis is detected, the `CacheManager` can be configured with
+You can also pin a provider explicitly:
+
+| `pyfly.cache.provider` value | Adapter Selected      | Required packages |
+|------------------------------|-----------------------|-------------------|
+| `auto`                       | Detected (see above)  | —                 |
+| `memory`                     | `InMemoryCache`       | None              |
+| `redis`                      | `RedisCacheAdapter`   | `redis[hiredis]`  |
+| `postgres`                   | `PostgresCacheAdapter` | `sqlalchemy[asyncio]` + `asyncpg` |
+
+When Redis is detected in auto mode, the `CacheManager` can be configured with
 `RedisCacheAdapter` as the primary and `InMemoryCache` as the fallback for
 automatic failover.
 
@@ -485,19 +602,23 @@ Configure caching in your `pyfly.yaml`:
 pyfly:
   cache:
     enabled: false
-    provider: memory      # "redis" or "memory"
-    ttl: 300              # Default TTL in seconds (5 minutes)
+    provider: auto      # auto | memory | redis | postgres
+    ttl: 300            # Default TTL in seconds (5 minutes)
 
     redis:
       url: redis://localhost:6379/0
+
+    postgres:
+      url: postgresql+asyncpg://user:pass@host/db
 ```
 
-| Property                 | Default                      | Description |
-|--------------------------|------------------------------|-------------|
-| `pyfly.cache.enabled`   | `false`                      | Enable or disable caching globally. |
-| `pyfly.cache.provider`  | `"memory"`                   | Cache provider: `"redis"` or `"memory"`. |
-| `pyfly.cache.ttl`       | `300`                        | Default TTL in seconds, applied when decorators do not specify their own TTL. |
-| `pyfly.cache.redis.url` | `"redis://localhost:6379/0"` | Redis connection URL (only used when provider is `"redis"` or auto-detected). |
+| Property                    | Default                      | Description |
+|-----------------------------|------------------------------|-------------|
+| `pyfly.cache.enabled`      | `false`                      | Enable or disable caching globally. |
+| `pyfly.cache.provider`     | `"auto"`                     | Cache provider: `"auto"`, `"memory"`, `"redis"`, or `"postgres"`. |
+| `pyfly.cache.ttl`          | `300`                        | Default TTL in seconds, applied when decorators do not specify their own TTL. |
+| `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (used when provider is `"redis"` or auto-detected). |
+| `pyfly.cache.postgres.url` | `"postgresql+asyncpg://localhost:5432/cache"` | PostgreSQL connection URL (used when provider is `"postgres"`). |
 
 ---
 

@@ -84,6 +84,13 @@ class SqlAlchemyPersistenceProvider:
                 payload = EXCLUDED.payload
             """
         )
+
+        # Strip tzinfo for TIMESTAMP columns — asyncpg rejects tz-aware datetimes
+        # against TIMESTAMP WITHOUT TIME ZONE.  Full tz info is preserved in the
+        # JSON payload and restored on deserialisation.
+        def _naive(dt: datetime | None) -> datetime | None:
+            return dt.replace(tzinfo=None) if dt is not None else None
+
         async with self._engine.begin() as conn:
             await conn.execute(
                 sql,
@@ -92,9 +99,9 @@ class SqlAlchemyPersistenceProvider:
                     "name": state.name,
                     "pattern": state.pattern.value,
                     "status": state.status.value,
-                    "started": state.started_at,
-                    "updated": state.updated_at,
-                    "completed": state.completed_at,
+                    "started": _naive(state.started_at),
+                    "updated": _naive(state.updated_at),
+                    "completed": _naive(state.completed_at),
                     "payload": raw,
                 },
             )
