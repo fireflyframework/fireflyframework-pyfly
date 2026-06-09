@@ -20,10 +20,11 @@ Registers an :class:`EventPublisher` bean keyed on ``pyfly.eda.provider``:
 * ``kafka`` — :class:`KafkaEventBus`, when ``aiokafka`` is available.
 * ``redis`` — :class:`RedisStreamsEventBus`, when ``redis`` is available.
 * ``postgres`` — :class:`PostgresEventBus`, when ``asyncpg`` is available.
+* ``rabbitmq`` — :class:`RabbitMqEventBus`, when ``aio_pika`` is available.
 
 Configuration keys (all optional, prefix ``pyfly.eda.``):
 
-* ``provider`` — ``memory | kafka | redis | postgres | auto``.
+* ``provider`` — ``memory | kafka | redis | postgres | rabbitmq | auto``.
 * ``destinations`` — comma-separated list of topics / streams /
   destinations to consume from. Defaults to ``pyfly.events``.
 * ``group`` — consumer group / cursor name. Defaults to
@@ -34,6 +35,8 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
 * ``postgres.listen-dsn`` — Optional dedicated DSN for the LISTEN
   connection. Defaults to ``postgres.dsn``.
 * ``postgres.channel`` — pg_notify channel. Default ``pyfly_eda``.
+* ``rabbitmq.url`` — AMQP URL. Default ``amqp://guest:guest@localhost/``.
+* ``rabbitmq.exchange-name`` — Exchange name. Default ``pyfly``.
 """
 
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
@@ -69,6 +72,8 @@ class EdaAutoConfiguration:
             return "postgres"
         if AutoConfiguration.is_available("redis"):
             return "redis"
+        if AutoConfiguration.is_available("aio_pika"):
+            return "rabbitmq"
         return "memory"
 
     @bean
@@ -122,6 +127,19 @@ class EdaAutoConfiguration:
                 channel=channel,
                 destinations=destinations,
                 group=group,
+            )
+
+        if provider == "rabbitmq":
+            from pyfly.eda.adapters.rabbitmq import RabbitMqEventBus
+
+            url = str(config.get("pyfly.eda.rabbitmq.url", "amqp://guest:guest@localhost/"))
+            exchange_name = str(config.get("pyfly.eda.rabbitmq.exchange-name", "pyfly"))
+            return RabbitMqEventBus(
+                url=url,
+                exchange_name=exchange_name,
+                destinations=destinations,
+                group=group,
+                serializer=serializer,
             )
 
         from pyfly.eda.adapters.memory import InMemoryEventBus
