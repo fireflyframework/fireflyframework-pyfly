@@ -44,10 +44,6 @@ from pyfly.testing import (
 _INTEGRATION_DIR = Path(__file__).resolve().parent
 REQUIRE_DOCKER = os.environ.get("PYFLY_INTEGRATION_REQUIRE_DOCKER") == "1"
 
-# Files under tests/integration/ that get the `integration` marker but do NOT need a real backend,
-# so they must not trip the PYFLY_INTEGRATION_REQUIRE_DOCKER fail-hard gate.
-_DOCKER_GATE_EXEMPT = {"test_foundation_wiring.py"}
-
 
 def unavailable(reason: str) -> NoReturn:
     """Skip the test — unless PYFLY_INTEGRATION_REQUIRE_DOCKER=1, then fail hard (CI gate)."""
@@ -65,8 +61,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         item_path = item.path.resolve()  # pytest >= 7 guarantees Node.path (a pathlib.Path)
         if item_path == _INTEGRATION_DIR or _INTEGRATION_DIR in item_path.parents:
             item.add_marker(pytest.mark.integration)
-            if item_path.name not in _DOCKER_GATE_EXEMPT:
-                has_integration = True
+            has_integration = True
     if REQUIRE_DOCKER and has_integration and not is_docker_available():
         raise pytest.UsageError("PYFLY_INTEGRATION_REQUIRE_DOCKER=1 but no Docker daemon is reachable")
 
