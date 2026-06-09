@@ -61,6 +61,10 @@ def _parse_duration(raw: str | int | float) -> timedelta:
     raise ValueError(f"Unknown duration unit {unit!r}")  # pragma: no cover
 
 
+# Public alias — reused by other modules (e.g. the callbacks circuit-breaker config).
+parse_duration = _parse_duration
+
+
 class ResilienceRegistry:
     """Registry of named resilience instances built from configuration.
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_property
+from pyfly.core.config import Config
 from pyfly.webhooks.event_listener import InMemoryWebhookEventStore, WebhookEventStore
 from pyfly.webhooks.processor import WebhookProcessor
 
@@ -14,7 +15,7 @@ from pyfly.webhooks.processor import WebhookProcessor
 @conditional_on_property("pyfly.webhooks.enabled", having_value="true")
 class WebhooksAutoConfiguration:
     @bean
-    def webhook_event_store(self, config: dict[str, object] | None = None) -> WebhookEventStore:
+    def webhook_event_store(self, config: Config) -> WebhookEventStore:
         """Build the idempotency store selected by ``pyfly.webhooks.idempotency.provider``.
 
         Supported values (default ``in-memory``):
@@ -27,8 +28,7 @@ class WebhooksAutoConfiguration:
           with a TTL of ``pyfly.webhooks.idempotency.ttl-seconds`` seconds
           (default ``86400``).  Requires the ``redis`` extra (``redis[asyncio]``).
         """
-        cfg = config or {}
-        provider = str(cfg.get("pyfly.webhooks.idempotency.provider", "in-memory"))
+        provider = str(config.get("pyfly.webhooks.idempotency.provider", "in-memory"))
 
         if provider == "redis":
             try:
@@ -42,8 +42,8 @@ class WebhooksAutoConfiguration:
 
             from pyfly.webhooks.redis_event_store import RedisWebhookEventStore
 
-            redis_url = str(cfg.get("pyfly.webhooks.idempotency.redis.url", "redis://localhost:6379/0"))
-            ttl = int(str(cfg.get("pyfly.webhooks.idempotency.ttl-seconds", "86400")))
+            redis_url = str(config.get("pyfly.webhooks.idempotency.redis.url", "redis://localhost:6379/0"))
+            ttl = int(str(config.get("pyfly.webhooks.idempotency.ttl-seconds", "86400")))
             client = aioredis.from_url(redis_url)
             return RedisWebhookEventStore(client, ttl_seconds=ttl)
 
