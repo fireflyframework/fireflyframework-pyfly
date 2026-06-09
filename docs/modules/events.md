@@ -15,9 +15,9 @@ guide covers both in depth.
 3. [The EventEnvelope](#the-eventenvelope)
 4. [ErrorStrategy Enum](#errorstrategy-enum)
 5. [EventPublisher Protocol](#eventpublisher-protocol)
-6. [EventConsumer Protocol](#eventconsumer-protocol)
-7. [EventHandler Callable](#eventhandler-callable)
-8. [InMemoryEventBus](#inmemoryeventbus)
+6. [EventHandler Callable](#eventhandler-callable)
+7. [InMemoryEventBus](#inmemoryeventbus)
+8. [Provider Selection](#provider-selection)
 9. [Declarative Decorators](#declarative-decorators)
    - [@event_publisher](#event_publisher)
    - [@publish_result](#publish_result)
@@ -43,8 +43,11 @@ Application / Domain Services
           v
    EventPublisher  (protocol / port)
           |
-          +-- InMemoryEventBus   (single-process, local pub/sub)
-          +-- (future adapters)  (Kafka-backed, Redis Streams, etc.)
+          +-- InMemoryEventBus      (single-process, local pub/sub)
+          +-- KafkaEventBus         (Apache Kafka via aiokafka)
+          +-- RedisStreamsEventBus   (Redis Streams via redis-py)
+          +-- PostgresEventBus      (pg_notify via asyncpg)
+          +-- RabbitMqEventBus      (RabbitMQ via aio-pika)
 ```
 
 Events are wrapped in an `EventEnvelope` that carries the payload alongside
@@ -156,25 +159,6 @@ class EventPublisher(Protocol):
 
 ---
 
-## EventConsumer Protocol
-
-The `EventConsumer` protocol defines the lifecycle for components that receive
-events from external sources:
-
-```python
-from pyfly.eda.ports.outbound import EventConsumer
-
-class EventConsumer(Protocol):
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
-```
-
-This protocol is primarily used by adapters that poll or listen on external
-event sources (message brokers, streams) and is separate from the in-process
-`EventPublisher`.
-
----
-
 ## EventHandler Callable
 
 An `EventHandler` is a type alias for any async callable that accepts an
@@ -248,6 +232,41 @@ When you call `publish()`, the bus:
 3. For each pair where `fnmatch.fnmatch(event_type, pattern)` is `True`,
    invokes the handler with the envelope.
 4. Handlers are called sequentially in subscription order.
+
+---
+
+## Provider Selection
+
+PyFly auto-configures the `EventPublisher` bean from the `pyfly.eda.provider`
+property. All keys are optional; the defaults work for local development.
+
+| Config key | Type | Default | Description |
+|---|---|---|---|
+| `pyfly.eda.provider` | `str` | `auto` | `auto \| memory \| kafka \| redis \| postgres \| rabbitmq`. When `auto`, the strongest available broker library wins (kafka > postgres > redis > rabbitmq > memory). |
+| `pyfly.eda.destinations` | `str` | `pyfly.events` | Comma-separated list of topics / streams / routing keys to consume from. |
+| `pyfly.eda.group` | `str` | `pyfly-default` | Consumer group name (used as Kafka group ID, Redis consumer group, Postgres cursor name, or RabbitMQ queue prefix). |
+| `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `avro`, or `protobuf`. |
+| `pyfly.eda.kafka.bootstrap-servers` | `str` | `localhost:9092` | Kafka bootstrap server list. |
+| `pyfly.eda.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL. |
+| `pyfly.eda.postgres.dsn` | `str` | *(required)* | PostgreSQL DSN for the producer connection pool. |
+| `pyfly.eda.postgres.listen-dsn` | `str` | same as `dsn` | Optional dedicated DSN for the LISTEN connection. |
+| `pyfly.eda.postgres.channel` | `str` | `pyfly_eda` | `pg_notify` channel name. |
+| `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
+| `pyfly.eda.rabbitmq.exchange-name` | `str` | `pyfly` | Name of the durable DIRECT exchange to declare. |
+
+### Example configuration
+
+```yaml
+# pyfly.yaml
+pyfly:
+  eda:
+    provider: "rabbitmq"
+    destinations: "orders,payments"
+    group: "order-service"
+    rabbitmq:
+      url: "amqp://user:pass@rabbitmq:5672/"
+      exchange-name: "myapp"
+```
 
 ---
 
@@ -587,11 +606,11 @@ PyFly provides both an EDA module (`pyfly.eda`) and a messaging module
 
 | Criterion | Domain Events (`pyfly.eda`) | Messaging (`pyfly.messaging`) |
 |-----------|----------------------------|-------------------------------|
-| **Scope** | In-process (same Python process). | Cross-process, cross-service, distributed. |
-| **Transport** | `InMemoryEventBus` -- direct function calls. | Kafka, RabbitMQ, or other external brokers. |
+| **Scope** | In-process by default; also distributed via the broker buses. | Cross-process, cross-service, distributed. |
+| **Transport** | `InMemoryEventBus` (direct calls) or a broker-backed bus: Kafka, Redis Streams, Postgres, RabbitMQ. | Kafka, RabbitMQ, or other external brokers. |
 | **Payload** | `EventEnvelope` with typed `dict` payload. | Raw `bytes` -- you choose the serialization format. |
 | **Pattern** | Glob-matched event types (`"order.*"`). | Topic-based with consumer groups. |
-| **Durability** | None -- if the process dies, events are lost. | Broker-dependent (Kafka retains messages, RabbitMQ can persist). |
+| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Postgres outbox, Redis Streams, RabbitMQ). | Broker-dependent (Kafka retains messages, RabbitMQ can persist). |
 | **Use case** | Decoupling domain services within a monolith. | Decoupling microservices across network boundaries. |
 
 **Rule of thumb**: If the producer and consumer live in the same process, use

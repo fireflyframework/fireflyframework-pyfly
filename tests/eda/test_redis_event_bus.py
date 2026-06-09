@@ -56,7 +56,7 @@ class TestRedisStreamsEventBus:
             raise RuntimeError("BUSYGROUP Consumer Group name already exists")
 
         bus._client.xgroup_create = AsyncMock(side_effect=raise_busy)  # type: ignore[attr-defined]
-        bus._client.close = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+        bus._client.aclose = AsyncMock(return_value=None)  # type: ignore[attr-defined]
         # Replace the consume loop with a no-op so start() can return
         # without spinning the real xreadgroup loop.
 
@@ -72,7 +72,7 @@ class TestRedisStreamsEventBus:
     async def test_stop_cancels_consume_task(self) -> None:
         bus = _bus()
         bus._client.xgroup_create = AsyncMock(return_value=None)  # type: ignore[attr-defined]
-        bus._client.close = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+        bus._client.aclose = AsyncMock(return_value=None)  # type: ignore[attr-defined]
 
         bus.subscribe("*", AsyncMock())
 

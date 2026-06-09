@@ -91,3 +91,34 @@ class TestEdaAutoConfiguration:
     def test_auto_provider_falls_back_to_memory(self) -> None:
         with patch("pyfly.config.auto.AutoConfiguration.is_available", return_value=False):
             assert EdaAutoConfiguration.detect_provider() == "memory"
+
+
+import pytest  # noqa: E402 — local import kept near the tests that use it
+
+
+@pytest.mark.parametrize(
+    ("available_modules", "expected_provider"),
+    [
+        # All present → kafka wins (highest precedence).
+        ({"aiokafka", "asyncpg", "redis", "aio_pika"}, "kafka"),
+        # Only asyncpg → postgres.
+        ({"asyncpg"}, "postgres"),
+        # Only redis → redis.
+        ({"redis"}, "redis"),
+        # Only aio_pika → rabbitmq.
+        ({"aio_pika"}, "rabbitmq"),
+        # Nothing → memory.
+        (set(), "memory"),
+        # Precedence: kafka > postgres > redis > rabbitmq > memory.
+        ({"asyncpg", "redis", "aio_pika"}, "postgres"),
+        ({"redis", "aio_pika"}, "redis"),
+    ],
+)
+def test_detect_provider_parametrized(
+    available_modules: set[str],
+    expected_provider: str,
+) -> None:
+    """detect_provider() returns the right provider for each installed-module combination."""
+    with patch("pyfly.config.auto.AutoConfiguration.is_available") as is_avail:
+        is_avail.side_effect = lambda mod: mod in available_modules
+        assert EdaAutoConfiguration.detect_provider() == expected_provider
