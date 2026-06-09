@@ -98,6 +98,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             repo: Repository[PgProduct, UUID] = Repository(PgProduct, session)
             product = PgProduct(name="Gadget", price=49.99, category="electronics")
             saved = await repo.save(product)
+            await session.commit()
 
         assert isinstance(saved.id, UUID), "Postgres must echo back a proper UUID"
         saved_id = saved.id
@@ -117,6 +118,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             repo = Repository(PgProduct, session)
             await repo.save(PgProduct(name="Thingamajig", price=9.99, category="misc"))
             await repo.save(PgProduct(name="Doohickey", price=19.99, category="misc"))
+            await session.commit()
 
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
@@ -128,6 +130,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             repo = Repository(PgProduct, session)
             for i in range(10):
                 await repo.save(PgProduct(name=f"Item-{i:02d}", price=float(i), category="bulk"))
+            await session.commit()
 
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
@@ -156,6 +159,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             repo = Repository(PgProduct, session)
             await repo.save(PgProduct(name="SuperWidget", price=99.0, category="special"))
             await repo.save(PgProduct(name="superwidget_v2", price=89.0, category="special"))
+            await session.commit()
 
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
@@ -176,6 +180,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             sd_repo: SoftDeleteRepository[PgSoftItem, UUID] = SoftDeleteRepository(PgSoftItem, session)
             item_a = await sd_repo.save(PgSoftItem(label="alpha"))
             item_b = await sd_repo.save(PgSoftItem(label="beta"))
+            await session.commit()
 
         soft_id = item_a.id
 
@@ -183,6 +188,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
         async with session_factory() as session:
             sd_repo = SoftDeleteRepository(PgSoftItem, session)
             await sd_repo.delete(soft_id)
+            await session.commit()
 
         # find_by_id must hide deleted row
         async with session_factory() as session:
@@ -195,6 +201,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
         async with session_factory() as session:
             sd_repo = SoftDeleteRepository(PgSoftItem, session)
             restored = await sd_repo.restore(soft_id)
+            await session.commit()
         assert restored is not None
         assert restored.deleted_at is None
 
@@ -206,6 +213,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
         async with session_factory() as session:
             sd_repo = SoftDeleteRepository(PgSoftItem, session)
             await sd_repo.hard_delete(soft_id)
+            await session.commit()
             assert await sd_repo.find_by_id(soft_id) is None
 
         # --- 9. count / exists ------------------------------------------------
