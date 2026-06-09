@@ -46,6 +46,7 @@ class TestControllerGenerator:
         assert "@rest_controller" in text
         assert '@request_mapping("/orders")' in text
         assert "class OrderController" in text
+        assert (tmp_path / "tests" / "test_order_controller.py").exists()
 
     def test_web_controller_for_web_archetype(self, tmp_path: Path) -> None:
         scaffold(tmp_path, archetype="web")
