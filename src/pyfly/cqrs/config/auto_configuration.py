@@ -27,6 +27,7 @@ from pyfly.core.config import Config
 from pyfly.cqrs.actuator.health import CqrsHealthIndicator
 from pyfly.cqrs.authorization.service import AuthorizationService
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
+from pyfly.cqrs.cache.eda_bridge import EdaCacheInvalidationBridge
 from pyfly.cqrs.command.bus import DefaultCommandBus
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
@@ -65,6 +66,8 @@ class CqrsAutoConfiguration:
       :class:`NoOpEventPublisher`)
     * :class:`DefaultCommandBus`
     * :class:`QueryCacheAdapter` (conditional on cache availability)
+    * :class:`EdaCacheInvalidationBridge` (when an EDA ``EventPublisher`` bean is
+      present; ``None`` otherwise)
     * :class:`DefaultQueryBus`
     """
 
@@ -138,6 +141,30 @@ class CqrsAutoConfiguration:
         # active; otherwise the adapter degrades to a silent no-op. Previously no
         # CacheAdapter was ever passed, so @cacheable queries were never cached.
         return QueryCacheAdapter(cache=cache)
+
+    @bean
+    def eda_cache_invalidation_bridge(
+        self,
+        cache: QueryCacheAdapter,
+        producer: EventPublisher | None = None,
+    ) -> EdaCacheInvalidationBridge | None:
+        """Wire the EDA→CQRS cache-invalidation bridge.
+
+        When an :class:`~pyfly.eda.ports.outbound.EventPublisher` bean is
+        present the bridge is created, subscribed to the bus and returned so
+        that applications can register additional rules via
+        ``bridge.register(event_type, pattern)``.
+
+        When no EDA bus is configured the bean evaluates to ``None`` and the
+        bridge is silently disabled.
+        """
+        if producer is None:
+            _logger.debug("No EventPublisher bean found — EDA cache-invalidation bridge disabled")
+            return None
+        bridge = EdaCacheInvalidationBridge(cache)
+        bridge.subscribe(producer)
+        _logger.debug("EDA cache-invalidation bridge wired to %s", type(producer).__name__)
+        return bridge
 
     @bean
     def query_bus(
