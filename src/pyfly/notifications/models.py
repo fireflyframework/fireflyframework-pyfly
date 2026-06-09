@@ -16,6 +16,7 @@ class EmailStatus(StrEnum):
     DELIVERED = "DELIVERED"
     BOUNCED = "BOUNCED"
     FAILED = "FAILED"
+    SUPPRESSED = "SUPPRESSED"
 
 
 @dataclass
