@@ -12,6 +12,7 @@ from pyfly.idp.models import (
     IdpRole,
     IdpUser,
     LoginRequest,
+    MfaChallenge,
     PasswordChangeRequest,
     SessionIntrospection,
 )
@@ -250,6 +251,51 @@ class AzureAdIdpAdapter:
             resp = await client.get(f"{self._graph}/groups", headers=headers)
             resp.raise_for_status()
             return [IdpRole(name=g["id"], description=g.get("displayName", "")) for g in resp.json().get("value", [])]
+
+    # -- MFA (Java parity) -------------------------------------------------
+
+    async def mfa_challenge(self, user_id: str) -> MfaChallenge:
+        """Azure AD manages MFA natively via Conditional Access policies."""
+        msg = "Azure AD manages MFA natively via Conditional Access policies"
+        raise NotImplementedError(msg)
+
+    async def mfa_verify(self, challenge_id: str, code: str) -> AuthResult:
+        """Azure AD manages MFA natively via Conditional Access policies."""
+        msg = "Azure AD manages MFA natively via Conditional Access policies"
+        raise NotImplementedError(msg)
+
+    # -- Extended user info (Java parity) ----------------------------------
+
+    async def get_user_info(self, access_token: str) -> IdpUser | None:
+        """Fetch /me from Microsoft Graph using a delegated access token."""
+        async with await self._client() as client:
+            resp = await client.get(
+                f"{self._graph}/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if resp.status_code != 200:
+                return None
+            return _from_aad(resp.json())
+
+    async def register_user(self, user: IdpUser, password: str) -> IdpUser:
+        """Public self-registration — delegates to admin create_user with enabled=True."""
+        user.enabled = True
+        return await self.create_user(user, password)
+
+    async def get_roles(self, user_id: str) -> list[IdpRole]:
+        """Return Azure AD group memberships for *user_id* as :class:`IdpRole` objects."""
+        async with await self._client() as client:
+            headers = await self._app_auth_header()
+            resp = await client.get(
+                f"{self._graph}/users/{user_id}/memberOf",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return []
+            return [
+                IdpRole(name=g.get("id", ""), description=g.get("displayName", ""))
+                for g in resp.json().get("value", [])
+            ]
 
 
 def _from_aad(data: dict[str, Any]) -> IdpUser:

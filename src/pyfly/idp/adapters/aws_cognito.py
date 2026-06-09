@@ -13,6 +13,7 @@ from pyfly.idp.models import (
     IdpRole,
     IdpUser,
     LoginRequest,
+    MfaChallenge,
     PasswordChangeRequest,
     SessionIntrospection,
 )
@@ -269,6 +270,47 @@ class AwsCognitoIdpAdapter:
     async def list_roles(self) -> list[IdpRole]:
         client = self._ensure_client()
         data = await self._run(client.list_groups, UserPoolId=self._user_pool_id)
+        return [IdpRole(name=g["GroupName"], description=g.get("Description", "")) for g in data.get("Groups", [])]
+
+    # -- MFA (Java parity) -------------------------------------------------
+
+    async def mfa_challenge(self, user_id: str) -> MfaChallenge:
+        """AWS Cognito manages MFA natively via its auth challenge flow."""
+        msg = "AWS Cognito manages MFA natively via its auth challenge flow"
+        raise NotImplementedError(msg)
+
+    async def mfa_verify(self, challenge_id: str, code: str) -> AuthResult:
+        """AWS Cognito manages MFA natively via its auth challenge flow."""
+        msg = "AWS Cognito manages MFA natively via its auth challenge flow"
+        raise NotImplementedError(msg)
+
+    # -- Extended user info (Java parity) ----------------------------------
+
+    async def get_user_info(self, access_token: str) -> IdpUser | None:
+        """Resolve an access token to the owning :class:`IdpUser` via Cognito GetUser."""
+        client = self._ensure_client()
+        try:
+            data = await self._run(client.get_user, AccessToken=access_token)
+        except Exception:  # noqa: BLE001
+            return None
+        return _from_cognito(data)
+
+    async def register_user(self, user: IdpUser, password: str) -> IdpUser:
+        """Public self-registration — delegates to admin create_user with enabled=True."""
+        user.enabled = True
+        return await self.create_user(user, password)
+
+    async def get_roles(self, user_id: str) -> list[IdpRole]:
+        """Return Cognito group memberships for *user_id* as :class:`IdpRole` objects."""
+        client = self._ensure_client()
+        try:
+            data = await self._run(
+                client.admin_list_groups_for_user,
+                UserPoolId=self._user_pool_id,
+                Username=user_id,
+            )
+        except Exception:  # noqa: BLE001
+            return []
         return [IdpRole(name=g["GroupName"], description=g.get("Description", "")) for g in data.get("Groups", [])]
 
 

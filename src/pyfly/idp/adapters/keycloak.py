@@ -20,6 +20,7 @@ from pyfly.idp.models import (
     IdpRole,
     IdpUser,
     LoginRequest,
+    MfaChallenge,
     PasswordChangeRequest,
     SessionIntrospection,
 )
@@ -287,6 +288,61 @@ class KeycloakIdpAdapter:
             headers = await self._admin_auth_header()
             resp = await client.get(f"{self._admin_path}/roles", headers=headers)
             resp.raise_for_status()
+            return [IdpRole(name=r["name"], description=r.get("description", "")) for r in resp.json()]
+
+    # -- MFA (Java parity) -------------------------------------------------
+
+    async def mfa_challenge(self, user_id: str) -> MfaChallenge:
+        """Keycloak manages MFA server-side during the browser auth flow."""
+        msg = "Keycloak performs MFA server-side during the browser auth flow"
+        raise NotImplementedError(msg)
+
+    async def mfa_verify(self, challenge_id: str, code: str) -> AuthResult:
+        """Keycloak manages MFA server-side during the browser auth flow."""
+        msg = "Keycloak performs MFA server-side during the browser auth flow"
+        raise NotImplementedError(msg)
+
+    # -- Extended user info (Java parity) ----------------------------------
+
+    async def get_user_info(self, access_token: str) -> IdpUser | None:
+        """Fetch user info from the Keycloak realm userinfo endpoint."""
+        async with await self._client() as client:
+            resp = await client.get(
+                f"{self._base_url}/realms/{self._realm}/protocol/openid-connect/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            return IdpUser(
+                id=data.get("sub", ""),
+                username=data.get("preferred_username", ""),
+                email=data.get("email", ""),
+                email_verified=data.get("email_verified", False),
+                first_name=data.get("given_name", ""),
+                last_name=data.get("family_name", ""),
+            )
+
+    async def register_user(self, user: IdpUser, password: str) -> IdpUser:
+        """Public self-registration — delegates to admin create_user."""
+        user.enabled = True
+        return await self.create_user(user, password)
+
+    async def get_roles(self, user_id: str) -> list[IdpRole]:
+        """Return realm role-mappings for *user_id* via the admin API.
+
+        Returns an empty list when the user is not found (404) or on any other
+        non-200 response, consistent with :class:`AwsCognitoIdpAdapter` and
+        :class:`AzureAdIdpAdapter`.
+        """
+        async with await self._client() as client:
+            headers = await self._admin_auth_header()
+            resp = await client.get(
+                f"{self._admin_path}/users/{user_id}/role-mappings/realm",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return []
             return [IdpRole(name=r["name"], description=r.get("description", "")) for r in resp.json()]
 
 
