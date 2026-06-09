@@ -26,7 +26,9 @@ from pyfly.cli.console import console
 
 def _emit(data: Any, *, as_json: bool, title: str) -> None:
     if as_json:
-        console.print_json(json.dumps(data))
+        # Emit raw JSON via click.echo (NOT rich) so output is exact and pipeable —
+        # rich's print_json wraps long lines at the console width, corrupting JSON.
+        click.echo(json.dumps(data, indent=2))
         return
     from rich.pretty import Pretty
 

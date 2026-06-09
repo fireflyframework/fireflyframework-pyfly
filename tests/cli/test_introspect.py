@@ -104,3 +104,15 @@ class TestEnvHealth:
         result = CliRunner().invoke(health_cmd, [])
         assert result.exit_code == 0, result.output
         assert "UP" in result.output or "status" in result.output.lower()
+
+
+class TestJsonIsClean:
+    def test_routes_json_is_parseable(self, monkeypatch, fixture_app) -> None:
+        # The quiet boot must keep startup banner/logs off stdout so --json pipes cleanly.
+        import json
+
+        _boot(monkeypatch, fixture_app)
+        result = CliRunner().invoke(routes_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)  # raises if stdout was contaminated
+        assert "contexts" in parsed

@@ -16,7 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import io
+import os
+import sys
 from typing import Any
 
 from pyfly.cli.console import console
@@ -46,12 +50,31 @@ def _discover_app_class() -> type:
 
 
 def boot_context(*, app_class: type | None = None) -> Any:
-    """Boot the application context offline (no HTTP server) and return it."""
+    """Boot the application context offline (no HTTP server) and return it.
+
+    Startup is run *quietly*: the framework banner is suppressed and stdout is
+    captured, so a command's ``--json`` output stays clean and pipeable
+    (e.g. ``pyfly routes --json | jq``). Startup output is only surfaced if
+    startup fails.
+    """
     from pyfly.core.application import PyFlyApplication
 
     cls = app_class or _discover_app_class()
+    # Keep startup quiet so a command's output (especially --json) stays clean:
+    #  - skip the framework banner (the sentinel ``run`` uses for worker processes),
+    #  - silence startup log records (structlog writes to the real stdout, bypassing
+    #    the redirect below — only a log-level bump reliably suppresses them).
+    os.environ.setdefault("_PYFLY_BANNER_PRINTED", "1")
+    os.environ.setdefault("PYFLY_LOGGING_LEVEL_ROOT", "CRITICAL")
     app = PyFlyApplication(cls)
-    run_async(app.startup())
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            run_async(app.startup())
+    except Exception:
+        # On failure, replay whatever startup printed so the error has context.
+        sys.stdout.write(captured.getvalue())
+        raise
     return app.context
 
 
