@@ -59,6 +59,23 @@ class ExtensionRegistry:
         async with self._lock:
             return [inst for _, inst in self._extensions.get(point_id, [])]
 
+    async def get_extension(self, point_id: str) -> Any:
+        """Return the single highest-priority extension for *point_id*.
+
+        Raises:
+            ValueError: if *point_id* is not a registered extension point or
+                has no registered extensions.
+        """
+        async with self._lock:
+            if point_id not in self._points:
+                msg = f"Extension point {point_id!r} is not registered"
+                raise ValueError(msg)
+            entries = self._extensions.get(point_id, [])
+            if not entries:
+                msg = f"Extension point {point_id!r} has no registered extensions"
+                raise ValueError(msg)
+            return entries[0][1]
+
     async def points(self) -> list[str]:
         async with self._lock:
             return list(self._extensions.keys())
