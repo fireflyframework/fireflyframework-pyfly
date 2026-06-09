@@ -194,14 +194,11 @@ class TestQueryBusWithRealCache:
         await bus.query(query)
         assert handler.call_count == 1
 
-        # The bus builds the cache key as ":cqrs:{query.get_cache_key()}" and
-        # passes it verbatim to the adapter.  The QueryCacheAdapter in turn
-        # prefixes with ":cqrs:" again before touching the underlying store.
-        # To evict through the adapter at the same level the bus uses, we must
-        # call bus.clear_cache with the full ":cqrs:…" key so the bus's evict
-        # call matches what was stored.
-        bus_key = f":cqrs:{query.get_cache_key()}"
-        await bus.clear_cache(bus_key)
+        # The bus passes the RAW key to the adapter; the QueryCacheAdapter is
+        # the single layer that applies the ":cqrs:" prefix.  So we evict using
+        # the raw key — the adapter will resolve to ":cqrs:product:p-evict".
+        raw_key = query.get_cache_key()
+        await bus.clear_cache(raw_key)
 
         # Now the same query must re-hit the handler.
         await bus.query(GetProductQuery(product_id="p-evict"))

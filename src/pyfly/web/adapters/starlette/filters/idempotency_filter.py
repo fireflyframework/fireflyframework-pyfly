@@ -191,6 +191,17 @@ class IdempotencyWebFilter(OncePerRequestFilter):
         # -- Cache miss → call the handler ----------------------------------------
         response: Response = await call_next(request)
 
+        # 5xx responses are transient errors — never cache them so that retries
+        # re-execute the handler rather than replaying an error forever.
+        if response.status_code >= 500:
+            _logger.debug(
+                "idempotency: skipping cache for %s %s — 5xx status %d",
+                method,
+                path,
+                response.status_code,
+            )
+            return response
+
         # After routing, request.scope["endpoint"] is populated by Starlette's
         # router.  Check the @disable_idempotency marker NOW so we never persist
         # a response for a route that opts out.

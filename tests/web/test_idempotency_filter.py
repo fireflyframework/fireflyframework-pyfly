@@ -195,6 +195,8 @@ class TestIdempotencyWebFilter:
         assert _handler_call_count == 2, "@disable_idempotency route must never cache"
         # No replay header
         assert IDEMPOTENCY_REPLAYED_HEADER not in resp2.headers
+        # The cache must be completely empty — nothing was ever stored
+        assert len(cache._store) == 0, "@disable_idempotency must never write to the cache"
 
     # ------------------------------------------------------------------
     # Safe methods (GET) — never cached
@@ -247,6 +249,45 @@ class TestIdempotencyWebFilter:
         assert r2.status_code == 200
         assert _handler_call_count == 1, f"{method} with same key should be replayed from cache"
         assert r2.headers.get(IDEMPOTENCY_REPLAYED_HEADER) == "true"
+
+    # ------------------------------------------------------------------
+    # 5xx responses — never cached; retries re-execute the handler
+    # ------------------------------------------------------------------
+
+    def test_5xx_response_not_cached_and_retry_hits_handler(self) -> None:
+        """A 500 response must NOT be stored; a second identical-key call re-executes."""
+        call_log: list[int] = []
+
+        async def _flaky_handler(request: Request) -> JSONResponse:
+            call_log.append(len(call_log) + 1)
+            if len(call_log) == 1:
+                return JSONResponse({"error": "transient"}, status_code=500)
+            return JSONResponse({"ok": True}, status_code=200)
+
+        cache = InMemoryCache()
+        idem_filter = IdempotencyWebFilter(cache=cache)
+        routes = [Route("/flaky", _flaky_handler, methods=["POST"])]
+        app = Starlette(
+            routes=routes,
+            middleware=[Middleware(WebFilterChainMiddleware, filters=[idem_filter])],
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        key = "key-flaky"
+        r1 = client.post("/flaky", headers={IDEMPOTENCY_KEY_HEADER: key})
+        assert r1.status_code == 500
+        # The 500 must NOT have been cached — no replay header
+        assert IDEMPOTENCY_REPLAYED_HEADER not in r1.headers
+
+        # Second call with the SAME key — handler must be called again (not replayed)
+        r2 = client.post("/flaky", headers={IDEMPOTENCY_KEY_HEADER: key})
+        assert r2.status_code == 200
+        assert len(call_log) == 2, "Handler must be called again after a 5xx — not replayed from cache"
+        # The second (200) response is now cached for future replays
+        r3 = client.post("/flaky", headers={IDEMPOTENCY_KEY_HEADER: key})
+        assert r3.status_code == 200
+        assert r3.headers.get(IDEMPOTENCY_REPLAYED_HEADER) == "true"
+        assert len(call_log) == 2  # third call served from cache
 
     # ------------------------------------------------------------------
     # Exclude-patterns (actuator, health, ready) — filter skips these

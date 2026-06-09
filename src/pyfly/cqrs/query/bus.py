@@ -211,7 +211,13 @@ class DefaultQueryBus:
 
     @staticmethod
     def _build_cache_key(query: Query[Any]) -> str | None:
+        """Return the raw cache key from the query — NO prefix.
+
+        The :class:`~pyfly.cqrs.cache.adapter.QueryCacheAdapter` is the single
+        layer that applies the ``:cqrs:`` prefix, so the bus must pass the raw
+        key to the adapter on every call (get, put, evict).
+        """
         key = query.get_cache_key()
         if key:
-            return f":cqrs:{key}"
+            return key
         return None

@@ -229,7 +229,9 @@ class TestDefaultQueryBus:
         await bus.query(query)
         assert handler.call_count == 1
 
-        cache_key = f":cqrs:{query.get_cache_key()}"
+        # _build_cache_key now returns the RAW key (no ":cqrs:" prefix).
+        # FakeCacheAdapter does not add any prefix, so we evict using the raw key.
+        cache_key = query.get_cache_key()
         await bus.clear_cache(cache_key)
 
         await bus.query(GetOrderQuery(order_id="ord-evict"))

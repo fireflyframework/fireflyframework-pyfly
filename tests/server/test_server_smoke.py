@@ -69,14 +69,14 @@ def _make_config(port: int) -> Any:
 
 async def _wait_for_server(port: int, *, timeout: float = 5.0, interval: float = 0.1) -> None:
     """Poll until the server at *port* responds or *timeout* seconds elapse."""
-    deadline = asyncio.get_event_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + timeout
     while True:
         try:
             async with httpx.AsyncClient() as client:
                 await client.get(f"http://127.0.0.1:{port}/", timeout=1.0)
                 return  # server is up
         except Exception as exc:
-            if asyncio.get_event_loop().time() >= deadline:
+            if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError(f"Server on port {port} did not start within {timeout}s") from exc
             await asyncio.sleep(interval)
 
