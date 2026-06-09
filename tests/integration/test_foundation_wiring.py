@@ -29,7 +29,7 @@ def test_unavailable_helper_fails_when_required(monkeypatch: pytest.MonkeyPatch)
     import tests.integration.conftest as it
 
     monkeypatch.setattr(it, "REQUIRE_DOCKER", True)
-    with pytest.raises(Exception) as excinfo:  # pytest.fail.Exception
+    with pytest.raises(pytest.fail.Exception) as excinfo:
         it.unavailable("no backend")
     assert "no backend" in str(excinfo.value)
 

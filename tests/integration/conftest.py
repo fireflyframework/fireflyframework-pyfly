@@ -47,7 +47,7 @@ REQUIRE_DOCKER = os.environ.get("PYFLY_INTEGRATION_REQUIRE_DOCKER") == "1"
 def unavailable(reason: str) -> NoReturn:
     """Skip the test — unless PYFLY_INTEGRATION_REQUIRE_DOCKER=1, then fail hard (CI gate)."""
     if REQUIRE_DOCKER:
-        raise RuntimeError(reason)
+        pytest.fail(reason, pytrace=False)
     pytest.skip(reason)
 
 
