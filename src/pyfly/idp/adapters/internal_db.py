@@ -183,8 +183,18 @@ class InternalDbIdpAdapter:
     async def mfa_challenge(self, user_id: str) -> MfaChallenge:
         """Create a TOTP challenge for *user_id* (user must exist).
 
-        A challenge_id → user_id mapping is stored so that :meth:`mfa_verify`
-        can resolve the user without exposing the user_id in the public API.
+        The server keeps a private ``challenge_id → user_id`` mapping so that
+        :meth:`mfa_verify` can resolve the user.  The *returned* DTO carries an
+        empty ``user_id`` field — callers (e.g. web controllers) only need the
+        opaque ``challenge_id``, and leaking the internal UUID enables user
+        enumeration.
+
+        .. note::
+            The ``_mfa_challenges`` dict is in-memory and grows without bound.
+            Each unanswered login call adds a new entry.  In production, entries
+            older than a few minutes should be dropped (e.g. by storing a
+            ``created_at`` timestamp and evicting stale entries on access).
+            # TODO: cap or TTL-expire _mfa_challenges before going to production.
         """
         async with self._lock:
             if user_id not in self._users:
@@ -192,7 +202,9 @@ class InternalDbIdpAdapter:
                 raise KeyError(msg)
             challenge_id = secrets.token_urlsafe(32)
             self._mfa_challenges[challenge_id] = user_id
-        return MfaChallenge(challenge_id=challenge_id, user_id=user_id, method="TOTP")
+        # user_id intentionally left empty — the opaque challenge_id is the
+        # only identifier the client should receive.
+        return MfaChallenge(challenge_id=challenge_id, user_id="", method="TOTP")
 
     async def mfa_verify(self, challenge_id: str, code: str) -> AuthResult:
         """Verify a TOTP *code* against *challenge_id* and issue tokens on success.
@@ -298,7 +310,7 @@ class InternalDbIdpAdapter:
         except ImportError as exc:
             msg = "TOTP MFA requires pyotp — `pip install pyfly[security]`"
             raise ImportError(msg) from exc
-        if not pyotp.TOTP(secret).verify(code):
+        if not pyotp.TOTP(secret).verify(code, valid_window=1):
             msg = "invalid MFA code"
             raise PermissionError(msg)
 

@@ -329,14 +329,20 @@ class KeycloakIdpAdapter:
         return await self.create_user(user, password)
 
     async def get_roles(self, user_id: str) -> list[IdpRole]:
-        """Return realm role-mappings for *user_id* via the admin API."""
+        """Return realm role-mappings for *user_id* via the admin API.
+
+        Returns an empty list when the user is not found (404) or on any other
+        non-200 response, consistent with :class:`AwsCognitoIdpAdapter` and
+        :class:`AzureAdIdpAdapter`.
+        """
         async with await self._client() as client:
             headers = await self._admin_auth_header()
             resp = await client.get(
                 f"{self._admin_path}/users/{user_id}/role-mappings/realm",
                 headers=headers,
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                return []
             return [IdpRole(name=r["name"], description=r.get("description", "")) for r in resp.json()]
 
 

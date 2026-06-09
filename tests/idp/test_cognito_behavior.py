@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from pyfly.idp.adapters.aws_cognito import AwsCognitoIdpAdapter
-from pyfly.idp.models import IdpUser, LoginRequest
+from pyfly.idp.models import IdpRole, IdpUser, LoginRequest
 
 USER_POOL_ID = "us-east-1_TestPool"
 CLIENT_ID = "test-client-id"
@@ -98,6 +98,9 @@ class _FakeCognitoClient:
 
     def get_user(self, **kwargs: Any) -> Any:
         return self._dispatch("get_user", **kwargs)
+
+    def admin_list_groups_for_user(self, **kwargs: Any) -> Any:
+        return self._dispatch("admin_list_groups_for_user", **kwargs)
 
 
 def _find_call(calls: list[dict[str, Any]], method: str) -> dict[str, Any]:
@@ -334,3 +337,116 @@ async def test_revoke_role_calls_admin_remove_user_from_group() -> None:
     assert call["Username"] == "alice"
     assert call["GroupName"] == "admins"
     assert ok is True
+
+
+# --------------------------------------------------------------------------- #
+# get_user_info — client.get_user(AccessToken=...) → IdpUser
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_user_info_calls_get_user_with_access_token() -> None:
+    """get_user_info() calls client.get_user(AccessToken=…) and maps the result."""
+    fake = _FakeCognitoClient()
+    fake.register(
+        "get_user",
+        {
+            "Username": "frank",
+            "UserAttributes": [
+                {"Name": "email", "Value": "frank@example.com"},
+                {"Name": "given_name", "Value": "Frank"},
+                {"Name": "family_name", "Value": "Lee"},
+            ],
+            "Enabled": True,
+        },
+    )
+
+    user = await _adapter(fake).get_user_info("ACCESS-TOKEN-XYZ")
+
+    # (a) outbound: get_user called with the provided AccessToken
+    call = _find_call(fake.calls, "get_user")
+    assert call["AccessToken"] == "ACCESS-TOKEN-XYZ"
+
+    # (b) parsed: IdpUser populated from the Cognito response
+    assert user is not None
+    assert user.username == "frank"
+    assert user.email == "frank@example.com"
+    assert user.first_name == "Frank"
+    assert user.last_name == "Lee"
+
+
+@pytest.mark.asyncio
+async def test_get_user_info_returns_none_on_exception() -> None:
+    """get_user_info() returns None when get_user raises (e.g. invalid token)."""
+    fake = _FakeCognitoClient()
+    fake.register("get_user", Exception("NotAuthorizedException"))
+
+    result = await _adapter(fake).get_user_info("BAD-TOKEN")
+    assert result is None
+
+
+# --------------------------------------------------------------------------- #
+# register_user — delegates to create_user, forces enabled=True
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_register_user_forces_enabled_and_creates() -> None:
+    """register_user() sets enabled=True and then calls create_user (admin_create_user)."""
+    fake = _FakeCognitoClient()
+    fake.register(
+        "admin_create_user",
+        {
+            "User": {
+                "Username": "grace",
+                "UserAttributes": [{"Name": "email", "Value": "grace@example.com"}],
+                "Enabled": True,
+            }
+        },
+    )
+    fake.register("admin_set_user_password", {})
+
+    user = IdpUser(username="grace", email="grace@example.com", enabled=False)
+    result = await _adapter(fake).register_user(user, password="S3cur3!Pass")
+
+    # enabled must have been set True before the create call
+    create_call = _find_call(fake.calls, "admin_create_user")
+    assert create_call["Username"] == "grace"
+    assert result.id == "grace"
+
+
+# --------------------------------------------------------------------------- #
+# get_roles — admin_list_groups_for_user → list[IdpRole]
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_roles_calls_admin_list_groups_for_user() -> None:
+    """get_roles() calls admin_list_groups_for_user and parses group names into IdpRole."""
+    fake = _FakeCognitoClient()
+    fake.register(
+        "admin_list_groups_for_user",
+        {
+            "Groups": [
+                {"GroupName": "admins", "Description": "Admin group"},
+                {"GroupName": "editors", "Description": ""},
+            ]
+        },
+    )
+
+    roles = await _adapter(fake).get_roles("alice")
+
+    # (a) outbound: called with correct pool and username
+    call = _find_call(fake.calls, "admin_list_groups_for_user")
+    assert call["UserPoolId"] == USER_POOL_ID
+    assert call["Username"] == "alice"
+
+    # (b) parsed: two IdpRole objects with correct names
+    assert len(roles) == 2
+    names = {r.name for r in roles}
+    assert names == {"admins", "editors"}
+    assert all(isinstance(r, IdpRole) for r in roles)
+
+
+@pytest.mark.asyncio
+async def test_get_roles_returns_empty_on_exception() -> None:
+    """get_roles() returns [] when admin_list_groups_for_user raises (e.g. user not found)."""
+    fake = _FakeCognitoClient()
+    fake.register("admin_list_groups_for_user", Exception("UserNotFoundException"))
+
+    roles = await _adapter(fake).get_roles("nonexistent")
+    assert roles == []

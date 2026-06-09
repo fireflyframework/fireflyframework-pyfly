@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from pyfly.idp.adapters.azure_ad import AzureAdIdpAdapter
-from pyfly.idp.models import IdpUser, LoginRequest
+from pyfly.idp.models import IdpRole, IdpUser, LoginRequest
 
 TENANT_ID = "tenant-abc"
 CLIENT_ID = "app-client-id"
@@ -414,3 +414,170 @@ async def test_create_user_posts_to_graph_users_and_parses_id() -> None:
 
     # (b) parsed: id from the returned JSON
     assert result.id == "new-aad-user-id"
+
+
+# --------------------------------------------------------------------------- #
+# get_user_info — GET /me with delegated access token → IdpUser
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_user_info_calls_graph_me_with_delegated_token() -> None:
+    """get_user_info() fetches /me from Graph using the supplied access token."""
+    fake = FakeClient(
+        [
+            (
+                "/me",
+                FakeResponse(
+                    200,
+                    json_body={
+                        "id": "aad-user-me",
+                        "userPrincipalName": "eve@example.com",
+                        "mail": "eve@example.com",
+                        "givenName": "Eve",
+                        "surname": "Chen",
+                        "accountEnabled": True,
+                    },
+                ),
+            ),
+        ]
+    )
+    adapter = _adapter()
+    _inject(adapter, fake)
+
+    user = await adapter.get_user_info("DELEGATED-TOKEN")
+
+    # (a) outbound: GET /me with the supplied delegated token (no app-token fetch)
+    me_req = _find(fake.requests, method="GET", needle="/me")
+    assert me_req["url"] == f"{GRAPH_URL}/me"
+    assert me_req["headers"]["Authorization"] == "Bearer DELEGATED-TOKEN"
+
+    # (b) parsed: IdpUser built from the /me response
+    assert user is not None
+    assert user.id == "aad-user-me"
+    assert user.username == "eve@example.com"
+    assert user.email == "eve@example.com"
+    assert user.first_name == "Eve"
+    assert user.last_name == "Chen"
+    assert user.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_get_user_info_returns_none_on_non_200() -> None:
+    """get_user_info() returns None when Graph responds with a non-200 status."""
+    fake = FakeClient(
+        [
+            (
+                "/me",
+                FakeResponse(401, json_body={"error": "InvalidAuthenticationToken"}),
+            ),
+        ]
+    )
+    adapter = _adapter()
+    _inject(adapter, fake)
+
+    result = await adapter.get_user_info("BAD-TOKEN")
+    assert result is None
+
+
+# --------------------------------------------------------------------------- #
+# register_user — delegates to create_user (admin POST /users)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_register_user_forces_enabled_and_posts_to_graph() -> None:
+    """register_user() sets enabled=True and delegates to create_user (POST /users)."""
+    fake = FakeClient(
+        [
+            (
+                "oauth2/v2.0/token",
+                FakeResponse(200, json_body={"access_token": "APP-TOKEN", "expires_in": 300}),
+            ),
+            (
+                "/users",
+                FakeResponse(
+                    201,
+                    json_body={"id": "reg-user-id", "userPrincipalName": "grace@example.com"},
+                ),
+            ),
+        ]
+    )
+    adapter = _adapter()
+    _inject(adapter, fake)
+
+    user = IdpUser(username="grace", email="grace@example.com", first_name="Grace", last_name="Wu", enabled=False)
+    result = await adapter.register_user(user, password="Reg1st3r!")
+
+    # (a) outbound: POST to /users (admin create path)
+    create_req = _find(fake.requests, method="POST", needle="/users")
+    assert create_req["url"] == GRAPH_USERS
+    # enabled was forced True before the call
+    assert create_req["json"]["accountEnabled"] is True
+
+    # (b) parsed: id from the Graph response
+    assert result.id == "reg-user-id"
+
+
+# --------------------------------------------------------------------------- #
+# get_roles — GET /users/{id}/memberOf → list[IdpRole]
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_roles_calls_member_of_and_parses_idp_roles() -> None:
+    """get_roles() fetches /users/{id}/memberOf and maps each group to an IdpRole."""
+    fake = FakeClient(
+        [
+            (
+                "oauth2/v2.0/token",
+                FakeResponse(200, json_body={"access_token": "APP-TOKEN", "expires_in": 300}),
+            ),
+            (
+                "/memberOf",
+                FakeResponse(
+                    200,
+                    json_body={
+                        "value": [
+                            {"id": "grp-admins", "displayName": "Admins"},
+                            {"id": "grp-editors", "displayName": "Editors"},
+                        ]
+                    },
+                ),
+            ),
+        ]
+    )
+    adapter = _adapter()
+    _inject(adapter, fake)
+
+    roles = await adapter.get_roles("aad-user-42")
+
+    # (a) outbound: GET /users/{id}/memberOf with app token
+    member_req = _find(fake.requests, method="GET", needle="/memberOf")
+    assert "aad-user-42" in member_req["url"]
+    assert member_req["headers"]["Authorization"] == "Bearer APP-TOKEN"
+
+    # (b) parsed: two IdpRole objects; name=group id, description=displayName
+    assert len(roles) == 2
+    names = {r.name for r in roles}
+    assert names == {"grp-admins", "grp-editors"}
+    assert all(isinstance(r, IdpRole) for r in roles)
+    descriptions = {r.description for r in roles}
+    assert "Admins" in descriptions
+    assert "Editors" in descriptions
+
+
+@pytest.mark.asyncio
+async def test_get_roles_returns_empty_on_non_200() -> None:
+    """get_roles() returns [] when the memberOf endpoint responds with non-200."""
+    fake = FakeClient(
+        [
+            (
+                "oauth2/v2.0/token",
+                FakeResponse(200, json_body={"access_token": "APP-TOKEN", "expires_in": 300}),
+            ),
+            (
+                "/memberOf",
+                FakeResponse(404, json_body={}),
+            ),
+        ]
+    )
+    adapter = _adapter()
+    _inject(adapter, fake)
+
+    roles = await adapter.get_roles("nonexistent-user")
+    assert roles == []
