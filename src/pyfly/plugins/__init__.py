@@ -18,6 +18,7 @@ from pyfly.plugins.decorators import (
     plugin,
 )
 from pyfly.plugins.manager import PluginManager
+from pyfly.plugins.models import PluginDescriptor, PluginState
 from pyfly.plugins.registry import ExtensionRegistry
 from pyfly.plugins.resolver import PluginDependencyResolver, PluginResolutionError
 
@@ -27,8 +28,10 @@ __all__ = [
     "ExtensionRegistry",
     "Plugin",
     "PluginDependencyResolver",
+    "PluginDescriptor",
     "PluginManager",
     "PluginResolutionError",
+    "PluginState",
     "extension",
     "extension_point",
     "plugin",

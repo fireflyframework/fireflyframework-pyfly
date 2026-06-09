@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.91 (2026-06-10)
+
+### Added (plugins parity — parity initiative SP-11)
+
+- **Plugin lifecycle state model**: `PluginState` (LOADED/STARTED/STOPPED/FAILED) + a `PluginDescriptor`
+  (state, loaded_at, last_state_change, failed_reason) tracked per plugin by the `PluginManager`.
+- **Per-plugin lifecycle with dependency cascade**: `start_plugin(id)` starts the plugin's transitive
+  dependencies first (skipping already-started ones); `stop_plugin(id)` stops its dependents first; a
+  failing hook transitions the plugin to FAILED and raises a typed `PluginStartError`/`PluginStopError`.
+  `get_plugin(id)` returns the descriptor.
+- **Plugin exception hierarchy**: `PluginException` (over `PyFlyException`) + `PluginLoadError`,
+  `PluginStartError`, `PluginStopError`, `PluginStateError` (`PluginResolutionError` now extends it).
+- **`ExtensionRegistry.get_extension(point)`**: single highest-priority getter (raises clearly for an
+  unknown/empty point) alongside the existing list getter.
+- **`@plugin(name=, author=)`**: optional metadata fields (backward-compatible; `name` defaults to `id`).
+- End-to-end multi-plugin lifecycle test + `PluginsAutoConfiguration` test + docs.
+
 ## v26.06.90 (2026-06-10)
 
 ### Added / Fixed / Tested (notifications completeness — parity initiative SP-10)
