@@ -169,3 +169,84 @@ def downgrade_cmd(revision: str) -> None:
     cfg = _get_alembic_config()
     command.downgrade(cfg, revision)
     console.print(f"[success]\u2713[/success] Database downgraded to {revision}.")
+
+
+@db_group.command("current")
+@click.option("--verbose", "-v", is_flag=True, help="Show full revision details.")
+def current_cmd(verbose: bool) -> None:
+    """Show the current database revision."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.current(cfg, verbose=verbose)
+
+
+@db_group.command("history")
+@click.option("--verbose", "-v", is_flag=True, help="Show full revision details.")
+def history_cmd(verbose: bool) -> None:
+    """List the migration history."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.history(cfg, verbose=verbose)
+
+
+@db_group.command("heads")
+@click.option("--verbose", "-v", is_flag=True, help="Show full revision details.")
+def heads_cmd(verbose: bool) -> None:
+    """Show the current head revision(s)."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.heads(cfg, verbose=verbose)
+
+
+@db_group.command("show")
+@click.argument("revision")
+def show_cmd(revision: str) -> None:
+    """Show details of a specific revision."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.show(cfg, revision)
+
+
+@db_group.command("revision")
+@click.option("--message", "-m", default=None, help="Revision message.")
+@click.option("--autogenerate", is_flag=True, help="Diff models to populate the revision (like 'migrate').")
+def revision_cmd(message: str | None, autogenerate: bool) -> None:
+    """Create a new revision (empty by default; --autogenerate to diff models)."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.revision(cfg, message=message, autogenerate=autogenerate)
+    console.print("[success]\u2713[/success] Revision created.")
+
+
+@db_group.command("stamp")
+@click.argument("revision")
+def stamp_cmd(revision: str) -> None:
+    """Stamp the database with a revision without running migrations."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.stamp(cfg, revision)
+    console.print(f"[success]\u2713[/success] Database stamped to {revision}.")
+
+
+@db_group.command("merge")
+@click.argument("revisions", nargs=-1, required=True)
+@click.option("--message", "-m", default=None, help="Merge revision message.")
+def merge_cmd(revisions: tuple[str, ...], message: str | None) -> None:
+    """Merge multiple head revisions into one."""
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.merge(cfg, list(revisions), message=message)
+    console.print("[success]\u2713[/success] Revisions merged.")
+
+
+@db_group.command("reset")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def reset_cmd(yes: bool) -> None:
+    """Downgrade to base then upgrade to head (DESTRUCTIVE)."""
+    if not yes:
+        click.confirm("This downgrades to base and re-applies all migrations. Continue?", abort=True)
+    command, _ = _require_alembic()
+    cfg = _get_alembic_config()
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "head")
+    console.print("[success]\u2713[/success] Database reset to head.")
