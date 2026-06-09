@@ -1,0 +1,26 @@
+"""{{ names.pascal }} REST controller."""
+
+from pyfly.container import rest_controller
+from pyfly.web import PathVar, get_mapping, post_mapping, request_mapping
+
+from {{ package_name }}.services.{{ names.snake }}_service import {{ names.pascal }}Service
+
+
+@rest_controller
+@request_mapping("/{{ names.kebab_plural }}")
+class {{ names.pascal }}Controller:
+
+    def __init__(self, {{ names.snake }}_service: {{ names.pascal }}Service) -> None:
+        self._service = {{ names.snake }}_service
+
+    @get_mapping("/")
+    async def list_{{ names.snake_plural }}(self) -> list[dict]:
+        return []
+
+    @get_mapping("/{id}")
+    async def get_{{ names.snake }}(self, id: PathVar[str]) -> dict:
+        return {"id": id}
+
+    @post_mapping("/", status_code=201)
+    async def create_{{ names.snake }}(self, body: dict) -> dict:
+        return body

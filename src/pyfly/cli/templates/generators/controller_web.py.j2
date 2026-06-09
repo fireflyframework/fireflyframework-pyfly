@@ -1,0 +1,20 @@
+"""{{ names.pascal }} web controller — serves HTML pages."""
+
+from pathlib import Path
+
+from starlette.requests import Request
+from starlette.templating import Jinja2Templates
+
+from pyfly.container import controller
+from pyfly.web import get_mapping, request_mapping
+
+_templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+
+
+@controller
+@request_mapping("/{{ names.kebab }}")
+class {{ names.pascal }}Controller:
+
+    @get_mapping("/")
+    async def index(self, request: Request):
+        return _templates.TemplateResponse(request, "{{ names.snake }}.html", {"request": request})

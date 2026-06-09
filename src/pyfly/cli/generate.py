@@ -165,3 +165,26 @@ def service_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> No
     )
     actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
     _report(info, actions, dry_run=dry_run)
+
+
+@generate_group.command("controller")
+@click.argument("name")
+@_gen_options
+@click.pass_context
+def controller_cmd(ctx: click.Context, name: str, force: bool, dry_run: bool) -> None:
+    """Generate a controller (REST or web, archetype-aware)."""
+    info = _resolve_info(ctx)
+    context = _context(info, name)
+    n: Names = context["names"]
+    template = "controller_web.py.j2" if info.archetype == "web" else "controller_rest.py.j2"
+    ctrl_dir = info.package_dir / "controllers"
+    artifacts: list[Artifact] = []
+    init = _ensure_init(ctrl_dir, dry_run=dry_run)
+    if init:
+        artifacts.append(init)
+    artifacts.append(Artifact("controller", ctrl_dir / f"{n.snake}_controller.py", _render(template, context)))
+    artifacts.append(
+        Artifact("test", info.tests_dir / f"test_{n.snake}_controller.py", _render("test_controller.py.j2", context))
+    )
+    actions = write_artifacts(artifacts, force=force, dry_run=dry_run)
+    _report(info, actions, dry_run=dry_run)
