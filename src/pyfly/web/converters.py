@@ -110,6 +110,96 @@ class TimeoutExceptionConverter:
         )
 
 
+class SQLAlchemyIntegrityExceptionConverter:
+    """Converts ``sqlalchemy.exc.IntegrityError`` to a PyFly 409 Conflict exception.
+
+    Lazy-imports SQLAlchemy so this converter is a silent no-op when the library
+    is not installed (``can_handle`` will always return ``False``).
+    """
+
+    def can_handle(self, exc: Exception) -> bool:
+        try:
+            from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
+            return isinstance(exc, IntegrityError)
+        except ImportError:
+            return False
+
+    def convert(self, exc: Exception) -> PyFlyException:
+        from pyfly.kernel.exceptions import ConflictException  # noqa: PLC0415
+
+        return ConflictException(
+            f"Data integrity constraint violated: {exc}",
+            code="INTEGRITY_ERROR",
+        )
+
+
+class HttpxExceptionConverter:
+    """Converts ``httpx.HTTPError`` (and subclasses) to PyFly gateway exceptions.
+
+    - ``httpx.TimeoutException`` (and subclasses such as ``ConnectTimeout``,
+      ``ReadTimeout``) → :class:`~pyfly.kernel.exceptions.GatewayTimeoutException`
+      (HTTP **504**).
+    - All other ``httpx.HTTPError`` subclasses (including ``ConnectError``,
+      ``RemoteProtocolError``, etc.) →
+      :class:`~pyfly.kernel.exceptions.BadGatewayException` (HTTP **502**).
+
+    Lazy-imports httpx so this converter is a no-op without the library.
+    """
+
+    def can_handle(self, exc: Exception) -> bool:
+        try:
+            import httpx  # noqa: PLC0415
+
+            return isinstance(exc, httpx.HTTPError)
+        except ImportError:
+            return False
+
+    def convert(self, exc: Exception) -> PyFlyException:
+        try:
+            import httpx  # noqa: PLC0415
+
+            if isinstance(exc, httpx.TimeoutException):
+                from pyfly.kernel.exceptions import GatewayTimeoutException  # noqa: PLC0415
+
+                return GatewayTimeoutException(
+                    f"Upstream service timed out: {exc}",
+                    code="GATEWAY_TIMEOUT",
+                )
+        except ImportError:
+            pass
+
+        from pyfly.kernel.exceptions import BadGatewayException  # noqa: PLC0415
+
+        return BadGatewayException(
+            f"Upstream service error: {exc}",
+            code="BAD_GATEWAY",
+        )
+
+
+class CircuitBreakerExceptionConverter:
+    """Converts :class:`~pyfly.kernel.exceptions.CircuitBreakerException` to HTTP 503.
+
+    The exception is already a PyFly exception, but registering it here allows
+    the converter chain to handle it uniformly (and mirrors how Spring's
+    ``CircuitBreakerExceptionConverter`` operates).  The ``errors.py`` status
+    map already maps it to 503, so this converter produces the same result.
+    """
+
+    def can_handle(self, exc: Exception) -> bool:
+        from pyfly.kernel.exceptions import CircuitBreakerException  # noqa: PLC0415
+
+        return isinstance(exc, CircuitBreakerException)
+
+    def convert(self, exc: Exception) -> PyFlyException:
+        from pyfly.kernel.exceptions import ServiceUnavailableException  # noqa: PLC0415
+
+        return ServiceUnavailableException(
+            f"Circuit breaker open — service unavailable: {exc}",
+            code="CIRCUIT_BREAKER_OPEN",
+        )
+
+
 def default_exception_converters() -> list[ExceptionConverter]:
     """The built-in converter chain consulted for non-PyFly exceptions.
 
@@ -122,6 +212,9 @@ def default_exception_converters() -> list[ExceptionConverter]:
         PydanticExceptionConverter(),
         JSONExceptionConverter(),
         TimeoutExceptionConverter(),
+        SQLAlchemyIntegrityExceptionConverter(),
+        HttpxExceptionConverter(),
+        CircuitBreakerExceptionConverter(),
     ]
 
 
