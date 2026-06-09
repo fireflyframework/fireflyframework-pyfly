@@ -257,7 +257,7 @@ class PostgresCacheAdapter:
                 text(
                     """
                     SELECT cache_key FROM pyfly_cache_entries
-                    WHERE cache_key LIKE :p
+                    WHERE cache_key LIKE :p ESCAPE '\\'
                       AND (expires_at IS NULL OR expires_at > :now)
                     LIMIT :lim
                     """

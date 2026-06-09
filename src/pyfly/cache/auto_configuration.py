@@ -55,7 +55,12 @@ class CacheAutoConfiguration:
             client = aioredis.from_url(url)  # type: ignore[no-untyped-call,unused-ignore]
             return RedisCacheAdapter(client=client)
 
-        if provider == "postgres" and AutoConfiguration.is_available("sqlalchemy.ext.asyncio"):
+        if provider == "postgres":
+            if not AutoConfiguration.is_available("sqlalchemy.ext.asyncio"):
+                raise ValueError(
+                    "pyfly.cache.provider=postgres requires SQLAlchemy async — "
+                    "install pyfly[data-relational,postgresql]."
+                )
             from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found,unused-ignore]
 
             from pyfly.cache.adapters.postgres import PostgresCacheAdapter

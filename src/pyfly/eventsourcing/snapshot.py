@@ -100,6 +100,7 @@ class SqlAlchemySnapshotStore:
                         sequence       = EXCLUDED.sequence,
                         payload        = EXCLUDED.payload,
                         created_at     = EXCLUDED.created_at
+                    WHERE pyfly_snapshots.sequence < EXCLUDED.sequence
                     """
                 ),
                 {
