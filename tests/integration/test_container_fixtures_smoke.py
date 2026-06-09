@@ -18,6 +18,7 @@ Run: PYFLY_INTEGRATION_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integ
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -59,7 +60,7 @@ async def test_kafka_fixture_roundtrips(kafka_url: str) -> None:
     )
     await consumer.start()
     try:
-        msg = await consumer.getone()
+        msg = await asyncio.wait_for(consumer.getone(), timeout=10)  # fail fast instead of hanging
         assert msg.value == b"hello"
     finally:
         await consumer.stop()
@@ -80,5 +81,6 @@ async def test_rabbitmq_fixture_roundtrips(amqp_url: str) -> None:
         incoming = await queue.get(timeout=10)
         assert incoming is not None and incoming.body == b"ping"
         await incoming.ack()
+        await channel.close()
     finally:
         await conn.close()

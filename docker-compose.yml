@@ -1,6 +1,7 @@
 # Local backends for PyFly integration tests (alternative to testcontainers auto-start).
 #   docker compose up -d
 #   export PYFLY_IT_POSTGRES_URL=postgresql+asyncpg://pyfly:pyfly@localhost:5432/pyfly
+#   export PYFLY_IT_MYSQL_URL=mysql+aiomysql://root:pyfly@localhost:3306/pyfly
 #   export PYFLY_IT_REDIS_URL=redis://localhost:6379/0
 #   export PYFLY_IT_MONGO_URI=mongodb://localhost:27017
 #   export PYFLY_IT_KAFKA_BOOTSTRAP=localhost:9092
@@ -45,7 +46,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      CLUSTER_ID: pyfly-local-cluster-0001
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk  # valid 22-char url-safe base64 16-byte UUID (KRaft requirement)
     ports: ["9092:9092"]
   keycloak:
     image: quay.io/keycloak/keycloak:25.0
