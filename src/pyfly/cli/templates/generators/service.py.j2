@@ -1,0 +1,11 @@
+"""{{ names.human|capitalize }} service."""
+
+from pyfly.container import service
+
+
+@service
+class {{ names.pascal }}Service:
+    """Business logic for {{ names.human }}."""
+
+    def ping(self) -> str:
+        return "{{ names.snake }} ok"
