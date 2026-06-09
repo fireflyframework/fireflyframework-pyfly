@@ -144,6 +144,7 @@ dev = [
     "ruff>=0.15.12",
     "mongomock-motor>=0.0.36",
     "jsonpath-ng>=1.8.0",
+    "respx>=0.21.0",
 ]
 
 [project.entry-points."pyfly.auto_configuration"]
