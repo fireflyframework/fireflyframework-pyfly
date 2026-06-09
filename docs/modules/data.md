@@ -220,8 +220,8 @@ Extends `CrudRepository` with pagination:
 
 ```python
 class PagingRepository(CrudRepository[T, ID], Protocol[T, ID]):
-    async def find_all_paged(
-        self, page: int = 1, size: int = 20, sort: list[str] | None = None
+    async def find_paginated(
+        self, page: int = 1, size: int = 20, pageable: Pageable | None = None
     ) -> Page[T]: ...
 ```
 
@@ -1085,6 +1085,55 @@ types; DTO / open (SpEL) / dynamic / association-traversing projections; the der
 `After` / `Before` (use `_like`/`_containing`/`@query` instead); `ExampleMatcher` string-match
 modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fall back to `@query`
 (or `native=True`) — it covers every case the derived parser doesn't.
+
+---
+
+## Database Health
+
+### SqlAlchemyHealthIndicator
+
+`SqlAlchemyHealthIndicator` is an actuator `HealthIndicator` that probes the configured relational
+database by executing `SELECT 1`.  It is auto-wired by `RelationalAutoConfiguration` and
+contributed to `/actuator/health` as the `db` component — no manual registration required.
+
+```python
+from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+
+indicator = SqlAlchemyHealthIndicator(engine)
+status = await indicator.health()
+# HealthStatus(status="UP", details={"database": "postgresql"})
+# HealthStatus(status="DOWN", details={"error": "OperationalError", "message": "..."})
+```
+
+**Behaviour:**
+
+| State | `status` | `details` keys |
+|-------|----------|----------------|
+| Connection succeeds | `"UP"` | `database` — SQLAlchemy dialect name (e.g. `"postgresql"`, `"sqlite"`) |
+| Connection fails | `"DOWN"` | `error` — exception class name; `message` — first 200 chars of the error message |
+
+Source file: `src/pyfly/data/relational/health.py`
+
+---
+
+## Database-Query Metrics
+
+When the observability module is active (i.e. a `MetricsRegistry` bean is present from
+`pyfly.observability`), the `QueryMetricsLifecycle` bean automatically attaches SQLAlchemy
+event listeners to the engine and records the following Prometheus metrics:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `pyfly_db_query_duration_seconds` | Histogram | `operation` | Latency of each database query |
+| `pyfly_db_queries_total` | Counter | `operation` | Total number of queries executed |
+| `pyfly_db_query_errors_total` | Counter | `operation` | Total number of failed queries |
+
+The `operation` label contains the SQL command verb (e.g. `SELECT`, `INSERT`, `UPDATE`,
+`DELETE`).  No configuration is required — the bean is created automatically when
+`prometheus_client` is installed and the `MetricsRegistry` is available; when neither is
+present the relational module continues to work unchanged.
+
+Source file: `src/pyfly/data/relational/metrics.py`
 
 ---
 
