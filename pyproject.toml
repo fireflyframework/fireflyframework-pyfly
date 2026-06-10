@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.6.91"
+version = "26.6.92"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -88,6 +88,9 @@ cache = [
 client = [
     "httpx>=0.28.1",
 ]
+config-server-git = [
+    "GitPython>=3.1",
+]
 grpc = [
     "grpcio>=1.60.0",
 ]
@@ -150,7 +153,7 @@ web-fastapi = [
     "uvloop>=0.22.1; sys_platform != 'win32'",
 ]
 full = [
-    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito,notifications]",
+    "pyfly[web,data-relational,data-document,postgresql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito,notifications,config-server-git]",
 ]
 
 [dependency-groups]

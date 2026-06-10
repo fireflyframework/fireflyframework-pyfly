@@ -53,11 +53,37 @@ class FilesystemConfigBackend:
     """Loads config from ``<root>/<application>-<profile>.{yaml,yml,json}``.
 
     The label maps to a subdirectory: ``<root>/<label>/<application>-<profile>.yaml``.
+
+    **Tiered search locations**
+
+    Pass *search_locations* (a list of directory paths, highest-precedence
+    first) to merge config from multiple directories.  The convention is::
+
+        search_locations=[domain_dir, core_dir, common_dir]
+
+    so the domain layer overrides core which overrides common.  Keys that exist
+    only in a lower-precedence location are inherited (fill-in semantics).
+    ``save()`` and ``list()`` operate on the **first** (primary / highest-
+    precedence) location; the single-root behaviour is unchanged when
+    *search_locations* is ``None``.
     """
 
-    def __init__(self, root: str | pathlib.Path) -> None:
+    def __init__(
+        self,
+        root: str | pathlib.Path,
+        *,
+        search_locations: list[str | pathlib.Path] | None = None,
+    ) -> None:
         self._root = pathlib.Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        if search_locations is not None:
+            # The primary location (index 0 = highest precedence) is the caller-
+            # supplied root; remaining locations follow in order.
+            self._locations: list[pathlib.Path] = [pathlib.Path(p) for p in search_locations]
+            for loc in self._locations:
+                loc.mkdir(parents=True, exist_ok=True)
+        else:
+            self._locations = []
 
     def _path_candidates(self, application: str, profile: str, label: str) -> list[pathlib.Path]:
         base = self._root / label if label else self._root
@@ -70,12 +96,60 @@ class FilesystemConfigBackend:
             self._root / f"{application}-{profile}.json",
         ]
 
+    def _path_candidates_for(
+        self, root: pathlib.Path, application: str, profile: str, label: str
+    ) -> list[pathlib.Path]:
+        """Like ``_path_candidates`` but for an arbitrary *root*."""
+        base = root / label if label else root
+        return [
+            base / f"{application}-{profile}.yaml",
+            base / f"{application}-{profile}.yml",
+            base / f"{application}-{profile}.json",
+            root / f"{application}-{profile}.yaml",
+            root / f"{application}-{profile}.yml",
+            root / f"{application}-{profile}.json",
+        ]
+
+    async def _fetch_from_root(
+        self, root: pathlib.Path, application: str, profile: str, label: str
+    ) -> ConfigSource | None:
+        """Attempt to read a single file match from *root*."""
+        for candidate in self._path_candidates_for(root, application, profile, label):
+            if not candidate.exists():
+                continue
+            text = await asyncio.get_running_loop().run_in_executor(None, candidate.read_text)
+            properties = await asyncio.get_running_loop().run_in_executor(
+                None, _parse_text, text, candidate.suffix.lstrip(".")
+            )
+            return ConfigSource(application=application, profile=profile, label=label, properties=properties)
+        return None
+
     async def fetch(self, application: str, profile: str, label: str = "main") -> ConfigSource | None:
+        if self._locations:
+            # Tiered mode: iterate locations from lowest to highest precedence
+            # and accumulate properties, so higher-precedence locations win.
+            merged: dict[str, Any] = {}
+            found = False
+            for loc in reversed(self._locations):
+                source = await self._fetch_from_root(loc, application, profile, label)
+                if source is not None:
+                    merged.update(source.properties)
+                    found = True
+            if not found:
+                return None
+            return ConfigSource(
+                application=application,
+                profile=profile,
+                label=label,
+                properties=merged,
+            )
+
+        # Single-root mode (original behaviour).
         for candidate in self._path_candidates(application, profile, label):
             if not candidate.exists():
                 continue
-            text = await asyncio.get_event_loop().run_in_executor(None, candidate.read_text)
-            properties = await asyncio.get_event_loop().run_in_executor(
+            text = await asyncio.get_running_loop().run_in_executor(None, candidate.read_text)
+            properties = await asyncio.get_running_loop().run_in_executor(
                 None, _parse_text, text, candidate.suffix.lstrip(".")
             )
             return ConfigSource(application=application, profile=profile, label=label, properties=properties)
@@ -84,6 +158,7 @@ class FilesystemConfigBackend:
     async def save(self, source: ConfigSource) -> None:
         import json
 
+        # Always write to _root (the primary / highest-precedence location).
         candidates = self._path_candidates(source.application, source.profile, source.label)
         existing = [c for c in candidates if c.exists()]
 
@@ -104,7 +179,7 @@ class FilesystemConfigBackend:
             text = json.dumps(source.properties, indent=2)
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.get_event_loop().run_in_executor(None, path.write_text, text)
+        await asyncio.get_running_loop().run_in_executor(None, path.write_text, text)
 
         # Guarantee exactly one file backs this (application, profile, label) so
         # future fetches/saves can't diverge across stale duplicate formats.
@@ -113,6 +188,7 @@ class FilesystemConfigBackend:
                 other.unlink(missing_ok=True)
 
     async def list(self) -> list[ConfigSource]:
+        # Always list from _root (the primary location).
         results: list[ConfigSource] = []
         for path in self._root.rglob("*"):
             if not path.is_file() or path.suffix.lstrip(".") not in {"yaml", "yml", "json"}:

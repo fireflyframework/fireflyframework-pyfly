@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.92 (2026-06-10)
+
+### Added / Fixed (config server backends — parity initiative SP-12)
+
+- **Git-backed config backend**: `GitConfigBackend` (new `pyfly[config-server-git]` extra, GitPython) clones a
+  config repo (works for local paths too), checks out a label/branch, and serves config from the working tree;
+  `save()` commits locally; all blocking git work runs off the event loop. Selectable via
+  `pyfly.config-server.backend.type=git` (+ `.git.uri`/`.git.label`), with a graceful filesystem fallback when
+  GitPython is absent.
+- **Tiered search-locations overlay**: `FilesystemConfigBackend(root, search_locations=[...])` merges matching
+  config across multiple base directories (a common/core/domain convention — highest precedence first), wired
+  via `pyfly.config-server.backend.search-locations`. Single-root behavior is unchanged.
+- **ConfigClient real e2e test**: `ConfigClient` now accepts an injectable `http_client`, enabling a true
+  round-trip test through `httpx.ASGITransport` → the Starlette config-server routes → backend, asserting the
+  reverse-merge precedence (app+profile overrides application+default; inherited keys survive).
+- **Fixes**: wired the backend-selection logic into the auto-config bean (it was previously dead code, so
+  `backend.type`/`search-locations` were silently ignored); cleaned up the Git clone tempdir (atexit) and
+  guarded concurrent clone with a lock; corrected an over-promising docstring/doc that implied shipped
+  Consul/Vault backends. Docs updated.
+
 ## v26.06.91 (2026-06-10)
 
 ### Added (plugins parity — parity initiative SP-11)
