@@ -187,9 +187,9 @@ class TestActions:
         assert [a.type for a in res.actions_executed] == ["set"]
 
     def test_unknown_operator_is_surfaced(self) -> None:
-        res = _evaluate(Condition(operator="between", field="x", value=[1, 5]), {"x": 3})
+        res = _evaluate(Condition(operator="fuzzy_match", field="x", value="abc"), {"x": "abc"})
         assert res.matched is False
-        assert "unknown operator: between" in (res.error or "")
+        assert "unknown operator: fuzzy_match" in (res.error or "")
 
 
 class TestRuleSet:

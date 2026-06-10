@@ -4,11 +4,43 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from pyfly.rule_engine.dsl import Action, Condition, Rule, RuleSet
+
+#: Type alias for action-handler callables stored in the internal registry.
+_HandlerFn = Callable[[Action, dict[str, Any]], None]
+
+
+def _make_default_handlers() -> dict[str, _HandlerFn]:
+    """Build the default action-handler registry (``set``, ``increment``, ``log``)."""
+
+    def _handle_set(action: Action, ctx: dict[str, Any]) -> None:
+        if action.target is None:
+            msg = "set action missing 'target'"
+            raise ValueError(msg)
+        RuleEvaluator._write(action.target, action.value, ctx)
+
+    def _handle_increment(action: Action, ctx: dict[str, Any]) -> None:
+        if action.target is None:
+            msg = "increment action missing 'target'"
+            raise ValueError(msg)
+        current = RuleEvaluator._read(action.target, ctx) or 0
+        RuleEvaluator._write(action.target, current + (action.value or 1), ctx)
+
+    def _handle_log(action: Action, ctx: dict[str, Any]) -> None:
+        logging.getLogger(__name__).info("rule action: %s", action.value or action.target)
+
+    return {
+        "set": _handle_set,
+        "increment": _handle_increment,
+        "log": _handle_log,
+    }
 
 
 @dataclass
@@ -20,7 +52,26 @@ class EvaluationResult:
 
 
 class RuleEvaluator:
-    """Single-rule evaluator."""
+    """Single-rule evaluator with a pluggable action-handler registry.
+
+    Parameters
+    ----------
+    action_handlers:
+        Optional mapping of action-type strings to handler callables.  Values
+        are merged on top of the built-in ``set`` / ``increment`` / ``log``
+        handlers, so you can override builtins or add entirely new types (e.g.
+        ``"call"``, ``"http"``) without subclassing.  Any action type not found
+        in the final registry raises :exc:`NotImplementedError`, matching the
+        original loud-failure semantics (audit #215).
+    """
+
+    def __init__(
+        self,
+        action_handlers: dict[str, _HandlerFn] | None = None,
+    ) -> None:
+        self._handlers: dict[str, _HandlerFn] = _make_default_handlers()
+        if action_handlers:
+            self._handlers.update(action_handlers)
 
     def evaluate(self, rule: Rule, ctx: dict[str, Any]) -> EvaluationResult:
         if not rule.enabled:
@@ -84,32 +135,52 @@ class RuleEvaluator:
             return actual not in (expected or [])
         if op == "regex":
             return bool(re.search(str(expected), str(actual or "")))
+        if op == "between":
+            if actual is None:
+                return False
+            lo, hi = expected[0], expected[1]
+            return bool(lo <= actual <= hi)
+        if op == "contains":
+            if actual is None:
+                return False
+            if isinstance(actual, str):
+                return str(expected) in actual
+            return expected in actual
+        if op == "not_contains":
+            if actual is None:
+                return False
+            if isinstance(actual, str):
+                return str(expected) not in actual
+            return expected not in actual
+        if op == "starts_with":
+            if actual is None:
+                return False
+            return str(actual).startswith(str(expected))
+        if op == "ends_with":
+            if actual is None:
+                return False
+            return str(actual).endswith(str(expected))
+        if op == "exists":
+            return actual is not None
+        if op == "is_null":
+            return actual is None
+        if op == "is_empty":
+            if actual is None:
+                return True
+            return bool(actual == "" or actual == [] or actual == {})
         msg = f"unknown operator: {op}"
         raise ValueError(msg)
 
     def _execute_action(self, action: Action, ctx: dict[str, Any]) -> None:
-        if action.type == "set":
-            if action.target is None:
-                msg = "set action missing 'target'"
-                raise ValueError(msg)
-            self._write(action.target, action.value, ctx)
-        elif action.type == "increment":
-            if action.target is None:
-                msg = "increment action missing 'target'"
-                raise ValueError(msg)
-            current = self._read(action.target, ctx) or 0
-            self._write(action.target, current + (action.value or 1), ctx)
-        elif action.type == "log":
-            import logging
-
-            logging.getLogger(__name__).info("rule action: %s", action.value or action.target)
-        else:
-            # 'call'/'calculate' and any unknown type are not implemented by the
-            # default evaluator — fail loudly so a typo or an unsupported action
-            # surfaces instead of silently doing nothing (audit #215). Real
-            # services override _execute_action to plug in HTTP calls, etc.
+        handler = self._handlers.get(action.type)
+        if handler is None:
+            # 'call'/'calculate' and any unknown type are not in the default
+            # registry — fail loudly so a typo or an unsupported action surfaces
+            # instead of silently doing nothing (audit #215).  Callers can inject
+            # custom handlers via the constructor to handle these types.
             msg = f"unsupported action type '{action.type}'; override _execute_action to handle it"
             raise NotImplementedError(msg)
+        handler(action, ctx)
 
     @staticmethod
     def _read(path: str, ctx: dict[str, Any]) -> Any:
@@ -138,11 +209,54 @@ class RuleEvaluator:
             setattr(cur, last, value)
 
 
-class RuleSetEvaluator:
-    """Evaluates an entire :class:`RuleSet` in priority order."""
+class EvaluationMode(Enum):
+    """Controls how many rules in a :class:`RuleSet` are evaluated.
 
-    def __init__(self, rule_evaluator: RuleEvaluator | None = None) -> None:
+    ``ALL``
+        Every enabled rule in the ruleset is evaluated in descending priority
+        order (the current default).  All matching rules execute their actions
+        against the **shared** context dict, so later rules see mutations made
+        by earlier ones.
+
+    ``FIRST_MATCH``
+        Rules are evaluated in descending priority order and evaluation stops
+        immediately after the first rule whose condition matched.  The returned
+        result list contains every rule that was evaluated *up to and including*
+        the first match; rules with lower priority are never evaluated and their
+        actions never fire.  The shared-context semantics are identical to
+        ``ALL`` for the subset of rules that *are* evaluated.
+    """
+
+    ALL = "all"
+    FIRST_MATCH = "first_match"
+
+
+class RuleSetEvaluator:
+    """Evaluates an entire :class:`RuleSet` in priority order.
+
+    Parameters
+    ----------
+    rule_evaluator:
+        The per-rule evaluator to delegate to.  Defaults to a vanilla
+        :class:`RuleEvaluator` (default action-handler registry).
+    mode:
+        :attr:`EvaluationMode.ALL` (default) evaluates every rule;
+        :attr:`EvaluationMode.FIRST_MATCH` stops after the first match.
+    """
+
+    def __init__(
+        self,
+        rule_evaluator: RuleEvaluator | None = None,
+        mode: EvaluationMode = EvaluationMode.ALL,
+    ) -> None:
         self._evaluator = rule_evaluator or RuleEvaluator()
+        self._mode = mode
 
     def evaluate(self, ruleset: RuleSet, ctx: dict[str, Any]) -> list[EvaluationResult]:
-        return [self._evaluator.evaluate(rule, ctx) for rule in ruleset.sorted_rules()]
+        results: list[EvaluationResult] = []
+        for rule in ruleset.sorted_rules():
+            result = self._evaluator.evaluate(rule, ctx)
+            results.append(result)
+            if self._mode is EvaluationMode.FIRST_MATCH and result.matched:
+                break
+        return results
