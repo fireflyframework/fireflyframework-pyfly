@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.94 (2026-06-10)
+
+### Docs (parity initiative — final cross-cutting sweep)
+
+- Refreshed `ROADMAP.md` from `v26.05.03` to `v26.06.93`, adding a "Production-readiness & parity
+  hardening" summary of everything that landed across the `v26.06.78 → v26.06.93` wave (the real-backend
+  integration-test foundation; the MongoDB production fix; the Postgres cache + RabbitMQ EDA adapters;
+  durable orchestration/event-sourcing persistence; HTTP idempotency; exception converters; CQRS EDA→cache
+  invalidation; real-transport client tests + grpc/websocket extras; notifications templates/opt-out/metrics;
+  TOTP MFA; resilience config; httpx callbacks + webhook validators; plugin lifecycle; Git config backend;
+  rule-engine completeness).
+- Corrected two now-stale parity claims in `spring-comparison.md` (the EDA bus can switch to
+  RabbitMQ/Redis-Streams/Postgres, not only Kafka; the cache supports a Postgres backend) and filled the
+  Integration Testing links missing from the top-level `docs/index.md` / `docs/README.md`. A drift scan
+  across all module/adapter docs confirmed the remaining references are accurate (the per-module docs were
+  kept current as each capability shipped).
+
+This release concludes the PyFly↔Spring-Boot parity initiative: real-backend integration tests, the missing
+adapters, per-subsystem depth, and documentation are in place across the framework.
+
 ## v26.06.93 (2026-06-10)
 
 ### Added (rule engine completeness — parity initiative SP-13)
