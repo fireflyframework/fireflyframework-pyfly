@@ -128,6 +128,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 |-------|-------------|
 | [AOP](modules/aop.md) | Aspect-oriented programming, pointcuts, advice types, weaving |
 | [Testing](modules/testing.md) | Test fixtures, mock containers, event assertions, testing patterns |
+| [Integration Testing](modules/integration-testing.md) | Running adapter tests against real backends (testcontainers, docker-compose, CI) |
 
 ---
 
