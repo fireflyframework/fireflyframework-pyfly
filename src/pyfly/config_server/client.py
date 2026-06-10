@@ -11,7 +11,14 @@ _logger = logging.getLogger(__name__)
 
 
 class ConfigClient:
-    """Minimal HTTP client for a Spring-Cloud-Config-style server."""
+    """Minimal HTTP client for a Spring-Cloud-Config-style server.
+
+    An optional *http_client* (an ``httpx.AsyncClient`` instance) may be
+    injected for testing or connection-pool sharing.  When provided the caller
+    owns the client's lifecycle — it is **not** closed by :meth:`fetch`.  When
+    omitted, a fresh ``httpx.AsyncClient`` is created and closed per call as
+    before (unchanged public behaviour).
+    """
 
     def __init__(
         self,
@@ -22,6 +29,7 @@ class ConfigClient:
         label: str = "main",
         username: str | None = None,
         password: str | None = None,
+        http_client: Any | None = None,
     ) -> None:
         self._url = url.rstrip("/")
         self._application = application
@@ -29,6 +37,7 @@ class ConfigClient:
         self._label = label
         self._username = username
         self._password = password
+        self._http_client = http_client
 
     async def fetch(self) -> dict[str, Any]:
         try:
@@ -41,7 +50,8 @@ class ConfigClient:
         auth: tuple[str, str] | None = (
             (self._username, self._password) if self._username is not None and self._password is not None else None
         )
-        async with httpx.AsyncClient(timeout=15.0) as client:
+
+        async def _do_get(client: Any) -> dict[str, Any]:
             resp = await client.get(path, auth=auth)
             if resp.status_code != 200:
                 _logger.warning(
@@ -52,11 +62,18 @@ class ConfigClient:
                     self._label,
                 )
                 return {}
-            data = resp.json()
-        # Spring orders propertySources HIGHEST priority first, so apply them
-        # in reverse (lowest first) and let higher-priority sources overwrite —
-        # the forward order let the lowest-priority source win (audit #86).
-        merged: dict[str, Any] = {}
-        for source in reversed(data.get("propertySources", [])):
-            merged.update(source.get("source") or {})
-        return merged
+            data: dict[str, Any] = resp.json()
+            # Spring orders propertySources HIGHEST priority first, so apply them
+            # in reverse (lowest first) and let higher-priority sources overwrite —
+            # the forward order let the lowest-priority source win (audit #86).
+            merged: dict[str, Any] = {}
+            for source in reversed(data.get("propertySources", [])):
+                merged.update(source.get("source") or {})
+            return merged
+
+        if self._http_client is not None:
+            # Injected client — caller owns lifecycle; do NOT close it.
+            return await _do_get(self._http_client)
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            return await _do_get(client)
