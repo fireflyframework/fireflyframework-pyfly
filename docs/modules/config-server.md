@@ -11,6 +11,11 @@ client services over HTTP.
 1. [Introduction](#introduction)
 2. [ConfigSource](#configsource)
 3. [Backends](#backends)
+   - [InMemoryConfigBackend](#inmemoryconfigbackend)
+   - [FilesystemConfigBackend](#filesystemconfigbackend)
+   - [Tiered search locations](#tiered-search-locations)
+   - [GitConfigBackend](#gitconfigbackend)
+   - [Custom backends](#custom-backends)
 4. [ConfigServer](#configserver)
 5. [ConfigClient](#configclient)
 
@@ -74,6 +79,12 @@ backend = InMemoryConfigBackend()                 # great for tests
 backend = FilesystemConfigBackend("/etc/pyfly")   # reads/writes files
 ```
 
+### InMemoryConfigBackend
+
+Dict-backed, thread-safe via `asyncio.Lock`. Ideal for unit tests.
+
+### FilesystemConfigBackend
+
 **`FilesystemConfigBackend`** stores each bundle as
 `<root>/<label>/<application>-<profile>.{yaml,yml,json}` (falling back to
 `<root>/<application>-<profile>.*` when the labeled file is absent). `fetch()`
@@ -86,9 +97,80 @@ When auto-configured, the backend `root` is **configurable and persistent** via
 so saved config survives restarts. Only when neither is set does it fall back to a
 throwaway tempdir (`config_server/auto_configuration.py`).
 
-Implement `ConfigBackend` to back the server with a database, S3, Git, etc.:
+### Tiered search locations
+
+Pass `search_locations` (a list of directories, **highest-precedence first**) to
+merge config from multiple layers.  The convention is `[domain, core, common]` so
+domain settings override core, which override common; keys present only in a
+lower-precedence location are **inherited** (fill-in semantics).
 
 ```python
+backend = FilesystemConfigBackend(
+    domain_dir,
+    search_locations=[domain_dir, core_dir, common_dir],
+)
+```
+
+Configure via YAML (comma-separated or YAML list):
+
+```yaml
+pyfly:
+  config-server:
+    backend:
+      search-locations:
+        - /etc/pyfly/domain
+        - /etc/pyfly/core
+        - /etc/pyfly/common
+```
+
+`save()` and `list()` always operate on the **first** (primary / highest-
+precedence) location.
+
+### GitConfigBackend
+
+A Git-backed backend that clones a repository and delegates file reads to
+`FilesystemConfigBackend` over the working tree.
+
+```python
+from pyfly.config_server.adapters.git import GitConfigBackend
+
+backend = GitConfigBackend(
+    "https://github.com/my-org/config-repo.git",
+    label="main",          # branch / tag / SHA
+    clone_dir="/tmp/cfg",  # optional; defaults to a tempdir
+)
+```
+
+Requires GitPython: `pip install pyfly[config-server-git]`.
+
+**Saving** writes the file into the working tree and commits it locally.
+Pushing to the remote is **out of scope** — call `await backend.refresh()` to
+pull the latest commits from `origin`.
+
+Configure via YAML:
+
+```yaml
+pyfly:
+  config-server:
+    backend:
+      type: git
+      git:
+        uri: "https://github.com/my-org/config-repo.git"
+        label: main
+        clone-dir: /var/lib/pyfly/git-config   # optional
+```
+
+When `backend.type=git` is set but GitPython is not installed, the server logs
+a warning and falls back to `FilesystemConfigBackend`.
+
+### Custom backends
+
+Implement `ConfigBackend` to back the server with Consul, Vault, etcd,
+a database, S3, or any other store:
+
+```python
+from pyfly.config_server.backend import ConfigBackend, ConfigSource
+
 @runtime_checkable
 class ConfigBackend(Protocol):
     async def fetch(self, application: str, profile: str, label: str = "main") -> ConfigSource | None: ...
@@ -155,6 +237,7 @@ client = ConfigClient(
     label="main",               # optional, defaults to "main"
     username=None,              # optional HTTP basic auth
     password=None,
+    http_client=None,           # optional: inject an httpx.AsyncClient
 )
 properties = await client.fetch()   # flattened {dotted_key: value} dict
 ```
@@ -163,6 +246,35 @@ properties = await client.fetch()   # flattened {dotted_key: value} dict
 `{url}/{application}/{profile}/{label}`, then merges the document's `propertySources`
 in **reverse** order (Spring lists highest priority first) so the highest-priority
 source wins. A non-200 response logs a warning and returns `{}`.
+
+### Transport injection
+
+Pass `http_client` (an `httpx.AsyncClient`) to reuse a connection pool or to
+drive the client against an ASGI app in tests:
+
+```python
+import httpx
+from starlette.applications import Starlette
+
+from pyfly.config_server.adapters.starlette import make_starlette_config_server_routes
+
+app = Starlette(routes=make_starlette_config_server_routes(server))
+
+async with httpx.AsyncClient(
+    transport=httpx.ASGITransport(app=app),
+    base_url="http://config",
+) as http_client:
+    client = ConfigClient(
+        url="http://config",
+        application="orders",
+        profile="prod",
+        http_client=http_client,
+    )
+    props = await client.fetch()
+```
+
+When `http_client` is injected the caller owns its lifecycle — `fetch()` does
+**not** close it.
 
 **Invoked automatically at startup.** You normally do not call `ConfigClient` directly:
 `PyFlyApplication` invokes it during bootstrap when `pyfly.cloud.config.uri` (or
