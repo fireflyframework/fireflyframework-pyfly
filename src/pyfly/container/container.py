@@ -543,7 +543,12 @@ class Container:
 
         # Fast path: a plain class dependency — no typing origin and not a PEP 604 union.
         if origin is None and not isinstance(param_type, types.UnionType):
-            if param_type is type:
+            # `type` and `Any` are not injectable dependencies — let the caller fall back
+            # to the parameter's default (NoSuchBeanError + has_default => use default).
+            # `Any` must NOT be resolved: it would match whatever bean happens to be
+            # registered under `Any` (e.g. an `@bean ... -> Any`), injecting the wrong
+            # object — e.g. a CacheHealthIndicator landing in `registry: Any = None`.
+            if param_type is type or param_type is Any:
                 raise NoSuchBeanError(bean_type=None)
             return self.resolve(param_type)
 
