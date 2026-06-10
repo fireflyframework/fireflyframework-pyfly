@@ -246,7 +246,7 @@ class ApplicationContext:
         # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
         for group in instance_groups:
             rep = group[0]
-            bean_name = rep.name or rep.impl_type.__name__
+            bean_name = rep.display_name
             inst = rep.instance
             for pp in sorted_pps:
                 inst = pp.before_init(inst, bean_name)
@@ -256,7 +256,7 @@ class ApplicationContext:
         # Pass 2: @post_construct then after_init (weaving now sees every aspect)
         for group in instance_groups:
             rep = group[0]
-            bean_name = rep.name or rep.impl_type.__name__
+            bean_name = rep.display_name
             await self._call_post_construct(rep.instance)
             inst = rep.instance
             for pp in sorted_pps:
@@ -977,7 +977,7 @@ class ApplicationContext:
         batched startup passes for a single bean. Aspects are already collected
         during startup, so a single bean weaves correctly here.
         """
-        bean_name = reg.name or reg.impl_type.__name__
+        bean_name = reg.display_name
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
         for pp in sorted_pps:
             instance = pp.before_init(instance, bean_name)
