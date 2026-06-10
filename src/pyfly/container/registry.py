@@ -59,7 +59,7 @@ class Registration:
             return self.name
         impl = self.impl_type
         direct = getattr(impl, "__name__", None)
-        if direct is not None:
+        if isinstance(direct, str):
             return direct
         args = get_args(impl)
         if args:

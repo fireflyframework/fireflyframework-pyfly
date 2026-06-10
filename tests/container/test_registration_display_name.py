@@ -30,11 +30,9 @@ def test_display_name_is_union_safe() -> None:
     assert reg.display_name == "_A | _B"  # no AttributeError
 
 
-def test_display_name_handles_arbitrary_typing_construct() -> None:
-    from typing import Optional
-
-    # Optional[_A] (== Union[_A, None]) and similar typing constructs must never
-    # raise; the exact rendering varies by Python version, but it is always a
-    # usable, non-empty name.
-    name = Registration(impl_type=Optional[_A]).display_name
+def test_display_name_handles_optional_union() -> None:
+    # ``_A | None`` (the PEP 604 form of Optional) is also a ``types.UnionType``
+    # and must never raise; the exact rendering may vary by Python version, but
+    # it is always a usable, non-empty name.
+    name = Registration(impl_type=(_A | None)).display_name
     assert isinstance(name, str) and name
