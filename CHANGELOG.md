@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.96 (2026-06-10)
+
+### Fixed
+
+- **`Any` / `Any | None` parameters are no longer autowired.** A constructor or
+  `@bean`-method parameter typed `Any` (e.g. `registry: Any = None`) or `Any | None`
+  (e.g. `metrics: Any | None = None`) was resolved against the container, matching
+  whatever bean was registered under `Any` (such as an `@bean ... -> Any` cache health
+  indicator). That injected the wrong object, e.g. `'CacheHealthIndicator' object has
+  no attribute 'counter'` landing in `RuleEngineService(metrics=...)`. `Any` is now
+  treated like `type` — not injectable — so the parameter falls back to its default.
+  Regression tests in `tests/container/test_any_not_injectable.py`.
+
+---
+
 ## v26.06.95 (2026-06-10)
 
 ### Fixed
