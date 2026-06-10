@@ -323,6 +323,7 @@ PyFly is organized into four layers:
 | **Actuator** | Health checks, monitoring endpoints | [Actuator](modules/actuator.md) |
 | **Admin** | Embedded management dashboard, real-time monitoring | [Admin Dashboard](modules/admin.md) |
 | **Testing** | Test fixtures and assertions | [Testing](modules/testing.md) |
+| **Integration Testing** | Real-backend adapter tests with testcontainers, docker-compose, and CI | [Integration Testing](modules/integration-testing.md) |
 | **CLI** | Command-line tools | [CLI Reference](cli.md) |
 
 ---
@@ -368,6 +369,7 @@ PyFly is organized into four layers:
 - [AOP](modules/aop.md) — Aspect-oriented programming, pointcuts, advice
 - [Validation](modules/validation.md) — Input validation with Pydantic
 - [Testing](modules/testing.md) — Test fixtures, assertions, mock containers
+- [Integration Testing](modules/integration-testing.md) — Real-backend adapter tests (testcontainers, docker-compose, CI)
 - [Transactional Engine](modules/transactional.md) — Saga, Workflow, TCC distributed transaction patterns
 - [Event Sourcing](modules/eventsourcing.md) — AggregateRoot, EventStore, snapshots, outbox, projections
 - [Domain (DDD primitives)](modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification
