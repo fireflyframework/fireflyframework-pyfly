@@ -570,6 +570,11 @@ class Container:
             args = get_args(param_type)
             non_none = [a for a in args if a is not type(None)]
             if len(non_none) == 1:
+                # Optional[Any] (`Any | None`) is not an injectable dependency — `Any`
+                # would match whatever bean happens to be registered under `Any`,
+                # injecting the wrong object. Leave it unset (None).
+                if non_none[0] is Any:
+                    return None
                 try:
                     return self.resolve(non_none[0])
                 except (NoSuchBeanError, NoUniqueBeanError):
