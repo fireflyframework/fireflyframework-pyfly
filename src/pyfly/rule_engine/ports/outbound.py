@@ -33,14 +33,16 @@ from pyfly.rule_engine.evaluator import EvaluationResult
 class ActionHandler(Protocol):
     """SPI for executing a single rule action.
 
-    Each handler is registered under its action *type* string (e.g. ``"call"``,
-    ``"http"``) in the :class:`~pyfly.rule_engine.evaluator.RuleEvaluator`
-    action-handler registry.  The handler receives the full :class:`Action`
-    (so it can inspect ``target``, ``value``, ``expression``, ``arguments``)
-    and the mutable evaluation *context* dict.
+    A handler is any *callable* taking ``(action, ctx)`` — a plain function, a
+    lambda, or an object with ``__call__`` — so it matches the registry shape
+    used by :class:`~pyfly.rule_engine.evaluator.RuleEvaluator` exactly. Each
+    handler is registered under its action *type* string (e.g. ``"call"``,
+    ``"http"``) in that evaluator's action-handler registry. The handler
+    receives the full :class:`Action` (so it can inspect ``target``, ``value``,
+    ``expression``, ``arguments``) and the mutable evaluation *context* dict.
     """
 
-    def handle(self, action: Action, ctx: dict[str, Any]) -> None: ...
+    def __call__(self, action: Action, ctx: dict[str, Any]) -> None: ...
 
 
 @runtime_checkable

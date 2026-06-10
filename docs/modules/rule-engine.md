@@ -332,21 +332,26 @@ recorded in `EvaluationResult.error` and sibling actions still execute.
 ### Custom handlers via `ActionHandler` protocol
 
 ```python
-from pyfly.rule_engine.ports.outbound import ActionHandler
 from pyfly.rule_engine.dsl import Action
 from typing import Any
 
+# A handler is any callable (action, ctx) -> None — a plain function ...
+def audit_handler(action: Action, ctx: dict[str, Any]) -> None:
+    # action.target, action.value, action.expression, action.arguments available
+    record_audit_event(action.arguments.get("event"), ctx.get("order_id"))
+
+# ... or an object implementing the ActionHandler __call__ protocol:
 class AuditHandler:
-    def handle(self, action: Action, ctx: dict[str, Any]) -> None:
-        # action.target, action.value, action.expression, action.arguments available
+    def __call__(self, action: Action, ctx: dict[str, Any]) -> None:
         record_audit_event(action.arguments.get("event"), ctx.get("order_id"))
 
 # register at RuleEvaluator construction time
-evaluator = RuleEvaluator(action_handlers={"call": AuditHandler().handle})
+evaluator = RuleEvaluator(action_handlers={"call": audit_handler})
 ```
 
 Any callable `(action: Action, ctx: dict[str, Any]) -> None` satisfies the
-`ActionHandler` protocol — a method reference or a plain function both work.
+`ActionHandler` protocol (it declares `__call__`) — a plain function, a lambda,
+or an object with `__call__` all work.
 
 Custom handlers are **additive**: built-in `set`/`increment`/`log` remain
 available unless you explicitly override them with the same key.
