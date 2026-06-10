@@ -1006,7 +1006,7 @@ async def update_order(self, order: Order) -> Order: ...
 
 The decorator names and behavior map one-to-one. PyFly uses explicit `backend` injection (a `CacheAdapter` instance) rather than named caches. PyFly also provides `@cache` as a simpler alias for `@cacheable`.
 
-**Backend:** Spring auto-configures CacheManager based on classpath. PyFly auto-configures based on installed extras — if `redis` is installed, `RedisCacheAdapter` is used; otherwise `InMemoryCache`. Both can be overridden in configuration.
+**Backend:** Spring auto-configures CacheManager based on classpath. PyFly auto-configures based on installed extras — if `redis` is installed, `RedisCacheAdapter` is used; otherwise `InMemoryCache`. A `PostgresCacheAdapter` (durable SQL-backed cache) is also available via `pyfly.cache.provider=postgres`. All can be overridden in configuration.
 
 ---
 
@@ -1224,7 +1224,7 @@ class OrderPublisher:
         await self._event_bus.publish(event)
 ```
 
-**Key difference:** PyFly separates **messaging** (Kafka/RabbitMQ transport) from **events** (domain event bus). The messaging module handles broker communication; the EDA module provides the event bus abstraction. This means you can publish domain events within a monolith using `InMemoryEventBus` and later switch to Kafka by changing the adapter — no code changes needed.
+**Key difference:** PyFly separates **messaging** (Kafka/RabbitMQ transport) from **events** (domain event bus). The messaging module handles broker communication; the EDA module provides the event bus abstraction. This means you can publish domain events within a monolith using `InMemoryEventBus` and later switch to Kafka, RabbitMQ, Redis Streams, or Postgres by changing the adapter (`pyfly.eda.provider`) — no code changes needed.
 
 ---
 
