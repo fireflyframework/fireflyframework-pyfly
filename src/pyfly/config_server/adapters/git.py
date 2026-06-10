@@ -23,8 +23,10 @@ Requires GitPython: ``pip install pyfly[config-server-git]``.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import importlib.util
 import logging
+import shutil
 import tempfile
 from typing import Any
 
@@ -62,7 +64,10 @@ class GitConfigBackend:
         Branch (or tag / SHA) to check out.  Defaults to ``"main"``.
     clone_dir:
         Where to clone the repository.  When *None* a temporary directory is
-        created automatically and cleaned up when the process exits.
+        created automatically and registered with ``atexit`` for cleanup when
+        the process exits.  **In production it is strongly recommended to pass
+        an explicit ``clone_dir``** so the clone persists across restarts and
+        the location can be managed by the operator.
     """
 
     def __init__(
@@ -77,19 +82,22 @@ class GitConfigBackend:
         self._clone_dir = clone_dir
         self._repo: Any = None  # git.Repo, set on first _ensure_repo() call
         self._fs: FilesystemConfigBackend | None = None
+        # Lock guards the lazy-init path so that two concurrent first-fetches
+        # cannot both attempt to clone into the same directory.
+        self._init_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_repo(self) -> FilesystemConfigBackend:
-        """Lazily clone the repo and return (or return the cached) FS backend."""
-        if self._fs is not None:
-            return self._fs
+    def _ensure_repo(self, work_dir: str) -> FilesystemConfigBackend:
+        """Clone the repo into *work_dir* and return the FS backend.
 
+        Must only be called once (the caller holds ``_init_lock`` and checks
+        ``self._fs is None`` before dispatching this to the executor).
+        """
         git = _require_git()
 
-        work_dir = self._clone_dir or tempfile.mkdtemp(prefix="pyfly-git-config-")
         _logger.debug("GitConfigBackend: cloning %s → %s (label=%s)", self._uri, work_dir, self._label)
         self._repo = git.Repo.clone_from(self._uri, work_dir)
         # Checkout the requested label (branch / tag / sha).
@@ -103,13 +111,36 @@ class GitConfigBackend:
 
     async def _run_sync(self, fn: Any, *args: Any) -> Any:
         """Run a synchronous callable in the default executor."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, fn, *args)
 
     async def _ensure_repo_async(self) -> FilesystemConfigBackend:
-        """Async wrapper that returns a typed FilesystemConfigBackend."""
-        result: FilesystemConfigBackend = await self._run_sync(self._ensure_repo)
-        return result
+        """Return the cached FS backend, initialising (cloning) on the first call.
+
+        An ``asyncio.Lock`` guards the init path so that two concurrent first
+        callers cannot both attempt to ``git clone`` into the same directory.
+        The fast-path (already initialised) skips the lock entirely.
+        """
+        # Fast-path: already initialised — no lock needed.
+        if self._fs is not None:
+            return self._fs
+
+        async with self._init_lock:
+            # Re-check after acquiring the lock: a concurrent coroutine may
+            # have completed the clone while we were waiting.
+            if self._fs is not None:
+                return self._fs
+
+            if self._clone_dir:
+                work_dir = self._clone_dir
+            else:
+                work_dir = tempfile.mkdtemp(prefix="pyfly-git-config-")
+                # Register cleanup so the tempdir is removed when the process
+                # exits normally (Fix 2 — prevents tempdir leaks).
+                atexit.register(shutil.rmtree, work_dir, True)
+
+            result: FilesystemConfigBackend = await self._run_sync(self._ensure_repo, work_dir)
+            return result
 
     # ------------------------------------------------------------------
     # ConfigBackend protocol

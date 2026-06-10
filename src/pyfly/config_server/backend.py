@@ -117,8 +117,8 @@ class FilesystemConfigBackend:
         for candidate in self._path_candidates_for(root, application, profile, label):
             if not candidate.exists():
                 continue
-            text = await asyncio.get_event_loop().run_in_executor(None, candidate.read_text)
-            properties = await asyncio.get_event_loop().run_in_executor(
+            text = await asyncio.get_running_loop().run_in_executor(None, candidate.read_text)
+            properties = await asyncio.get_running_loop().run_in_executor(
                 None, _parse_text, text, candidate.suffix.lstrip(".")
             )
             return ConfigSource(application=application, profile=profile, label=label, properties=properties)
@@ -148,8 +148,8 @@ class FilesystemConfigBackend:
         for candidate in self._path_candidates(application, profile, label):
             if not candidate.exists():
                 continue
-            text = await asyncio.get_event_loop().run_in_executor(None, candidate.read_text)
-            properties = await asyncio.get_event_loop().run_in_executor(
+            text = await asyncio.get_running_loop().run_in_executor(None, candidate.read_text)
+            properties = await asyncio.get_running_loop().run_in_executor(
                 None, _parse_text, text, candidate.suffix.lstrip(".")
             )
             return ConfigSource(application=application, profile=profile, label=label, properties=properties)
@@ -179,7 +179,7 @@ class FilesystemConfigBackend:
             text = json.dumps(source.properties, indent=2)
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.get_event_loop().run_in_executor(None, path.write_text, text)
+        await asyncio.get_running_loop().run_in_executor(None, path.write_text, text)
 
         # Guarantee exactly one file backs this (application, profile, label) so
         # future fetches/saves can't diverge across stale duplicate formats.

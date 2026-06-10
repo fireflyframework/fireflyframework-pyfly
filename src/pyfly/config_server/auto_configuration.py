@@ -85,15 +85,9 @@ def _build_backend(config: Config) -> ConfigBackend:
 @conditional_on_property("pyfly.config-server.enabled", having_value="true")
 class ConfigServerAutoConfiguration:
     @bean
-    def config_backend(self, config: Config) -> FilesystemConfigBackend:
-        # Persist under a configured root so saved config survives restarts and an
-        # operator can point the server at a real config directory (audit #88).
-        # Fall back to a throwaway tempdir only when nothing is configured.
-        root = config.get("pyfly.config-server.backend.root") or config.get(
-            "pyfly.config-server.native.search-locations"
-        )
-        return FilesystemConfigBackend(str(root) if root else tempfile.mkdtemp(prefix="pyfly-config-"))
+    def config_backend(self, config: Config) -> ConfigBackend:
+        return _build_backend(config)
 
     @bean
-    def config_server(self, backend: FilesystemConfigBackend) -> ConfigServer:
+    def config_server(self, backend: ConfigBackend) -> ConfigServer:
         return ConfigServer(backend=backend)
