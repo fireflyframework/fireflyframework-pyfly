@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.93 (2026-06-10)
+
+### Added (rule engine completeness — parity initiative SP-13)
+
+Brought the rule engine (the weakest subsystem, ~18% parity) to functional parity:
+
+- **Rich operators**: added `between`, `contains`, `not_contains`, `starts_with`, `ends_with`, `exists`,
+  `is_null`, `is_empty` (all None-safe) on top of the existing comparison/logical set.
+- **Fluent builder DSL** (`pyfly.rule_engine.builder`): `field(...).<op>()`, `all_of/any_of/not_`,
+  `set_action/increment_action/log_action`, and `rule(id)...build()` / `ruleset(...)...build()`.
+- **Loading + validation**: `RuleSetLoader.from_json` (alongside YAML/dict) and a `RuleSetValidator` /
+  `validate_ruleset` / `RuleValidationError` that catches duplicate ids, unknown operators, missing action
+  targets, malformed `between`, empty `and`/`or`, and bad `not` arity.
+- **Hexagonal port + service**: `RuleEnginePort` + `ActionHandler` SPI (`ports/outbound.py`) and a
+  `RuleEngineService` facade (`evaluate`, async `evaluate_by_name` over the repository, save/get/list) with
+  `pyfly_rule_*_total` metrics (evaluations/matched/actions-fired/errors) when a `MetricsRecorder` is present.
+- **Pluggable action handlers**: `RuleEvaluator(action_handlers={...})` makes `call`/`calculate`/custom action
+  types pluggable without subclassing (built-in `set`/`increment`/`log` preserved, additive).
+- **Evaluation modes**: `EvaluationMode.ALL` (default) and `FIRST_MATCH` on `RuleSetEvaluator`, wired via
+  `pyfly.rule-engine.mode`.
+- End-to-end integration test + full `docs/modules/rule-engine.md` rewrite (operator reference, modes,
+  builder, validation, service, handlers, metrics). Stateful forward-chaining remains out of scope by design.
+
 ## v26.06.92 (2026-06-10)
 
 ### Added / Fixed (config server backends — parity initiative SP-12)
