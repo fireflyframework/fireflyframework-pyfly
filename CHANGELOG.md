@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.95 (2026-06-10)
+
+### Fixed
+
+- **Union-safe bean-name derivation.** Registering a bean whose implementation type is
+  a PEP 604 union (`X | Y`, a `types.UnionType`) crashed application startup with
+  `AttributeError: 'types.UnionType' object has no attribute '__name__'`, surfaced as a
+  `BeanCreationException` from `ApplicationContext.start()`. Default bean-name derivation
+  now goes through a new union-safe `Registration.display_name`, which falls back to the
+  union member names (then `str()`) when `impl_type` has no `__name__`. The same property
+  is reused for scope-resolution error messages so they never raise either. Added
+  regression tests in `tests/container/test_registration_display_name.py`.
+
+---
+
 ## v26.06.94 (2026-06-10)
 
 ### Docs (parity initiative — final cross-cutting sweep)

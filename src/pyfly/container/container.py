@@ -398,7 +398,7 @@ class Container:
         if ctx is None:
             raise RuntimeError(
                 f"No active request context for REQUEST-scoped bean "
-                f"{reg.impl_type.__name__}. Ensure a RequestContextFilter is active."
+                f"{reg.display_name}. Ensure a RequestContextFilter is active."
             )
 
         # Store request-scoped instances in the context's attributes
@@ -424,12 +424,12 @@ class Container:
         if ctx is None:
             raise RuntimeError(
                 f"No active request context for SESSION-scoped bean "
-                f"{reg.impl_type.__name__}. Ensure a RequestContextFilter is active."
+                f"{reg.display_name}. Ensure a RequestContextFilter is active."
             )
         session = ctx.get(HTTP_SESSION_KEY)
         if session is None:
             raise RuntimeError(
-                f"No HTTP session for SESSION-scoped bean {reg.impl_type.__name__}. "
+                f"No HTTP session for SESSION-scoped bean {reg.display_name}. "
                 f"Ensure the session module (SessionFilter) is enabled."
             )
 
@@ -448,7 +448,7 @@ class Container:
         if handler is None:
             raise RuntimeError(
                 f"Custom scope {reg.scope!r} is not registered for bean "
-                f"{reg.impl_type.__name__}. Available: {sorted(self._custom_scopes)}. "
+                f"{reg.display_name}. Available: {sorted(self._custom_scopes)}. "
                 f"Call container.register_scope({reg.scope!r}, handler) first."
             )
         cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
