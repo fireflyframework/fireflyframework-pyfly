@@ -84,6 +84,39 @@ class RuleEvaluator:
             return actual not in (expected or [])
         if op == "regex":
             return bool(re.search(str(expected), str(actual or "")))
+        if op == "between":
+            if actual is None:
+                return False
+            lo, hi = expected[0], expected[1]
+            return bool(lo <= actual <= hi)
+        if op == "contains":
+            if actual is None:
+                return False
+            if isinstance(actual, str):
+                return str(expected) in actual
+            return expected in actual
+        if op == "not_contains":
+            if actual is None:
+                return False
+            if isinstance(actual, str):
+                return str(expected) not in actual
+            return expected not in actual
+        if op == "starts_with":
+            if actual is None:
+                return False
+            return str(actual).startswith(str(expected))
+        if op == "ends_with":
+            if actual is None:
+                return False
+            return str(actual).endswith(str(expected))
+        if op == "exists":
+            return actual is not None
+        if op == "is_null":
+            return actual is None
+        if op == "is_empty":
+            if actual is None:
+                return True
+            return bool(actual == "" or actual == [] or actual == {})
         msg = f"unknown operator: {op}"
         raise ValueError(msg)
 
