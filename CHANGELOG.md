@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.97 (2026-06-11)
+
+### Fixed
+
+- **Process-global, idempotent metric registration.** `MetricsRegistry` cached its
+  Prometheus collectors in **per-instance** dicts (`self._counters`/`_histograms`/
+  `_gauges`), but prometheus_client registers every `Counter`/`Histogram`/`Gauge` on the
+  process-global default `REGISTRY` keyed by name. A second `MetricsRegistry` (e.g. a
+  second `create_app()` in one pytest process) therefore re-created an already-registered
+  collector and prometheus raised `ValueError: Duplicated timeseries in CollectorRegistry:
+  pyfly_db_query_duration_seconds...`. The collector caches are now **module-level**
+  (process-global), so get-or-create is idempotent across every `MetricsRegistry` in the
+  process — matching prometheus's one-collector-per-name model. The global default registry
+  is still used for `/metrics` exposition (production behavior unchanged). This retires the
+  per-app `conftest` fixture workaround that downstream services carried to reset the
+  registry between apps. Regression tests in `tests/observability/test_metrics_idempotent.py`.
+
+---
+
 ## v26.06.96 (2026-06-10)
 
 ### Fixed

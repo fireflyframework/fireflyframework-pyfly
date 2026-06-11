@@ -35,12 +35,29 @@ except ImportError:
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+# Metric collector caches are PROCESS-GLOBAL (module-level), not per-instance.
+# prometheus_client registers every Counter/Histogram/Gauge on the process-global
+# default ``REGISTRY`` keyed by metric name, so a name may only be created once per
+# process. Caching per ``MetricsRegistry`` instance meant a second registry (e.g. a
+# second ``create_app()`` in one pytest process) re-created an already-registered
+# collector and prometheus raised "Duplicated timeseries in CollectorRegistry". Keying
+# the caches at module scope makes get-or-create idempotent across every
+# ``MetricsRegistry`` in the process, matching prometheus's one-collector-per-name model.
+_COUNTERS: dict[str, Counter] = {}
+_HISTOGRAMS: dict[str, Histogram] = {}
+_GAUGES: dict[str, Gauge] = {}
+
 
 class MetricsRegistry(MetricsRecorder):
     """Registry for application metrics — the Prometheus :class:`MetricsRecorder` adapter.
 
-    Wraps prometheus_client to provide a clean API for creating and
-    managing metrics. Ensures each metric name is registered only once.
+    Wraps prometheus_client to provide a clean API for creating and managing metrics.
+    Registration is **process-global and idempotent**: collector caches live at module
+    scope, so every metric name is created exactly once per process no matter how many
+    ``MetricsRegistry`` instances exist. This mirrors prometheus_client's own
+    one-collector-per-name model on the global default ``REGISTRY`` and means a second
+    application (e.g. a second ``create_app()`` in one test process) reuses the existing
+    collectors instead of raising "Duplicated timeseries in CollectorRegistry".
     """
 
     def __init__(self) -> None:
@@ -48,15 +65,12 @@ class MetricsRegistry(MetricsRecorder):
             raise ImportError(
                 "prometheus_client is required for metrics. Install the observability extra: pyfly[observability]"
             )
-        self._counters: dict[str, Counter] = {}
-        self._histograms: dict[str, Histogram] = {}
-        self._gauges: dict[str, Gauge] = {}
 
     def counter(self, name: str, description: str, labels: list[str] | None = None) -> Counter:
-        """Get or create a counter metric."""
-        if name not in self._counters:
-            self._counters[name] = Counter(name, description, labels or [])
-        return self._counters[name]
+        """Get or create a counter metric (idempotent process-wide)."""
+        if name not in _COUNTERS:
+            _COUNTERS[name] = Counter(name, description, labels or [])
+        return _COUNTERS[name]
 
     def histogram(
         self,
@@ -65,19 +79,19 @@ class MetricsRegistry(MetricsRecorder):
         labels: list[str] | None = None,
         buckets: tuple[float, ...] | None = None,
     ) -> Histogram:
-        """Get or create a histogram metric."""
-        if name not in self._histograms:
+        """Get or create a histogram metric (idempotent process-wide)."""
+        if name not in _HISTOGRAMS:
             kwargs: dict[str, Any] = {}
             if buckets:
                 kwargs["buckets"] = buckets
-            self._histograms[name] = Histogram(name, description, labels or [], **kwargs)
-        return self._histograms[name]
+            _HISTOGRAMS[name] = Histogram(name, description, labels or [], **kwargs)
+        return _HISTOGRAMS[name]
 
     def gauge(self, name: str, description: str, labels: list[str] | None = None) -> Gauge:
-        """Get or create a gauge metric."""
-        if name not in self._gauges:
-            self._gauges[name] = Gauge(name, description, labels or [])
-        return self._gauges[name]
+        """Get or create a gauge metric (idempotent process-wide)."""
+        if name not in _GAUGES:
+            _GAUGES[name] = Gauge(name, description, labels or [])
+        return _GAUGES[name]
 
 
 def _sanitize(name: str) -> str:

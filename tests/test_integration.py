@@ -187,7 +187,7 @@ class TestEndToEndOrderService:
             return data
 
         await tracked_create(order)
-        counter = metrics._counters["orders_created"]
+        counter = metrics.counter("orders_created", "Total orders created")
         child = counter.labels(method="tracked_create", result="success", exception="none", **{"class": ""})
         assert child._value.get() == 1.0
 
