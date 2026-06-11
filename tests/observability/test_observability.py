@@ -73,7 +73,7 @@ class TestMetrics:
         await my_operation()
         await my_operation()
 
-        counter = registry._counters["operation_calls"]  # prometheus appends _total
+        counter = registry.counter("operation_calls", "Operation calls")  # prometheus appends _total
         success = counter.labels(method="my_operation", result="success", exception="none", **{"class": ""})
         assert success._value.get() == 2.0
 
