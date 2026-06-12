@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.98 (2026-06-12)
+
+### Added
+
+- **Public health-indicator container scan: `pyfly.actuator.install_health_indicators`.**
+  The scan that discovers `HealthIndicator` beans in a started `ApplicationContext` and
+  registers them on a `HealthAggregator` existed only as private closures inside the
+  FastAPI and Starlette `create_app` factories, each reaching into
+  `container._registrations`. It is now a public, documented helper in
+  `pyfly.actuator.wiring` (exported from `pyfly.actuator`, alongside
+  `build_actuator_routes`) built on the container's public
+  `registered_types()` / `get_registration()` surface, with an optional `groups=`
+  parameter to assign probe-group membership to every scanned indicator. Both web
+  adapters (actuator + admin paths) now delegate to it, and out-of-web-stack
+  processes — e.g. EDA workers that serve `/actuator/health/*` from a standalone
+  Starlette app — can wire indicators without copying framework internals.
+  `HealthAggregator` also gains a public `has_indicator(name)` accessor.
+  Tests in `tests/actuator/test_health_indicators_wiring.py`.
+
+---
+
 ## v26.06.97 (2026-06-11)
 
 ### Fixed

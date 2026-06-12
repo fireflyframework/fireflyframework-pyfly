@@ -290,8 +290,8 @@ def create_app(
     # Mount actuator endpoints when active (actuator_active resolved above).
     agg = None
     if actuator_active:
-        from pyfly.actuator.health import HealthAggregator, HealthIndicator
-        from pyfly.actuator.wiring import build_actuator_routes
+        from pyfly.actuator.health import HealthAggregator
+        from pyfly.actuator.wiring import build_actuator_routes, install_health_indicators
 
         agg = HealthAggregator()
 
@@ -300,7 +300,7 @@ def create_app(
         # NOTE: ``create_app`` is typically called BEFORE the ApplicationContext
         # has started (the startup happens inside the ASGI ``lifespan``
         # function). At this point user / auto-configuration beans have
-        # been *registered* but not *instantiated*, so the eager loop only
+        # been *registered* but not *instantiated*, so the eager scan only
         # finds indicators that were attached as static singletons.
         #
         # The remaining indicators are picked up by ``_install_indicators``
@@ -308,16 +308,7 @@ def create_app(
         # the time on_startup fires, the lifespan has already triggered
         # ``PyFlyApplication.startup()`` and every bean has been built.
         def _install_indicators() -> None:
-            if context is None:
-                return
-            seen = set(agg._indicators.keys())  # noqa: SLF001 — intentional, indicator names
-            for cls, reg in context.container._registrations.items():
-                if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
-                    indicator_name = reg.name or cls.__name__
-                    if indicator_name in seen:
-                        continue
-                    agg.add_indicator(indicator_name, reg.instance)
-                    seen.add(indicator_name)
+            install_health_indicators(context, agg)
 
         _install_indicators()
         _extra_post_start.append(_install_indicators)
@@ -380,7 +371,8 @@ def create_app(
         # Reuse health aggregator from actuator, or create one for admin
         health_agg = agg
         if health_agg is None:
-            from pyfly.actuator.health import HealthAggregator, HealthIndicator
+            from pyfly.actuator.health import HealthAggregator
+            from pyfly.actuator.wiring import install_health_indicators
 
             health_agg = HealthAggregator()
 
@@ -388,15 +380,7 @@ def create_app(
                 # HealthIndicator beans are only instantiated during start();
                 # rescan post-start so the admin health view isn't a frozen empty
                 # pre-startup snapshot when the actuator is disabled (audit #70).
-                if context is None:
-                    return
-                seen = set(_agg._indicators.keys())  # noqa: SLF001
-                for cls, reg in context.container._registrations.items():
-                    if reg.instance is not None and isinstance(reg.instance, HealthIndicator):
-                        name = reg.name or cls.__name__
-                        if name not in seen:
-                            _agg.add_indicator(name, reg.instance)
-                            seen.add(name)
+                install_health_indicators(context, _agg)
 
             _install_admin_indicators()
             _extra_post_start.append(_install_admin_indicators)

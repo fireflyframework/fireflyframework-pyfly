@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pyfly.actuator.health import HealthAggregator
+    from pyfly.actuator.health import HealthAggregator, ProbeGroup
     from pyfly.actuator.http_exchanges import HttpExchangeRecorder
     from pyfly.context.application_context import ApplicationContext
 
@@ -43,6 +43,44 @@ def resolve_actuator_active(context: ApplicationContext | None, actuator_enabled
             context.config.get("pyfly.web.actuator.enabled", "true"),
         )
     ).lower() in ("true", "1", "yes")
+
+
+def install_health_indicators(
+    context: ApplicationContext | None,
+    aggregator: HealthAggregator,
+    *,
+    groups: set[ProbeGroup] | None = None,
+) -> None:
+    """Register every instantiated ``HealthIndicator`` bean from *context* on *aggregator*.
+
+    The scan walks the container's registrations and picks up every bean whose
+    singleton instance implements :class:`pyfly.actuator.health.HealthIndicator`,
+    named after the bean name (falling back to the class name). Beans that have
+    never been instantiated (e.g. ``@lazy`` singletons that were never resolved)
+    are skipped, so callers should run the scan after the application context has
+    started. Indicators already registered on *aggregator* keep their existing
+    registration — re-running the scan is idempotent.
+
+    *groups* assigns probe-group membership to every indicator the scan adds;
+    ``None`` keeps the default (the indicator participates in both liveness and
+    readiness).
+
+    The container keeps one registration per bean type, so two indicator beans
+    of the same concrete class are discovered only once (the last registered).
+    """
+    if context is None:
+        return
+    from pyfly.actuator.health import HealthIndicator
+
+    container = context.container
+    for cls in container.registered_types():
+        reg = container.get_registration(cls)
+        if reg is None or reg.instance is None or not isinstance(reg.instance, HealthIndicator):
+            continue
+        name = reg.name or cls.__name__
+        if aggregator.has_indicator(name):
+            continue
+        aggregator.add_indicator(name, reg.instance, groups=groups)
 
 
 def _health_show(config: Any, key: str) -> bool:
