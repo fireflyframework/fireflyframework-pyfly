@@ -16,6 +16,7 @@
 from pyfly.actuator.health import HealthAggregator, HealthIndicator, HealthResult, HealthStatus, ProbeGroup
 from pyfly.actuator.ports import ActuatorEndpoint
 from pyfly.actuator.registry import ActuatorRegistry
+from pyfly.actuator.wiring import build_actuator_routes, install_health_indicators
 
 __all__ = [
     "ActuatorEndpoint",
@@ -25,4 +26,6 @@ __all__ = [
     "HealthResult",
     "HealthStatus",
     "ProbeGroup",
+    "build_actuator_routes",
+    "install_health_indicators",
 ]

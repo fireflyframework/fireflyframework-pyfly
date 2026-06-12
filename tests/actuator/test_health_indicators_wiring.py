@@ -11,14 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for health-indicator wiring: protocol conformance, aggregation, show-details."""
+"""Tests for health-indicator wiring: protocol conformance, aggregation, show-details,
+and the public container scan (``install_health_indicators``)."""
 
 from __future__ import annotations
 
 import pytest
 from starlette.testclient import TestClient
 
-from pyfly.actuator.health import HealthIndicator, HealthResult, HealthStatus, aggregate_status
+from pyfly.actuator.health import (
+    HealthAggregator,
+    HealthIndicator,
+    HealthResult,
+    HealthStatus,
+    ProbeGroup,
+    aggregate_status,
+)
+from pyfly.actuator.wiring import install_health_indicators
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.cqrs.actuator.health import CqrsHealthIndicator
@@ -139,3 +148,91 @@ class TestHealthEndpointIntegration:
         comp = body["components"]["_OutOfServiceIndicator"]
         assert comp["status"] == "OUT_OF_SERVICE"
         assert "details" not in comp
+
+
+class _UpIndicator:
+    async def health(self) -> HealthStatus:
+        return HealthStatus(status="UP")
+
+
+class _DownIndicator:
+    async def health(self) -> HealthStatus:
+        return HealthStatus(status="DOWN", details={"reason": "offline"})
+
+
+class _NotAnIndicator:
+    pass
+
+
+class TestInstallHealthIndicators:
+    @pytest.mark.asyncio
+    async def test_scans_started_context_for_indicator_beans(self):
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(_UpIndicator)
+        ctx.register_bean(_NotAnIndicator)
+        await ctx.start()
+
+        agg = HealthAggregator()
+        install_health_indicators(ctx, agg)
+
+        assert agg.has_indicator("_UpIndicator")
+        assert not agg.has_indicator("_NotAnIndicator")
+        result = await agg.check()
+        assert result.status == "UP"
+        assert "_UpIndicator" in result.components
+
+    def test_none_context_is_a_no_op(self):
+        agg = HealthAggregator()
+        install_health_indicators(None, agg)
+        assert not agg.has_indicator("_UpIndicator")
+
+    def test_bean_name_wins_over_class_name(self):
+        ctx = ApplicationContext(Config({}))
+        ctx.container.register_instance(_UpIndicator, _UpIndicator(), name="database_health")
+
+        agg = HealthAggregator()
+        install_health_indicators(ctx, agg)
+
+        assert agg.has_indicator("database_health")
+        assert not agg.has_indicator("_UpIndicator")
+
+    @pytest.mark.asyncio
+    async def test_rescan_is_idempotent_and_preserves_existing_registration(self):
+        ctx = ApplicationContext(Config({}))
+        ctx.container.register_instance(_DownIndicator, _DownIndicator(), name="db")
+
+        agg = HealthAggregator()
+        pre_registered = _UpIndicator()
+        agg.add_indicator("db", pre_registered, groups={ProbeGroup.READINESS})
+        install_health_indicators(ctx, agg)
+        install_health_indicators(ctx, agg)
+
+        # The pre-registered "db" indicator (UP, readiness-only) is kept: the
+        # scanned DOWN indicator of the same name must not displace it.
+        result = await agg.check()
+        assert result.status == "UP"
+        liveness = await agg.check_liveness()
+        assert "db" not in liveness.components
+
+    @pytest.mark.asyncio
+    async def test_groups_apply_to_scanned_indicators(self):
+        ctx = ApplicationContext(Config({}))
+        ctx.container.register_instance(_DownIndicator, _DownIndicator(), name="db")
+
+        agg = HealthAggregator()
+        install_health_indicators(ctx, agg, groups={ProbeGroup.READINESS})
+
+        readiness = await agg.check_readiness()
+        assert readiness.status == "DOWN"
+        liveness = await agg.check_liveness()
+        assert "db" not in liveness.components
+        assert liveness.status == "UP"
+
+    def test_uninstantiated_beans_are_skipped(self):
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(_UpIndicator)  # registered, never resolved -> no instance
+
+        agg = HealthAggregator()
+        install_health_indicators(ctx, agg)
+
+        assert not agg.has_indicator("_UpIndicator")
