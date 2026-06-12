@@ -502,13 +502,21 @@ class ApplicationContext:
                 # shares the same instance/factory; the startup lifecycle and
                 # wiring passes de-duplicate by instance identity so the bean is
                 # never post-processed or subscribed twice (audit #113).
-                if return_type not in self._container._registrations:
+                #
+                # A PEP 604 union / TypeVar / generic-alias return hint (e.g. the
+                # idiomatic ``Foo | None``) is *not* a real class: ``get_type_hints``
+                # preserves it as a ``types.UnionType``, which has no
+                # ``__name__``/``__qualname__``/``__module__``. It must never become a
+                # ``_registrations`` key — the concrete ``impl_type`` registered above
+                # already backs single-bean resolution, and a non-class key crashed the
+                # admin BeansProvider (500 on ``/admin/api/beans/graph``).
+                if isinstance(return_type, type) and return_type not in self._container._registrations:
                     self._container.register(return_type, scope=bean_scope)
                     return_reg = self._container._registrations[return_type]
                     return_reg.factory = factory
                     if bean_scope == Scope.SINGLETON:
                         return_reg.instance = result
-                elif getattr(method, "__pyfly_bean_primary__", False):
+                elif isinstance(return_type, type) and getattr(method, "__pyfly_bean_primary__", False):
                     # A later @bean(primary=True) for the same return type must win the
                     # single-bean direct resolution (the @Bean @Primary semantics) —
                     # otherwise resolve() returns whichever @bean was processed first.

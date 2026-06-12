@@ -48,7 +48,7 @@ class BeansProvider:
         if getattr(cls, "__pyfly_bean_method__", None):
             return "bean_method"
 
-        name = cls.__name__
+        name = BeansProvider._key_name(cls)
         suffixes: list[tuple[str, str]] = [
             ("AutoConfiguration", "auto_configuration"),
             ("Adapter", "adapter"),
@@ -102,6 +102,40 @@ class BeansProvider:
     @staticmethod
     def _type_name(t: Any) -> str:
         return getattr(t, "__name__", str(t))
+
+    @staticmethod
+    def _key_name(cls: Any) -> str:
+        """Union/TypeVar-safe display name for a registration key.
+
+        A registration key is not guaranteed to be a real class: a ``@bean``
+        factory typed ``-> Foo | None`` yields a ``types.UnionType`` key, and
+        ``TypeVar``/generic-alias keys are possible too. None of those have
+        ``__name__``, so fall back to ``__qualname__`` then ``str()`` — admin
+        introspection must never raise ``AttributeError`` (it surfaced as a 500
+        on ``/admin/api/beans/graph``).
+        """
+        return getattr(cls, "__name__", None) or getattr(cls, "__qualname__", None) or str(cls)
+
+    @staticmethod
+    def _key_qualname(cls: Any) -> str:
+        """Union/TypeVar-safe ``module.qualname`` string for a registration key."""
+        module = getattr(cls, "__module__", "") or ""
+        qualname = getattr(cls, "__qualname__", None) or getattr(cls, "__name__", None) or str(cls)
+        return f"{module}.{qualname}" if module else qualname
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Coerce a condition/metadata value into something JSON-serialisable.
+
+        Type objects render as their name and primitives pass through; anything
+        else — generic aliases (``list[str]``), unions, ``TypeVar`` — becomes a
+        readable string so ``JSONResponse`` can never raise on the detail view.
+        """
+        if isinstance(value, type):
+            return value.__name__
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     def _build_deps_list(self, cls: type) -> list[dict[str, str]]:
         """Build the flat dependency list used by ``get_beans``."""
@@ -160,14 +194,19 @@ class BeansProvider:
             cond_type = cond.get("type", "unknown")
             if cond_type == "on_class":
                 check = cond.get("check")
-                passed = bool(check()) if callable(check) else True
+                try:
+                    passed = bool(check()) if callable(check) else True
+                except Exception:
+                    # A user condition's ``check`` callable must never 500 the
+                    # admin detail endpoint; treat an erroring check as failed.
+                    passed = False
             else:
                 # The bean is registered, so all startup conditions passed.
                 passed = True
-            # Build a serialisable copy (skip the callable ``check`` key).
-            entry: dict[str, Any] = {
-                k: (v.__name__ if isinstance(v, type) else v) for k, v in cond.items() if k != "check"
-            }
+            # Build a JSON-serialisable copy (skip the callable ``check`` key).
+            # Condition values may be generic aliases (``list[str]``), unions, or
+            # ``TypeVar`` — none JSON-serialisable — so coerce via ``_json_safe``.
+            entry: dict[str, Any] = {k: BeansProvider._json_safe(v) for k, v in cond.items() if k != "check"}
             entry["passed"] = passed
             result.append(entry)
         return result
@@ -198,7 +237,12 @@ class BeansProvider:
         """Return Autowired field descriptors from class attributes."""
         fields: list[dict[str, Any]] = []
         for attr_name in vars(cls):
-            val = getattr(cls, attr_name, None)
+            try:
+                val = getattr(cls, attr_name, None)
+            except Exception:
+                # A descriptor ``__get__`` that raises on class access must not
+                # 500 the admin detail endpoint (mirrors _find_lifecycle_methods).
+                continue
             if isinstance(val, Autowired):
                 fields.append(
                     {
@@ -216,7 +260,7 @@ class BeansProvider:
     async def get_beans(self) -> dict[str, Any]:
         beans: list[dict[str, Any]] = []
         for cls, reg in self._context.container._registrations.items():
-            bean_name = reg.name or cls.__name__
+            bean_name = reg.name or self._key_name(cls)
             stereotype = getattr(cls, "__pyfly_stereotype__", "none")
             conditions = getattr(cls, "__pyfly_conditions__", [])
             order = getattr(cls, "__pyfly_order__", None)
@@ -231,7 +275,7 @@ class BeansProvider:
             beans.append(
                 {
                     "name": bean_name,
-                    "type": f"{cls.__module__}.{cls.__qualname__}",
+                    "type": self._key_qualname(cls),
                     "scope": scope_name(reg.scope),
                     "stereotype": stereotype,
                     "category": category,
@@ -252,7 +296,7 @@ class BeansProvider:
 
     async def get_bean_detail(self, name: str) -> dict[str, Any] | None:
         for cls, reg in self._context.container._registrations.items():
-            bean_name = reg.name or cls.__name__
+            bean_name = reg.name or self._key_name(cls)
             if bean_name == name:
                 return await self._build_detail(cls, reg)
         return None
@@ -329,7 +373,7 @@ class BeansProvider:
         registered_names: dict[type, str] = {}
 
         for cls, reg in self._context.container._registrations.items():
-            bean_name = reg.name or cls.__name__
+            bean_name = reg.name or self._key_name(cls)
             registered_names[cls] = bean_name
             stereotype = getattr(cls, "__pyfly_stereotype__", "none")
             metrics = self._get_metrics_dict(cls)
@@ -338,7 +382,7 @@ class BeansProvider:
                 {
                     "id": bean_name,
                     "name": bean_name,
-                    "type": f"{cls.__module__}.{cls.__qualname__}",
+                    "type": self._key_qualname(cls),
                     "stereotype": stereotype,
                     "category": category,
                     "scope": scope_name(reg.scope),
@@ -351,7 +395,7 @@ class BeansProvider:
 
         # Build edges from constructor dependency hints
         for cls, reg in self._context.container._registrations.items():
-            source = reg.name or cls.__name__
+            source = reg.name or self._key_name(cls)
             for _param_name, param_type in self._get_constructor_hints(cls).items():
                 base = self._extract_base_type(param_type)
                 if base is None:
@@ -362,7 +406,7 @@ class BeansProvider:
 
         # Build edges from @Autowired field injection
         for cls, reg in self._context.container._registrations.items():
-            source = reg.name or cls.__name__
+            source = reg.name or self._key_name(cls)
             for _field_name, field_type in self._get_autowired_hints(cls).items():
                 base = self._extract_base_type(field_type)
                 if base is None:
@@ -400,12 +444,12 @@ class BeansProvider:
         metrics = self._get_metrics_dict(cls)
 
         return {
-            "name": reg.name or cls.__name__,
-            "type": f"{cls.__module__}.{cls.__qualname__}",
+            "name": reg.name or self._key_name(cls),
+            "type": self._key_qualname(cls),
             "scope": scope_name(reg.scope),
             "stereotype": stereotype,
             "category": category,
-            "module": cls.__module__,
+            "module": getattr(cls, "__module__", None),
             "file": self._safe_getfile(cls),
             "doc": inspect.getdoc(cls) or "",
             "primary": getattr(cls, "__pyfly_primary__", False),
