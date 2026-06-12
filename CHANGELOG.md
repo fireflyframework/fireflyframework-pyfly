@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.99 (2026-06-12)
+
+### Fixed
+
+- **Admin bean-graph 500 on union / `TypeVar` beans.** The admin dashboard's
+  `#bean-graph` view (and `/beans`, `/beans/{name}`) returned a 500 whenever a bean's
+  registration key was not a plain class. The idiomatic `@bean def make_foo(self) -> Foo
+  | None` is the common trigger: `typing.get_type_hints` preserves `Foo | None` as a
+  `types.UnionType`, and the configuration processor registered that union object
+  directly as a `_registrations` key. A `types.UnionType` (and `TypeVar`) has no
+  `__name__`/`__qualname__`/`__module__`, so `BeansProvider`, which derived bean
+  names/types straight from the key, raised
+  `AttributeError: 'types.UnionType' object has no attribute '__name__'`. Notably this
+  only surfaced *after* the v26.06.95 startup fix made union beans bootable. Fixed at
+  three layers:
+  - **Source** (`ApplicationContext._process_configurations`): a non-class return hint
+    is no longer registered as a `_registrations` key — the concrete `type(result)`
+    registration already backs single-bean resolution, so nothing is lost.
+  - **Provider hardening** (`BeansProvider`): all bean-name / type-string derivation now
+    goes through union/`TypeVar`-safe `_key_name` / `_key_qualname` helpers, so admin
+    introspection never raises on an unusual registration key from any source.
+  - **Backstop** (Starlette admin adapter): admin API handlers now convert any
+    unexpected error into a logged, structured JSON 500 instead of a raw Starlette 500,
+    so a single odd bean can never blank an entire dashboard view.
+- **Admin bean-detail 500s on awkward bean metadata.** `/beans/{name}` additionally
+  hardened against three reproduced crashes: generic-alias condition values
+  (`@conditional_on_bean(list[str])`) are now coerced to JSON-serialisable strings; an
+  `@conditional_on_class` `check()` that raises is reported as *not passed* rather than
+  propagating; and a class-level descriptor whose `__get__` raises during the autowired
+  field scan is skipped (mirroring the existing lifecycle-scan guard).
+- **Stale `pyfly.__version__`.** `__version__` had drifted to `26.06.94` while the
+  package shipped `26.06.98`, so the admin dashboard's `framework_version`, the CLI
+  banner, generated SBOMs, and the admin static-asset cache-busting query all reported
+  the wrong version. It now tracks the release version again.
+
+Regression coverage drives the **real** `ApplicationContext`/`Container` (not the mocked
+container the prior admin tests used, which is exactly why these 500s shipped):
+`tests/context/test_bean_method_union_return.py` and
+`tests/admin/test_beans_provider_realcontext.py`.
+
+---
+
 ## v26.06.98 (2026-06-12)
 
 ### Added

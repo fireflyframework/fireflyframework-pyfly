@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,9 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.transactions_provider import TransactionsProvider
     from pyfly.admin.registry import AdminViewRegistry
     from pyfly.admin.server.instance_registry import InstanceRegistry
+
+
+_logger = logging.getLogger("pyfly.admin")
 
 
 class _NoCacheStaticFiles(StaticFiles):
@@ -131,13 +135,26 @@ class AdminRouteBuilder:
         return None
 
     def _guarded(self, handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
-        """Wrap an admin API handler so it enforces require_auth before running."""
+        """Wrap an admin API handler so it enforces require_auth before running.
+
+        Any unexpected error from the handler is converted to a structured JSON
+        500 (and logged) instead of bubbling out as a raw Starlette 500. Admin
+        introspection runs over a live container and can encounter unusual bean
+        metadata; a single odd bean must never take down a whole dashboard view.
+        """
 
         async def _wrapped(request: Request) -> Response:
             denied = self._auth_failure()
             if denied is not None:
                 return denied
-            return await handler(request)
+            try:
+                return await handler(request)
+            except Exception:
+                _logger.exception("admin_api_handler_error path=%s", request.url.path)
+                return JSONResponse(
+                    {"error": "Internal admin error", "path": request.url.path},
+                    status_code=500,
+                )
 
         return _wrapped
 
