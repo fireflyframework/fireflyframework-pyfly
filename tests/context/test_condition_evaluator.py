@@ -142,6 +142,23 @@ class TestOnMissingBean:
 
         assert evaluator.should_include(FallbackCache, bean_pass=True) is False
 
+    def test_fails_when_exact_type_bean_registered(self):
+        # Regression: a bean registered as EXACTLY the type must make
+        # @conditional_on_missing_bean back off (previously the exact match was
+        # skipped, so the default ALSO registered -> two beans of the same type).
+        evaluator, container = _make_evaluator()
+
+        class CacheAdapter:
+            pass
+
+        container.register(CacheAdapter)  # exact type, not a subclass
+
+        @conditional_on_missing_bean(CacheAdapter)
+        class FallbackCache:
+            pass
+
+        assert evaluator.should_include(FallbackCache, bean_pass=True) is False
+
 
 # ------------------------------------------------------------------
 # on_bean
@@ -177,6 +194,23 @@ class TestOnBean:
             pass
 
         assert evaluator.should_include(TransactionManager, bean_pass=True) is False
+
+    def test_passes_when_exact_type_bean_registered(self):
+        # Regression: a bean registered as EXACTLY the type must satisfy
+        # @conditional_on_bean(T) (previously the exact match was skipped, so the
+        # condition wrongly failed unless a *subclass* of T was registered).
+        evaluator, container = _make_evaluator()
+
+        class DataSource:
+            pass
+
+        container.register(DataSource)  # exact type, not a subclass
+
+        @conditional_on_bean(DataSource)
+        class TransactionManager:
+            pass
+
+        assert evaluator.should_include(TransactionManager, bean_pass=True) is True
 
 
 # ------------------------------------------------------------------
