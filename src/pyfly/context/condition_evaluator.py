@@ -150,16 +150,29 @@ class ConditionEvaluator:
         return self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)
 
     def _has_bean_of_type(self, bean_type: type, *, exclude: type | None = None) -> bool:
-        """Check if any registered bean is a subclass of the given type."""
+        """Check if any registered bean is the given type, or a subclass of it.
+
+        ``exclude`` (the declaring class) is skipped so a configuration's own bean
+        does not satisfy its own ``@conditional_on_(missing_)bean`` during evaluation.
+        An exact-type registration (``cls is bean_type``) DOES count — registering a
+        bean of exactly ``T`` must satisfy ``@conditional_on_bean(T)`` and must make
+        ``@conditional_on_missing_bean(T)`` back off (matching Spring semantics and
+        ``_candidate_bean_groups`` below). Previously exact matches were skipped, which
+        broke ``@conditional_on_bean(T)`` for any bean registered exactly as ``T`` and
+        forced callers to subclass ``T`` purely to be detected.
+        """
         for cls in self._container._registrations:
-            if cls is bean_type or cls is exclude:
+            if cls is exclude:
                 continue
+            if cls is bean_type:
+                return True
             try:
                 if issubclass(cls, bean_type):
                     return True
             except TypeError:
                 # Protocols with non-method members (e.g. properties) do not
-                # support issubclass().  Fall back to identity check only.
+                # support issubclass(); the identity check above already covers
+                # an exact-type registration.
                 pass
         return False
 

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.100 (2026-06-13)
+
+### Fixed
+
+- **`@conditional_on_bean(T)` / `@conditional_on_missing_bean(T)` ignored a bean registered
+  as *exactly* `T`.** `ConditionEvaluator._has_bean_of_type` skipped any registration whose
+  key was the queried `bean_type` itself (`if cls is bean_type or cls is exclude: continue`),
+  counting only strict subclasses. Two consequences:
+  - `@conditional_on_bean(T)` never matched a bean registered under exactly `T`. Concretely,
+    an `HttpSecurity` bean (registered as `HttpSecurity`) did **not** satisfy
+    `HttpSecurityFilterAutoConfiguration`'s `@conditional_on_bean(HttpSecurity)`, so the
+    URL-authorization filter was never built and applications relying on the documented
+    "register an `HttpSecurity` bean" path had no effective `HttpSecurityFilter`.
+  - `@conditional_on_missing_bean(T)` failed to detect an exact-`T` user bean, so a custom
+    override had to *subclass* `T` purely to be seen — registering a bean of exactly `T`
+    silently left the framework default in place, producing two beans of the same type.
+
+  `_has_bean_of_type` now counts an exact-type registration (`cls is bean_type or
+  issubclass(cls, bean_type)`), matching Spring semantics and the sibling
+  `_candidate_bean_groups` logic; the `exclude` (declaring-class) self-reference guard is
+  unchanged. Regression tests added for both conditionals in
+  `tests/context/test_condition_evaluator.py`. Full fast suite green (4715 passed; the only
+  failures are pre-existing `pyotp`-not-installed IDP MFA tests, unrelated to this change).
+
+---
+
 ## v26.06.99 (2026-06-12)
 
 ### Fixed
