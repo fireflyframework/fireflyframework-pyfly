@@ -15,12 +15,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, get_args, get_origin
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, get_args, get_origin, overload
 
 import pymongo
 
 from pyfly.data.page import Page
-from pyfly.data.pageable import Pageable
+from pyfly.data.pageable import Pageable, Sort
 
 if TYPE_CHECKING:
     from pyfly.data.document.mongodb.specification import MongoSpecification
@@ -32,9 +33,10 @@ ID = TypeVar("ID")
 class MongoRepository(Generic[T, ID]):
     """Generic CRUD repository for Beanie documents.
 
-    Mirrors ``Repository[T, ID]`` from the SQLAlchemy adapter but operates
-    against MongoDB via Beanie ODM. No session injection — Beanie uses a
-    globally initialised pymongo async client.
+    Mirrors ``Repository[T, ID]`` from the SQLAlchemy adapter — implementing the
+    Spring-parity ``PagingAndSortingRepository`` contract — but operates against
+    MongoDB via Beanie ODM. No session injection — Beanie uses a globally
+    initialised pymongo async client.
 
     Type Parameters:
         T: The document type (Beanie Document subclass).
@@ -70,60 +72,131 @@ class MongoRepository(Generic[T, ID]):
             )
         self._model: type[T] = cast(type[T], resolved)
 
+    def _query(self, **filters: Any) -> Any:
+        """Build a Beanie find-query, optionally filtered by field equality."""
+        if filters:
+            return self._model.find(filters)  # type: ignore[attr-defined]
+        return self._model.find_all()  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _sort_spec(sort: Sort) -> list[tuple[str, int]]:
+        """Build a pymongo sort specification from a :class:`Sort`."""
+        return [
+            (order.property, pymongo.ASCENDING if order.direction == "asc" else pymongo.DESCENDING)
+            for order in sort.orders
+        ]
+
+    # ------------------------------------------------------------------
+    # CrudRepository
+    # ------------------------------------------------------------------
+
     async def save(self, entity: T) -> T:
         """Persist a document (insert or update)."""
         await entity.save()  # type: ignore[attr-defined]
         return entity
 
+    async def save_all(self, entities: list[T]) -> list[T]:
+        """Persist multiple documents."""
+        if not entities:
+            return []
+        result = await self._model.insert_many(entities)  # type: ignore[attr-defined]
+        for entity, oid in zip(entities, result.inserted_ids, strict=False):
+            entity.id = oid  # type: ignore[attr-defined]
+        return entities
+
     async def find_by_id(self, id: ID) -> T | None:
         """Find a document by its primary key."""
         return cast("T | None", await self._model.get(id))  # type: ignore[attr-defined]
 
-    async def find_all(self, **filters: Any) -> list[T]:
-        """Find all documents, optionally filtered by field values."""
-        if filters:
-            return cast(list[T], await self._model.find(filters).to_list())  # type: ignore[attr-defined]
-        return cast(list[T], await self._model.find_all().to_list())  # type: ignore[attr-defined]
+    async def find_all_by_id(self, ids: list[ID]) -> list[T]:
+        """Find all documents with IDs in the given list (Spring ``findAllById``)."""
+        if not ids:
+            return []
+        return cast(
+            list[T],
+            await self._model.find({"_id": {"$in": ids}}).to_list(),  # type: ignore[attr-defined]
+        )
 
-    async def delete(self, id: ID) -> None:
-        """Delete a document by its primary key."""
-        entity = await self.find_by_id(id)
-        if entity is not None:
-            await entity.delete()  # type: ignore[attr-defined]
-
-    async def find_paginated(self, page: int = 1, size: int = 20, pageable: Pageable | None = None) -> Page[T]:
-        """Find documents with pagination.
-
-        Args:
-            page: Page number (1-based).
-            size: Number of items per page.
-            pageable: Optional Pageable with page, size, and sort criteria.
-        """
-        if pageable is not None:
-            page = pageable.page
-            size = pageable.size
-
-        total = await self._model.find_all().count()  # type: ignore[attr-defined]
-        offset = (page - 1) * size
-
-        query = self._model.find_all()  # type: ignore[attr-defined]
-
-        if pageable is not None:
-            sort_spec = self._build_sort(pageable)
-            if sort_spec:
-                query = query.sort(sort_spec)
-
-        items = await query.skip(offset).limit(size).to_list()
-        return Page(items=items, total=total, page=page, size=size)
+    async def exists_by_id(self, id: ID) -> bool:
+        """Check whether a document with the given id exists (Spring ``existsById``)."""
+        return await self.find_by_id(id) is not None
 
     async def count(self) -> int:
         """Return the total number of documents."""
         return cast(int, await self._model.find_all().count())  # type: ignore[attr-defined]
 
-    async def exists(self, id: ID) -> bool:
-        """Check if a document with the given ID exists."""
+    async def delete(self, entity: T) -> None:
+        """Delete a document instance (Spring ``delete(entity)``)."""
+        await entity.delete()  # type: ignore[attr-defined]
+
+    async def delete_by_id(self, id: ID) -> None:
+        """Delete a document by its primary key (Spring ``deleteById``)."""
         entity = await self.find_by_id(id)
-        return entity is not None
+        if entity is not None:
+            await entity.delete()  # type: ignore[attr-defined]
+
+    async def delete_all_by_id(self, ids: list[ID]) -> None:
+        """Delete all documents whose ids are in ``ids`` (Spring ``deleteAllById``)."""
+        if not ids:
+            return
+        await self._model.find({"_id": {"$in": ids}}).delete()  # type: ignore[attr-defined]
+
+    async def delete_all(self, entities: list[T] | None = None) -> None:
+        """Delete the given documents, or ALL when ``entities`` is ``None`` (Spring ``deleteAll``)."""
+        if entities is None:
+            await self._model.delete_all()  # type: ignore[attr-defined]
+            return
+        for entity in entities:
+            await entity.delete()  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # ReactiveSortingRepository + PagingAndSortingRepository
+    # ------------------------------------------------------------------
+
+    @overload
+    async def find_all(self, criteria: None = ..., **filters: Any) -> list[T]: ...
+    @overload
+    async def find_all(self, criteria: Sort, **filters: Any) -> list[T]: ...
+    @overload
+    async def find_all(self, criteria: Pageable, **filters: Any) -> Page[T]: ...
+    async def find_all(self, criteria: Sort | Pageable | None = None, **filters: Any) -> list[T] | Page[T]:
+        """Spring ``findAll`` family.
+
+        - ``find_all()`` / ``find_all(active=True)`` → ``list[T]`` (optionally filtered)
+        - ``find_all(Sort.by("name"))`` → sorted ``list[T]``
+        - ``find_all(Pageable.of(1, 20))`` → ``Page[T]``
+        """
+        if isinstance(criteria, Pageable):
+            return await self._find_page(criteria, **filters)
+        query = self._query(**filters)
+        if isinstance(criteria, Sort):
+            spec = self._sort_spec(criteria)
+            if spec:
+                query = query.sort(spec)
+        return cast(list[T], await query.to_list())
+
+    async def stream_all(self, criteria: Sort | None = None, **filters: Any) -> AsyncIterator[T]:
+        """Stream documents lazily (``Flux<T>`` analogue) via an async cursor."""
+        query = self._query(**filters)
+        if criteria is not None:
+            spec = self._sort_spec(criteria)
+            if spec:
+                query = query.sort(spec)
+        async for doc in query:
+            yield cast(T, doc)
+
+    async def _find_page(self, pageable: Pageable, **filters: Any) -> Page[T]:
+        total = await self._query(**filters).count()
+        query = self._query(**filters)
+        spec = self._sort_spec(pageable.sort)
+        if spec:
+            query = query.sort(spec)
+        items = await query.skip(pageable.offset).limit(pageable.size).to_list()
+        return Page(items=items, total=total, page=pageable.page, size=pageable.size)
+
+    # ------------------------------------------------------------------
+    # Specification extensions (PyFly)
+    # ------------------------------------------------------------------
 
     async def find_all_by_spec(self, spec: MongoSpecification[T]) -> list[T]:
         """Find all documents matching a specification."""
@@ -142,55 +215,9 @@ class MongoRepository(Generic[T, ID]):
             total = await self._model.find_all().count()  # type: ignore[attr-defined]
             query = self._model.find_all()  # type: ignore[attr-defined]
 
-        sort_spec = self._build_sort(pageable)
+        sort_spec = self._sort_spec(pageable.sort)
         if sort_spec:
             query = query.sort(sort_spec)
 
         items = await query.skip(pageable.offset).limit(pageable.size).to_list()
         return Page(items=items, total=total, page=pageable.page, size=pageable.size)
-
-    @staticmethod
-    def _build_sort(pageable: Pageable) -> list[tuple[str, int]]:
-        """Build a pymongo sort specification from a Pageable."""
-        sort_spec: list[tuple[str, int]] = []
-        for order in pageable.sort.orders:
-            direction = pymongo.ASCENDING if order.direction == "asc" else pymongo.DESCENDING
-            sort_spec.append((order.property, direction))
-        return sort_spec
-
-    async def save_all(self, entities: list[T]) -> list[T]:
-        """Persist multiple documents."""
-        if not entities:
-            return []
-        result = await self._model.insert_many(entities)  # type: ignore[attr-defined]
-        for entity, oid in zip(entities, result.inserted_ids, strict=False):
-            entity.id = oid  # type: ignore[attr-defined]
-        return entities
-
-    async def find_all_by_ids(self, ids: list[ID]) -> list[T]:
-        """Find all documents with IDs in the given list."""
-        if not ids:
-            return []
-        return cast(
-            list[T],
-            await self._model.find(  # type: ignore[attr-defined]
-                {"_id": {"$in": ids}}
-            ).to_list(),
-        )
-
-    async def delete_all(self, ids: list[ID]) -> int:
-        """Delete all documents with IDs in the given list. Returns count deleted."""
-        if not ids:
-            return 0
-        result = await self._model.find(  # type: ignore[attr-defined]
-            {"_id": {"$in": ids}}
-        ).delete()
-        return result.deleted_count if result else 0
-
-    async def delete_all_entities(self, entities: list[T]) -> int:
-        """Delete all given document instances. Returns count deleted."""
-        count = 0
-        for entity in entities:
-            await entity.delete()  # type: ignore[attr-defined]
-            count += 1
-        return count
