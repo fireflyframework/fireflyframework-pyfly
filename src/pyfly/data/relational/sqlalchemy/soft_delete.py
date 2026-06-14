@@ -70,9 +70,7 @@ class SoftDeleteRepository(Repository[T, ID]):
             return
         session = self._require_session()
         await session.execute(
-            sa_update(self._model)
-            .where(self._pk_column.in_(ids))
-            .values(deleted_at=datetime.now(UTC))
+            sa_update(self._model).where(self._pk_column.in_(ids)).values(deleted_at=datetime.now(UTC))
         )
         await session.flush()
 
