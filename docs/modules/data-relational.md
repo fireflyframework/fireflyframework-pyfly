@@ -161,7 +161,7 @@ order = await repo.save(Order(customer_id="abc", status="PENDING"))
 found = await repo.find_by_id(order.id)
 ```
 
-`Repository[T, ID]` satisfies the [`RepositoryPort[T, ID]`](data.md#repository-ports) protocol, enabling hexagonal architecture where your service layer depends on the port, not the adapter.
+`Repository[T, ID]` satisfies the [`RepositoryPort[T, ID]`](data.md#repository-ports) protocol, enabling hexagonal architecture where your service layer depends on the port, not the adapter. The port hierarchy is `CrudRepository[T, ID]` -> `ReactiveSortingRepository[T, ID]` -> `PagingAndSortingRepository[T, ID]` (mirroring Spring Data WebFlux's `ReactiveCrudRepository` -> `ReactiveSortingRepository` + paging), and `RepositoryPort` is an alias of `CrudRepository`.
 
 ### Creating a Repository
 
@@ -194,17 +194,23 @@ class ProductRepository(Repository[Product, int]):
 
 ### CRUD Methods Reference
 
-| Method                                           | Return Type  | Description                                    |
-|--------------------------------------------------|--------------|------------------------------------------------|
-| `save(entity)`                                   | `T`          | Insert or update; flushes and refreshes        |
-| `find_by_id(id: ID)`                             | `T \| None`  | Find by primary key                            |
-| `find_all(**filters)`                             | `list[T]`    | Find all, optionally filtered by column values |
-| `delete(id: ID)`                                  | `None`       | Delete by primary key (no-op if not found)     |
-| `count()`                                         | `int`        | Count all entities in the table                |
-| `exists(id: ID)`                                  | `bool`       | Check if an entity with this ID exists         |
-| `find_paginated(page, size, pageable)`            | `Page[T]`    | Paginated query with optional sorting          |
-| `find_all_by_spec(spec)`                          | `list[T]`    | Find all matching a Specification              |
-| `find_all_by_spec_paged(spec, pageable)`          | `Page[T]`    | Paginated query with Specification + sorting   |
+| Method                                           | Return Type         | Description                                              |
+|--------------------------------------------------|---------------------|---------------------------------------------------------|
+| `save(entity)`                                   | `T`                 | Insert or update; flushes and refreshes                 |
+| `find_by_id(id: ID)`                             | `T \| None`         | Find by primary key                                     |
+| `find_all(**filters)`                             | `list[T]`           | Find all, optionally filtered by column values          |
+| `find_all(sort: Sort)`                            | `list[T]`           | Fetch all, applying the `Sort` order                    |
+| `find_all(pageable: Pageable)`                    | `Page[T]`           | Paginated query: counts total, applies sort, slices     |
+| `find_all_by_id(ids)`                            | `list[T]`           | Find all entities whose IDs are in `ids`                |
+| `stream_all(criteria: Sort \| None, **filters)`  | `AsyncIterator[T]`  | Stream all (the `Flux[T]` analogue); optional `Sort`    |
+| `delete(entity: T)`                              | `None`              | Delete the given entity                                 |
+| `delete_by_id(id: ID)`                           | `None`              | Delete by primary key (no-op if not found)              |
+| `delete_all(entities=None)`                      | `None`              | Delete the given entities; with no args, truncate all   |
+| `delete_all_by_id(ids)`                          | `None`              | Delete all entities whose IDs are in `ids`              |
+| `count()`                                         | `int`               | Count all entities in the table                         |
+| `exists_by_id(id: ID)`                           | `bool`              | Check if an entity with this ID exists                  |
+| `find_all_by_spec(spec)`                          | `list[T]`           | Find all matching a Specification                       |
+| `find_all_by_spec_paged(spec, pageable)`          | `Page[T]`           | Paginated query with Specification + sorting            |
 
 **save()** calls `session.add()`, then `session.flush()` and `session.refresh()` to ensure the returned entity has all database-generated values (ID, defaults, etc.).
 
@@ -215,7 +221,16 @@ orders = await repo.find_all(status="PENDING", customer_id="abc")
 # Equivalent to: SELECT * FROM orders WHERE status = 'PENDING' AND customer_id = 'abc'
 ```
 
-**delete()** looks up the entity first and deletes it if found. If not found, it is a no-op.
+**delete_by_id()** looks up the entity first and deletes it if found. If not found, it is a no-op. **delete(entity)** removes the given entity directly. The `delete_all(entities)` form deletes each given entity, while `delete_all()` with no arguments truncates the whole table; both return `None`. `delete_all_by_id(ids)` deletes every entity whose ID is in `ids`.
+
+**find_all(pageable)** counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. **find_all(sort)** fetches every row in the given `Sort` order, and **stream_all(criteria=Sort.by(...))** yields entities one at a time as an `AsyncIterator[T]` (the `Flux[T]` analogue):
+
+```python
+from pyfly.data import Sort
+
+async for order in repo.stream_all(Sort.by("name")):
+    process(order)
+```
 
 ---
 
@@ -500,14 +515,14 @@ For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [
 from pyfly.data import Pageable, Sort
 
 # Basic pagination
-page = await repo.find_paginated(page=1, size=20)
+page = await repo.find_all(Pageable.of(page=1, size=20))
 
-# With Pageable (overrides page/size and adds sorting)
+# With Pageable (page, size and sorting)
 pageable = Pageable.of(page=2, size=10, sort=Sort.by("name"))
-page = await repo.find_paginated(pageable=pageable)
+page = await repo.find_all(pageable)
 ```
 
-When `pageable` is provided, its `page`, `size`, and `sort` override the primitive `page` and `size` arguments.
+`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. `Pageable` is 1-based, so `page=1` is the first page.
 
 ### Paginated Specification Queries
 
@@ -892,16 +907,17 @@ This adds a `deleted_at` column. Use `SoftDeleteRepository` for automatic soft-d
 from pyfly.data.relational.sqlalchemy import SoftDeleteRepository
 
 class OrderRepository(SoftDeleteRepository[Order, UUID]):
-    pass  # delete() sets deleted_at, find methods exclude deleted entities
+    pass  # delete_by_id()/delete() set deleted_at, find methods exclude deleted entities
 ```
 
 | Method | Behavior |
 |--------|----------|
-| `delete(id)` | Sets `deleted_at` (soft delete) |
+| `delete_by_id(id)` | Sets `deleted_at` (soft delete); returns `None` |
+| `delete(entity)` | Sets `deleted_at` on the given entity (soft delete); returns `None` |
 | `find_by_id(id)` | Excludes soft-deleted entities |
 | `find_all()` | Excludes soft-deleted entities |
-| `find_paginated(page, size, pageable)` | Excludes soft-deleted entities; respects pagination and sort |
-| `find_all_by_ids(ids)` | Excludes soft-deleted entities |
+| `find_all(pageable)` | Excludes soft-deleted entities; counts total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, returns `Page[T]` |
+| `find_all_by_id(ids)` | Excludes soft-deleted entities |
 | `find_all_by_spec(spec)` | Applies spec predicate AND excludes soft-deleted entities |
 | `find_all_by_spec_paged(spec, pageable)` | Applies spec predicate AND excludes soft-deleted entities |
 | `find_all_including_deleted()` | Includes soft-deleted entities |
@@ -1094,7 +1110,7 @@ class ProductService:
 
     async def delete(self, product_id: str) -> None:
         from uuid import UUID
-        await self._repo.delete(UUID(product_id))
+        await self._repo.delete_by_id(UUID(product_id))
 
     async def count_in_category(self, category: str) -> int:
         return await self._repo.count_by_category(category)

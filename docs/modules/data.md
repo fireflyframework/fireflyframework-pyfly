@@ -17,7 +17,8 @@
   - [RepositoryPort\[T, ID\]](#repositoryportt-id)
   - [SessionPort](#sessionport)
   - [CrudRepository\[T, ID\]](#crudrepositoryt-id)
-  - [PagingRepository\[T, ID\]](#pagingrepositoryt-id)
+  - [ReactiveSortingRepository\[T, ID\]](#reactivesortingrepositoryt-id)
+  - [PagingAndSortingRepository\[T, ID\]](#pagingandsortingrepositoryt-id)
   - [Hexagonal Usage Pattern](#hexagonal-usage-pattern)
 - [Derived Query Methods](#derived-query-methods)
   - [QueryMethodParser](#querymethodparser)
@@ -128,8 +129,10 @@ The data module follows a hexagonal architecture with two distinct layers:
 from pyfly.data import (
     Page, Pageable, Sort, Order,        # Pagination
     Mapper,                              # Entity ↔ DTO mapping
-    RepositoryPort, SessionPort,         # Port interfaces
-    CrudRepository, PagingRepository,    # Extended port interfaces
+    RepositoryPort, SessionPort,         # Port interfaces (RepositoryPort aliases CrudRepository)
+    CrudRepository,                      # Base CRUD port interface
+    ReactiveSortingRepository,           # CrudRepository + sorted find_all / stream_all
+    PagingAndSortingRepository,          # ReactiveSortingRepository + paged find_all
     QueryMethodParser,                   # Derived query parsing (shared)
     QueryMethodCompilerPort,             # Compiler contract
     Specification,                       # Composable query predicate ABC
@@ -167,26 +170,38 @@ For hexagonal architecture, your service layer should depend on port protocols r
 
 ### RepositoryPort[T, ID]
 
-The base repository interface — a `Protocol` that all adapters satisfy:
+`RepositoryPort` is an **alias** of `CrudRepository[T, ID]` — the base repository interface, a
+`Protocol` that all adapters satisfy. Import either name; they refer to the same protocol:
 
 ```python
-class RepositoryPort(Protocol[T, ID]):
+class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
     async def find_by_id(self, id: ID) -> T | None: ...
+    async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self, **filters: Any) -> list[T]: ...
-    async def delete(self, id: ID) -> None: ...
+    async def delete(self, entity: T) -> None: ...
+    async def delete_by_id(self, id: ID) -> None: ...
+    async def delete_all_by_id(self, ids: Iterable[ID]) -> None: ...
+    async def delete_all(self, entities: Iterable[T] | None = None) -> None: ...
     async def count(self) -> int: ...
-    async def exists(self, id: ID) -> bool: ...
+    async def exists_by_id(self, id: ID) -> bool: ...
+
+
+RepositoryPort = CrudRepository  # alias
 ```
 
-| Method                  | Return Type  | Description                                    |
-|-------------------------|--------------|------------------------------------------------|
-| `save(entity)`          | `T`          | Insert or update; return persisted entity      |
-| `find_by_id(id)`        | `T \| None`  | Find by primary key                            |
-| `find_all(**filters)`   | `list[T]`    | Find all, optionally filtered by field values  |
-| `delete(id)`            | `None`       | Delete by primary key (no-op if not found)     |
-| `count()`               | `int`        | Count all entities                             |
-| `exists(id)`            | `bool`       | Check if an entity with this ID exists         |
+| Method                       | Return Type        | Description                                          |
+|------------------------------|--------------------|-----------------------------------------------------|
+| `save(entity)`               | `T`                | Insert or update; return persisted entity           |
+| `find_by_id(id)`             | `T \| None`        | Find by primary key                                 |
+| `find_all_by_id(ids)`        | `list[T]`          | Find all entities whose IDs are in `ids`            |
+| `find_all(**filters)`        | `list[T]`          | Find all, optionally filtered by field values       |
+| `delete(entity)`             | `None`             | Delete the given entity (no-op if not present)       |
+| `delete_by_id(id)`           | `None`             | Delete by primary key (no-op if not found)          |
+| `delete_all_by_id(ids)`      | `None`             | Delete all entities whose IDs are in `ids`          |
+| `delete_all(entities=None)`  | `None`             | Delete the given entities; with no args, truncate all|
+| `count()`                    | `int`              | Count all entities                                  |
+| `exists_by_id(id)`           | `bool`             | Check if an entity with this ID exists              |
 
 ### SessionPort
 
@@ -201,29 +216,79 @@ class SessionPort(Protocol):
 
 ### CrudRepository[T, ID]
 
-Spring Data-style CRUD interface with type parameters for both entity and ID:
+The Spring Data-style CRUD interface with type parameters for both entity and ID. It is the root of
+the repository protocol hierarchy and the target of the `RepositoryPort` alias
+(`RepositoryPort = CrudRepository`):
 
 ```python
 class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
     async def find_by_id(self, id: ID) -> T | None: ...
+    async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self) -> list[T]: ...
     async def delete(self, entity: T) -> None: ...
     async def delete_by_id(self, id: ID) -> None: ...
+    async def delete_all_by_id(self, ids: Iterable[ID]) -> None: ...
+    async def delete_all(self, entities: Iterable[T] | None = None) -> None: ...
     async def count(self) -> int: ...
     async def exists_by_id(self, id: ID) -> bool: ...
 ```
 
-### PagingRepository[T, ID]
+All delete methods return `None`. `delete_all()` with no arguments truncates the whole table/collection.
 
-Extends `CrudRepository` with pagination:
+### ReactiveSortingRepository[T, ID]
+
+Extends `CrudRepository` with **sorted** fetch-all and a reactive stream. This mirrors Spring Data
+WebFlux's `ReactiveSortingRepository`:
 
 ```python
-class PagingRepository(CrudRepository[T, ID], Protocol[T, ID]):
-    async def find_paginated(
-        self, page: int = 1, size: int = 20, pageable: Pageable | None = None
-    ) -> Page[T]: ...
+class ReactiveSortingRepository(CrudRepository[T, ID], Protocol[T, ID]):
+    async def find_all(self, sort: Sort) -> list[T]: ...
+    def stream_all(
+        self, criteria: Sort | None = None, **filters: Any
+    ) -> AsyncIterator[T]: ...
 ```
+
+`find_all(sort)` returns every entity ordered by the given `Sort`. `stream_all(...)` is the `Flux<T>`
+analogue — an `AsyncIterator[T]` you consume with `async for`:
+
+```python
+async for product in repo.stream_all(Sort.by("name")):
+    ...
+```
+
+### PagingAndSortingRepository[T, ID]
+
+Extends `ReactiveSortingRepository` with **pagination**. This mirrors Spring Data's
+`PagingAndSortingRepository` (the old `PagingRepository` protocol has been folded into it):
+
+```python
+class PagingAndSortingRepository(ReactiveSortingRepository[T, ID], Protocol[T, ID]):
+    async def find_all(self, pageable: Pageable) -> Page[T]: ...
+```
+
+`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`,
+and returns a `Page[T]`. Pageables are **1-based** (`page >= 1`):
+
+```python
+from pyfly.data import Pageable, Sort
+
+page = await repo.find_all(Pageable.of(page=1, size=20, sort=Sort.by("created_at").descending()))
+```
+
+The full protocol hierarchy is therefore:
+`CrudRepository[T, ID]` → `ReactiveSortingRepository[T, ID]` → `PagingAndSortingRepository[T, ID]`,
+with `RepositoryPort` as an alias of `CrudRepository`.
+
+The `find_all` overloads across the chain are:
+
+| Call                    | Return Type          | Defined on                       |
+|-------------------------|----------------------|----------------------------------|
+| `find_all()`            | `list[T]`            | `CrudRepository`                 |
+| `find_all(**filters)`   | `list[T]`            | `CrudRepository`                 |
+| `find_all(sort)`        | `list[T]`            | `ReactiveSortingRepository`      |
+| `find_all(pageable)`    | `Page[T]`            | `PagingAndSortingRepository`     |
+| `stream_all(sort)`      | `AsyncIterator[T]`   | `ReactiveSortingRepository`      |
 
 ### Hexagonal Usage Pattern
 
@@ -503,7 +568,7 @@ order_desc = SortOrder.desc("created_at") # Order(property="created_at", directi
 `Page[T]` is a frozen dataclass returned by paginated queries:
 
 ```python
-page = await repo.find_paginated(page=1, size=20)
+page = await repo.find_all(Pageable.of(page=1, size=20))
 
 page.items          # list[T] -- the items on this page
 page.total          # int -- total items across all pages
@@ -976,12 +1041,19 @@ class DynamoRepository(Generic[T, ID]):
     """Generic CRUD repository for DynamoDB."""
     async def save(self, entity: T) -> T: ...
     async def find_by_id(self, id: ID) -> T | None: ...
-    async def find_all(self, **filters: Any) -> list[T]: ...
-    async def delete(self, id: ID) -> None: ...
+    async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
+    async def find_all(self, *args: Any, **filters: Any) -> list[T] | Page[T]: ...
+    async def delete(self, entity: T) -> None: ...
+    async def delete_by_id(self, id: ID) -> None: ...
+    async def delete_all_by_id(self, ids: Iterable[ID]) -> None: ...
+    async def delete_all(self, entities: Iterable[T] | None = None) -> None: ...
     async def count(self) -> int: ...
-    async def exists(self, id: ID) -> bool: ...
-    async def find_paginated(self, page=1, size=20, pageable=None) -> Page[T]: ...
+    async def exists_by_id(self, id: ID) -> bool: ...
+    def stream_all(self, criteria: Sort | None = None, **filters: Any) -> AsyncIterator[T]: ...
 ```
+
+The `find_all` overload accepts no args (`list[T]`), `**filters` (`list[T]`), a `Sort` (`list[T]`),
+or a `Pageable` (`Page[T]`); `delete_all()` with no arguments truncates the table.
 
 4. **Implement the query compiler** (satisfying `QueryMethodCompilerPort`):
 
@@ -1058,7 +1130,7 @@ Reach for the simplest one that fits, and escalate only when it can't express th
 | **Query-by-Example** (`FilterUtils.from_example` / `from_dict`) | You have a populated example object or a dict of equality filters (e.g. straight from API query params). | You need ranges, `OR`, or anything beyond field-equality `AND`. | `FilterUtils.from_dict({"status": "ACTIVE"})` |
 
 Then wrap any of the above with **`Pageable` + `Sort`** for paginated, ordered results
-(`find_paginated`, `find_all_by_spec_paged`). Use `Pageable.unpaged()` to fetch everything.
+(`find_all(pageable)`, `find_all_by_spec_paged`). Use `Pageable.unpaged()` to fetch everything.
 
 ## Spring Data Parity & Current Limitations
 

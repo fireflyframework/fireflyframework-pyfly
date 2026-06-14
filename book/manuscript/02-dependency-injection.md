@@ -171,8 +171,8 @@ on startup. No further wiring is needed.
 generic `Repository[WalletEntity, str]`. The two type arguments tell
 the framework the *entity type* (`WalletEntity`) and the *primary-key
 type* (`str`); from that it generates and injects a full async CRUD
-surface — `find_by_id`, `save`, `find_all`, `delete`, `count`,
-`find_paginated`, and more — backed by the transactional
+surface — `find_by_id`, `save`, `find_all`, `find_all(pageable)`,
+`delete`, `delete_by_id`, `count`, and more — backed by the transactional
 `AsyncSession` from the relational auto-configuration:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 2.2b — WalletRepository: framework Repository subclass

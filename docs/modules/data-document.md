@@ -300,15 +300,21 @@ class OrderRepository(MongoRepository[OrderDocument, PydanticObjectId]):
 
 ### CRUD Methods Reference
 
-| Method                                     | Return Type  | Description                                    |
-|--------------------------------------------|--------------|------------------------------------------------|
-| `save(entity)`                             | `T`          | Insert or update; calls `entity.save()`        |
-| `find_by_id(id: ID)`                       | `T \| None`  | Find by primary key via `model.get(id)`        |
-| `find_all(**filters)`                       | `list[T]`    | Find all, optionally filtered by field values  |
-| `delete(id: ID)`                            | `None`       | Delete by primary key (no-op if not found)     |
-| `count()`                                   | `int`        | Count all documents in the collection          |
-| `exists(id: ID)`                            | `bool`       | Check if a document with this ID exists        |
-| `find_paginated(page, size, pageable)`      | `Page[T]`    | Paginated query with optional sorting          |
+| Method                                     | Return Type         | Description                                    |
+|--------------------------------------------|---------------------|------------------------------------------------|
+| `save(entity)`                             | `T`                 | Insert or update; calls `entity.save()`        |
+| `find_by_id(id: ID)`                       | `T \| None`         | Find by primary key via `model.get(id)`        |
+| `find_all_by_id(ids)`                      | `list[T]`           | Find all documents whose ID is in `ids`        |
+| `find_all(**filters)`                      | `list[T]`           | Find all, optionally filtered by field values  |
+| `find_all(sort: Sort)`                     | `list[T]`           | Fetch all documents sorted by `sort`           |
+| `find_all(pageable: Pageable)`             | `Page[T]`           | Paginated query with the `Pageable`'s sort     |
+| `stream_all(sort: Sort \| None = None, **filters)` | `AsyncIterator[T]` | Stream documents (Flux analogue), optionally sorted/filtered |
+| `count()`                                  | `int`               | Count all documents in the collection          |
+| `exists_by_id(id: ID)`                     | `bool`              | Check if a document with this ID exists        |
+| `delete(entity: T)`                        | `None`              | Delete the given document instance             |
+| `delete_by_id(id: ID)`                     | `None`              | Delete by primary key (no-op if not found)     |
+| `delete_all(entities=None)`                | `None`              | Delete the given documents, or all if `None`   |
+| `delete_all_by_id(ids)`                    | `None`              | Delete all documents whose ID is in `ids`      |
 
 **save()** calls Beanie's `entity.save()`, which performs an upsert — inserting the document if it is new or updating it if it already exists. The returned entity is the same object with any server-side defaults applied.
 
@@ -319,21 +325,28 @@ orders = await repo.find_all(status="PENDING", customer_id="abc")
 # Equivalent to: db.orders.find({"status": "PENDING", "customer_id": "abc"})
 ```
 
-When called without filters, it returns all documents in the collection.
+When called without filters, it returns all documents in the collection. Passing a `Sort` (e.g. `find_all(Sort.by("name"))`) fetches all documents in the given order, while passing a `Pageable` (e.g. `find_all(Pageable.of(1, 20))`) returns a `Page[T]`.
 
-**delete()** looks up the entity by ID first, then calls `entity.delete()` if found. If not found, it is a no-op.
-
-**find_paginated()** supports both simple page/size arguments and a `Pageable` object:
+**stream_all()** is the Flux<T> analogue: it returns an `AsyncIterator[T]` so you can iterate documents lazily, optionally applying a `Sort` and/or equality filters:
 
 ```python
-# Simple pagination
-page = await repo.find_paginated(page=1, size=20)
+async for product in repo.stream_all(Sort.by("name")):
+    process(product)
+```
+
+**delete_by_id()** looks up the entity by ID first, then calls `entity.delete()` if found. If not found, it is a no-op. **delete(entity)** deletes a document instance directly. The `*_all` deletes (`delete_all(entities)`, `delete_all()` with no args to truncate, and `delete_all_by_id(ids)`) all return `None`.
+
+**find_all(pageable)** counts the total, applies the `Pageable`'s sort, slices with LIMIT/OFFSET (`.skip()`/`.limit()`), and returns a `Page[T]`:
+
+```python
+# Basic pagination (page 1, 20 items per page)
+page = await repo.find_all(Pageable.of(1, 20))
 
 # With Pageable and sorting
 from pyfly.data import Pageable, Sort
 
 pageable = Pageable.of(page=1, size=20, sort=Sort.by("name"))
-page = await repo.find_paginated(pageable=pageable)
+page = await repo.find_all(pageable)
 ```
 
 Source file: `src/pyfly/data/document/mongodb/repository.py`
@@ -948,26 +961,26 @@ For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [
 
 ### Paginated Queries
 
-The `find_paginated()` method on `MongoRepository` supports both simple page/size arguments and a full `Pageable` object with sorting:
+The `find_all(pageable)` method on `MongoRepository` accepts a `Pageable` object with sorting and returns a `Page[T]`:
 
 ```python
 from pyfly.data import Pageable, Sort
 
 # Basic pagination (page 1, 20 items per page)
-page = await repo.find_paginated(page=1, size=20)
+page = await repo.find_all(Pageable.of(1, 20))
 
-# With Pageable (overrides page/size and adds sorting)
+# With Pageable (page, size, and sorting)
 pageable = Pageable.of(
     page=2,
     size=10,
     sort=Sort.by("created_at").descending(),
 )
-page = await repo.find_paginated(pageable=pageable)
+page = await repo.find_all(pageable)
 ```
 
-When a `pageable` is provided, its `page`, `size`, and `sort` override the primitive `page` and `size` arguments.
+The `Pageable` carries the `page`, `size`, and `sort` for the query. Pageable in PyFly is 1-based (`page >= 1`).
 
-The implementation:
+The implementation: `find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with LIMIT/OFFSET, and returns a `Page[T]`. In detail:
 1. Counts total documents in the collection via `find_all().count()`.
 2. Calculates the offset: `(page - 1) * size`.
 3. Builds a sort specification from the `Pageable.sort` orders (if provided).
@@ -1321,7 +1334,7 @@ class ProductService:
             size=size,
             sort=Sort.by("name"),
         )
-        result = await self._repo.find_paginated(pageable=pageable)
+        result = await self._repo.find_all(pageable)
         return result.map(self._to_response)
 
     async def search_by_name(self, query: str) -> list[ProductResponse]:
@@ -1329,7 +1342,7 @@ class ProductService:
         return [self._to_response(d) for d in docs]
 
     async def delete(self, product_id: str) -> None:
-        await self._repo.delete(product_id)
+        await self._repo.delete_by_id(product_id)
 
     @staticmethod
     def _to_response(doc: ProductDocument) -> ProductResponse:

@@ -59,7 +59,7 @@ PyFly Data follows the **Spring Data architecture**: a shared commons layer (`py
 
 | Guide | What You'll Learn |
 |-------|-------------------|
-| [Data Commons](data.md) | `RepositoryPort[T, ID]`, `CrudRepository`, `PagingRepository`, `QueryMethodParser`, `QueryMethodCompilerPort`, `Page`/`Pageable`/`Sort`, `Mapper`, derived query naming convention, building custom adapters |
+| [Data Commons](data.md) | `RepositoryPort[T, ID]` (alias of `CrudRepository`), `CrudRepository` → `ReactiveSortingRepository` → `PagingAndSortingRepository`, `QueryMethodParser`, `QueryMethodCompilerPort`, `Page`/`Pageable`/`Sort`, `Mapper`, derived query naming convention, building custom adapters |
 | [Data Relational — SQLAlchemy Adapter](data-relational.md) | `Repository[T, ID]`, `BaseEntity`, `Specification` pattern, `@query` (JPQL/native SQL), `reactive_transactional`, `FilterOperator`/`FilterUtils`, `RepositoryBeanPostProcessor`, Alembic migrations |
 | [Data Document — MongoDB Adapter](data-document.md) | `MongoRepository[T, ID]`, `BaseDocument`, `MongoQueryMethodCompiler`, `mongo_transactional`, `MongoRepositoryBeanPostProcessor`, Beanie ODM setup |
 

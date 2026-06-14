@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.101 (2026-06-14)
+
+### Changed
+
+- **BREAKING — PyFly Data repositories now match Spring Data's reactive contract.** The data
+  repositories `Repository` (SQLAlchemy), `MongoRepository` (Beanie) and `SoftDeleteRepository`
+  implement the full Spring-parity hierarchy `CrudRepository` → `ReactiveSortingRepository` →
+  `PagingAndSortingRepository` (exported from `pyfly.data`), verified by `isinstance`. The protocol
+  hierarchy mirrors Spring Boot WebFlux's `ReactiveCrudRepository` → `ReactiveSortingRepository`
+  (plus paging). `RepositoryPort` is now an alias of `CrudRepository`, and the legacy
+  `PagingRepository` protocol has been removed (folded into `PagingAndSortingRepository`).
+
+  Method renames (hard cutover, no aliases):
+  - `exists(id)` → `exists_by_id(id)`
+  - `delete(id)` → `delete_by_id(id)`, with a **new** `delete(entity)` that deletes a managed instance
+  - `find_all_by_ids(ids)` → `find_all_by_id(ids)`
+  - `delete_all(ids)` → `delete_all_by_id(ids)`
+  - `delete_all_entities(entities)` → `delete_all(entities)`
+
+  New capabilities:
+  - `delete_all()` (no args) truncates the table/collection (Spring `deleteAll()`).
+  - `find_all(Sort)` returns a sorted `list[T]` (Spring `ReactiveSortingRepository.findAll(Sort)`).
+  - `find_all(Pageable)` returns a `Page[T]` (replaces the removed `find_paginated(...)`; use
+    `find_all(Pageable.of(page, size, sort))`).
+  - `stream_all(Sort | None = None, **filters)` returns an `AsyncIterator[T]` — the `Flux<T>` analogue —
+    streaming rows lazily via a server-side cursor (SQLAlchemy `stream_scalars`) or async cursor (Beanie).
+  - All delete methods now return `None` (the `*_all` deletes no longer return an `int` count).
+
+### Migration
+
+- `repo.exists(x)` → `repo.exists_by_id(x)`
+- `repo.delete(id)` → `repo.delete_by_id(id)` (and `repo.delete(entity)` to delete an instance)
+- `repo.find_all_by_ids(xs)` → `repo.find_all_by_id(xs)`
+- `repo.delete_all([ids])` → `repo.delete_all_by_id([ids])`
+- `repo.delete_all_entities(es)` → `repo.delete_all(es)`
+- `repo.find_paginated(page=p, size=s)` → `repo.find_all(Pageable.of(p, s))`
+- `repo.find_paginated(pageable=pg)` → `repo.find_all(pg)`
+
 ## v26.06.100 (2026-06-13)
 
 ### Fixed
