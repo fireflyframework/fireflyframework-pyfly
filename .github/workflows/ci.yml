@@ -71,6 +71,7 @@ jobs:
           --ignore=tests/data/test_mongo_projection_query.py
           --ignore=tests/data/test_mongo_query_compiler.py
           --ignore=tests/data/test_mongo_repository.py
+          --ignore=tests/data/test_mongo_repository_parity.py
           --ignore=tests/data/test_mongo_specification.py
           --ignore=tests/data/test_mongo_wiring.py
           -q --tb=short
