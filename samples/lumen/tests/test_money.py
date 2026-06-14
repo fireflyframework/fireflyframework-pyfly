@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
@@ -19,7 +21,7 @@ def test_value_equality_is_structural() -> None:
 
 def test_money_is_immutable() -> None:
     money = Money(1050, Currency.EUR)
-    with pytest.raises(Exception):  # frozen dataclass -> FrozenInstanceError
+    with pytest.raises(FrozenInstanceError):  # frozen dataclass
         money.amount = 0  # type: ignore[misc]
 
 

@@ -36,9 +36,7 @@ def _to_payload(event: DomainEvent) -> dict[str, Any]:
     return payload
 
 
-async def publish_domain_events(
-    publisher: EventPublisher, events: Iterable[DomainEvent]
-) -> None:
+async def publish_domain_events(publisher: EventPublisher, events: Iterable[DomainEvent]) -> None:
     """Publish each drained domain event on the wallet events channel.
 
     The envelope's ``event_type`` is the domain event class name

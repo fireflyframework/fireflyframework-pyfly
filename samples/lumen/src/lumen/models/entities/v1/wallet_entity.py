@@ -89,9 +89,7 @@ class Wallet(AggregateRoot[str]):
         if not owner_id.strip():
             raise BusinessRuleViolation("wallet-owner-required", "owner_id is required")
         wallet = cls(id=wallet_id, owner_id=owner_id, balance=Money.zero(currency))
-        wallet.raise_event(
-            WalletOpened(wallet_id=wallet_id, owner_id=owner_id, currency=currency.value)
-        )
+        wallet.raise_event(WalletOpened(wallet_id=wallet_id, owner_id=owner_id, currency=currency.value))
         return wallet
 
     # --- transitions -----------------------------------------------------
@@ -100,9 +98,7 @@ class Wallet(AggregateRoot[str]):
         """Credit *amount* to the balance; raises :class:`FundsDeposited`."""
         self._assert_currency(amount)
         if not amount.is_positive:
-            raise BusinessRuleViolation(
-                "wallet-deposit-positive", "deposit amount must be > 0"
-            )
+            raise BusinessRuleViolation("wallet-deposit-positive", "deposit amount must be > 0")
         self.balance = self.balance.add(amount)
         assert self.id is not None
         self.raise_event(
@@ -118,9 +114,7 @@ class Wallet(AggregateRoot[str]):
         """Debit *amount*; refuses to overdraw. Raises :class:`FundsWithdrawn`."""
         self._assert_currency(amount)
         if not amount.is_positive:
-            raise BusinessRuleViolation(
-                "wallet-withdrawal-positive", "withdrawal amount must be > 0"
-            )
+            raise BusinessRuleViolation("wallet-withdrawal-positive", "withdrawal amount must be > 0")
         remaining = self.balance.subtract(amount)
         if remaining.is_negative:
             raise BusinessRuleViolation(

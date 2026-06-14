@@ -27,8 +27,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
 from lumen.core.mappers.wallet_mapper import to_entity
 from lumen.core.services.transfers import (
     MONEY_TRANSFER_SAGA,
@@ -38,9 +36,10 @@ from lumen.core.services.transfers import (
 )
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
-from lumen.models.entities.v1.wallet_orm import WalletEntity
 from lumen.models.entities.v1.wallet_entity import Wallet
+from lumen.models.entities.v1.wallet_orm import WalletEntity
 from lumen.models.repositories.wallet_repository import WalletRepository
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pyfly.data.relational.sqlalchemy import Base
 from pyfly.transactional.saga.engine.argument_resolver import ArgumentResolver
@@ -53,7 +52,6 @@ from pyfly.transactional.saga.engine.step_invoker import StepInvoker
 from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
 from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
 from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
-
 
 # --------------------------------------------------------------------------
 # Fixtures — the real saga stack over a real SQLite-backed repository.
@@ -203,12 +201,8 @@ async def test_failed_credit_on_currency_mismatch_compensates(
     # Source is EUR; destination is USD. The debit succeeds, but crediting USD
     # with a EUR amount is a currency mismatch the Wallet/Money invariant
     # rejects -> compensation re-credits the source.
-    await _open_funded_wallet(
-        repository, wallet_id="wlt-src", owner_id="alice", minor=1000, currency=Currency.EUR
-    )
-    await _open_funded_wallet(
-        repository, wallet_id="wlt-dst", owner_id="bob", minor=500, currency=Currency.USD
-    )
+    await _open_funded_wallet(repository, wallet_id="wlt-src", owner_id="alice", minor=1000, currency=Currency.EUR)
+    await _open_funded_wallet(repository, wallet_id="wlt-dst", owner_id="bob", minor=500, currency=Currency.USD)
 
     result = await transfer_service.transfer(
         TransferRequest(

@@ -55,9 +55,7 @@ class WalletAuditListener:
         # Net deposited minus withdrawn, per wallet, in minor units.
         self._running_totals: dict[str, int] = {}
 
-    @event_listener(
-        event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"]
-    )
+    @event_listener(event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"])
     async def on_wallet_event(self, envelope: EventEnvelope) -> None:
         """Project every wallet domain event into the read models."""
         payload = dict(envelope.payload)
@@ -77,14 +75,10 @@ class WalletAuditListener:
             self._running_totals.setdefault(wallet_id, 0)
         elif envelope.event_type == "FundsDeposited":
             amount = int(payload.get("amount", 0))
-            self._running_totals[wallet_id] = (
-                self._running_totals.get(wallet_id, 0) + amount
-            )
+            self._running_totals[wallet_id] = self._running_totals.get(wallet_id, 0) + amount
         elif envelope.event_type == "FundsWithdrawn":
             amount = int(payload.get("amount", 0))
-            self._running_totals[wallet_id] = (
-                self._running_totals.get(wallet_id, 0) - amount
-            )
+            self._running_totals[wallet_id] = self._running_totals.get(wallet_id, 0) - amount
 
         logger.info(
             "wallet_audit_observed",

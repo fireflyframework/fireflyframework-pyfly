@@ -22,8 +22,8 @@ from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.domain import AggregateNotFound
 from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
 

@@ -20,17 +20,17 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories.wallet_repository import (
+    WalletRepository,
+    balance_at_least,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 
-from lumen.models.entities.v1.wallet_orm import WalletEntity
-from lumen.models.repositories.wallet_repository import (
-    WalletRepository,
-    balance_at_least,
-)
 from pyfly.data import Pageable, Sort
 from pyfly.data.relational.sqlalchemy import Base
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor

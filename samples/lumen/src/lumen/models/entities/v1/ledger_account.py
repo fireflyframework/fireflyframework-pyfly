@@ -125,9 +125,7 @@ class LedgerAccount(AggregateRoot):
             raise BusinessRuleViolation("ledger-owner-required", "owner_id is required")
         account = cls()
         account.id = account_id
-        account.apply(
-            LedgerOpened(account_id=account_id, owner_id=owner_id, currency=currency.value)
-        )
+        account.apply(LedgerOpened(account_id=account_id, owner_id=owner_id, currency=currency.value))
         return account
 
     # --- commands (write side: validate invariants, then ``apply``) ------
@@ -196,6 +194,5 @@ class LedgerAccount(AggregateRoot):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (
-            f"LedgerAccount(id={self.id!r}, owner_id={self.owner_id!r}, "
-            f"balance={self.balance}, version={self.version})"
+            f"LedgerAccount(id={self.id!r}, owner_id={self.owner_id!r}, balance={self.balance}, version={self.version})"
         )

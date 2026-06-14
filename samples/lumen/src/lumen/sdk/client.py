@@ -31,16 +31,12 @@ class LumenClient:
         return str(payload["wallet_id"])
 
     async def deposit(self, wallet_id: str, request: DepositRequest) -> int:
-        response = await self._http.post(
-            f"/api/v1/wallets/{wallet_id}/deposit", json=request.model_dump()
-        )
+        response = await self._http.post(f"/api/v1/wallets/{wallet_id}/deposit", json=request.model_dump())
         response.raise_for_status()
         return int(response.json()["balance_minor"])
 
     async def withdraw(self, wallet_id: str, request: DepositRequest) -> int:
-        response = await self._http.post(
-            f"/api/v1/wallets/{wallet_id}/withdraw", json=request.model_dump()
-        )
+        response = await self._http.post(f"/api/v1/wallets/{wallet_id}/withdraw", json=request.model_dump())
         response.raise_for_status()
         return int(response.json()["balance_minor"])
 
