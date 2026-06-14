@@ -16,7 +16,7 @@
 These tests exercise behaviour that mongomock cannot fully replicate:
   - Real pymongo async I/O with actual network round-trips
   - ``$regex`` filter queries executed by a live MongoDB
-  - ``save_all`` + ``find_all_by_ids`` batch operations
+  - ``save_all`` + ``find_all_by_id`` batch operations
   - Pagination total counts from a real aggregation pipeline
   - Beanie document insertion / retrieval with full BSON round-trip
 
@@ -96,7 +96,7 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         assert len(published) == 2
         assert all(a.published for a in published)
 
-        # --- 3. find_paginated -----------------------------------------------
+        # --- 3. find_all(Pageable) -------------------------------------------
         # Insert more articles for pagination
         for i in range(10):
             await repo.save(Article(title=f"Bulk Article {i:02d}", author="system", score=float(i)))
@@ -104,7 +104,7 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         total_count = await repo.count()
         assert total_count >= 13  # 3 + 10
 
-        page: Page[Article] = await repo.find_paginated(page=1, size=5)
+        page: Page[Article] = await repo.find_all(Pageable.of(1, 5))
         assert isinstance(page, Page)
         assert len(page.items) == 5
         assert page.total == total_count
@@ -112,13 +112,13 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         assert page.size == 5
         assert page.has_next is True
 
-        page2: Page[Article] = await repo.find_paginated(page=2, size=5)
+        page2: Page[Article] = await repo.find_all(Pageable.of(2, 5))
         assert len(page2.items) == 5
         assert page2.page == 2
 
         # Sorted pagination
         pageable = Pageable.of(1, 5, Sort(orders=(Order.desc("score"),)))
-        sorted_page: Page[Article] = await repo.find_paginated(pageable=pageable)
+        sorted_page: Page[Article] = await repo.find_all(pageable)
         assert len(sorted_page.items) == 5
         # Highest score first
         scores = [a.score for a in sorted_page.items]
@@ -137,20 +137,20 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         assert len(python_articles) == 2
         assert all("Python" in a.title for a in python_articles)
 
-        # --- 5. save_all + find_all_by_ids batch operations ------------------
+        # --- 5. save_all + find_all_by_id batch operations -------------------
         batch = [Article(title=f"Batch-{j}", author="batch_author", score=float(j)) for j in range(4)]
         saved_batch = await repo.save_all(batch)
         assert len(saved_batch) == 4
         assert all(a.id is not None for a in saved_batch)
 
         batch_ids = [a.id for a in saved_batch]
-        fetched = await repo.find_all_by_ids(batch_ids)
+        fetched = await repo.find_all_by_id(batch_ids)
         assert len(fetched) == 4
         assert {a.id for a in fetched} == set(batch_ids)
 
         # --- 6. delete -------------------------------------------------------
         to_delete = saved_batch[0]
-        await repo.delete(to_delete.id)
+        await repo.delete_by_id(to_delete.id)
         assert await repo.find_by_id(to_delete.id) is None
 
         # count reflects deletion
@@ -158,10 +158,10 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         # total_count=13 (3 explicit + 10 bulk); +3 regex articles (step 4); +4 batch (step 5); -1 deleted (step 6)
         assert new_count == total_count + 6  # +3 python/js articles + 4 batch - 1 deleted = net +6
 
-        # --- 7. exists -------------------------------------------------------
-        assert await repo.exists(saved_batch[1].id) is True
+        # --- 7. exists_by_id -------------------------------------------------
+        assert await repo.exists_by_id(saved_batch[1].id) is True
         # Use a valid ObjectId format that does not exist in the collection
-        assert await repo.exists("000000000000000000000000") is False
+        assert await repo.exists_by_id("000000000000000000000000") is False
 
         # --- 8. spec + pagination (find_all_by_spec_paged) -------------------
         author_spec: MongoSpecification[Article] = MongoSpecification(lambda root, f: {**f, "author": "batch_author"})

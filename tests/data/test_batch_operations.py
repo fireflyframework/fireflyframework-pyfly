@@ -58,40 +58,47 @@ class TestBatchOperations:
         assert all(item.id is not None for item in result)
 
     @pytest.mark.asyncio
-    async def test_find_all_by_ids(self, repo, session):
+    async def test_find_all_by_id(self, repo, session):
         items = [Item(name="x"), Item(name="y"), Item(name="z")]
         saved = await repo.save_all(items)
         ids = [item.id for item in saved]
 
-        found = await repo.find_all_by_ids(ids[:2])
+        found = await repo.find_all_by_id(ids[:2])
         assert len(found) == 2
         assert {item.name for item in found} == {"x", "y"}
 
     @pytest.mark.asyncio
-    async def test_find_all_by_ids_empty(self, repo):
-        found = await repo.find_all_by_ids([])
+    async def test_find_all_by_id_empty(self, repo):
+        found = await repo.find_all_by_id([])
         assert found == []
 
     @pytest.mark.asyncio
-    async def test_delete_all_by_ids(self, repo, session):
+    async def test_delete_all_by_id(self, repo, session):
         items = await repo.save_all([Item(name="a"), Item(name="b"), Item(name="c")])
         ids = [item.id for item in items]
 
-        deleted = await repo.delete_all(ids[:2])
-        assert deleted == 2
+        result = await repo.delete_all_by_id(ids[:2])
+        assert result is None
 
         remaining = await repo.find_all()
         assert len(remaining) == 1
         assert remaining[0].name == "c"
 
     @pytest.mark.asyncio
-    async def test_delete_all_by_ids_empty(self, repo):
-        deleted = await repo.delete_all([])
-        assert deleted == 0
+    async def test_delete_all_by_id_empty(self, repo):
+        await repo.save_all([Item(name="a")])
+        await repo.delete_all_by_id([])
+        assert await repo.count() == 1
 
     @pytest.mark.asyncio
     async def test_delete_all_entities(self, repo, session):
         items = await repo.save_all([Item(name="a"), Item(name="b")])
-        deleted = await repo.delete_all_entities(items)
-        assert deleted == 2
+        result = await repo.delete_all(items)
+        assert result is None
+        assert await repo.count() == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_all_truncate(self, repo, session):
+        await repo.save_all([Item(name="a"), Item(name="b"), Item(name="c")])
+        await repo.delete_all()
         assert await repo.count() == 0

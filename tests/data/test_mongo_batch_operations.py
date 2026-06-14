@@ -53,35 +53,42 @@ class TestMongoBatchOperations:
         assert all(w.id is not None for w in result)
 
     @pytest.mark.asyncio
-    async def test_find_all_by_ids(self, repo):
+    async def test_find_all_by_id(self, repo):
         widgets = await repo.save_all([Widget(name="x"), Widget(name="y"), Widget(name="z")])
         ids = [w.id for w in widgets]
 
-        found = await repo.find_all_by_ids(ids[:2])
+        found = await repo.find_all_by_id(ids[:2])
         assert len(found) == 2
 
     @pytest.mark.asyncio
-    async def test_find_all_by_ids_empty(self, repo):
-        found = await repo.find_all_by_ids([])
+    async def test_find_all_by_id_empty(self, repo):
+        found = await repo.find_all_by_id([])
         assert found == []
 
     @pytest.mark.asyncio
-    async def test_delete_all_by_ids(self, repo):
+    async def test_delete_all_by_id(self, repo):
         widgets = await repo.save_all([Widget(name="a"), Widget(name="b"), Widget(name="c")])
         ids = [w.id for w in widgets]
 
-        deleted = await repo.delete_all(ids[:2])
-        assert deleted == 2
+        result = await repo.delete_all_by_id(ids[:2])
+        assert result is None
         assert await repo.count() == 1
 
     @pytest.mark.asyncio
-    async def test_delete_all_by_ids_empty(self, repo):
-        deleted = await repo.delete_all([])
-        assert deleted == 0
+    async def test_delete_all_by_id_empty(self, repo):
+        await repo.save_all([Widget(name="a")])
+        await repo.delete_all_by_id([])
+        assert await repo.count() == 1
 
     @pytest.mark.asyncio
     async def test_delete_all_entities(self, repo):
         widgets = await repo.save_all([Widget(name="a"), Widget(name="b")])
-        deleted = await repo.delete_all_entities(widgets)
-        assert deleted == 2
+        result = await repo.delete_all(widgets)
+        assert result is None
+        assert await repo.count() == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_all_truncate(self, repo):
+        await repo.save_all([Widget(name="a"), Widget(name="b"), Widget(name="c")])
+        await repo.delete_all()
         assert await repo.count() == 0

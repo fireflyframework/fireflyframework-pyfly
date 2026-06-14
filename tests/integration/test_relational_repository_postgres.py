@@ -125,7 +125,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
             misc = await repo.find_all(category="misc")
         assert len(misc) == 2
 
-        # --- 4. find_paginated (page / size / total) --------------------------
+        # --- 4. find_all(Pageable) (page / size / total) ----------------------
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
             for i in range(10):
@@ -134,7 +134,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
 
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
-            page: Page[PgProduct] = await repo.find_paginated(page=1, size=4)
+            page: Page[PgProduct] = await repo.find_all(Pageable.of(1, 4))
         assert isinstance(page, Page)
         assert len(page.items) <= 4
         assert page.total >= 10  # other items saved above also counted
@@ -143,7 +143,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
         async with session_factory() as session:
             repo = Repository(PgProduct, session)
             pageable = Pageable.of(1, 5, Sort(orders=(Order.desc("price"),)))
-            page2: Page[PgProduct] = await repo.find_paginated(pageable=pageable)
+            page2: Page[PgProduct] = await repo.find_all(pageable)
         assert len(page2.items) <= 5
         assert page2.total >= 10
 
@@ -187,7 +187,7 @@ async def test_postgres_repository_full(pg_url: str) -> None:
         # soft-delete item_a
         async with session_factory() as session:
             sd_repo = SoftDeleteRepository(PgSoftItem, session)
-            await sd_repo.delete(soft_id)
+            await sd_repo.delete_by_id(soft_id)
             await session.commit()
 
         # find_by_id must hide deleted row
@@ -225,8 +225,8 @@ async def test_postgres_repository_full(pg_url: str) -> None:
 
         async with session_factory() as session:
             sd_repo = SoftDeleteRepository(PgSoftItem, session)
-            assert await sd_repo.exists(item_b.id) is True
-            assert await sd_repo.exists(uuid.uuid4()) is False
+            assert await sd_repo.exists_by_id(item_b.id) is True
+            assert await sd_repo.exists_by_id(uuid.uuid4()) is False
 
     finally:
         async with engine.begin() as conn:

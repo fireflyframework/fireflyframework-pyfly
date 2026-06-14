@@ -99,19 +99,26 @@ class TestRepository:
         assert len(items) == 3
 
     @pytest.mark.asyncio
-    async def test_delete(self, repo: Repository[Item, UUID]):
+    async def test_delete_by_id(self, repo: Repository[Item, UUID]):
         item = await repo.save(Item(name="ToDelete", price=0.0))
-        await repo.delete(item.id)
+        await repo.delete_by_id(item.id)
 
         result = await repo.find_by_id(item.id)
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_find_paginated(self, repo: Repository[Item, UUID]):
+    async def test_delete_entity(self, repo: Repository[Item, UUID]):
+        item = await repo.save(Item(name="ToDelete", price=0.0))
+        await repo.delete(item)
+
+        assert await repo.find_by_id(item.id) is None
+
+    @pytest.mark.asyncio
+    async def test_find_all_pageable(self, repo: Repository[Item, UUID]):
         for i in range(15):
             await repo.save(Item(name=f"Item-{i}", price=float(i)))
 
-        page = await repo.find_paginated(page=1, size=5)
+        page = await repo.find_all(Pageable.of(1, 5))
         assert isinstance(page, Page)
         assert len(page.items) == 5
         assert page.total == 15
@@ -119,11 +126,11 @@ class TestRepository:
         assert page.has_next is True
 
     @pytest.mark.asyncio
-    async def test_find_paginated_last_page(self, repo: Repository[Item, UUID]):
+    async def test_find_all_pageable_last_page(self, repo: Repository[Item, UUID]):
         for i in range(12):
             await repo.save(Item(name=f"Item-{i}", price=float(i)))
 
-        page = await repo.find_paginated(page=3, size=5)
+        page = await repo.find_all(Pageable.of(3, 5))
         assert len(page.items) == 2
         assert page.total == 12
         assert page.has_next is False
@@ -136,13 +143,13 @@ class TestRepository:
         assert await repo.count() == 2
 
     @pytest.mark.asyncio
-    async def test_exists(self, repo: Repository[Item, UUID]):
+    async def test_exists_by_id(self, repo: Repository[Item, UUID]):
         item = await repo.save(Item(name="Exists"))
-        assert await repo.exists(item.id) is True
+        assert await repo.exists_by_id(item.id) is True
 
         from uuid import uuid4
 
-        assert await repo.exists(uuid4()) is False
+        assert await repo.exists_by_id(uuid4()) is False
 
 
 class TestReactiveTransactional:
@@ -338,7 +345,7 @@ class TestRepositoryIntId:
     @pytest.mark.asyncio
     async def test_delete_int_id(self, int_repo: Repository[IntItem, int]):
         item = await int_repo.save(IntItem(name="ToDelete", price=0.0))
-        await int_repo.delete(item.id)
+        await int_repo.delete_by_id(item.id)
         assert await int_repo.find_by_id(item.id) is None
 
     @pytest.mark.asyncio
@@ -350,8 +357,8 @@ class TestRepositoryIntId:
     @pytest.mark.asyncio
     async def test_exists_int_id(self, int_repo: Repository[IntItem, int]):
         item = await int_repo.save(IntItem(name="Exists"))
-        assert await int_repo.exists(item.id) is True
-        assert await int_repo.exists(999) is False
+        assert await int_repo.exists_by_id(item.id) is True
+        assert await int_repo.exists_by_id(999) is False
 
     @pytest.mark.asyncio
     async def test_autoincrement_ids(self, int_repo: Repository[IntItem, int]):

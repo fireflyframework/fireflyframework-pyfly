@@ -155,16 +155,19 @@ class TestPortSwappability:
             async def find_by_id(self, id: UUID) -> Any | None:
                 return self._store.get(id)
 
-            async def find_all(self, **filters: Any) -> list[Any]:
+            async def find_all(self, criteria: Any = None, **filters: Any) -> list[Any]:
                 return list(self._store.values())
 
-            async def delete(self, id: UUID) -> None:
+            async def delete(self, entity: Any) -> None:
+                self._store.pop(entity.id, None)
+
+            async def delete_by_id(self, id: UUID) -> None:
                 self._store.pop(id, None)
 
             async def count(self) -> int:
                 return len(self._store)
 
-            async def exists(self, id: UUID) -> bool:
+            async def exists_by_id(self, id: UUID) -> bool:
                 return id in self._store
 
             async def save_all(self, entities: list[Any]) -> list[Any]:
@@ -172,22 +175,19 @@ class TestPortSwappability:
                     self._store[e.id] = e
                 return entities
 
-            async def find_all_by_ids(self, ids: list[UUID]) -> list[Any]:
+            async def find_all_by_id(self, ids: list[UUID]) -> list[Any]:
                 return [self._store[i] for i in ids if i in self._store]
 
-            async def delete_all(self, ids: list[UUID]) -> int:
-                count = 0
+            async def delete_all_by_id(self, ids: list[UUID]) -> None:
                 for i in ids:
-                    if self._store.pop(i, None) is not None:
-                        count += 1
-                return count
+                    self._store.pop(i, None)
 
-            async def delete_all_entities(self, entities: list[Any]) -> int:
-                count = 0
+            async def delete_all(self, entities: list[Any] | None = None) -> None:
+                if entities is None:
+                    self._store.clear()
+                    return
                 for e in entities:
-                    if self._store.pop(e.id, None) is not None:
-                        count += 1
-                return count
+                    self._store.pop(e.id, None)
 
         repo = MockRepo()
         assert isinstance(repo, RepositoryPort)
