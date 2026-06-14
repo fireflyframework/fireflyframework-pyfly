@@ -11,80 +11,81 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for CrudRepository and PagingRepository port protocols."""
+"""Tests for the Spring-parity repository protocol hierarchy."""
 
 from __future__ import annotations
 
-from pyfly.data.ports.outbound import CrudRepository, PagingRepository
+from collections.abc import AsyncIterator
+from typing import Any
+
+from pyfly.data.ports.outbound import (
+    CrudRepository,
+    PagingAndSortingRepository,
+    ReactiveSortingRepository,
+    RepositoryPort,
+)
+
+
+class _Crud:
+    async def save(self, entity: Any) -> Any: ...
+    async def save_all(self, entities: Any) -> Any: ...
+    async def find_by_id(self, id: Any) -> Any: ...
+    async def find_all(self, criteria: Any = None, **filters: Any) -> Any: ...
+    async def find_all_by_id(self, ids: Any) -> Any: ...
+    async def exists_by_id(self, id: Any) -> Any: ...
+    async def count(self) -> Any: ...
+    async def delete(self, entity: Any) -> None: ...
+    async def delete_by_id(self, id: Any) -> None: ...
+    async def delete_all_by_id(self, ids: Any) -> None: ...
+    async def delete_all(self, entities: Any = None) -> None: ...
+
+
+class _Paging(_Crud):
+    def stream_all(self, criteria: Any = None, **filters: Any) -> AsyncIterator[Any]:  # type: ignore[empty-body]
+        ...
 
 
 class TestCrudRepository:
-    def test_is_runtime_checkable(self) -> None:
-        """CrudRepository should be decorated with @runtime_checkable."""
-        assert hasattr(CrudRepository, "__protocol_attrs__") or isinstance(CrudRepository, type)
-        # The real proof: isinstance checks don't raise TypeError
-        # (they would if the protocol were not runtime_checkable).
+    def test_runtime_checkable(self) -> None:
+        assert isinstance(_Crud(), CrudRepository)
 
-        class _Dummy:
-            async def save(self, entity): ...
-            async def find_by_id(self, id): ...
-            async def find_all(self): ...
-            async def delete(self, entity): ...
-            async def delete_by_id(self, id): ...
-            async def count(self): ...
-            async def exists_by_id(self, id): ...
-            async def save_all(self, entities): ...
-            async def find_all_by_ids(self, ids): ...
-            async def delete_all(self, ids): ...
-            async def delete_all_entities(self, entities): ...
-
-        assert isinstance(_Dummy(), CrudRepository)
+    def test_repository_port_is_crud_alias(self) -> None:
+        assert RepositoryPort is CrudRepository
+        assert isinstance(_Crud(), RepositoryPort)
 
     def test_required_method_names(self) -> None:
-        """CrudRepository must declare all expected CRUD methods."""
         expected = {
             "save",
+            "save_all",
             "find_by_id",
             "find_all",
+            "find_all_by_id",
+            "exists_by_id",
+            "count",
             "delete",
             "delete_by_id",
-            "count",
-            "exists_by_id",
-            "save_all",
-            "find_all_by_ids",
+            "delete_all_by_id",
             "delete_all",
-            "delete_all_entities",
         }
-        # Protocol methods are available via __protocol_attrs__ or callable attrs
-        attrs = {
-            name
-            for name in dir(CrudRepository)
-            if not name.startswith("_") and callable(getattr(CrudRepository, name, None))
-        }
-        assert expected.issubset(attrs), f"Missing methods: {expected - attrs}"
+        attrs = {n for n in dir(CrudRepository) if not n.startswith("_")}
+        assert expected.issubset(attrs), f"Missing: {expected - attrs}"
+
+    def test_incomplete_class_is_not_crud(self) -> None:
+        class _Partial:
+            async def save(self, entity: Any) -> Any: ...
+
+        assert not isinstance(_Partial(), CrudRepository)
 
 
-class TestPagingRepository:
-    def test_defines_find_paginated(self) -> None:
-        """PagingRepository must expose find_paginated."""
-        assert hasattr(PagingRepository, "find_paginated")
-        assert callable(getattr(PagingRepository, "find_paginated", None))
+class TestSortingAndPaging:
+    def test_sorting_is_runtime_checkable(self) -> None:
+        assert isinstance(_Paging(), ReactiveSortingRepository)
 
-    def test_is_runtime_checkable(self) -> None:
-        """PagingRepository should be runtime_checkable as well."""
+    def test_paging_is_runtime_checkable(self) -> None:
+        assert isinstance(_Paging(), PagingAndSortingRepository)
 
-        class _PagingDummy:
-            async def save(self, entity): ...
-            async def find_by_id(self, id): ...
-            async def find_all(self): ...
-            async def delete(self, entity): ...
-            async def delete_by_id(self, id): ...
-            async def count(self): ...
-            async def exists_by_id(self, id): ...
-            async def save_all(self, entities): ...
-            async def find_all_by_ids(self, ids): ...
-            async def delete_all(self, ids): ...
-            async def delete_all_entities(self, entities): ...
-            async def find_paginated(self, page=1, size=20, sort=None): ...
+    def test_sorting_adds_stream_all(self) -> None:
+        assert "stream_all" in dir(ReactiveSortingRepository)
 
-        assert isinstance(_PagingDummy(), PagingRepository)
+    def test_crud_without_stream_is_not_sorting(self) -> None:
+        assert not isinstance(_Crud(), ReactiveSortingRepository)
