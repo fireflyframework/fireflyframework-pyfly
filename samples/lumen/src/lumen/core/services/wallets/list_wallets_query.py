@@ -3,7 +3,7 @@
 """``ListWallets`` — read-side intent for a page of wallets.
 
 Carries a :class:`pyfly.data.Pageable` (page number, size, sort). The
-handler runs it through the repository's ``find_paginated`` and returns a
+handler runs it through the repository's ``find_all(pageable)`` and returns a
 :class:`~pyfly.data.Page` of :class:`WalletDto`.
 """
 

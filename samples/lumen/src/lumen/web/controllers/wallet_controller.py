@@ -8,7 +8,7 @@ dispatches it through the bus — the controller holds no business logic.
 The two list endpoints showcase the framework's data layer over the wire:
 
 * ``GET /api/v1/wallets?page=&size=`` returns a *page* of wallets, built
-  from the repository's ``find_paginated``;
+  from the repository's ``find_all(pageable)``;
 * ``GET /api/v1/wallets/rich?min_minor=&page=&size=`` returns a page
   filtered by a composable :class:`Specification`.
 
@@ -98,7 +98,7 @@ class WalletController:
     async def list_wallets(
         self, page: QueryParam[int] = 1, size: QueryParam[int] = 20
     ) -> PageDto[WalletDto]:
-        """A page of wallets, newest first (``find_paginated`` + ``Page.map``)."""
+        """A page of wallets, newest first (``find_all(pageable)`` + ``Page.map``)."""
         result = await self._queries.query(
             ListWallets(pageable=Pageable.of(page, size, _NEWEST_FIRST))
         )

@@ -93,7 +93,7 @@ async def test_full_lifecycle_through_booted_context(booted_context: object) -> 
     assert reloaded.owner_id == "u-1"
     assert reloaded.balance_minor == 3500
 
-    # --- paged list (find_paginated + Page.map) -------------------------
+    # --- paged list (find_all(pageable) + Page.map) ---------------------
     page = await queries.query(ListWallets(pageable=Pageable.of(1, 10)))
     assert page.total == 2
     assert {w.id for w in page.items} == {w1, w2}

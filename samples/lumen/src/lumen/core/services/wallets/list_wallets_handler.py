@@ -3,10 +3,11 @@
 """Handler for :class:`ListWallets`.
 
 Showcases framework pagination: it calls the inherited
-``find_paginated(pageable=…)`` on the repository — which counts the total,
-applies the ``Pageable``'s sort, and slices with ``LIMIT/OFFSET`` — then
-uses :meth:`pyfly.data.Page.map` to project each :class:`WalletEntity` row
-onto a :class:`WalletDto` while preserving the pagination metadata.
+``find_all(pageable)`` on the repository — which counts the total,
+applies the ``Pageable``'s sort, and slices with ``LIMIT/OFFSET``, returning a
+:class:`pyfly.data.Page` — then uses :meth:`pyfly.data.Page.map` to project each
+:class:`WalletEntity` row onto a :class:`WalletDto` while preserving the
+pagination metadata.
 """
 
 from __future__ import annotations
@@ -28,5 +29,5 @@ class ListWalletsHandler(QueryHandler[ListWallets, Page[WalletDto]]):
         self._repository = repository
 
     async def do_handle(self, query: ListWallets) -> Page[WalletDto]:  # type: ignore[override]
-        page = await self._repository.find_paginated(pageable=query.pageable)
+        page = await self._repository.find_all(query.pageable)
         return page.map(entity_to_dto)

@@ -4,7 +4,7 @@
 
 Exercises the Spring-Data-style repository the application boots on: the
 inherited CRUD surface (``save``/``upsert``, ``find_by_id``, ``count``,
-``find_paginated``), the **derived query** (``find_by_owner_id``, compiled
+``find_all(pageable)``), the **derived query** (``find_by_owner_id``, compiled
 from the method name by the real ``RepositoryBeanPostProcessor``), and the
 **Specification** path (``find_rich`` / ``find_all_by_spec``). It then
 proves persistence by re-opening the database with a fresh engine/session.
@@ -158,7 +158,7 @@ async def test_specification_find_rich_paged_and_sorted(
 
 
 @pytest.mark.asyncio
-async def test_find_paginated_counts_and_pages(
+async def test_find_all_pageable_counts_and_pages(
     sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
     factory, _ = sqlite_factory
@@ -168,7 +168,7 @@ async def test_find_paginated_counts_and_pages(
             await repo.upsert(_entity(f"wlt-{i}", "owner", i * 100, age_days=5 - i))
         await session.commit()
 
-        page = await repo.find_paginated(pageable=Pageable.of(1, 2, Sort.by("created_at").descending()))
+        page = await repo.find_all(Pageable.of(1, 2, Sort.by("created_at").descending()))
         assert page.total == 5
         assert page.total_pages == 3
         assert len(page.items) == 2
