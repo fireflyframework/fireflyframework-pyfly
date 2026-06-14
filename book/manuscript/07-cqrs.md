@@ -464,7 +464,7 @@ class ListRichWallets(Query[Page[WalletDto]]):
     pageable: Pageable
 :::
 
-::: listing lumen/core/services/wallets/list_wallets_handler.py | Listing 7.13 — ListWalletsHandler: find_paginated + Page.map
+::: listing lumen/core/services/wallets/list_wallets_handler.py | Listing 7.13 — ListWalletsHandler: find_all(pageable) + Page.map
 from __future__ import annotations
 
 from lumen.core.mappers.wallet_mapper import entity_to_dto
@@ -484,7 +484,7 @@ class ListWalletsHandler(QueryHandler[ListWallets, Page[WalletDto]]):
         self._repository = repository
 
     async def do_handle(self, query: ListWallets) -> Page[WalletDto]:  # type: ignore[override]
-        page = await self._repository.find_paginated(pageable=query.pageable)
+        page = await self._repository.find_all(query.pageable)
         return page.map(entity_to_dto)
 :::
 
@@ -512,7 +512,7 @@ class ListRichWalletsHandler(QueryHandler[ListRichWallets, Page[WalletDto]]):
         return page.map(entity_to_dto)
 :::
 
-`find_paginated` is inherited from the framework `Repository` base. It counts the total rows, applies the `Pageable`'s sort, and slices with `LIMIT`/`OFFSET` — returning a `Page[WalletEntity]` that carries `items`, `total`, `page`, `size`, `total_pages`, `has_next`, and `has_previous`. `Page.map(entity_to_dto)` transforms the items without touching the metadata. The controller wraps the result in a `PageDto` for the wire.
+`find_all(pageable)` is inherited from the framework `Repository` base. It counts the total rows, applies the `Pageable`'s sort, and slices with `LIMIT`/`OFFSET` — returning a `Page[WalletEntity]` that carries `items`, `total`, `page`, `size`, `total_pages`, `has_next`, and `has_previous`. `Page.map(entity_to_dto)` transforms the items without touching the metadata. The controller wraps the result in a `PageDto` for the wire.
 
 `find_rich` is defined on `WalletRepository` itself and delegates to the inherited `find_all_by_spec_paged`. It constructs a `Specification` — a composable `WHERE` predicate — and passes it alongside the `Pageable`. The framework appends the `WHERE` clause, the sort, and the `LIMIT`/`OFFSET`, then executes a count query for the total. The handler calls `repo.find_rich(query.min_minor, query.pageable)` and maps the page exactly as before.
 
@@ -798,11 +798,11 @@ The three headers — `X-Correlation-ID`, `X-Trace-ID`, and `X-Span-ID` — foll
 
 Part II is complete. Lumen now has a full vertical slice from HTTP to domain and back — one built on architectural decisions that will scale without rewriting.
 
-In Chapter 5 you gave the system persistence: a `WalletRepository` subclassing `Repository[WalletEntity, str]` — the framework's Spring-Data-style generic repository that provides `find_by_id`, `find_paginated`, `find_all_by_spec_paged`, and more out of the box, with the `AsyncSession` injected by relational auto-configuration. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
+In Chapter 5 you gave the system persistence: a `WalletRepository` subclassing `Repository[WalletEntity, str]` — the framework's Spring-Data-style generic repository that provides `find_by_id`, `find_all(pageable)`, `find_all_by_spec_paged`, and more out of the box, with the `AsyncSession` injected by relational auto-configuration. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
 
 In this chapter you separated the write model from the read model. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing automatically for every command. Each command handler carries `@transactional()` on `do_handle`: the decorator opens a committed unit of work from `self._session_factory`, swaps the session onto the repository, commits on success, and rolls back on failure. Persistence goes through `repository.upsert` — backed by `session.merge` — so INSERT and UPDATE share a single code path keyed on the aggregate's own id.
 
-`GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline without the event-publishing step, and without `@transactional()` because reads do not commit. `GetBalanceHandler` projects through a `@projection`-marked `BalanceView` interface and `Mapper.project`, copying only the declared fields and applying a registered major-unit transform. `ListWallets` and `ListRichWallets` round out the query side: `find_paginated` returns a counted, sorted, offset-limited `Page[WalletEntity]`; `find_all_by_spec_paged` runs a composable `Specification` predicate on top of the same pagination machinery. Both use `Page.map(entity_to_dto)` to project items without touching the metadata.
+`GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline without the event-publishing step, and without `@transactional()` because reads do not commit. `GetBalanceHandler` projects through a `@projection`-marked `BalanceView` interface and `Mapper.project`, copying only the declared fields and applying a registered major-unit transform. `ListWallets` and `ListRichWallets` round out the query side: `find_all(pageable)` returns a counted, sorted, offset-limited `Page[WalletEntity]`; `find_all_by_spec_paged` runs a composable `Specification` predicate on top of the same pagination machinery. Both use `Page.map(entity_to_dto)` to project items without touching the metadata.
 
 Each handler carries the `@command_handler` + `@service` (or `@query_handler` + `@service`) stack: the first decorator registers the class by introspecting its generic type argument; the second wires it into the DI container so constructor dependencies are injected automatically.
 

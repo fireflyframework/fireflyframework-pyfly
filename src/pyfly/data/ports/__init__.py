@@ -14,6 +14,19 @@
 """Data access ports — abstract interfaces for persistence adapters."""
 
 from pyfly.data.ports.compiler import QueryMethodCompilerPort
-from pyfly.data.ports.outbound import RepositoryPort, SessionPort
+from pyfly.data.ports.outbound import (
+    CrudRepository,
+    PagingAndSortingRepository,
+    ReactiveSortingRepository,
+    RepositoryPort,
+    SessionPort,
+)
 
-__all__ = ["QueryMethodCompilerPort", "RepositoryPort", "SessionPort"]
+__all__ = [
+    "CrudRepository",
+    "PagingAndSortingRepository",
+    "QueryMethodCompilerPort",
+    "ReactiveSortingRepository",
+    "RepositoryPort",
+    "SessionPort",
+]

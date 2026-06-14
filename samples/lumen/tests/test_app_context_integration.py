@@ -42,11 +42,10 @@ async def booted_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Asy
     # reaped by the GC at interpreter teardown, which SQLAlchemy logs as an
     # error. It is harmless (the test passes and persistence is verified by
     # reload); quiet just that pool logger so the run output stays clean.
-    logging.getLogger("sqlalchemy.pool.impl.AsyncAdaptedQueuePool").setLevel(
-        logging.CRITICAL
-    )
+    logging.getLogger("sqlalchemy.pool.impl.AsyncAdaptedQueuePool").setLevel(logging.CRITICAL)
 
     from lumen.app import LumenApplication
+
     from pyfly.core import PyFlyApplication
 
     app = PyFlyApplication(LumenApplication, config_path=str(_HERE.parent / "pyfly.yaml"))
@@ -71,6 +70,7 @@ async def test_full_lifecycle_through_booted_context(booted_context: object) -> 
     from lumen.core.services.wallets.open_wallet_command import OpenWallet
     from lumen.core.services.wallets.withdraw_funds_command import WithdrawFunds
     from lumen.interfaces.enums.v1.currency import Currency
+
     from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
     from pyfly.data import Pageable
 
@@ -93,22 +93,18 @@ async def test_full_lifecycle_through_booted_context(booted_context: object) -> 
     assert reloaded.owner_id == "u-1"
     assert reloaded.balance_minor == 3500
 
-    # --- paged list (find_paginated + Page.map) -------------------------
+    # --- paged list (find_all(pageable) + Page.map) ---------------------
     page = await queries.query(ListWallets(pageable=Pageable.of(1, 10)))
     assert page.total == 2
     assert {w.id for w in page.items} == {w1, w2}
 
     # --- Specification: only wallets with balance >= 1000 ---------------
-    rich = await queries.query(
-        ListRichWallets(min_minor=1000, pageable=Pageable.of(1, 10))
-    )
+    rich = await queries.query(ListRichWallets(min_minor=1000, pageable=Pageable.of(1, 10)))
     assert rich.total == 1
     assert [w.id for w in rich.items] == [w1]
 
     # min_minor=0 returns everyone
-    everyone = await queries.query(
-        ListRichWallets(min_minor=0, pageable=Pageable.of(1, 10))
-    )
+    everyone = await queries.query(ListRichWallets(min_minor=0, pageable=Pageable.of(1, 10)))
     assert everyone.total == 2
 
     # --- projection-backed balance --------------------------------------

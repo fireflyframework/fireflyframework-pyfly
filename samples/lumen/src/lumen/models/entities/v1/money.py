@@ -33,9 +33,7 @@ class Money(ValueObject):
 
     def __post_init__(self) -> None:
         if not isinstance(self.amount, int) or isinstance(self.amount, bool):
-            raise BusinessRuleViolation(
-                "money-amount-integer", "amount must be an integer number of minor units"
-            )
+            raise BusinessRuleViolation("money-amount-integer", "amount must be an integer number of minor units")
 
     # --- factories -------------------------------------------------------
 

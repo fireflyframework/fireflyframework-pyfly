@@ -101,7 +101,7 @@ async def test_balance_survives_reload_by_replay(event_store: InMemoryEventStore
     # 1. Open + credit + debit, then persist the pending events.
     account = LedgerAccount.open("acct-1", owner_id="owner-7", currency=Currency.EUR)
     account.credit(Money(2500, Currency.EUR))  # +25.00
-    account.debit(Money(1000, Currency.EUR))   # -10.00 -> 15.00
+    account.debit(Money(1000, Currency.EUR))  # -10.00 -> 15.00
     assert account.balance == Money(1500, Currency.EUR)
 
     repo = LedgerAccountRepository(event_store)
@@ -230,8 +230,10 @@ def test_auto_configuration_registers_event_store_beans() -> None:
     """``enable_domain_stack`` activates this auto-config when
     ``pyfly.eventsourcing.enabled=true`` (set in pyfly.yaml), registering
     the in-memory event/snapshot stores the ledger repository depends on."""
+    from pyfly.core.config import Config
     from pyfly.eventsourcing.auto_configuration import EventSourcingAutoConfiguration
 
-    config = EventSourcingAutoConfiguration()
-    assert isinstance(config.event_store(), InMemoryEventStore)
-    assert isinstance(config.snapshot_store(), InMemorySnapshotStore)
+    auto = EventSourcingAutoConfiguration()
+    cfg = Config()  # empty config -> providers default to "memory"
+    assert isinstance(auto.event_store(cfg), InMemoryEventStore)
+    assert isinstance(auto.snapshot_store(cfg), InMemorySnapshotStore)

@@ -7,10 +7,14 @@ the framework's generic
 :class:`~pyfly.data.relational.sqlalchemy.Repository`. Declaring
 ``Repository[WalletEntity, str]`` tells the framework the **entity type**
 (``WalletEntity``) and the **primary-key type** (``str``); from that it
-provides a full async CRUD surface out of the box — ``save``,
-``find_by_id``, ``find_all``, ``delete``, ``count``, ``find_paginated``,
-``find_all_by_spec``/``find_all_by_spec_paged`` and more — with the
-``AsyncSession`` injected by the relational auto-configuration.
+provides the full Spring-parity async repository surface out of the box
+(``CrudRepository`` → ``ReactiveSortingRepository`` →
+``PagingAndSortingRepository``) — ``save``/``save_all``, ``find_by_id``,
+``find_all`` (no-arg, ``find_all(Sort)``, ``find_all(Pageable) -> Page``),
+``stream_all``, ``exists_by_id``, ``count``, ``delete``/``delete_by_id``,
+``delete_all_by_id``/``delete_all``, plus
+``find_all_by_spec``/``find_all_by_spec_paged`` — with the ``AsyncSession``
+injected by the relational auto-configuration.
 
 On top of the inherited methods this repository adds two things the way
 Spring Data does:

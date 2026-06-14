@@ -172,7 +172,7 @@ Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, 
 | `Pageable` / `PageRequest.of(page, size, Sort.by(…).descending())` | `Pageable.of(page, size, Sort.by("created_at").descending())` | `from pyfly.data import Pageable, Sort`. `Sort.by(*fields)` returns ascending; `.descending()` flips all. |
 | `Page<T>` | `Page[T]` | `from pyfly.data import Page`. Attributes: `.items`, `.total`, `.page`, `.size`, `.total_pages`, `.has_next`, `.has_previous`. `.map(fn)` transforms items, preserving metadata. |
 | `page.getContent()` / `page.getTotalElements()` | `page.items` / `page.total` | Python naming; `.total_pages` derived as `ceil(total / size)`. |
-| `repo.findAll(pageable)` | `await repo.find_paginated(pageable=pageable)` | Returns `Page[T]`. |
+| `repo.findAll(pageable)` | `await repo.find_all(pageable)` | Returns `Page[T]`. |
 | `repo.findAll(spec, pageable)` | `await repo.find_all_by_spec_paged(spec, pageable)` | Applies WHERE, ORDER BY, and LIMIT/OFFSET in one call. |
 
 ### Transactions & `save`

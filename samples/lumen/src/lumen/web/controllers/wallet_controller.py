@@ -8,7 +8,7 @@ dispatches it through the bus — the controller holds no business logic.
 The two list endpoints showcase the framework's data layer over the wire:
 
 * ``GET /api/v1/wallets?page=&size=`` returns a *page* of wallets, built
-  from the repository's ``find_paginated``;
+  from the repository's ``find_all(pageable)``;
 * ``GET /api/v1/wallets/rich?min_minor=&page=&size=`` returns a page
   filtered by a composable :class:`Specification`.
 
@@ -69,39 +69,25 @@ class WalletController:
 
     @post_mapping("", status_code=201)
     async def open_wallet(self, request: Valid[Body[OpenWalletRequest]]) -> dict[str, str]:
-        wallet_id = await self._commands.send(
-            OpenWallet(owner_id=request.owner_id, currency=request.currency)
-        )
+        wallet_id = await self._commands.send(OpenWallet(owner_id=request.owner_id, currency=request.currency))
         return {"wallet_id": wallet_id}
 
     @post_mapping("/{wallet_id}/deposit")
-    async def deposit(
-        self, wallet_id: PathVar[str], request: Valid[Body[DepositRequest]]
-    ) -> dict[str, int | str]:
-        balance = await self._commands.send(
-            DepositFunds(wallet_id=wallet_id, amount=request.amount)
-        )
+    async def deposit(self, wallet_id: PathVar[str], request: Valid[Body[DepositRequest]]) -> dict[str, int | str]:
+        balance = await self._commands.send(DepositFunds(wallet_id=wallet_id, amount=request.amount))
         return {"wallet_id": wallet_id, "balance_minor": balance}
 
     @post_mapping("/{wallet_id}/withdraw")
-    async def withdraw(
-        self, wallet_id: PathVar[str], request: Valid[Body[DepositRequest]]
-    ) -> dict[str, int | str]:
-        balance = await self._commands.send(
-            WithdrawFunds(wallet_id=wallet_id, amount=request.amount)
-        )
+    async def withdraw(self, wallet_id: PathVar[str], request: Valid[Body[DepositRequest]]) -> dict[str, int | str]:
+        balance = await self._commands.send(WithdrawFunds(wallet_id=wallet_id, amount=request.amount))
         return {"wallet_id": wallet_id, "balance_minor": balance}
 
     # --- paged / specification queries (declare before /{wallet_id}) -----
 
     @get_mapping("")
-    async def list_wallets(
-        self, page: QueryParam[int] = 1, size: QueryParam[int] = 20
-    ) -> PageDto[WalletDto]:
-        """A page of wallets, newest first (``find_paginated`` + ``Page.map``)."""
-        result = await self._queries.query(
-            ListWallets(pageable=Pageable.of(page, size, _NEWEST_FIRST))
-        )
+    async def list_wallets(self, page: QueryParam[int] = 1, size: QueryParam[int] = 20) -> PageDto[WalletDto]:
+        """A page of wallets, newest first (``find_all(pageable)`` + ``Page.map``)."""
+        result = await self._queries.query(ListWallets(pageable=Pageable.of(page, size, _NEWEST_FIRST)))
         return PageDto.from_page(result)
 
     @get_mapping("/rich")

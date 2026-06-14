@@ -16,7 +16,7 @@ This chapter rebuilds Lumen's persistence on that layer, exactly as the running 
 
 ::: figure art/figures/05-repository.svg | Figure 5.1 — Your code depends on the repository; the framework supplies the SQLAlchemy implementation behind it.
 
-A PyFly repository is a class that subclasses the generic `Repository[Entity, ID]` and is marked with the `@repository` stereotype. That is the whole declaration. From the two type parameters the framework learns the **entity type** and the **primary-key type**, and from there it provides a complete async data-access surface — `save`, `find_by_id`, `find_all`, `delete`, `count`, `exists`, plus pagination and specification queries — with the database `AsyncSession` injected for you.
+A PyFly repository is a class that subclasses the generic `Repository[Entity, ID]` and is marked with the `@repository` stereotype. That is the whole declaration. From the two type parameters the framework learns the **entity type** and the **primary-key type**, and from there it provides a complete async data-access surface — `save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `count`, `exists_by_id`, plus pagination and specification queries — with the database `AsyncSession` injected for you.
 
 This is the Repository pattern as Spring Data popularised it, translated to idiomatic async Python. You write *what* you want (the method) and the framework writes *how* (the SQL).
 
@@ -97,19 +97,24 @@ class WalletRepository(Repository[WalletEntity, str]):
 
 There is no `__init__`, no SQL, and no adapter class. With just that declaration, any handler that injects a `WalletRepository` can already call:
 
-| Method                          | Returns        | What it does                              |
-|---------------------------------|----------------|-------------------------------------------|
-| `save(entity)`                  | `T`            | Insert or update; **flushes** + refreshes |
-| `find_by_id(id)`                | `T \| None`    | Load by primary key                       |
-| `find_all(**filters)`           | `list[T]`      | All rows, optional equality filters       |
-| `delete(id)`                    | `None`         | Delete by primary key (no-op if absent)   |
-| `count()`                       | `int`          | Count every row in the table              |
-| `exists(id)`                    | `bool`         | Whether a row with this id exists         |
-| `save_all(entities)`            | `list[T]`      | Bulk insert/update                        |
-| `find_all_by_ids(ids)`          | `list[T]`      | Load many rows by primary key             |
-| `find_paginated(...)`           | `Page[T]`      | Paged + sorted query (see below)          |
-| `find_all_by_spec(spec)`        | `list[T]`      | Rows matching a `Specification`           |
-| `find_all_by_spec_paged(...)`   | `Page[T]`      | Paged + sorted `Specification` query      |
+| Method                          | Returns             | What it does                              |
+|---------------------------------|---------------------|-------------------------------------------|
+| `save(entity)`                  | `T`                 | Insert or update; **flushes** + refreshes |
+| `find_by_id(id)`                | `T \| None`         | Load by primary key                       |
+| `find_all(**filters)`           | `list[T]`           | All rows, optional equality filters       |
+| `find_all(sort)`                | `list[T]`           | All rows in a given `Sort` order          |
+| `find_all(pageable)`            | `Page[T]`           | Paged + sorted query (see below)          |
+| `stream_all(sort)`              | `AsyncIterator[T]`  | Stream every row (the `Flux<T>` analogue) |
+| `delete(entity)`                | `None`              | Delete a given entity                     |
+| `delete_by_id(id)`              | `None`              | Delete by primary key (no-op if absent)   |
+| `delete_all(entities=None)`     | `None`              | Delete the given entities (or all rows)   |
+| `delete_all_by_id(ids)`         | `None`              | Delete many rows by primary key           |
+| `count()`                       | `int`               | Count every row in the table              |
+| `exists_by_id(id)`              | `bool`              | Whether a row with this id exists         |
+| `save_all(entities)`            | `list[T]`           | Bulk insert/update                        |
+| `find_all_by_id(ids)`           | `list[T]`           | Load many rows by primary key             |
+| `find_all_by_spec(spec)`        | `list[T]`           | Rows matching a `Specification`           |
+| `find_all_by_spec_paged(...)`   | `Page[T]`           | Paged + sorted `Specification` query      |
 
 That is more than enough for most entities. Lumen adds three methods of its own on top — a derived query, a specification query, and an upsert — which the next sections build up.
 
@@ -183,11 +188,11 @@ The prefix decides the *shape* of the result: `find_by` returns a list, `count_b
 
 ## Pagination: Page, Pageable, and Sort
 
-A list endpoint should never return *every* wallet. PyFly's pagination types — `Pageable` (what page, what size, what sort), `Sort` (the ordering), and `Page[T]` (the slice plus metadata) — are inherited straight from the CRUD surface via `find_paginated`.
+A list endpoint should never return *every* wallet. PyFly's pagination types — `Pageable` (what page, what size, what sort), `Sort` (the ordering), and `Page[T]` (the slice plus metadata) — are inherited straight from the CRUD surface via `find_all(pageable)`.
 
 Lumen's `ListWallets` query handler is the whole story in three lines:
 
-::: listing lumen/core/services/wallets/list_wallets_handler.py | Listing 5.4 — Paginating with find_paginated, then mapping the page
+::: listing lumen/core/services/wallets/list_wallets_handler.py | Listing 5.4 — Paginating with find_all(pageable), then mapping the page
 @query_handler
 @service
 class ListWalletsHandler(
@@ -200,13 +205,13 @@ class ListWalletsHandler(
     async def do_handle(  # type: ignore[override]
         self, query: ListWallets
     ) -> Page[WalletDto]:
-        page = await self._repository.find_paginated(
-            pageable=query.pageable
+        page = await self._repository.find_all(
+            query.pageable
         )
         return page.map(entity_to_dto)
 :::
 
-`find_paginated(pageable=…)` does three things in one call: it counts the total number of matching rows, applies the `Pageable`'s sort, and slices the result with `LIMIT`/`OFFSET`. It hands back a `Page[WalletEntity]`. The handler then calls `page.map(entity_to_dto)` to turn each row into a `WalletDto` **without losing the pagination metadata** — `.map` carries `total`, `page`, `size`, and the rest across to the new page.
+`find_all(pageable)` does three things in one call: it counts the total number of matching rows, applies the `Pageable`'s sort, and slices the result with `LIMIT`/`OFFSET`. It hands back a `Page[WalletEntity]`. The handler then calls `page.map(entity_to_dto)` to turn each row into a `WalletDto` **without losing the pagination metadata** — `.map` carries `total`, `page`, `size`, and the rest across to the new page.
 
 A `Page[T]` exposes everything a client needs to render a pager:
 
@@ -583,7 +588,7 @@ async def test_specification_find_rich_paged_and_sorted(
 
 The first test drives the derived query: three wallets in, two owners out, and `find_by_owner_id("alice")` returns exactly the two — proof that the framework compiled `WHERE owner_id = :owner_id` from the method name. The second drives the `Specification` path: it asserts the threshold filter (`total == 2`, only mid and rich match `>= 1000`), the newest-first sort (`wlt-rich` is the newest of the two), the page metadata (`total_pages == 2`, `has_next`), and that the same `balance_at_least` predicate also runs unpaged through `find_all_by_spec`.
 
-The fixture mirrors what the framework does at startup — build the engine, run `Base.metadata.create_all` inside a `begin()` block so the DDL commits, hand back a session factory — so the test exercises the exact table the application creates. Other tests in the same file prove `upsert` round-trips through a *fresh* engine (durability across reconnect) and that `find_paginated` counts and slices a five-wallet table correctly.
+The fixture mirrors what the framework does at startup — build the engine, run `Base.metadata.create_all` inside a `begin()` block so the DDL commits, hand back a session factory — so the test exercises the exact table the application creates. Other tests in the same file prove `upsert` round-trips through a *fresh* engine (durability across reconnect) and that `find_all(pageable)` counts and slices a five-wallet table correctly.
 
 !!! spring "Spring parity"
     Constructing the repository directly against a real in-process database mirrors Spring's `@DataJpaTest` slice, which boots an H2 database and the JPA layer in isolation to test repositories without the full context. `Base.metadata.create_all` is the analogue of `spring.jpa.hibernate.ddl-auto=create`, and running `RepositoryBeanPostProcessor` by hand stands in for the Spring proxy that materialises derived queries on a `JpaRepository` at startup.
@@ -595,9 +600,9 @@ The fixture mirrors what the framework does at startup — build the engine, run
 Lumen now persists wallets through PyFly's Spring-Data-style repository layer:
 
 - **Entity** — `WalletEntity(Base)`, a SQLAlchemy 2.0 row with a string primary key (the aggregate's own id) and integer minor-unit balances.
-- **Repository** — `WalletRepository(Repository[WalletEntity, str])`, marked `@repository`. The framework supplies full async CRUD (`save`, `find_by_id`, `find_all`, `delete`, `count`, `exists`, `save_all`, `find_all_by_ids`, pagination, specifications) with no hand-written adapter.
+- **Repository** — `WalletRepository(Repository[WalletEntity, str])`, marked `@repository`. The framework supplies full async CRUD (`save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `delete_all`/`delete_all_by_id`, `count`, `exists_by_id`, `save_all`, `find_all_by_id`, `stream_all`, pagination, specifications) with no hand-written adapter.
 - **Derived query** — `find_by_owner_id`, declared as a `...` stub and compiled from its name by the `RepositoryBeanPostProcessor`.
-- **Pagination** — `find_paginated(pageable=…)` returning a `Page[T]` with `total` / `total_pages` / `has_next`, mapped to DTOs with `Page.map`, exposed at `GET /api/v1/wallets`.
+- **Pagination** — `find_all(pageable)` returning a `Page[T]` with `total` / `total_pages` / `has_next`, mapped to DTOs with `Page.map`, exposed at `GET /api/v1/wallets`.
 - **Specification** — `balance_at_least(n)` composed with `& | ~` and run via `find_all_by_spec_paged`, exposed at `GET /api/v1/wallets/rich`.
 - **Projection** — `@projection BalanceView`, a concrete dataclass the `Mapper` projects rows onto for the balance read view.
 - **Transactions** — write handlers decorated `@transactional()` (because `save`/`upsert` only *flush*), using `upsert`/`session.merge` for an aggregate that owns its id, with the aggregate ↔ entity mapper keeping the domain model pure.

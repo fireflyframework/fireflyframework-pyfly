@@ -65,7 +65,7 @@ class TodoService:
         )
 
     async def delete(self, todo_id: int) -> None:
-        await self._repository.delete(todo_id)
+        await self._repository.delete_by_id(todo_id)
 {% elif has_mongodb %}
 
     def __init__(self, repository: TodoDocumentRepository) -> None:
@@ -110,7 +110,7 @@ class TodoService:
         )
 
     async def delete(self, todo_id: str) -> None:
-        await self._repository.delete(todo_id)
+        await self._repository.delete_by_id(todo_id)
 {% else %}
 
     def __init__(self, repository: TodoRepository) -> None:

@@ -909,11 +909,13 @@ results = await repository.find_all_by_spec(spec)
 
 **PyFly:**
 ```python
-page: Page[Order] = await repository.find_all_paginated(
-    Pageable(page=0, size=20, sort="created_at:desc")
+page: Page[Order] = await repository.find_all(
+    Pageable.of(1, 20, Sort.by("created_at").descending())
 )
 # page.content, page.total_elements, page.total_pages, page.number
 ```
+
+`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. PyFly's `Pageable` is **1-based** (`page >= 1`). Import with `from pyfly.data import Pageable, Sort`.
 
 ### Entity ↔ DTO Mapping — MapStruct → `Mapper`
 
@@ -1617,7 +1619,7 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `@Around` | `@around` | Around advice |
 | `@AfterReturning` | `@after_returning` | After-returning advice |
 | `@AfterThrowing` | `@after_throwing` | After-throwing advice |
-| `JpaRepository` | `CrudRepository` / `Repository` | CRUD operations |
+| `JpaRepository` / `ReactiveCrudRepository` | `CrudRepository` → `ReactiveSortingRepository` → `PagingAndSortingRepository` (`RepositoryPort` is an alias of `CrudRepository`); concrete `Repository` / `MongoRepository` | CRUD + sorted/paged operations |
 | `findByXAndY` | `find_by_x_and_y` | Derived queries |
 | `@Query` | `@query` | Custom queries |
 | `Specification` | `Specification` | Dynamic query predicates |

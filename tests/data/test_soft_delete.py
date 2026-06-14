@@ -22,6 +22,7 @@ from sqlalchemy import String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 
@@ -79,7 +80,7 @@ class TestSoftDeleteMixin:
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
         order = await repo.save(SoftOrder(name="ToDelete"))
-        await repo.delete(order.id)
+        await repo.delete_by_id(order.id)
         await repo._require_session().refresh(order)
         assert order.is_deleted is True
 
@@ -92,7 +93,7 @@ class TestSoftDeleteRepository:
         session: AsyncSession,
     ):
         order = await repo.save(SoftOrder(name="ToDelete"))
-        await repo.delete(order.id)
+        await repo.delete_by_id(order.id)
         await session.refresh(order)
         assert order.deleted_at is not None
 
@@ -102,7 +103,7 @@ class TestSoftDeleteRepository:
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
         order = await repo.save(SoftOrder(name="Deleted"))
-        await repo.delete(order.id)
+        await repo.delete_by_id(order.id)
         found = await repo.find_by_id(order.id)
         assert found is None
 
@@ -123,7 +124,7 @@ class TestSoftDeleteRepository:
     ):
         a = await repo.save(SoftOrder(name="Active"))
         b = await repo.save(SoftOrder(name="Deleted"))
-        await repo.delete(b.id)
+        await repo.delete_by_id(b.id)
 
         items = await repo.find_all()
         assert len(items) == 1
@@ -136,7 +137,7 @@ class TestSoftDeleteRepository:
     ):
         await repo.save(SoftOrder(name="Active"))
         b = await repo.save(SoftOrder(name="Deleted"))
-        await repo.delete(b.id)
+        await repo.delete_by_id(b.id)
 
         items = await repo.find_all_including_deleted()
         assert len(items) == 2
@@ -147,7 +148,7 @@ class TestSoftDeleteRepository:
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
         order = await repo.save(SoftOrder(name="Restored"))
-        await repo.delete(order.id)
+        await repo.delete_by_id(order.id)
 
         restored = await repo.restore(order.id)
         assert restored is not None
@@ -160,7 +161,7 @@ class TestSoftDeleteRepository:
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
         order = await repo.save(SoftOrder(name="Restored"))
-        await repo.delete(order.id)
+        await repo.delete_by_id(order.id)
         assert await repo.find_by_id(order.id) is None
 
         await repo.restore(order.id)
@@ -180,7 +181,7 @@ class TestSoftDeleteRepository:
         assert len(items) == 0
 
     @pytest.mark.asyncio
-    async def test_delete_all_soft_deletes_multiple(
+    async def test_delete_all_by_id_soft_deletes_multiple(
         self,
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
@@ -188,20 +189,52 @@ class TestSoftDeleteRepository:
         b = await repo.save(SoftOrder(name="B"))
         c = await repo.save(SoftOrder(name="C"))
 
-        deleted_count = await repo.delete_all([a.id, b.id])
-        assert deleted_count == 2
+        await repo.delete_all_by_id([a.id, b.id])
 
         active = await repo.find_all()
         assert len(active) == 1
         assert active[0].id == c.id
 
     @pytest.mark.asyncio
-    async def test_delete_all_empty_list(
+    async def test_delete_all_by_id_empty_list(
         self,
         repo: SoftDeleteRepository[SoftOrder, UUID],
     ):
-        deleted_count = await repo.delete_all([])
-        assert deleted_count == 0
+        await repo.save(SoftOrder(name="A"))
+        await repo.delete_all_by_id([])
+        assert await repo.count() == 1
+
+    @pytest.mark.asyncio
+    async def test_delete_entity_soft_deletes(
+        self,
+        repo: SoftDeleteRepository[SoftOrder, UUID],
+    ):
+        order = await repo.save(SoftOrder(name="ByEntity"))
+        await repo.delete(order)
+        assert await repo.find_by_id(order.id) is None
+        assert len(await repo.find_all_including_deleted()) == 1
+
+    @pytest.mark.asyncio
+    async def test_delete_all_entities_soft_deletes(
+        self,
+        repo: SoftDeleteRepository[SoftOrder, UUID],
+    ):
+        a = await repo.save(SoftOrder(name="A"))
+        b = await repo.save(SoftOrder(name="B"))
+        await repo.delete_all([a, b])
+        assert await repo.count() == 0
+        assert len(await repo.find_all_including_deleted()) == 2
+
+    @pytest.mark.asyncio
+    async def test_delete_all_truncate_soft_deletes_active(
+        self,
+        repo: SoftDeleteRepository[SoftOrder, UUID],
+    ):
+        await repo.save(SoftOrder(name="A"))
+        await repo.save(SoftOrder(name="B"))
+        await repo.delete_all()
+        assert await repo.count() == 0
+        assert len(await repo.find_all_including_deleted()) == 2
 
     @pytest.mark.asyncio
     async def test_count_excludes_soft_deleted(
@@ -211,7 +244,7 @@ class TestSoftDeleteRepository:
         await repo.save(SoftOrder(name="Active1"))
         await repo.save(SoftOrder(name="Active2"))
         b = await repo.save(SoftOrder(name="Deleted"))
-        await repo.delete(b.id)
+        await repo.delete_by_id(b.id)
 
         assert await repo.count() == 2
 
@@ -220,25 +253,36 @@ class TestSoftDeletePaginatedExcludesDeleted:
     """Audit #103 — paginated / by-ids / by-spec readers must exclude soft-deleted rows."""
 
     @pytest.mark.asyncio
-    async def test_find_paginated_excludes_deleted(self, repo, session):
+    async def test_find_all_pageable_excludes_deleted(self, repo, session):
         a = SoftOrder(name="a")
         b = SoftOrder(name="b")
         session.add_all([a, b])
         await session.flush()
-        await repo.delete(a.id)
+        await repo.delete_by_id(a.id)
 
-        page = await repo.find_paginated(page=1, size=10)
+        page = await repo.find_all(Pageable.of(1, 10))
         names = {o.name for o in page.items}
         assert names == {"b"}
         assert page.total == 1  # the deleted row is not counted
 
     @pytest.mark.asyncio
-    async def test_find_all_by_ids_excludes_deleted(self, repo, session):
+    async def test_find_all_by_id_excludes_deleted(self, repo, session):
         a = SoftOrder(name="a")
         b = SoftOrder(name="b")
         session.add_all([a, b])
         await session.flush()
-        await repo.delete(a.id)
+        await repo.delete_by_id(a.id)
 
-        found = await repo.find_all_by_ids([a.id, b.id])
+        found = await repo.find_all_by_id([a.id, b.id])
         assert {o.name for o in found} == {"b"}
+
+    @pytest.mark.asyncio
+    async def test_stream_all_excludes_deleted(self, repo, session):
+        a = SoftOrder(name="a")
+        b = SoftOrder(name="b")
+        session.add_all([a, b])
+        await session.flush()
+        await repo.delete_by_id(a.id)
+
+        names = {o.name async for o in repo.stream_all(Sort.by("name"))}
+        assert names == {"b"}

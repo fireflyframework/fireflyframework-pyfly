@@ -18,10 +18,9 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.staticfiles import StaticFiles
 
+from lumen.app import LumenApplication
 from pyfly.core import PyFlyApplication
 from pyfly.web.adapters.starlette import create_app
-
-from lumen.app import LumenApplication
 
 # Bootstrap: load config, scan packages, build the DI context.
 _pyfly = PyFlyApplication(LumenApplication)

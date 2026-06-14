@@ -30,7 +30,13 @@ from pyfly.data.mapper import Mapper, default_mapper, mapping
 from pyfly.data.page import Page
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.ports.compiler import QueryMethodCompilerPort
-from pyfly.data.ports.outbound import CrudRepository, PagingRepository, RepositoryPort, SessionPort
+from pyfly.data.ports.outbound import (
+    CrudRepository,
+    PagingAndSortingRepository,
+    ReactiveSortingRepository,
+    RepositoryPort,
+    SessionPort,
+)
 from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
 from pyfly.data.projection import is_projection, projection, projection_fields
 from pyfly.data.query import query
@@ -48,10 +54,11 @@ __all__ = [
     "Order",
     "Page",
     "Pageable",
-    "PagingRepository",
+    "PagingAndSortingRepository",
     "Propagation",
     "QueryMethodCompilerPort",
     "QueryMethodParser",
+    "ReactiveSortingRepository",
     "RepositoryPort",
     "SessionPort",
     "Sort",

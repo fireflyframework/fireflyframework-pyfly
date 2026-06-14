@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
-from pyfly.data import Page, Pageable
 from pyfly.cqrs import Query
+from pyfly.data import Page, Pageable
 
 
 @dataclass(frozen=True)

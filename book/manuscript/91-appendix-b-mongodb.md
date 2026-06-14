@@ -211,13 +211,17 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 | `save(entity)` | `T` | Insert or update via Beanie `entity.save()` |
 | `find_by_id(id)` | `T \| None` | Find by primary key |
 | `find_all(**filters)` | `list[T]` | Find all; keyword args become equality filters |
-| `delete(id)` | `None` | Delete by primary key; no-op if not found |
+| `find_all(sort)` | `list[T]` | Fetch all documents, ordered by a `Sort` |
+| `find_all(pageable)` | `Page[T]` | Paged query: counts the total, applies the Pageable's sort, slices with skip/limit, returns `Page[T]` |
+| `stream_all(sort)` | `AsyncIterator[T]` | Stream all documents (the Flux<T> analogue); optional `Sort` and equality filters |
+| `delete(entity)` | `None` | Delete a loaded document instance |
+| `delete_by_id(id)` | `None` | Delete by primary key; no-op if not found |
 | `count()` | `int` | Count all documents in the collection |
-| `exists(id)` | `bool` | True if a document with this ID exists |
-| `find_paginated(page, size, pageable)` | `Page[T]` | Paginated query with optional sort |
+| `exists_by_id(id)` | `bool` | True if a document with this ID exists |
 | `save_all(entities)` | `list[T]` | Bulk insert via `insert_many` |
-| `find_all_by_ids(ids)` | `list[T]` | Find all with IDs in a list |
-| `delete_all(ids)` | `int` | Delete all with IDs in a list |
+| `find_all_by_id(ids)` | `list[T]` | Find all with IDs in a list |
+| `delete_all_by_id(ids)` | `None` | Delete all with IDs in a list |
+| `delete_all(entities=None)` | `None` | Delete the given documents; with no args, truncate the entire collection |
 | `find_all_by_spec(spec)` | `list[T]` | Find matching a `MongoSpecification` |
 | `find_all_by_spec_paged(spec, pageable)` | `Page[T]` | Find matching a `MongoSpecification` with pagination and sort |
 
@@ -336,11 +340,12 @@ async def list_products(
         size=size,
         sort=Sort.by("name"),
     )
-    return await repo.find_paginated(pageable=pageable)
+    return await repo.find_all(pageable)
 :::
 
-`find_paginated` counts total documents, calculates offset as `(page-1)*size`, applies
-`.sort()`, `.skip()`, and `.limit()` to the Beanie query, and returns `Page[T]`.
+`find_all(pageable)` counts the total, applies the Pageable's sort, slices with
+`.skip((page-1)*size)` and `.limit(size)` on the Beanie query, and returns `Page[T]`.
+Pageable is 1-based, so page `1` is the first page.
 
 ---
 

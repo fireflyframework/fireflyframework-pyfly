@@ -640,7 +640,7 @@ async def test_specification_find_rich_paged_and_sorted(
 
 
 @pytest.mark.asyncio
-async def test_find_paginated_counts_and_pages(
+async def test_find_all_pageable_counts_and_pages(
     sqlite_factory: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
     factory, _ = sqlite_factory
@@ -652,8 +652,8 @@ async def test_find_paginated_counts_and_pages(
             )
         await session.commit()
 
-        page = await repo.find_paginated(
-            pageable=Pageable.of(1, 2, Sort.by("created_at").descending())
+        page = await repo.find_all(
+            Pageable.of(1, 2, Sort.by("created_at").descending())
         )
         assert page.total == 5
         assert page.total_pages == 3
@@ -860,7 +860,7 @@ async def test_full_lifecycle_through_booted_context(
     assert reloaded.owner_id == "u-1"
     assert reloaded.balance_minor == 3500
 
-    # --- paged list (find_paginated + Page.map) --------------------------
+    # --- paged list (find_all(pageable) + Page.map) ----------------------
     page = await queries.query(ListWallets(pageable=Pageable.of(1, 10)))
     assert page.total == 2
     assert {w.id for w in page.items} == {w1, w2}
@@ -886,7 +886,7 @@ async def test_full_lifecycle_through_booted_context(
 
 `booted_context` uses pytest's built-in `monkeypatch` fixture to set `PYFLY_DATA_RELATIONAL_URL` before the application boots. The framework reads this environment variable during relational auto-configuration, so the context uses the isolated temp-file SQLite database for the life of the test, then disposes of it when the fixture tears down.
 
-`test_full_lifecycle_through_booted_context` exercises every query type the application exposes: `GetWallet` (aggregate reload), `ListWallets` (paginated list using `find_paginated`), `ListRichWallets` (Specification predicate using `find_all_by_spec_paged`), and `GetBalance` (projection-backed balance). It proves that the `RepositoryBeanPostProcessor`, the `@transactional` boundary around each command handler, and the DI wiring all compose correctly in a single boot.
+`test_full_lifecycle_through_booted_context` exercises every query type the application exposes: `GetWallet` (aggregate reload), `ListWallets` (paginated list using `find_all(pageable)`), `ListRichWallets` (Specification predicate using `find_all_by_spec_paged`), and `GetBalance` (projection-backed balance). It proves that the `RepositoryBeanPostProcessor`, the `@transactional` boundary around each command handler, and the DI wiring all compose correctly in a single boot.
 
 !!! spring "Spring parity"
     This test is the Python equivalent of `@SpringBootTest` with an embedded H2
@@ -942,7 +942,7 @@ At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain mod
 
 In the middle, `conftest.py` wires the real components — the framework `WalletRepository` over an in-memory SQLite engine, `InMemoryEventBus`, all five command and query handlers (including `ListWalletsHandler` and `ListRichWalletsHandler`), and `WalletAuditListener` — into reusable async fixtures that pytest shares automatically across modules. The `RepositoryBeanPostProcessor` is applied to the repository fixture exactly as the `ApplicationContext` applies it at startup. `test_cqrs_flow.py` dispatches commands and queries through the real bus and checks every field of the query DTOs. `test_event_listener.py` proves that the audit listener observes exactly the events produced by successful commands and nothing from rejected ones.
 
-`test_sql_wallet_repository.py` exercises the `WalletRepository` directly against a temporary SQLite file, covering the full CRUD surface, the derived query `find_by_owner_id` (compiled from the method name by `RepositoryBeanPostProcessor`), the `find_paginated` API that returns a `Page` with total count and page metadata, and the `Specification` predicate path via `find_rich` / `find_all_by_spec`. The two-engine reconnect pattern proves true durability.
+`test_sql_wallet_repository.py` exercises the `WalletRepository` directly against a temporary SQLite file, covering the full CRUD surface, the derived query `find_by_owner_id` (compiled from the method name by `RepositoryBeanPostProcessor`), the `find_all(pageable)` API that returns a `Page` with total count and page metadata, and the `Specification` predicate path via `find_rich` / `find_all_by_spec`. The two-engine reconnect pattern proves true durability.
 
 At the peak, `test_app_context_integration.py` boots the real `LumenApplication` with the database URL overridden to an isolated SQLite file, then drives the full open → deposit → withdraw → list → rich → balance lifecycle through the context-resolved buses. This single test proves that the DI scan, CQRS auto-configuration, `RepositoryBeanPostProcessor`, and `@transactional` boundary all compose correctly.
 
@@ -962,7 +962,7 @@ Concretely, you learned:
   stubs raise `NotImplementedError`.
 - **Derived queries** (`find_by_owner_id`) — declared as stubs; the
   post-processor compiles them to `WHERE owner_id = :value` at startup.
-- **`Pageable.of(page, size, sort)` + `Page`** — the `find_paginated`
+- **`Pageable.of(page, size, sort)` + `Page`** — the `find_all(pageable)`
   API returns a `Page` with `total`, `total_pages`, `has_next`, and
   `items`; assert each field for pagination correctness.
 - **`Specification` predicates** — `balance_at_least(n)` is passed to
@@ -1008,7 +1008,7 @@ Concretely, you learned:
 
 4. **Add a multi-owner pagination test.** In `test_sql_wallet_repository.py`,
    add a test that inserts ten wallets with two different owners, calls
-   `find_by_owner_id` for each owner, and then calls `find_paginated` with
+   `find_by_owner_id` for each owner, and then calls `find_all` with
    `Pageable.of(1, 3, Sort.by("balance_minor").descending())`. Assert that
    `page.total == 10`, `page.total_pages == 4`, and that the first item in
    `page.items` has the highest `balance_minor`. This proves that pagination

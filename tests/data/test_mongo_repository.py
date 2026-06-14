@@ -24,6 +24,7 @@ from mongomock_motor import AsyncMongoMockClient
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
+from pyfly.data.pageable import Pageable, Sort
 
 # ---------------------------------------------------------------------------
 # Test document
@@ -140,19 +141,26 @@ class TestCRUD:
         assert active_items[0].name == "Active"
 
     @pytest.mark.asyncio
-    async def test_delete(self, repo: MongoRepository):
+    async def test_delete_by_id(self, repo: MongoRepository):
         item = await repo.save(SampleItem(name="ToDelete"))
-        await repo.delete(item.id)
+        await repo.delete_by_id(item.id)
 
         found = await repo.find_by_id(item.id)
         assert found is None
+
+    @pytest.mark.asyncio
+    async def test_delete_entity(self, repo: MongoRepository):
+        item = await repo.save(SampleItem(name="ToDelete"))
+        await repo.delete(item)
+
+        assert await repo.find_by_id(item.id) is None
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent_no_error(self, repo: MongoRepository):
         """Deleting a non-existent ID should not raise."""
         from bson import ObjectId
 
-        await repo.delete(ObjectId())
+        await repo.delete_by_id(ObjectId())
 
     @pytest.mark.asyncio
     async def test_find_by_id_nonexistent_returns_none(self, repo: MongoRepository):
@@ -179,15 +187,15 @@ class TestCountAndExists:
         assert await repo.count() == 2
 
     @pytest.mark.asyncio
-    async def test_exists_true(self, repo: MongoRepository):
+    async def test_exists_by_id_true(self, repo: MongoRepository):
         item = await repo.save(SampleItem(name="Exists"))
-        assert await repo.exists(item.id) is True
+        assert await repo.exists_by_id(item.id) is True
 
     @pytest.mark.asyncio
-    async def test_exists_false(self, repo: MongoRepository):
+    async def test_exists_by_id_false(self, repo: MongoRepository):
         from bson import ObjectId
 
-        assert await repo.exists(ObjectId()) is False
+        assert await repo.exists_by_id(ObjectId()) is False
 
 
 # ===========================================================================
@@ -197,37 +205,51 @@ class TestCountAndExists:
 
 class TestPagination:
     @pytest.mark.asyncio
-    async def test_find_paginated_basic(self, repo: MongoRepository):
+    async def test_find_all_pageable_basic(self, repo: MongoRepository):
         for i in range(15):
             await repo.save(SampleItem(name=f"Item-{i:02d}"))
 
-        page = await repo.find_paginated(page=1, size=5)
+        page = await repo.find_all(Pageable.of(1, 5))
         assert len(page.items) == 5
         assert page.total == 15
         assert page.page == 1
         assert page.size == 5
 
     @pytest.mark.asyncio
-    async def test_find_paginated_second_page(self, repo: MongoRepository):
+    async def test_find_all_pageable_second_page(self, repo: MongoRepository):
         for i in range(12):
             await repo.save(SampleItem(name=f"Item-{i:02d}"))
 
-        page = await repo.find_paginated(page=2, size=5)
+        page = await repo.find_all(Pageable.of(2, 5))
         assert len(page.items) == 5
         assert page.total == 12
         assert page.page == 2
 
     @pytest.mark.asyncio
-    async def test_find_paginated_last_page_partial(self, repo: MongoRepository):
+    async def test_find_all_pageable_last_page_partial(self, repo: MongoRepository):
         for i in range(7):
             await repo.save(SampleItem(name=f"Item-{i:02d}"))
 
-        page = await repo.find_paginated(page=2, size=5)
+        page = await repo.find_all(Pageable.of(2, 5))
         assert len(page.items) == 2
         assert page.total == 7
 
     @pytest.mark.asyncio
-    async def test_find_paginated_empty(self, repo: MongoRepository):
-        page = await repo.find_paginated(page=1, size=10)
+    async def test_find_all_pageable_empty(self, repo: MongoRepository):
+        page = await repo.find_all(Pageable.of(1, 10))
         assert len(page.items) == 0
         assert page.total == 0
+
+    @pytest.mark.asyncio
+    async def test_find_all_sorted(self, repo: MongoRepository):
+        for n in ("C", "A", "B"):
+            await repo.save(SampleItem(name=n))
+        names = [w.name for w in await repo.find_all(Sort.by("name"))]
+        assert names == ["A", "B", "C"]
+
+    @pytest.mark.asyncio
+    async def test_stream_all(self, repo: MongoRepository):
+        for n in ("C", "A", "B"):
+            await repo.save(SampleItem(name=n))
+        names = [w.name async for w in repo.stream_all(Sort.by("name"))]
+        assert names == ["A", "B", "C"]
