@@ -323,8 +323,10 @@ class PyFlyApplication:
         """Log mapped endpoints and documentation URLs (Spring Boot style)."""
         route_metadata = self._route_metadata
         docs_enabled = self._docs_enabled
-        host = self._host or str(self.config.get("pyfly.web.host", "0.0.0.0"))
-        port = self._port or int(self.config.get("pyfly.web.port", 8080))
+        from pyfly.config.properties.server import resolve_app_host, resolve_app_port
+
+        host = self._host or resolve_app_host(self.config)
+        port = self._port or resolve_app_port(self.config)
 
         if route_metadata:
             self._logger.info("mapped_endpoints", count=len(route_metadata))

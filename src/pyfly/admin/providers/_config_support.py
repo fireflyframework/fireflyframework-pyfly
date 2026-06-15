@@ -105,8 +105,8 @@ def effective_origins(config: Any, keys: list[str], sources: list[dict[str, Any]
 
 
 def group_prefix(dotted_key: str) -> str:
-    """Group key by its first two dotted segments (e.g. ``pyfly.web.port`` ->
-    ``pyfly.web``); single-segment keys group under themselves."""
+    """Group key by its first two dotted segments (e.g. ``pyfly.server.port`` ->
+    ``pyfly.server``); single-segment keys group under themselves."""
     parts = dotted_key.split(".")
     if len(parts) <= 1:
         return parts[0] if parts else ""

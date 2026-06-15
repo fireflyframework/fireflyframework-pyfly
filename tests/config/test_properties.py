@@ -19,6 +19,7 @@ from pyfly.config.properties import (
     LoggingProperties,
     MessagingProperties,
     RelationalProperties,
+    ServerProperties,
     WebProperties,
 )
 from pyfly.core.config import Config
@@ -28,16 +29,27 @@ class TestWebProperties:
     def test_bind_defaults(self):
         config = Config({"pyfly": {"web": {}}})
         props = config.bind(WebProperties)
-        assert props.port == 8000
-        assert props.host == "0.0.0.0"
+        assert props.adapter == "auto"
         assert props.debug is False
 
     def test_bind_custom_values(self):
-        config = Config({"pyfly": {"web": {"port": 9090, "host": "127.0.0.1", "debug": True}}})
+        config = Config({"pyfly": {"web": {"adapter": "fastapi", "debug": True}}})
         props = config.bind(WebProperties)
+        assert props.adapter == "fastapi"
+        assert props.debug is True
+
+
+class TestServerProperties:
+    def test_bind_defaults(self):
+        # Spring server.port / server.address parity (replaces pyfly.web.port/host).
+        props = Config({"pyfly": {"server": {}}}).bind(ServerProperties)
+        assert props.host == "0.0.0.0"
+        assert props.port == 8080
+
+    def test_bind_custom_values(self):
+        props = Config({"pyfly": {"server": {"port": 9090, "host": "127.0.0.1"}}}).bind(ServerProperties)
         assert props.port == 9090
         assert props.host == "127.0.0.1"
-        assert props.debug is True
 
 
 class TestRelationalProperties:
