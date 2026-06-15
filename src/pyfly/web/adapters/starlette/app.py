@@ -317,97 +317,16 @@ def create_app(
 
     # Mount admin dashboard when enabled (admin_enabled computed above)
     if admin_enabled and context is not None:
-        from pyfly.admin.adapters.starlette import AdminRouteBuilder
-        from pyfly.admin.config import AdminProperties, AdminServerProperties
-        from pyfly.admin.providers.beans_provider import BeansProvider
-        from pyfly.admin.providers.cache_provider import CacheProvider
-        from pyfly.admin.providers.config_provider import ConfigProvider
-        from pyfly.admin.providers.cqrs_provider import CqrsProvider
-        from pyfly.admin.providers.env_provider import EnvProvider
-        from pyfly.admin.providers.health_provider import HealthProvider
-        from pyfly.admin.providers.logfile_provider import LogfileProvider
-        from pyfly.admin.providers.loggers_provider import LoggersProvider
-        from pyfly.admin.providers.mappings_provider import MappingsProvider
-        from pyfly.admin.providers.metrics_provider import MetricsProvider
-        from pyfly.admin.providers.overview_provider import OverviewProvider
-        from pyfly.admin.providers.runtime_provider import RuntimeProvider
-        from pyfly.admin.providers.scheduled_provider import ScheduledProvider
-        from pyfly.admin.providers.server_provider import ServerProvider
-        from pyfly.admin.providers.traces_provider import TracesProvider
-        from pyfly.admin.providers.transactions_provider import TransactionsProvider
-        from pyfly.admin.registry import AdminViewRegistry
+        from pyfly.admin.wiring import build_admin_routes
 
-        admin_props = AdminProperties()
-        with contextlib.suppress(Exception):
-            admin_props = context.config.bind(AdminProperties)
-
-        # Server mode: build the instance registry and seed it from statically
-        # configured instances so the /api/instances routes are mounted and
-        # serverMode reports true (audit #67). Background health pollers are not
-        # wired here (deferred).
-        admin_instance_registry = None
-        server_props = AdminServerProperties()
-        with contextlib.suppress(Exception):
-            server_props = context.config.bind(AdminServerProperties)
-        if server_props.enabled:
-            from pyfly.admin.server.discovery import StaticDiscovery
-            from pyfly.admin.server.instance_registry import InstanceRegistry
-
-            admin_instance_registry = InstanceRegistry()
-            StaticDiscovery(server_props.instances, admin_instance_registry).discover()
-
-        # Use the trace collector that was created above and wired into the
-        # filter chain — it is the live instance recording HTTP traffic.
-        trace_collector = admin_trace_collector
-
-        # Find view registry from context
-        view_registry = AdminViewRegistry()
-        for _cls, reg in context.container._registrations.items():
-            if reg.instance is not None and isinstance(reg.instance, AdminViewRegistry):
-                view_registry = reg.instance
-                view_registry.discover_from_context(context)
-                break
-
-        # Reuse health aggregator from actuator, or create one for admin
-        health_agg = agg
-        if health_agg is None:
-            from pyfly.actuator.health import HealthAggregator
-            from pyfly.actuator.wiring import install_health_indicators
-
-            health_agg = HealthAggregator()
-
-            def _install_admin_indicators(_agg: HealthAggregator = health_agg) -> None:
-                # HealthIndicator beans are only instantiated during start();
-                # rescan post-start so the admin health view isn't a frozen empty
-                # pre-startup snapshot when the actuator is disabled (audit #70).
-                install_health_indicators(context, _agg)
-
-            _install_admin_indicators()
-            _extra_post_start.append(_install_admin_indicators)
-
-        admin_builder = AdminRouteBuilder(
-            properties=admin_props,
-            overview=OverviewProvider(context, health_agg),
-            beans=BeansProvider(context),
-            health=HealthProvider(health_agg),
-            env=EnvProvider(context),
-            config=ConfigProvider(context),
-            loggers=LoggersProvider(),
-            metrics=MetricsProvider(),
-            scheduled=ScheduledProvider(context),
-            mappings=MappingsProvider(context),
-            caches=CacheProvider(context),
-            cqrs=CqrsProvider(context),
-            transactions=TransactionsProvider(context),
-            traces=TracesProvider(trace_collector),
-            view_registry=view_registry,
-            trace_collector=trace_collector,
-            logfile=LogfileProvider(context),
-            runtime=RuntimeProvider(),
-            server=ServerProvider(context=context),
-            instance_registry=admin_instance_registry,
+        routes.extend(
+            build_admin_routes(
+                context,
+                admin_trace_collector=admin_trace_collector,
+                base_health_agg=agg,
+                extra_post_start=_extra_post_start,
+            )
         )
-        routes.extend(admin_builder.build_routes())  # type: ignore[arg-type]
 
     # Collect route metadata (used for OpenAPI and startup logging)
     route_metadata = registrar.collect_route_metadata(context) if context is not None else []
