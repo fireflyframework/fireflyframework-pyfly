@@ -142,6 +142,9 @@ def create_app(
         actuator_active = False
         admin_enabled = False
     management_separated = management_mode == "separate"
+    # Separation needs a lifespan hook to start the management listener; without
+    # one, degrade to shared so actuator/admin are never silently unreachable.
+    _serve_separately = management_separated and lifespan is not None
 
     # --- Build the WebFilter chain ---
     # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
@@ -331,11 +334,11 @@ def create_app(
         _extra_post_start.append(_install_indicators)
 
         # When separated, actuator routes live on the management app, not here.
-        if not management_separated:
+        if not _serve_separately:
             app.routes.extend(build_actuator_routes(context, agg, http_exchange_recorder))
 
     # Mount admin dashboard when enabled (unless served on the management port).
-    if admin_enabled and context is not None and not management_separated:
+    if admin_enabled and context is not None and not _serve_separately:
         from pyfly.admin.wiring import build_admin_routes
 
         app.routes.extend(
@@ -410,24 +413,26 @@ def create_app(
             async with _inner_lifespan_ctx(app_):
                 _install_dynamic_wiring()
                 mgmt_server = None
-                if management_separated and management_props is not None and context is not None:
-                    from pyfly.config.properties.server import resolve_app_host
-                    from pyfly.server.management_server import ManagementServer
-                    from pyfly.web.adapters.starlette.management_app import create_management_app
-
-                    mgmt_app = create_management_app(
-                        context,
-                        health_agg=agg,
-                        http_exchange_recorder=http_exchange_recorder,
-                        admin_trace_collector=admin_trace_collector,
-                        actuator_active=actuator_active,
-                        admin_enabled=admin_enabled,
-                        base_path=management_props.base_path,
-                    )
-                    mgmt_host = management_props.address or resolve_app_host(context.config)
-                    mgmt_server = ManagementServer(mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0))
-                    await mgmt_server.start()
                 try:
+                    if _serve_separately and management_props is not None and context is not None:
+                        from pyfly.config.properties.server import resolve_app_host
+                        from pyfly.server.management_server import ManagementServer
+                        from pyfly.web.adapters.starlette.management_app import create_management_app
+
+                        mgmt_app = create_management_app(
+                            context,
+                            health_agg=agg,
+                            http_exchange_recorder=http_exchange_recorder,
+                            admin_trace_collector=admin_trace_collector,
+                            actuator_active=actuator_active,
+                            admin_enabled=admin_enabled,
+                            base_path=management_props.base_path,
+                        )
+                        mgmt_host = management_props.address or resolve_app_host(context.config)
+                        mgmt_server = ManagementServer(
+                            mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0)
+                        )
+                        await mgmt_server.start()
                     yield
                 finally:
                     if mgmt_server is not None:

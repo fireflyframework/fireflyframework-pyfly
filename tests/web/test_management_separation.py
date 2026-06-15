@@ -19,6 +19,9 @@ so the management port is whatever the test sets — unset means shared.
 
 from __future__ import annotations
 
+import contextlib
+from typing import Any
+
 import pytest
 
 from pyfly.context.application_context import ApplicationContext
@@ -26,11 +29,18 @@ from pyfly.core.config import Config
 from pyfly.web.adapters.starlette.app import create_app
 
 
-async def _main_paths(config_dict: dict) -> set[str]:
+@contextlib.asynccontextmanager
+async def _noop_lifespan(app: Any):
+    # A lifespan is required for separation to take effect (it starts the
+    # management listener); a no-op one is enough to exercise the route gating.
+    yield
+
+
+async def _main_paths(config_dict: dict, *, lifespan: object | None = _noop_lifespan) -> set[str]:
     ctx = ApplicationContext(Config(config_dict))
     await ctx.start()
     try:
-        app = create_app(context=ctx, docs_enabled=False)
+        app = create_app(context=ctx, docs_enabled=False, lifespan=lifespan)
         # Run the post-start rescan the lifespan normally performs.
         app.state.pyfly_install_dynamic_wiring()
         return {getattr(r, "path", "") for r in app.router.routes}
@@ -91,13 +101,31 @@ async def test_separate_mode_fastapi_parity() -> None:
     )
     await ctx.start()
     try:
-        fa = create_fastapi_app(context=ctx, docs_enabled=False)
+        fa = create_fastapi_app(context=ctx, docs_enabled=False, lifespan=_noop_lifespan)
         fa.state.pyfly_install_dynamic_wiring()
         paths = {getattr(r, "path", "") for r in fa.routes}
         assert not any(p.startswith("/actuator") for p in paths)
         assert not any(p.startswith("/admin") for p in paths)
     finally:
         await ctx.stop()
+
+
+@pytest.mark.asyncio
+async def test_separate_mode_without_lifespan_degrades_to_shared() -> None:
+    # No lifespan means the management listener cannot start, so actuator/admin
+    # must remain on the main app instead of silently vanishing.
+    paths = await _main_paths(
+        {
+            "pyfly": {
+                "server": {"port": 8080},
+                "management": {"server": {"port": 9097}, "endpoints": {"web": {"exposure": {"include": "*"}}}},
+                "admin": {"enabled": True},
+            }
+        },
+        lifespan=None,
+    )
+    assert any(p.startswith("/actuator") for p in paths)
+    assert any(p.startswith("/admin") for p in paths)
 
 
 @pytest.mark.asyncio
