@@ -4,7 +4,7 @@ PyFly's roadmap is driven by achieving feature parity with the full [Firefly Fra
 
 ---
 
-## Current State (v26.06.93)
+## Current State (v26.06.102)
 
 PyFly ships with **39 fully-implemented modules** covering the foundation, application, infrastructure, integration, and cross-cutting layers — including the rewritten transactional engine (Saga + Workflow + TCC), Event Sourcing, IDP, ECM, Notifications, Webhooks, Callbacks, Plugins, Rule Engine, Config Server, and the **`pyfly.domain` DDD primitives** (`v26.05.02`). The starter system reached Java/.NET parity in `v26.05.03`: declarative `@enable_*_stack` decorators now actually activate the bundle's property defaults at boot, an imperative `register_*_stack(app)` API mirrors .NET's `services.AddFireflyXxx(...)`, and a new `@enable_web_stack` ships dedicated web-tier wiring. See the [Changelog](CHANGELOG.md) for full details.
 

@@ -19,6 +19,8 @@ import platform
 import time
 from typing import TYPE_CHECKING, Any
 
+from pyfly.config.properties.server import resolve_app_port
+
 if TYPE_CHECKING:
     from pyfly.actuator.health import HealthAggregator
     from pyfly.context.application_context import ApplicationContext
@@ -48,7 +50,7 @@ class OverviewProvider:
             "uptime_seconds": round(time.monotonic() - _start_time, 1),
             "python_version": platform.python_version(),
             "platform": platform.system(),
-            "web_port": int(self._context.config.get("pyfly.web.port", 8080)),
+            "web_port": resolve_app_port(self._context.config),
         }
 
         # Framework version

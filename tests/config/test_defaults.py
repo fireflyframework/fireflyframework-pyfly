@@ -32,9 +32,13 @@ class TestFrameworkDefaults:
         defaults = Config._load_framework_defaults()
         assert defaults["pyfly"]["logging"]["level"]["root"] == "INFO"
 
-    def test_defaults_have_web_port(self):
+    def test_defaults_have_server_port(self):
         defaults = Config._load_framework_defaults()
-        assert defaults["pyfly"]["web"]["port"] == 8080
+        assert defaults["pyfly"]["server"]["port"] == 8080
+
+    def test_defaults_have_management_server_port(self):
+        defaults = Config._load_framework_defaults()
+        assert defaults["pyfly"]["management"]["server"]["port"] == 9090
 
     def test_defaults_data_disabled(self):
         defaults = Config._load_framework_defaults()
@@ -88,7 +92,7 @@ class TestTomlConfig:
         # Overridden by TOML
         assert config.get("pyfly.app.name") == "toml-app"
         # From defaults
-        assert config.get("pyfly.web.port") == 8080
+        assert config.get("pyfly.server.port") == 8080
 
     def test_toml_profile_overlay(self, tmp_path: Path):
         base = tmp_path / "pyfly.toml"
@@ -153,20 +157,20 @@ class TestMultiSourceConfig:
     def test_root_overrides_config_dir(self, tmp_path: Path):
         config_dir = tmp_path / "config"
         config_dir.mkdir()
-        (config_dir / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: config-dir\n  web:\n    port: 8080\n")
+        (config_dir / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: config-dir\n  server:\n    port: 8080\n")
         (tmp_path / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: root-override\n")
 
         config = Config.from_sources(tmp_path)
         assert config.get("pyfly.app.name") == "root-override"  # root wins
-        assert config.get("pyfly.web.port") == 8080  # from config dir
+        assert config.get("pyfly.server.port") == 8080  # from config dir
 
     def test_profile_overlays_from_both_locations(self, tmp_path: Path):
-        (tmp_path / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: base\n  web:\n    port: 8080\n")
-        (tmp_path / "pyfly-dev.yaml").write_text("pyfly:\n  web:\n    port: 9090\n")
+        (tmp_path / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: base\n  server:\n    port: 8080\n")
+        (tmp_path / "pyfly-dev.yaml").write_text("pyfly:\n  server:\n    port: 9090\n")
 
         config = Config.from_sources(tmp_path, active_profiles=["dev"])
         assert config.get("pyfly.app.name") == "base"
-        assert config.get("pyfly.web.port") == 9090
+        assert config.get("pyfly.server.port") == 9090
 
     def test_tracks_loaded_sources(self, tmp_path: Path):
         (tmp_path / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: tracked\n")
@@ -178,22 +182,22 @@ class TestMultiSourceConfig:
 
     def test_toml_and_yaml_merged(self, tmp_path: Path):
         (tmp_path / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: from-yaml\n")
-        (tmp_path / "pyfly.toml").write_text("[pyfly.web]\nport = 9999\n")
+        (tmp_path / "pyfly.toml").write_text("[pyfly.server]\nport = 9999\n")
 
         config = Config.from_sources(tmp_path)
         assert config.get("pyfly.app.name") == "from-yaml"
-        assert config.get("pyfly.web.port") == 9999
+        assert config.get("pyfly.server.port") == 9999
 
     def test_config_subdir_profile_overlay(self, tmp_path: Path):
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "pyfly.yaml").write_text("pyfly:\n  app:\n    name: config-dir\n")
-        (config_dir / "pyfly-prod.yaml").write_text("pyfly:\n  web:\n    port: 443\n")
-        (tmp_path / "pyfly.yaml").write_text("pyfly:\n  web:\n    port: 8080\n")
+        (config_dir / "pyfly-prod.yaml").write_text("pyfly:\n  server:\n    port: 443\n")
+        (tmp_path / "pyfly.yaml").write_text("pyfly:\n  server:\n    port: 8080\n")
 
         config = Config.from_sources(tmp_path, active_profiles=["prod"])
         assert config.get("pyfly.app.name") == "config-dir"
-        assert config.get("pyfly.web.port") == 443
+        assert config.get("pyfly.server.port") == 443
 
     def test_empty_dir_returns_defaults(self, tmp_path: Path):
         config = Config.from_sources(tmp_path)

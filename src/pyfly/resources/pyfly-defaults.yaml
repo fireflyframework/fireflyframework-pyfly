@@ -13,8 +13,9 @@ pyfly:
       root: "INFO"
     format: "console"
   web:
-    port: 8080
-    host: "0.0.0.0"
+    # NOTE: the application listen host/port moved to pyfly.server.host / .port
+    # (Spring server.address / server.port parity). pyfly.web.host / .port were
+    # removed in v26.06.102.
     debug: false
     docs:
       enabled: true
@@ -53,7 +54,18 @@ pyfly:
       distribution:
         percentiles-histogram:
           http.server.requests: false
+    # Spring management.server.* parity. By DEFAULT the actuator endpoints and the
+    # admin dashboard run on this dedicated port (9090) while the app stays on
+    # pyfly.server.port (8080). Set this equal to the app port for single-port
+    # behavior; -1 disables the management web endpoints entirely.
+    server:
+      port: 9090
+      address: null
+      base-path: ""
   server:
+    # Application listener (Spring server.address / server.port parity).
+    host: "0.0.0.0"
+    port: 8080
     type: "auto"
     event-loop: "auto"
     workers: 0

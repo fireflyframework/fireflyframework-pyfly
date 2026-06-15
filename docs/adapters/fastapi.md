@@ -25,6 +25,7 @@ uv add "pyfly[web-fastapi]"
 pyfly:
   web:
     adapter: auto
+  server:
     port: 8080
     host: "0.0.0.0"
 ```
@@ -72,8 +73,9 @@ Key characteristics:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `pyfly.web.adapter` | `str` | `"auto"` | Adapter selection (`auto`, `fastapi`, `starlette`) |
-| `pyfly.web.port` | `int` | `8000` | Server port |
-| `pyfly.web.host` | `str` | `"0.0.0.0"` | Server bind address |
+| `pyfly.server.port` | `int` | `8080` | Application server port |
+| `pyfly.server.host` | `str` | `"0.0.0.0"` | Server bind address |
+| `pyfly.management.server.port` | `int` | `9090` | Management port serving actuator + admin separately (env `PYFLY_MANAGEMENT_SERVER_PORT`) |
 | `pyfly.web.debug` | `bool` | `false` | Debug mode |
 | `pyfly.web.docs.enabled` | `bool` | `true` | Enable OpenAPI / Swagger UI / ReDoc |
 | `pyfly.web.actuator.enabled` | `bool` | `false` | Enable actuator endpoints |

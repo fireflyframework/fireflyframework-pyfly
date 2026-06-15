@@ -1353,21 +1353,24 @@ PyFly follows the same pattern with `ApplicationServerPort` for ASGI servers and
 
 ```yaml
 pyfly:
-  web:
-    port: 8080
   server:
+    port: 8080            # app HTTP port (Spring server.port)
     type: auto            # auto | granian | uvicorn | hypercorn
     event-loop: auto      # auto | uvloop | winloop | asyncio
     workers: 0            # 0 = cpu_count
     granian:
       runtime-threads: 1
+  management:
+    server:
+      port: 9090          # actuator + admin on a separate port (env PYFLY_MANAGEMENT_SERVER_PORT)
 ```
 
 | Spring Boot | PyFly | Purpose |
 |-------------|-------|---------|
 | `WebServer` interface | `ApplicationServerPort` protocol | Contract for the embedded server |
 | `EventLoopGroup` (Netty) | `EventLoopPort` protocol | Contract for the I/O runtime |
-| `server.port` | `pyfly.web.port` | HTTP listen port |
+| `server.port` | `pyfly.server.port` | HTTP listen port (default 8080) |
+| `management.server.port` | `pyfly.management.server.port` | Separate actuator + admin port (default 9090) |
 | `server.tomcat.*` | `pyfly.server.granian.*` | Server-specific tuning |
 | Tomcat (default) | Granian (default) | Highest-priority server |
 | Jetty (fallback) | Uvicorn (fallback) | Ecosystem-standard fallback |
@@ -1663,7 +1666,8 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `SagaResult` | `SagaResult` | Saga execution result |
 | `WebServer` | `ApplicationServerPort` | Embedded ASGI server contract |
 | `EventLoopGroup` (Netty) | `EventLoopPort` | Event loop / I/O runtime |
-| `server.port` | `pyfly.web.port` | HTTP listen port |
+| `server.port` | `pyfly.server.port` | HTTP listen port (default 8080) |
+| `management.server.port` | `pyfly.management.server.port` | Separate actuator + admin port (default 9090) |
 | `server.tomcat.*` | `pyfly.server.granian.*` | Server-specific tuning |
 | `server.jetty.*` | `pyfly.server.uvicorn.*` | Fallback server tuning |
 | `server.undertow.*` | `pyfly.server.hypercorn.*` | Alternative server tuning |

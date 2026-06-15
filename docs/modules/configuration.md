@@ -155,7 +155,7 @@ the nested dictionary is walked.
 ```
 Config Key                   -->  Environment Variable
 pyfly.app.name               -->  PYFLY_APP_NAME
-pyfly.web.port               -->  PYFLY_WEB_PORT
+pyfly.server.port            -->  PYFLY_SERVER_PORT
 pyfly.data.pool-size          -->  PYFLY_DATA_POOL_SIZE
 database.host                -->  PYFLY_DATABASE_HOST
 ```
@@ -166,11 +166,17 @@ The transformation:
 3. Uppercase the result.
 4. Prefix with `PYFLY_`.
 
+> **One uniform prefix.** Every PyFly setting binds from a single `PYFLY_*`
+> environment-variable prefix — there is no `SPRING_*`, `FIREFLY_*` or `IDP_*`
+> split. Even identity-provider config follows it (`pyfly.idp.*` ->
+> `PYFLY_IDP_*`). The mapping is centralized in `Config._env_key`, so the rule
+> above holds for every key in the framework.
+
 If no env var is set, the method walks the nested dictionary using the dot-separated parts.
 Returns `default` if the key is not found.
 
 ```python
-port = config.get("pyfly.web.port", 8080)  # int 8080 from YAML, or str from env var
+port = config.get("pyfly.server.port", 8080)  # int 8080 from YAML, or str from env var
 ```
 
 **Relaxed segment matching:** the dictionary walk in `get()` / `_raw_get()` is *relaxed*
@@ -190,8 +196,8 @@ def get_section(self, prefix: str) -> dict[str, Any]:
 Returns all values under a dot-notation prefix as a dictionary subtree.
 
 ```python
-web_config = config.get_section("pyfly.web")
-# {"port": 8080, "host": "0.0.0.0", "debug": False, "docs": {"enabled": True}, ...}
+server_config = config.get_section("pyfly.server")
+# {"host": "0.0.0.0", "port": 8080, "workers": 0, "type": "auto", ...}
 ```
 
 If the prefix does not exist, returns an empty dict `{}`.
@@ -206,14 +212,14 @@ Binds a config section to a `@config_properties` dataclass, producing a typed ob
 See the [@config_properties](#config_properties) section for details.
 
 ```python
-@config_properties(prefix="pyfly.web")
+@config_properties(prefix="pyfly.server")
 @dataclass
-class WebConfig:
+class ServerConfig:
     port: int = 8080
     host: str = "0.0.0.0"
 
-web = config.bind(WebConfig)
-print(web.port)  # 8080
+server = config.bind(ServerConfig)
+print(server.port)  # 8080
 ```
 
 Raises `ValueError` if the class is not decorated with `@config_properties`.
@@ -560,6 +566,39 @@ configuration is loaded.
 
 ---
 
+## Application and Management Server Ports
+
+PyFly serves the actuator endpoints (`/actuator/*`) and the admin dashboard
+(`/admin`) on a **separate management port** by default, so they are not exposed
+on the public application port (Spring Boot `management.server.port` parity).
+
+| Key | Env var | Default | Meaning |
+|---|---|---|---|
+| `pyfly.server.port` | `PYFLY_SERVER_PORT` | `8080` | Application HTTP port (Spring `server.port`). |
+| `pyfly.server.host` | `PYFLY_SERVER_HOST` | `0.0.0.0` | Application bind address (Spring `server.address`). |
+| `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` | `9090` | Management (actuator + admin) port. A different port runs a dedicated in-process listener; equal to the app port collapses to a single shared port; `-1` disables the management web endpoints entirely. |
+| `pyfly.management.server.address` | `PYFLY_MANAGEMENT_SERVER_ADDRESS` | app host | Management bind address (e.g. `127.0.0.1` for node-local only). |
+| `pyfly.management.server.base-path` | `PYFLY_MANAGEMENT_SERVER_BASE_PATH` | `""` | Path prefix on the management server. |
+
+Out of the box: app on **`8080`**, management on **`9090`**. To run everything
+on one port (the pre-`v26.06.102` behavior), set the management port equal to the
+app port:
+
+```bash
+PYFLY_SERVER_PORT=8080 PYFLY_MANAGEMENT_SERVER_PORT=8080 python main.py
+```
+
+The management server is a second **in-process** listener (not extra workers);
+it shares the same process, event loop and beans, and works regardless of the
+ASGI server adapter (Uvicorn, Granian, Hypercorn). With `pyfly.server.workers > 1`
+each worker binds the management port with `SO_REUSEPORT`; per-worker Prometheus
+scraping uses `prometheus_client` multiprocess mode (`PROMETHEUS_MULTIPROC_DIR`),
+the standard multi-process metrics approach.
+
+> **Breaking change (v26.06.102):** the legacy `pyfly.web.port` / `pyfly.web.host`
+> keys (and `PYFLY_WEB_PORT` / `PYFLY_WEB_HOST`) were removed in favor of
+> `pyfly.server.port` / `pyfly.server.host`.
+
 ## Configuration Layering
 
 PyFly's four-layer configuration system is the core of its flexibility. Each layer deeply
@@ -568,7 +607,7 @@ merges into the previous, with later layers taking precedence.
 ```
 Priority (highest to lowest):
 
-  4. Environment Variables        PYFLY_WEB_PORT=9090
+  4. Environment Variables        PYFLY_SERVER_PORT=9090
   3. Profile Overlay Files        pyfly-prod.yaml
   2. User Configuration File      pyfly.yaml
   1. Framework Defaults            pyfly-defaults.yaml (bundled)
@@ -695,7 +734,8 @@ Every dot-notation config key maps to an environment variable:
 | Config Key | Environment Variable |
 |---|---|
 | `pyfly.app.name` | `PYFLY_APP_NAME` |
-| `pyfly.web.port` | `PYFLY_WEB_PORT` |
+| `pyfly.server.port` | `PYFLY_SERVER_PORT` |
+| `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` |
 | `pyfly.web.debug` | `PYFLY_WEB_DEBUG` |
 | `pyfly.data.pool-size` | `PYFLY_DATA_POOL_SIZE` |
 | `pyfly.cache.redis.url` | `PYFLY_CACHE_REDIS_URL` |
@@ -718,8 +758,10 @@ dataclass:
 ### Environment Variable Examples
 
 ```bash
-# Override the web server port
-PYFLY_WEB_PORT=9090
+# Application server port (default 8080)
+PYFLY_SERVER_PORT=8080
+# Management (actuator + admin) port (default 9090)
+PYFLY_MANAGEMENT_SERVER_PORT=9090
 
 # Enable debug mode
 PYFLY_WEB_DEBUG=true
@@ -1069,8 +1111,10 @@ Every key can be overridden in your config file or via environment variables.
 
 | Key | Default | Description |
 |---|---|---|
-| `pyfly.web.port` | `8080` | HTTP server port. |
-| `pyfly.web.host` | `"0.0.0.0"` | HTTP server bind address. |
+| `pyfly.server.port` | `8080` | Application HTTP port (Spring `server.port` parity). |
+| `pyfly.server.host` | `"0.0.0.0"` | Application bind address (Spring `server.address` parity). |
+| `pyfly.management.server.port` | `9090` | Management (actuator + admin) port. Equal to the app port = shared; `-1` = disabled. |
+| `pyfly.management.server.address` | `null` | Management bind address (defaults to the app host). |
 | `pyfly.web.debug` | `false` | Enable debug mode. |
 | `pyfly.web.docs.enabled` | `true` | Enable API documentation endpoints. |
 | `pyfly.web.actuator.enabled` | `false` | Enable actuator management endpoints. |
@@ -1426,7 +1470,7 @@ PYFLY_PROFILES_ACTIVE=prod python main.py
 # Production with env var overrides (e.g., in a container)
 PYFLY_PROFILES_ACTIVE=prod \
   PYFLY_DATA_URL="postgresql+asyncpg://rds-prod:5432/orders" \
-  PYFLY_WEB_PORT=8080 \
+  PYFLY_SERVER_PORT=8080 \
   python main.py
 ```
 
@@ -1437,13 +1481,13 @@ For the production container example above, the effective configuration is built
 1. **Framework defaults** (from `pyfly-defaults.yaml`)
 2. **Base config** (`pyfly.yaml`: pool-size=5, port=8080, cache TTL=300)
 3. **Profile overlay** (`pyfly-prod.yaml`: pool-size=25, port=443, cache TTL=600)
-4. **Env vars** (`PYFLY_DATA_URL` overrides the prod DB URL, `PYFLY_WEB_PORT=8080` overrides the prod port)
+4. **Env vars** (`PYFLY_DATA_URL` overrides the prod DB URL, `PYFLY_SERVER_PORT=8080` overrides the prod port)
 
 Final effective values:
 
 | Key | Value | Source |
 |---|---|---|
-| `pyfly.web.port` | `"8080"` | Env var (overrides prod overlay's 443) |
+| `pyfly.server.port` | `"8080"` | Env var (overrides prod overlay's 443) |
 | `pyfly.web.debug` | `false` | Prod overlay |
 | `pyfly.web.docs.enabled` | `false` | Prod overlay |
 | `pyfly.data.url` | `"postgresql+asyncpg://rds-prod:5432/orders"` | Env var |

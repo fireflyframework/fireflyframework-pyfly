@@ -4,7 +4,8 @@ pyfly:
     version: 1.0.0
   banner:
     mode: console
-  web:
+  server:
+    # App on 8080; actuator + admin default to the management port 9090.
     port: 8080
   observability:
     metrics:

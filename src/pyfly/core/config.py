@@ -439,7 +439,7 @@ class Config:
         env_val = os.environ.get(self._env_key(key))
         if env_val is not None:
             # Relaxed binding: coerce the raw env string to match the type of the
-            # value it overrides (so PYFLY_WEB_PORT=9000 yields int 9000, not "9000").
+            # value it overrides (so PYFLY_SERVER_PORT=9000 yields int 9000, not "9000").
             return _coerce_like(env_val, self._raw_get(key))
 
         current = self._raw_get(key)

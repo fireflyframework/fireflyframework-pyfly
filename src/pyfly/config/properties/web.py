@@ -24,11 +24,14 @@ from pyfly.core.config import config_properties
 @config_properties(prefix="pyfly.web")
 @dataclass
 class WebProperties:
-    """Configuration for the web subsystem (pyfly.web.*)."""
+    """Configuration for the web subsystem (pyfly.web.*).
+
+    The application listen ``host`` / ``port`` moved to :class:`ServerProperties`
+    (``pyfly.server.host`` / ``pyfly.server.port``, Spring ``server.*`` parity)
+    in v26.06.102; the former ``pyfly.web.host`` / ``pyfly.web.port`` were removed.
+    """
 
     adapter: str = "auto"
-    port: int = 8000
-    host: str = "0.0.0.0"
     debug: bool = False
     docs: dict[str, Any] = field(default_factory=lambda: {"enabled": True})
     actuator: dict[str, Any] = field(default_factory=lambda: {"enabled": False})

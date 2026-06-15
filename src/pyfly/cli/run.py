@@ -94,7 +94,7 @@ def _ensure_src_on_path() -> None:
     "defines",
     multiple=True,
     metavar="KEY=VALUE",
-    help="Override a config value (e.g. -D web.port=9000).",
+    help="Override a config value (e.g. -D server.port=9000).",
 )
 @click.option(
     "--env",
@@ -367,7 +367,11 @@ def _run_with_uvicorn_reload(app_path: str, host: str, port: int, reload_dirs: l
 
 
 def _read_port_from_config() -> int | None:
-    """Read the web port from pyfly.yaml if available."""
+    """Read the application port from pyfly.yaml if available.
+
+    Spring ``server.port`` parity: reads ``pyfly.server.port`` (the former
+    ``pyfly.web.port`` key was removed in v26.06.102).
+    """
     import yaml
 
     config_path = Path("pyfly.yaml")
@@ -377,8 +381,8 @@ def _read_port_from_config() -> int | None:
         with open(config_path) as f:
             config = yaml.safe_load(f) or {}
         pyfly_section = config.get("pyfly", {}) or {}
-        web_section = pyfly_section.get("web", {}) or {}
-        port = web_section.get("port")
+        server_section = pyfly_section.get("server", {}) or {}
+        port = server_section.get("port")
         return int(port) if port is not None else None
     except Exception:
         return None

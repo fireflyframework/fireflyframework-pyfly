@@ -16,8 +16,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pyfly.core.config import config_properties
+
+if TYPE_CHECKING:
+    from pyfly.core.config import Config
 
 
 @dataclass
@@ -33,8 +37,15 @@ class GranianProperties:
 @config_properties(prefix="pyfly.server")
 @dataclass
 class ServerProperties:
-    """Configuration for the application server (pyfly.server.*)."""
+    """Configuration for the application server (pyfly.server.*).
 
+    ``host`` / ``port`` are the Spring ``server.address`` / ``server.port``
+    parity keys and the *only* way to configure the application listener — the
+    former ``pyfly.web.host`` / ``pyfly.web.port`` keys were removed.
+    """
+
+    host: str = "0.0.0.0"
+    port: int = 8080
     type: str = "auto"
     event_loop: str = "auto"
     workers: int = 1
@@ -47,3 +58,20 @@ class ServerProperties:
     max_concurrent_connections: int | None = None
     max_requests_per_worker: int | None = None
     granian: GranianProperties = field(default_factory=GranianProperties)
+
+
+def resolve_app_port(config: Config) -> int:
+    """Resolve the application HTTP port (Spring ``server.port`` parity).
+
+    Reads ``pyfly.server.port`` (which ``Config.get`` resolves from the
+    ``PYFLY_SERVER_PORT`` env var, config files, then the ``8080`` default).
+    """
+    return int(config.get("pyfly.server.port", 8080))
+
+
+def resolve_app_host(config: Config) -> str:
+    """Resolve the application bind host (Spring ``server.address`` parity).
+
+    Reads ``pyfly.server.host`` (env ``PYFLY_SERVER_HOST`` / config / default).
+    """
+    return str(config.get("pyfly.server.host", "0.0.0.0"))
