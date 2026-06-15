@@ -41,7 +41,14 @@ class RequestLoggingFilter(OncePerRequestFilter):
             response = cast(Response, await call_next(request))
         except Exception as exc:
             duration_ms = (time.perf_counter() - start) * 1000
-            logger.error(
+            # Expected client/domain faults (validation, auth — the 4xx family)
+            # are normal traffic: log at WARNING. Reserve ERROR for unexpected
+            # 5xx failures. The global exception handler still renders the
+            # RFC 7807 response; this is just the access log.
+            from pyfly.kernel.exceptions import is_expected_error
+
+            log = logger.warning if is_expected_error(exc) else logger.error
+            log(
                 "http_request_failed",
                 method=request.method,
                 path=request.url.path,

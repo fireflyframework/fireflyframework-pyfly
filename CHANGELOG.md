@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.104 (2026-06-15)
+
+### Changed
+
+- **Clean error reporting — no raw tracebacks for expected (4xx) errors.** A new
+  `pyfly.kernel.exceptions.is_expected_error()` classifies `BusinessException`
+  and `SecurityException` (validation, business-rule, not-found, auth — the HTTP
+  4xx family) as *expected*. These are now logged at **WARNING without a stack
+  trace**; only unexpected infrastructure/5xx errors get a full traceback:
+  - CQRS `CommandHandler.on_error` / `QueryHandler.on_error` no longer log
+    `exc_info=True` for expected errors (previously every command/query failure,
+    including validation, dumped a stack trace).
+  - The web `RequestLoggingFilter` logs expected 4xx request failures at WARNING
+    instead of ERROR (the RFC 7807 response is unchanged).
+- **CLI shows clean one-line errors.** `pyfly` now surfaces uncaught failures
+  (e.g. a configuration/validation error during boot) as a single
+  `Error: <message>` line and exit code 1, instead of a raw Python traceback.
+  Pass `--debug` (or set `PYFLY_DEBUG=1`) to see the full traceback.
+
+---
+
 ## v26.06.103 (2026-06-15)
 
 ### Fixed

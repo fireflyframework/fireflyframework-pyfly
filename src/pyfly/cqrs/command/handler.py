@@ -27,6 +27,7 @@ from types import get_original_bases as get_orig_bases
 from typing import Generic, TypeVar, get_args
 
 from pyfly.cqrs.context.execution_context import ExecutionContext
+from pyfly.kernel.exceptions import is_expected_error
 
 C = TypeVar("C")  # Command type
 R = TypeVar("R")  # Result type
@@ -123,13 +124,21 @@ class CommandHandler(Generic[C, R]):
         """Called after ``post_process``.  Override for metrics / logging."""
 
     async def on_error(self, command: C, error: Exception) -> None:
-        """Called when ``do_handle`` raises.  Override for error reporting."""
-        _logger.error(
-            "Command %s failed: %s",
-            type(command).__name__,
-            error,
-            exc_info=True,
-        )
+        """Called when ``do_handle`` raises.  Override for error reporting.
+
+        Expected client/domain faults (validation, business rules — the 4xx
+        family) are logged at WARNING without a stack trace; only unexpected
+        infrastructure/5xx errors get a full traceback.
+        """
+        if is_expected_error(error):
+            _logger.warning("Command %s failed: %s", type(command).__name__, error)
+        else:
+            _logger.error(
+                "Command %s failed: %s",
+                type(command).__name__,
+                error,
+                exc_info=True,
+            )
 
     def map_error(self, command: C, error: Exception) -> Exception:
         """Transform an exception before it propagates.  Override for mapping."""
