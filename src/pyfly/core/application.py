@@ -349,12 +349,24 @@ class PyFlyApplication:
             self._logger.info("api_documentation", redoc=f"{base_url}/redoc")
             self._logger.info("api_documentation", openapi=f"{base_url}/openapi.json")
 
-        # Log admin dashboard URL when enabled
+        # Management server (actuator + admin) — Spring management.server.* parity.
+        # When a separate management port is configured, actuator and admin move
+        # off the application port onto it.
+        from pyfly.server.management_server import resolve_management_mode
+
+        mgmt_mode, mgmt_props = resolve_management_mode(self.config, int(port))
+        if mgmt_mode == "separate" and mgmt_props is not None:
+            mgmt_host = mgmt_props.address or host
+            admin_base_url = f"http://{mgmt_host}:{mgmt_props.port}"
+            self._logger.info("management_server", url=admin_base_url, endpoints="actuator + admin")
+        else:
+            admin_base_url = f"http://{host}:{port}"
+
+        # Log admin dashboard URL when enabled (and not disabled via mgmt port -1)
         admin_enabled = str(self.config.get("pyfly.admin.enabled", "false")).lower() in ("true", "1", "yes")
-        if admin_enabled:
-            base_url = f"http://{host}:{port}"
+        if admin_enabled and mgmt_mode != "disabled":
             admin_path = str(self.config.get("pyfly.admin.path", "/admin"))
-            self._logger.info("admin_dashboard", url=f"{base_url}{admin_path}")
+            self._logger.info("admin_dashboard", url=f"{admin_base_url}{admin_path}")
 
     async def run(self, args: list[str] | None = None) -> int:
         """Start the app, dispatch the shell, then shut down (CLI entry point).
