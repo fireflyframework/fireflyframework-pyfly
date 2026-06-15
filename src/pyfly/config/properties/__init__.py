@@ -17,6 +17,7 @@ from pyfly.config.properties.cache import CacheProperties
 from pyfly.config.properties.client import ClientProperties
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.config.properties.logging import LoggingProperties
+from pyfly.config.properties.management import ManagementServerProperties
 from pyfly.config.properties.messaging import MessagingProperties
 from pyfly.config.properties.mongodb import DocumentProperties
 from pyfly.config.properties.server import GranianProperties, ServerProperties
@@ -28,6 +29,7 @@ __all__ = [
     "DocumentProperties",
     "GranianProperties",
     "LoggingProperties",
+    "ManagementServerProperties",
     "MessagingProperties",
     "RelationalProperties",
     "ServerProperties",
