@@ -362,7 +362,7 @@ The actuator (covered in the next section) exposes the metrics registry for scra
 - `GET /actuator/metrics` — Micrometer-compatible JSON listing all metric names
 - `GET /actuator/prometheus` — standard text-exposition format for scraping
 
-Point your Prometheus `scrape_configs` at `/actuator/prometheus` and all `MetricsRegistry` metrics appear alongside built-in process metrics (CPU, memory, threads, GC).
+Point your Prometheus `scrape_configs` at `/actuator/prometheus` and all `MetricsRegistry` metrics appear alongside built-in process metrics (CPU, memory, threads, GC). By default the actuator listens on the **management port** (`9090`), not the application port (`8080`) — so the scrape target is `http://<host>:9090/actuator/prometheus`. See "The management port" below.
 
 !!! spring "Spring parity"
     `MetricsRegistry` mirrors Spring's `MeterRegistry` from Micrometer.
@@ -547,6 +547,23 @@ pyfly:
 ```
 
 When enabled, `create_app()` automatically scans the DI container for `HealthIndicator` beans, creates a `HealthAggregator`, instantiates all built-in endpoints, and mounts them at `/actuator/*`.
+
+### The management port
+
+By default these `/actuator/*` endpoints — and the `/admin` dashboard from the
+next section — are served on a **separate management port** (`9090`), not the
+application port (`8080`). This is Spring Boot's `management.server.port` model:
+keep health checks, Prometheus scraping, and the admin console off the public
+port, exposing only the business API to the internet while ops tooling reaches
+`9090` from inside the cluster.
+
+The management port is a second in-process listener (not extra workers), so it
+adds no deployment complexity. Configure it via `pyfly.management.server.port`
+(env `PYFLY_MANAGEMENT_SERVER_PORT`): set it **equal** to `pyfly.server.port` to
+serve everything on one port, or to **`-1`** to disable the management web
+endpoints. A Kubernetes deployment therefore points liveness/readiness probes and
+the Prometheus `ServiceMonitor` at port `9090`, and the `Service`/`Ingress` for
+user traffic at `8080`.
 
 ### Built-in endpoints
 

@@ -360,7 +360,9 @@ Install with: `pip install 'pyfly[testcontainers]'`
 
 | Spring Boot | PyFly | Notes |
 |---|---|---|
-| `server.port` | `pyfly.web.port` | HTTP listen port. |
+| `server.port` | `pyfly.server.port` | Application HTTP listen port (default 8080). |
+| `server.address` | `pyfly.server.host` | Application bind address. |
+| `management.server.port` | `pyfly.management.server.port` | Separate management (actuator + admin) port; default 9090. |
 | Tomcat (default) | Granian (default) | Rust/tokio HTTP runtime; highest priority. |
 | Jetty (fallback) | Uvicorn (fallback) | Ecosystem-standard ASGI fallback. |
 | Undertow (alternative) | Hypercorn (alternative) | Advanced protocol support (HTTP/3). |

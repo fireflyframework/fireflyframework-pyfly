@@ -2,7 +2,7 @@
 
 Enterprise Python has long meant stitching together a dozen independent libraries — one for dependency injection, another for routing, yet another for async database access — with no shared idiom to bind them. **PyFly** changes that. It brings the cohesive, convention-over-configuration experience that Spring Boot gave the Java world, rebuilt from the ground up for Python 3.12+ and `async`/`await`.
 
-This book teaches PyFly **by doing**. You build one real application from an empty folder to a secured, observable, event-driven service — making every concept concrete before moving to the next. Crucially, the code in these pages is not illustrative pseudocode: it is taken from a **real project that compiles, boots, and passes its tests** against PyFly v26.6.60. Every listing was verified against the running sample, so what you read is what actually works.
+This book teaches PyFly **by doing**. You build one real application from an empty folder to a secured, observable, event-driven service — making every concept concrete before moving to the next. Crucially, the code in these pages is not illustrative pseudocode: it is taken from a **real project that compiles, boots, and passes its tests** against PyFly v26.6.103. Every listing was verified against the running sample, so what you read is what actually works.
 
 ### Who This Book Is For
 

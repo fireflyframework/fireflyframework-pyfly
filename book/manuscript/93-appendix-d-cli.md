@@ -119,7 +119,7 @@ pyfly run [--host HOST] [--port PORT] [--server SERVER]
 | Option | Default | Description |
 |---|---|---|
 | `--host` | `0.0.0.0` | Bind address |
-| `--port` | Config or `8080` | Port (CLI → `pyfly.web.port` → 8080) |
+| `--port` | Config or `8080` | App port (CLI → `pyfly.server.port` → 8080) |
 | `--server` | Auto-detect | `granian`, `uvicorn`, or `hypercorn` |
 | `--workers` | Config or `0` | Worker processes (`0` = cpu count) |
 | `--reload` | off | Auto-reload on code changes |

@@ -165,8 +165,8 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     _pyfly._docs_enabled = getattr(
         app.state, "pyfly_docs_enabled", False
     )
-    _pyfly._host = str(_pyfly.config.get("pyfly.web.host", "0.0.0.0"))
-    _pyfly._port = int(_pyfly.config.get("pyfly.web.port", 8080))
+    _pyfly._host = str(_pyfly.config.get("pyfly.server.host", "0.0.0.0"))
+    _pyfly._port = int(_pyfly.config.get("pyfly.server.port", 8080))
     await _pyfly.startup()
     yield
     await _pyfly.shutdown()
@@ -266,7 +266,7 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-:: PyFly Framework :: (v26.06.60) (Python 3.13.13)
+:: PyFly Framework :: (v26.06.103) (Python 3.13.13)
 Copyright 2026 Firefly Software Foundation. | Apache License 2.0
 2026-06-07 20:34:32,442 [INFO] pyfly.core: starting_application |
     app=lumen version=1.0.0 python=3.13.13 pid=72300

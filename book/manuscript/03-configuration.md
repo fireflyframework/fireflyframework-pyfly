@@ -61,7 +61,7 @@ Nested keys map directly to dot-notation access through `Config.get()`:
 
 ```python
 config.get("pyfly.app.name")       # "lumen"
-config.get("pyfly.web.port")               # 8080
+config.get("pyfly.server.port")            # 8080
 config.get("pyfly.data.relational.url")    # "sqlite+aiosqlite:///./lumen.db"
 config.get("pyfly.eda.provider")           # "memory"
 ```
@@ -85,7 +85,7 @@ PyFly avoids this by layering four configuration sources, each deeply merged on 
 
 **Layer 1 — Framework defaults.** The bundled `pyfly-defaults.yaml` inside the `pyfly.resources` package provides a sensible default for every key the framework reads. You never edit this file — it is loaded via `importlib.resources` and works correctly in packaged distributions. The framework always starts from a complete, working baseline.
 
-**Layer 2 — User configuration file.** Your `pyfly.yaml` (or `pyfly.toml`). Include only the keys that differ from the framework defaults. In Listing 3.1, `pyfly.web.port: 8080` matches the default — it is included for clarity, not necessity.
+**Layer 2 — User configuration file.** Your `pyfly.yaml` (or `pyfly.toml`). Include only the keys that differ from the framework defaults. In Listing 3.1, `pyfly.server.port: 8080` matches the default — it is included for clarity, not necessity.
 
 **Layer 3 — Profile overlay files.** For each active profile, PyFly looks for a file named `pyfly-{profile}.yaml` alongside the base file and deep-merges it in. Profile overlays contain only the keys that change.
 
@@ -93,16 +93,17 @@ PyFly avoids this by layering four configuration sources, each deeply merged on 
 
 ### Deep merge, not replacement
 
-Layers combine through a recursive deep merge (`Config._deep_merge()`). Nested dictionaries are merged key-by-key; scalar values are replaced. The distinction matters in practice: without deep merge, a production overlay that changes only the port would wipe out the `host` and `docs` keys sitting alongside it in the same `web:` section. With deep merge, you write only what you mean to change.
+Layers combine through a recursive deep merge (`Config._deep_merge()`). Nested dictionaries are merged key-by-key; scalar values are replaced. The distinction matters in practice: without deep merge, a production overlay that changes only `pyfly.server.port` would wipe out the `host` key sitting alongside it in the same `server:` section — and the unrelated `web.docs` block in a sibling section. With deep merge, you write only what you mean to change.
 
 To make this concrete, consider a base file and a production overlay:
 
 ```yaml
 # pyfly.yaml (base)
 pyfly:
-  web:
+  server:
     port: 8080
     host: "0.0.0.0"
+  web:
     docs:
       enabled: true
 ```
@@ -110,7 +111,7 @@ pyfly:
 ```yaml
 # pyfly-prod.yaml (overlay)
 pyfly:
-  web:
+  server:
     port: 443
 ```
 
@@ -118,11 +119,12 @@ After merge, the effective configuration is:
 
 ```yaml
 pyfly:
-  web:
+  server:
     port: 443         # overridden by prod overlay
     host: "0.0.0.0"   # preserved from base
+  web:
     docs:
-      enabled: true   # preserved from base
+      enabled: true   # preserved from base (sibling section untouched)
 ```
 
 Only the keys that differ appear in the overlay. Everything else is preserved from the layer below.
@@ -186,8 +188,9 @@ The test overlay silences the startup banner so test output stays clean, disable
 
 ::: listing pyfly-prod.yaml | Listing 3.4 — Production overlay: real database, JSON logging, docs off
 pyfly:
-  web:
+  server:
     port: 443
+  web:
     debug: false
     docs:
       enabled: false
@@ -203,7 +206,7 @@ pyfly:
     mode: "OFF"
 :::
 
-The production overlay makes several deliberate choices. It disables the interactive API docs — you do not want a live Swagger UI on a production endpoint. It switches logging to `json` format so aggregators like Datadog or CloudWatch can parse structured fields rather than scraping human-readable text. It points `pyfly.data.relational.url` at the real PostgreSQL instance. It sets `port: 443`, though in practice you will override this with `PYFLY_WEB_PORT` from your deployment pipeline so no topology details enter the repository.
+The production overlay makes several deliberate choices. It disables the interactive API docs — you do not want a live Swagger UI on a production endpoint. It switches logging to `json` format so aggregators like Datadog or CloudWatch can parse structured fields rather than scraping human-readable text. It points `pyfly.data.relational.url` at the real PostgreSQL instance. It sets `pyfly.server.port: 443`, though in practice you will override this with `PYFLY_SERVER_PORT` from your deployment pipeline so no topology details enter the repository.
 
 !!! tip "Tip"
     Multiple profiles are comma-separated in the env var and are applied in order, so the last profile wins on conflicts: `PYFLY_PROFILES_ACTIVE=prod,metrics` first applies `pyfly-prod.yaml`, then `pyfly-metrics.yaml`. Use this to compose cross-cutting concerns — a `metrics` profile can enable Prometheus scraping without duplicating your entire prod config.
@@ -384,7 +387,8 @@ Every dot-notation config key maps to a `PYFLY_`-prefixed environment variable t
 | Config key | Environment variable |
 |---|---|
 | `pyfly.app.name` | `PYFLY_APP_NAME` |
-| `pyfly.web.port` | `PYFLY_WEB_PORT` |
+| `pyfly.server.port` | `PYFLY_SERVER_PORT` |
+| `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` |
 | `pyfly.web.debug` | `PYFLY_WEB_DEBUG` |
 | `pyfly.data.relational.url` | `PYFLY_DATA_RELATIONAL_URL` |
 | `pyfly.data.relational.pool-size` | `PYFLY_DATA_RELATIONAL_POOL_SIZE` |
@@ -408,11 +412,11 @@ Activating the production profile and overriding the database URL for a specific
 ```bash
 PYFLY_PROFILES_ACTIVE=prod \
   PYFLY_DATA_RELATIONAL_URL="postgresql+asyncpg://rds-prod:5432/lumen" \
-  PYFLY_WEB_PORT=8080 \
+  PYFLY_SERVER_PORT=8080 \
   python main.py
 ```
 
-Here, `PYFLY_WEB_PORT=8080` overrides the prod overlay's `port: 443`. The precedence stack resolves like this:
+Here, `PYFLY_SERVER_PORT=8080` overrides the prod overlay's `port: 443`. The precedence stack resolves like this:
 
 1. Framework defaults → `port: 8080`
 2. Base config → `port: 8080` (unchanged)
@@ -454,10 +458,40 @@ The four-layer stack — defaults → file → profile overlay → env vars — 
 
 ---
 
+## Application and management ports
+
+PyFly separates the **application** port from the **management** port, mirroring
+Spring Boot's `server.port` / `management.server.port`. Out of the box the
+business API listens on `pyfly.server.port` (**8080**) while the actuator
+endpoints (`/actuator/*`) and the admin dashboard (`/admin`) are served on a
+dedicated `pyfly.management.server.port` (**9090**). This keeps health checks,
+Prometheus scraping, and the admin console off the public port — you expose only
+8080 to the internet and reach 9090 from inside the cluster.
+
+| Key | Env var | Default | Purpose |
+|---|---|---|---|
+| `pyfly.server.port` | `PYFLY_SERVER_PORT` | `8080` | Application HTTP port |
+| `pyfly.server.host` | `PYFLY_SERVER_HOST` | `0.0.0.0` | Application bind address |
+| `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` | `9090` | Management (actuator + admin) port |
+| `pyfly.management.server.address` | `PYFLY_MANAGEMENT_SERVER_ADDRESS` | app host | Management bind address |
+
+The management port is a second **in-process** listener — not extra worker
+processes — sharing the same event loop and beans, so it works with any server
+adapter (Granian, Uvicorn, Hypercorn). Two values change the topology: set
+`pyfly.management.server.port` **equal** to the app port to serve everything on a
+single port (the pre-`v26.06.102` behaviour), or set it to **`-1`** to disable the
+management web endpoints entirely.
+
+!!! spring "Spring parity"
+    `pyfly.server.port` ≡ Spring `server.port`, `pyfly.server.host` ≡
+    `server.address`, and `pyfly.management.server.port` ≡
+    `management.server.port`. Setting a distinct management port runs the actuator
+    on its own connector, exactly as Spring Boot does.
+
 ## Try it yourself {.exercises}
 
 1. **Add a staging overlay.** Create `pyfly-staging.yaml` with a PostgreSQL URL for a shared test database under `pyfly.data.relational.url`, `pyfly.data.relational.enabled: true`, and logging at `INFO`. Activate it with `PYFLY_PROFILES_ACTIVE=staging python main.py` and verify from the startup log that the staging source was loaded. Compare the effective configuration to what the prod overlay would produce.
 
 2. **Bind a new typed property and use it.** Add a `max_wallets_per_owner: int = 5` field to a new `WalletProperties` class decorated with `@config_properties(prefix="lumen.wallet")`, and a matching `lumen.wallet.max-wallets-per-owner: 5` key in `pyfly.yaml` (outside the `pyfly:` block). Inject `Config` into `WalletService`, call `config.bind(WalletProperties)`, and add a guard in `open_wallet` that raises `ValueError` when the owner already holds the maximum number of wallets. Write a quick test that overrides the limit to `1` by setting `PYFLY_LUMEN_WALLET_MAX_WALLETS_PER_OWNER=1` and verifying the error fires on the second wallet.
 
-3. **Override a value via an env var and observe precedence.** Set `PYFLY_WEB_PORT=9090` before starting Lumen. Check the startup log and confirm the server binds to `9090`, not the `8080` in `pyfly.yaml`. Then unset the env var and restart — the port should revert to `8080`. This exercise makes the read-time nature of env-var resolution concrete: the env var always wins, and removing it immediately restores the file value without any code change.
+3. **Override a value via an env var and observe precedence.** Set `PYFLY_SERVER_PORT=9090` before starting Lumen. Check the startup log and confirm the server binds to `9090`, not the `8080` in `pyfly.yaml`. Then unset the env var and restart — the port should revert to `8080`. This exercise makes the read-time nature of env-var resolution concrete: the env var always wins, and removing it immediately restores the file value without any code change.
