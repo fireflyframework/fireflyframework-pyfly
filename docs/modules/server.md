@@ -342,6 +342,8 @@ pyfly:
 
 **HTTP version:** When `http: "auto"`, the server selects the best HTTP version it supports. Granian defaults to HTTP/2; Uvicorn defaults to HTTP/1.1; Hypercorn supports HTTP/1.1, HTTP/2, and HTTP/3.
 
+**Management port:** The application binds to `pyfly.server.port` (env `PYFLY_SERVER_PORT`, default 8080). Actuator endpoints and admin are served separately on `pyfly.management.server.port` (env `PYFLY_MANAGEMENT_SERVER_PORT`, default 9090).
+
 ---
 
 ## CLI: pyfly run
@@ -441,7 +443,8 @@ PyFly's server abstraction mirrors Spring Boot's embedded server architecture:
 |-------------|-------|---------|
 | `WebServer` interface | `ApplicationServerPort` protocol | Contract for running the HTTP server |
 | `EventLoopGroup` (Netty) | `EventLoopPort` protocol | Contract for the event loop / I/O runtime |
-| `server.port` | `pyfly.server.port` via `pyfly.web.port` | HTTP listen port |
+| `server.port` | `pyfly.server.port` | HTTP listen port |
+| `management.server.port` | `pyfly.management.server.port` | Management port (actuator + admin, default 9090) |
 | `server.tomcat.*` | `pyfly.server.granian.*` | Server-specific tuning properties |
 | `server.servlet.context-path` | `pyfly.web.base-path` | Application base path |
 | Tomcat (default) | Granian (default) | Highest-priority embedded server |

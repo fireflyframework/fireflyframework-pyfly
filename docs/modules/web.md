@@ -154,8 +154,6 @@ from dataclasses import dataclass, field
 @dataclass
 class WebProperties:
     adapter: str = "auto"
-    port: int = 8000
-    host: str = "0.0.0.0"
     debug: bool = False
     docs: dict = field(default_factory=lambda: {"enabled": True})
     actuator: dict = field(default_factory=lambda: {"enabled": False})
@@ -164,20 +162,29 @@ class WebProperties:
 | Field      | Type   | Default                   | Description                                                |
 |------------|--------|---------------------------|------------------------------------------------------------|
 | `adapter`  | `str`  | `"auto"`                  | Web adapter to use: `"auto"`, `"starlette"`, or `"none"`   |
-| `port`     | `int`  | `8000`                    | HTTP server listen port                                    |
-| `host`     | `str`  | `"0.0.0.0"`              | HTTP server bind address                                   |
 | `debug`    | `bool` | `False`                   | Enable Starlette debug mode                                |
 | `docs`     | `dict` | `{"enabled": True}`       | OpenAPI documentation settings                             |
 | `actuator` | `dict` | `{"enabled": False}`      | Actuator endpoint settings                                 |
+
+> **Server port/host.** The application HTTP port and bind address are configured
+> under `pyfly.server.*` (Spring `server.port` / `server.address` parity), **not**
+> under `pyfly.web.*`: `pyfly.server.port` (env `PYFLY_SERVER_PORT`, default `8080`)
+> and `pyfly.server.host` (env `PYFLY_SERVER_HOST`). Actuator and admin endpoints
+> are served on a separate management port, `pyfly.management.server.port`
+> (env `PYFLY_MANAGEMENT_SERVER_PORT`, default `9090`).
 
 You can set these values in your `application.yml` or `application.toml`:
 
 ```yaml
 pyfly:
+  server:
+    port: 8080
+    host: 0.0.0.0
+  management:
+    server:
+      port: 9090   # actuator + admin served separately
   web:
     adapter: starlette
-    port: 9090
-    host: 0.0.0.0
     debug: false
     docs:
       enabled: true
@@ -2330,9 +2337,13 @@ Or via configuration:
 ```yaml
 # application.yml
 pyfly:
+  server:
+    port: 8080
+  management:
+    server:
+      port: 9090   # actuator + admin served separately
   web:
     adapter: auto
-    port: 8080
     debug: false
     docs:
       enabled: true

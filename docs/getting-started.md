@@ -183,9 +183,15 @@ pyfly:
   profiles:
     active: ""                  # Set to "dev", "prod", etc.
 
-  web:
-    port: 8080
+  server:
+    port: 8080                  # Application HTTP port
     host: "0.0.0.0"
+
+  management:
+    server:
+      port: 9090                # Actuator + admin on a separate management port
+
+  web:
     debug: false
     docs:
       enabled: true             # Swagger UI and ReDoc
@@ -198,11 +204,15 @@ pyfly:
     format: console             # "console" for dev, "json" for prod
 ```
 
+The application listens on `pyfly.server.port` (default `8080`), while actuator and
+admin endpoints are served separately on the management port `pyfly.management.server.port`
+(env `PYFLY_MANAGEMENT_SERVER_PORT`, default `9090`).
+
 PyFly uses a layered configuration system with this priority (highest wins):
 
 | Priority | Source                              | Example                          |
 |----------|-------------------------------------|----------------------------------|
-| 4 (highest) | Environment variables            | `PYFLY_WEB_PORT=9000`          |
+| 4 (highest) | Environment variables            | `PYFLY_SERVER_PORT=9000`       |
 | 3        | Profile-specific config             | `pyfly-production.yaml`         |
 | 2        | Your `pyfly.yaml`                   | `pyfly.yaml`                    |
 | 1 (lowest) | Framework defaults                | Built-in `pyfly-defaults.yaml`  |

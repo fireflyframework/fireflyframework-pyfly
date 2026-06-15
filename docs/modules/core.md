@@ -342,7 +342,7 @@ Examples:
 | Config Key | Environment Variable |
 |---|---|
 | `pyfly.app.name` | `PYFLY_APP_NAME` |
-| `pyfly.web.port` | `PYFLY_WEB_PORT` |
+| `pyfly.server.port` | `PYFLY_SERVER_PORT` |
 | `pyfly.data.pool-size` | `PYFLY_DATA_POOL_SIZE` |
 | `app.name` | `PYFLY_APP_NAME` |
 
@@ -489,7 +489,7 @@ one, with later layers winning on conflicts.
 
 ```
 +-----------------------------------------------+
-|  4. Environment Variables  (highest priority)  |  PYFLY_WEB_PORT=9090
+|  4. Environment Variables  (highest priority)  |  PYFLY_SERVER_PORT=8080
 +-----------------------------------------------+
 |  3. Profile Overlay                            |  pyfly-prod.yaml
 +-----------------------------------------------+
@@ -550,7 +550,7 @@ pyfly:
   app:
     name: "my-service"
     version: "1.0.0"
-  web:
+  server:
     port: 8080
     host: "0.0.0.0"
   data:
@@ -566,7 +566,7 @@ pyfly:
 name = "my-service"
 version = "1.0.0"
 
-[pyfly.web]
+[pyfly.server]
 port = 8080
 host = "0.0.0.0"
 
@@ -703,9 +703,15 @@ pyfly:
       root: "INFO"
     format: "console"
 
-  web:
+  server:
     port: 8080
     host: "0.0.0.0"
+
+  management:
+    server:
+      port: 9090
+
+  web:
     debug: false
     docs:
       enabled: true
@@ -747,8 +753,9 @@ pyfly:
 | Key | Default | Description |
 |---|---|---|
 | `pyfly.app.name` | `"pyfly-app"` | Application name |
-| `pyfly.web.port` | `8080` | HTTP server port |
-| `pyfly.web.host` | `"0.0.0.0"` | HTTP server bind address |
+| `pyfly.server.port` | `8080` | HTTP server port |
+| `pyfly.server.host` | `"0.0.0.0"` | HTTP server bind address |
+| `pyfly.management.server.port` | `9090` | Management port (actuator + admin), env `PYFLY_MANAGEMENT_SERVER_PORT`, served separately from the app |
 | `pyfly.web.debug` | `false` | Debug mode |
 | `pyfly.logging.level.root` | `"INFO"` | Root log level |
 | `pyfly.logging.format` | `"console"` | Log output format |
@@ -802,7 +809,7 @@ pyfly:
   banner:
     mode: "TEXT"
     location: "banner.txt"
-  web:
+  server:
     port: 8080
   greeting:
     default-name: "World"
@@ -813,8 +820,9 @@ pyfly:
 
 ```yaml
 pyfly:
-  web:
+  server:
     port: 443
+  web:
     debug: false
   logging:
     level:
@@ -897,8 +905,8 @@ PYFLY_PROFILES_ACTIVE=prod python main.py
 ### Overriding Config with Environment Variables
 
 ```bash
-# Override the web port
-PYFLY_WEB_PORT=9090 python main.py
+# Override the HTTP server port
+PYFLY_SERVER_PORT=8080 python main.py
 
 # Override the greeting default name
 PYFLY_GREETING_DEFAULT_NAME="PyFly" python main.py

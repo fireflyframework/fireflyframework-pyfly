@@ -570,13 +570,13 @@ pyfly run [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--host` | `0.0.0.0` | Bind address |
-| `--port` | From `pyfly.yaml` or `8080` | Port number (resolved from: CLI flag → `pyfly.web.port` in config → `8080`) |
+| `--port` | From `pyfly.yaml` or `8080` | Port number (resolved from: CLI flag → `pyfly.server.port` in config → `8080`) |
 | `--server` | From config or `auto` | ASGI server: `granian`, `uvicorn`, `hypercorn` (auto-selects highest-priority installed) |
 | `--workers` | From config or `0` | Number of worker processes (`0` = `cpu_count`) |
 | `--reload` | `false` | Enable auto-reload on code changes (for development) |
 | `--app` | Auto-discovered | Application import path (e.g., `myapp.main:app`) |
 | `--profile, -p <name>` | — | Activate a named profile (sets `PYFLY_PROFILES_ACTIVE`); repeatable or comma-separated |
-| `-D, --define KEY=VALUE` | — | Override a config value at runtime (e.g. `-D web.port=9000`); the `pyfly.` prefix may be included or omitted; repeatable |
+| `-D, --define KEY=VALUE` | — | Override a config value at runtime (e.g. `-D server.port=9000`); the `pyfly.` prefix may be included or omitted; repeatable |
 | `--env KEY=VALUE` | — | Set a raw environment variable for the app process; repeatable |
 | `--debug` | `false` | Enable debug logging (sets `pyfly.logging.level.root=DEBUG`) |
 | `--watch <dir>` | — | Extra directory to watch in reload mode (implies `--reload`); repeatable |
@@ -653,7 +653,7 @@ pyfly run -p prod -p cloud
 pyfly run --profile prod,cloud
 
 # Override config values at runtime
-pyfly run -D web.port=9000 -D logging.level.root=INFO
+pyfly run -D server.port=9000 -D logging.level.root=INFO
 
 # Pass raw environment variables to the app process
 pyfly run --env DATABASE_URL=postgresql://localhost/mydb --env FEATURE_X=1

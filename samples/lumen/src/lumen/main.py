@@ -33,8 +33,8 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     """Manage application startup and shutdown lifecycle."""
     _pyfly._route_metadata = getattr(app.state, "pyfly_route_metadata", [])
     _pyfly._docs_enabled = getattr(app.state, "pyfly_docs_enabled", False)
-    _pyfly._host = str(_pyfly.config.get("pyfly.web.host", "0.0.0.0"))
-    _pyfly._port = int(_pyfly.config.get("pyfly.web.port", 8080))
+    _pyfly._host = str(_pyfly.config.get("pyfly.server.host", "0.0.0.0"))
+    _pyfly._port = int(_pyfly.config.get("pyfly.server.port", 8080))
     await _pyfly.startup()
     yield
     await _pyfly.shutdown()
