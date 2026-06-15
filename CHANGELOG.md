@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.105 (2026-06-15)
+
+### Fixed
+
+- **Requests to the separate management port are now access-logged.** The
+  management app (actuator + admin on `pyfly.management.server.port`) was built
+  without the `RequestLoggingFilter`, so health probes, Prometheus scrapes and
+  admin calls to the management port produced no `http_request` log line. The
+  filter is now wired into the management app's chain (honoring the same
+  `pyfly.web.request-logging.enabled` opt-out), so management-port traffic is
+  logged through pyfly's structured logger exactly like the main app.
+
+---
+
 ## v26.06.104 (2026-06-15)
 
 ### Changed

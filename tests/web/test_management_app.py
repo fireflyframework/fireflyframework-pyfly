@@ -56,6 +56,57 @@ async def test_management_app_serves_actuator_and_admin_not_business() -> None:
         await ctx.stop()
 
 
+def _chain_filters(app: object) -> list[object]:
+    from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
+
+    mws = [m for m in app.user_middleware if m.cls is WebFilterChainMiddleware]  # type: ignore[attr-defined]
+    return mws[0].kwargs["filters"] if mws else []
+
+
+@pytest.mark.asyncio
+async def test_management_app_logs_requests_via_request_logging_filter() -> None:
+    from pyfly.web.adapters.starlette.filters import RequestLoggingFilter
+
+    ctx = ApplicationContext(Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}}))
+    await ctx.start()
+    try:
+        mgmt = create_management_app(
+            ctx,
+            health_agg=None,
+            http_exchange_recorder=None,
+            admin_trace_collector=None,
+            actuator_active=True,
+            admin_enabled=False,
+            base_path="",
+        )
+        # The access log filter is wired into the management chain, so requests to
+        # the management port are logged through pyfly's logger system.
+        assert any(isinstance(f, RequestLoggingFilter) for f in _chain_filters(mgmt))
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.asyncio
+async def test_management_app_request_logging_respects_opt_out() -> None:
+    from pyfly.web.adapters.starlette.filters import RequestLoggingFilter
+
+    ctx = ApplicationContext(Config({"pyfly": {"web": {"request-logging": {"enabled": "false"}}}}))
+    await ctx.start()
+    try:
+        mgmt = create_management_app(
+            ctx,
+            health_agg=None,
+            http_exchange_recorder=None,
+            admin_trace_collector=None,
+            actuator_active=True,
+            admin_enabled=False,
+            base_path="",
+        )
+        assert not any(isinstance(f, RequestLoggingFilter) for f in _chain_filters(mgmt))
+    finally:
+        await ctx.stop()
+
+
 @pytest.mark.asyncio
 async def test_management_app_base_path_prefix() -> None:
     ctx = ApplicationContext(Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}}))
