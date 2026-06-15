@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.103 (2026-06-15)
+
+### Fixed
+
+- **Management server robustness (follow-up to v26.06.102).**
+  - The management endpoints no longer silently disappear when `create_app()` is
+    called without a `lifespan` while a separate management port is configured.
+    Because the management listener can only be started from the app lifespan,
+    separation now requires a lifespan; without one it degrades to the shared
+    port so `/actuator/*` and `/admin` stay reachable.
+  - The management listener's start/stop is now fully wrapped in `try/finally`,
+    so the bound socket is always released if startup fails partway through.
+  - `make_reuse_socket` closes its socket deterministically if `bind()`/`listen()`
+    fails (e.g. the management port is already in use) instead of leaking the fd.
+  - On a slow shutdown, the embedded management server task is now awaited after
+    cancellation so it is not left pending.
+
+---
+
 ## v26.06.102 (2026-06-15)
 
 ### Changed

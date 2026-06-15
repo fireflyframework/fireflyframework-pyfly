@@ -67,14 +67,20 @@ def make_reuse_socket(host: str, port: int) -> socket.socket:
     for the single-worker default.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        # pragma: no cover - platform without a working SO_REUSEPORT
-        with contextlib.suppress(OSError):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind((host, port))
-    sock.listen()
-    sock.set_inheritable(True)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            # pragma: no cover - platform without a working SO_REUSEPORT
+            with contextlib.suppress(OSError):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind((host, port))
+        sock.listen()
+        sock.set_inheritable(True)
+    except BaseException:
+        # Close the socket deterministically if binding/listening fails (e.g. the
+        # management port is already in use) instead of leaking the fd.
+        sock.close()
+        raise
     return sock
 
 
@@ -120,6 +126,10 @@ class ManagementServer:
                 await asyncio.wait_for(self._task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError):  # pragma: no cover - shutdown race
                 self._task.cancel()
+                # Drain the cancellation so the task is not left pending.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+            self._task = None
         if self._sock is not None:
             self._sock.close()
             self._sock = None
