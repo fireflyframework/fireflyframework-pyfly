@@ -58,9 +58,7 @@ async def test_management_app_serves_actuator_and_admin_not_business() -> None:
 
 @pytest.mark.asyncio
 async def test_management_app_base_path_prefix() -> None:
-    ctx = ApplicationContext(
-        Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}})
-    )
+    ctx = ApplicationContext(Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}}))
     await ctx.start()
     try:
         mgmt = create_management_app(

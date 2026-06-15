@@ -64,9 +64,7 @@ async def test_separate_mode_removes_actuator_and_admin_from_main() -> None:
 
 @pytest.mark.asyncio
 async def test_disabled_mode_removes_actuator_and_admin_everywhere() -> None:
-    paths = await _main_paths(
-        {"pyfly": {"management": {"server": {"port": -1}}, "admin": {"enabled": True}}}
-    )
+    paths = await _main_paths({"pyfly": {"management": {"server": {"port": -1}}, "admin": {"enabled": True}}})
     assert not any(p.startswith("/actuator") for p in paths)
     assert not any(p.startswith("/admin") for p in paths)
 

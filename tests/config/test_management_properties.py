@@ -29,9 +29,7 @@ def test_defaults() -> None:
 
 
 def test_binds_from_config() -> None:
-    cfg = Config(
-        {"pyfly": {"management": {"server": {"port": 9090, "address": "127.0.0.1", "base-path": "/mgmt"}}}}
-    )
+    cfg = Config({"pyfly": {"management": {"server": {"port": 9090, "address": "127.0.0.1", "base-path": "/mgmt"}}}})
     props = cfg.bind(ManagementServerProperties)
     assert props.port == 9090
     assert props.address == "127.0.0.1"

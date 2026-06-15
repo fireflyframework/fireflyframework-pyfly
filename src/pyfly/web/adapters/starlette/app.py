@@ -430,9 +430,7 @@ def create_app(
                         base_path=management_props.base_path,
                     )
                     mgmt_host = management_props.address or resolve_app_host(context.config)
-                    mgmt_server = ManagementServer(
-                        mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0)
-                    )
+                    mgmt_server = ManagementServer(mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0))
                     await mgmt_server.start()
                 try:
                     yield
