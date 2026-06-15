@@ -34,6 +34,7 @@ from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
     CorrelationFilter,
     RequestContextFilter,
+    RequestLoggingFilter,
     SecurityHeadersFilter,
     TracingFilter,
     TransactionIdFilter,
@@ -45,12 +46,12 @@ if TYPE_CHECKING:
     from pyfly.actuator.http_exchanges import HttpExchangeRecorder
     from pyfly.context.application_context import ApplicationContext
 
-# Capture filters belong on the MAIN app (they record business traffic). The
-# management app must not re-add them or it would double-count and capture only
-# management traffic.
-_CAPTURE_FILTER_NAMES = frozenset(
-    {"MetricsFilter", "HttpExchangeRecorderFilter", "TraceCollectorFilter", "RequestLoggingFilter"}
-)
+# Capture filters belong on the MAIN app (they record *business* traffic for the
+# actuator/admin endpoints). The management app must not re-add them or it would
+# double-count and capture only management traffic. NOTE: RequestLoggingFilter is
+# deliberately NOT here — it is the access log, which we DO want on the management
+# app so requests to the management port are logged through the same logger.
+_CAPTURE_FILTER_NAMES = frozenset({"MetricsFilter", "HttpExchangeRecorderFilter", "TraceCollectorFilter"})
 
 
 def create_management_app(
@@ -59,6 +60,8 @@ def create_management_app(
     health_agg: HealthAggregator | None,
     http_exchange_recorder: HttpExchangeRecorder | None,
     admin_trace_collector: Any | None,
+    metrics_filter: WebFilter | None = None,
+    http_exchange_filter: WebFilter | None = None,
     actuator_active: bool,
     admin_enabled: bool,
     base_path: str = "",
@@ -78,6 +81,27 @@ def create_management_app(
         TransactionIdFilter(),
         SecurityHeadersFilter(),
     ]
+    # Access-log management traffic (health probes, Prometheus scrapes, admin
+    # calls) through the same structured logger as the main app, honoring the
+    # same opt-out flag. Without this, requests to the management port would be
+    # invisible in the logs.
+    request_logging_enabled = str(context.config.get("pyfly.web.request-logging.enabled", "true")).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if request_logging_enabled:
+        filters.append(RequestLoggingFilter())
+    # Capture management-port traffic into the SAME recorders the main app uses,
+    # so the dashboard/actuator on the management port (metrics, http-exchanges,
+    # traces) reflect BOTH the application port and the management port. These are
+    # the shared instances owned by the main app; a request traverses only one
+    # app's chain, so counting/recording happens exactly once (no double count).
+    # (TraceCollector/HttpExchange keep their own path exclusions for dashboard
+    # self-polling.)
+    for _capture in (metrics_filter, http_exchange_filter, admin_trace_collector):
+        if _capture is not None and not any(f is _capture for f in filters):
+            filters.append(_capture)
     builtin_types = tuple(type(f) for f in filters)
 
     # Pull in user security/session/CSRF WebFilter beans so actuator/admin auth
