@@ -23,6 +23,7 @@ from types import get_original_bases as get_orig_bases
 from typing import Generic, TypeVar, get_args
 
 from pyfly.cqrs.context.execution_context import ExecutionContext
+from pyfly.kernel.exceptions import is_expected_error
 
 Q = TypeVar("Q")  # Query type
 R = TypeVar("R")  # Result type
@@ -123,7 +124,12 @@ class QueryHandler(Generic[Q, R]):
         """Called after ``post_process``."""
 
     async def on_error(self, query: Q, error: Exception) -> None:
-        _logger.error("Query %s failed: %s", type(query).__name__, error, exc_info=True)
+        # Expected client/domain faults (4xx) log cleanly at WARNING; only
+        # unexpected infrastructure/5xx errors get a full traceback.
+        if is_expected_error(error):
+            _logger.warning("Query %s failed: %s", type(query).__name__, error)
+        else:
+            _logger.error("Query %s failed: %s", type(query).__name__, error, exc_info=True)
 
     def map_error(self, query: Q, error: Exception) -> Exception:
         return error

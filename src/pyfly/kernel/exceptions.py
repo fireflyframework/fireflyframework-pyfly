@@ -224,3 +224,23 @@ class PluginStopError(PluginException):
 class PluginStateError(PluginException):
     """An operation was attempted on a plugin in an incompatible state
     (e.g. starting an already-started plugin, or referencing an unknown id)."""
+
+
+# =============================================================================
+# Error classification
+# =============================================================================
+
+
+def is_expected_error(exc: BaseException) -> bool:
+    """Whether *exc* is an *expected* error that should be logged cleanly.
+
+    Expected errors are client/domain faults — validation failures, business
+    rule violations, not-found, auth — i.e. ``BusinessException`` and
+    ``SecurityException`` (the HTTP 4xx family). These are part of normal
+    operation, so they are logged at WARNING **without** a stack trace and
+    surfaced to users as clean messages rather than raw tracebacks.
+
+    Everything else (``InfrastructureException`` and unexpected exceptions —
+    the 5xx family) returns ``False`` and warrants a full traceback.
+    """
+    return isinstance(exc, BusinessException | SecurityException)

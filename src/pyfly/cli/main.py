@@ -15,22 +15,61 @@
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
 import click
 
-from pyfly.cli.console import print_banner
+from pyfly.cli.console import err_console, print_banner
 
 
 class PyFlyCLI(click.Group):
-    """Custom Click group that shows the PyFly banner on help."""
+    """Custom Click group that shows the PyFly banner on help and prints clean
+    errors instead of raw Python tracebacks."""
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         print_banner()
         super().format_help(ctx, formatter)
 
+    def invoke(self, ctx: click.Context) -> Any:
+        """Run the command, surfacing failures as a clean ``Error: ...`` line.
+
+        Click's own exceptions (usage errors, ``Abort``) and explicit
+        ``SystemExit`` codes pass through unchanged. Any other exception —
+        e.g. a configuration/validation error during app boot — is printed as
+        a single user-friendly message with exit code 1, instead of dumping a
+        traceback. Pass ``--debug`` (or set ``PYFLY_DEBUG=1``) to see the full
+        traceback.
+        """
+        try:
+            return super().invoke(ctx)
+        except (click.ClickException, click.exceptions.Abort, click.exceptions.Exit, SystemExit):
+            # Click's own control flow: usage errors, Ctrl-C, and ctx.exit()/--help
+            # (Exit carries the intended exit code, including 0 for --help).
+            raise
+        except Exception as exc:
+            debug = bool(ctx.params.get("debug")) or os.environ.get("PYFLY_DEBUG", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            err_console.print(f"[error]Error:[/error] {exc}")
+            if debug:
+                err_console.print_exception()
+            else:
+                err_console.print("[dim]Re-run with --debug (or PYFLY_DEBUG=1) for the full traceback.[/dim]")
+            raise SystemExit(1) from exc
+
 
 @click.group(cls=PyFlyCLI)
+@click.option(
+    "--debug",
+    is_flag=True,
+    envvar="PYFLY_DEBUG",
+    help="Show full tracebacks on error (default: clean one-line errors).",
+)
 @click.version_option(package_name="pyfly")
-def cli() -> None:
+def cli(debug: bool) -> None:  # noqa: ARG001 — read from ctx.params in PyFlyCLI.invoke
     """PyFly — The official Python implementation of the Firefly Framework."""
 
 
