@@ -125,6 +125,24 @@ def create_app(
     actuator_active = resolve_actuator_active(context, actuator_enabled)
     http_exchange_recorder, http_exchange_filter = make_http_exchange_filter(context, actuator_active)
 
+    # Management server port separation (Spring management.server.* parity) — see
+    # the matching block in pyfly.web.adapters.starlette.app for the rationale.
+    management_mode = "shared"
+    management_props = None
+    if context is not None:
+        import os as _os
+
+        from pyfly.config.properties.server import resolve_app_port
+        from pyfly.server.management_server import resolve_management_mode
+
+        _env_port = _os.environ.get("_PYFLY_SERVER_PORT")
+        _main_port = int(_env_port) if _env_port else resolve_app_port(context.config)
+        management_mode, management_props = resolve_management_mode(context.config, _main_port)
+    if management_mode == "disabled":
+        actuator_active = False
+        admin_enabled = False
+    management_separated = management_mode == "separate"
+
     # --- Build the WebFilter chain ---
     # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans
     # and @pre_authorize/@post_authorize have a live RequestContext to read.
@@ -312,10 +330,12 @@ def create_app(
         app.state.pyfly_install_health_indicators = _install_indicators
         _extra_post_start.append(_install_indicators)
 
-        app.routes.extend(build_actuator_routes(context, agg, http_exchange_recorder))
+        # When separated, actuator routes live on the management app, not here.
+        if not management_separated:
+            app.routes.extend(build_actuator_routes(context, agg, http_exchange_recorder))
 
-    # Mount admin dashboard when enabled (admin_enabled computed above)
-    if admin_enabled and context is not None:
+    # Mount admin dashboard when enabled (unless served on the management port).
+    if admin_enabled and context is not None and not management_separated:
         from pyfly.admin.wiring import build_admin_routes
 
         app.routes.extend(
@@ -389,7 +409,31 @@ def create_app(
         async def _lifespan_with_dynamic_wiring(app_: FastAPI) -> AsyncIterator[None]:
             async with _inner_lifespan_ctx(app_):
                 _install_dynamic_wiring()
-                yield
+                mgmt_server = None
+                if management_separated and management_props is not None and context is not None:
+                    from pyfly.config.properties.server import resolve_app_host
+                    from pyfly.server.management_server import ManagementServer
+                    from pyfly.web.adapters.starlette.management_app import create_management_app
+
+                    mgmt_app = create_management_app(
+                        context,
+                        health_agg=agg,
+                        http_exchange_recorder=http_exchange_recorder,
+                        admin_trace_collector=admin_trace_collector,
+                        actuator_active=actuator_active,
+                        admin_enabled=admin_enabled,
+                        base_path=management_props.base_path,
+                    )
+                    mgmt_host = management_props.address or resolve_app_host(context.config)
+                    mgmt_server = ManagementServer(
+                        mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0)
+                    )
+                    await mgmt_server.start()
+                try:
+                    yield
+                finally:
+                    if mgmt_server is not None:
+                        await mgmt_server.stop()
 
         app.router.lifespan_context = _lifespan_with_dynamic_wiring
 

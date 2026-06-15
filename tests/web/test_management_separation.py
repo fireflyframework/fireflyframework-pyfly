@@ -72,6 +72,37 @@ async def test_disabled_mode_removes_actuator_and_admin_everywhere() -> None:
 
 
 @pytest.mark.asyncio
+async def test_separate_mode_fastapi_parity() -> None:
+    from importlib.util import find_spec
+
+    if find_spec("fastapi") is None:  # pragma: no cover
+        pytest.skip("fastapi not installed")
+
+    from pyfly.web.adapters.fastapi.app import create_app as create_fastapi_app
+
+    ctx = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "server": {"port": 8080},
+                    "management": {"server": {"port": 9098}, "endpoints": {"web": {"exposure": {"include": "*"}}}},
+                    "admin": {"enabled": True},
+                }
+            }
+        )
+    )
+    await ctx.start()
+    try:
+        fa = create_fastapi_app(context=ctx, docs_enabled=False)
+        fa.state.pyfly_install_dynamic_wiring()
+        paths = {getattr(r, "path", "") for r in fa.routes}
+        assert not any(p.startswith("/actuator") for p in paths)
+        assert not any(p.startswith("/admin") for p in paths)
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.asyncio
 async def test_equal_port_stays_shared() -> None:
     paths = await _main_paths(
         {
