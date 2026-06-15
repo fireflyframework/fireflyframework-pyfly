@@ -108,6 +108,43 @@ async def test_management_app_request_logging_respects_opt_out() -> None:
 
 
 @pytest.mark.asyncio
+async def test_management_app_captures_both_ports_via_shared_filters() -> None:
+    """Shared capture filters run on the management app too, so the dashboard /
+    actuator reflect BOTH the application and management ports."""
+    from pyfly.actuator.http_exchanges import HttpExchangeRecorder, HttpExchangeRecorderFilter
+    from pyfly.web.adapters.starlette.filters.metrics_filter import MetricsFilter
+
+    ctx = ApplicationContext(Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}}))
+    await ctx.start()
+    try:
+        recorder = HttpExchangeRecorder()
+        http_exchange_filter = HttpExchangeRecorderFilter(recorder)
+        metrics_filter = MetricsFilter(histogram=False)
+        mgmt = create_management_app(
+            ctx,
+            health_agg=None,
+            http_exchange_recorder=recorder,
+            admin_trace_collector=None,
+            metrics_filter=metrics_filter,
+            http_exchange_filter=http_exchange_filter,
+            actuator_active=True,
+            admin_enabled=False,
+            base_path="",
+        )
+        # Both shared capture filters are wired into the management chain.
+        chain = _chain_filters(mgmt)
+        assert any(isinstance(f, MetricsFilter) for f in chain)
+        assert any(isinstance(f, HttpExchangeRecorderFilter) for f in chain)
+
+        # A request to the management port is recorded into the shared recorder.
+        client = TestClient(mgmt)
+        assert client.get("/actuator/info").status_code == 200
+        assert any("/actuator/info" in ex.get("request", {}).get("uri", "") for ex in recorder.recent())
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.asyncio
 async def test_management_app_base_path_prefix() -> None:
     ctx = ApplicationContext(Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "*"}}}}}}))
     await ctx.start()

@@ -10,13 +10,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Requests to the separate management port are now access-logged.** The
-  management app (actuator + admin on `pyfly.management.server.port`) was built
-  without the `RequestLoggingFilter`, so health probes, Prometheus scrapes and
-  admin calls to the management port produced no `http_request` log line. The
-  filter is now wired into the management app's chain (honoring the same
-  `pyfly.web.request-logging.enabled` opt-out), so management-port traffic is
-  logged through pyfly's structured logger exactly like the main app.
+- **Management-port observability now covers BOTH the application and the
+  management ports.** When actuator + admin run on a separate
+  `pyfly.management.server.port`, the dashboard/actuator there is the single
+  observability pane — but it previously reflected only the application port:
+  - **Access log:** the management app was built without `RequestLoggingFilter`,
+    so health probes, Prometheus scrapes and admin calls to the management port
+    produced no `http_request` log line. It is now wired into the management
+    chain (honoring `pyfly.web.request-logging.enabled`), so management-port
+    traffic is logged through pyfly's structured logger like the main app.
+  - **Metrics / HTTP exchanges / traces:** the data-capture filters
+    (`MetricsFilter`, `HttpExchangeRecorderFilter`, the admin `TraceCollector`)
+    ran only on the main app, so `http.server.requests`, `/actuator/httpexchanges`
+    and the admin Traces view excluded management-port traffic. The **same shared
+    capture instances** now also run on the management app, so the dashboard
+    reflects both ports. A request traverses exactly one app's chain, so there is
+    no double counting; the recorders keep their own path exclusions (Prometheus
+    scrape, admin SSE self-polling).
 
 ---
 

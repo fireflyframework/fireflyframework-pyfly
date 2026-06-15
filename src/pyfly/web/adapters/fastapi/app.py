@@ -424,6 +424,8 @@ def create_app(
                             health_agg=agg,
                             http_exchange_recorder=http_exchange_recorder,
                             admin_trace_collector=admin_trace_collector,
+                            metrics_filter=metrics_filter_instance,
+                            http_exchange_filter=http_exchange_filter,
                             actuator_active=actuator_active,
                             admin_enabled=admin_enabled,
                             base_path=management_props.base_path,

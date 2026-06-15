@@ -60,6 +60,8 @@ def create_management_app(
     health_agg: HealthAggregator | None,
     http_exchange_recorder: HttpExchangeRecorder | None,
     admin_trace_collector: Any | None,
+    metrics_filter: WebFilter | None = None,
+    http_exchange_filter: WebFilter | None = None,
     actuator_active: bool,
     admin_enabled: bool,
     base_path: str = "",
@@ -90,6 +92,16 @@ def create_management_app(
     )
     if request_logging_enabled:
         filters.append(RequestLoggingFilter())
+    # Capture management-port traffic into the SAME recorders the main app uses,
+    # so the dashboard/actuator on the management port (metrics, http-exchanges,
+    # traces) reflect BOTH the application port and the management port. These are
+    # the shared instances owned by the main app; a request traverses only one
+    # app's chain, so counting/recording happens exactly once (no double count).
+    # (TraceCollector/HttpExchange keep their own path exclusions for dashboard
+    # self-polling.)
+    for _capture in (metrics_filter, http_exchange_filter, admin_trace_collector):
+        if _capture is not None and not any(f is _capture for f in filters):
+            filters.append(_capture)
     builtin_types = tuple(type(f) for f in filters)
 
     # Pull in user security/session/CSRF WebFilter beans so actuator/admin auth
