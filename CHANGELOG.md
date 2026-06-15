@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.102 (2026-06-15)
+
+### Changed
+
+- **BREAKING — actuator and admin now run on a separate management port by
+  default, and the application port key is `pyfly.server.port`.** PyFly gains a
+  second in-process HTTP listener that serves the actuator endpoints
+  (`/actuator/*`) and the admin dashboard (`/admin`), keeping them off the public
+  business port (Spring Boot `management.server.port` parity). Out of the box the
+  app runs on `pyfly.server.port` (**8080**) and management on
+  `pyfly.management.server.port` (**9090**).
+
+  New / changed configuration (all bind from the uniform `PYFLY_*` prefix):
+  - `pyfly.server.port` (env `PYFLY_SERVER_PORT`, default `8080`) and
+    `pyfly.server.host` (env `PYFLY_SERVER_HOST`, default `0.0.0.0`) — the
+    application listener, Spring `server.port` / `server.address` parity.
+  - `pyfly.management.server.port` (env `PYFLY_MANAGEMENT_SERVER_PORT`, default
+    `9090`): a different port runs the dedicated management listener; equal to the
+    app port collapses to a single shared port; `-1` disables the management web
+    endpoints entirely.
+  - `pyfly.management.server.address` (env `PYFLY_MANAGEMENT_SERVER_ADDRESS`,
+    default = app host) and `pyfly.management.server.base-path`
+    (env `PYFLY_MANAGEMENT_SERVER_BASE_PATH`).
+
+  The management listener is adapter-agnostic (Uvicorn/Granian/Hypercorn) and is
+  started/stopped within the application lifespan. Full multi-worker support: each
+  worker binds the management port with `SO_REUSEPORT`.
+
+- **BREAKING — `pyfly.web.port` / `pyfly.web.host` removed.** The application
+  port/host keys (and the `PYFLY_WEB_PORT` / `PYFLY_WEB_HOST` env vars) are
+  removed in favor of `pyfly.server.port` / `pyfly.server.host`.
+
+### Fixed
+
+- `pyfly.__version__` was stale at `26.06.100`; it now tracks the released version.
+
+### Migration
+
+- Application port: replace `pyfly.web.port` → `pyfly.server.port` and
+  `PYFLY_WEB_PORT` → `PYFLY_SERVER_PORT` (likewise `*.host` / `PYFLY_WEB_HOST` →
+  `PYFLY_SERVER_HOST`).
+- If you previously reached `/actuator/*` or `/admin` on the application port,
+  either point clients/probes at the management port (default `9090`), or restore
+  single-port behavior by setting `pyfly.management.server.port` equal to your app
+  port (e.g. `PYFLY_MANAGEMENT_SERVER_PORT=8080`). Set it to `-1` to disable the
+  management web endpoints entirely.
+
+---
+
 ## v26.06.101 (2026-06-14)
 
 ### Changed
