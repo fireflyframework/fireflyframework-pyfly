@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.110 (2026-06-16)
+
+### Fixed
+
+- **The separate management port (actuator + admin) is now OPEN by default.** When
+  ``pyfly.management.server.port`` runs actuator/admin on a dedicated port, the
+  app's user security filters (e.g. an ``HttpSecurity`` gate whose ``deny-all``
+  catch-all is scoped to the *main* app's URL space) were applied there too —
+  rejecting ``/admin``, ``/actuator/info``, ``/actuator/metrics`` with 401/403
+  while only ``/actuator/health`` (explicitly permitted) worked. The management
+  port is a separate, typically-internal listener (Spring ``management.server.port``
+  parity) protected by network isolation, so it no longer applies the app's
+  security filters by default. Opt back in with
+  ``pyfly.management.security.enabled: true``.
+
+---
+
 ## v26.06.109 (2026-06-16)
 
 ### Fixed

@@ -104,21 +104,31 @@ def create_management_app(
             filters.append(_capture)
     builtin_types = tuple(type(f) for f in filters)
 
-    # Pull in user security/session/CSRF WebFilter beans so actuator/admin auth
-    # works on the management port, excluding the capture filters owned by the
-    # main app.
-    present = {id(f) for f in filters}
-    for _cls, reg in context.container._registrations.items():
-        inst = reg.instance
-        if (
-            inst is not None
-            and id(inst) not in present
-            and isinstance(inst, WebFilter)
-            and not isinstance(inst, builtin_types)
-            and type(inst).__name__ not in _CAPTURE_FILTER_NAMES
-        ):
-            filters.append(inst)
-            present.add(id(inst))
+    # The management port (actuator + admin) is OPEN by default: it is a separate,
+    # typically-internal port (Spring management.server.port parity) protected by
+    # network isolation, not by the application's auth. The app's user security
+    # WebFilters (e.g. an HttpSecurity gate with a deny-all catch-all scoped to the
+    # MAIN app's URL space) would otherwise reject /admin, /actuator/info, etc. with
+    # 401/403. Opt in with ``pyfly.management.security.enabled: true`` to also apply
+    # the app's security/session/CSRF filters to the management port.
+    management_security = str(context.config.get("pyfly.management.security.enabled", "false")).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if management_security:
+        present = {id(f) for f in filters}
+        for _cls, reg in context.container._registrations.items():
+            inst = reg.instance
+            if (
+                inst is not None
+                and id(inst) not in present
+                and isinstance(inst, WebFilter)
+                and not isinstance(inst, builtin_types)
+                and type(inst).__name__ not in _CAPTURE_FILTER_NAMES
+            ):
+                filters.append(inst)
+                present.add(id(inst))
     filters.sort(key=lambda f: get_order(type(f)))
 
     middleware = [Middleware(WebFilterChainMiddleware, filters=filters)]
