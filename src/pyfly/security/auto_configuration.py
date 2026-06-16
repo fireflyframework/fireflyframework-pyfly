@@ -27,9 +27,20 @@ except ImportError:
     BcryptPasswordEncoder = object  # type: ignore[misc,assignment]
 
 try:
-    from pyfly.security.oauth2.resource_server import JWKSTokenValidator
+    from pyfly.security.oauth2.resource_server import (
+        ClaimMappings,
+        JWKSTokenValidator,
+        discover_oidc,
+    )
 except ImportError:
     JWKSTokenValidator = object  # type: ignore[misc,assignment]
+    ClaimMappings = object  # type: ignore[misc,assignment]
+    discover_oidc = None  # type: ignore[assignment]
+
+try:
+    from pyfly.security.oauth2.properties import ResourceServerProperties
+except ImportError:
+    ResourceServerProperties = object  # type: ignore[misc,assignment]
 
 try:
     from pyfly.security.oauth2.authorization_server import AuthorizationServer, InMemoryTokenStore
@@ -134,23 +145,47 @@ class PasswordEncoderAutoConfiguration:
 @conditional_on_property("pyfly.security.oauth2.resource-server.enabled", having_value="true")
 @conditional_on_class("jwt")
 class OAuth2ResourceServerAutoConfiguration:
-    """Auto-configures a JWKSTokenValidator when a JWKS URI is provided.
+    """Auto-configures a multi-IdP :class:`JWKSTokenValidator`.
 
-    Activated when ``pyfly.security.oauth2.resource-server.enabled=true``
-    and ``pyjwt`` is installed.  Reads the JWKS endpoint, issuer, and
-    audience from configuration properties.
+    Activated when ``pyfly.security.oauth2.resource-server.enabled=true`` and
+    ``pyjwt`` is installed. Binds :class:`ResourceServerProperties` and works out
+    of the box with Keycloak, Microsoft Entra ID (v1.0 + v2.0) and AWS Cognito —
+    deriving the JWKS endpoint via OIDC discovery from ``issuer-uri`` when no
+    explicit ``jwks-uri`` is given, and mapping authorities / scopes / principal
+    from a configurable set of claim paths.
     """
 
     @bean
     @conditional_on_missing_bean(JWKSTokenValidator)
     def jwks_token_validator(self, config: Config) -> JWKSTokenValidator:
-        jwks_uri = str(config.get("pyfly.security.oauth2.resource-server.jwks-uri", ""))
-        issuer = config.get("pyfly.security.oauth2.resource-server.issuer")
-        audience = config.get("pyfly.security.oauth2.resource-server.audience")
+        props = config.bind(ResourceServerProperties)
+
+        jwks_uri = props.jwks_uri
+        issuer = props.issuer or None
+        # OIDC discovery (Spring's ``issuer-uri``): derive the JWKS endpoint and
+        # the authoritative issuer from the provider's discovery document.
+        if not jwks_uri and props.issuer_uri:
+            jwks_uri, discovered_issuer = discover_oidc(props.issuer_uri, timeout=float(props.jwks_timeout_seconds))
+            issuer = issuer or discovered_issuer
+
+        mappings = ClaimMappings(
+            principal_claims=tuple(props.principal_claim_list()),
+            authority_claims=tuple(props.authorities_claim_list()),
+            scope_claims=tuple(props.scope_claim_list()),
+            authority_prefix=props.authority_prefix,
+            attribute_claims=tuple(props.attribute_claim_list()),
+        )
+
         return JWKSTokenValidator(
             jwks_uri=jwks_uri,
-            issuer=str(issuer) if issuer is not None else None,
-            audience=str(audience) if audience is not None else None,
+            issuer=issuer,
+            audiences=props.audience_list(),
+            algorithms=props.algorithm_list(),
+            leeway=props.clock_skew_seconds,
+            validate_audience=props.validate_audience,
+            claim_mappings=mappings,
+            jwks_timeout=float(props.jwks_timeout_seconds),
+            jwks_cache_seconds=props.jwks_cache_seconds,
         )
 
     @bean
@@ -160,9 +195,11 @@ class OAuth2ResourceServerAutoConfiguration:
         # rescan adds it to the chain whenever the resource server is on (#41).
         from pyfly.web.adapters.starlette.filters.oauth2_resource_filter import OAuth2ResourceServerFilter
 
+        props = config.bind(ResourceServerProperties)
         return OAuth2ResourceServerFilter(
             token_validator=token_validator,
-            exclude_patterns=_exclude_patterns(config, "pyfly.security.oauth2.resource-server.exclude-patterns"),
+            exclude_patterns=props.exclude_pattern_list(),
+            error_mode=props.authenticate_error_mode,
         )
 
 

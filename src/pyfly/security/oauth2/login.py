@@ -301,7 +301,8 @@ class OAuth2LoginHandler:
         validator = JWKSTokenValidator(
             jwks_uri=registration.jwks_uri,
             issuer=getattr(registration, "issuer_uri", "") or None,
-            audience=registration.client_id,
+            # An OIDC id_token's audience is the client_id.
+            audiences=[registration.client_id],
         )
         try:
             claims = validator.validate(id_token)

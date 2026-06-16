@@ -27,11 +27,13 @@ from pyfly.security.oauth2.client import (
     keycloak,
 )
 from pyfly.security.oauth2.login import OAuth2LoginHandler
-from pyfly.security.oauth2.resource_server import JWKSTokenValidator
+from pyfly.security.oauth2.properties import ResourceServerProperties
+from pyfly.security.oauth2.resource_server import ClaimMappings, JWKSTokenValidator, discover_oidc
 from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
 
 __all__ = [
     "AuthorizationServer",
+    "ClaimMappings",
     "ClientRegistration",
     "ClientRegistrationRepository",
     "InMemoryClientRegistrationRepository",
@@ -39,7 +41,9 @@ __all__ = [
     "JWKSTokenValidator",
     "OAuth2LoginHandler",
     "OAuth2SessionSecurityFilter",
+    "ResourceServerProperties",
     "TokenStore",
+    "discover_oidc",
     "github",
     "google",
     "keycloak",

@@ -954,16 +954,58 @@ from pyfly.security.oauth2 import (
 
 ### OAuth2 Resource Server (JWKS)
 
-The `JWKSTokenValidator` validates RS256-signed JWTs using a remote JWKS (JSON Web Key Set) endpoint. This is used when your application acts as an **OAuth2 Resource Server** -- it receives tokens issued by an external authorization server and validates them.
+The `JWKSTokenValidator` validates JWTs against a remote JWKS (JSON Web Key Set) endpoint. Use it when your application is an **OAuth2 Resource Server** — it receives bearer tokens issued by an external authorization server and validates the signature, `iss`, `aud` and `exp` (with clock-skew leeway). It is **multi-IdP out of the box**: Keycloak, Microsoft Entra ID (v1.0 + v2.0) and AWS Cognito all work via configuration, no subclassing.
+
+#### Enable via configuration (recommended)
+
+The resource-server filter auto-wires when `pyfly.security.oauth2.resource-server.enabled=true`. It binds [`ResourceServerProperties`](#) and adds a bearer-token filter to the chain.
+
+```yaml
+pyfly:
+  security:
+    enabled: true
+    oauth2:
+      resource-server:
+        enabled: true
+        # Provide a JWKS URI directly, OR an issuer-uri for OIDC discovery:
+        issuer-uri: "https://login.microsoftonline.com/<tenant>/v2.0"   # discovers jwks-uri + issuer
+        # jwks-uri: "https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys"
+        audiences: "api://my-backend"      # comma-separated; token aud must match ANY
+        validate-audience: true            # set false for Cognito ACCESS tokens (they carry no aud)
+        algorithms: "RS256"
+        clock-skew-seconds: 60             # leeway for iat/nbf/exp (default 60)
+        # Config-driven claim mapping (dotted paths, '*' wildcard, colon-safe):
+        principal-claim-names: "oid,sub"
+        authorities-claim-names: "roles,realm_access.roles,resource_access.*.roles,groups,cognito:groups"
+        scope-claim-names: "scp,scope"     # Entra uses scp; Keycloak/Cognito use scope
+        attribute-claims: "tid,preferred_username"
+        authority-prefix: ""               # e.g. "ROLE_" / "SCOPE_" for Spring-style authorities
+        exclude-patterns: "/actuator/**,/api/v1/version"
+        authenticate-error-mode: "anonymous"   # or "401" to reject invalid tokens at the filter
+```
+
+Per-IdP quick reference:
+
+| IdP | `issuer` | Roles claim(s) | Scopes | Audience |
+|---|---|---|---|---|
+| **Keycloak** | `https://<host>/realms/<r>` | `realm_access.roles`, `resource_access.*.roles` | `scope` | client / `account` |
+| **Entra ID v2.0** | `https://login.microsoftonline.com/<tid>/v2.0` | `roles`, `groups` | `scp` | `api://…` or client GUID |
+| **Cognito (access)** | `https://cognito-idp.<region>.amazonaws.com/<pool>` | `cognito:groups` | `scope` | **none** → set `validate-audience: false` |
+
+#### Programmatic use
 
 ```python
-from pyfly.security.oauth2 import JWKSTokenValidator
+from pyfly.security.oauth2 import JWKSTokenValidator, ClaimMappings
 
 validator = JWKSTokenValidator(
     jwks_uri="https://auth.example.com/.well-known/jwks.json",
     issuer="https://auth.example.com",
-    audience="my-api",
+    audiences=["my-api"],
+    leeway=60,
+    claim_mappings=ClaimMappings(attribute_claims=("tid",)),
 )
+ctx = validator.to_security_context(token)
+# SecurityContext(user_id=..., roles=[...], permissions=[...], attributes={...})
 ```
 
 **Constructor parameters:**
@@ -971,33 +1013,20 @@ validator = JWKSTokenValidator(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `jwks_uri` | `str` | required | URL of the JWKS endpoint |
-| `issuer` | `str \| None` | `None` | Expected `iss` claim (validates if set) |
-| `audience` | `str \| None` | `None` | Expected `aud` claim (validates if set) |
+| `issuer` | `str \| None` | `None` | Expected `iss` claim (validated if set) |
+| `audiences` | `list[str] \| None` | `None` | Accepted audiences; `aud` must match any. Empty disables `aud` validation |
 | `algorithms` | `list[str] \| None` | `["RS256"]` | Allowed signing algorithms |
+| `leeway` | `int` | `60` | Clock-skew tolerance (seconds) for `iat`/`nbf`/`exp` |
+| `validate_audience` | `bool` | `True` | Skip `aud` validation when `False` (Cognito access tokens) |
+| `claim_mappings` | `ClaimMappings \| None` | multi-IdP defaults | Config-driven claim→context mapping |
 
-**Validating tokens:**
+**Claim mapping (`ClaimMappings`):** claim names are searched as **dotted paths** with a single `*` wildcard (`resource_access.*.roles`) and are colon-safe (`cognito:groups`). Defaults map authorities from `roles`, `realm_access.roles`, `resource_access.*.roles`, `groups`, `cognito:groups`; scopes from `scp`, `scope`; principal from `oid` then `sub`.
 
-```python
-# Validate and get raw payload
-payload = validator.validate(token)
-# {"sub": "user-123", "roles": ["ADMIN"], "scope": "read write", ...}
+To customise per IdP without subclassing, set the `*-claim-names` config keys. An application that needs bespoke mapping can still subclass `JWKSTokenValidator` and register it — `@conditional_on_missing_bean(JWKSTokenValidator)` backs the default off.
 
-# Validate and build SecurityContext directly
-ctx = validator.to_security_context(token)
-# SecurityContext(user_id="user-123", roles=["ADMIN"], permissions=["read", "write"])
-```
+**OIDC discovery:** set `issuer-uri` (instead of `jwks-uri`) and the framework fetches `<issuer-uri>/.well-known/openid-configuration` to learn the `jwks_uri` + `issuer`.
 
-**Claim mapping for `to_security_context()`:**
-
-| JWT Claim | SecurityContext Field | Notes |
-|---|---|---|
-| `sub` | `user_id` | Standard subject claim |
-| `roles` | `roles` | Flat roles array |
-| `realm_access.roles` | `roles` | Keycloak-style nested roles (fallback) |
-| `permissions` | `permissions` | Flat permissions array |
-| `scope` | `permissions` | Space-separated scopes (fallback, split on spaces) |
-
-**Source:** `src/pyfly/security/oauth2/resource_server.py`
+**Source:** `src/pyfly/security/oauth2/resource_server.py`, `src/pyfly/security/oauth2/properties.py`
 
 ### OAuth2 Client Registration
 
