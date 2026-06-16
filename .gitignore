@@ -41,3 +41,5 @@ docs/superpowers/
 book/dist/**
 !book/dist/pyfly-by-example.pdf
 !book/dist/pyfly-by-example.epub
+!book/dist/pyfly-by-example-es.pdf
+!book/dist/pyfly-by-example-es.epub

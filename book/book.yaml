@@ -9,12 +9,20 @@ cover_svg: "art/cover.svg"
 cover_png: "art/cover.png"
 trim_width: "7.5in"
 trim_height: "9.25in"
+manuscript_dir: "manuscript"
+output_basename: "pyfly-by-example"
+labels:
+  contents: "Contents"
 front:
   - {id: title,       file: 00-front/00-title.md,       nav: false}
   - {id: copyright,   file: 00-front/00-copyright.md,   nav: false}
+  - {id: dedication,  file: 00-front/00-dedication.md,  nav: false}
   - {id: preface,     file: 00-front/00-preface.md,     title: "Preface"}
   - {id: conventions, file: 00-front/00-conventions.md, title: "Conventions"}
 parts:
+  - title: "Quick Start"
+    chapters:
+      - {id: quickstart, file: 00-quickstart.md, num: "", title: "Build Lumen Step by Step", opener: art/openers/ch01.svg}
   - title: "Part I — Foundations"
     chapters:
       - {id: ch01, file: 01-why-pyfly.md, num: 1, title: "Why PyFly?", opener: art/openers/ch01.svg}

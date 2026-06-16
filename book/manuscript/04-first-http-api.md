@@ -27,6 +27,16 @@ manages and the web layer routes requests into. Two decorators mark it:
 stereotype; `@request_mapping` from `pyfly.web` sets the URL prefix inherited by
 every handler in the class.
 
+A few terms in that paragraph will recur throughout the chapter, so let us pin
+them down once. A **bean** is simply an object the DI container creates and
+hands out for you — you never call `WalletController()` yourself; the framework
+constructs it and keeps a single shared instance. A **stereotype** is a label
+the framework stamps on a class so it knows *what kind* of bean it is —
+`@rest_controller` stamps "this is a web controller", which is the cue the
+startup machinery uses to go looking for routes inside it. A **handler** is one
+`async def` method on the controller that answers one kind of request. With
+those three words in hand, the rest of the chapter reads as plain English.
+
 Route handlers are plain `async def` methods, each decorated with
 `@get_mapping`, `@post_mapping`, `@put_mapping`, `@patch_mapping`, or
 `@delete_mapping`. Every mapping decorator accepts an optional relative path and
@@ -191,6 +201,90 @@ on success. `@get_mapping("/{wallet_id}")` maps `GET /api/v1/wallets/{wallet_id}
 Paths are concatenated at startup; duplicate or trailing slashes are normalised
 automatically.
 
+### Building the controller, step by step
+
+If you are typing this in from scratch, the listing above lands all at once.
+Here is the same controller assembled in the order you would actually build it,
+so each decorator has a job to do before the next one arrives.
+
+**Step 1 — Create the file and the class.** Make
+`src/lumen/web/controllers/wallet_controller.py` and define an empty class
+decorated with the two class-level decorators. This is enough for PyFly to
+discover the controller at startup, even before it has a single route.
+
+```python
+from pyfly.container import rest_controller
+from pyfly.web import request_mapping
+
+
+@rest_controller
+@request_mapping("/api/v1/wallets")
+class WalletController:
+    """Digital-wallet REST API: open, deposit, inspect."""
+```
+
+**Step 2 — Add the first handler.** Give the class one `async def` method and
+mark it with a mapping decorator. `@post_mapping("", status_code=201)` maps
+`POST /api/v1/wallets` — the empty path means "the base path with nothing
+appended" — and promises a `201 Created` on success.
+
+**Step 3 — Add the remaining handlers.** Repeat the pattern: one `async def`
+per route, each with its own mapping decorator and relative path. The full set
+in Listing 4.1 gives you open, fetch, balance, deposit, and list.
+
+**Step 4 — Wire the store.** The module-level `_wallets` dictionary is the only
+"database" Part I needs. Each handler reads from and writes to it directly;
+Chapter 5 swaps it for a real repository without touching a single decorator.
+
+!!! note "Note"
+    Notice what you did *not* write: no router file mapping URLs to functions,
+    no registration call in `main.py`, no manual OpenAPI entry. The decorators
+    are the registration. At startup `ControllerRegistrar` finds every
+    `@rest_controller` bean and mounts its routes for you.
+
+!!! tip "Run it"
+    Start the server and confirm the routes are live. From the project root:
+
+    ```bash
+    uv run pyfly run --server uvicorn
+    ```
+
+    The boot banner reports the framework version and the bound port:
+
+    ```
+    :: PyFly Framework :: (v26.06.110) (Python 3.13.13)
+    ```
+
+    In a second terminal, open a wallet and read it back:
+
+    ```bash
+    curl -s -X POST localhost:8080/api/v1/wallets \
+      -H 'Content-Type: application/json' \
+      -d '{"owner_id": "alice", "currency": "EUR"}'
+    ```
+
+    You should see a `201` body with the generated id:
+
+    ```json
+    {"wallet_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
+    ```
+
+    Copy that id and fetch the wallet:
+
+    ```bash
+    curl -s localhost:8080/api/v1/wallets/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+    ```
+
+    ```json
+    {"id": "a1b2c3d4-...", "owner_id": "alice", "currency": "EUR",
+     "balance_minor": 0, "balance": 0.0, "created_at": "2026-06-15T10:30:00+00:00"}
+    ```
+
+**What just happened.** Two class-level decorators registered the controller and
+fixed its URL prefix; one method-level decorator turned an `async def` into a
+live route; the framework did the routing, JSON serialisation, and status-code
+handling. You wrote business intent, not plumbing.
+
 ::: figure art/figures/04-request.svg | Figure 4.1 — How a request flows to your handler.
 
 !!! spring "Spring parity"
@@ -213,8 +307,15 @@ from**.
 
 This approach makes handler signatures self-documenting. The parameter list of
 any handler tells you exactly which parts of the request it reads and what types
-it expects — without opening a router file or consulting the docs. The
-`ParameterResolver` inspects each handler signature at startup and builds a
+it expects — without opening a router file or consulting the docs.
+
+In plain terms, **binding** is the framework copying a piece of the incoming
+request into one of your handler's parameters, converting it to the type you
+asked for along the way. You declare *what you want and where it comes from* with
+a type annotation; PyFly does the extracting, parsing, and type-coercion before
+your method body runs.
+
+The `ParameterResolver` inspects each handler signature at startup and builds a
 resolution plan, so there is zero overhead per request for introspection. Five
 binding types cover every part of an HTTP request:
 
@@ -262,6 +363,21 @@ admit `None`. A missing required `QueryParam` raises `InvalidRequestException`
 (HTTP 400). To make a parameter optional, give it a default value or annotate it
 `QueryParam[str | None]`.
 
+!!! tip "Run it"
+    With the server running and at least one wallet opened, exercise the
+    `list_wallets` handler — first with no filter, then with the optional
+    `owner_id` query parameter:
+
+    ```bash
+    curl -s 'localhost:8080/api/v1/wallets'
+    curl -s 'localhost:8080/api/v1/wallets?owner_id=alice'
+    ```
+
+    The first returns every wallet; the second returns only Alice's. Because
+    `owner_id` has a default of `None`, omitting it is perfectly valid — no 400.
+    The path variable behaves the same way in reverse: ask for a wallet id that
+    does not exist and you get a clean `404`, which the next section dissects.
+
 ### Body[T] — request body
 
 Deserialises the JSON (or XML) request body. When `T` is a Pydantic `BaseModel`,
@@ -300,6 +416,13 @@ query parameter.
     `T | None` = optional. The rule is uniform across `QueryParam`, `Header`,
     and `Cookie` — you learn it once, it applies everywhere.
 
+**What just happened.** You learned the whole binding vocabulary as five
+parallel annotations — `PathVar`, `QueryParam`, `Body`, `Header`, `Cookie` —
+that all read like English in a handler signature and all share one
+required-vs-optional rule. The framework reads the annotation, pulls the value
+from the right place, coerces it to your type, and hands you a ready-to-use
+argument. There is nothing else to wire.
+
 ---
 
 ## Validation with Valid[T]
@@ -315,10 +438,20 @@ constraints for free. `Valid[T]` is PyFly's marker that converts a Pydantic
 `ValidationError` into a **structured 422 response** instead of letting it
 bubble up to a 500.
 
+A quick gloss before the code. A **DTO** — Data Transfer Object — is a small
+class that describes the *shape* of data crossing the wire: what fields a request
+must carry, or what fields a response will return. Lumen's DTOs are plain
+Pydantic models, so the field declarations double as validation rules.
+**Validation** is the act of checking incoming data against those rules and
+rejecting it cleanly if it does not fit — before any of your handler code runs.
+
 ### Pydantic DTOs for Lumen
 
 The request and response DTOs used in Lumen's wallet API live under
-`lumen/interfaces/dtos/v1/` — one file per DTO. Here they are in full.
+`lumen/interfaces/dtos/v1/` — one file per DTO. The directory name encodes a
+convention worth noting: `interfaces` holds the contracts the outside world sees,
+and `v1` versions them so a future `v2` payload shape can live alongside the old
+one without breaking existing clients. Here they are in full.
 
 ::: listing lumen/interfaces/dtos/v1/open_wallet_request.py | Listing 4.2a — OpenWalletRequest: wallet-opening payload
 from __future__ import annotations
@@ -467,6 +600,21 @@ Content-Type: application/json
 {"owner_id": ""}
 ```
 
+!!! tip "Run it"
+    With the server running, send the bad payload and watch for the `422`:
+
+    ```bash
+    curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8080/api/v1/wallets \
+      -H 'Content-Type: application/json' \
+      -d '{"owner_id": ""}'
+    ```
+
+    The `-w '\nHTTP %{http_code}\n'` flag prints the status line after the body,
+    so you can confirm it is `HTTP 422` — not the `201` a valid request returns,
+    and not a `500`. The body is the structured envelope shown below. Try a
+    second variant — `-d '{"owner_id": "alice", "currency": "XYZ"}'` — to see the
+    `Currency` enum reject an unknown code with the same envelope shape.
+
 The response is HTTP 422:
 
 ```json
@@ -514,6 +662,13 @@ Use `Valid[Body[T]]` for every endpoint that accepts user input.
     `async def open_wallet(self, request: Valid[Body[OpenWalletRequest]])`. The
     422 response shape (field-level errors with location paths) mirrors Spring
     Boot 3's `MethodArgumentNotValidException` payload.
+
+**What just happened.** The validation rules never left the DTO. `Field(min_length=1)`
+on `owner_id`, the `Currency` enum, and `Field(gt=0)` on `amount` are the entire
+specification — and wrapping the body in `Valid` turned any breach of those rules
+into a predictable, machine-readable `422` before your handler ran. You wrote
+constraints once, on the data; the framework enforced them everywhere the data
+arrives.
 
 ---
 
@@ -596,10 +751,31 @@ response:
 }
 ```
 
+!!! tip "Run it"
+    Ask for a wallet that was never opened and watch the framework turn your
+    `raise` into a clean `404`:
+
+    ```bash
+    curl -s -w '\nHTTP %{http_code}\n' localhost:8080/api/v1/wallets/w-999
+    ```
+
+    The status line reads `HTTP 404` and the body is the envelope above, with
+    `"code": "WALLET_NOT_FOUND"` and your `context` carried through verbatim. You
+    never wrote a status code in `get_wallet` — `ResourceNotFoundException` maps
+    to 404 for you. Note the `transaction_id` in the response; copy it and grep
+    your server log to find the exact request.
+
 The `transaction_id` is free: the `TransactionIdFilter` assigns a UUID to every
 request and threads it through all error responses. Clients log it; support uses
 it to find the corresponding server log entry. A single ID is all that is needed
 to reconstruct what happened.
+
+**What just happened.** Your handler expressed a domain fact — "this wallet does
+not exist" — by raising a typed exception with a message, a code, and some
+context. The web layer's global handler did the HTTP translation: it picked the
+status code from the exception's class, wrapped everything in the standard error
+envelope, and stamped a `transaction_id`. HTTP concerns stayed out of your
+business code entirely.
 
 !!! note "RFC 7807"
     The default error envelope — `{"error": {...}}` — is PyFly's own format. If
@@ -660,16 +836,41 @@ As soon as Lumen starts, three documentation endpoints are live at no cost:
 The `OpenAPIGenerator` introspects `ControllerRegistrar`'s route metadata —
 every path, method, path variable, query parameter, and request/response schema
 (from Pydantic model introspection) — and assembles the spec at startup. You
-never write the spec by hand. Disable it in production with
-`pyfly.web.docs.enabled: false` in `pyfly.yaml`.
+never write the spec by hand. The docs endpoints live on the **application**
+port (8080) alongside your API; they are on by default (`pyfly.web.docs.enabled:
+true`). Disable them in production with `pyfly.web.docs.enabled: false` in
+`pyfly.yaml`.
 
-!!! tip "Tip"
-    Open `http://localhost:8080/docs` while Lumen is running. You will see
+!!! note "Note"
+    Do not confuse the docs endpoints with the **admin dashboard**. `/docs`,
+    `/redoc`, and `/openapi.json` describe *your* API and serve on the app port
+    (8080). The PyFly Admin Dashboard (`/admin`) and the actuator health
+    endpoints (`/actuator/*`) describe the *running process* and serve on the
+    separate **management** port (`pyfly.management.server.port`, default 9090),
+    introduced in Chapter 3. They are two different listeners with two different
+    audiences.
+
+!!! tip "Run it"
+    With the server running, fetch the raw spec and confirm your routes are in
+    it:
+
+    ```bash
+    curl -s localhost:8080/openapi.json | head -c 200
+    ```
+
+    You will see the OpenAPI 3.0 header and the start of the `paths` map. Then
+    open `http://localhost:8080/docs` in a browser. You will see
     `POST /api/v1/wallets`, `GET /api/v1/wallets/{wallet_id}`,
     `POST /api/v1/wallets/{wallet_id}/deposit`, and the others — each with the
     correct request and response schemas derived from your Pydantic models, and
-    the `owner_id` query parameter on `list_wallets` already documented with
-    its type and default.
+    the `owner_id` query parameter on `list_wallets` already documented with its
+    type and default. Click "Try it out" on `POST /api/v1/wallets` to open a
+    real wallet straight from the browser.
+
+**What just happened.** You did not write a line of API documentation, yet a
+complete, interactive, always-accurate spec appeared. The same route and model
+metadata that drives request handling also drives the docs, so the two can never
+drift apart.
 
 ---
 
@@ -681,8 +882,10 @@ different trade-offs in throughput, HTTP version support, OS compatibility, and
 ecosystem tooling. Locking an application to a single server at the framework
 level forces you to accept those trade-offs permanently.
 
-PyFly does not hardcode an ASGI server. At startup, `ServerAutoConfiguration`
-runs a cascading selection based on what is installed:
+An **ASGI server** is the process that actually accepts TCP connections, parses
+HTTP, and calls your application — the layer between the operating system's
+socket and your handlers. PyFly does not hardcode one. At startup,
+`ServerAutoConfiguration` runs a cascading selection based on what is installed:
 
 | Priority | Server | Characteristic |
 |---|---|---|
@@ -699,15 +902,31 @@ pyfly run --server uvicorn --reload      # development: auto-reload
 pyfly run --server granian --workers 4  # production: multi-worker
 ```
 
+!!! tip "Run it"
+    For day-to-day development, run with auto-reload so the server restarts on
+    every save:
+
+    ```bash
+    uv run pyfly run --reload
+    ```
+
+    PyFly logs the chosen server and the bound port at startup. Because
+    `--reload` requires a built-in file watcher, PyFly selects **Uvicorn** for
+    reload mode regardless of the cascade order. Edit a handler, save, and watch
+    the log report the restart — then re-run any `curl` from earlier and see your
+    change live without stopping the process.
+
 The event loop is pluggable too: `uvloop` (Linux/macOS) and `winloop` (Windows)
 are selected automatically when installed, delivering a 2–4× throughput
 improvement over the asyncio default. Install them with `uv add "pyfly[web-fast]"`.
 
 !!! tip "Tip"
     For development, `pyfly run --reload` is all you need — it picks the best
-    available server and event loop automatically. For production,
-    `pyfly run --server granian --workers 0` resolves `0` to the CPU count,
-    maximising throughput. CLI flags always override `pyfly.yaml`.
+    available server and event loop automatically. For production, pass an
+    explicit positive worker count to scale across cores —
+    `pyfly run --server granian --workers 4`, as in the example above. A `0`
+    or negative `--workers` value resolves to a single worker, so multi-worker
+    is always an explicit opt-in. CLI flags always override `pyfly.yaml`.
 
 ---
 
@@ -740,6 +959,17 @@ built here carry forward intact.
 ---
 
 ## Try it yourself {.exercises}
+
+Each exercise is small and self-contained. After every change, restart with
+`uv run pyfly run --reload` and re-run the suggested `curl` to confirm the
+behaviour. If you have the dev dependencies installed, you can also run the
+project's test suite at any point to make sure nothing regressed:
+
+```bash
+uv run --extra dev pytest
+```
+
+You should see a row of passing dots and a `passed` summary line.
 
 1. **Add a `DELETE /api/v1/wallets/{wallet_id}` endpoint.** Remove the wallet
    from `_wallets` and return 204 No Content. Raise `ResourceNotFoundException`

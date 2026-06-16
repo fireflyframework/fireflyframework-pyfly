@@ -12,6 +12,23 @@ maps the persistence row, and a CQRS handler that depends on both —
 and let PyFly wire them together from nothing but type hints.
 No factories, no manual `new`, no glue code.
 
+This chapter is hands-on. We will build each piece in small,
+numbered steps, and after every milestone there is a **Run it**
+checkpoint that shows the exact command to type and the output you
+should see on screen. If your output matches, you are on track; if
+it does not, the gap tells you precisely what to fix. You are
+following along inside `samples/lumen` with PyFly **v26.6.110**
+installed (`uv sync` from the Lumen directory pulls it in).
+
+!!! note "New term: container"
+    Throughout the chapter we talk about *the container*. A
+    **container** is simply the object PyFly creates at startup that
+    knows how to build, connect, and hand out all your application's
+    objects. You never construct it yourself — when you run the app,
+    PyFly stands the container up, fills it with your beans, and keeps
+    it alive until shutdown. Think of it as a smart warehouse that
+    both stores your objects and assembles them on demand.
+
 Before a single line of Lumen code appears, it is worth pausing on
 *why* that matters. In a conventional Python project you would write
 something like:
@@ -43,6 +60,15 @@ to manage. A **bean** is any object the container creates, wires, and
 owns. You make a class visible to the container by applying a
 **stereotype decorator** — a thin annotation that registers the class
 and signals its architectural role.
+
+!!! note "New terms: bean and stereotype"
+    A **bean** is just an instance the container owns — it builds it,
+    supplies its dependencies, and (usually) keeps a single shared copy
+    around. A **stereotype** is the decorator you put on a class to say
+    "container, this is yours, please manage it." The word *stereotype*
+    is borrowed from Spring; it simply means "a labelled role." Putting
+    `@service` on a class is the whole act of registration — there is no
+    separate config file to edit.
 
 PyFly ships five stereotypes:
 
@@ -117,20 +143,118 @@ found?" confusion when adding new subpackages. `@enable_domain_stack`
 activates the CQRS, transactional engine, event sourcing, relational
 data, and rule-engine auto-configurations in a single line.
 
+Read that listing as four decisions:
+
+- **Step 1 — name the application.** `name="lumen"` and
+  `version="1.0.0"` become the identity the startup banner and the
+  `/actuator/info` endpoint report. (These are the *application's* name
+  and version; the framework version is separate — v26.6.110 here.)
+- **Step 2 — describe it.** `description=...` is human-facing metadata
+  surfaced in the generated API docs.
+- **Step 3 — list the packages to scan.** Every entry in
+  `scan_packages` is a dotted Python path the container will import and
+  inspect. If a class with a stereotype lives in a package *not* on
+  this list, the container never sees it.
+- **Step 4 — enable the stack.** `@enable_domain_stack` switches on the
+  domain-tier auto-configurations so the CQRS buses, the transactional
+  session, and the relational data layer all exist before your beans
+  are wired.
+
+!!! tip "Tip: scan the package, not the class"
+    `scan_packages` entries are *package* paths (`lumen.web.controllers`),
+    never individual module or class paths. The container walks the
+    package and discovers every stereotype-decorated class inside it.
+    When you add a new handler under `lumen.core.services.wallets`, it is
+    picked up automatically — no edit to `scan_packages` needed. You only
+    touch this list when you introduce a brand-new subpackage.
+
+**Run it.** From the Lumen project root, boot the application and watch
+the container assemble itself:
+
+```bash
+cd samples/lumen
+uv run pyfly run --server uvicorn
+```
+
+You should see the banner followed by structured startup lines — the
+container reporting exactly what it scanned and wired:
+
+```text
+:: PyFly Framework :: (v26.6.110) (Python 3.12.13)
+
+pyfly.core: starting_application | app=lumen version=1.0.0
+pyfly.core: scanned_package | package=lumen.models.repositories beans_found=1
+pyfly.core: scanned_package | package=lumen.core.services.wallets beans_found=7
+pyfly.core: scanned_package | package=lumen.core.services.transfers beans_found=2
+pyfly.core: scanned_package | package=lumen.core.services.listeners beans_found=1
+pyfly.core: scanned_package | package=lumen.web.controllers beans_found=1
+pyfly.core: bean_summary | total=137 services=10 repositories=1 controllers=4 configurations=19
+pyfly.core: server_started | server=uvicorn host=0.0.0.0 port=8080 workers=1
+pyfly.core: application_started | app=lumen startup_time_s=0.143 beans_initialized=137
+```
+
+The `scanned_package` lines are `scan_packages` doing its job: one line
+per entry, each reporting how many beans it found. The final
+`application_started` line — the equivalent of Spring Boot's "Started
+Application in N seconds" — is your signal that the context booted
+cleanly. Press `Ctrl-C` to stop the server.
+
+!!! note "New term: the management port"
+    Two ports appear at startup. Your application's HTTP API listens on
+    `pyfly.server.port` (default **8080**). Operational endpoints — the
+    health check, info, and the admin dashboard — listen separately on
+    the **management port** `pyfly.management.server.port` (default
+    **9090**), which is open and unauthenticated by default. You will
+    not touch either in this chapter, but it is worth knowing why two
+    ports light up. (The older `pyfly.web.port` key was removed in
+    v26.6.102; always use `pyfly.server.port` now.)
+
+**What just happened.** A single command did a lot. PyFly loaded
+`pyfly.yaml`, imported each package in `scan_packages`, found every
+stereotype-decorated class, asked the container to build them in
+dependency order, and reported the totals — 137 beans, of which most
+are framework auto-configuration beans and only a handful are yours so
+far. From this point on, the rest of the chapter is about *adding* to
+that bean count: an entity, a repository, and a command handler, each
+discovered by exactly this mechanism.
+
 !!! spring "Spring parity"
     `scan_packages` is the equivalent of Spring's
     `@ComponentScan(basePackages = {...})`. The semantics are identical:
     list every subpackage you want the framework to introspect, and it
-    will register everything it finds.
+    will register everything it finds. The `application_started` log line
+    mirrors Spring Boot's "Started Application in N seconds (process
+    running for M)" startup summary.
 
 ### The entity and the repository
 
 Lumen stores wallets in a relational database. Two classes carry this
 responsibility: `WalletEntity` (the persistence row) and
-`WalletRepository` (the data-access bean).
+`WalletRepository` (the data-access bean). We will build them in order:
+first the row shape, then the data-access bean that reads and writes it.
+
+!!! note "New term: entity"
+    An **entity** is the in-database shape of one record — here, one
+    wallet, stored as one row in a `wallets` table. It is deliberately
+    plain: just typed columns, no behaviour. (Lumen keeps the *rich*
+    domain object, the `Wallet` aggregate, separate; you will meet it in
+    Chapter 6. For now, the entity is simply how a wallet is written to
+    and read from the database.)
 
 **The entity.** `WalletEntity` is a plain SQLAlchemy-mapped class that
-inherits the framework's `Base`:
+inherits the framework's `Base`. Build it field by field:
+
+- **Step 1 — inherit `Base`.** Subclassing PyFly's declarative `Base`
+  is what enrols the class in the ORM's metadata so the framework can
+  create its table.
+- **Step 2 — name the table.** `__tablename__ = "wallets"` is the SQL
+  table this class maps to.
+- **Step 3 — declare the primary key.** `id` is a `str` column marked
+  `primary_key=True` — the wallet keeps its own domain id (`wlt-…`)
+  rather than a generated number.
+- **Step 4 — declare the remaining columns.** `owner_id`, `currency`,
+  `balance_minor` (the balance in minor units — cents — so there is
+  never a floating-point rounding bug), and a `created_at` timestamp.
 
 ::: listing lumen/models/entities/v1/wallet_orm.py | Listing 2.2a — WalletEntity: the persistence row
 from __future__ import annotations
@@ -166,6 +290,33 @@ class WalletEntity(Base):
 Inheriting `Base` (PyFly's declarative base) registers the `wallets`
 table in `Base.metadata`; the framework's engine lifecycle creates it
 on startup. No further wiring is needed.
+
+**Run it.** With `ddl-auto: create` set in `pyfly.yaml`, the framework
+builds the schema from your mapped entities the moment the app boots.
+Start the app again and look for the data-layer lines:
+
+```bash
+uv run pyfly run --server uvicorn
+```
+
+```text
+pyfly.data.relational.auto_configuration: Initializing database schema (ddl-auto=create)
+pyfly.data.relational.auto_configuration: Database schema initialized (1 tables)
+```
+
+`1 tables` is your `wallets` table — created purely because
+`WalletEntity` inherits `Base`. There is no migration script to run and
+no `CREATE TABLE` to write by hand. (Lumen uses SQLite by default, so
+the database is just a `lumen.db` file in the project directory.)
+
+!!! note "New term: repository"
+    A **repository** is the object your code talks to when it wants to
+    load or save entities. Instead of writing SQL, you call methods like
+    `find_by_id` or `save`. PyFly's `Repository` base class *generates*
+    those methods for you from the entity and key types, so the
+    repository you write is mostly empty — you declare it, and the
+    framework fills in the implementation. (CRUD, used below, just stands
+    for Create, Read, Update, Delete — the four basic data operations.)
 
 **The repository.** `WalletRepository` subclasses the framework's
 generic `Repository[WalletEntity, str]`. The two type arguments tell
@@ -233,18 +384,38 @@ maintain: **the framework supplies and injects the implementation;
 you depend on the repository class itself by type.**
 
 The three extra methods show the extension points the framework
-exposes on top of the inherited CRUD:
+exposes on top of the inherited CRUD. Look at them one at a time:
 
-- `find_by_owner_id` is a **derived query** — the
-  `RepositoryBeanPostProcessor` parses the method name and compiles
-  a real `SELECT … WHERE owner_id = :owner_id` at startup; you write
-  the stub (`...`) and the framework fills it in.
-- `find_rich` is a **Specification query** — it composes a reusable
-  `Specification` predicate and runs it with pagination and sorting
-  via the inherited `find_all_by_spec_paged`.
-- `upsert` is a thin convenience over `session.merge` so a command
-  handler can persist an entity whether it is new or already exists
-  with a single call.
+- **Step 1 — a derived query.** `find_by_owner_id` is a **derived
+  query**: the `RepositoryBeanPostProcessor` (a startup component that
+  edits beans after they are built) parses the method *name* and
+  compiles a real `SELECT … WHERE owner_id = :owner_id`. You write only
+  the stub body (`...`); the framework supplies the SQL. The naming
+  convention is the API — `find_by_<column>` becomes
+  `WHERE <column> = ?`.
+- **Step 2 — a Specification query.** `find_rich` composes a reusable
+  `Specification` predicate (here, `balance_at_least`) and runs it with
+  pagination and sorting via the inherited `find_all_by_spec_paged`.
+  Specifications are how you build a composable, type-safe `WHERE`
+  clause when a method name would get unwieldy.
+- **Step 3 — an upsert.** `upsert` is a thin convenience over
+  `session.merge` so a command handler can persist an entity whether it
+  is new (INSERT) or already exists (UPDATE) with a single call. Because
+  the wallet owns its own id, both cases key on the same primary key.
+
+**What just happened.** You declared a repository whose body is almost
+entirely empty, yet it now exposes a complete async CRUD surface plus
+one derived query, one specification query, and an upsert. The
+`@repository` stereotype registered it as a bean; the framework read the
+`Repository[WalletEntity, str]` base, generated the implementation, and
+made it injectable by type. You wrote intent; PyFly wrote the plumbing.
+
+!!! tip "Tip: confirm the repository is registered"
+    Re-run `uv run pyfly run --server uvicorn` and look at the
+    `bean_summary` line: `repositories=1`. That single registered
+    repository is your `WalletRepository`. If you ever add a second
+    repository and it does not appear in this count, the usual cause is
+    that its package is missing from `scan_packages`.
 
 !!! spring "Spring parity"
     `@service`, `@component`, `@repository`, and `@configuration` map
@@ -267,6 +438,14 @@ never call constructors yourself. You declare what a class *needs* as
 them in automatically. This is **constructor injection**, and it is the
 recommended approach for all mandatory dependencies.
 
+!!! note "New term: injection"
+    **Injection** is the act of the container *handing* a class the
+    objects it depends on, rather than the class building them itself.
+    With *constructor* injection, you simply list the dependencies as
+    typed `__init__` parameters; the container reads those type hints and
+    passes in matching beans when it builds the object. The class never
+    says *how* to obtain its dependencies — only *what* it needs.
+
 The mental model is a simple wishlist: list the types you need; the
 container delivers the right instances. If a dependency does not exist
 at startup, you get a clear `NoSuchBeanError` immediately — not a
@@ -280,8 +459,25 @@ decorators: `@command_handler` (or `@query_handler`) **stacked on
 class as a bean; the CQRS decorator adds only routing metadata
 (`__pyfly_command_type__` or `__pyfly_query_type__`) so the
 command/query bus can dispatch to the right handler. Without `@service`,
-the container never sees the class and the bus raises `NoHandlerError`
-at dispatch time.
+the container never sees the class and the command bus raises
+`CommandHandlerNotFoundException` at dispatch time (the query bus raises
+`QueryHandlerNotFoundException` for a missing query handler).
+
+Before reading the listing, here is the shape of what you are about to
+write, step by step:
+
+- **Step 1 — register the bean.** Put `@service` directly on the class.
+  This is the line that makes the container manage it.
+- **Step 2 — add routing metadata.** Stack `@command_handler` *above*
+  `@service`. It reads `CommandHandler[DepositFunds, int]` and records
+  "this bean handles `DepositFunds` commands."
+- **Step 3 — declare dependencies in `__init__`.** List the repository,
+  the event publisher, and the session factory as typed parameters.
+  This single signature is the complete wiring specification — the
+  container reads it and supplies all three.
+- **Step 4 — write the business logic in `do_handle`.** Wrap it in
+  `@transactional()` so the whole load-mutate-save sequence is one
+  committed unit of work.
 
 The `DepositFundsHandler` shows the pattern in full:
 
@@ -397,6 +593,35 @@ The container resolves dependencies **recursively**. When it constructs
 `DepositFundsHandler` it also constructs `WalletRepository` (the
 framework-generated CRUD bean), the `EventPublisher`, and the
 `async_sessionmaker` — none of which the handler needs to know about.
+
+**What just happened.** You declared a handler that needs three
+collaborators and wrote not one line of wiring code. The container read
+the `__init__` type hints, built each dependency (and *their*
+dependencies, recursively), and handed the finished object to whoever
+asks for `DepositFundsHandler`. Swapping the in-memory event bus for
+Kafka later will not touch this class at all — it asks for an
+`EventPublisher` and is content with whatever the container provides.
+
+**Run it.** The surest way to confirm the whole graph wires together is
+the integration test that boots the *real* application context and
+drives a deposit through the command bus. From the Lumen project root:
+
+```bash
+uv run --extra dev pytest tests/test_app_context_integration.py -q
+```
+
+```text
+.                                                                        [100%]
+1 passed in 0.19s
+```
+
+That single dot is the container proving itself: it scanned the
+packages, generated the repository, resolved the `EventPublisher` and
+session factory, constructed `DepositFundsHandler` with all three
+injected, and ran an `open → deposit → withdraw → reload` lifecycle
+end to end. If a dependency were missing, this test would fail at
+*startup* with a `NoSuchBeanError` long before any assertion ran — which
+is exactly the early, loud failure the container is designed to give you.
 
 ::: figure art/figures/02-di.svg | Figure 2.1 — The container injects dependencies from type hints.
 
@@ -581,10 +806,27 @@ as a single factory. For all of these situations, PyFly provides the
 participates fully in the container's resolution and lifecycle
 machinery.
 
+!!! note "New terms: @configuration and @bean"
+    A `@configuration` class is a place to put **factory methods**. A
+    `@bean` method is one such factory: the container *calls* it during
+    startup and registers whatever it returns as a bean. You reach for
+    this pattern when a dependency cannot simply be stereotyped — for
+    example a third-party object you do not own, or one that needs custom
+    construction. The method's **return type annotation** is what the
+    container uses to register the result, so it is mandatory.
+
 A `@configuration` class acts as a factory. Its `@bean` methods are
 called during the startup sequence, and each method's return value is
 registered as a bean whose type comes from the method's return
-annotation:
+annotation. Read the listing below in two steps:
+
+- **Step 1 — mark the class `@configuration`.** This tells the context
+  to scan it for `@bean` methods before any stereotype beans are built.
+- **Step 2 — write a `@bean` method with a return annotation.**
+  `event_publisher(self) -> EventPublisher` constructs an
+  `InMemoryEventBus` and — because the annotation says `EventPublisher`
+  — registers it *as* an `EventPublisher`. Anything that asks for an
+  `EventPublisher` now receives this instance.
 
 ::: listing lumen/infra_config.py | Listing 2.4 — Producing an EventPublisher bean via @configuration
 from pyfly.container import configuration, bean
@@ -613,6 +855,17 @@ instance without knowing or caring about the concrete type.
 Swapping to a Kafka adapter for production means replacing
 `InMemoryEventBus()` with `KafkaEventPublisher(settings.kafka_url)` in
 a single method. The rest of the codebase is untouched.
+
+!!! note "Note: how Lumen actually gets its EventPublisher"
+    The listing above shows the `@configuration` / `@bean` pattern you
+    would write to hand-build a bean. Lumen itself does *not* need this
+    for its event bus: setting `eda.provider: memory` in `pyfly.yaml`
+    asks the framework's EDA auto-configuration to register an
+    `EventPublisher` bean for you (the same `InMemoryEventBus` you see
+    in the `events_is InMemoryEventBus` wiring at startup). That is why
+    `DepositFundsHandler` can simply ask for an `EventPublisher` — the
+    auto-configuration already supplied one. Reach for `@bean` when you
+    need a bean the framework does *not* provide out of the box.
 
 `@bean` methods can also declare parameters; the container resolves
 them automatically:
@@ -759,6 +1012,26 @@ direct call for synchronous methods.
 `ApplicationContext.stop()` before the bean is discarded. Beans are
 destroyed in **reverse** initialisation order, so a listener started
 after the repository is stopped before it.
+
+**Run it.** Add the bean above to a scanned package, then start and stop
+the app to watch both hooks fire. The `@post_construct` line appears
+during the startup pass; pressing `Ctrl-C` triggers the
+`@pre_destroy` line:
+
+```bash
+uv run pyfly run --server uvicorn
+```
+
+```text
+... wallet_audit_listener_ready          # @post_construct, during startup
+^C
+... shutting_down | app=lumen
+... wallet_audit_listener_shutting_down   # @pre_destroy, during shutdown
+```
+
+Seeing `..._ready` *before* `application_started` confirms the hook runs
+as part of the eager startup pass; seeing `..._shutting_down` after the
+`Ctrl-C` confirms the symmetric teardown.
 
 ::: figure art/figures/02-lifecycle.svg | Figure 2.2 — A bean's lifecycle.
 

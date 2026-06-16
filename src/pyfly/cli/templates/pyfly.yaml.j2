@@ -8,7 +8,6 @@ pyfly:
 
 {% if has_web or has_fastapi or archetype in ("web-api", "fastapi-api", "web", "hexagonal", "core") %}
   web:
-    port: 8080
 {% if has_fastapi or archetype == "fastapi-api" %}
     adapter: fastapi
 {% else %}
@@ -19,6 +18,9 @@ pyfly:
 {% if has_web or has_fastapi %}
   server:
     type: "auto"
+    # The application HTTP port (Spring `server.port` parity). The legacy
+    # `pyfly.web.port` was removed in v26.06.102; use `pyfly.server.port`.
+    port: 8080
     event-loop: "auto"
     workers: 0
 {% if has_granian %}

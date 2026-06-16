@@ -10,6 +10,11 @@ Lumen's wallet is now a first-class citizen of the domain. The `Wallet` aggregat
 
 By the end of this chapter Lumen's controller dispatches commands and queries instead of calling the service directly. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` travel the command path; `GetWallet`, `GetBalance`, `ListWallets`, and `ListRichWallets` travel the query path. The `Wallet` aggregate you built in Chapter 6 remains untouched — CQRS does not replace the domain model; it is the delivery mechanism for instructions to it.
 
+!!! note "New jargon, in plain terms"
+    A **bus** here is not hardware — it is a single object you hand a message to, and it figures out which handler should run. A **handler** is one small class that does the work for exactly one message type. A **DTO** (data transfer object) is a plain shape — id, owner, balance — that you put on the wire as JSON; it is deliberately separate from your rich domain object. A **projection** is a read-only slice of your data shaped for one specific view. You will meet each of these as we build, one piece at a time, so do not worry if they feel abstract right now.
+
+This chapter is built around PyFly **v26.6.110**, and every listing is taken verbatim from the Lumen sample under `samples/lumen/src/lumen`. We will go gently: build the commands first, then their handlers, then the queries, then wire everything into the controller — running the app and the tests at each milestone so you can see the pieces come alive before the next one is added.
+
 ---
 
 ## Why separate reads from writes
@@ -36,7 +41,12 @@ Before writing a single line of handler code, name your system's intentions. In 
 
 A command is a frozen dataclass that inherits from `Command[R]`, where `R` is the type the handler returns. The generic parameter is documentation and a type-checker hint; the bus does not enforce it at runtime.
 
-Lumen's commands live in three separate files under `lumen/core/services/wallets/`, one per intent. Here is the first:
+!!! note "What is `Command[R]`?"
+    The `[R]` in `Command[R]` is a *generic type parameter* — a placeholder for "whatever this command returns". `OpenWallet(Command[str])` says "sending me gives you back a `str`" (the new wallet id). `DepositFunds(Command[int])` says "sending me gives you back an `int`" (the new balance). Your editor and type checker use this to catch mistakes; at runtime the bus simply returns whatever the handler returned.
+
+Lumen's commands live in three separate files under `lumen/core/services/wallets/`, one per intent. We will build them one at a time.
+
+**Step 1 — Write the `OpenWallet` command.** Create `open_wallet_command.py`. It carries the two facts needed to open a wallet — who owns it and which currency it holds — and a `validate()` hook that rejects a blank owner before the bus ever looks for a handler.
 
 ::: listing lumen/core/services/wallets/open_wallet_command.py | Listing 7.1 — OpenWallet: a frozen command with built-in validation
 from __future__ import annotations
@@ -62,7 +72,7 @@ class OpenWallet(Command[str]):
         return ValidationResult.success()
 :::
 
-And the deposit and withdrawal commands:
+**Step 2 — Write the `DepositFunds` and `WithdrawFunds` commands.** Each carries a `wallet_id` to target and an `amount` in minor units, and validates that the id is present and the amount is positive. They are deliberately near-identical twins — same shape, opposite direction.
 
 ::: listing lumen/core/services/wallets/deposit_funds_command.py | Listing 7.2 — DepositFunds: amount in minor units, no currency field
 from __future__ import annotations
@@ -128,6 +138,9 @@ Four design choices are baked into every command:
 
 - **Imperative-mood naming**: `DepositFunds`, not `WalletDeposit` or `DepositFundsCommand`. This makes the command log read like a business audit trail — a sequence of things that *happened* — rather than a list of technical operations.
 
+!!! note "What just happened"
+    You now have three small files, each describing *one thing the system can do*, with no logic beyond a couple of field checks. There are no handlers yet — these commands do nothing on their own. That is the point: a command is an envelope, not the worker who opens it. Next you will write the workers (the handlers) that actually carry out each intent.
+
 ### Implementing a command handler
 
 A command handler inherits from `CommandHandler[C, R]` and implements exactly one method: `do_handle`. You write the *what*; the bus wraps it with the *how*.
@@ -136,7 +149,10 @@ A command handler inherits from `CommandHandler[C, R]` and implements exactly on
 
 **`@transactional()` turns `do_handle` into a committed unit of work.** Command handlers inject `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. When `@transactional()` runs `do_handle` it opens a fresh session from that factory, swaps it onto the repository for the duration of the call, commits on success, and rolls back on any exception. Without `@transactional()` the framework's shared session only flushes — the write survives within the request but is never committed to the database.
 
-Here is `OpenWalletHandler`:
+!!! note "Flush vs. commit, in plain terms"
+    A **flush** pushes your pending changes into the database connection so later queries in the *same* session can see them — but they are still inside an open transaction that can be rolled back. A **commit** makes them permanent. Without `@transactional()` your deposit would flush (visible mid-request) but never commit (gone after the request). The decorator is what makes the change stick.
+
+**Step 3 — Write `OpenWalletHandler`.** Now build the worker for the first command. Create `open_wallet_handler.py`, stack `@command_handler` over `@service`, inject the repository, the event publisher, and the session factory, and implement the single `do_handle` method.
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 7.4 — OpenWalletHandler: @transactional() unit of work + upsert
 from __future__ import annotations
@@ -190,7 +206,7 @@ Walk through `do_handle` step by step. `f"wlt-{uuid4()}"` generates a stable pre
 
 Note the constructor requirement: `super().__init__()` is mandatory on `CommandHandler`. Skip it and the base-class bookkeeping — correlation context, lifecycle hooks — is never initialized. The repository, `EventPublisher`, and `session_factory` are all injected by the DI container from type hints; no factory configuration is needed.
 
-Here are the deposit and withdrawal handlers:
+**Step 4 — Write the deposit and withdrawal handlers.** These two add one move that `OpenWalletHandler` did not need: they *load* an existing wallet before acting on it. The shape is the same in both, differing only in whether they call `wallet.deposit(...)` or `wallet.withdraw(...)`.
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 7.5 — DepositFundsHandler: find_by_id → to_aggregate → act → upsert
 from __future__ import annotations
@@ -290,6 +306,23 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
 
 Notice what is absent: no try/except blocks, no logging calls, no tracing setup. All of that belongs to the bus pipeline. The handler is a pure expression of business intent.
 
+!!! note "What just happened"
+    The write side is now complete: three commands and three handlers. Sending `OpenWallet` creates and persists a fresh wallet; sending `DepositFunds` or `WithdrawFunds` loads one, drives its domain behaviour, and saves it. The `@command_handler` + `@service` stack means PyFly discovers and wires these at startup — you never call them directly, and you never register them by hand.
+
+**Run it — confirm the write side works end to end.** The Lumen sample already ships a test that exercises the full command path. From the `samples/lumen` directory, run just that test:
+
+::: listing terminal | Listing 7.4a — Exercise the command path
+uv run --extra dev pytest tests/test_cqrs_flow.py::test_full_wallet_lifecycle -q
+:::
+
+You should see a single passing test:
+
+```
+1 passed in 0.42s
+```
+
+That one test opens a wallet, deposits 1 500 minor units, withdraws 500, and asserts the balance lands at 1 000 — proving `OpenWalletHandler`, `DepositFundsHandler`, and `WithdrawFundsHandler` all commit through the bus. If you see `0 items collected`, you are not in the `samples/lumen` directory; `cd` there first. If you see `no handler found`, double-check that both decorators are present on each handler — that is the single most common cause.
+
 ### The entity↔aggregate mapper
 
 Command handlers do not interact with the repository through the domain aggregate. They interact through a flat `WalletEntity` row — the persistence shape the framework `Repository[WalletEntity, str]` understands — and use `wallet_mapper` to translate between the two worlds:
@@ -339,7 +372,11 @@ A **query** is a frozen dataclass that inherits from `Query[R]`, where `R` is th
 
 Queries return **read DTOs** rather than domain aggregates. The separation is deliberate. If `GetWalletHandler` returned a `Wallet` aggregate, the API layer would be coupled to every field on the aggregate — a change to the domain model could silently break the API contract. A dedicated `WalletDto` Pydantic model projects exactly the fields the HTTP response needs. Add a field to `Wallet`? The projection changes only if you explicitly include it in the DTO. Remove a field from `Wallet`? The projection compiles until you clean it up.
 
-::: listing lumen/core/services/wallets/get_wallet_query.py | Listing 7.7 — GetWallet: a frozen query returning WalletDto or None
+The read side mirrors the write side step for step — query message, then query handler — but with two simplifications: no `@transactional()` (nothing to commit) and no event publishing (nothing changed).
+
+**Step 5 — Write the single-lookup queries.** Create `get_wallet_query.py` and `get_balance_query.py`. Both carry only a `wallet_id`; what differs is what they promise to return.
+
+::: listing lumen/core/services/wallets/get_wallet_query.py | Listing 7.7 — GetWallet: a single-lookup query returning a full WalletDto
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -373,7 +410,7 @@ class GetBalance(Query[BalanceDto | None]):
 
 Both queries carry only `wallet_id`. `GetWallet` returns a `WalletDto` — the full representation including `id`, `owner_id`, `currency`, `balance_minor`, `balance`, and `created_at`. `GetBalance` returns a `BalanceDto` — a lighter projection that omits `owner_id` and `created_at`. A balance poll does not need the owner; leaving those fields out saves bandwidth and avoids accidentally exposing account ownership in a response that callers may log. Keeping the two queries separate means you can tune each independently — caching, authorization, or a dedicated read store — without touching the other.
 
-The query handlers live under the same `wallets/` package as the commands. **The same `@query_handler` + `@service` stacking applies**: `@query_handler` registers the class with the handler registry; `@service` wires it into the DI container. Both decorators are required for the same reasons as on command handlers.
+**Step 6 — Write the single-lookup query handlers.** The query handlers live under the same `wallets/` package as the commands. **The same `@query_handler` + `@service` stacking applies**: `@query_handler` registers the class with the handler registry; `@service` wires it into the DI container. Both decorators are required for the same reasons as on command handlers. Notice how much smaller these are than the command handlers — no session factory, no event publisher, just the repository and a one-line projection.
 
 ::: listing lumen/core/services/wallets/get_wallet_handler.py | Listing 7.9 — GetWalletHandler: find_by_id → entity_to_dto → return
 from __future__ import annotations
@@ -427,7 +464,10 @@ Both handlers delegate projection to `wallet_mapper` — the single module that 
 
 The read side does not stop at single-resource lookups. Production systems need lists with pagination metadata and the ability to filter by runtime predicates. The framework handles both through the `Repository` base class.
 
-`ListWallets` wraps a `Pageable` (page number, size, sort) and asks the repository for a counted, sorted, limited slice. `ListRichWallets` adds a `min_minor` threshold and runs it through a composable `Specification` — a predicate object that can be combined with `&`, `|`, and `~` before execution.
+!!! note "Pageable and Specification, in plain terms"
+    A **`Pageable`** bundles three things a list endpoint needs: which page you want, how big each page is, and how to sort. A **`Specification`** is a reusable, composable filter — think of it as a `WHERE` clause you can build as an object and combine with `&` (and), `|` (or), and `~` (not) before it ever touches SQL. Both come from the framework's data layer; you do not write the SQL yourself.
+
+**Step 7 — Write the list queries and handlers.** `ListWallets` wraps a `Pageable` (page number, size, sort) and asks the repository for a counted, sorted, limited slice. `ListRichWallets` adds a `min_minor` threshold and runs it through a composable `Specification`. Build the two query messages first, then their handlers.
 
 ::: listing lumen/core/services/wallets/list_wallets_query.py | Listing 7.11 — ListWallets: a Pageable-carrying query
 from __future__ import annotations
@@ -530,6 +570,35 @@ The return value is whatever `do_handle` returned — a `BalanceDto` or `None`. 
 !!! note "Queries return None, not exceptions"
     Query handlers return `None` when the resource is not found rather than raising `AggregateNotFound`. This is a deliberate convention: a query that finds nothing is not an error — it is an answer. The controller turns a `None` result into a 404 response, keeping the HTTP concern out of the handler.
 
+!!! note "What just happened"
+    Both sides of CQRS now exist. Three commands and three handlers change state; four queries and four handlers read it. None of them know about HTTP, and none of them are registered by hand — the decorators do that at startup. The only thing missing is the HTTP boundary that turns a web request into a message and a message result into a web response. That is the controller, which you build next.
+
+**Run it — confirm every handler is registered.** Before touching the controller, prove the bus discovered all your handlers. Start the app, then ask the CQRS health indicator how many handlers it found. From the `samples/lumen` directory:
+
+::: listing terminal | Listing 7.14a — Start Lumen
+uv run pyfly run --server uvicorn
+:::
+
+In a second terminal, query the actuator health endpoint. In v26.6.110 the actuator lives on its own management port, **9090** by default — not the app's 8080:
+
+::: listing terminal | Listing 7.14b — Count the registered handlers
+curl -s localhost:9090/actuator/health | python -m json.tool
+:::
+
+Look for the `cqrs_health_indicator` block. With every command and query handler from this chapter in place it reports three command handlers and four query handlers:
+
+```json
+"cqrs_health_indicator": {
+  "status": "UP",
+  "details": {"command_handlers": 3, "query_handlers": 4}
+}
+```
+
+If a count is lower than you expect, a handler is missing one of its two decorators and the registry never mapped it. Stop the server with `Ctrl-C` when you are done.
+
+!!! note "The actuator lives on its own port now"
+    In PyFly v26.6.110 the business API and the actuator run on **separate** ports — Spring-style. Your wallet endpoints listen on `pyfly.server.port` (default **8080**), while actuator endpoints and the admin dashboard listen on `pyfly.management.server.port` (default **9090**), which is open and unauthenticated by default. Lumen keeps the defaults, so health is at `localhost:9090/actuator/health` and the wallet API is at `localhost:8080/api/v1/wallets`. The default actuator HTTP exposure is `health,info`; expose more via `pyfly.management.endpoints.web.exposure.include`. Lock the management port down in production with `pyfly.management.security.enabled: true`, or disable it entirely with `pyfly.management.server.port: -1`.
+
 ---
 
 ## Wiring the bus into the controller
@@ -552,7 +621,7 @@ The framework registers a controller's routes in **alphabetical method-name orde
 
 The collection handlers are named `list_wallets` and `list_rich_wallets`; the single-resource handlers are named `wallet_detail` and `wallet_balance`. Alphabetically, `l` sorts before `w`, so the collection routes (`GET /`, `GET /rich`) are always registered ahead of the parameterised routes (`GET /{wallet_id}`, `GET /{wallet_id}/balance`). If you rename `wallet_detail` to something that sorts before `list_*`, the `/rich` route will silently break.
 
-Here is the complete controller:
+**Step 8 — Wire the buses into the controller.** Replace the old `WalletApplicationService` dependency with the two buses, then turn each endpoint into a one-liner: build a command or query from the request, dispatch it, return the result. Here is the complete controller.
 
 ::: listing lumen/web/controllers/wallet_controller.py | Listing 7.15 — WalletController: DefaultCommandBus + DefaultQueryBus + paged list endpoints
 from __future__ import annotations
@@ -692,11 +761,56 @@ The `wallet_detail` and `wallet_balance` methods show the only remaining HTTP co
 !!! tip "Let the bus raise"
     You do not need to catch `CommandProcessingException` or `QueryProcessingException` in the controller unless you want to customize the error shape. The global exception handler maps `AggregateNotFound` to 404 and `BusinessRuleViolation` to 422 — the same as before. The bus exceptions propagate those originals transparently.
 
+**Run it — drive the full HTTP path.** The vertical slice is complete: HTTP request → command/query → bus → handler → domain → repository → response. Prove it from the outside. Start the app (`uv run pyfly run --server uvicorn`), then in a second terminal open a wallet:
+
+::: listing terminal | Listing 7.15a — Open a wallet over HTTP
+curl -s -X POST localhost:8080/api/v1/wallets \
+  -H 'content-type: application/json' \
+  -d '{"owner_id":"u-1","currency":"EUR"}'
+:::
+
+The `open_wallet` endpoint dispatches `OpenWallet` and returns the generated id:
+
+```json
+{"wallet_id": "wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c"}
+```
+
+Copy that id, deposit into it, then read the balance back:
+
+::: listing terminal | Listing 7.15b — Deposit, then read the balance
+curl -s -X POST localhost:8080/api/v1/wallets/wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c/deposit \
+  -H 'content-type: application/json' -d '{"amount":1500}'
+
+curl -s localhost:8080/api/v1/wallets/wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c/balance
+:::
+
+The deposit echoes the new balance in minor units; the balance query returns the `BalanceDto`:
+
+```json
+{"wallet_id": "wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c", "balance_minor": 1500}
+{"wallet_id": "wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c", "balance_minor": 1500, "balance": 15.0}
+```
+
+Finally, confirm the route-ordering decision from earlier pays off — list the wallets and the "rich" subset:
+
+::: listing terminal | Listing 7.15c — Both list routes resolve correctly
+curl -s 'localhost:8080/api/v1/wallets?page=1&size=20'
+curl -s 'localhost:8080/api/v1/wallets/rich?min_minor=1000'
+:::
+
+Both return a `PageDto` envelope (`items`, `total`, `total_pages`, `has_next`, `has_previous`). The `/rich` call resolves to `list_rich_wallets`, *not* to `wallet_detail` looking for a wallet whose id is the literal string `"rich"` — exactly because `list_*` sorts before `wallet_*`. If `/rich` ever returns a 404, that ordering has been broken; revisit the method-name rule above.
+
+!!! warning "Use a real id"
+    The wallet id above is illustrative — yours will differ on every `open_wallet` call. Paste the id returned by your own `POST /api/v1/wallets` into the deposit and balance URLs, or you will get a 404.
+
 ---
 
 ## The handler pipeline
 
 A single `send` or `query` call triggers more than just the handler. Understanding the pipeline tells you where to put each cross-cutting concern — and, just as importantly, where *not* to put it.
+
+!!! note "What is a 'pipeline'?"
+    A **pipeline** is just a fixed sequence of steps the bus runs around your handler — like an assembly line. Your message enters one end, passes through validation and authorization, gets handled, and (for commands) has its events published, before the result comes back out. You write only the one step in the middle (`do_handle`); the bus owns the rest, identically for every message.
 
 The pipeline is defined once, in the bus, and applies uniformly to every handler. You never write pipeline logic inside a handler. The order is strict:
 
@@ -809,6 +923,20 @@ Each handler carries the `@command_handler` + `@service` (or `@query_handler` + 
 `WalletController` no longer knows about the service layer. It injects `DefaultCommandBus` and `DefaultQueryBus`, builds a command or query from the HTTP request, dispatches it, and either returns the result or raises a domain exception. Single-resource handler methods are named `wallet_detail` and `wallet_balance` — a deliberate choice so they sort alphabetically *after* the collection methods `list_wallets` and `list_rich_wallets`, ensuring the literal `/rich` segment is registered before the `/{wallet_id}` variable route.
 
 Adding a new command now means three things: define a frozen dataclass, implement one `do_handle` decorated with `@command_handler` + `@service` and annotated with `@transactional()`, and add one endpoint that calls `self._commands.send`. The pipeline applies automatically.
+
+**Run it — the whole chapter, in one command.** From the `samples/lumen` directory, run the CQRS flow tests one last time to confirm every piece you built this chapter still hangs together:
+
+::: listing terminal | Listing 7.17 — Verify the full CQRS slice
+uv run --extra dev pytest tests/test_cqrs_flow.py -q
+:::
+
+All five scenarios pass — the happy-path lifecycle, the not-found query, the rejected overdraw, the rejected non-positive deposit, and the rejected deposit to an unknown wallet:
+
+```
+5 passed in 0.61s
+```
+
+Those last four cases are worth pausing on: each one exercises the *pipeline*, not the handler. The overdraw is refused by the aggregate and surfaces as `CommandProcessingException`; the non-positive deposit never reaches a handler at all because `validate()` rejects it first. You wrote zero error-handling code to get any of that.
 
 ---
 

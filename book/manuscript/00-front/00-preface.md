@@ -2,7 +2,7 @@
 
 Enterprise Python has long meant stitching together a dozen independent libraries — one for dependency injection, another for routing, yet another for async database access — with no shared idiom to bind them. **PyFly** changes that. It brings the cohesive, convention-over-configuration experience that Spring Boot gave the Java world, rebuilt from the ground up for Python 3.12+ and `async`/`await`.
 
-This book teaches PyFly **by doing**. You build one real application from an empty folder to a secured, observable, event-driven service — making every concept concrete before moving to the next. Crucially, the code in these pages is not illustrative pseudocode: it is taken from a **real project that compiles, boots, and passes its tests** against PyFly v26.6.103. Every listing was verified against the running sample, so what you read is what actually works.
+This book teaches PyFly **by doing**. You build one real application from an empty folder to a secured, observable, event-driven service — making every concept concrete before moving to the next. Crucially, the code in these pages is not illustrative pseudocode: it is taken from a **real project that compiles, boots, and passes its tests** against PyFly v26.6.110. Every listing was verified against the running sample, so what you read is what actually works.
 
 ### Who This Book Is For
 
@@ -14,6 +14,7 @@ Spring Boot developers will feel especially at home. Wherever PyFly mirrors a Sp
 
 Every chapter advances **Lumen**, a digital-wallet and ledger service. The journey follows a deliberate arc, one part at a time:
 
+- **Quick Start — Build Lumen Step by Step.** Before the deep dive, a single guided walkthrough takes you from an empty folder to a running, tested wallet feature — open a wallet, deposit, read the balance over HTTP — so you see the whole shape of a PyFly application before zooming into any one part. Every later chapter then expands one slice of what you built here.
 - **Part I — Foundations (Chapters 1–4).** You scaffold the first Lumen service with `pyfly new`, run it under an ASGI server, wire PyFly's dependency-injection container, bind typed configuration and profiles, and expose your first validated REST endpoints.
 - **Part II — Modeling & Persisting (Chapters 5–7).** You introduce the repository pattern over a port, persist wallets with async SQLAlchemy (SQLite, no infrastructure required), model the domain with a `Money` value object and a `Wallet` aggregate, and split reads from writes with CQRS command and query handlers dispatched through a bus.
 - **Part III — Event-Driven (Chapters 8–10).** The aggregate raises domain events; a listener projects them; an **event-sourced ledger** rebuilds every balance by replaying its event stream; and the same events flow out to Kafka or RabbitMQ for other services.

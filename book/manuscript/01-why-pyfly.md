@@ -49,25 +49,46 @@ Every layer follows the same **hexagonal architecture** principle: your code liv
 
 To make these ideas concrete, you will build **Lumen** — a fintech wallet platform — throughout the book. Lumen starts simply: a REST API that records ledger entries and reports wallet balances. By the final chapter it will span multiple services communicating over events, with sagas coordinating cross-service transfers. Starting with a well-structured skeleton saves you the pain of retrofitting architecture later, so PyFly's scaffolder generates that structure for you up front.
 
-First, verify you have Python 3.12 or later and [uv](https://docs.astral.sh/uv/) (PyFly's recommended package manager):
+We will take this one short step at a time. Nothing here assumes prior PyFly experience — if you can run a command in a terminal, you can follow along.
 
-::: listing terminal | Listing 1.1 — Verify prerequisites and scaffold Lumen
+!!! note "New term: uv"
+    [uv](https://docs.astral.sh/uv/) is a fast Python package manager and project runner (think `pip` + `virtualenv` + a task runner, rolled into one binary). PyFly recommends it, and every command in this book that starts with `uv run` simply means "run this inside the project's virtual environment". If you have only ever used `pip`, you lose nothing — uv reads the same standard `pyproject.toml`.
+
+**Step 1 — Check your prerequisites.** PyFly targets Python 3.12+ and uses uv. Confirm both are installed:
+
+::: listing terminal | Listing 1.1 — Verify prerequisites
 python --version
 # Python 3.12.0 or later
 
 uv --version
 # uv 0.5.0 or later
+:::
 
-# Scaffold the Lumen wallet service (web-api archetype, web feature)
+If either command is missing or reports an older version, install it before continuing (uv's install instructions are one short script on its website). Everything else PyFly needs, it pulls in for you.
+
+**Step 2 — Scaffold the project.** A single command generates a complete, production-shaped project directory:
+
+::: listing terminal | Listing 1.2 — Scaffold the Lumen wallet service
+# web-api archetype, web feature
 uv run pyfly new lumen --archetype web-api --features web
+:::
 
+!!! note "New term: scaffold / archetype"
+    To *scaffold* is to generate a ready-made project skeleton so you start from working code instead of an empty folder. An *archetype* is the template that scaffolding uses — `web-api` is the REST-service template. The `--features web` flag adds the ASGI server dependency (the piece that actually accepts HTTP requests). `uv run pyfly new` calls PyFly's archetype registry and writes the whole directory in one shot.
+
+**Step 3 — Move into the project and install dependencies.**
+
+::: listing terminal | Listing 1.3 — Enter the project and sync dependencies
 cd lumen
 
 # Install dependencies (including the pyfly CLI and ASGI server)
 uv sync
 :::
 
-`uv run pyfly new` calls the PyFly archetype registry and generates a production-shaped project directory in one shot. The `--archetype web-api` flag selects the REST service template; `--features web` adds the ASGI server dependency. `uv sync` installs the declared dependencies, including the `pyfly` command itself (available via the `cli` extra in `pyproject.toml`).
+`uv sync` reads the declared dependencies from `pyproject.toml` and installs them into a project-local virtual environment — including the `pyfly` command itself (available via the `cli` extra). The first sync downloads packages; subsequent syncs are near-instant because uv caches everything.
+
+!!! tip "Run it: confirm the CLI works"
+    From the project root, run `uv run pyfly --help`. You should see the PyFly command list (`new`, `run`, and friends). If that prints, your toolchain is healthy and you are ready to inspect the generated project.
 
 !!! tip "Tip"
     Run `pyfly new` **without arguments** to enter interactive mode. It walks you through archetype and feature selection with arrow-key navigation — handy when you want to pre-select extras like relational data or messaging support.
@@ -114,9 +135,12 @@ The apparent simplicity is deliberate. `pyproject.toml` gives you a standards-co
 
 Understanding the scaffold's entry-point structure early will save you confusion later. The scaffold generates two files that work together: `app.py` declares the application and `main.py` exposes the ASGI `app` that the server imports. Each has a distinct responsibility.
 
-Open `src/lumen/app.py`:
+!!! note "New term: ASGI"
+    *ASGI* (Asynchronous Server Gateway Interface) is the standard contract between a Python web server and an async web application — the modern, async successor to WSGI. You do not have to implement it; PyFly hands the server a ready-made ASGI `app` object. Just remember: the *server* (Uvicorn or Granian) speaks ASGI to your *app*.
 
-::: listing lumen/app.py | Listing 1.2 — Application declaration (@pyfly_application)
+**Step 1 — Open the application declaration.** Look at `src/lumen/app.py`:
+
+::: listing lumen/app.py | Listing 1.4 — Application declaration (@pyfly_application)
 from pyfly.core import pyfly_application
 
 
@@ -139,9 +163,12 @@ Short as it is, every parameter pulls its weight:
 
 The `Application` class body is intentionally empty. You never instantiate it yourself — `PyFlyApplication` does that during startup: it loads configuration from `pyfly.yaml`, configures structured logging, prints the startup banner, scans packages, initialises the `ApplicationContext`, and logs startup timing.
 
-Now open `src/lumen/main.py`:
+!!! note "New terms: DI and the ApplicationContext"
+    *Dependency injection* (DI) means a class declares what it needs in its constructor and the framework supplies those collaborators, rather than the class building them itself. The *ApplicationContext* (often just "the container") is the registry that holds every wired object — PyFly calls each one a *bean*, the same term Spring uses. `scan_packages` is what populates it.
 
-::: listing lumen/main.py | Listing 1.3 — ASGI entry point (main.py)
+**Step 2 — Open the ASGI entry point.** Now look at `src/lumen/main.py`:
+
+::: listing lumen/main.py | Listing 1.5 — ASGI entry point (main.py)
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -182,15 +209,18 @@ app = create_app(
 
 This is the file that `pyfly run` (and any ASGI server like Uvicorn) discovers. The module-level `app` object is a Starlette application: `create_app` mounts every `@rest_controller` found in the DI context and wires the lifespan hook so startup and shutdown happen cleanly. The `@pyfly_application` decorator alone does **not** create the ASGI `app` — `main.py` is the explicit bridge between the DI world (`app.py`) and the HTTP world.
 
+!!! note "What just happened"
+    Two small files split one job in two. `app.py` answers *what is this application and where does its code live* (name, version, scan packages). `main.py` answers *how does a web server reach it* — it bootstraps PyFly into an `ApplicationContext`, then exposes a single ASGI `app` object. When you later add a controller or service, you edit neither file: you just drop the new class into one of the scanned packages and PyFly wires it on the next boot.
+
 ---
 
 ## Project files
 
 The other two files you will edit most often are `pyproject.toml` and `pyfly.yaml`. Each plays a distinct role: `pyproject.toml` manages dependencies, while `pyfly.yaml` owns every runtime knob.
 
-`pyproject.toml` records the project's dependencies. Notice the extras:
+**Step 1 — Read the dependency manifest.** `pyproject.toml` records the project's dependencies. Notice the extras:
 
-::: listing lumen/pyproject.toml | Listing 1.4 — pyproject.toml (key sections)
+::: listing lumen/pyproject.toml | Listing 1.6 — pyproject.toml (key sections)
 [project]
 name = "lumen-demo"
 version = "0.1.0"
@@ -210,21 +240,22 @@ dev = [
 ]
 :::
 
+!!! note "New term: extras"
+    An *extra* is an optional bundle of dependencies named in square brackets — `pyfly[web]` means "install PyFly plus its `web` optional group". Extras keep your install lean: you pull in a database driver, a CLI, or a faster server only when you actually use it.
+
 The `web` extra in `pyfly[web]` bundles Uvicorn together with the ASGI adapter. The `cli` extra (add it when you need the `pyfly` command outside of `uv run`) provides the command-line tooling. Other extras — `data-relational`, `granian` — are opt-in; you add them only when a feature needs them. The Lumen wallet sample, for example, declares `pyfly[cli,web,data-relational]` because it connects to SQLite.
 
-`pyfly.yaml` is where all runtime settings live:
+**Step 2 — Read the runtime configuration.** `pyfly.yaml` is where all runtime settings live:
 
-::: listing lumen/pyfly.yaml | Listing 1.5 — pyfly.yaml (scaffold default)
+::: listing lumen/pyfly.yaml | Listing 1.7 — pyfly.yaml (scaffold default)
 pyfly:
   app:
     name: lumen-demo
+    version: 0.1.0
     module: lumen_demo.main:app
 
-  web:
-    port: 8080
-    adapter: auto
-
   server:
+    port: 8080
     type: "auto"
     event-loop: "auto"
     workers: 0
@@ -241,7 +272,13 @@ pyfly:
       root: INFO
 :::
 
-The `module` key tells `pyfly run` exactly where the ASGI `app` lives — `lumen_demo.main:app`. Port, server type, actuator endpoints, and log level all have sensible defaults; you override only what you actually need to change.
+The `module` key tells `pyfly run` exactly where the ASGI `app` lives — `lumen_demo.main:app`. The application listens on `pyfly.server.port` (default `8080`); server type, actuator endpoints, and log level all have sensible defaults too, so you override only what you actually need to change.
+
+!!! spring "Spring parity"
+    `pyfly.server.port` is the direct counterpart of Spring Boot's `server.port`, right down to the `8080` default. The matching environment-variable override is `PYFLY_SERVER_PORT` (Spring's `SERVER_PORT`). Application identity follows the same pattern: `pyfly.app.name` and `pyfly.app.version` mirror `spring.application.name`.
+
+!!! warning "Renamed key: use server.port, not web.port"
+    Earlier PyFly releases used `pyfly.web.port` (and the `PYFLY_WEB_PORT` environment variable) for the listen port. Both were **removed** in v26.06.102 in favour of `pyfly.server.port` / `PYFLY_SERVER_PORT`. If you copy an old config and the port seems ignored, this is almost always why — rename the key under `server:` and the override takes effect.
 
 !!! note "Default server: Granian vs Uvicorn"
     PyFly's default ASGI server is **Granian**, a high-performance Rust-based server. The scaffold's `pyfly[web]` dependency bundles **Uvicorn** instead (lighter install). The two are interchangeable: pass `--server uvicorn` on the command line, or add `pyfly[granian]` to your dependencies to use Granian. The Lumen wallet sample runs with `--server uvicorn` for this reason.
@@ -250,11 +287,16 @@ The `module` key tells `pyfly run` exactly where the ASGI `app` lives — `lumen
 
 ## Your first run
 
-With the project in place, start the server. From the project root:
+With the project in place, start the server.
 
-::: listing terminal | Listing 1.6 — Run the server with uv
+**Step 1 — Start the server.** From the project root, run:
+
+::: listing terminal | Listing 1.8 — Run the server with uv
 uv run pyfly run --server uvicorn
 :::
+
+!!! note "Why `--server uvicorn`"
+    PyFly's default server is Granian, but the `pyfly[web]` extra ships Uvicorn (a lighter install). Passing `--server uvicorn` tells PyFly to use the server you actually have. If you ever see an error about Granian not being installed, this flag is the fix — or add `pyfly[granian]` and drop the flag.
 
 After a moment you will see the PyFly ASCII banner followed by a stream of structured startup events:
 
@@ -266,10 +308,10 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-:: PyFly Framework :: (v26.06.103) (Python 3.13.13)
+:: PyFly Framework :: (v26.06.110) (Python 3.13.13)
 Copyright 2026 Firefly Software Foundation. | Apache License 2.0
 2026-06-07 20:34:32,442 [INFO] pyfly.core: starting_application |
-    app=lumen version=1.0.0 python=3.13.13 pid=72300
+    app=lumen-demo version=0.1.0 python=3.13.13 pid=72300
 2026-06-07 20:34:32,442 [INFO] pyfly.core: runtime_environment |
     os=Darwin os_version=25.5.0 arch=arm64 cpus=11
 2026-06-07 20:34:32,442 [INFO] pyfly.core: loaded_config |
@@ -277,7 +319,7 @@ Copyright 2026 Firefly Software Foundation. | Apache License 2.0
 2026-06-07 20:34:32,442 [INFO] pyfly.core: loaded_config |
     source=pyfly.yaml
 2026-06-07 20:34:32,442 [INFO] pyfly.core: scanned_package |
-    package=lumen.web.controllers beans_found=1
+    package=lumen_demo.controllers beans_found=1
 2026-06-07 20:34:32,580 [INFO] pyfly.core: bean_summary |
     total=127 services=6 repositories=2 controllers=4
 2026-06-07 20:34:32,580 [INFO] pyfly.core: mapped_endpoints | count=5
@@ -285,6 +327,10 @@ Copyright 2026 Firefly Software Foundation. | Apache License 2.0
     method=POST path=/api/v1/wallets handler=open_wallet
 2026-06-07 20:34:32,580 [INFO] pyfly.core: api_documentation |
     swagger_ui=http://0.0.0.0:8080/docs
+2026-06-07 20:34:32,580 [INFO] pyfly.core: management_server |
+    url=http://0.0.0.0:9090 endpoints=actuator + admin
+2026-06-07 20:34:32,580 [INFO] pyfly.core: admin_dashboard |
+    url=http://0.0.0.0:9090/admin
 2026-06-07 20:34:32,581 [INFO] pyfly.core: server_started |
     server=uvicorn host=0.0.0.0 port=8080 workers=1
 ```
@@ -296,13 +342,28 @@ Read these log lines as a story of what the framework did on your behalf. Each e
 3. **`loaded_config`** (×2) — configuration is layered: the framework ships `pyfly-defaults.yaml` with safe production defaults; your `pyfly.yaml` overrides only what you need. Activate a profile (e.g., `--profile prod`) and you will see a third entry.
 4. **`scanned_package`** — the DI container found one `@rest_controller` in the web controllers package. `beans_found` grows as you add services and repositories.
 5. **`bean_summary`** — the total DI context size, including framework-internal beans. Even with 127 beans registered, PyFly boots in well under a second.
-6. **`server_started`** — Uvicorn is accepting connections.
+6. **`management_server`** — the actuator endpoints and admin dashboard are served on a *separate* management port (default `9090`), independent of the app's `8080`.
+7. **`admin_dashboard`** — the exact URL of the live admin UI, `http://0.0.0.0:9090/admin`.
+8. **`server_started`** — Uvicorn is accepting connections on the application port.
 
-Two endpoints are already live before you have written a single line of application logic. Try the health check first:
+!!! note "What just happened"
+    You ran one command and PyFly did the work of an entire boilerplate sprint: it loaded layered configuration, scanned your packages, wired the DI container, mapped your HTTP routes, published interactive API docs, brought up a separate management server with health checks and an admin dashboard, and started accepting requests — all logged as named, machine-filterable events. Leave this server running in its terminal; you will call it from a second terminal in the next steps. Press `Ctrl+C` when you want to stop it.
 
-::: listing terminal | Listing 1.7 — Health check
-curl -s localhost:8080/actuator/health
+!!! spring "Spring parity"
+    Serving actuator and the admin dashboard on a dedicated port mirrors Spring Boot's `management.server.port`. In PyFly the key is `pyfly.management.server.port` (default `9090`). Set it equal to `pyfly.server.port` for single-port behaviour, or set it to `-1` to disable the management endpoints entirely. By default this port is **open and unauthenticated** (also Spring parity) — fine for local development, but in production secure it with `pyfly.management.security.enabled: true`.
+
+Two endpoints are already live before you have written a single line of application logic. Open a *second* terminal (leave the server running in the first) and try the health check.
+
+**Step 2 — Check the live health endpoint.** It lives on the management port, `9090`:
+
+::: listing terminal | Listing 1.9 — Health check (management port 9090)
+curl -s localhost:9090/actuator/health
 :::
+
+!!! note "New term: actuator"
+    The *actuator* is PyFly's built-in operations layer: a small set of HTTP endpoints that report on the running app — `/actuator/health`, `/actuator/info`, and (when you expose them) metrics, environment, and more. It is the same concept, and the same `/actuator` base path, as Spring Boot Actuator. By default only `health` and `info` are exposed over HTTP; widen that with `pyfly.management.endpoints.web.exposure.include`.
+
+You should see a JSON document with a top-level `"status": "UP"` and a `components` map — one entry per health indicator the framework registered:
 
 ```json
 {
@@ -328,22 +389,39 @@ curl -s localhost:8080/actuator/health
 }
 ```
 
-Then call the first business endpoint — opening a wallet:
+**Step 3 — Open a wallet.** Now call the first business endpoint. Unlike the actuator, this lives on the *application* port, `8080`:
 
-::: listing terminal | Listing 1.8 — Open a wallet
+::: listing terminal | Listing 1.10 — Open a wallet (application port 8080)
 curl -s -X POST localhost:8080/api/v1/wallets \
   -H 'content-type: application/json' \
   -d '{"owner_id":"u-1","currency":"EUR"}'
 :::
 
+The response is the new wallet's identifier (your UUID will differ):
+
 ```json
 {"wallet_id": "wlt-c5bbb2a7-dd49-4321-932e-e4c6bfa5cc2c"}
 ```
 
-Open `http://localhost:8080/docs` in your browser for the interactive Swagger UI; `http://localhost:8080/redoc` gives you ReDoc; the raw OpenAPI spec is at `/openapi.json`.
+!!! note "What just happened"
+    That single `curl` travelled through the whole stack the framework built for you: the JSON body was validated against the `OpenWalletRequest` model, the `WalletController` turned it into an `OpenWallet` command, the command bus dispatched it to its handler, a `Wallet` aggregate was created and persisted, and the new id came back as JSON. You will build each of those layers yourself in later chapters — for now, notice that it already works end to end.
+
+**Step 4 — Explore the interactive docs.** Open `http://localhost:8080/docs` in your browser for the interactive Swagger UI; `http://localhost:8080/redoc` gives you ReDoc; the raw OpenAPI spec is at `http://localhost:8080/openapi.json`. The docs live on the application port alongside your API.
 
 !!! note "Note"
-    All three doc URLs are emitted in the boot log (`api_documentation` entries) so you never have to remember them. `http://localhost:8080/admin` opens the PyFly Admin Dashboard — a live view of beans, endpoints, health indicators, and recent log events.
+    All three doc URLs are emitted in the boot log (`api_documentation` entries) so you never have to remember them. The PyFly Admin Dashboard — a live view of beans, endpoints, health indicators, and recent log events — opens at `http://localhost:9090/admin` on the management port (its exact URL is the `admin_dashboard` boot-log line).
+
+**Step 5 — Run the generated tests.** The scaffold ships a working test suite so you can confirm the toolchain end to end. Install the dev tools, then run pytest:
+
+::: listing terminal | Listing 1.11 — Run the test suite
+uv sync --group dev
+uv run --group dev pytest -q
+:::
+
+!!! note "Expected output"
+    You should see a short run of dots (or `PASSED` lines) and a green summary like `3 passed in 0.42s` — the exact count depends on the archetype. Any green summary means PyFly, your virtual environment, and pytest are all wired correctly. (The Lumen wallet sample you study throughout the book ships a far larger suite, but it runs the same way: `uv run --group dev pytest -q`.)
+
+That completes the loop: install, scaffold, run, call, and test — all before writing a line of your own logic.
 
 ---
 
@@ -355,11 +433,11 @@ In under five minutes you installed PyFly, scaffolded a production-shaped servic
 |---|---|
 | Structured JSON logging with runtime metadata | Framework default — emitted on every boot |
 | Interactive API docs (Swagger UI + ReDoc) | Built-in; always on, opt out via `pyfly.yaml` |
-| Health endpoint (`/actuator/health`) | `actuator.endpoints.enabled: true` in scaffold |
+| Health endpoint (`/actuator/health` on port 9090) | `actuator.endpoints.enabled: true` in scaffold |
 | Profile-aware configuration layering | `pyfly.yaml` + `--profile` flag |
 | Auto-discovery DI container | `scan_packages` in `@pyfly_application` |
 | Startup timing, bean summary, endpoint map | Emitted as structured log events on every boot |
-| Admin Dashboard (`/admin`) | Enabled in the scaffold by default |
+| Admin Dashboard (`/admin` on management port 9090) | Enabled in the scaffold by default |
 
 That is the PyFly promise: sensible decisions made for you, conventions consistent across every service, and production-ready defaults from the very first run.
 
@@ -369,8 +447,10 @@ That is the PyFly promise: sensible decisions made for you, conventions consiste
 
 1. **Rename the service.** Open `pyfly.yaml` and change `app.name` from `lumen-demo` to `lumen-wallet`. Also update the `name` parameter in `@pyfly_application`. Re-run with `uv run pyfly run --server uvicorn` and confirm the new name appears in the `starting_application` log line.
 
-2. **Explore the live docs.** With the server running, open `http://localhost:8080/docs`. Notice the service name and version at the top of the Swagger UI. Then navigate to `http://localhost:8080/redoc` and compare the two doc renderers. Check the health response at `http://localhost:8080/actuator/health` and note which health indicators are already reporting.
+2. **Explore the live docs.** With the server running, open `http://localhost:8080/docs`. Notice the service name and version at the top of the Swagger UI. Then navigate to `http://localhost:8080/redoc` and compare the two doc renderers. Check the health response at `http://localhost:9090/actuator/health` (remember: the actuator lives on the management port, not the application port) and note which health indicators are already reporting. Open `http://localhost:9090/admin` to see the same information in the live dashboard.
 
 3. **Switch to Granian.** Add `pyfly[granian]` to the `dependencies` list in `pyproject.toml`, run `uv sync`, then start the server without the `--server uvicorn` flag. Compare the `server_started` log line — the `server` field should now read `granian`.
 
 4. **Map files to responsibilities.** Look at the two entry-point files `app.py` and `main.py`. Write a one-sentence description of what each one is responsible for. Where does the DI container come from? Where does the ASGI `app` object live? Which one would you edit to change the scan packages?
+
+5. **Collapse to a single port.** Add `pyfly.management.server.port: 8080` under the `server`-sibling `management:` section in `pyfly.yaml` (so it equals `pyfly.server.port`). Re-run the server and watch the boot log: the `management_server` line disappears and `http://localhost:8080/actuator/health` now responds on the application port. Then try `pyfly.management.server.port: -1`, re-run, and confirm the actuator and admin routes are gone entirely.

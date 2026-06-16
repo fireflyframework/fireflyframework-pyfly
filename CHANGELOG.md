@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.111 (2026-06-16)
+
+### Added
+
+- **"PyFly by Example" — Spanish edition.** The book is now published in Spanish
+  (`book/dist/pyfly-by-example-es.{epub,pdf}`) alongside the English edition,
+  built from a parallel `book/manuscript-es/` manuscript via `book.es.yaml`. The
+  book build (`book/build/build.py`) is now language-parameterized (`--config`,
+  per-manifest `manuscript_dir` / `output_basename` / localized labels). Both
+  editions are attached to the GitHub release.
+- **Quick Start tutorial + step-by-step depth.** A new "Build Lumen Step by Step"
+  walkthrough takes the reader from an empty folder to a running, tested wallet
+  feature; every chapter was deepened into a more granular, beginner-friendly
+  tutorial. A dedication was added (EN + ES).
+
+### Fixed
+
+- **`pyfly new` no longer scaffolds the removed `pyfly.web.port` key.** The project
+  template (`pyfly.yaml.j2`) now emits the port under `server:` as
+  `pyfly.server.port` (Spring `server.port` parity); the legacy `pyfly.web.port`
+  was removed in v26.06.102 and had been left as a dead key in freshly scaffolded
+  applications.
+
+---
+
 ## v26.06.110 (2026-06-16)
 
 ### Fixed

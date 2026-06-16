@@ -38,11 +38,30 @@ in the right order.
 By the end of the chapter, every hot path in Lumen will be cached and every
 outbound dependency wrapped in a resilience fence.
 
+!!! note "What you will build, in plain terms"
+    This chapter introduces a lot of vocabulary — *cache*, *token bucket*,
+    *bulkhead*, *circuit breaker*. Do not let the jargon intimidate you. Every
+    one of these is a small, self-contained tool that you bolt onto a function
+    with a single decorator. We will introduce each tool one at a time, build
+    it into Lumen step by step, run it, and watch what changes. By the end you
+    will have a mental checklist: *is this read hot? cache it; is this call
+    going over the network? fence it.* The version of PyFly used throughout is
+    **v26.6.110** — every command and config key below matches that release.
+
 ---
 
 ## Caching the read path
 
 ### Why cache wallet reads?
+
+!!! note "New term: cache"
+    A *cache* is a small, fast holding area where you keep the answer to an
+    expensive question so you can hand it back instantly the next time someone
+    asks. The first time Lumen computes wallet `w-001`'s balance it stores the
+    result in the cache; subsequent reads return that stored copy without
+    re-running the database query. The trade-off — and there is always a
+    trade-off — is that the stored copy can be slightly out of date. The rest
+    of this section is about keeping that staleness inside acceptable bounds.
 
 Lumen's most frequent operation is the balance query: "what is wallet
 `w-001`'s current balance?" Under normal load that query hits the read
@@ -91,7 +110,11 @@ with zero cleanup overhead on your side.
 
 ### Setting up a cache backend
 
-For development, a single import is all you need:
+We will wire up two backends: an in-process one for development and a shared
+Redis-backed one for production. Take them one at a time.
+
+**Step 1 — Pick a development backend.** For development, a single import is
+all you need:
 
 ::: listing lumen/cache/config_dev.py | Listing 13.1 — InMemoryCache for development
 from pyfly.cache.adapters.memory import InMemoryCache
@@ -103,7 +126,16 @@ wallet_cache = InMemoryCache(max_size=1000)
 entries, the least-recently-used entry is dropped to make room. Pass `None`
 (the default) to leave the cache unbounded and rely entirely on TTLs.
 
-For production, point `RedisCacheAdapter` at a `redis.asyncio.Redis` client:
+!!! note "New term: LRU and TTL"
+    *LRU* stands for *least-recently-used* — when the cache is full, the entry
+    nobody has touched for the longest is the one evicted to make room. *TTL*
+    stands for *time-to-live* — how long an entry stays valid before it expires
+    on its own. `InMemoryCache` supports both: `max_size` caps how many entries
+    it holds (LRU); each `put` can carry a TTL that ages the entry out.
+
+**Step 2 — Pick a production backend.** For production, point
+`RedisCacheAdapter` at a `redis.asyncio.Redis` client, and wrap it with an
+in-memory fallback so a Redis hiccup never takes Lumen down:
 
 ::: listing lumen/cache/config_prod.py | Listing 13.2 — RedisCacheAdapter for production
 import redis.asyncio as aioredis
@@ -134,8 +166,37 @@ required. The `@bean` method tells PyFly's DI container to create a
 singleton and inject it wherever `CacheAdapter` is declared as a
 dependency.
 
+**What just happened.** You now have one `CacheAdapter` interface and two
+ways to satisfy it. In development you hand the DI container an
+`InMemoryCache`; in production you hand it a `CacheManager` that fronts Redis
+and quietly falls back to memory when Redis is unreachable. Every handler in
+the rest of this chapter asks for `cache: CacheAdapter` in its constructor and
+never knows or cares which one it got — that is the hexagonal payoff.
+
 !!! tip "Auto-configuration"
-    Add `pyfly.cache.enabled: true` and `pyfly.cache.provider: redis` to `pyfly.yaml` and PyFly will wire `RedisCacheAdapter` + `InMemoryCache` into a `CacheManager` automatically — no `@configuration` class needed.
+    You do not have to write the `@configuration` class at all. Add the
+    following to `pyfly.yaml` and PyFly's `CacheAutoConfiguration` builds a
+    `CacheAdapter` bean for you at startup:
+
+    ```yaml
+    pyfly:
+      cache:
+        enabled: true        # required to switch the subsystem on
+        provider: redis      # redis | postgres | memory | auto
+        redis:
+          url: redis://localhost:6379/0
+        max-size: 1000       # used by the memory provider
+    ```
+
+    With `provider: redis` (or `auto`, which detects an installed
+    `redis.asyncio`) the auto-config wires a `RedisCacheAdapter` pointed at
+    `pyfly.cache.redis.url`. It registers that single adapter as the
+    `CacheAdapter` bean — it does **not** add the in-memory failover layer.
+    When you want Redis *plus* the transparent in-process fallback shown in
+    Listing 13.2, declare the `CacheManager` yourself in a `@configuration`
+    class as above. The auto-config also backs off entirely if you have
+    already defined your own `CacheAdapter` bean (`@conditional_on_missing_bean`),
+    so the two approaches never collide.
 
 ### @cacheable — skip execution on a hit
 
@@ -145,9 +206,24 @@ the same key it returns the stored value *without executing the function body
 at all*.
 
 Lumen's `GetBalanceHandler` is a natural fit: balance reads are frequent,
-cheap to cache, and tolerate a few seconds of staleness. The handler receives
-`CacheAdapter` through its constructor — injected by PyFly — and wraps
-`do_handle` at construction time:
+cheap to cache, and tolerate a few seconds of staleness. We will add caching
+to it in three small moves.
+
+**Step 1 — Accept the cache.** Add a `cache: CacheAdapter` parameter to the
+constructor. PyFly's DI container sees the type and injects whichever backend
+you wired up in the previous section.
+
+**Step 2 — Move the real work into a private method.** Rename the body that
+hits the database to `_fetch`. This is the function the cache will wrap.
+
+**Step 3 — Wrap it at construction time.** Inside `__init__`, set
+`self.do_handle = cacheable(...)(self._fetch)`. We wrap inside `__init__`
+(rather than as a `@cacheable` decorator on the method) for one reason: the
+`backend=cache` argument only exists once `cache` has been injected, and that
+does not happen until `__init__` runs.
+
+The handler receives `CacheAdapter` through its constructor — injected by
+PyFly — and wraps `do_handle` at construction time:
 
 ::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 13.3 — @cacheable on GetBalanceHandler
 from datetime import timedelta
@@ -227,6 +303,69 @@ cacheable(
 )(self._fetch)
 ```
 
+#### Run it — prove the second read skips the database
+
+The cleanest way to *see* a cache hit is a unit test that counts how many
+times the repository is called. Use a real `InMemoryCache` (no Redis needed)
+and a tiny stub repository:
+
+::: listing tests/cache/test_get_balance_cache.py | Listing 13.3a — A test that proves the second read is a hit
+from datetime import timedelta
+
+import pytest
+
+from pyfly.cache import cacheable
+from pyfly.cache.adapters.memory import InMemoryCache
+
+
+class _CountingRepo:
+    """Stub repository that records how many times it is queried."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def find_by_id(self, wallet_id: str) -> dict:
+        self.calls += 1
+        return {"wallet_id": wallet_id, "balance_minor": 500}
+
+
+@pytest.mark.asyncio
+async def test_second_read_is_a_cache_hit() -> None:
+    repo = _CountingRepo()
+    cache = InMemoryCache(max_size=10)
+
+    fetch = cacheable(
+        backend=cache,
+        key="wallet:balance:{wallet_id}",
+        ttl=timedelta(seconds=5),
+    )(repo.find_by_id)
+
+    first = await fetch("wlt-001")   # miss -> runs the repo
+    second = await fetch("wlt-001")  # hit  -> repo NOT called again
+
+    assert first == second
+    assert repo.calls == 1           # the body ran exactly once
+:::
+
+Run just this test:
+
+```console
+$ uv run --extra dev pytest tests/cache/test_get_balance_cache.py -q
+.                                                                        [100%]
+1 passed in 0.04s
+```
+
+The single `.` and `1 passed` confirm it: the second call returned the cached
+value and `repo.calls` stayed at `1`, so the database was touched exactly once
+across two reads. That is a cache hit, demonstrated rather than asserted in
+prose.
+
+**What just happened.** You wrapped a plain async function with `cacheable`,
+backed it with an `InMemoryCache`, and confirmed that identical keys
+short-circuit the body. In `GetBalanceHandler` the wrapped function is
+`_fetch` and the backend is the injected `CacheAdapter`, but the mechanics are
+exactly what you just ran.
+
 !!! spring "Spring parity"
     `@cacheable` mirrors Spring's `@Cacheable`. The `key` template uses Python's `str.format` syntax instead of SpEL, but the semantics — skip-on-hit, store-on-miss, `condition`, `unless` — are identical. `@cache` is a lower-level alias that behaves the same way; use whichever name reads better in your codebase.
 
@@ -240,8 +379,22 @@ the cache current.
 
 `DepositFundsHandler` is the canonical example. After a deposit succeeds,
 the new balance must be visible to the next read without waiting for the TTL
-to expire. Wrapping `do_handle` with `@cache_put` refreshes the cache entry
-atomically with the write:
+to expire. The wiring mirrors what you did for `@cacheable`, with one critical
+detail to watch:
+
+**Step 1 — Accept the cache** in the constructor, exactly as before.
+
+**Step 2 — Move the deposit logic into `_deposit`** and keep its
+`@transactional()` decorator so the write still commits as one unit of work.
+
+**Step 3 — Wrap with `cache_put`, reusing the *same* key shape.** The deposit
+handler must write to the very cache slot the balance reader looks up.
+`@cacheable` uses `"wallet:balance:{query.wallet_id}"`; here the argument is
+named `command`, so the template is `"wallet:balance:{command.wallet_id}"`.
+Different parameter names, but both resolve to `wallet:balance:wlt-001`.
+
+Wrapping `do_handle` with `@cache_put` refreshes the cache entry atomically
+with the write:
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 13.4 — @cache_put refreshes the cache on a deposit
 from datetime import timedelta
@@ -395,6 +548,13 @@ A coherent strategy matches each operation to the right decorator:
 
 ### Why protection matters
 
+!!! note "New term: resilience"
+    *Resilience* here means the system keeps serving requests it *can* serve
+    even when a dependency it relies on is slow, overloaded, or down. The tools
+    in this section do not make the downstream faster — they stop one sick
+    dependency from making the whole of Lumen sick. Each tool is, again, a
+    decorator you stack on the function that makes the risky call.
+
 Caching makes the happy path fast. Resilience patterns protect Lumen when
 the happy path is unavailable. Without protection, a slow `AccountService`
 triggers a cascade:
@@ -462,11 +622,71 @@ sees 10 calls per second can absorb a burst of 40 calls immediately
 (drawing on saved tokens), then sustains 20 calls per second afterwards.
 Fixed-window rate limiters cannot express this nuance.
 
+#### Run it — watch the bucket run dry
+
+A small script makes the behaviour concrete. Create a limiter with a tiny
+bucket, call past its capacity, and observe the rejection:
+
+::: listing scratch/rate_demo.py | Listing 13.6a — Draining the token bucket on purpose
+import asyncio
+
+from pyfly.kernel.exceptions import RateLimitException
+from pyfly.resilience import RateLimiter, rate_limiter
+
+# 3 tokens, refilling slowly so the burst is what we observe.
+limiter = RateLimiter(max_tokens=3, refill_rate=1.0)
+
+
+@rate_limiter(limiter)
+async def ping(n: int) -> str:
+    return f"ok-{n}"
+
+
+async def main() -> None:
+    for n in range(5):
+        try:
+            print(await ping(n))
+        except RateLimitException:
+            print(f"rejected-{n}")
+
+
+asyncio.run(main())
+:::
+
+Run it directly:
+
+```console
+$ uv run python scratch/rate_demo.py
+ok-0
+ok-1
+ok-2
+rejected-3
+rejected-4
+```
+
+The first three calls each spend a token; the fourth and fifth arrive with an
+empty bucket and are rejected immediately with `RateLimitException` — no
+queuing, no waiting. Slow the loop down (or raise `refill_rate`) and the
+rejections disappear because tokens refill between calls.
+
+**What just happened.** You did not change the function `ping` at all — you
+decorated it. The decorator inserted an `await limiter.acquire()` before every
+call, and `acquire()` raised when the bucket was empty. This is the shape every
+resilience tool in this chapter takes: a decorator that guards the call without
+the function body knowing it exists.
+
 Multiple functions sharing one `RateLimiter` instance enforce a *global*
 rate across all of them — useful for capping total traffic to a downstream
 service regardless of which internal method initiates the call.
 
 ### Bulkhead — concurrency isolation
+
+!!! note "New term: bulkhead"
+    The name comes from shipbuilding: a ship's hull is divided into sealed
+    compartments (*bulkheads*) so that a breach in one does not flood the whole
+    vessel. A software bulkhead caps how many calls to one dependency can run at
+    once, so a flood of slow calls to `AccountService` cannot consume every
+    coroutine and sink unrelated requests.
 
 `Bulkhead` is a semaphore: it limits the number of calls *in-flight at the
 same time*. Calls beyond `max_concurrent` are rejected immediately with
@@ -647,6 +867,13 @@ when many instances restart simultaneously.
 
 ### @circuit_breaker — fast failure under sustained outage
 
+!!! note "New term: circuit breaker"
+    Borrowed from electrical wiring: a circuit breaker *trips* (opens) when too
+    much current flows, cutting the circuit before the wiring overheats. A
+    software circuit breaker trips after too many failures, cutting off calls to
+    a failing dependency so you stop hammering it — and so your own callers fail
+    fast instead of waiting on calls that are doomed to error anyway.
+
 Retrying a genuinely unavailable service amplifies load at exactly the
 moment that service most needs relief. The circuit-breaker pattern solves
 this: after a threshold of consecutive failures the circuit **opens** and
@@ -711,6 +938,94 @@ calls fail.
 
 !!! spring "Spring parity"
     `@retry` mirrors Spring Retry's `@Retryable` (with `maxAttempts`, `backoff`, `include`). `CircuitBreaker` mirrors Resilience4j's `CircuitBreaker` (failure threshold, recovery timeout, CLOSED/OPEN/HALF_OPEN state machine, half-open probe calls, expected-exception filter). PyFly does not use the Resilience4j Java library — it is a pure-Python re-implementation with the same semantics.
+
+### Configuring resilience from `pyfly.yaml`
+
+So far you have constructed every `RateLimiter`, `Bulkhead`, and
+`CircuitBreaker` in code. That is perfect for a single gateway, but operations
+teams usually want to tune these thresholds *without a code change* — bump a
+timeout, widen a rate limit — and they want one obvious place to read the
+current settings. PyFly v26.6.110 ships a config-driven **`ResilienceRegistry`**
+for exactly this, giving parity with Resilience4j's named-registry model.
+
+**Step 1 — Declare named instances in `pyfly.yaml`.** Each entry under
+`pyfly.resilience.*` becomes a named instance. Names are yours to choose;
+group them by the downstream they protect:
+
+```yaml
+pyfly:
+  resilience:
+    circuit-breaker:
+      account-api:
+        failure-threshold: 5
+        recovery-timeout: 30s
+        # or switch to windowed-rate mode:
+        # failure-rate-threshold: 0.5
+        # window-size: 10
+    rate-limiter:
+      account-api:
+        max-tokens: 50
+        refill-rate: 20.0
+    bulkhead:
+      account-api:
+        max-concurrent: 8
+    time-limiter:
+      account-api:
+        timeout: 2s
+```
+
+Durations accept friendly suffixes — `30s`, `500ms`, `1m`, `2h` — or a bare
+number read as seconds. Keys use kebab-case (`failure-threshold`); PyFly's
+relaxed binding accepts snake_case too.
+
+**Step 2 — Inject the registry and look instances up by name.** PyFly's
+`ResilienceAutoConfiguration` registers a single `ResilienceRegistry` bean
+built from those keys (it is always on, and returns an empty registry when no
+keys are present). Ask for it in any `@service` constructor:
+
+::: listing lumen/account/gateway_configured.py | Listing 13.12a — Pulling resilience instances from the registry
+from pyfly.container import service
+from pyfly.resilience import (
+    ResilienceRegistry,
+    bulkhead,
+    circuit_breaker,
+    rate_limiter,
+)
+
+
+@service
+class AccountGateway:
+
+    def __init__(self, http_client, registry: ResilienceRegistry) -> None:
+        self._http = http_client
+        # Look up the named instances declared in pyfly.yaml.
+        cb = registry.circuit_breaker("account-api")
+        rl = registry.rate_limiter("account-api")
+        bh = registry.bulkhead("account-api")
+
+        # Wrap the real call with the config-driven instances.
+        guarded = circuit_breaker(cb)(self._raw_get)
+        guarded = bulkhead(bh)(guarded)
+        self.get_account = rate_limiter(rl)(guarded)
+
+    async def _raw_get(self, account_id: str) -> dict:
+        resp = await self._http.get(f"/accounts/{account_id}")
+        return resp.json()
+:::
+
+**What just happened.** The thresholds now live in configuration, not in
+Python literals. A `CircuitBreaker` named `account-api` is materialised once at
+startup and shared by everything that looks it up — so the failure counts and
+OPEN/CLOSED state are *global* across all callers of that name, exactly like a
+shared in-code instance. Looking up an unknown name raises `KeyError` with the
+list of available names, so a typo fails loudly at startup rather than silently
+creating an unprotected path.
+
+!!! tip "Time limiter returns a timedelta"
+    `registry.time_limiter("account-api")` returns the configured **`timedelta`**, not a decorator — feed it straight into `time_limiter(timeout=registry.time_limiter("account-api"))`. The other three accessors (`circuit_breaker`, `rate_limiter`, `bulkhead`) return the instance you pass to the matching decorator.
+
+!!! spring "Spring parity"
+    The `ResilienceRegistry` mirrors Resilience4j's `CircuitBreakerRegistry`, `RateLimiterRegistry`, and `BulkheadRegistry` — named instances declared in configuration and looked up at runtime. Spring Boot's `resilience4j.circuitbreaker.instances.<name>.*` becomes `pyfly.resilience.circuit-breaker.<name>.*`; the property names line up one-for-one.
 
 ---
 
@@ -845,6 +1160,59 @@ Note that `@cacheable` sits *above* `@fallback`. That means:
   `@fallback`, or use the `unless` predicate:
   `unless=lambda r: r.get("status") == "degraded"`.
 
+#### Run it — make the downstream fail and watch the stack degrade
+
+You do not need a live `AccountService` to verify the stack. Wire the
+resilience layers around a stub HTTP client that always raises, and assert
+that the caller still gets a usable `DEGRADED` response instead of an
+exception:
+
+::: listing tests/resilience/test_gateway_stack.py | Listing 13.13a — The stack degrades instead of throwing
+import pytest
+
+from pyfly.resilience import fallback, retry
+
+DEGRADED = {"status": "degraded", "balance_minor": None}
+
+
+class _BrokenClient:
+    async def get(self, path: str) -> dict:
+        raise IOError("AccountService unreachable")
+
+
+@fallback(fallback_value=DEGRADED, on=(IOError,))
+@retry(max_attempts=2, delay=0.0, exceptions=(IOError,))
+async def get_account(client: _BrokenClient, account_id: str) -> dict:
+    resp = await client.get(f"/accounts/{account_id}")
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_degrades_instead_of_raising() -> None:
+    result = await get_account(_BrokenClient(), "acc-1")
+    assert result == DEGRADED
+:::
+
+Run it:
+
+```console
+$ uv run --extra dev pytest tests/resilience/test_gateway_stack.py -q
+.                                                                        [100%]
+1 passed in 0.05s
+```
+
+`@retry` tried the call twice, both attempts raised `IOError`, and `@fallback`
+caught the final exception and returned `DEGRADED`. The caller never saw the
+error — exactly the behaviour you want when `AccountService` is having a bad
+day.
+
+**What just happened.** You assembled a slice of the full stack — retry on the
+inside, fallback on the outside — and proved that a hard failure surfaces as a
+degraded-but-valid response. Add `@rate_limiter`, `@bulkhead`,
+`@time_limiter`, and `@circuit_breaker` between them in the order shown above
+and each one folds into the same flow: every exception they raise is caught by
+the outer `@fallback`, so the caller always receives a response it can use.
+
 ---
 
 ## What you built {.recap}
@@ -890,6 +1258,11 @@ Concretely, you learned:
   arguments — and opens the circuit after a failure threshold, short-
   circuiting subsequent calls during the recovery window so the downstream
   has time to recover.
+- **`ResilienceRegistry`** (PyFly v26.6.110) materialises named
+  `CircuitBreaker`, `RateLimiter`, `Bulkhead`, and time-limiter instances from
+  `pyfly.resilience.*` config keys, so operations can tune thresholds in
+  `pyfly.yaml` and inject the registry to look instances up by name — Spring
+  Boot's `resilience4j.*.instances.<name>.*` parity.
 - **Decorator order** matters: fallback outermost, then rate limiter,
   bulkhead, time limiter, circuit breaker, and retry innermost — with caching
   above the fallback to cache even degraded responses.
@@ -905,6 +1278,8 @@ production.
 
 **Exercise 1 — Conditional caching.** The `GetBalance` handler is called far more often for active wallets than for test wallets. Add `condition=lambda query: not query.wallet_id.startswith("test-")` to the `cacheable(...)` call inside `GetBalanceHandler.__init__` and verify with a unit test using `InMemoryCache` that queries for test wallet ids always reach the repository.
 
-**Exercise 2 — Circuit breaker with rate-based threshold.** Replace the consecutive-count circuit breaker in `AccountGateway` with a rate-based one: open the circuit when more than 60% of the last 20 calls fail. Construct `CircuitBreaker(failure_rate_threshold=0.6, window_size=20, recovery_timeout=60.0, expected=(IOError, TimeoutError))` and write a test that fires 12 failing calls followed by 8 successful ones, asserting that the circuit opens after the 13th failure (crossing 60% of 20).
+**Exercise 2 — Circuit breaker with rate-based threshold.** Replace the consecutive-count circuit breaker in `AccountGateway` with a rate-based one: open the circuit when at least 60% of the last 20 calls fail. Construct `CircuitBreaker(failure_rate_threshold=0.6, window_size=20, recovery_timeout=60.0, expected=(IOError, TimeoutError))`. Two subtleties drive the test design. First, in rate mode the breaker stays not-tripped until the window is *full* — it requires a complete 20-call window before judging the rate — so a burst of failures alone never opens it. Second, the breaker only re-evaluates its trip condition on a *failure* (a success never opens it), so the call that crosses the threshold must itself be a failing call. Write a test that fires 8 succeeding calls followed by 12 failing ones (20 calls total = one full window, ending on a failure). Assert that the circuit stays `CLOSED` through call 19 (the window is still partial), then `OPENS` on the 20th call, when the window fills and the failure rate reaches exactly 12 / 20 = 0.60.
 
 **Exercise 3 — Evict by prefix.** Lumen sometimes needs to invalidate all cache entries for a given wallet owner (GDPR deletion). Add a `purge_owner(owner_id: str)` method to a wallet admin service that calls `backend.evict_by_prefix(f"wallet:balance:{owner_id}:")` directly (without a decorator), and write a test that pre-populates three wallet keys for one owner and one for another, calls `purge_owner`, and asserts that only the target owner's entries are gone.
+
+**Exercise 4 — Config-driven resilience.** Move `AccountGateway`'s hard-coded thresholds into `pyfly.yaml` under `pyfly.resilience.circuit-breaker.account-api`, `pyfly.resilience.rate-limiter.account-api`, and `pyfly.resilience.bulkhead.account-api`. Inject `ResilienceRegistry` into the gateway, look the three instances up by name, and write a test that asserts the materialised `CircuitBreaker.failure_threshold` matches the value you set in config. Note that `ResilienceRegistry.from_config(...)` expects a pyfly `Config`, not a plain dict — it calls `config.get_section("pyfly.resilience.circuit-breaker")` internally. Build one in the test from a nested dict, e.g. `Config({"pyfly": {"resilience": {"circuit-breaker": {"account-api": {"failure-threshold": 5}}}}})` (import `from pyfly.core.config import Config`), then pass that `Config` to `from_config`. Confirm that looking up a misspelled name raises `KeyError` with the list of available names.
