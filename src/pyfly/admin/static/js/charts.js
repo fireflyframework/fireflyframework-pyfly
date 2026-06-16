@@ -254,11 +254,24 @@ export function createDonutChart(canvas, options = {}) {
  */
 export function createGaugeChart(canvas, options = {}) {
     const thresholds = options.thresholds || { warning: 60, danger: 80 };
-    let currentValue = Math.max(0, Math.min(100, options.value || 0));
+    // ``max`` is the value that fills the arc completely; ``unit`` is the suffix
+    // on the centre readout. The defaults (100 / '%') keep the gauge a
+    // percentage meter. Pass ``{ max, unit: '' }`` to show an absolute count
+    // (e.g. thread count, connection count) as a plain number rather than a %.
+    const max = options.max != null && options.max > 0 ? options.max : 100;
+    const unit = options.unit != null ? options.unit : '%';
+    // The displayed value is the raw number (not clamped to 100); only the arc
+    // fill is bounded to 0-100% of ``max``.
+    let currentValue = Math.max(0, options.value || 0);
+
+    function fill(val) {
+        return Math.max(0, Math.min(100, (val / max) * 100));
+    }
 
     function getColor(val) {
-        if (val >= thresholds.danger) return cssVar('--admin-danger') || '#f43f5e';
-        if (val >= thresholds.warning) return cssVar('--admin-warning') || '#f59e0b';
+        const pct = fill(val);
+        if (pct >= thresholds.danger) return cssVar('--admin-danger') || '#f43f5e';
+        if (pct >= thresholds.warning) return cssVar('--admin-warning') || '#f59e0b';
         return cssVar('--admin-success') || '#10b981';
     }
 
@@ -266,7 +279,7 @@ export function createGaugeChart(canvas, options = {}) {
         type: 'doughnut',
         data: {
             datasets: [{
-                data: [currentValue, 100 - currentValue],
+                data: [fill(currentValue), 100 - fill(currentValue)],
                 backgroundColor: [getColor(currentValue), cssVar('--admin-border-subtle') || '#162032'],
                 borderWidth: 0,
             }],
@@ -293,7 +306,7 @@ export function createGaugeChart(canvas, options = {}) {
                 ctx.font = `700 ${Math.round(size * 0.2)}px ${cssVar('--admin-font-mono') || 'monospace'}`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(`${Math.round(currentValue)}%`, width / 2, height / 2 - 4);
+                ctx.fillText(`${Math.round(currentValue)}${unit}`, width / 2, height / 2 - 4);
                 // Label
                 if (options.label) {
                     ctx.fillStyle = cssVar('--admin-text-muted') || '#64748b';
@@ -307,8 +320,8 @@ export function createGaugeChart(canvas, options = {}) {
 
     return {
         update(value) {
-            currentValue = Math.max(0, Math.min(100, value));
-            chart.data.datasets[0].data = [currentValue, 100 - currentValue];
+            currentValue = Math.max(0, value);
+            chart.data.datasets[0].data = [fill(currentValue), 100 - fill(currentValue)];
             chart.data.datasets[0].backgroundColor = [getColor(currentValue), cssVar('--admin-border-subtle') || '#162032'];
             chart.update();
         },

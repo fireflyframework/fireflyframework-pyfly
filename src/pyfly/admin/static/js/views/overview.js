@@ -454,6 +454,12 @@ export async function render(container, api) {
         threadGauge = createGaugeChart(threadCanvas, {
             value: 0,
             label: 'Threads',
+            // Thread count is an absolute number, not a percentage: show the
+            // raw count (unit: '') and scale the arc against a generous ceiling
+            // so it doubles as a thread-leak indicator (amber past 60, red past
+            // 80) without ever rendering a misleading ``%``.
+            unit: '',
+            max: 100,
             thresholds: { warning: 60, danger: 80 },
         });
 

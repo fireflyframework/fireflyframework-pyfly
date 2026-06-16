@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.106 (2026-06-16)
+
+### Fixed
+
+- **Admin dashboard: the Overview "Thread Count" gauge no longer renders the
+  thread count as a percentage.** The gauge widget (`createGaugeChart`) was a
+  fixed 0–100 percentage meter — it clamped its value to 100 and appended a
+  hard-coded `%` to the centre readout — but the Overview page feeds it the
+  absolute active-thread count. A process with 8 threads therefore showed
+  `8%`, and any count above 100 clamped to `100%`. The gauge now accepts a
+  `max` (the value that fills the arc) and a `unit` (the readout suffix); the
+  thread gauge passes `unit: ''` and `max: 100`, so it shows the raw count
+  (`8`, `150`, …) while still acting as a thread-leak indicator (amber past 60,
+  red past 80). The defaults (`max: 100`, `unit: '%'`) keep every percentage
+  gauge rendering exactly as before.
+
+---
+
 ## v26.06.105 (2026-06-15)
 
 ### Fixed
