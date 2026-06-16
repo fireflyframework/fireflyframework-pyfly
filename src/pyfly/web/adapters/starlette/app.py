@@ -230,10 +230,6 @@ def create_app(
 
     _install_user_filters()
 
-    middleware: list[Middleware] = [
-        Middleware(WebFilterChainMiddleware, filters=filters),
-    ]
-
     # CORS auto-configuration (audit #204): when no explicit CORSConfig is passed,
     # build one from ``pyfly.web.cors.*`` so CORS is enabled purely via YAML, like
     # Spring's CorsAutoConfiguration. Secure-by-default: disabled unless opted in.
@@ -242,6 +238,13 @@ def create_app(
 
         cors = _CORSConfig.from_config(context.config)
 
+    # CORS middleware must be the OUTERMOST middleware (first in the list) so it
+    # answers the OPTIONS preflight itself — and adds the Access-Control-* headers
+    # — BEFORE the WebFilterChain (which holds the security gate). Otherwise the
+    # gate rejects the credential-less preflight with 401 and the browser blocks
+    # the real request ("Load failed"). Starlette applies middleware outermost
+    # first, so CORS is prepended ahead of WebFilterChainMiddleware.
+    middleware: list[Middleware] = []
     if cors is not None:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -256,6 +259,7 @@ def create_app(
                 max_age=cors.max_age,
             )
         )
+    middleware.append(Middleware(WebFilterChainMiddleware, filters=filters))
 
     routes: list[Route] = []
     registrar = ControllerRegistrar()
