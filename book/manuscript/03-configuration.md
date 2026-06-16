@@ -14,7 +14,32 @@ This chapter shows how PyFly solves that with a single `pyfly.yaml`, a four-laye
 
 Every non-trivial application has at least two audiences for its configuration: a developer who wants verbose logs and a relaxed local database, and a production system that demands structured JSON logs, a real connection pool, and no debug mode. The naive solution — `if os.getenv("ENV") == "prod":` scattered through a dozen files — quickly becomes impossible to audit. PyFly's answer is one canonical YAML (or TOML) file that holds everything your application knows about itself, with separate mechanisms for what changes between environments.
 
-PyFly auto-discovers this file in your project root. The framework checks candidates in order — `pyfly.yaml`, `pyfly.toml`, `config/pyfly.yaml`, `config/pyfly.toml` — and loads the first one it finds. Here is Lumen's base `pyfly.yaml`:
+PyFly auto-discovers this file in your project root. The framework checks candidates in order — `pyfly.yaml`, `pyfly.toml`, `config/pyfly.yaml`, `config/pyfly.toml` — and loads the first one it finds.
+
+!!! note "New term: auto-discovery"
+    "Auto-discovery" simply means you do not have to tell PyFly where the config file is. You drop `pyfly.yaml` in your project root and the framework finds it on startup. No path argument, no registration call.
+
+Let us look at Lumen's base `pyfly.yaml` one section at a time, then read it as a whole.
+
+**Step 1 — Identify the service.** The first block names the application and gives it a version. These two values flow into the startup banner, the health endpoint, and trace metadata, so every part of the system reports the same identity:
+
+```yaml
+pyfly:
+  app:
+    name: lumen
+    version: 1.0.0
+```
+
+**Step 2 — Pick the listen port.** PyFly's business API listens on `pyfly.server.port`. The default is `8080`, so this line is technically redundant — it is written out for clarity. (If you have read older PyFly material that mentioned `pyfly.web.port`, note that key was removed in v26.06.102; use `pyfly.server.port` now.)
+
+```yaml
+  server:
+    port: 8080
+```
+
+**Step 3 — Turn on the domain features Lumen uses.** The remaining blocks switch on observability, CQRS, the transactional engine, event sourcing, caching, the in-memory event bus, and the relational data layer. Each block is one feature; you enable what you need and leave the rest at their framework defaults.
+
+Here is the complete file. Notice that `pyfly:` is the only top-level key — everything Lumen tells the framework lives under it:
 
 ::: listing pyfly.yaml | Listing 3.1 — Lumen's base configuration file
 pyfly:
@@ -23,7 +48,8 @@ pyfly:
     version: 1.0.0
   banner:
     mode: console
-  web:
+  server:
+    # App on 8080; actuator + admin default to the management port 9090.
     port: 8080
   observability:
     metrics:
@@ -40,14 +66,16 @@ pyfly:
     enabled: true
   cache:
     provider: in-memory
-  # Event-Driven Architecture: in-memory bus (no broker needed).
-  # The EventPublisher bean that wallet command handlers publish
-  # through — and that @event_listener projections subscribe to —
-  # is activated by setting provider to "memory".
+  # Event-Driven Architecture: the in-memory bus (no broker needed).
+  # Setting the provider registers the EventPublisher bean that the
+  # wallet command handlers publish domain events through and that the
+  # @event_listener audit projection auto-subscribes to.
   eda:
     provider: memory
-  # Relational data layer (SQLAlchemy + SQLite via aiosqlite).
-  # The framework creates the schema on startup (ddl-auto=create).
+  # Relational data layer (SQLAlchemy + SQLite via aiosqlite). The
+  # framework creates the schema on startup (ddl-auto=create) and backs
+  # the WalletRepository (a framework Repository[WalletEntity, str]) that
+  # the command handlers persist through inside @transactional().
   data:
     relational:
       enabled: true
@@ -55,20 +83,47 @@ pyfly:
       ddl-auto: create
 :::
 
+!!! note "Run it"
+    From the Lumen project root, start the app and watch which file the framework loads:
+
+    ```bash
+    cd samples/lumen
+    uv sync
+    uv run pyfly run
+    ```
+
+    The startup banner prints the framework version, then PyFly logs each
+    configuration source it merged (one `loaded_config` line per layer) before the
+    application binds to port `8080`:
+
+    ```
+    :: PyFly Framework :: (v26.06.110) (Python 3.12.13)
+    Copyright 2026 Firefly Software Foundation. | Apache License 2.0
+    no_active_profiles  message=No active profiles set, falling back to default
+    loaded_config  source=pyfly-defaults.yaml (framework defaults)
+    loaded_config  source=.../samples/lumen/pyfly.yaml
+    Uvicorn running on http://0.0.0.0:8080
+    ```
+
+    Leave it running; you will hit it with `curl` shortly. Press `Ctrl+C` to stop.
+
 Three things are worth noting. First, the `pyfly:` top-level key is reserved exclusively for framework settings — web server, observability, CQRS, EDA, data access, and profiles all live there. Your own application keys go under a different top-level name (such as `lumen:`). Second, `pyfly.app.name` and `pyfly.app.version` identify the service throughout — startup banner, health endpoints, and trace metadata all read these values. Third, the `pyfly.data.relational.*` block configures the SQLAlchemy/aiosqlite layer; `url`, `ddl-auto`, and `enabled` are its three core keys.
 
-Nested keys map directly to dot-notation access through `Config.get()`:
+Nested keys map directly to dot-notation access through `Config.get()`. To read a nested value, you join the key path with dots — `pyfly.server.port` walks `pyfly:` then `server:` then `port:`:
 
 ```python
-config.get("pyfly.app.name")       # "lumen"
-config.get("pyfly.server.port")            # 8080
-config.get("pyfly.data.relational.url")    # "sqlite+aiosqlite:///./lumen.db"
-config.get("pyfly.eda.provider")           # "memory"
+config.get("pyfly.app.name")              # "lumen"
+config.get("pyfly.server.port")           # 8080
+config.get("pyfly.data.relational.url")   # "sqlite+aiosqlite:///./lumen.db"
+config.get("pyfly.eda.provider")          # "memory"
 ```
 
 `Config.get()` uses **relaxed segment matching**: `ddl-auto` and `ddl_auto` resolve to the same key. Your YAML can use kebab-case (the conventional YAML style) and your Python code can use snake_case — no need to remember which form you used in the file.
 
 PyFly uses `PyYAML` (`yaml.safe_load`) for YAML parsing; native YAML types are preserved. The integer `8080` in YAML arrives as a Python `int` — no string parsing required.
+
+!!! note "What just happened"
+    You wrote one YAML file, and PyFly turned it into a typed, queryable configuration object. The `pyfly:` block told the framework which features to switch on (data layer, CQRS, event bus); `Config.get("…")` reads any value back out by its dotted path; and the relaxed matching means you never have to remember whether you wrote `ddl-auto` or `ddl_auto`. That single object is the source of truth the rest of this chapter builds on.
 
 !!! tip "Tip"
     You can also use TOML if your team prefers INI-like syntax with strict typing. Rename the file to `pyfly.toml` and use TOML table syntax — `[pyfly.web]`, `[pyfly.data.relational]` — instead of YAML nesting. Every feature described in this chapter works identically with both formats.
@@ -140,6 +195,9 @@ The layering system provides the mechanism for varying configuration between env
 
 A **profile** is a named environment variant — `dev`, `test`, `staging`, `prod`. Activating a profile loads an overlay file and can conditionally include or exclude beans.
 
+!!! note "New term: overlay file"
+    An "overlay" is a small YAML file that contains *only the keys that change* for one environment. PyFly merges it on top of the base `pyfly.yaml`. You never repeat the full configuration — you just state the differences, and the deep merge from the previous section fills in everything else.
+
 ### Activating profiles
 
 PyFly must know which profiles are active *before* loading the full configuration, because it needs to know which overlay files to merge. This **early profile resolution** follows a deliberate priority order:
@@ -151,12 +209,14 @@ PyFly must know which profiles are active *before* loading the full configuratio
 In production, override with an env var — no code change, no file edit:
 
 ```bash
-PYFLY_PROFILES_ACTIVE=prod python main.py
+PYFLY_PROFILES_ACTIVE=prod uv run pyfly run
 ```
 
 ### Profile overlay files
 
-For each active profile `{name}`, PyFly looks for `pyfly-{name}.yaml` next to the base file. Lumen ships three overlays, each containing only the keys that differ from the base:
+For each active profile `{name}`, PyFly looks for `pyfly-{name}.yaml` next to the base file. We will add three overlays to Lumen, each containing only the keys that differ from the base. Build them one at a time.
+
+**Step 1 — The development overlay.** Create `pyfly-dev.yaml` alongside `pyfly.yaml`. Dev wants the loudest possible feedback loop: full tracebacks, every SQL query echoed to the terminal, and framework internals visible at `DEBUG`.
 
 ::: listing pyfly-dev.yaml | Listing 3.2 — Development overlay: verbose logging, debug mode
 pyfly:
@@ -172,6 +232,8 @@ pyfly:
 
 Three keys cover everything the dev environment needs: debug mode for detailed tracebacks, SQL echo so every query appears in the terminal, and `DEBUG` log level so framework internals are visible. Everything else comes unchanged from the base file. Note that `echo` lives under `pyfly.data.relational.*`, consistent with the base file structure.
 
+**Step 2 — The test overlay.** Create `pyfly-test.yaml`. The test environment wants the opposite of dev: quiet. Silence the banner so test output stays readable, turn off real persistence (unit tests mock the repository), and raise the log threshold so passing tests print nothing.
+
 ::: listing pyfly-test.yaml | Listing 3.3 — Test overlay: in-memory SQLite, silent banner
 pyfly:
   banner:
@@ -185,6 +247,8 @@ pyfly:
 :::
 
 The test overlay silences the startup banner so test output stays clean, disables data persistence (unit tests mock the repository layer), and raises the log threshold to `WARNING` so passing tests produce no noise.
+
+**Step 3 — The production overlay.** Create `pyfly-prod.yaml`. Production flips many switches at once: a real PostgreSQL URL, structured JSON logs, the interactive docs turned off, and a quiet banner.
 
 ::: listing pyfly-prod.yaml | Listing 3.4 — Production overlay: real database, JSON logging, docs off
 pyfly:
@@ -207,6 +271,25 @@ pyfly:
 :::
 
 The production overlay makes several deliberate choices. It disables the interactive API docs — you do not want a live Swagger UI on a production endpoint. It switches logging to `json` format so aggregators like Datadog or CloudWatch can parse structured fields rather than scraping human-readable text. It points `pyfly.data.relational.url` at the real PostgreSQL instance. It sets `pyfly.server.port: 443`, though in practice you will override this with `PYFLY_SERVER_PORT` from your deployment pipeline so no topology details enter the repository.
+
+!!! note "Run it"
+    With the three overlay files in place, activate the dev profile and watch the merge happen. The `PYFLY_PROFILES_ACTIVE` environment variable tells PyFly which overlays to load before it reads the rest of the config:
+
+    ```bash
+    PYFLY_PROFILES_ACTIVE=dev uv run pyfly run
+    ```
+
+    The startup log now lists the dev overlay among the merged sources, and because dev sets `pyfly.data.relational.echo: true`, every SQL statement appears in the terminal as soon as the app touches the database:
+
+    ```
+    active_profiles  profiles=['dev']
+    loaded_config  source=pyfly-defaults.yaml (framework defaults)
+    loaded_config  source=.../samples/lumen/pyfly.yaml
+    loaded_config  source=.../samples/lumen/pyfly-dev.yaml (profile: dev)
+    INFO   sqlalchemy.engine.Engine  BEGIN (implicit)
+    ```
+
+    Stop the app, run it again *without* the env var, and the dev overlay disappears from the source list — the base file's quieter defaults take over. That is the whole profile mechanism in one experiment: one env var swaps an entire layer in and out.
 
 !!! tip "Tip"
     Multiple profiles are comma-separated in the env var and are applied in order, so the last profile wins on conflicts: `PYFLY_PROFILES_ACTIVE=prod,metrics` first applies `pyfly-prod.yaml`, then `pyfly-metrics.yaml`. Use this to compose cross-cutting concerns — a `metrics` profile can enable Prometheus scraping without duplicating your entire prod config.
@@ -233,7 +316,13 @@ class VerboseAuditLogger:
     ...
 ```
 
+!!! note "New term: bean"
+    A "bean" is any object the DI container creates and manages for you — a `@service`, `@repository`, `@command_handler`, and so on (the term comes straight from Spring). "Profile-scoped" means the container only creates the bean when a matching profile is active.
+
 `Environment.accepts_profiles()` evaluates profile expressions during the first pass of `ApplicationContext.start()`. Beans whose expression does not match the active set are removed before any resolution takes place — never instantiated, never wired, never present in the container. The result is a container that is structurally different per environment, with no `if` statement in your application code.
+
+!!! note "What just happened"
+    Profiles gave you two independent tools. The *overlay files* (`pyfly-{name}.yaml`) change configuration *values* per environment. The `profile=` parameter on a stereotype changes which *beans exist* per environment. Both are driven by the same active-profile set — set once via `PYFLY_PROFILES_ACTIVE` — so a single env var reshapes both your settings and your object graph, with zero conditional logic in your business code.
 
 ---
 
@@ -243,9 +332,14 @@ String-key lookups like `config.get("pyfly.data.relational.url")` work for occas
 
 `@config_properties` solves exactly this by binding a config section to a typed Python dataclass.
 
+!!! note "New term: binding"
+    "Binding" means copying values out of the config tree into the fields of a typed object. A Python `@dataclass` is a class whose fields are declared with type hints (`url: str`, `pool_size: int`); after binding, you read `props.pool_size` and get a real `int`, not a string you have to convert yourself.
+
 ### Declaring a properties class
 
-Decorate a `@dataclass` with `@config_properties(prefix="...")`. The `prefix` identifies the config section to bind; field names must match the keys under that section (kebab/snake interchangeable). Here is the framework's own `RelationalProperties`, which binds the `pyfly.data.relational.*` block:
+Decorate a `@dataclass` with `@config_properties(prefix="...")`. The `prefix` identifies the config section to bind; field names must match the keys under that section (kebab/snake interchangeable).
+
+**Step 1 — Write the class.** Here is the framework's own `RelationalProperties`, which binds the `pyfly.data.relational.*` block:
 
 ::: listing pyfly/config/properties/data.py | Listing 3.5 — RelationalProperties: typed settings for the data layer
 from dataclasses import dataclass
@@ -268,7 +362,7 @@ The decorator sets `__pyfly_config_prefix__` on the class and marks it as an inj
 
 Notice that each field carries a default value matching the framework's built-in `pyfly-defaults.yaml`. This is intentional: the class is self-documenting, and it can be constructed and used in unit tests without any YAML file on disk — just instantiate `RelationalProperties()` and you get the development defaults.
 
-Apply the same pattern to your own application-level settings. Here is how a `WalletProperties` class would look for Lumen's business rules:
+**Step 2 — Apply the pattern to your own settings.** The same decorator works for application-level configuration. Here is how a `WalletProperties` class would look for Lumen's business rules:
 
 ```python
 from dataclasses import dataclass
@@ -282,7 +376,14 @@ class WalletProperties:
     default_currency: str = "USD"
 ```
 
-Add the matching block to `pyfly.yaml` under the `lumen:` top-level key (outside `pyfly:`) and the framework binds it automatically — no special registration required.
+**Step 3 — Add the matching YAML.** Put the block under the `lumen:` top-level key (outside `pyfly:`, since this is your application's own namespace, not the framework's) and the framework binds it automatically — no special registration required:
+
+```yaml
+lumen:
+  wallet:
+    daily-transfer-limit: 10000.0
+    default-currency: USD
+```
 
 ### Binding and injecting
 
@@ -331,6 +432,27 @@ When the DI container starts Lumen, `WalletService.__init__` receives the shared
 
 The critical detail in step 2 is that `effective_section()` applies the full four-layer stack — defaults, file, profile overlay, env vars — before the dataclass is constructed. By the time `bind()` finishes, `RelationalProperties` reflects whatever the production overlay or a runtime env var says, not just the base YAML.
 
+!!! note "What just happened"
+    You replaced scattered `config.get("…")` string lookups with a single typed object. `config.bind(RelationalProperties)` reads the whole `pyfly.data.relational.*` section once, applies the four-layer precedence, coerces strings to the right types, and hands back a plain dataclass. From then on your service reads `self.db.enabled` as a `bool` with IDE autocompletion — and a typo in a field name is caught at startup, not at request time in production.
+
+!!! note "Run it"
+    You can prove the env-var layer reaches a bound property with a tiny check. The base `pyfly.yaml` sets `pyfly.data.relational.enabled: true`; here we override it from the environment. From the Lumen project root:
+
+    ```bash
+    PYFLY_DATA_RELATIONAL_ENABLED=false uv run python -c "
+    from pyfly.core import Config
+    from pyfly.config.properties import RelationalProperties
+    db = Config.from_file('pyfly.yaml').bind(RelationalProperties)
+    print('enabled =', db.enabled, type(db.enabled).__name__)
+    "
+    ```
+
+    Expected output — the env var wins over the YAML and the string `"false"` is coerced to a `bool`:
+
+    ```
+    enabled = False bool
+    ```
+
 ### Injecting individual values with Value
 
 For isolated settings that do not warrant a full properties class, PyFly provides a `Value` descriptor. Declare it as a class-level field and the DI container resolves it at bean creation time — exactly like Spring Boot's `@Value("${...}")`:
@@ -360,8 +482,10 @@ Native YAML types arrive correctly typed — integers, booleans, and floats need
 |---|---|
 | `int` | `int(value)` |
 | `float` | `float(value)` |
-| `bool` | `value.lower() in ("true", "1", "yes", "on")` |
+| `bool` | `value.lower() in ("true", "1", "yes")` |
 | `str` | no coercion needed |
+
+The `bind()` dataclass path treats `"true"`, `"1"`, and `"yes"` as `True`; the read-time `get()`/env override path additionally accepts `"on"`.
 
 Calling `bind()` on a class not decorated with `@config_properties` raises `ValueError` immediately — a clear fail-fast signal at startup rather than a silent wrong-value bug at request time.
 
@@ -413,7 +537,7 @@ Activating the production profile and overriding the database URL for a specific
 PYFLY_PROFILES_ACTIVE=prod \
   PYFLY_DATA_RELATIONAL_URL="postgresql+asyncpg://rds-prod:5432/lumen" \
   PYFLY_SERVER_PORT=8080 \
-  python main.py
+  uv run pyfly run
 ```
 
 Here, `PYFLY_SERVER_PORT=8080` overrides the prod overlay's `port: 443`. The precedence stack resolves like this:
@@ -441,12 +565,15 @@ PYFLY_SECURITY_JWT_SECRET="$(vault kv get -field=jwt_secret secret/lumen)"
 `Config.bind()` also handles values that exist *only* as environment variables — no matching entry in any YAML file. `effective_section()` injects these env-only keys into the bound section so `bind()` sees the same value that `get()` would. Add a new field to a `@config_properties` class, set it exclusively via an env var in your deployment pipeline, and it is populated correctly even when the YAML files have not been updated yet:
 
 ```bash
-# No YAML entry for pyfly.data.relational.pool-size?
+# No YAML entry for pyfly.data.relational.echo?
 # Set it exclusively via env var — bind() still picks it up.
-PYFLY_DATA_RELATIONAL_POOL_SIZE=20 python main.py
+PYFLY_DATA_RELATIONAL_ECHO=true uv run pyfly run
 ```
 
 This is a practical escape hatch during incremental rollouts: the deploying team can inject a new value before the YAML file is updated and reviewed, and the application picks it up without a code change.
+
+!!! warning "Multi-word field names and env-only injection"
+    Env-only injection treats each underscore in a `PYFLY_*` name as a path separator, so `PYFLY_DATA_RELATIONAL_POOL_SIZE` is read as the nested path `pool` → `size`, not the flat field `pool_size`. For a single-word field like `echo` this is unambiguous and `bind()` injects it cleanly. For a multi-word field such as `pool_size`, give the key a real home in your YAML (even just `pool-size: 5`) so the env var overrides an existing leaf instead of relying on env-only injection. Read-time `config.get("pyfly.data.relational.pool-size")` always returns the env value regardless, because `get()` maps the whole dotted key in one step.
 
 ---
 
@@ -482,15 +609,46 @@ adapter (Granian, Uvicorn, Hypercorn). Two values change the topology: set
 single port (the pre-`v26.06.102` behaviour), or set it to **`-1`** to disable the
 management web endpoints entirely.
 
+!!! warning "The management port is open by default"
+    For Spring Boot parity, the management port (9090) is **open and
+    unauthenticated** by default — it is meant to live on an internal network
+    protected by network isolation, not by the app's login filters. Before you
+    expose it anywhere reachable, secure it with
+    `pyfly.management.security.enabled: true`, which applies the app's security,
+    session, and CSRF filters to the management port too. By default only the
+    `health` and `info` actuator endpoints are exposed over HTTP; widen that with
+    `pyfly.management.endpoints.web.exposure.include` (for example
+    `"health,info,metrics,prometheus"`).
+
+!!! note "Run it"
+    Start Lumen and hit the management port directly. The health endpoint lives on
+    9090, not on the application's 8080:
+
+    ```bash
+    uv run pyfly run        # in one terminal
+    curl http://localhost:9090/actuator/health   # in another
+    ```
+
+    Expected output — a small JSON document reporting the service is up:
+
+    ```json
+    {"status":"UP"}
+    ```
+
+    The same path on the app port (`curl http://localhost:8080/actuator/health`)
+    will not answer, because the actuator listens only on the management port.
+
 !!! spring "Spring parity"
     `pyfly.server.port` ≡ Spring `server.port`, `pyfly.server.host` ≡
     `server.address`, and `pyfly.management.server.port` ≡
     `management.server.port`. Setting a distinct management port runs the actuator
-    on its own connector, exactly as Spring Boot does.
+    on its own connector, exactly as Spring Boot does. `pyfly.management.security.enabled`
+    and `pyfly.management.endpoints.web.exposure.include` mirror Spring's
+    management security and `management.endpoints.web.exposure.include` settings.
 
 ## Try it yourself {.exercises}
 
-1. **Add a staging overlay.** Create `pyfly-staging.yaml` with a PostgreSQL URL for a shared test database under `pyfly.data.relational.url`, `pyfly.data.relational.enabled: true`, and logging at `INFO`. Activate it with `PYFLY_PROFILES_ACTIVE=staging python main.py` and verify from the startup log that the staging source was loaded. Compare the effective configuration to what the prod overlay would produce.
+1. **Add a staging overlay.** Create `pyfly-staging.yaml` with a PostgreSQL URL for a shared test database under `pyfly.data.relational.url`, `pyfly.data.relational.enabled: true`, and logging at `INFO`. Activate it with `PYFLY_PROFILES_ACTIVE=staging uv run pyfly run` and verify from the startup log that the staging source was loaded. Compare the effective configuration to what the prod overlay would produce.
 
 2. **Bind a new typed property and use it.** Add a `max_wallets_per_owner: int = 5` field to a new `WalletProperties` class decorated with `@config_properties(prefix="lumen.wallet")`, and a matching `lumen.wallet.max-wallets-per-owner: 5` key in `pyfly.yaml` (outside the `pyfly:` block). Inject `Config` into `WalletService`, call `config.bind(WalletProperties)`, and add a guard in `open_wallet` that raises `ValueError` when the owner already holds the maximum number of wallets. Write a quick test that overrides the limit to `1` by setting `PYFLY_LUMEN_WALLET_MAX_WALLETS_PER_OWNER=1` and verifying the error fires on the second wallet.
 

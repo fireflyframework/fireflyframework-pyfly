@@ -28,13 +28,42 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 ```
 
+A quick gloss before we start, since three terms recur in this chapter. A
+**fixture** is a reusable piece of test setup — pytest builds it once, hands it to
+your test, and tears it down afterward. A **conftest.py** is a special file pytest
+discovers automatically; any fixtures you declare there become available to every
+test in the package without an import. And **`pytest-asyncio` auto mode** simply
+means you can write `async def test_...` and pytest will `await` it for you — no
+per-test decorator required. Each of these appears again with a concrete example
+below; this is just the map.
+
 Install dev dependencies and run the suite:
 
 ```bash
 uv run --extra dev pytest -q
 ```
 
-The bare `uv sync` (without `--extra dev`) omits the dev group, so pytest is not installed. Always include `--extra dev` when running tests.
+The bare `uv sync` (without `--extra dev`) omits the dev group, so pytest is not
+installed. Always include `--extra dev` when running tests.
+
+**Run it.** From the `samples/lumen` directory, run the whole suite once now so you
+have a baseline before changing anything:
+
+```bash
+uv run --extra dev pytest -q
+```
+
+You should see a row of dots — one per test — followed by a summary line:
+
+```text
+.........................................                                [100%]
+41 passed in 0.28s
+```
+
+Forty-one passing tests, under a third of a second, no Docker and no external
+process. That speed is the whole point of the pyramid: the fast base catches most
+regressions before the slower integration layers ever run. If you instead see
+`No module named pytest`, you forgot `--extra dev` — re-run with it.
 
 ---
 
@@ -45,6 +74,37 @@ The domain model — `Money` and `Wallet` — has no framework dependencies. It 
 ### Testing Money
 
 `Money` is a frozen dataclass. Every operation either succeeds and returns a new `Money` instance, or raises `BusinessRuleViolation`. Each violation carries a `.rule` string that names the violated invariant — useful for asserting the exact rule in tests.
+
+A quick gloss on two terms. A **value object** is an object defined entirely by its
+values — two `Money(1050, EUR)` instances are equal because their fields are equal,
+not because they are the same object in memory. A **frozen dataclass** is Python's
+way of making such an object immutable: once constructed, you cannot reassign its
+fields. Together they make `Money` safe to pass around freely — no caller can
+mutate it behind your back, so it never needs defensive copying.
+
+Let us build the test file one assertion-group at a time. Each step below maps to
+one `def test_...` function in the listing that follows.
+
+**Step 1 — equality is structural.** `test_value_equality_is_structural` asserts
+that two `Money` values with the same amount and currency are equal, and that
+differing in either field makes them unequal. This is the value-object contract.
+
+**Step 2 — immutability is enforced.** `test_money_is_immutable` tries to assign to
+`money.amount` and expects an exception. The frozen dataclass raises
+`FrozenInstanceError`, proving you cannot mutate a value after construction.
+
+**Step 3 — arithmetic returns new values.** `test_add_and_subtract_same_currency`
+checks that `add` and `subtract` produce the expected `Money`, never mutating the
+operands.
+
+**Step 4 — the convenience surface.** `test_zero_factory_and_major_units` covers the
+`Money.zero(currency)` factory, the `major_units` property, and the `__str__`
+formatting.
+
+**Step 5 — invariants reject bad input.** The last two tests assert that mixing
+currencies and passing a non-integer amount each raise `BusinessRuleViolation` with
+a specific `.rule` string — `"money-currency-mismatch"` and
+`"money-amount-integer"`.
 
 ::: listing tests/test_money.py | Listing 16.1 — Pure unit tests for the Money value object
 from __future__ import annotations
@@ -95,6 +155,29 @@ def test_non_integer_amount_is_rejected() -> None:
 
 Every test is synchronous — no `async`, no `await`, no fixtures. Pytest collects the module-level functions automatically. `Currency.EUR` is an enum value, not a plain string, matching the domain model's type contract exactly.
 
+**Run it.** Run just this file to see the unit base of the pyramid in action:
+
+```bash
+uv run --extra dev pytest tests/test_money.py -q
+```
+
+Expected output:
+
+```text
+......                                                                   [100%]
+6 passed in 0.02s
+```
+
+Six tests, twenty milliseconds. No database connected, no event bus started — these
+tests construct a plain object and assert on its behaviour. That is what makes the
+base of the pyramid so wide and so fast.
+
+*What just happened.* You proved the entire `Money` contract — equality,
+immutability, arithmetic, and every invariant — without touching a single piece of
+framework infrastructure. Pure-domain code stays pure-domain testable. When one of
+these fails, you know the bug is in the value object itself, not in wiring, a
+session, or the bus.
+
 !!! tip "Minor-unit arithmetic"
     `Money` stores amounts in **minor units** (integer cents). `Money(1050,
     Currency.EUR)` represents €10.50 — verified by `major_units == 10.5` and
@@ -104,6 +187,35 @@ Every test is synchronous — no `async`, no `await`, no fixtures. Pytest collec
 ### Testing the Wallet aggregate
 
 `Wallet` enforces several invariants: the owner must be a non-blank string, deposits must be positive, withdrawals must not overdraw, and amounts must match the wallet's currency. Each violation carries a `.rule` attribute for precise assertion.
+
+One term first. An **aggregate** (or **aggregate root**) is a cluster of domain
+objects treated as a single unit for consistency — here, the `Wallet` and its
+balance. Every change goes through the aggregate's methods, so the aggregate is the
+one place that guarantees its invariants hold. That makes it the natural unit to
+test: drive it through its public methods and assert the rules never break.
+
+The pattern every aggregate test follows is **arrange, act, assert**. Arrange:
+construct the wallet into a known state. Act: call one method. Assert: check the
+balance, the emitted event, or the raised violation. Watch for it in each test:
+
+**Step 1 — opening emits an event.** `test_open_creates_empty_wallet` opens a wallet
+and asserts the balance is zero and exactly one `WalletOpened` event is queued.
+
+**Step 2 — opening validates its arguments.** `test_open_requires_owner` passes a
+blank owner and expects `BusinessRuleViolation` with rule
+`"wallet-owner-required"`.
+
+**Step 3 — the happy path of deposit then withdraw.**
+`test_deposit_then_withdraw_happy_path` deposits, asserts the balance and the
+`FundsDeposited` event, then withdraws and asserts the balance and the
+`FundsWithdrawn` event. Note the `clear_events()` call in the arrange step — more on
+that just below the listing.
+
+**Step 4 — invariants reject bad operations.** The final three tests prove a
+withdrawal cannot overdraw, a deposit must be positive, and an amount must match the
+wallet's currency. Each asserts the exact `.rule` string, and the overdraw test also
+asserts the balance was left unchanged and no event was raised — proof the invariant
+fired *before* any state changed.
 
 ::: listing tests/test_wallet_aggregate.py | Listing 16.2 — Unit tests for the Wallet aggregate root
 from __future__ import annotations
@@ -185,6 +297,28 @@ def test_currency_mismatch_is_rejected() -> None:
 
 Three details deserve attention. First, `Wallet.open` takes three positional arguments: a pre-generated `wallet_id`, an `owner_id`, and a `Currency` enum value — the aggregate does not generate its own ID. Second, `pending_events()` returns buffered events without draining; `clear_events()` returns and drains. The `test_deposit_then_withdraw_happy_path` test calls `clear_events()` after opening so each assertion sees exactly one event. Third, `FundsDeposited` and `FundsWithdrawn` carry `amount` (the operation amount in minor units) and `balance` (the post-operation running balance) — not `new_balance`. Always verify real event dataclass fields before asserting them.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_wallet_aggregate.py -q
+```
+
+Expected output:
+
+```text
+......                                                                   [100%]
+6 passed in 0.02s
+```
+
+*What just happened.* The trickiest line to read is the assignment
+`[event] = wallet.clear_events()`. That is a list unpacking: it asserts the returned
+list has **exactly one** element and binds it to `event` in a single step. If the
+aggregate had raised zero or two events, the unpacking itself would raise a
+`ValueError` and the test would fail — so the shape of the event stream is checked
+for free. This is why the happy-path test calls `clear_events()` right after opening:
+it drains the `WalletOpened` event so the next unpacking sees only the
+`FundsDeposited` event you are actually asserting on.
+
 !!! spring "Spring parity"
     Testing a DDD aggregate in isolation is the same discipline in any stack. In
     Spring / jMolecules you would call the aggregate's methods directly and
@@ -199,6 +333,47 @@ Three details deserve attention. First, `Wallet.open` takes three positional arg
 The CQRS and event-listener tests need real infrastructure: a SQLite-backed `WalletRepository`, an event bus, command and query handlers, and a running bus. Rather than recreating this in every test module, Lumen declares the wiring once in `tests/conftest.py`. Pytest discovers the file automatically and makes the fixtures available to every test in the package.
 
 The key difference from a hand-rolled adapter test is that the `repository` fixture uses the **real framework `WalletRepository`** — the same Spring-Data-style class the application boots — and runs it through the **real `RepositoryBeanPostProcessor`**, which compiles derived-query stubs from method names at startup.
+
+This file is the heart of the chapter, so we will read it top to bottom as a series
+of small, layered steps. Each fixture builds on the one above it. The thing to keep
+in mind: pytest links fixtures by **name**. When a fixture function declares a
+parameter, pytest looks for a fixture with that name, builds it, and injects it. That
+is how a small graph of independent fixtures composes into a full test stack.
+
+**Step 1 — make the sample importable.** The first few lines push the sample's
+`src/` onto `sys.path` so `import lumen...` resolves. The `pythonpath = ["src"]`
+setting in `pyproject.toml` does the same thing for pytest's own collection; this
+line covers direct imports inside `conftest.py` before pytest's path tweaks apply.
+
+**Step 2 — `session_factory`: a database engine.** This async fixture creates an
+in-memory SQLite engine, runs `Base.metadata.create_all` to build the schema, and
+yields an `async_sessionmaker`. A **session factory** is a callable that hands out
+fresh database sessions; the framework's relational auto-configuration creates one
+exactly like this at startup. The single shared engine keeps the in-memory database
+alive for the whole test — close it and the data vanishes.
+
+**Step 3 — `repository`: the real Spring-Data-style repository.** It constructs the
+framework `WalletRepository`, then calls
+`RepositoryBeanPostProcessor().after_init(repo, "walletRepository")`. A
+**post-processor** is a hook that runs against a freshly created bean — here it reads
+method names like `find_by_owner_id` and compiles them into real queries. Skip this
+call and those methods stay stubs that raise `NotImplementedError`.
+
+**Step 4 — `event_bus`: the in-memory event bus.** A one-line fixture that yields an
+`InMemoryEventBus` — the same publisher the application uses in non-Kafka
+deployments.
+
+**Step 5 — `audit_listener`: a subscriber on that bus.** It creates the
+`WalletAuditListener` and subscribes its handler to the bus, reading the event
+patterns straight off the decorated method's `__pyfly_event_patterns__` attribute —
+exactly what the `ApplicationContext` does when it auto-wires listeners at startup.
+
+**Step 6 — `command_bus` and `query_bus`: the CQRS dispatchers.** Each builds a
+`HandlerRegistry`, registers the real handlers (passing them the `repository`,
+`event_bus`, and `session_factory` they need), and yields a bus. **CQRS** —
+Command/Query Responsibility Segregation — simply means writes go through a command
+bus and reads through a query bus; a **handler** is the function that actually
+processes one command or query.
 
 ::: listing tests/conftest.py | Listing 16.3 — conftest.py: real framework components wired with no mocks
 from __future__ import annotations
@@ -347,6 +522,24 @@ Each fixture is declared with `@pytest_asyncio.fixture` (not the bare `@pytest.f
 
 The `session_factory` fixture is shared. `repository` and `command_bus` both receive it, so the same in-memory SQLite engine backs reads, writes, and the `@transactional` boundary the handlers open. The `audit_listener` and `command_bus` fixtures both receive `event_bus`; pytest instantiates that once per test and shares it between them, so events published by the command handlers are visible to the listener.
 
+*What just happened.* You wired a complete, production-shaped test stack — engine,
+repository, event bus, listener, and both CQRS buses — entirely from fixtures, with
+no mocks. The two facts that make it work are worth holding onto. First, **fixtures
+compose by name**: `command_bus` asks for `repository`, `event_bus`, and
+`session_factory` simply by naming them as parameters, and pytest threads the graph
+together. Second, **a fixture requested by two others is built once per test**: both
+`repository` and `command_bus` name `session_factory`, so they share one engine —
+the write a command makes is the read a query sees. Get this file right and every
+test in the next four sections is a two-line call.
+
+!!! spring "Spring parity"
+    `conftest.py` is PyFly's `@TestConfiguration` plus the shared
+    `application-test.properties` of a Spring Boot project — a single place that
+    declares the beans every test reuses. A `@pytest_asyncio.fixture` is the rough
+    equivalent of a `@Bean` method in that config: pytest builds it lazily, injects
+    it where its name is requested, and tears it down afterward, just as the Spring
+    test context manages bean lifecycle and injection.
+
 !!! tip "No mocks anywhere"
     Every component in `conftest.py` is the real production implementation.
     `WalletRepository` is the same class the application boots.
@@ -360,6 +553,26 @@ The `session_factory` fixture is shared. `repository` and `command_bus` both rec
 ## Testing the CQRS flow end to end
 
 With the fixtures from `conftest.py`, exercising the full command/query cycle is a matter of calling `command_bus.send(...)` and `query_bus.query(...)`. No handler is instantiated in the test body — the bus dispatches to the handler already registered in the fixture.
+
+Notice how short each test body becomes now that the wiring lives in `conftest.py`.
+A test declares the fixtures it needs as parameters, then reads as plain narrative:
+
+**Step 1 — request the buses.** Each test signature lists `command_bus` and/or
+`query_bus`. pytest sees those names, builds the fixture graph from `conftest.py`,
+and injects the ready buses.
+
+**Step 2 — send commands.** `await command_bus.send(OpenWallet(...))` returns the new
+wallet id; subsequent `DepositFunds` and `WithdrawFunds` commands return the running
+balance. You assert on each return value as you go.
+
+**Step 3 — query the read side.** `await query_bus.query(GetWallet(...))` and
+`GetBalance(...)` reload the persisted state and return DTOs (data-transfer objects —
+plain read models). You assert their fields match what the commands wrote.
+
+**Step 4 — prove the error paths.** The remaining tests send a command that must fail
+— an overdraw, a non-positive deposit, an unknown wallet — wrapped in
+`pytest.raises(CommandProcessingException)`. That context manager asserts the block
+raises the named exception; if it does not, the test fails.
 
 ::: listing tests/test_cqrs_flow.py | Listing 16.4 — End-to-end CQRS tests through the real bus
 from __future__ import annotations
@@ -464,6 +677,27 @@ async def test_deposit_to_unknown_wallet_is_rejected(
 
 The error-path tests verify that the bus surfaces domain violations correctly. **`CommandProcessingException`** is the bus's wrapper for any exception raised inside a handler — including `BusinessRuleViolation` from the aggregate. Calling code never sees the raw domain exception; it always sees the bus wrapper.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_cqrs_flow.py -q
+```
+
+Expected output:
+
+```text
+.....                                                                    [100%]
+5 passed in 0.05s
+```
+
+*What just happened.* This is the first layer that touches real infrastructure, and
+it still runs in milliseconds. The command went through the real bus, the real
+handler opened a real `@transactional` unit of work on a real SQLite session,
+committed it, and the query read it back — the exact path that runs in production,
+minus the HTTP layer. Because the handler is registered in the fixture rather than
+constructed in the test, you are testing the *dispatch* as well as the logic: if the
+command-to-handler routing broke, these tests would catch it.
+
 !!! note "asyncio_mode = \"auto\" and @pytest.mark.asyncio"
     With `asyncio_mode = "auto"` every async test is collected and run
     automatically. The `@pytest.mark.asyncio` decorator is **not required** but
@@ -477,6 +711,41 @@ The error-path tests verify that the bus surfaces domain violations correctly. *
 The CQRS flow tests prove the full open/deposit/withdraw/query pipeline. The repository adapter tests go one level deeper: they directly exercise the `WalletRepository` API — CRUD, **derived queries** compiled from method names, **`Pageable`/`Page`** pagination, and **`Specification`** predicates — against a temporary SQLite file database. No Docker, no external process, no network. pytest's built-in `tmp_path` fixture provides a temporary directory cleaned up automatically after each test.
 
 The local fixture `_make_repo` mirrors what the `ApplicationContext` does at startup: construct the repository and run `RepositoryBeanPostProcessor.after_init` to compile the derived-query stubs. Without that call, methods like `find_by_owner_id` would raise `NotImplementedError`.
+
+Two terms before the listing. A **derived query** is a repository method whose body
+is generated from its *name*: `find_by_owner_id` becomes `WHERE owner_id = :value`,
+no SQL written by hand. A **Specification** is a reusable, composable predicate
+object you pass to a query — `balance_at_least(1000)` is one — for filters too
+dynamic to bake into a method name. **Pagination** wraps both: `Pageable.of(page,
+size, sort)` describes which slice you want, and the query returns a `Page` carrying
+the items plus `total`, `total_pages`, and `has_next`.
+
+This section uses a **file-based** SQLite database (via `tmp_path`) rather than the
+in-memory one, so it can prove a stronger property — durability across a reconnect.
+Here is the shape of each test:
+
+**Step 1 — `sqlite_factory`: a temp-file engine.** The fixture builds a SQLite engine
+backed by a real file under pytest's `tmp_path` (a fresh temp directory per test,
+auto-deleted afterward), creates the schema, and yields both the factory and the URL.
+Yielding the URL is what lets one test reconnect with a brand-new engine.
+
+**Step 2 — CRUD and persistence.**
+`test_upsert_inserts_then_updates_and_persists` upserts a row, upserts it again with
+a new balance to prove update-in-place, commits, reads it back — then disposes the
+engine and reconnects with a *fresh* one to prove the data truly hit disk.
+
+**Step 3 — the unknown-id path.** `test_find_by_id_unknown_returns_none` confirms a
+miss returns `None`, not an error.
+
+**Step 4 — derived query.** `test_derived_find_by_owner_id` inserts wallets for two
+owners and asserts `find_by_owner_id("alice")` returns only Alice's — proof the
+post-processor compiled the method-name convention correctly.
+
+**Step 5 — Specification + pagination.**
+`test_specification_find_rich_paged_and_sorted` and
+`test_find_all_pageable_counts_and_pages` exercise the `find_rich` /
+`find_all_by_spec` predicate path and the `find_all(pageable)` paging path, asserting
+`total`, `total_pages`, `has_next`, and the exact ordering of `page.items`.
 
 ::: listing tests/test_sql_wallet_repository.py | Listing 16.5 — Repository tests: CRUD, derived query, pagination, Specification
 from __future__ import annotations
@@ -664,6 +933,27 @@ async def test_find_all_pageable_counts_and_pages(
 
 Four things to note. First, `_make_repo` calls `RepositoryBeanPostProcessor().after_init(repo, ...)` — without this, `find_by_owner_id` is still a stub and raises `NotImplementedError`. The post-processor compiles the method name into a SQLAlchemy `WHERE owner_id = :owner_id` clause. Second, `upsert` is the repository's insert-or-update; after each batch of upserts, `await session.commit()` flushes to SQLite. Third, `find_rich` takes a minimum balance and a `Pageable`; it delegates to `find_all_by_spec_paged(balance_at_least(min), pageable)`. Fourth, the two-engine pattern in `test_upsert_inserts_then_updates_and_persists` proves true durability: data committed through one engine is readable by a completely fresh engine and session.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_sql_wallet_repository.py -q
+```
+
+Expected output:
+
+```text
+.....                                                                    [100%]
+5 passed in 0.06s
+```
+
+*What just happened.* The standout is the two-engine reconnect in the first test.
+Many "persistence" tests pass even when nothing was written to disk, because the same
+session caches the object in memory and hands it back on read. By disposing the
+engine entirely and opening a *second* one against the same file URL, this test
+forces a real round-trip to storage — if `upsert` or `commit` were silently not
+persisting, the reconnect would return `None` and the test would fail. That is the
+difference between testing your code and testing your cache.
+
 !!! spring "Spring parity"
     This test layer is the Python equivalent of `@DataJpaTest` with an embedded
     H2 database in Spring Boot. `@DataJpaTest` loads only the JPA layer (entities,
@@ -683,6 +973,26 @@ Four things to note. First, `_make_repo` calls `RepositoryBeanPostProcessor().af
 ## Testing the event listener
 
 `WalletAuditListener` listens for domain events published by the command handlers. Testing it end to end — command runs on the bus, handler publishes events, listener receives them — requires all three components to share the same `InMemoryEventBus`. The `conftest.py` fixtures already arrange this: both `command_bus` and `audit_listener` accept an `event_bus` argument, and pytest injects the same instance into both.
+
+An **event listener** is just a method that the framework subscribes to the bus so it
+runs whenever a matching event is published. Lumen's `WalletAuditListener` keeps an
+in-memory audit log and a running balance per wallet — a tiny **projection** (a read
+model built by folding events). Testing it is the clearest demonstration of the
+shared-fixture trick: because `command_bus` and `audit_listener` name the same
+`event_bus`, an event a command publishes is an event the listener observes, with no
+glue in the test body.
+
+The tests follow one rhythm:
+
+**Step 1 — drive commands.** Open a wallet, deposit, withdraw — all through
+`command_bus`.
+
+**Step 2 — read the projection.** Call `audit_listener.entries_for(wallet_id)` and
+assert the recorded event types, in order, plus the `running_total`.
+
+**Step 3 — assert the negative.** One test deliberately overdraws — a command that
+must fail — and asserts the audit log records nothing from it. A failed operation
+leaves no trace.
 
 ::: listing tests/test_event_listener.py | Listing 16.6 — Event listener tests: command publishes, listener observes
 from __future__ import annotations
@@ -761,11 +1071,34 @@ async def test_event_type_matches_domain_event_class_names(
 
 `test_event_type_matches_domain_event_class_names` proves a domain invariant: a rejected command (overdraw) raises no event. The audit log must never record a side effect from a failed operation.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_event_listener.py -q
+```
+
+Expected output:
+
+```text
+...                                                                      [100%]
+3 passed in 0.04s
+```
+
+*What just happened.* No part of the test connected the listener to the bus — the
+`audit_listener` fixture did that in `conftest.py`, subscribing the handler to the
+same `event_bus` the `command_bus` publishes through. So sending a command and then
+reading `entries_for(...)` exercises the real publish/subscribe path end to end. The
+negative test is the subtle one: it proves the audit log is driven by *events*, not
+by *attempts* — a rejected withdrawal raises a `BusinessRuleViolation` before any
+event is emitted, so nothing reaches the listener.
+
 !!! tip "event_type is the class name"
     PyFly's event publisher sets `event_type` to the domain event class name:
     `"WalletOpened"`, `"FundsDeposited"`, `"FundsWithdrawn"`. The
-    `@event_listener(pattern)` decorator on `WalletAuditListener.on_wallet_event`
-    uses a glob pattern (`"Wallet*"`, `"Funds*"`) to subscribe to all three.
+    `@event_listener(event_types=["WalletOpened", "FundsDeposited", "FundsWithdrawn"])`
+    decorator on `WalletAuditListener.on_wallet_event` names those three types
+    explicitly; the framework stores them on the method as
+    `__pyfly_event_patterns__`, which the `audit_listener` fixture reads to subscribe.
     The test asserts the string class names directly.
 
 ---
@@ -774,7 +1107,29 @@ async def test_event_type_matches_domain_event_class_names(
 
 The unit tests, CQRS flow tests, and repository tests each wire one layer of the stack. The booted-context integration test wires everything at once: it starts the real `ApplicationContext` — DI component scan, CQRS auto-configuration, relational auto-configuration, `RepositoryBeanPostProcessor`, `@transactional` seam, EDA event bus — then resolves the `DefaultCommandBus` and `DefaultQueryBus` from the context and drives the full wallet lifecycle.
 
-The database URL is overridden via an environment variable so the test never touches the developer's `lumen.db`.
+The **ApplicationContext** is PyFly's runtime container — the object that scans for
+components, builds beans, runs post-processors, and holds the wired application
+together. Booting it is the most faithful test you can write short of starting an
+HTTP server: every piece of wiring the framework does at startup actually happens.
+
+The database URL is overridden via an environment variable so the test never touches the developer's `lumen.db`. Here is the plan:
+
+**Step 1 — isolate the database.** The `booted_context` fixture uses pytest's
+`monkeypatch` fixture to set `PYFLY_DATA_RELATIONAL_URL` to a temp-file SQLite path
+under `tmp_path`, *before* the app boots. `monkeypatch` is pytest's safe way to set
+an environment variable for the duration of one test and automatically restore it
+afterward — so this test can never clobber your real `lumen.db`.
+
+**Step 2 — boot the real application.** It constructs `PyFlyApplication(LumenApplication,
+config_path=...)` and `await app.startup()`. That single call runs the entire startup
+sequence: component scan, all auto-configurations, the `RepositoryBeanPostProcessor`,
+and the event bus. The fixture yields `app.context` and, in its `finally` block,
+closes the shared session and calls `app.shutdown()`.
+
+**Step 3 — resolve beans and drive the lifecycle.** The test calls
+`ctx.get_bean(DefaultCommandBus)` and `ctx.get_bean(DefaultQueryBus)` — pulling the
+*same* buses the application would use — then runs open → deposit → withdraw → list →
+rich → balance, asserting each result.
 
 ::: listing tests/test_app_context_integration.py | Listing 16.7 — Booted-context integration: full DI + persistence composition
 from __future__ import annotations
@@ -888,6 +1243,44 @@ async def test_full_lifecycle_through_booted_context(
 
 `test_full_lifecycle_through_booted_context` exercises every query type the application exposes: `GetWallet` (aggregate reload), `ListWallets` (paginated list using `find_all(pageable)`), `ListRichWallets` (Specification predicate using `find_all_by_spec_paged`), and `GetBalance` (projection-backed balance). It proves that the `RepositoryBeanPostProcessor`, the `@transactional` boundary around each command handler, and the DI wiring all compose correctly in a single boot.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_app_context_integration.py -q
+```
+
+Expected output:
+
+```text
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+One test, but the heaviest one in the suite: it actually started the framework. If
+the DI scan missed a bean, an auto-configuration mis-wired, or the `@transactional`
+boundary failed to commit, this is the test that catches it — which is exactly why it
+sits at the peak of the pyramid and why there is only one of it.
+
+*What just happened.* The environment-variable override is the load-bearing trick.
+The framework reads `pyfly.data.relational.url` from config during relational
+auto-configuration, and PyFly maps any config key to a `PYFLY_*` environment variable
+(dots and dashes become underscores, uppercased), so `PYFLY_DATA_RELATIONAL_URL`
+overrides the `url` in `pyfly.yaml`. Setting it with `monkeypatch` *before*
+`app.startup()` is what redirects the whole booted application to a throwaway
+database — and `monkeypatch` undoes the change when the fixture tears down, so no
+other test is affected.
+
+!!! tip "A dedicated test profile (v26.6.110)"
+    Setting one variable is fine for a single override. When a project needs a whole
+    block of test-only settings, PyFly's **profile** mechanism (Spring parity) is
+    cleaner: drop a `pyfly-test.yaml` next to `pyfly.yaml` with your test overrides,
+    then activate it by setting `PYFLY_PROFILES_ACTIVE=test` (or
+    `pyfly.profiles.active: test` in config). On boot, PyFly overlays
+    `pyfly-test.yaml` on top of the base `pyfly.yaml`, so values like the database
+    URL or `ddl-auto` apply only under that profile. Lumen does not need a profile —
+    one env override covers its single test-only setting — but reach for one as the
+    test configuration grows.
+
 !!! spring "Spring parity"
     This test is the Python equivalent of `@SpringBootTest` with an embedded H2
     database. `@SpringBootTest` loads the full application context, including all
@@ -932,11 +1325,26 @@ async def test_wallet_round_trip_against_real_postgres():
 
 Lumen does not use these helpers — SQLite covers the persistence layer without Docker, and the in-memory bus covers event routing. Reach for them when your project has infrastructure that cannot be reproduced without a real daemon.
 
+**Run it.** You have now walked every layer file by file. Run the whole suite one more
+time to confirm the full pyramid is green together:
+
+```bash
+uv run --extra dev pytest -q
+```
+
+Expected output — the same `41 passed` you started with, now with a mental model of
+exactly what each dot proves:
+
+```text
+.........................................                                [100%]
+41 passed in 0.28s
+```
+
 ---
 
 ## What you built {.recap}
 
-Lumen now has 41 passing tests across six files, exercising every layer of the pyramid.
+The six test files this chapter built add up to 26 passing tests, exercising every layer of the pyramid. Together with the saga tests from Chapter 12 and the event-sourcing tests from Chapter 9, Lumen's full suite is **41 passing tests** — the count you saw when you ran `uv run --extra dev pytest -q` at the start.
 
 At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain model's arithmetic, immutability, and invariant rules. All tests are synchronous, pure Python functions — no fixtures, no DI, no `async`. The `BusinessRuleViolation.rule` attribute makes each assertion specific to the exact violated invariant.
 
@@ -976,6 +1384,12 @@ Concretely, you learned:
 - **`monkeypatch.setenv`** — override configuration before booting the
   context in integration tests; the framework reads environment variables
   during auto-configuration.
+- **`PYFLY_*` config overrides** — every config key maps to an environment
+  variable (`pyfly.data.relational.url` → `PYFLY_DATA_RELATIONAL_URL`); set it
+  with `monkeypatch.setenv` before booting to redirect the whole application.
+- **Test profile (v26.6.110)** — for a block of test-only settings, add a
+  `pyfly-test.yaml` overlay and activate it with `PYFLY_PROFILES_ACTIVE=test`
+  (Spring `application-test.yaml` parity).
 - **Framework helpers** (`PyFlyTestCase`, `mock_bean`, `create_test_container`,
   Testcontainers) — available in `pyfly.testing` for projects that need them;
   Lumen keeps things simple with real components.

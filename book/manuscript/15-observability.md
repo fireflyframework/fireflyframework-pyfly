@@ -18,6 +18,17 @@ This chapter adds eyes and ears to Lumen. The three pillars of observability ans
 
 On top of those pillars sits the **Actuator** — production management endpoints that expose health, bean wiring, environment, and live logger levels — and the **Admin Dashboard**, an embedded browser UI that ties everything together in a single pane of glass.
 
+!!! note "New in v26.6.110"
+    Two changes in this release shape how you reach everything in this chapter.
+    First, the Actuator and Admin Dashboard now listen on a **separate
+    management port** — `9090` by default — rather than the application port
+    `8080`. Second, that management port is **open and unauthenticated by
+    default** (Spring Boot's `management.server.port` model), so you can curl
+    `http://localhost:9090/actuator/health` immediately, and you lock it down
+    with `pyfly.management.security.enabled: true` when you ship. We will point
+    out the right port at each step. If you have read older drafts that used
+    `http://localhost:8080/actuator/...`, swap the port to `9090`.
+
 Finally, you will see how **Aspect-Oriented Programming** (AOP) applies logging and metrics to every service method declaratively, without touching the methods themselves.
 
 By the end of the chapter Lumen will produce structured JSON logs with correlation IDs and automatic PII masking, emit Prometheus metrics scraped by any standard collector, propagate OpenTelemetry trace spans across service boundaries, answer Kubernetes liveness and readiness probes, and display all of the above in a zero-configuration dashboard reachable at `/admin`.
@@ -40,7 +51,18 @@ Searching for `ord-123` in Elasticsearch works — until the format changes. And
 
 ### get_logger
 
-PyFly exposes a single factory function that returns a structured logger backed by `structlog` (when the `observability` extra is installed) or a zero-dependency stdlib shim otherwise. Both accept the same call signature:
+PyFly exposes a single factory function that returns a structured logger backed by `structlog` (when the `observability` extra is installed) or a zero-dependency stdlib shim otherwise. Both accept the same call signature.
+
+!!! note "Jargon: factory function"
+    A *factory function* is just a function whose job is to build and hand back
+    a configured object. `get_logger("lumen.wallet")` does the wiring for you —
+    you never construct a logger by hand. The string you pass (`"lumen.wallet"`)
+    is the *logger name*; it is conventionally the dotted module path, and it is
+    what level overrides like `lumen.wallet: DEBUG` target.
+
+Let us build a tiny example you can run, then graduate to the real wallet code. Follow these steps.
+
+**Step 1 — Create a throwaway demo module.** Inside your Lumen project, create `src/lumen/logging_demo.py` with the contents of the listing below. (This is a scratch file for learning; delete it afterwards — the real logging lives inside the handlers later in the chapter.)
 
 ::: listing lumen/logging_demo.py | Listing 15.1 — Structured logger usage
 from pyfly.logging import get_logger
@@ -56,6 +78,12 @@ logger.error(
 )
 :::
 
+**Step 2 — Run it.** Execute the module directly:
+
+```bash
+uv run python -m lumen.logging_demo
+```
+
 In development with `format: console` the output reads naturally:
 
 ```
@@ -63,6 +91,8 @@ In development with `format: console` the output reads naturally:
 10:30:01 [warning ] balance_low     wallet_id=wlt-001 remaining=300
 10:30:02 [error   ] deposit_rejected wallet_id=wlt-001 reason=insufficient_funds
 ```
+
+Notice the shape: the *first* argument (`"wallet_opened"`) is the **event name**, not a sentence, and everything after it is a `key=value` pair. There is no string formatting, no f-string, no `%s`. That is the whole point of structured logging — the event name stays stable while the fields carry the variable data.
 
 In production with `format: json` every line is a self-contained JSON object:
 
@@ -88,6 +118,14 @@ pyfly:
 that prefix. `sqlalchemy.engine: WARNING` silences query logs without touching
 your code. An environment variable `PYFLY_LOGGING_LEVEL_ROOT=WARNING` overrides
 the config key, which is useful for staging builds.
+
+**What just happened.** You called one function, `get_logger`, and got a logger
+that takes structured `key=value` fields. The `format` setting decides how those
+fields render: `console` for humans at your terminal, `json` for machines in
+production. You did not write any handler, formatter, or appender code — PyFly
+installed those on the root logger at startup. Flip `format: console` to
+`format: json` in `pyfly.yaml` and re-run the demo to see the same three events
+emitted as one JSON object per line, ready for a log aggregator to ingest.
 
 !!! tip "Why not stdlib `logging` directly?"
     `logging.getLogger("x").info("event", wallet_id="wlt-001")` raises
@@ -125,7 +163,21 @@ Every `logger.*` call inside `handle_deposit` — including calls deep in downst
 
 ### PII redaction
 
-**PII redaction** is enabled by default. Before any log record reaches an output handler, PyFly scans the rendered message for emails, credit-card numbers, IBANs, SSNs, JWTs, bearer tokens, and URL credentials. Detected patterns are replaced with `<EMAIL>`, `<CREDIT_CARD>`, and so on.
+**PII** stands for *personally identifiable information* — emails, card numbers, national-ID numbers, and the like. **PII redaction** is enabled by default. Before any log record reaches an output handler, PyFly scans the rendered message for emails, credit-card numbers, IBANs, SSNs, JWTs, bearer tokens, and URL credentials. Detected patterns are replaced with `<EMAIL>`, `<CREDIT_CARD>`, and so on.
+
+You can see this for yourself in a few seconds. Add one line to the demo from Step 1:
+
+```python
+logger.info("contact_logged", email="alice@example.com")
+```
+
+Run `uv run python -m lumen.logging_demo` again. The output shows the value already masked — you never had to opt in:
+
+```
+10:30:03 [info    ] contact_logged  email=<EMAIL>
+```
+
+That redaction pass runs for *every* logger in the process, including ones inside third-party libraries, which is why it catches leaks you did not write.
 
 The regex engine ships with every install. The Presidio-backed NER engine — which also catches free-text names and addresses — is available via the `[pii]` extra and activates automatically when installed:
 
@@ -184,7 +236,7 @@ PyFly writes to `./logs/lumen.log` and rotates at 50 MB, keeping 14 rotated file
 
 ### The MetricsRegistry
 
-**`MetricsRegistry`** is a thin wrapper around `prometheus_client` that guarantees each metric name is registered only once. Duplicate calls to `counter()` or `histogram()` with the same name return the existing metric rather than raising a `ValueError`. Inject it from the DI container (auto-configured when `prometheus_client` is installed) or create it manually:
+A **metric** is a number you sample over time: a count of deposits, a latency in seconds, a memory figure. **Prometheus** is the de-facto open-source metrics database; it *scrapes* (periodically reads) an HTTP endpoint your app exposes and stores the numbers. **`MetricsRegistry`** is PyFly's small front door to that world: a thin wrapper around the `prometheus_client` library that guarantees each metric name is registered only once. Duplicate calls to `counter()` or `histogram()` with the same name return the existing metric rather than raising a `ValueError`. Inject it from the DI container (auto-configured when `prometheus_client` is installed) or create it manually:
 
 ::: listing lumen/observability/metrics.py | Listing 15.3 — Creating metrics
 from pyfly.observability import MetricsRegistry
@@ -215,7 +267,22 @@ deposit_duration = registry.histogram(
 
 ### @timed — automatic duration histogram
 
-**`@timed`** records how long an async or sync function takes to run, using a labeled histogram. It works on any callable and automatically adds `class`, `method`, and `exception` labels:
+**`@timed`** records how long an async or sync function takes to run, using a labeled histogram. It works on any callable and automatically adds `class`, `method`, and `exception` labels.
+
+!!! note "Jargon: counter vs histogram"
+    A **counter** only goes up — it answers "how many?" (deposits served,
+    errors raised). A **histogram** buckets observed *values* — it answers "how
+    long?" or "how big?" and lets Prometheus compute percentiles (p95 latency).
+    Rule of thumb: count events with a counter; measure durations and sizes with
+    a histogram.
+
+Now let us wire the first real metric into Lumen. Here is the deposit handler you built in earlier chapters — the only change is the decorator on `do_handle`.
+
+**Step 1 — Import the metrics helpers.** At the top of `src/lumen/core/services/wallets/deposit_funds_handler.py`, add `MetricsRegistry` and `timed` to the `pyfly.observability` import.
+
+**Step 2 — Create a module-level registry.** Add `registry = MetricsRegistry()` above the class. Because the registry deduplicates by name, sharing one per module is safe.
+
+**Step 3 — Decorate `do_handle`.** Put `@timed(...)` *above* `@transactional()` so the timer wraps the whole transactional unit of work.
 
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listing 15.4 — @timed on DepositFundsHandler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -268,6 +335,47 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 The decorator captures `start = time.perf_counter()`, calls the function, and observes the elapsed time in the `finally` block. The `exception` label is `"none"` on success and the exception type name on failure, so you can split latency by outcome in Grafana. The `class` and `method` labels are derived automatically from the function's qualified name.
 
 Histogram names follow Micrometer dot.case convention: `"lumen.deposit.duration"` becomes `lumen_deposit_duration_seconds` in Prometheus, with a `_seconds` suffix added if absent.
+
+**Step 4 — Expose the Prometheus endpoint.** By default the actuator web-exposes
+only `health` and `info` (see "The management port" below). Add `prometheus` to
+the exposure list in `pyfly.yaml` so the scrape endpoint appears:
+
+```yaml
+pyfly:
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: "health,info,prometheus"
+```
+
+**Step 5 — Run it and see the metric appear.** Start Lumen, drive one deposit through the API, then scrape the management port.
+
+```bash
+# Terminal 1 — start the app (business API on 8080, management on 9090)
+uv run pyfly run --server uvicorn
+
+# Terminal 2 — open a wallet, then deposit into it
+WALLET=$(curl -s -X POST localhost:8080/api/v1/wallets \
+  -H 'Content-Type: application/json' \
+  -d '{"owner_id":"usr-42","currency":"EUR"}' \
+  | python -c "import sys,json;print(json.load(sys.stdin)['wallet_id'])")
+curl -s -X POST localhost:8080/api/v1/wallets/$WALLET/deposit \
+  -H 'Content-Type: application/json' -d '{"amount":1350}'
+
+# Now scrape the metric — note the MANAGEMENT port 9090, not 8080
+curl -s localhost:9090/actuator/prometheus | grep lumen_deposit_duration
+```
+
+You should see histogram lines like these (your numbers will differ):
+
+```
+lumen_deposit_duration_seconds_bucket{class="DepositFundsHandler",method="do_handle",exception="none",le="0.05"} 1.0
+lumen_deposit_duration_seconds_count{class="DepositFundsHandler",method="do_handle",exception="none"} 1.0
+lumen_deposit_duration_seconds_sum{class="DepositFundsHandler",method="do_handle",exception="none"} 0.013
+```
+
+The `_count` line confirms one observation; the `_sum` line is the total seconds spent. If `grep` finds nothing, you have not driven a deposit yet — the metric is created lazily on first call.
 
 ### @counted — automatic invocation counter
 
@@ -355,6 +463,14 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
 
 `amount` is an `int` in minor units (e.g. 1050 = €10.50) — the `Money` value object enforces the type. Each invocation produces both a histogram observation and a counter increment.
 
+**What just happened.** You added cross-cutting measurement to three handlers
+by changing nothing but the decorator stack. `@timed` answers "how long did it
+take?", `@counted` answers "how often, and did it succeed?", and stacking them
+gives you both for free. The handler bodies — the actual business logic — never
+mention metrics. After running a few deposits and withdrawals you can scrape
+`localhost:9090/actuator/prometheus` again and watch `lumen_withdrawals_total`
+and `lumen_balance_reads_total` climb.
+
 ### Prometheus scrape endpoint
 
 The actuator (covered in the next section) exposes the metrics registry for scraping. When the actuator is enabled and `prometheus_client` is installed, two endpoints are mounted automatically with no additional code:
@@ -375,6 +491,14 @@ Point your Prometheus `scrape_configs` at `/actuator/prometheus` and all `Metric
 ## Distributed tracing
 
 ### @span — OpenTelemetry span decorator
+
+!!! note "Jargon: trace, span, OpenTelemetry"
+    A **span** is one timed, named step of work — "fetch wallet", "persist
+    deposit". A **trace** is the whole tree of spans for a single request, root
+    to leaf. **OpenTelemetry** (often "OTel") is the vendor-neutral standard for
+    producing traces; once your spans speak OTel, any compatible viewer — Jaeger,
+    Tempo, Honeycomb — can display them. PyFly emits OTel spans so you are never
+    locked to one tool.
 
 **`@span`** wraps an async or sync function in an OpenTelemetry span. Each span is a timed, named unit of work. Spans nest automatically through OpenTelemetry's context propagation, so a `@span`-decorated function called from inside another `@span`-decorated function produces a parent-child relationship in your trace viewer:
 
@@ -432,6 +556,25 @@ pyfly:
       otlp:
         endpoint: "http://localhost:4318"
 ```
+
+**Run it — see spans without a collector.** Standing up Jaeger or Tempo is
+overkill while you are learning. Set the **console exporter** instead, which
+prints each span to stdout. Lumen ships with `tracing.enabled: false`; flip it on
+and choose `console`:
+
+```yaml
+pyfly:
+  observability:
+    tracing:
+      enabled: true
+      exporter: console
+```
+
+Restart with `uv run pyfly run --server uvicorn`, drive one deposit through the
+API as in the metrics step, and watch the terminal. Each `@span` prints a JSON
+block showing its name, the parent span id, and the elapsed time — the same
+parent-child structure the diagram above sketches, just in text form. Switch back
+to `exporter: otlp` (or remove the override) once you have a real collector.
 
 Exporter selection rules:
 
@@ -533,20 +676,46 @@ The **Actuator** gives Kubernetes and your ops tooling a stable contract: a set 
 
 ### Enabling the Actuator
 
-Pass `actuator_enabled=True` to `create_app()`, or set the flag in `pyfly.yaml`:
+The Actuator is **on by default** when a PyFly context is present — you do not
+have to enable it at all to get `/actuator/health` and `/actuator/info`. You only
+touch the flag to turn it *off*, or to be explicit. Pass `actuator_enabled=True`
+to `create_app()`, or set the flag in `pyfly.yaml`:
 
 ```yaml
 pyfly:
-  web:
-    actuator:
-      enabled: true
+  management:
+    enabled: true            # default; the actuator is on unless you set false
   app:
     name: lumen
     version: 1.0.0
     description: Lumen wallet service
 ```
 
+!!! note "Config key changed"
+    The enable flag is now `pyfly.management.enabled`. The older
+    `pyfly.web.actuator.enabled` still works as a legacy alias, but new code
+    should use the `pyfly.management.*` namespace, which is where the port,
+    security, and endpoint-exposure settings also live.
+
 When enabled, `create_app()` automatically scans the DI container for `HealthIndicator` beans, creates a `HealthAggregator`, instantiates all built-in endpoints, and mounts them at `/actuator/*`.
+
+**Run it — your first health check.** Lumen already enables the actuator, so
+just start the app and curl the health endpoint on the **management port**:
+
+```bash
+uv run pyfly run --server uvicorn
+curl -s localhost:9090/actuator/health
+```
+
+A healthy app returns HTTP 200 with:
+
+```json
+{"status":"UP"}
+```
+
+If you get connection-refused, confirm you used `9090` (management), not `8080`
+(business). The same `/actuator/health` on `8080` returns 404 — the business
+port deliberately does not carry management endpoints.
 
 ### The management port
 
@@ -564,6 +733,42 @@ serve everything on one port, or to **`-1`** to disable the management web
 endpoints. A Kubernetes deployment therefore points liveness/readiness probes and
 the Prometheus `ServiceMonitor` at port `9090`, and the `Service`/`Ingress` for
 user traffic at `8080`.
+
+!!! warning "The management port is OPEN by default"
+    As of v26.6.110 the management port is **unauthenticated by default** — the
+    `/actuator/*` and `/admin` routes answer any caller that can reach `9090`.
+    This is intentional (Spring Boot's model): the port is meant to be reachable
+    only from inside your cluster, behind network isolation, never exposed on the
+    public internet. If you cannot guarantee that isolation, turn on the app's
+    security filters for the management port too:
+
+    ```yaml
+    pyfly:
+      management:
+        security:
+          enabled: true
+    ```
+
+    With that flag set, the same authentication, role guards, and CSRF rules
+    that protect your business API also gate the management port.
+
+By default the actuator web-exposes only **`health` and `info`** — again matching
+Spring Boot, which keeps potentially sensitive endpoints (`beans`, `env`,
+`threaddump`, `prometheus`) off the wire until you opt in. Widen the set with
+`pyfly.management.endpoints.web.exposure.include`:
+
+```yaml
+pyfly:
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: "health,info,metrics,prometheus,loggers"   # or "*" for all
+```
+
+So the Prometheus scrape and runtime-logger steps later in this chapter assume
+you have added `prometheus` and `loggers` to this list. The `*` shortcut exposes
+everything and is convenient in development.
 
 ### Built-in endpoints
 
@@ -639,7 +844,15 @@ class DatabaseHealthIndicator:
 
 `HealthStatus.status` accepts four values: `"UP"`, `"DOWN"`, `"OUT_OF_SERVICE"`, or `"UNKNOWN"`. The aggregator applies a severity ordering (`DOWN > OUT_OF_SERVICE > UP > UNKNOWN`) and returns the worst-case status across all indicators. If any indicator's `health()` method raises, that indicator is treated as `"DOWN"` with `details={"error": "check failed"}`; the exception is logged but does not crash the health endpoint.
 
-A healthy response looks like:
+**Run it — watch a custom indicator surface.** Drop the listing above into
+`src/lumen/health/indicators.py`, restart Lumen, and ask for the detailed health
+report (the `?show-details` form, or simply scrape it from the management port):
+
+```bash
+curl -s localhost:9090/actuator/health
+```
+
+A healthy response now includes your component by name:
 
 ```json
 {
@@ -657,24 +870,45 @@ A healthy response looks like:
 }
 ```
 
+You wrote no registration code: the `@component` stereotype plus the
+`async def health()` method is the entire contract. At startup the actuator
+scanned the container, found anything that looks like a health indicator, and
+folded it into the aggregator.
+
+!!! note "Building probes by hand — `app.state.pyfly_health_aggregator`"
+    New in v26.6.110, the live `HealthAggregator` is reachable at
+    `app.state.pyfly_health_aggregator` on the Starlette app object. This is the
+    *same* aggregator the `/actuator/health` route uses, whether the actuator
+    runs on the main app or on the separate management port. If you ever need a
+    bespoke readiness gate — say, a custom ASGI route that returns 503 until a
+    one-time warm-up completes — you can read this aggregator directly or
+    register extra indicators on it after `create_app()`, instead of going
+    through HTTP. It is exposed only by the Starlette adapter.
+
 ### Changing log levels at runtime
 
-The loggers endpoint lets you inspect and change log levels without restarting Lumen — invaluable when a production incident needs DEBUG output for exactly one package:
+The loggers endpoint lets you inspect and change log levels without restarting Lumen — invaluable when a production incident needs DEBUG output for exactly one package. First add `loggers` to the exposure list (`pyfly.management.endpoints.web.exposure.include: "health,info,loggers"`), then drive it from the **management port** `9090`:
 
 ```bash
 # List all loggers with configured and effective levels
-curl http://localhost:8080/actuator/loggers
+curl http://localhost:9090/actuator/loggers
 
 # Enable DEBUG for the wallet module — takes effect immediately
-curl -X POST http://localhost:8080/actuator/loggers/lumen.wallet \
+curl -X POST http://localhost:9090/actuator/loggers/lumen.wallet \
   -H "Content-Type: application/json" \
   -d '{"configuredLevel": "DEBUG"}'
 
 # Reset to inherit from parent
-curl -X POST http://localhost:8080/actuator/loggers/lumen.wallet \
+curl -X POST http://localhost:9090/actuator/loggers/lumen.wallet \
   -H "Content-Type: application/json" \
   -d '{"configuredLevel": null}'
 ```
+
+**What just happened.** You changed a logger's level on a *running* process. The
+POST took effect immediately — no restart, no redeploy. In a real incident you
+would flip exactly one package to DEBUG, capture the noisy output you need, then
+POST `null` to put it back the way it was, all without disturbing the rest of the
+service.
 
 The endpoint uses Spring Boot's level vocabulary (`OFF`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) and is drop-in compatible with Spring Boot Actuator tooling.
 
@@ -713,19 +947,19 @@ class GitInfoEndpoint:
 
 ### Kubernetes probe configuration
 
-Point your pod spec at the dedicated liveness and readiness sub-paths so Kubernetes can make independent restart and traffic decisions:
+Point your pod spec at the dedicated liveness and readiness sub-paths so Kubernetes can make independent restart and traffic decisions. Because the actuator lives on the management port, the probes target **`9090`**, while your `Service` routes user traffic to `8080`:
 
 ```yaml
 livenessProbe:
   httpGet:
     path: /actuator/health/liveness
-    port: 8080
+    port: 9090
   initialDelaySeconds: 10
   periodSeconds: 30
 readinessProbe:
   httpGet:
     path: /actuator/health/readiness
-    port: 8080
+    port: 9090
   initialDelaySeconds: 5
   periodSeconds: 10
 ```
@@ -762,6 +996,42 @@ pyfly:
 ```
 
 The dashboard auto-discovers beans, health indicators, loggers, scheduled tasks, HTTP mappings, caches, CQRS handlers, sagas, and metrics from the running `ApplicationContext`. It presents them in **15 built-in views** with real-time Server-Sent Event (SSE) updates — no WebSocket, no polling loop in your code.
+
+!!! note "Where to find it: the management port"
+    Like the actuator, the dashboard is served on the **management port**. With
+    Lumen's defaults that is `http://localhost:9090/admin`, not `8080/admin`.
+    Set `pyfly.management.server.port` equal to `pyfly.server.port` if you would
+    rather serve the dashboard on the same port as your API. And remember: that
+    port is open by default — gate it with `pyfly.management.security.enabled` or
+    the dashboard's own `require_auth` (shown under "Security") before exposing it
+    anywhere untrusted.
+
+**Run it — open the dashboard.** Enable it in `pyfly.yaml`, start Lumen, and open
+the URL in a browser:
+
+```yaml
+pyfly:
+  admin:
+    enabled: true
+    title: "Lumen Admin"
+```
+
+```bash
+uv run pyfly run --server uvicorn
+# then visit http://localhost:9090/admin
+```
+
+You should see the Overview view populate within a second or two: app name and
+uptime, a green health badge, and bean counts grouped by stereotype. Drive a few
+deposits through `localhost:8080` and watch the Health and Metrics panels update
+live — the page never reloads, because the data arrives over SSE.
+
+!!! note "Jargon: SSE (Server-Sent Events)"
+    SSE is a one-way streaming channel: the browser opens a single long-lived
+    HTTP connection and the server *pushes* events down it as they happen. It is
+    simpler than a WebSocket (which is two-way) and is exactly the right tool for
+    a dashboard that only needs to *receive* updates. You write no polling loop;
+    the framework handles the stream.
 
 ### Built-in views
 
@@ -934,7 +1204,23 @@ PyFly's AOP module ships five advice types:
 
 ### @aspect — declaring an aspect
 
-**`@aspect`** marks a class as a PyFly aspect. The class is automatically registered in the DI container as a singleton and receives injected dependencies via `__init__`. No explicit base class is required:
+!!! note "Jargon: aspect, advice, pointcut, weaving"
+    Four words travel together in AOP. An **aspect** is the class that bundles a
+    cross-cutting concern. **Advice** is a single piece of behaviour inside it
+    (the body of `@before`, `@around`, and so on). A **pointcut** is the pattern
+    string — like `"service.*.*"` — that decides *which* methods the advice
+    applies to. **Weaving** is the act of stitching the advice into those methods
+    at startup. You write aspects; PyFly does the weaving.
+
+**`@aspect`** marks a class as a PyFly aspect. The class is automatically registered in the DI container as a singleton and receives injected dependencies via `__init__`. No explicit base class is required.
+
+Build the logging aspect in three moves.
+
+**Step 1 — Declare the class.** Create `src/lumen/aspects/logging_aspect.py`, mark the class `@aspect`, and give it a module-level `logger`.
+
+**Step 2 — Add advice methods.** Each method is decorated with one advice type (`@before`, `@after_returning`, `@after_throwing`) and a pointcut string. The `jp: JoinPoint` argument carries the intercepted call's details.
+
+**Step 3 — Set ordering.** `@order(-50)` makes this aspect run earlier than higher-numbered ones — useful when you want logging to bracket the metrics aspect you write next.
 
 ::: listing lumen/aspects/logging_aspect.py | Listing 15.12 — A logging aspect
 from pyfly.aop import aspect, before, after_returning, after_throwing, JoinPoint
@@ -1035,6 +1321,15 @@ In production you never call `weave_bean()` manually. `AopAutoConfiguration` reg
 
 The result is zero-configuration AOP: define aspects, define services, start the application — the weaver wires them together.
 
+**What just happened.** You wrote two aspects — one for logging, one for metrics —
+and never edited a single handler. At startup, `AspectBeanPostProcessor` matched
+their pointcuts against your service beans and wove the advice into the matching
+methods in place. From now on, every `@service` method emits entry/exit logs and a
+duration histogram automatically. Add a new handler tomorrow and it inherits the
+same observability the moment its pointcut matches — nothing to remember, nothing
+to copy-paste. That is the payoff of AOP: the cross-cutting behaviour lives in one
+place, and the business code stays clean.
+
 ### JoinPoint reference
 
 Every advice handler receives a `JoinPoint` dataclass:
@@ -1120,6 +1415,28 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 `command.amount` is an `int` in minor units — enforced by the `DepositFunds` command's validator (`amount > 0`). The `Money` value object wraps it with the wallet's `Currency`, preventing cross-currency arithmetic at the domain boundary.
 
 Seven lines of decorators and one `get_logger` call — and Lumen's deposit path is fully observable.
+
+**Run it — confirm nothing broke.** Observability decorators wrap behaviour
+around your handlers; they must not change the result those handlers return. Run
+the existing Lumen suite to prove the deposit path still behaves:
+
+```bash
+uv run --extra dev pytest -q
+```
+
+Every test should stay green:
+
+```
+.........................................                        [100%]
+41 passed in 0.3s
+```
+
+Then do one full manual lap with the app running: drive a deposit on `8080`,
+confirm `/actuator/health` is `UP` on `9090`, scrape `/actuator/prometheus` and
+see `lumen_wallet_deposits_total` increment, and open `http://localhost:9090/admin`
+to watch the same event flow through the live Metrics and Log Viewer panels. All
+three pillars — logs, metrics, traces — now describe a single deposit, joined by
+one `trace_id`.
 
 ---
 

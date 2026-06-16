@@ -86,11 +86,24 @@ method as a step with its compensation, and declare the dependency
 ordering. The engine discovers the class through the DI container, builds
 a validated DAG at startup, and drives execution asynchronously.
 
+!!! note "New term: orchestration"
+    *Orchestration* means one central component — here, PyFly's `SagaEngine` — decides the order in which steps run and what to do when one fails. The alternative, *choreography*, has each service react to events with no central conductor. This chapter uses orchestration because it makes the recovery path explicit and easy to test: the engine owns the rules, your saga class just declares the steps.
+
+We will build the transfer saga in four moves: turn the engine on, declare
+the saga class, look at the DAG the engine builds from it, then call the
+engine from a service. Take them one at a time.
+
 ### Enabling the engine
 
 The transactional engine is activated by the `@enable_domain_stack`
-starter decorator on your application class, together with a single YAML
-property. In Lumen:
+starter decorator on your application class — and that single decorator is
+all you need. No extra YAML is required. In Lumen:
+
+**Add the starter decorator.** Open your application class and
+stack `@enable_domain_stack` above `@pyfly_application`. A *starter*
+decorator is PyFly's way of switching on a whole feature area (here, the
+transactional engine and its DI wiring) without you registering each
+component by hand — the Spring equivalent is an `@EnableXxx` annotation.
 
 ::: listing lumen/app.py | Listing 12.1 — Enabling the transactional engine via the domain stack
 from pyfly.core import pyfly_application
@@ -110,7 +123,17 @@ class LumenApplication:
     pass
 :::
 
-Add the property in `application.yaml`:
+**Turning it off, or on under a narrower starter.** `@enable_domain_stack`
+already sets `pyfly.transactional.enabled: true` for you, so the engine is
+live as soon as the decorator is on the class. The same property is the
+knob you reach for in two situations:
+
+- **To switch the engine off** under the domain stack, set it to `false` in
+  `application.yaml` — the auto-configuration is gated on the value being
+  exactly `"true"`, so anything else disables it.
+- **To switch it on under a narrower starter** such as `@enable_core_stack`
+  (which does *not* include the transactional engine), add the property
+  yourself:
 
 ```yaml
 pyfly:
@@ -118,16 +141,40 @@ pyfly:
     enabled: true
 ```
 
-**How it works:** `@enable_domain_stack` imports
-`TransactionalEngineAutoConfiguration`, guarded by
-`@conditional_on_property("pyfly.transactional.enabled", having_value="true")`.
-When the property is set, the auto-configuration wires every engine
-component — `SagaEngine`, `TccEngine`, `WorkflowEngine`, `SagaRegistry`,
+!!! note "Run it: confirm the engine wired up"
+    Start the app on its default port (`pyfly.server.port` is `8080` in v26.6.110) and watch the startup log:
+
+    ```bash
+    uv run pyfly run
+    ```
+
+    Among the startup lines you should see the transactional components register, for example:
+
+    ```
+    INFO  pyfly.starters.domain  domain stack enabled: transactional engine active
+    INFO  pyfly.transactional    registered saga 'money-transfer' (2 steps)
+    INFO  pyfly.server           Uvicorn running on http://0.0.0.0:8080
+    ```
+
+    If you explicitly set `transactional.enabled: false` (or enable only the core stack without adding the property), the saga line never appears and `SagaEngine.execute(...)` later raises `ValueError: Saga 'money-transfer' is not registered`. Seeing the `registered saga` line is your proof the wiring worked.
+
+**How it works:** `@enable_domain_stack` merges `DOMAIN_STACK_PROPERTIES`
+into the active config, and that dict already contains
+`pyfly.transactional.enabled: "true"` — so the decorator both registers
+*and* activates the engine in one move. The auto-configuration,
+`TransactionalEngineAutoConfiguration`, is guarded by
+`@conditional_on_property("pyfly.transactional.enabled", having_value="true")`;
+because the starter set the value to `"true"`, the condition matches and
+the auto-configuration wires every engine component — `SagaEngine`,
+`TccEngine`, `WorkflowEngine`, `SagaRegistry`,
 `InMemoryPersistenceAdapter`, and `LoggerEventsAdapter` — into the DI
 container. The `OrchestrationBeanPostProcessor` then scans every bean
 produced at startup: any bean carrying `__pyfly_saga__` metadata is
 registered into `SagaRegistry` automatically. You never call
 `registry.register_from_bean()` in production code.
+
+!!! note "What just happened"
+    One small change — a single decorator — gave you a fully wired saga engine. `@enable_domain_stack` both declared the components and turned them on (it sets `pyfly.transactional.enabled: true` for you), and a startup bean post-processor found your saga classes and registered them for you. From here on you only write saga classes and call `SagaEngine.execute(...)`; the plumbing is done.
 
 ### Declaring the transfer saga
 
@@ -135,6 +182,14 @@ Lumen's wallet transfer is a two-step saga: debit the source wallet, then
 credit the destination. If the credit fails — wrong currency or missing
 wallet — the engine compensates by re-crediting the source, returning both
 balances to their original values.
+
+!!! note "New term: compensation"
+    A *compensation* (or *compensating transaction*) is the undo for a step. It is not a database rollback — by the time you compensate, the original write has already committed to its own store. Instead it is a *new forward operation* that semantically reverses the effect. The undo for "debit the source" is not `ROLLBACK`; it is "deposit the same amount back into the source". Every step that changes state needs a matching compensation.
+
+Build it in three moves. **Step 1** — declare the class and stack the
+decorators. **Step 2** — write the forward steps and their compensation.
+**Step 3** — wire the parameters with injection markers. The complete file
+is below; we then walk each move.
 
 ::: listing lumen/core/services/transfers/money_transfer_saga.py | Listing 12.2 — MoneyTransferSaga: debit → credit, with compensation
 from __future__ import annotations
@@ -245,6 +300,7 @@ class MoneyTransferSaga:
 
 **How it works — step by step:**
 
+**Step 1 — the decorator stack.**
 `@saga(name=MONEY_TRANSFER_SAGA)` stamps `__pyfly_saga__` on the class
 with the saga name. The decorator only attaches metadata — it does not
 wrap the class or create a proxy. **The critical requirement** is that
@@ -255,6 +311,10 @@ causes the DI container to instantiate and scan the bean at startup; the
 Without `@service`, the class is never scanned and the saga cannot be
 executed by name.
 
+!!! warning "Decorator order is not optional"
+    Read the stack top-to-bottom: `@saga` is *above* `@service`. Swap them — `@service` above `@saga` — and the bean still registers with DI, but the saga metadata is applied to the already-wrapped object, the post-processor never finds it, and `execute("money-transfer")` fails with `ValueError: Saga 'money-transfer' is not registered`. If you hit that error, check the decorator order first.
+
+**Step 2 — the step methods.**
 `@saga_step` attaches `__pyfly_saga_step__` metadata directly to the
 async method — no wrapper, no proxy — so `inspect.iscoroutinefunction`
 keeps returning `True` and the engine correctly `await`s the call. The
@@ -282,6 +342,7 @@ Because saga steps share one `AsyncSession`, `upsert` flushes so each
 step sees the previous step's write; the surrounding application boundary
 owns the final commit.
 
+**Step 3 — wire the parameters.**
 Parameter injection uses `typing.Annotated` with **marker instances**, not
 bare classes:
 
@@ -302,7 +363,13 @@ back, and upserts — the same load-mutate-save cycle as the forward steps.
 Compensations always read from `ctx.step_results` via `FromStep`, never
 from the original input.
 
+!!! note "What just happened"
+    You wrote one class that holds the whole transfer story: a forward step to debit, its compensation to re-credit, and a second forward step to credit. The decorators told the engine *what each method is* (a step, a compensation) and *how they connect* (`compensate=`, `depends_on=`). You did not write any orchestration loop or try/except rollback logic — that is the engine's job. Your code only describes the business operation and its undo.
+
 ### The step DAG
+
+!!! note "New term: DAG"
+    A *DAG* — directed acyclic graph — is a set of steps connected by "must-run-before" arrows, with no cycles (no step can, directly or indirectly, depend on itself). The engine reads your `depends_on` declarations, builds this graph, and sorts it into *layers*: everything in layer 0 has no unmet dependencies and runs first; layer 1 runs once layer 0 finishes; and so on. Steps in the same layer are independent, so the engine runs them at the same time. A cycle would make the layering impossible, so the engine rejects it at startup rather than at run time.
 
 The two steps form a linear chain:
 
@@ -322,7 +389,14 @@ two checks in the same layer and run them concurrently with
 
 ### Executing the saga
 
-Inject `SagaEngine` from the DI container and call `execute`:
+The saga class only *describes* the operation. To *run* it you need a thin
+service that injects the engine and calls it by name.
+
+**Step 1 — inject `SagaEngine`.** Declare a `@service` whose constructor
+takes a `SagaEngine` parameter; the DI container hands you the
+auto-configured engine. **Step 2 — call `execute`** with the saga name and
+the input payload. **Step 3 — fold the `SagaResult`** into a small,
+JSON-friendly dict for the caller.
 
 ::: listing lumen/core/services/transfers/transfer_service.py | Listing 12.3 — Executing the money transfer saga
 from __future__ import annotations
@@ -385,6 +459,44 @@ successfully rolled back.
 - `result.correlation_id` — UUID to correlate logs and traces across services.
 - `result.error` — the exception that stopped the saga, or `None` on success.
 
+!!! note "Run it: the happy path and the compensated path"
+    Expose `TransferService.transfer` behind an HTTP route (Chapter 11 covered controllers) and exercise both outcomes against the running app on `pyfly.server.port` (`8080`).
+
+    A valid transfer between two existing same-currency wallets returns the completed summary:
+
+    ```bash
+    curl -s -X POST http://localhost:8080/transfers \
+      -d '{"source_wallet_id":"w-1","destination_wallet_id":"w-2","amount":500,"currency":"EUR"}'
+    ```
+
+    ```json
+    {
+      "status": "completed",
+      "correlation_id": "8f3c…",
+      "source_balance": 9500,
+      "destination_balance": 10500
+    }
+    ```
+
+    Now point the transfer at a destination wallet that does not exist. `credit-destination` raises `AggregateNotFound`, the engine compensates `debit-source`, and the response reports exactly that:
+
+    ```bash
+    curl -s -X POST http://localhost:8080/transfers \
+      -d '{"source_wallet_id":"w-1","destination_wallet_id":"does-not-exist","amount":500,"currency":"EUR"}'
+    ```
+
+    ```json
+    {
+      "status": "failed",
+      "correlation_id": "1a2b…",
+      "failed_steps": ["credit-destination"],
+      "compensated_steps": ["debit-source"],
+      "error": "Wallet 'does-not-exist' not found"
+    }
+    ```
+
+    The key observation: re-read `w-1` afterwards and its balance is back to `9500` — `debit-source` was rolled back by `recredit_source`. A failed transfer leaves both wallets exactly as they started.
+
 !!! spring "Spring parity"
     `@saga` / `@saga_step` mirror `@Saga` / `@SagaStep` in the Java `fireflyframework-transactional-engine` library. The decorator-stack rule (`@saga` on `@service`) mirrors the Java rule that `@Saga` must be on a `@Service`-annotated class so the `WorkflowBeanPostProcessor` can discover it. The parameter-injection markers (`Input()`, `FromStep("id")`) map directly to `@Input` and `@FromStep` in the Java version. The async model differs: Java uses Project Reactor (`Mono<T>`) while PyFly uses native `async/await` with `asyncio.gather` for parallel layers.
 
@@ -420,6 +532,38 @@ system as forward steps. `Annotated[DebitResult, FromStep("debit-source")]`
 reads the `DebitResult` that `debit_source` stored in the context when it
 completed — so you always compensate with the actual committed data, never
 an approximation.
+
+!!! note "Run it: prove compensation in a test"
+    You do not need a running server to verify the unhappy path — a fast unit test against the engine is enough, and it is the kind of test you will write for every saga. Drive `TransferService.transfer` with a destination wallet that does not exist, then assert the compensation ran:
+
+    ```python
+    async def test_failed_transfer_compensates_the_debit(transfer_service):
+        result = await transfer_service.transfer(
+            TransferRequest(
+                source_wallet_id="w-1",
+                destination_wallet_id="does-not-exist",
+                amount=500,
+                currency=Currency.EUR,
+            )
+        )
+        assert result["status"] == "failed"
+        assert result["failed_steps"] == ["credit-destination"]
+        assert result["compensated_steps"] == ["debit-source"]
+    ```
+
+    Run just this test (the `--extra dev` group installs pytest; Chapter 16 covers fixtures in depth):
+
+    ```bash
+    uv run --extra dev pytest -q -k compensates
+    ```
+
+    Expected output:
+
+    ```
+    1 passed in 0.05s
+    ```
+
+    A green test here is your guarantee that a broken transfer never leaves money missing.
 
 ### Compensation policies
 

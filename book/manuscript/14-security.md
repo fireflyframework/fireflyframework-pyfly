@@ -16,6 +16,15 @@ This chapter locks Lumen down. You will:
 
 If you have worked with Spring Security before, the shape will feel familiar: configure a filter chain, annotate individual methods, and swap the user-detail source for an IDP. PyFly calls those pieces `SecurityMiddleware + HttpSecurity`, `@secure`, and `IdpAdapter`, but the concepts map one-to-one.
 
+This chapter is written as a guided tutorial. We build the security layer one piece at a time — issue a token, validate it, guard a handler, hash a password, store a session, federate to an IDP — and after each piece you will find a **Run it** checkpoint with the exact command to type and the output you should expect. If you have never wired authentication into a web service before, that is fine: each new term is glossed in plain language the first time it appears, and you can follow along by editing the Lumen sample as you read.
+
+!!! note "Version"
+    The listings and config keys in this chapter target PyFly **v26.6.110**.
+    If you are on an earlier release, a few property names differ — most notably
+    the application port is now `pyfly.server.port` (Spring's `server.port`),
+    and the actuator and admin dashboard live on a separate management port,
+    `pyfly.management.server.port` (default `9090`).
+
 ::: figure art/figures/14-security.svg | Figure 14.1 — Lumen's security layers. A JWT filter populates the SecurityContext; HttpSecurity enforces URL-level rules; @secure enforces handler-level rules; the IDP port delegates identity to an external provider.
 
 ---
@@ -26,7 +35,7 @@ If you have worked with Spring Security before, the shape will feel familiar: co
 
 Lumen is a stateless API. HTTP sessions would require sticky routing or a shared session store on every replica. JWT tokens let each service validate credentials independently — no shared state, no coordination, horizontal scaling by default.
 
-A **JWT** is a signed JSON payload. Lumen's auth service issues a token on login; every subsequent request carries that token in the `Authorization` header; `SecurityMiddleware` validates the signature and unpacks the token into a `SecurityContext` that the rest of the request can read.
+A **JWT** (JSON Web Token, pronounced "jot") is a signed JSON payload. Think of it as a tamper-evident badge: the server stamps a small JSON document — *who you are*, *what roles you hold*, *when it expires* — and signs it with a secret key. The badge travels with every request. Because the signature can only be produced by someone holding the secret, the server can trust the badge without looking anything up in a database. Lumen's auth service issues a token on login; every subsequent request carries that token in the `Authorization` header; `SecurityMiddleware` validates the signature and unpacks the token into a `SecurityContext` that the rest of the request can read.
 
 ### JWTService
 
@@ -101,6 +110,43 @@ def _permissions_for(role: str) -> list[str]:
 
 **How it works.** `login` fetches the user record and calls `BcryptPasswordEncoder.verify` to compare the supplied password against the stored hash. On success it calls `jwt.encode`, which auto-appends an `exp` claim `expiration_seconds` seconds from now (default `3600` — one hour). You never import `datetime`: the service computes the Unix-timestamp expiry as `int(time.time()) + expiration_seconds`. The caller receives a compact, self-contained token string.
 
+Walking through the `login` method one step at a time:
+
+**Step 1 — Look up the user.** `find_by_username` returns the stored user record, or `None` if no such username exists. We will treat both "no such user" and "wrong password" as the same failure so an attacker cannot tell which usernames are registered.
+
+**Step 2 — Verify the password.** `self._encoder.verify(password, user.password_hash)` re-hashes the supplied password with the salt baked into the stored hash and compares the two in constant time. If the user was not found, or the passwords do not match, raise `UnauthorizedException` — PyFly renders this as a `401` with the machine-readable code `INVALID_CREDENTIALS`.
+
+**Step 3 — Build the claims.** On success, assemble the JSON payload that will become the token's body: `sub` (the subject — the user's id), `roles`, and the `permissions` that role grants.
+
+**Step 4 — Sign and return.** `self._jwt.encode({...})` signs the payload with the configured secret, stamps the mandatory `exp` claim, and returns the compact token string. That string is what the client stores and replays on every later request.
+
+!!! note "Jargon: claim"
+    A *claim* is just one key/value statement inside the token's JSON body —
+    `"sub": "42"` claims the subject is user 42. The token carries a bag of
+    claims; the framework copies the security-relevant ones (`sub`, `roles`,
+    `permissions`) into the `SecurityContext`.
+
+!!! tip "Run it — issue a token in the REPL"
+    You do not need a running server to see `JWTService` work. With Lumen's
+    virtual environment active, open a Python REPL and sign a payload:
+
+    ```python
+    >>> from pyfly.security import JWTService
+    >>> jwt = JWTService(secret="dev-secret-change-me", algorithm="HS256")
+    >>> token = jwt.encode({"sub": "42", "roles": ["USER"]})
+    >>> token[:20]            # a compact "header.payload.signature" string
+    'eyJhbGciOiJIUzI1NiIs'
+    >>> ctx = jwt.to_security_context(token)
+    >>> ctx.user_id, ctx.roles
+    ('42', ['USER'])
+    ```
+
+    The token round-trips: `encode` added the `exp` claim for you, and
+    `to_security_context` validated the signature and unpacked the claims into a
+    `SecurityContext`. Try tampering with a character in the middle of the
+    string and calling `jwt.decode(token)` again — you will get a
+    `SecurityException`, because the signature no longer matches the payload.
+
 ### The SecurityContext
 
 **`SecurityContext`** is a frozen dataclass that carries authentication and authorisation data for a single request. The middleware creates it from the validated token; your handlers receive it as an injected parameter.
@@ -160,6 +206,15 @@ def build_app(context):
 
 **How it works.** `exclude_paths` lists the paths where no token is expected. Login and register cannot require authentication because the token does not exist yet; docs paths are excluded so the API explorer works without credentials. Every other path goes through token validation.
 
+!!! note "Jargon: middleware"
+    *Middleware* is code that wraps every request, running before the route
+    handler on the way in and after it on the way out. `SecurityMiddleware`
+    uses the "in" pass to read the token and stash a `SecurityContext` on
+    `request.state` so handlers downstream can read it without re-parsing the
+    header.
+
+**What just happened.** You now have the two halves of authentication wired up. `AuthService.login` *mints* a token after checking the password; `SecurityMiddleware` *reads* that token on every later request and turns it into a `SecurityContext`. Crucially, the middleware is permissive — it never returns a `401`. A request with a bad or missing token simply arrives anonymous, and the decision to allow or reject it is deferred to the next two layers you will build: `HttpSecurity` (broad, URL-level) and `@secure` (precise, per-handler). Separating *who you are* (authentication) from *what you may do* (authorization) is what keeps each layer small and testable.
+
 ### URL-level rules with HttpSecurity
 
 `@secure` guards individual handler methods. **`HttpSecurity`** guards whole URL subtrees at the filter layer — before the route dispatcher runs. The two are complementary: `HttpSecurity` provides fast, broad policy at the edge; `@secure` adds fine-grained, per-handler enforcement behind it.
@@ -173,7 +228,7 @@ from pyfly.security.http_security import HttpSecurity
 class SecurityConfig:
 
     @bean
-    def http_security_filter(self):
+    def http_security(self) -> HttpSecurity:
         hs = HttpSecurity()
         hs.authorize_requests() \
             .request_matchers("/idp/admin/**").has_role("ADMIN") \
@@ -183,12 +238,55 @@ class SecurityConfig:
                 "/idp/login", "/idp/refresh",
             ).permit_all() \
             .any_request().permit_all()
-        return hs.build()
+        return hs
 
 :::
 :::
 
 **How it works.** Rules are evaluated in declaration order — first match wins. The `HttpSecurityFilter` runs at `HIGHEST_PRECEDENCE + 350`, after authentication filters have populated `request.state.security_context`, so every role and permission check has a fully hydrated context to inspect. The terminal methods — `has_role`, `has_any_role`, `has_permission`, `authenticated`, `permit_all`, and `deny_all` — cover every common policy; unsatisfied rules return RFC 7807 problem-detail JSON (`application/problem+json`) with the appropriate HTTP status.
+
+Read the DSL chain top to bottom — that is exactly the order the filter evaluates it:
+
+**Step 1 — Open the rule list.** `hs.authorize_requests()` starts the fluent builder. Every `.request_matchers(...)` call that follows registers one rule.
+
+**Step 2 — Lock down the admin subtree.** `.request_matchers("/idp/admin/**").has_role("ADMIN")` requires the `ADMIN` role for anything under `/idp/admin`. The `**` glob matches any depth of path segments.
+
+**Step 3 — Require login for wallets.** `.request_matchers("/api/v1/wallets/**").authenticated()` accepts any logged-in caller, regardless of role, for the wallet tree. Finer per-handler rules come later via `@secure`.
+
+**Step 4 — Allow the public paths.** `.request_matchers("/health", "/docs", ...).permit_all()` lets health checks, the docs explorer, and the IDP login/refresh endpoints through with no token.
+
+**Step 5 — Set the default.** `.any_request().permit_all()` is the catch-all for paths no earlier rule matched. Flip it to `.deny_all()` once every route is explicitly accounted for — "deny by default" is the safer production posture.
+
+**Step 6 — Return the builder.** Return the configured `HttpSecurity` itself — do **not** call `hs.build()` here. Because `SecurityConfig` is a `@configuration` class, auto-configuration's `HttpSecurityFilterAutoConfiguration` (active whenever an `HttpSecurity` bean is present) picks up the `HttpSecurity` bean, calls `.build()` for you, and registers the resulting `HttpSecurityFilter` on the chain.
+
+!!! tip "Run it — see the gate accept and reject"
+    Start the app with `uv run pyfly run` (it serves on `pyfly.server.port`,
+    default `8080`). In another terminal, hit a guarded path without a token:
+
+    ```bash
+    curl -i http://localhost:8080/api/v1/wallets
+    ```
+
+    Expected — the gate rejects the anonymous request with an RFC 7807 body:
+
+    ```text
+    HTTP/1.1 401 Unauthorized
+    content-type: application/problem+json
+
+    {"type":"about:blank","title":"Unauthorized","status":401,
+     "detail":"Authentication is required to access this resource.",
+     "instance":"/api/v1/wallets"}
+    ```
+
+    Now replay it with a token (use the `$TOKEN` you minted in the REPL above,
+    or one from `/idp/login`):
+
+    ```bash
+    curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/wallets
+    ```
+
+    Expected — `HTTP/1.1 200 OK` and a JSON page of wallets. The same URL,
+    two outcomes, decided entirely by the token: that is the gate doing its job.
 
 !!! note "Two-layer defense"
     `HttpSecurity` provides fast URL-level policy before routes are even
@@ -197,7 +295,7 @@ class SecurityConfig:
     the second, finer-grained layer. Use both together for defense in depth.
 
 !!! spring "Spring parity"
-    `HttpSecurity` mirrors Spring Security's `HttpSecurity.authorizeHttpRequests()` chain. `request_matchers` corresponds to `requestMatchers`, `authenticated()` to `.authenticated()`, `has_role` to `hasRole`, and `build()` triggers registration of the underlying filter just as `build()` finalises the Spring filter chain. The fnmatch glob patterns (`/api/admin/**`) behave identically to Spring's Ant-style path matching.
+    `HttpSecurity` mirrors Spring Security's `HttpSecurity.authorizeHttpRequests()` chain. `request_matchers` corresponds to `requestMatchers`, `authenticated()` to `.authenticated()`, `has_role` to `hasRole`, and the `build()` that auto-configuration calls on your `HttpSecurity` bean finalises the underlying filter just as `build()` finalises the Spring filter chain. The fnmatch glob patterns (`/api/admin/**`) behave identically to Spring's Ant-style path matching.
 
 ---
 
@@ -214,9 +312,9 @@ pyfly:
       algorithm: HS256
       filter:
         enabled: true
-        exclude-patterns: >-
-          /docs,/openapi.json,/actuator/health,
-          /api/auth/login,/api/auth/register
+      exclude-patterns: >-
+        /docs,/openapi.json,
+        /api/auth/login,/api/auth/register
     password:
       bcrypt-rounds: 12
 
@@ -231,10 +329,50 @@ pyfly:
 | `pyfly.security.jwt.exclude-patterns` | *(absent)* | Comma-separated paths to skip |
 | `pyfly.security.password.bcrypt-rounds` | `12` | Bcrypt cost factor |
 
+Note where each key lives: `filter.enabled` is nested under `jwt.filter`, but `exclude-patterns` sits one level up, directly under `jwt` — that is the key the auto-configuration reads (`pyfly.security.jwt.exclude-patterns`). There is no `/actuator/health` in the exclude list any more: as of v26.6.110 the actuator and admin dashboard run on a **separate management port** (`pyfly.management.server.port`, default `9090`), so they never pass through the application's JWT filter at all.
+
 !!! warning "Production secret"
     Never commit the real JWT secret to source control. Use `${JWT_SECRET}` and
     inject the value from an environment variable or a secrets manager at
     deploy time.
+
+!!! warning "The management port is open by default"
+    For Spring parity, the management server (`/actuator/*` and the admin
+    dashboard, default port `9090`) is **unauthenticated by default** — it does
+    not share the application's security gate. In any non-local deployment,
+    secure it explicitly:
+
+    ```yaml
+    pyfly:
+      management:
+        security:
+          enabled: true       # apply the security gate to the management port
+    ```
+
+    Setting `pyfly.management.server.port: -1` disables the management endpoints
+    entirely. The default actuator HTTP exposure is just `health,info`; widen it
+    with `pyfly.management.endpoints.web.exposure.include`.
+
+!!! tip "Run it — confirm auto-wiring on startup"
+    With the keys above in `pyfly.yaml`, start the app and watch the boot log:
+
+    ```bash
+    uv run pyfly run
+    ```
+
+    Expected — you will see the app bind to `:8080` and the management server to
+    `:9090`, and the security beans appear with no `@configuration` code of your
+    own. A quick proof that the encoder bean exists:
+
+    ```bash
+    curl -s http://localhost:8080/api/auth/login \
+      -d '{"username":"alice","password":"hunter2"}' \
+      -H 'content-type: application/json'
+    ```
+
+    Expected — a JSON body containing an `access_token` (or a `401` with
+    `INVALID_CREDENTIALS` if the credentials are wrong). Either way, the
+    `JWTService` and `BcryptPasswordEncoder` beans were wired automatically.
 
 ---
 
@@ -456,6 +594,43 @@ The collection handlers (`list_wallets`, `list_rich_wallets`) sort
 alphabetically before `wallet_balance` / `wallet_detail`, so the framework
 registers the literal `""` and `/rich` routes first — ensuring Starlette
 resolves `/api/v1/wallets/rich` as a fixed segment rather than as a wallet id.
+
+To add `@secure` to one handler, the recipe is always the same three steps:
+
+**Step 1 — Add the parameter.** Give the method a `security_context: SecurityContext` keyword parameter. (For the `GET` list handlers that already have defaulted query params, default it to `None` so the parameter order stays valid: `security_context: SecurityContext = None`.)
+
+**Step 2 — Stack the decorator.** Put `@secure(...)` *above* `@get_mapping` / `@post_mapping`. Order matters: the authorization check must run before the route binding does.
+
+**Step 3 — Choose the minimal guard.** Pick the least-privilege rule that still lets the right users through — `roles=["USER", "ADMIN"]` for ordinary reads, an extra `permissions=["wallet:deposit"]` for money-moving writes, `roles=["ADMIN"]` for the full detail view.
+
+!!! tip "Run it — watch a 403 for the wrong role"
+    `wallet_detail` is `ADMIN`-only. Call it with a `USER` token (the
+    authentication succeeds, but authorization fails):
+
+    ```bash
+    curl -i -H "Authorization: Bearer $USER_TOKEN" \
+      http://localhost:8080/api/v1/wallets/abc-123
+    ```
+
+    Expected — the request clears the gate (it *is* authenticated) but
+    `@secure(roles=["ADMIN"])` rejects it. The exception handler renders a
+    problem body that includes the machine-readable `code`:
+
+    ```text
+    HTTP/1.1 403 Forbidden
+    content-type: application/problem+json
+
+    {"type":"about:blank","title":"Forbidden","status":403,
+     "detail":"Insufficient roles: requires one of ['ADMIN']",
+     "code":"FORBIDDEN"}
+    ```
+
+    Note the difference from the gate's `401` earlier: a missing or invalid
+    token at the gate gives `401` ("I don't know who you are"), while a valid
+    token without the required role gives `403 FORBIDDEN` ("I know who you are,
+    and you may not do this"). The same `USER` token *would* succeed against
+    `GET /api/v1/wallets/abc-123/balance`, which is guarded with
+    `roles=["USER", "ADMIN"]`.
 
 !!! note "Amounts in minor units"
     `DepositRequest.amount` is an `int` in **minor units** (cents). €10.50 is
@@ -766,6 +941,155 @@ class SessionConfig:
 
 ---
 
+## Validating tokens from an external IdP (OAuth2 resource server)
+
+So far Lumen has *minted its own tokens* with `JWTService` and a shared HMAC
+secret. That is perfect for a self-contained service. But in most real-world
+deployments, the tokens are issued by a dedicated identity provider — Keycloak, Microsoft
+Entra ID (formerly Azure AD), or AWS Cognito — and your service's only job is to
+**validate** them. This is the **OAuth2 resource server** role, and as of
+v26.6.110 PyFly gives it to you with config alone: no code, and the same one
+configuration works across all three providers.
+
+!!! note "Jargon: resource server"
+    In OAuth2 terms, the IdP that issues tokens is the *authorization server*;
+    your API, which holds the data callers want and checks their tokens, is the
+    *resource server*. Lumen is a resource server. It never sees the user's
+    password — it only verifies the badge the IdP already signed.
+
+The difference from `JWTService` is the **signing scheme**. Your own tokens are
+signed with a symmetric secret (`HS256`) — the same key both signs and verifies,
+so only services that hold the secret can validate. IdP tokens are signed
+*asymmetrically* (`RS256`): the IdP keeps a private key and publishes the
+matching public keys at a **JWKS** endpoint (JSON Web Key Set). Your resource
+server downloads those public keys, caches them, and uses them to verify every
+token's signature — it never needs the IdP's secret at all.
+
+### Turning it on
+
+`JWKSTokenValidator` does the work, and `OAuth2ResourceServerAutoConfiguration`
+wires it from `pyfly.security.oauth2.resource-server.*`. Here is the full
+Keycloak setup:
+
+::: listing lumen/resources/pyfly.yaml | Listing 14.11 — Multi-IdP OAuth2 resource server (Keycloak)
+pyfly:
+  security:
+    oauth2:
+      resource-server:
+        enabled: true
+        # Either point at the JWKS endpoint directly...
+        jwks-uri: "https://keycloak.example.com/realms/lumen/protocol/openid-connect/certs"
+        # ...or give an issuer-uri and let OIDC discovery find jwks-uri + issuer:
+        # issuer-uri: "https://keycloak.example.com/realms/lumen"
+        issuer: "https://keycloak.example.com/realms/lumen"
+        audiences: "lumen-backend"
+        validate-audience: true
+        algorithms: "RS256"
+        clock-skew-seconds: 60
+        exclude-patterns: "/idp/login,/idp/refresh,/docs,/openapi.json"
+
+:::
+:::
+
+Step by step:
+
+**Step 1 — Enable it.** `enabled: true` activates `OAuth2ResourceServerAutoConfiguration` (PyJWT must be installed). That registers a `JWKSTokenValidator` bean and the bearer-token filter on the application's chain.
+
+**Step 2 — Point at the keys.** Set `jwks-uri` directly, or set `issuer-uri` and let PyFly fetch `<issuer-uri>/.well-known/openid-configuration` to discover both the `jwks-uri` and the authoritative `issuer` — exactly like Spring's `issuer-uri`.
+
+**Step 3 — Pin the audience and issuer.** `audiences` lists the values the token's `aud` claim must match (any one). `issuer` (when set) is checked against the token's `iss`. Together they ensure a token minted for a *different* application or realm cannot be replayed against Lumen.
+
+**Step 4 — Leave the defaults alone for claim mapping.** You did not configure where roles live, yet it just works for Keycloak, Entra, and Cognito. That is the job of `ClaimMappings`, covered next.
+
+### How claims become a SecurityContext
+
+Every IdP puts roles and scopes in different places. Keycloak nests realm roles under `realm_access.roles` and per-client roles under `resource_access.<client>.roles`; Entra uses a flat `roles` array (or `groups`); Cognito uses `cognito:groups`. `ClaimMappings` reconciles them with a small path language, so `has_role(...)` and `has_permission(...)` work the same regardless of provider.
+
+| Mapping field | Default search order | Becomes |
+|---|---|---|
+| `principal_claims` | `oid`, `sub` | `SecurityContext.user_id` |
+| `authority_claims` | `roles`, `scopes`, `authorities`, `realm_access.roles`, `resource_access.*.roles`, `groups`, `cognito:groups` | `SecurityContext.roles` |
+| `scope_claims` | `scp`, `scope` (space-split) | `SecurityContext.permissions` |
+| `attribute_claims` | *(none)* | `SecurityContext.attributes` |
+
+Two rules make the defaults span every provider:
+
+- **Dotted paths** descend into nested objects: `realm_access.roles` reads `payload["realm_access"]["roles"]`.
+- A single-level **`*` wildcard** iterates every key at that level: `resource_access.*.roles` collects the `roles` array from *every* client entry under `resource_access`. Path segments split on `.` only, so a colon-bearing claim name like `cognito:groups` is matched verbatim.
+
+Roles are collected across *all* matching paths and de-duplicated, so a Keycloak token contributes both its realm roles and its client roles into one flat `roles` list.
+
+!!! note "Jargon: JWKS and kid"
+    A *JWKS* is the IdP's public-key directory. Each key carries a `kid` (key
+    id); each token's header names the `kid` it was signed with. The validator
+    looks up that exact key, caches the set (default 300s), and rotates
+    automatically when the IdP publishes new keys — no redeploy needed.
+
+If the built-in defaults do not match your IdP, override only what differs:
+
+::: listing lumen/resources/pyfly.yaml | Listing 14.12 — Tuning claim mapping for Entra ID and Cognito
+pyfly:
+  security:
+    oauth2:
+      resource-server:
+        enabled: true
+        # Microsoft Entra ID (v2.0):
+        issuer-uri: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+        audiences: "api://lumen-backend"
+        principal-claim-names: "oid,sub"      # Entra's stable user id first
+        authorities-claim-names: "roles,groups"
+        scope-claim-names: "scp"              # Entra delegated scopes
+        attribute-claims: "tid,preferred_username"
+        # AWS Cognito access tokens carry no 'aud' — disable audience checks:
+        # validate-audience: false
+        # authorities-claim-names: "cognito:groups"
+
+:::
+:::
+
+**Step 5 (when needed) — Cognito has no `aud`.** Cognito *access* tokens carry `client_id` instead of `aud`, so set `validate-audience: false` for them; the signature, `iss`, and `exp` checks still apply.
+
+!!! tip "Run it — accept a real IdP token, reject a forged one"
+    With the resource server enabled, replay a token your IdP issued against a
+    guarded route:
+
+    ```bash
+    curl -i -H "Authorization: Bearer $KEYCLOAK_TOKEN" \
+      http://localhost:8080/api/v1/wallets
+    ```
+
+    Expected — `HTTP/1.1 200 OK`. The filter fetched the JWKS, matched the
+    token's `kid`, verified the `RS256` signature, the `iss`, the `aud`, and the
+    `exp` (with 60s of clock-skew tolerance), then built a `SecurityContext`
+    from the token's claims.
+
+    Now flip one character in the token and retry. Expected — `HTTP/1.1 401`
+    (or an anonymous context that the gate then rejects), because the signature
+    no longer matches any published key. You did not write or deploy a single
+    line of validation code to get either outcome.
+
+**What just happened.** You added a production-grade, multi-IdP token validator with configuration only. `JWKSTokenValidator` verifies the signature against the IdP's published keys (so the secret never leaves the IdP), checks `iss` / `aud` / `exp`, and maps provider-specific claims into the same `SecurityContext` the rest of the chapter already uses. Your `@secure` decorators and `HttpSecurity` rules do not change at all — they read `roles` and `permissions` exactly as before, whether the token came from Lumen's own `JWTService` or from Keycloak.
+
+!!! warning "error mode: anonymous vs 401"
+    By default (`authenticate-error-mode: anonymous`) a *present but invalid*
+    token yields an anonymous context and the request continues to the
+    `HttpSecurity` gate, which decides. Set `authenticate-error-mode: "401"` to
+    reject an invalid token right at the filter with
+    `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750). A *missing*
+    token always falls through to the gate either way.
+
+!!! spring "Spring parity"
+    This is PyFly's `spring-boot-starter-oauth2-resource-server`. The
+    `resource-server.issuer-uri` / `jwks-uri` keys mirror
+    `spring.security.oauth2.resourceserver.jwt.*`; OIDC discovery, the accepted
+    `audiences` list, configurable `algorithms`, and the 60-second clock-skew
+    default all match Spring Security's `JwtDecoder` and `JwtTimestampValidator`.
+    `ClaimMappings` is the equivalent of a custom
+    `JwtAuthenticationConverter` / `JwtGrantedAuthoritiesConverter`, but
+    expressed declaratively in YAML.
+
+---
+
 ## External identity (IDP)
 
 ### The problem with managing identity in-house
@@ -835,7 +1159,7 @@ Key DTOs:
 
 ### Keycloak adapter
 
-::: listing lumen/config/idp_config.py | Listing 14.11 — Wiring the Keycloak adapter
+::: listing lumen/config/idp_config.py | Listing 14.13 — Wiring the Keycloak adapter
 from pyfly.container import bean, configuration
 from pyfly.idp import IdpAdapter, KeycloakIdpAdapter
 
@@ -860,7 +1184,7 @@ class IdpConfig:
 
 ### Using the IDP in a service
 
-::: listing lumen/core/services/auth/idp_auth_service.py | Listing 14.12 — Using IdpAdapter in the auth service
+::: listing lumen/core/services/auth/idp_auth_service.py | Listing 14.14 — Using IdpAdapter in the auth service
 from pyfly.container import service
 from pyfly.idp import IdpAdapter, IdpUser, LoginRequest
 from pyfly.kernel.exceptions import UnauthorizedException
@@ -926,7 +1250,7 @@ class IdpAuthService:
 
 Enable the IDP subsystem in `pyfly.yaml` and PyFly wires the adapter and a ready-made REST controller automatically:
 
-::: listing lumen/resources/pyfly.yaml | Listing 14.13 — IDP auto-configuration
+::: listing lumen/resources/pyfly.yaml | Listing 14.15 — IDP auto-configuration
 pyfly:
   idp:
     enabled: true
@@ -981,7 +1305,7 @@ When Starlette is present, `IdpAutoConfiguration` also registers an `IdpControll
 
 The listing below shows the complete wiring: IDP adapter, JWT filter, URL-level rules, and a Redis session store for the admin dashboard.
 
-::: listing lumen/config/security_full.py | Listing 14.14 — Full security configuration
+::: listing lumen/config/security_full.py | Listing 14.16 — Full security configuration
 from pyfly.container import bean, configuration
 from pyfly.idp import IdpAdapter, KeycloakIdpAdapter
 from pyfly.security.http_security import HttpSecurity
@@ -1000,7 +1324,7 @@ class LumenSecurityConfig:
         )
 
     @bean
-    def http_security_filter(self):
+    def http_security(self) -> HttpSecurity:
         hs = HttpSecurity()
         hs.authorize_requests() \
             .request_matchers(
@@ -1014,7 +1338,7 @@ class LumenSecurityConfig:
                 "/api/v1/wallets/**"
             ).authenticated() \
             .any_request().permit_all()
-        return hs.build()
+        return hs
 
 :::
 :::
@@ -1042,10 +1366,12 @@ This chapter opened Part V by closing Lumen's open front door. You:
   (paged list), `list_rich_wallets` (filtered list), `wallet_balance`, and
   `wallet_detail` — each carry the minimal guard: USER+ADMIN for most,
   `wallet:deposit` permission for mutations, ADMIN-only for the full detail
-  view. Authorization failures raise `SecurityException` (401, code
-  `AUTH_REQUIRED`) for unauthenticated callers and `ForbiddenException` (403,
-  code `FORBIDDEN`) for authenticated callers who lack the required role or
-  permission.
+  view. When `@secure` rejects a call it raises `SecurityException` (code
+  `AUTH_REQUIRED`) for an unauthenticated caller or `ForbiddenException` (code
+  `FORBIDDEN`) for an authenticated caller who lacks the required role or
+  permission — both render as HTTP `403` through the exception handler. The
+  broader `HttpSecurity` gate, sitting in front of those handlers, is what
+  returns the bare `401` for a missing or invalid token.
 - Hashed passwords with **`BcryptPasswordEncoder`**, the default adapter for the
   `PasswordEncoder` protocol. The cost factor is tunable; the stored hash is
   self-describing; verification is timing-safe.
@@ -1054,10 +1380,23 @@ This chapter opened Part V by closing Lumen's open front door. You:
   no dependencies; in production, `RedisSessionStore` serialises to JSON and
   lets Redis manage TTL. The `SessionFilter` rolls the cookie TTL on every
   request and deletes it on invalidation.
+- Validated tokens issued by an external IdP with the config-driven
+  **OAuth2 resource server** (`JWKSTokenValidator`). One block of
+  `pyfly.security.oauth2.resource-server.*` config accepts Keycloak, Microsoft
+  Entra ID, and AWS Cognito tokens out of the box: it verifies the `RS256`
+  signature against the IdP's JWKS keys, checks `iss` / `aud` / `exp` with a
+  60-second clock-skew, and maps each provider's roles, scopes, and principal
+  into the same `SecurityContext` via `ClaimMappings` — so `@secure` and
+  `HttpSecurity` stay unchanged.
 - Delegated identity to an external provider via the **`IdpAdapter`** port and
   the **`KeycloakIdpAdapter`** implementation. The auto-configured
   `IdpController` exposes login, refresh, logout, introspect, and admin user
   management under `/idp` with no extra code.
+- Learned that the actuator and admin dashboard run on a **separate management
+  port** (`pyfly.management.server.port`, default `9090`) that is
+  **unauthenticated by default** for Spring parity, and that you secure it with
+  `pyfly.management.security.enabled: true` (or disable it entirely with
+  port `-1`).
 
 ---
 

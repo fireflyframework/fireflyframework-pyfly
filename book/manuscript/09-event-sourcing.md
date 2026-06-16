@@ -76,7 +76,12 @@ In Chapter 6, `Wallet` held `_balance: Money` as direct Python state — `deposi
 
 This two-step indirection — apply, then handle — is the core mechanic of event sourcing. It enforces a strict discipline: every state transition is recorded exactly once as an event, and the aggregate's current state is always provable from its history.
 
+!!! note "Jargon: aggregate, handler, fold"
+    An **aggregate** is a single consistency boundary — one object that owns a set of related state and the rules that keep it valid. `LedgerAccount` is an aggregate: its balance and its overdraft rule live together. A **handler** (sometimes called an *apply-handler*) is the small function that takes one event and updates the aggregate's fields. A **fold** is the functional-programming term for walking a list and accumulating a result one element at a time — replaying a stream of events into a balance is exactly a fold over the event list. You will see "fold" used as a synonym for "the handler runs over each event."
+
 **Zero-arg constructor.** `LedgerAccount.__init__` takes no arguments. This is required because `EventSourcedRepository` calls the factory as `LedgerAccount()` and then assigns `.id` before replaying the stream. Never construct a new ledger by passing arguments to `__init__` — call the `open` classmethod instead.
+
+We will build the aggregate in four moves, then run the unit tests to prove each invariant holds. Read the full listing first, then walk the steps below it.
 
 Here are the domain events and the aggregate:
 
@@ -240,6 +245,19 @@ The factory method `open` calls `apply(LedgerOpened(...))` rather than setting f
 
 The `version` counter starts at zero and increments after each dispatched event. After `open`, `account.version == 1`; after one credit, `account.version == 2`. You will see this number again when the `EventStore` enforces optimistic concurrency.
 
+**Building it step by step.** The listing is dense the first time through. Here is the same code as four deliberate moves — the order in which you would actually write it.
+
+**Step 1 — Define the durable facts.** Write the three event dataclasses (`LedgerOpened`, `Credited`, `Debited`) extending `pyfly.eventsourcing.DomainEvent`. Give every field a default value (`account_id: str = ""`, `amount: int = 0`). The defaults are not cosmetic: the repository rebuilds these dataclasses from a stored payload, and a dataclass with required fields could not be reconstructed when an old event predates a newer field.
+
+**Step 2 — Set up the empty aggregate.** Write `__init__` with no parameters. Initialise the fields to neutral defaults (`owner_id = ""`, `balance = Money.zero(Currency.EUR)`) and register one `when()` handler per event class, each as a two-arg lambda delegating to a private method. At this point the aggregate is a blank slate that knows how to react to events but has not seen any.
+
+**Step 3 — Add the factory and the commands.** Write the `open` classmethod and the `credit` / `debit` methods. Each one validates its invariants first (currency match, positive amount, no overdraft), computes the resulting balance, and only then calls `self.apply(SomeEvent(...))`. Validation lives in the command; the handler never validates.
+
+**Step 4 — Write the pure folds.** Write `_on_opened`, `_on_credited`, `_on_debited`. Each reads fields off the event and assigns them to the aggregate — no arithmetic, no validation, no exceptions. Because these same three methods run on both the write path and the replay path, keeping them dumb is what guarantees that a reloaded ledger equals the live one.
+
+!!! tip "Why validation belongs in the command, not the handler"
+    The handler runs again every time the aggregate is loaded from history. If validation lived in the handler, you would be re-checking the overdraft rule against data that already passed it years ago — and worse, a rule that has since *changed* could reject a historical event that was perfectly valid when it happened. Validate once, on the write that produces the event; trust the event forever after.
+
 `pending_events()` returns the events queued since the last save. The unit tests drive the aggregate in isolation — no repository needed — which makes invariant verification straightforward:
 
 ::: listing tests/test_ledger_event_sourcing.py | Listing 9.2 — Unit tests: aggregate in isolation, commands and invariants
@@ -283,8 +301,25 @@ def test_debit_cannot_overdraw() -> None:
     ]
 :::
 
+**Run it.** These three tests need no database and no event store — the aggregate stands entirely on its own. Run just this file's unit tests from the Lumen project root:
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k "open or credit or debit or currency"
+```
+
+You should see the in-isolation tests pass:
+
+```
+....                                                                    [100%]
+4 passed, 7 deselected in 0.05s
+```
+
+The four dots are the four aggregate-only tests (the three shown above plus a currency-mismatch check); the seven deselected tests are the store-backed ones, which we run later. If you see a `TypeError` about the number of arguments, you have almost certainly hit the bound-method trap from the warning above — passing `self._on_opened` directly to `when()` instead of wrapping it in a two-arg lambda.
+
+**What just happened.** You built a domain object that records *what changed* instead of *what is*. `open` emitted a `LedgerOpened` fact and bumped the version to 1. `credit` and `debit` each validated their rule, computed the new balance, and emitted a fact — so a credit followed by a debit left three facts queued and the version at 3. When a rule failed (the overdraft test), the command raised before calling `apply`, so no faulty event ever entered the buffer. The aggregate's in-memory balance and its list of pending events stayed perfectly in step, and nothing touched a database yet.
+
 !!! tip "on_{event_type} as an alternative"
-    Instead of `when()` lambdas, you can define a method on the aggregate named after the event in snake_case — `on_ledgeropened(self, evt)` is discovered automatically. Use `when()` for concise one-liners and named methods for handlers that need multiple statements or local variables. The dispatch order is: `when()` handler first; then `on_{event_type}` method; then `EventHandlerException` if neither exists.
+    Instead of `when()` lambdas, you can define a method on the aggregate named after the event's `event_type` — which is the event **class name**, so `on_LedgerOpened(self, evt)` (matching the `LedgerOpened` dataclass) is discovered automatically. Use `when()` for concise one-liners and named methods for handlers that need multiple statements or local variables. The dispatch order is: `when()` handler first; then the `on_{event_type}` method; then `EventHandlerException` if neither exists.
 
 !!! spring "Spring parity"
     `AggregateRoot` + `apply()` + `when()` is PyFly's equivalent of Axon Framework's `@Aggregate` + `AggregateLifecycle.apply(event)` + `@EventSourcingHandler`. Axon uses annotation-driven handler discovery (`@EventSourcingHandler`); PyFly uses `when()` registration or `on_*` method convention. The replaying mechanic — load events from the store, call the same handlers, rebuild state — is identical in both frameworks.
@@ -326,6 +361,17 @@ from pyfly.eventsourcing.repository import EventSourcedRepository
 ## The LedgerAccountRepository
 
 You subclass `EventSourcedRepository` for two reasons: to pass the concrete factory and snapshot store through a single well-named constructor, and — optionally — to override `_envelope_to_event` so that replayed events are real typed dataclasses rather than the generic attribute-bag the base class produces.
+
+!!! note "Jargon: envelope and attribute-bag"
+    A `StoredEventEnvelope` is the *wire shape* the store persists: it wraps the event's `payload` (a plain dict) together with bookkeeping fields the store needs — `aggregate_id`, `aggregate_type`, `sequence`, `event_type`, `event_id`, and `occurred_at`. Think of it as the addressed envelope around the letter. An **attribute-bag** is the generic stand-in object the base repository creates on load if you do not override anything: a nameless object with the payload's keys set as attributes. It works — the handlers only read attributes — but it is not your real `Credited` dataclass, so it cannot be type-checked or `isinstance`-tested. The override below trades that anonymity for the real thing.
+
+Build the repository in three small steps.
+
+**Step 1 — Map class names back to dataclasses.** The store records each event's `event_type` as the class name string (`"Credited"`). To rebuild the real dataclass on load, you need a lookup from that string to the class. That is `_EVENT_TYPES` — one entry per event type.
+
+**Step 2 — Subclass and forward the constructor.** `LedgerAccountRepository.__init__` takes the `store` (and an optional `snapshots` store) and forwards everything to `super().__init__`, supplying `factory=LedgerAccount` so the base class knows how to make a blank aggregate.
+
+**Step 3 — Override `_envelope_to_event` for typed replay.** Look the `event_type` up in `_EVENT_TYPES`, filter the stored payload down to fields the dataclass actually declares (using `__dataclass_fields__`), and construct the real event. Fall back to the base class's generic hydration for any event type you do not recognise.
 
 ::: listing lumen/models/repositories/ledger_repository.py | Listing 9.3 — LedgerAccountRepository: typed replay via _envelope_to_event
 from __future__ import annotations
@@ -397,9 +443,31 @@ class LedgerAccountRepository(EventSourcedRepository[LedgerAccount]):
 
 The `_envelope_to_event` override looks up the stored `event_type` string in `_EVENT_TYPES`, uses `__dataclass_fields__` to filter the payload to known fields, and reconstructs the real dataclass. Unknown fields are silently dropped — forward-compatibility in practice: if a future event version adds a field the old handler does not recognise, the ledger keeps replaying instead of crashing. The base-class fallback at the bottom handles any event type the repository does not know about.
 
+!!! note "Jargon: forward-compatibility"
+    A reader is **forward-compatible** when it can ingest data written by a *newer* version of itself without breaking — it simply ignores parts it does not understand. Dropping unknown payload fields is exactly that: a v2 writer can add a `reference_code` to `Credited`, and a still-running v1 reader keeps folding the event correctly instead of crashing on the surprise field.
+
+**Run it.** A focused test exercises this override directly — it hands the repository a hand-built envelope and asserts it gets back a real `Credited` dataclass:
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k typed_replay
+```
+
+```
+.                                                                       [100%]
+1 passed, 10 deselected in 0.05s
+```
+
+**What just happened.** You wired the persistence boundary without writing a single line of SQL or storage code. The base `EventSourcedRepository` already knows how to drain pending events on `save` and replay them on `load`; your subclass added only two things — a zero-arg factory so it can build a blank ledger, and a typed `_envelope_to_event` so the events it replays are the very same dataclasses the aggregate emitted on the write side. That symmetry is the whole point: write and replay run identical code.
+
 ---
 
 ## Save, load, and the replay proof
+
+This is the moment the whole chapter has been building toward: proving that a ledger reloaded from nothing but its stored events equals the live ledger that produced them. The test below does it in two halves.
+
+**Step 1 — Write a ledger and persist it.** Open a ledger, credit it, debit it, then call `repo.save(account)`. The repository drains the three pending events into the store and clears the aggregate's buffer.
+
+**Step 2 — Reload from a clean slate and compare.** Make a *brand-new* repository and call `load("acct-1")`. Nothing in this second half shares memory with the first object. The recovered ledger's balance can only be correct if it was recomputed by replaying the stored stream — which is exactly the proof we want.
 
 The following test demonstrates the complete save-and-load cycle:
 
@@ -445,6 +513,19 @@ async def test_balance_survives_reload_by_replay(
 
 The test uses *two independent repository instances* sharing the same in-memory store — `repo` for the write, `fresh_repo` for the read. This proves that replay, not in-process object identity, is the source of truth.
 
+**Run it.** Run the headline test plus the raw-stream inspection test that follows it:
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k "reload_by_replay or immutable_event_stream"
+```
+
+```
+..                                                                      [100%]
+2 passed, 9 deselected in 0.05s
+```
+
+**What just happened.** You proved event sourcing actually works end to end. The first ledger lived only in memory; after `save`, its facts lived only in the store. A second, unrelated ledger object then rebuilt the exact same 15.00 EUR balance by folding those facts back through the same handlers — no stored balance column anywhere in sight. The version landed on 3 (one event per `LedgerOpened` / `Credited` / `Debited`), and the reconstructed ledger had nothing pending because loading is not the same as changing.
+
 The event store also exposes raw envelopes for inspection — useful for audits and tests:
 
 ::: listing tests/test_ledger_event_sourcing.py | Listing 9.5 — The store holds the immutable event stream
@@ -481,6 +562,9 @@ Two concurrent requests — a credit from the mobile app and an automated fee de
 
 **Optimistic concurrency** prevents this. Before appending new events, the `EventStore` compares the stream's *current* version against the *expected* version the repository recorded at load time. If they match, the append proceeds and the version advances. If they do not match — because another writer already appended — `ConcurrencyError` is raised and the losing request must retry from a fresh load.
 
+!!! note "Jargon: optimistic vs pessimistic locking"
+    *Pessimistic* locking assumes conflict is likely, so it grabs a lock up front — no other writer can touch the row until you release it. *Optimistic* concurrency assumes conflict is rare, so it takes no lock at all: it lets both writers proceed and only checks, at save time, whether anyone else changed the stream first. The loser retries. For most ledgers, two simultaneous writers to the *same* account are uncommon, so the optimistic strategy avoids the cost of locking on the overwhelmingly common no-conflict path.
+
 The `expected_version` is passed implicitly by the repository: it records the version at which it loaded the aggregate and supplies it to the store on save. You never manage version numbers in application code.
 
 The version progression is deterministic: after a save-and-reload, further writes advance the version without conflict:
@@ -512,6 +596,19 @@ async def test_continues_appending_after_a_reload(
 :::
 
 **How it works.** After the first save the stream is at version 2. When loaded, `reloaded.version == 2`. `repo.save(reloaded)` appends with `expected_version=2`; the store advances to 3 and succeeds. The `final` load replays all three events and confirms the correct balance.
+
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k continues_appending
+```
+
+```
+.                                                                       [100%]
+1 passed, 10 deselected in 0.05s
+```
+
+**What just happened.** A reloaded ledger remembered its version, so the next save lined up cleanly behind the events already in the stream — no conflict, sequence numbers in order, balance correct. This is the *happy path* of optimistic concurrency: one writer at a time. The moment two writers race, the second one's `expected_version` would no longer match and the store would raise `ConcurrencyError` instead — which is the case the warning below tells you how to handle.
 
 !!! warning "Always handle ConcurrencyError"
     When two writers race, the losing save raises `ConcurrencyError`. Your application service must catch it and decide what to do: retry the full load-mutate-save cycle (appropriate for low-contention writes), or surface a 409 Conflict to the caller (appropriate when the caller should re-submit with fresh data). Never silently swallow the error — a swallowed concurrency error leaves the stream in an inconsistent state.
@@ -573,6 +670,19 @@ async def test_snapshot_store_round_trips_the_ledger() -> None:
 
 **How it works.** After the save, the repository checks: does `version 2 // 100 > 0 // 100`? No — the snapshot threshold has not been crossed, so no snapshot is taken. The next `load` performs a full replay of the two events and returns the correct balance. Once a ledger does cross a 100-event boundary, the repository serialises the aggregate's state into a snapshot envelope. The next load finds the snapshot, deserialises directly to that version, and then asks the event store for events with a sequence number greater than the snapshot version — reducing replay cost to the delta only.
 
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k snapshot_store_round_trips
+```
+
+```
+.                                                                       [100%]
+1 passed, 10 deselected in 0.05s
+```
+
+**What just happened.** You wired a snapshot store into the repository and the ledger still reloaded correctly — which is exactly what should happen for a short stream. Because the two events never crossed the 100-event interval, no snapshot was written and the load fell back to a plain full replay. Snapshots are pure optimization: wiring one in costs nothing for short streams and quietly pays off once an account becomes high-frequency. You can prove the correctness of your ledger with the snapshot store both present and absent — the answer is identical.
+
 !!! tip "Snapshot interval in production"
     A `snapshot_interval` of 100 is the default and a sensible starting point. For high-frequency ledgers you might lower it; for accounts that only change a few times a day, a higher interval reduces snapshot-storage cost. Snapshots are an optimization, not a correctness requirement — removing them leaves the system correct but slower.
 
@@ -582,21 +692,39 @@ async def test_snapshot_store_round_trips_the_ledger() -> None:
 
 The `pyfly.eventsourcing` module ships in the **base** `pyfly` package — no extra dependency. Enabling it takes two steps: set `pyfly.eventsourcing.enabled: true` in `pyfly.yaml` and annotate the application with `@enable_domain_stack`. PyFly's auto-configuration then registers `event_store` and `snapshot_store` beans automatically.
 
+!!! note "Jargon: bean and auto-configuration"
+    A **bean** is just an object the framework creates once and hands to anything that asks for it — the same dependency-injection idea you met in Chapter 2. **Auto-configuration** is a class of bean-producing factory methods that PyFly activates *only when a condition is met* — here, the `@conditional_on_property("pyfly.eventsourcing.enabled", having_value="true")` guard. Flip that one config flag on, and the `event_store` and `snapshot_store` beans appear in the container; leave it off, and the event-sourcing machinery stays dormant. You never call the factory yourself.
+
 The test suite confirms this directly:
 
 ::: listing tests/test_ledger_event_sourcing.py | Listing 9.8 — Auto-configuration registers the event store beans
 def test_auto_configuration_registers_event_store_beans() -> None:
     """enable_domain_stack activates this auto-config when
-    pyfly.eventsourcing.enabled=true, registering the in-memory
-    event/snapshot stores the ledger repository depends on."""
+    pyfly.eventsourcing.enabled=true (set in pyfly.yaml), registering
+    the in-memory event/snapshot stores the ledger repository depends on."""
+    from pyfly.core.config import Config
     from pyfly.eventsourcing.auto_configuration import (
         EventSourcingAutoConfiguration,
     )
 
-    config = EventSourcingAutoConfiguration()
-    assert isinstance(config.event_store(), InMemoryEventStore)
-    assert isinstance(config.snapshot_store(), InMemorySnapshotStore)
+    auto = EventSourcingAutoConfiguration()
+    cfg = Config()  # empty config -> providers default to "memory"
+    assert isinstance(auto.event_store(cfg), InMemoryEventStore)
+    assert isinstance(auto.snapshot_store(cfg), InMemorySnapshotStore)
 :::
+
+**Run it.**
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k auto_configuration
+```
+
+```
+.                                                                       [100%]
+1 passed, 10 deselected in 0.05s
+```
+
+**What just happened.** With the `enabled` flag on, the auto-config produced the two in-memory stores the ledger repository depends on — without you instantiating either. Note that the factory methods take a `Config` argument: that is how they read `pyfly.eventsourcing.store.provider` to decide between the `memory` default and a SQL-backed adapter. Passing an empty `Config()` leaves them on `memory`, which is what the test asserts.
 
 In application code, the repository is wired through dependency injection:
 
@@ -629,13 +757,20 @@ The event store is the system of record, but most application queries — "what 
 
 That background process is a **projection**. A projection subscribes to the event stream and updates a read model each time a relevant event arrives. PyFly provides `FunctionProjection` and `ProjectionRunner` in `pyfly.eventsourcing.projection`:
 
+!!! note "Jargon: read model, projection, write model"
+    The **write model** is the side you have built so far — the aggregate and its event stream, optimised for *recording changes correctly*. A **read model** is a separate, query-shaped copy of the data, optimised for *answering questions fast* (one row per ledger with its current balance, say). A **projection** is the process that keeps a read model in sync by replaying the event stream into it. This separation — one model for writes, another for reads — is the **CQRS** pattern you met in Chapter 7, now backed by an event stream instead of a relational table.
+
 - **`FunctionProjection(name, handler_fn)`** — wraps an async function that receives one `StoredEventEnvelope` and updates the read model.
 - **`ProjectionRunner(projection, store)`** — drives the projection by iterating the `EventStore` in sequence-number order and calling the handler for each envelope.
+
+A projection comes together in three pieces. **Step 1** — write the handler: an `async` function that takes one envelope and updates the read model (here a plain `dict`; in production a database table). **Step 2** — wrap it: `FunctionProjection("balance_ledger", handler)` turns the bare function into a named projection. **Step 3** — drive it: `ProjectionRunner(projection, store)` connects the projection to the event store and, when started, feeds it every stored envelope in sequence order.
 
 Here is a `BalanceLedgerProjection` that builds a balance read model from the event stream:
 
 ::: listing lumen/eventsourcing/balance_projection.py | Listing 9.9 — BalanceLedgerProjection: a read model built from the event stream
 from __future__ import annotations
+
+import asyncio
 
 from pyfly.eventsourcing import InMemoryEventStore
 from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
@@ -672,13 +807,23 @@ def build_projection(store: InMemoryEventStore) -> ProjectionRunner:
 
 async def demo_projection(store: InMemoryEventStore) -> None:
     runner = build_projection(store)
+    # start() launches a background polling task and returns immediately;
+    # the read model is populated asynchronously as the loop drains the
+    # store. Poll until the projection has caught up, then stop the runner.
     await runner.start()
+    try:
+        for _ in range(50):
+            if "led-001" in _balance_store:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await runner.stop()
 
     balance = _balance_store.get("led-001", {})
     print(f"Balance read model: {balance}")
 :::
 
-**How it works.** `FunctionProjection("balance_ledger", _handle_envelope)` wraps the async handler. `ProjectionRunner(projection, store)` links it to the `InMemoryEventStore`. `await runner.start()` iterates every envelope in the store in sequence-number order and calls `_handle_envelope` for each one. After `start()` returns, `_balance_store` reflects the current state of every ledger in the store.
+**How it works.** `FunctionProjection("balance_ledger", _handle_envelope)` wraps the async handler. `ProjectionRunner(projection, store)` links it to the `InMemoryEventStore`. `await runner.start()` launches a background polling task and returns *immediately* — it does not block until the store is drained. The task loops on `store.stream_all(...)`, calling `_handle_envelope` for each new envelope in order and advancing a cursor (`_last_event_id`) so it never re-processes an event. Because population happens asynchronously, the demo polls `_balance_store` until the projection has caught up, then calls `await runner.stop()` to halt the loop before reading the result. Only after the projection has processed the envelopes does `_balance_store` reflect the current state of every ledger in the store.
 
 The projection is intentionally stateless — it reads only `envelope.event_type` and `envelope.payload`. No aggregate is loaded; no repository is called. The read model is cheap to rebuild: stop the runner, clear `_balance_store`, call `start()` again. This rebuild-from-history property is unique to event sourcing — state-storage models have already discarded the history.
 
@@ -776,20 +921,55 @@ The upcaster runs when the `EventStore` loads an event whose schema version is l
 
 ### Multi-tenancy
 
-When multiple tenants share the same event store, stream IDs must be scoped by tenant. The canonical approach is to prefix every `aggregate_id` with the tenant identifier — `"tenant-A::led-001"` rather than `"led-001"`. `EventSourcedRepository` accepts a `tenant_id` parameter on construction and prepends the prefix to every stream operation transparently:
+When multiple tenants share the same event store, events must be scoped by tenant so one tenant can never read or replay another's stream. PyFly gives you two seams for this; neither lives on `EventSourcedRepository` (its constructor takes only `store`, `factory`, `snapshots`, and `snapshot_interval` — there is no `tenant_id` parameter).
+
+The first seam is on the **envelope itself**. `StoredEventEnvelope` carries a dedicated `tenant_id` field, and `StoredEventEnvelope.of(...)` accepts it as a keyword argument:
 
 ```python
-repo_tenant_a = EventSourcedRepository(
-    store,
-    factory=LedgerAccount,
+envelope = StoredEventEnvelope.of(
+    aggregate_id="led-001",
+    aggregate_type="LedgerAccount",
+    sequence=0,
+    event=Credited(...),
     tenant_id="tenant-A",
 )
+```
+
+The SQL adapter persists this as a `tenant_id` column on `pyfly_event_store`, so a tenant-aware store can filter every query by it. This keeps the `aggregate_id` clean while still partitioning the log per tenant.
+
+The second seam is a **pattern you implement yourself**: prefix every `aggregate_id` with the tenant identifier — `"tenant-A::led-001"` rather than `"led-001"` — when you call `repo.save` and `repo.load`. A thin tenant-aware wrapper around the repository can apply and strip the prefix so application code never sees it:
+
+```python
+class TenantLedgerRepository:
+    def __init__(self, repo: LedgerAccountRepository, tenant_id: str) -> None:
+        self._repo = repo
+        self._prefix = f"{tenant_id}::"
+
+    async def load(self, account_id: str) -> LedgerAccount | None:
+        return await self._repo.load(self._prefix + account_id)
 ```
 
 Projections must scope their read models similarly — typically by including `tenant_id` as a column in the read-model table and filtering on it at query time.
 
 !!! note "Choosing event sourcing"
     Event sourcing adds operational complexity — upcasters, snapshot management, projection rebuild procedures, outbox relay monitoring. Choose it deliberately for domains where auditability and time-travel queries are first-class requirements: financial ledgers, medical records, supply-chain logs. For CRUD-heavy domains where the current state is all that matters, state storage is simpler and sufficient.
+
+---
+
+## Run the whole chapter
+
+You ran each piece in isolation as you built it. Now run the complete ledger suite to confirm everything still passes together:
+
+```bash
+uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q
+```
+
+```
+...........                                                              [100%]
+11 passed in 0.06s
+```
+
+Eleven dots: the four aggregate-isolation tests, the headline reload-by-replay proof, the raw-stream inspection, the typed-replay override, the post-reload concurrency check, the snapshot round-trip, the unknown-ledger lookup, and the auto-configuration wiring check. With those green, the `LedgerAccount` aggregate and its repository are complete and correct.
 
 ---
 

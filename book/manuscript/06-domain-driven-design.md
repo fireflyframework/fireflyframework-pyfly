@@ -18,6 +18,9 @@ Before you can build a model that enforces its own rules, you need a vocabulary 
 
 Think about what makes two wallets distinct. Even if two wallets happen to hold exactly one hundred euros, they are still separate wallets belonging to separate owners — you care *which one* you have. Now think about the amount itself. One hundred euros is one hundred euros; the exact Python object that holds the value is irrelevant. If a deposit adds fifty euros to a wallet's balance, you do not want to update the existing amount in place — you want to derive a brand-new amount that records the result. Mutating in place invites aliasing bugs where two parts of the code unknowingly share a reference to the same object and see each other's changes.
 
+!!! note "Jargon, in plain language"
+    A few words recur throughout this chapter. An **invariant** is a rule that must always hold — for a wallet, "the balance is never negative." An **aggregate** is a small cluster of objects that change together and must stay consistent as a group. An **aliasing bug** happens when two pieces of code accidentally hold the *same* object and one mutates it, surprising the other. Keep these three in mind; the rest of the chapter is largely about preventing the last one and guaranteeing the first inside the second.
+
 DDD names these two roles **entities** and **value objects**, and PyFly's `pyfly.domain` module makes them first-class concepts:
 
 | Concept | PyFly base | Equality | Mutation |
@@ -104,6 +107,55 @@ class Money(ValueObject):
 The `currency` field uses the `Currency` enum (`Currency.EUR`, `Currency.USD`, `Currency.GBP`) rather than a bare string, ruling out typos at construction time. Currency comparisons inside `_assert_same_currency` use Python's identity check (`is`) — raising `BusinessRuleViolation("money-currency-mismatch")` if they differ — so the error surfaces exactly where the mistake was made.
 
 Both `add` and `subtract` return a *new* `Money` instance rather than modifying `self`, a direct consequence of `frozen=True`. This immutability guarantee means the aggregate holding a `Money` value can never be partially updated: either the whole replacement succeeds or the old value remains in place. The `is_positive` and `is_negative` properties expose the sign without leaking the raw integer. `major_units` converts to a decimal for display, and `__str__` formats as `"10.50 EUR"` via `currency.value`.
+
+**Build it step by step.** If you are creating `Money` from scratch, here is the order to write it in, and why each line matters.
+
+Step 1 — Declare the two fields and freeze the class. Add `amount: int` and `currency: Currency` to a class decorated with `@dataclass(frozen=True)` that subclasses `ValueObject`. `frozen=True` is what makes the object immutable and gives you structural equality for free: two `Money` instances with the same amount and currency are now `==`.
+
+Step 2 — Guard the constructor. Add `__post_init__` to reject anything that is not a plain integer. The `isinstance(self.amount, bool)` check is deliberate — in Python `True` is an `int`, and you do not want `Money(True, ...)` slipping through.
+
+Step 3 — Add the `zero` factory. A wallet opens at a zero balance, so `Money.zero(currency)` reads better at the call site than `Money(0, currency)`.
+
+Step 4 — Add `add` and `subtract`, each routing through `_assert_same_currency` first. Returning a brand-new `Money` (never mutating `self`) is what prevents the aliasing bug from the section opener.
+
+Step 5 — Add the display helpers: `is_positive`, `is_negative`, `major_units`, and `__str__`.
+
+**Run it.** `Money` has no dependency on the framework runtime or a database, so you can exercise every rule from a Python prompt. Start one with `uv run python` from the `samples/lumen` directory and type:
+
+```python
+>>> from lumen.models.entities.v1.money import Money
+>>> from lumen.interfaces.enums.v1.currency import Currency
+>>> ten_fifty = Money(1050, Currency.EUR)
+>>> str(ten_fifty)
+'10.50 EUR'
+>>> ten_fifty.add(Money(450, Currency.EUR))
+Money(amount=1500, currency=<Currency.EUR: 'EUR'>)
+>>> ten_fifty.add(Money(100, Currency.USD))
+Traceback (most recent call last):
+  ...
+pyfly.domain.exceptions.BusinessRuleViolation: cannot combine EUR with USD
+>>> Money(10.5, Currency.EUR)
+Traceback (most recent call last):
+  ...
+pyfly.domain.exceptions.BusinessRuleViolation: amount must be an integer number of minor units
+```
+
+The two tracebacks are the point: the model refuses a cross-currency sum and a float amount *at the moment you make the mistake*, not three layers deeper during reconciliation.
+
+Lumen ships these exact behaviours as tests. Run them with:
+
+```
+uv run --extra dev pytest tests/test_money.py -q
+```
+
+and you should see all six pass:
+
+```
+......                                                             [100%]
+6 passed in 0.0Xs
+```
+
+**What just happened.** You built a value object that is impossible to misuse: it cannot be mutated, it cannot mix currencies, and it cannot hold a float. Every other piece of the wallet model will lean on these guarantees, which is why `Money` comes first.
 
 !!! note "Minor units vs decimal"
     Storing money as integer cents is one convention; another is Python's `decimal.Decimal` with a fixed scale. Both are valid. What matters is picking one and sticking to it within the bounded context. For Lumen, integer minor units keep the model free of import-time precision configuration, and `__post_init__` enforces the constraint with `BusinessRuleViolation("money-amount-integer")` so a float never silently enters the model.
@@ -264,6 +316,55 @@ class Wallet(AggregateRoot[str]):
 
 **How it works.** The aggregate boundary is enforced at three levels. First, `__slots__` locks the attribute set, and `balance` and `owner_id` are deliberately public-but-owned: only the aggregate's own methods (`deposit`, `withdraw`) mutate them, while the `currency` property is a read-only convenience that delegates to `balance.currency`. Second, the factory classmethod `open` is the sole legitimate way to create a new wallet: the caller supplies the `wallet_id` (so the application layer controls ID generation), `open` validates that `owner_id` is non-blank, initializes the balance with `Money.zero(currency)`, and immediately queues `WalletOpened`. Using a factory rather than calling `__init__` directly ensures the opening event is *never* forgotten, even in a test fixture. Third, the domain events — `WalletOpened`, `FundsDeposited`, `FundsWithdrawn` — are frozen dataclasses. `FundsDeposited` and `FundsWithdrawn` carry a `balance` field (the post-operation balance in minor units), so a subscriber never needs to call back into the aggregate to learn the current state.
 
+**Build it step by step.** The `Wallet` class has more moving parts than `Money`, so here is the order to assemble it.
+
+Step 1 — Define the three event classes first (`WalletOpened`, `FundsDeposited`, `FundsWithdrawn`), each a `@dataclass(frozen=True)` subclass of `DomainEvent`. They have to exist before the aggregate can reference them. We cover events in depth in the next section but two; for now they are just the records the wallet will emit.
+
+Step 2 — Declare the aggregate. Subclass `AggregateRoot[str]` (the `[str]` says the id is a string), set `__slots__` to lock the attribute names, and write `__init__` to store `owner_id`, `balance`, and `created_at`. Call `super().__init__(id)` first so the base class sets up the id and the internal event buffer.
+
+Step 3 — Add the `currency` read-only property that delegates to `self.balance.currency`. This is a convenience that keeps callers from reaching two levels deep into `wallet.balance.currency`.
+
+Step 4 — Write the `open` factory classmethod. It validates `owner_id`, builds the wallet with a `Money.zero(currency)` balance, and calls `self.raise_event(WalletOpened(...))`. Making `open` a classmethod — rather than expecting callers to use `__init__` plus a manual event — guarantees the opening event is never forgotten.
+
+Step 5 — Write `deposit` and `withdraw`. Each one validates first (currency match, positive amount, and for withdraw, sufficient funds), *then* mutates `self.balance`, *then* raises its event. Order matters: never mutate before every check has passed, or you can leave the wallet in a half-changed state.
+
+Step 6 — Add the private `_assert_currency` helper that both transitions share.
+
+!!! note "raise_event is not raising an exception"
+    Despite the name, `raise_event` does not throw anything. It *appends* an event to an internal buffer on the aggregate (`AggregateRoot._pending_events`). Nothing is published at that moment. A later step — the application service, after a successful save — drains the buffer with `clear_events()` and hands the events to the event bus. Think of `raise_event` as "make a note that this happened", not "abort".
+
+**Run it.** Like `Money`, the `Wallet` aggregate is pure Python — no database needed. From `uv run python`:
+
+```python
+>>> from lumen.models.entities.v1.wallet_entity import Wallet
+>>> from lumen.models.entities.v1.money import Money
+>>> from lumen.interfaces.enums.v1.currency import Currency
+>>> w = Wallet.open("wlt-1", "owner-1", Currency.EUR)
+>>> w.deposit(Money(1000, Currency.EUR))
+>>> w.withdraw(Money(400, Currency.EUR))
+>>> str(w.balance)
+'6.00 EUR'
+>>> [e.event_type for e in w.pending_events()]
+['WalletOpened', 'FundsDeposited', 'FundsWithdrawn']
+>>> w.withdraw(Money(9999, Currency.EUR))
+Traceback (most recent call last):
+  ...
+pyfly.domain.exceptions.BusinessRuleViolation: cannot withdraw 99.99 EUR; balance is 6.00 EUR
+```
+
+Notice the three events sitting in the buffer after the successful operations, and notice that the overdraft attempt raised *before* touching the balance — `pending_events()` still shows three, not four. Lumen's test suite asserts exactly this:
+
+```
+uv run --extra dev pytest tests/test_wallet_aggregate.py -q
+```
+
+```
+......                                                             [100%]
+6 passed in 0.0Xs
+```
+
+**What just happened.** The wallet now owns its rules. There is no way to overdraw it, no way to feed it the wrong currency, and no way to change its state without leaving an event behind that records what happened. The service layer no longer has to remember any of that.
+
 The diagram below shows the complete picture: state, invariants, and the events the wallet emits.
 
 ::: figure art/figures/06-aggregate.svg | Figure 6.1 — The Wallet aggregate: state, invariants, and the events it emits.
@@ -286,6 +387,34 @@ Lumen's `Wallet` has three invariants:
 All three are enforced inside the aggregate methods. The framework exception for this is **`BusinessRuleViolation`** from `pyfly.domain`. It takes two required arguments: a stable machine-readable `rule` slug and a human-readable `message`. Lumen's slugs — `"wallet-insufficient-funds"`, `"wallet-currency-mismatch"`, `"wallet-deposit-positive"`, `"wallet-withdrawal-positive"` — are kebab-cased labels that travel in the RFC 7807 response body and in structured log fields.
 
 `BusinessRuleViolation` extends `pyfly.kernel.BusinessException`, so the RFC 7807 problem-details mapper from Chapter 4 translates it automatically into an HTTP 422 response — no extra handler required.
+
+!!! note "What RFC 7807 means here"
+    RFC 7807 is the web standard for "problem details" — a small, predictable JSON shape (`type`, `title`, `status`, `detail`, plus your own fields) that an API returns when something goes wrong. PyFly's mapper turns any `BusinessException` into one of these automatically, so the `rule` slug you set on `BusinessRuleViolation` ends up in the response body where a client can read it without parsing English prose.
+
+**See the invariant hold.** The promise of an invariant is that a *failed* operation leaves the model exactly as it was. You can prove that from `uv run python`:
+
+```python
+>>> from lumen.models.entities.v1.wallet_entity import Wallet
+>>> from lumen.models.entities.v1.money import Money
+>>> from lumen.interfaces.enums.v1.currency import Currency
+>>> from pyfly.domain import BusinessRuleViolation
+>>> w = Wallet.open("wlt-1", "owner-1", Currency.EUR)
+>>> w.deposit(Money(500, Currency.EUR))
+>>> w.clear_events()            # drain the open + deposit events
+[WalletOpened(...), FundsDeposited(...)]
+>>> try:
+...     w.withdraw(Money(501, Currency.EUR))
+... except BusinessRuleViolation as exc:
+...     print(exc.rule)
+...
+wallet-insufficient-funds
+>>> str(w.balance)              # unchanged — the rule fired before any mutation
+'5.00 EUR'
+>>> w.pending_events()          # and no event was queued for the failed attempt
+[]
+```
+
+That is the whole guarantee in three lines: the rule slug is stable and machine-readable, the balance did not move, and no event leaked for an operation that never happened.
 
 !!! warning "Keep invariants in the model, not the service"
     Moving the overdraft check back into `WalletService` creates two problems. First, any code that calls `repo.save(entity)` directly bypasses the check entirely. Second, you end up duplicating the rule across every path that modifies a wallet — the service, a background job, an admin command. When the rule changes — say, the product team introduces a configurable overdraft buffer — there is exactly one place to update: the aggregate method. That is the whole point.
@@ -407,6 +536,24 @@ def demonstrate_event_fields() -> None:
 
 Notice that `FundsDeposited` carries both `amount` (the transaction) and `balance` (the post-operation balance, in minor units). A subscriber updating a read-model balance needs no callback into the aggregate or the database — everything is in the event. That self-contained design keeps consumers simple and eliminates extra round-trips.
 
+!!! note "Read-model, in plain language"
+    A **read-model** is a separate, query-optimised copy of data shaped for displaying — a dashboard total, a search index, a cache. Because `FundsDeposited` already carries the post-operation `balance`, a service that maintains such a copy can apply the event blindly without ever loading the wallet again. We build read-models properly in a later chapter; here, just note why putting `balance` in the event pays off.
+
+**Run it.** You can see the three auto-populated fields on any event from `uv run python`:
+
+```python
+>>> from lumen.models.entities.v1.wallet_entity import FundsDeposited
+>>> evt = FundsDeposited(wallet_id="w-1", amount=5000, currency="EUR", balance=15000)
+>>> evt.event_type
+'FundsDeposited'
+>>> evt.event_id           # a fresh UUID, set by DomainEvent.__post_init__
+'3fa85f64-5717-4562-b3fc-2c963f66afa6'
+>>> evt.occurred_at        # a UTC timestamp, also set automatically
+datetime.datetime(2026, 6, 16, 9, 30, 0, tzinfo=datetime.timezone.utc)
+```
+
+You declared four fields; you got seven, because `DomainEvent` contributes `event_id`, `occurred_at`, and the `event_type` property. That is the whole appeal of subclassing it — every event is self-identifying with zero extra code.
+
 The event lifecycle spans two phases. Inside the aggregate: when `wallet.deposit(amount)` succeeds, it calls `self.raise_event(FundsDeposited(...))`, appending the event to a private buffer in `AggregateRoot`. Nothing is published yet. At the service boundary: after the repository saves the aggregate and the transaction commits, the application service drains the buffer and publishes. This *save-first, publish-after* sequence guarantees that an event is never dispatched for a change that failed to persist. Listing 6.6 shows that boundary in full:
 
 ::: listing lumen/wallet_application_service.py | Listing 6.6 — Draining domain events after a successful save
@@ -455,6 +602,18 @@ class WalletApplicationService:
 :::
 
 **How it works.** `open_wallet` calls `Wallet.open`, which queues a `WalletOpened` event internally; after the `save`, `wallet.clear_events()` returns that one event and `publish` dispatches it. `deposit` follows the same three-step pattern: load, mutate, save — then drain. The `for event in wallet.clear_events()` loop is intentionally explicit rather than hidden inside the repository, because the application service is the right place to decide *when* publishing happens — after the transaction boundary, not before.
+
+**The publish cycle, step by step.** Every command method in the application service follows the same four-beat rhythm. Learn it once and every future use-case (transfer, refund, freeze) writes itself:
+
+Step 1 — Load (or create). For a new wallet, call the `Wallet.open` factory; for an existing one, `await self._repo.find(wallet_id)`.
+
+Step 2 — Mutate through a behaviour method. Call `wallet.deposit(...)` or `wallet.withdraw(...)`. This is where the invariants run and the events get queued in the aggregate's buffer.
+
+Step 3 — Save. `await self._repo.save(wallet)`. Nothing has been published yet, on purpose — if the save fails, no event escapes.
+
+Step 4 — Drain and publish. `for event in wallet.clear_events(): await self._events.publish(event)`. This runs only after the save succeeds, so an event is never dispatched for a change that did not persist.
+
+**What just happened.** The aggregate decides *what* happened and records it; the application service decides *when* the world hears about it. Keeping those two responsibilities apart is why the wallet stays free of any broker, queue, or transaction code — and why the publish order is "save first, publish after."
 
 !!! tip "Event ordering"
     `raise_event` appends to the buffer in call order. `clear_events` drains and clears it, returning events in the same order. If a single aggregate method raises multiple events (a batch operation, for example), they arrive at the event bus in the order they were raised — oldest first.
@@ -541,6 +700,35 @@ def to_aggregate(entity: WalletEntity) -> Wallet:
 
 `to_entity` writes `wallet.balance.amount` (an integer) directly into `balance_minor` — no float conversion. `to_aggregate` reconstructs a `Currency` enum from the stored ISO-4217 string via `Currency(entity.currency)`, then builds a `Money` from the raw integer minor-unit value. The `created_at` field is preserved on the round-trip so rehydrated aggregates carry their original timestamp. There is no floating-point boundary crossing anywhere.
 
+**Build the mapper step by step.** A mapper is just two pure functions. There is no framework magic to wire up; you write them and call them at the right moments.
+
+Step 1 — Write `to_entity(wallet)`. Read each piece of the aggregate and copy it into the flat row: `wallet.id`, `wallet.owner_id`, `wallet.currency.value` (the ISO string, not the enum), `wallet.balance.amount` (the raw integer minor units), and `wallet.created_at`. The `assert wallet.id is not None` makes the precondition explicit — you only persist wallets that already have an id.
+
+Step 2 — Write `to_aggregate(entity)`, the reverse. Rebuild the `Currency` enum from the stored string with `Currency(entity.currency)`, wrap the integer back into a `Money`, and construct a `Wallet`. Passing `created_at=entity.created_at` preserves the original timestamp across the round-trip.
+
+Step 3 — Call them at the boundary, not inside the aggregate. The command handler calls `to_entity` just before `repo.save(...)` and `to_aggregate` just after `repo.find(...)`. The `Wallet` class never imports the row, and the row never imports the `Wallet`.
+
+**Run it.** The round-trip is pure Python — no live database required to prove it preserves every field. From `uv run python`:
+
+```python
+>>> from lumen.models.entities.v1.wallet_entity import Wallet
+>>> from lumen.models.entities.v1.money import Money
+>>> from lumen.interfaces.enums.v1.currency import Currency
+>>> from lumen.core.mappers import wallet_mapper
+>>> w = Wallet.open("wlt-1", "owner-1", Currency.EUR)
+>>> w.deposit(Money(2500, Currency.EUR))
+>>> row = wallet_mapper.to_entity(w)        # aggregate -> flat row
+>>> (row.id, row.currency, row.balance_minor)
+('wlt-1', 'EUR', 2500)
+>>> back = wallet_mapper.to_aggregate(row)  # flat row -> aggregate
+>>> str(back.balance), back.owner_id
+('25.00 EUR', 'owner-1')
+```
+
+The integer `2500` crosses both directions untouched — no float ever appears at the persistence boundary, which is the whole reason `Money` stores minor units.
+
+**What just happened.** You kept two models that never import each other and bridged them with two tiny functions. A schema change now touches only `WalletEntity`; a rule change touches only `Wallet`. Neither can break the other by accident.
+
 The mapper is intentionally narrow. It does not enforce rules — `Wallet.__init__` and the behaviour methods do that. It does not publish events — the application service does that. It only translates shape.
 
 **The repository.** The application service never interacts with `WalletEntity` directly. Instead a command handler calls `wallet_mapper.to_entity(wallet)` before persisting and `wallet_mapper.to_aggregate(entity)` after loading, while the framework `WalletRepository(Repository[WalletEntity, str])` handles all SQL. Chapter 5 covers `Repository` in full; the key point here is that `Wallet` itself never imports SQLAlchemy — the aggregate stays free of persistence concerns across both sides of the mapper boundary.
@@ -609,6 +797,39 @@ def filter_eligible(
 :::
 
 **How it works.** `HasPositiveBalance` delegates to `wallet.balance.is_positive` (a property, no parentheses). `IsInCurrency` uses identity comparison (`is`) because `Currency` is a `StrEnum` with singleton members. The `eligible_for_withdrawal` factory combines them with `&`, producing a composite whose `is_satisfied_by` returns `True` only when both checks pass. Because `Specification` implements `__call__`, you pass the composite directly to `filter()` — no lambda wrapper needed.
+
+**Build a specification step by step.**
+
+Step 1 — Subclass `Specification[Wallet]` and implement the single required method, `is_satisfied_by(self, wallet) -> bool`. That is the entire contract: return `True` or `False`, never raise.
+
+Step 2 — If the rule needs a parameter (like a currency to match), take it in `__init__` and store it, as `IsInCurrency` does. A parameterless rule like `HasPositiveBalance` skips this.
+
+Step 3 — Compose with the Boolean operators. `HasPositiveBalance() & IsInCurrency(currency)` builds a new specification whose `is_satisfied_by` is true only when both halves are. `|` is or, `~` is not.
+
+Step 4 — Use it as a predicate. Because `Specification` implements `__call__`, the composite *is* a callable, so you can hand it straight to Python's built-in `filter()` with no lambda in between.
+
+**Run it.** Specifications are plain objects. Drop the classes from Listing 6.9 into a module (say `src/lumen/domain/specs.py`) and try them from `uv run python`:
+
+```python
+>>> from lumen.models.entities.v1.wallet_entity import Wallet
+>>> from lumen.models.entities.v1.money import Money
+>>> from lumen.interfaces.enums.v1.currency import Currency
+>>> from lumen.domain.specs import eligible_for_withdrawal
+>>> empty = Wallet.open("wlt-1", "owner-1", Currency.EUR)
+>>> funded = Wallet.open("wlt-2", "owner-2", Currency.EUR)
+>>> funded.deposit(Money(1000, Currency.EUR))
+>>> usd = Wallet.open("wlt-3", "owner-3", Currency.USD)
+>>> usd.deposit(Money(1000, Currency.USD))
+>>> spec = eligible_for_withdrawal(Currency.EUR)
+>>> spec(funded), spec(empty), spec(usd)
+(True, False, False)
+>>> [w.id for w in filter(spec, [empty, funded, usd])]
+['wlt-2']
+```
+
+Only the funded EUR wallet satisfies both halves of the composite, so `filter` keeps just that one.
+
+**What just happened.** You expressed a read-only business rule as a named, reusable object instead of an inline `if`. It composes with other rules at runtime, it passes straight into `filter`, and it is trivial to unit-test in isolation — and crucially, it lives *outside* the aggregate, where eligibility checks belong.
 
 The key design discipline: a specification is a *predicate*, not a *guard*. It returns `True` or `False` and never raises. Aggregate invariants (overdraft, currency mismatch) belong inside `deposit` and `withdraw` because they must *prevent* a state change. Specifications belong in services and query handlers because they *select* or *classify* — they never mutate.
 

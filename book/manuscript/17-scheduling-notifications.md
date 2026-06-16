@@ -21,6 +21,19 @@ Install the two optional extras before you start:
 uv add "pyfly[scheduling,notifications]"
 ```
 
+!!! note "New term: optional extras"
+    An *extra* is an opt-in slice of a package's dependencies. `pyfly` keeps
+    its core lean and ships heavier capabilities — scheduling, notifications,
+    and the rest — behind named extras so you only install what you use.
+    `pyfly[scheduling,notifications]` pulls in both. The square-bracket syntax
+    is standard Python packaging; `uv add` records it in your `pyproject.toml`
+    so the next `uv sync` reinstalls them. If you later see `ModuleNotFoundError`
+    for `croniter` or a notifications provider, you skipped this line — re-run it.
+
+This chapter targets PyFly **v26.6.110**. Every code listing below matches the
+real Lumen source under `samples/lumen/src/lumen`, and every framework API was
+checked against `pyfly` itself, so what you build here runs unchanged.
+
 ---
 
 ## Scheduled tasks
@@ -39,6 +52,30 @@ arrive from partners; outbound callbacks close the feedback loop.
 ### The @scheduled decorator
 
 **`@scheduled`** marks any `async` method on a `@service` bean for periodic execution. It accepts exactly one *trigger*: `fixed_rate`, `fixed_delay`, or `cron`. Providing zero or more than one trigger raises a `ValueError` at decoration time, so mistakes surface at startup rather than silently at three in the morning.
+
+!!! note "New term: trigger"
+    A *trigger* is the rule that decides *when* a scheduled method runs. You
+    pick exactly one: `cron` (a calendar expression like "every day at 02:00"),
+    `fixed_rate` (a steady interval such as "every 10 seconds"), or `fixed_delay`
+    (a gap measured after each run finishes). One method, one trigger.
+
+Let us build the nightly rollup one decision at a time.
+
+**Step 1 — Create the service file.** In the Lumen tree, add `daily_rollup.py`
+under a `ledger` package. The class is an ordinary `@service` — a plain Python
+class that PyFly registers in its dependency-injection container and constructs
+for you. Because it is a managed bean, you can ask for the `WalletRepository` in
+the constructor and the framework hands it over; you never call `new` yourself.
+
+**Step 2 — Pick the trigger.** This job must run once a night, on the clock, so
+the trigger is `cron`. The expression `"0 2 * * *"` reads field-by-field as
+*minute 0, hour 2, every day-of-month, every month, every day-of-week* — i.e.
+02:00 every day.
+
+**Step 3 — Write the work.** Inside the method, load every wallet, sum the
+persisted `balance_minor` integers, and (for now) log the total. In production
+you would write the snapshot to a reporting table or ship it downstream; logging
+keeps the example focused on the *scheduling*, not the bookkeeping.
 
 ::: listing lumen/ledger/daily_rollup.py | Listing 17.1 — Nightly wallet balance rollup with @scheduled
 from datetime import timedelta
@@ -79,6 +116,46 @@ That is all the wiring Lumen needs. With `pyfly[scheduling]` installed, `Schedul
 4. stops it gracefully on shutdown.
 
 No `SchedulerManager` required.
+
+!!! note "New term: auto-configuration"
+    *Auto-configuration* is PyFly noticing what is on your classpath and wiring
+    the matching machinery for you. `SchedulingAutoConfiguration` only activates
+    when `croniter` (pulled in by the `scheduling` extra) is importable — so the
+    scheduler appears the moment you install the extra and stays absent
+    otherwise. This is the same "convention over configuration" idea Spring Boot
+    made famous; you can always override a bean by declaring your own.
+
+**Run it.** Waiting until 02:00 to see your first tick is no fun, so temporarily
+change the trigger to fire every minute — `@scheduled(cron="* * * * *")` — and
+start the app from the `samples/lumen` directory:
+
+```bash
+uv run pyfly run --server uvicorn
+```
+
+At the top of the next minute you should see your rollup line in the logs (an
+empty database simply reports zero wallets):
+
+```text
+[rollup] 0 wallets, total 0.00 (minor units: 0)
+```
+
+Open a wallet and deposit into it (see the curl recipes in Chapter 7), wait for
+the next minute, and the totals move:
+
+```text
+[rollup] 1 wallets, total 15.00 (minor units: 1500)
+```
+
+Stop the app with Ctrl-C and **change the trigger back to `"0 2 * * *"`** before
+committing — the every-minute cron was only a probe.
+
+!!! note "What just happened"
+    You did not start a thread, open an event loop, or register a timer. You
+    wrote one `@service` with one `@scheduled` method, and the framework
+    discovered it at startup, computed the next fire time from the cron
+    expression, slept until then, and ran your coroutine — repeating forever.
+    The scheduler is *declarative*: you state *when*, PyFly handles *how*.
 
 ### fixed_rate vs. fixed_delay
 
@@ -132,6 +209,27 @@ def preview_rollup_schedule(expression: str, n: int = 5) -> list[str]:
     cron = CronExpression(expression)
     return [str(t) for t in cron.next_n_fire_times(n)]
 :::
+
+**Run it.** `CronExpression` needs no running app, so the fastest way to build
+intuition is the REPL. From `samples/lumen`:
+
+```bash
+uv run python -c "from pyfly.scheduling import CronExpression; \
+print(*CronExpression('0 2 * * *').next_n_fire_times(3), sep='\n')"
+```
+
+You should see the next three 02:00 instants, one per line (your dates will
+differ):
+
+```text
+2026-06-16 02:00:00+00:00
+2026-06-17 02:00:00+00:00
+2026-06-18 02:00:00+00:00
+```
+
+Notice the `+00:00` — fire times are UTC unless you pass a `zone` (covered
+next). This is also the cleanest way to sanity-check a user-supplied expression
+before you store it: an invalid string raises `ValueError` immediately.
 
 `CronExpression` accepts both the standard 5-field format (`min hour dom month dow`) and the Spring-style 6-field format with seconds first (`sec min hour dom month dow`). The Spring `?` wildcard is normalised to `*` transparently.
 
@@ -249,11 +347,28 @@ Under the hood `@async_method` sets `__pyfly_async__ = True` on the function; th
 pyfly:
   scheduling:
     enabled: true          # set false to disable all loops
-    thread-pool:
-      max-workers: 4       # threads for ThreadPoolTaskExecutor
+    executor:
+      type: asyncio        # 'asyncio' (default, in-loop) or 'thread'
+      max-workers: 4       # worker threads when type is 'thread'
+    lock:
+      provider: none       # none | memory | redis | postgres
 ```
 
 When `enabled` is `false`, `TaskScheduler` starts no loops and all `@scheduled` methods are silently skipped.
+
+The `executor.type` chooses how each tick runs. The default `asyncio` runs the
+coroutine on the application event loop — ideal for short, I/O-bound jobs like
+the rollup. Switch to `thread` (a pool of `executor.max-workers` threads) when a
+job does heavy CPU work or calls a blocking library, so it cannot stall the loop.
+
+!!! tip "Choosing a lock provider"
+    `lock.provider` selects the backend behind `@scheduled(lock=...)`, described
+    next: `none` (the default — no coordination), `memory` (mutual exclusion
+    within one process), `redis`, or `postgres` (true cross-instance
+    coordination with no code change). On `redis`/`postgres` PyFly builds the
+    `DistributedLock` bean for you from `pyfly.scheduling.lock.redis.url` or the
+    app's existing `AsyncEngine`; the hand-rolled `@bean` in Listing 17.4 is the
+    do-it-yourself alternative when you need custom semantics.
 
 ---
 
@@ -262,6 +377,14 @@ When `enabled` is `false`, `TaskScheduler` starts no loops and all `@scheduled` 
 Lumen needs to tell customers that their money has arrived — email for the balance confirmation, and optionally an SMS or mobile push for the real-time alert.
 
 PyFly's notifications module defines three **port protocols** and three **default services**. Your business logic depends on the protocols; the concrete provider adapters — SMTP, SendGrid, Twilio, Firebase — live behind the port boundary and can be swapped without touching a single line of domain code.
+
+!!! note "New term: port and adapter"
+    A *port* is an interface your code talks to — here, "something that can send
+    an email". An *adapter* is a concrete implementation of that port —
+    `SmtpEmailProvider`, `SendGridEmailProvider`, and so on. The pattern (also
+    called *hexagonal architecture*) means your deposit logic depends only on the
+    `EmailService` port, never on a specific vendor. Swapping SMTP for SendGrid
+    is a one-line change in a configuration class; the domain code never notices.
 
 ### The port hierarchy
 
@@ -317,7 +440,19 @@ push = PushMessage(
 
 ### Wiring the SMTP provider
 
-For development and self-hosted deployments, `SmtpEmailProvider` runs `smtplib` from a thread pool so the async event loop is never blocked:
+For development and self-hosted deployments, `SmtpEmailProvider` runs `smtplib` from a thread pool so the async event loop is never blocked.
+
+**Step 1 — Build the provider as a `@bean`.** A `@configuration` class is PyFly's
+place to assemble objects the container cannot construct on its own — here, an
+SMTP client that needs a host, credentials, and TLS settings. Each `@bean`
+method returns one ready-to-use object; the framework caches it and injects it
+wherever the return type is requested.
+
+**Step 2 — Wrap it in `DefaultEmailService`.** The second `@bean` takes the
+provider and returns it as an `EmailService` — the *port* your domain code
+depends on. The declared return type matters: by returning `EmailService`, every
+class that asks for an `EmailService` receives this wrapper, and none of them
+learn that SMTP is behind it.
 
 ::: listing lumen/notifications/config.py | Listing 17.6 — SMTP provider wired as a @bean
 from pyfly.container import bean, configuration
@@ -359,7 +494,24 @@ class NotificationConfig:
 
 Lumen publishes a `FundsDeposited` domain event every time the `deposit()` command succeeds (see Chapter 8). The right place to trigger the notification is an EDA listener subscribed to that event — not the command handler itself, which keeps the deposit path free of notification concerns.
 
-`FundsDeposited` carries `wallet_id: str`, `amount: int` (minor units), `currency: str`, and `balance: int` (new balance, minor units). The listener converts `amount` to a display string via `amount / 100`:
+`FundsDeposited` carries `wallet_id: str`, `amount: int` (minor units), `currency: str`, and `balance: int` (new balance, minor units). The listener converts `amount` to a display string via `amount / 100`.
+
+**Step 1 — Subscribe to the event.** Stack `@event_listener(event_types=["FundsDeposited"])`
+on an `async` method of a `@service`. At startup PyFly discovers the stamped
+method and auto-subscribes it to the `EventPublisher` bus — exactly the same
+mechanism `WalletAuditListener` used back in Chapter 8. You never wire a bus by
+hand.
+
+**Step 2 — Read the payload.** The handler receives an `EventEnvelope`. Its
+`payload` is a plain dict of the event's fields, so you pull `wallet_id`,
+`amount`, `currency`, and `balance` out with `.get(...)` and coerce the amounts
+to ints. Because amounts are minor units, dividing by 100 gives the display
+value: `25000` becomes `250.00`.
+
+**Step 3 — Send through the ports.** Inject `EmailService` and `PushService` in
+the constructor and call `.send(...)` on each. Both return a `NotificationResult`
+rather than raising — a flaky provider degrades gracefully instead of crashing
+the listener.
 
 ::: listing lumen/wallet/deposit_notification_listener.py | Listing 17.7 — Notifying on FundsDeposited
 from pyfly.container import service
@@ -424,6 +576,38 @@ class DepositNotificationListener:
 
 Both calls return a `NotificationResult`; inspect the `status` field to log failures or schedule retries.
 
+**Run it.** You do not want a real SMTP server while developing, so swap the
+provider for the log-only `DummyEmailProvider`. In your `@configuration` class,
+return a `DummyEmailProvider` (and `DummyPushProvider`) instead of the SMTP one,
+then start the app and trigger a deposit:
+
+```bash
+uv run pyfly run --server uvicorn
+# in a second terminal, open a wallet and deposit (see Chapter 7), e.g.:
+curl -s -X POST localhost:8080/api/v1/wallets/<wallet-id>/deposit \
+  -H 'content-type: application/json' -d '{"amount":25000}'
+```
+
+The deposit publishes `FundsDeposited`, the listener fires, and the dummy
+providers log the messages they "sent":
+
+```text
+[dummy email] to=['customer@example.com'] subject=Funds received: 250.00 EUR
+[dummy push] tokens=1 title=Funds received
+```
+
+The `DummyEmailProvider` also keeps every message it received in a `.sent` list —
+which is exactly what the test in Exercise 2 asserts against, no SMTP server
+required.
+
+!!! note "What just happened"
+    The deposit command knew nothing about email. It simply did its job and
+    raised a `FundsDeposited` domain event. The notification logic lives in a
+    separate listener that *reacts* to that event, so the deposit path stays
+    clean and you can add, remove, or change notifications without touching the
+    command handler. That separation — publish a fact, let interested parties
+    react — is the whole point of event-driven architecture.
+
 !!! spring "Spring parity"
     `EmailService` / `SmsService` / `PushService` are the Python
     equivalents of Spring's `JavaMailSender` (email) and third-party
@@ -442,6 +626,16 @@ An illustrative payment provider POSTs a `payment_intent.succeeded` event to Lum
 3. **dispatch** the verified event to a typed listener.
 
 PyFly's `pyfly.webhooks` module handles all three steps.
+
+!!! note "New terms: webhook, HMAC, idempotency"
+    A *webhook* is an HTTP POST that an external system sends *to you* when
+    something happens — the inbound mirror of the outbound callbacks later in
+    this chapter. Because anyone can POST to a public URL, the provider signs
+    each request with a shared secret using *HMAC* (a keyed hash); recomputing
+    the hash over the exact bytes received and comparing proves the payload is
+    genuine and untampered. *Idempotency* means "safe to receive more than
+    once": providers retry on network blips, so you store an idempotency key and
+    ignore a repeat — otherwise one card top-up could credit a wallet twice.
 
 ### WebhookEvent and AbstractWebhookEventListener
 
@@ -505,7 +699,16 @@ class PaymentWebhookListener(AbstractWebhookEventListener):
 
 ### WebhookProcessor — verify, dedupe, dispatch
 
-**`WebhookProcessor`** wires together a signature validator, an idempotency store, and a list of listeners:
+**`WebhookProcessor`** wires together a signature validator, an idempotency store, and a list of listeners. Assemble it in a `@configuration` class so it is a
+single shared bean:
+
+- `listeners` is the list of `AbstractWebhookEventListener` subclasses to fan
+  events out to (just `PaymentWebhookListener` for now);
+- `signature_validators` maps each `source` name to the validator that proves its
+  requests are genuine — here an `HmacSignatureValidator` keyed by the webhook
+  secret your provider gave you;
+- an `event_store` (omitted here, so the default in-memory one is used) remembers
+  idempotency keys.
 
 ::: listing lumen/webhooks/processor_config.py | Listing 17.9 — Assembling WebhookProcessor
 from pyfly.container import bean, configuration
@@ -537,22 +740,34 @@ class WebhookConfig:
 
 ### Handling a webhook in an HTTP handler
 
-Call `processor.process()` from your inbound HTTP handler. Pass the raw request body (unmodified bytes) — the validator computes the HMAC over the exact bytes received:
+Call `processor.process()` from your inbound HTTP handler. Pass the raw request body (unmodified bytes) — the validator computes the HMAC over the exact bytes received.
+
+!!! warning "Read the body as raw bytes, not parsed JSON"
+    The signature is computed over the *exact bytes* the provider sent. If you
+    parse the JSON and re-serialize it, key order or whitespace can shift and the
+    HMAC will no longer match — every legitimate request would be rejected.
+    Always pass `await request.body()` (the untouched bytes) to `process()`, as
+    the handler below does.
 
 ::: listing lumen/webhooks/payment_handler.py | Listing 17.10 — Inbound payment-provider webhook endpoint
-from pyfly.container import service
-from pyfly.web import Request, Response, router
+from pyfly.container import rest_controller
+from pyfly.web import post_mapping, request_mapping
 from pyfly.webhooks import WebhookProcessor
+from starlette.requests import Request
+from starlette.responses import Response
 
 
-@service
+@rest_controller
+@request_mapping("/webhooks")
 class PaymentWebhookHandler:
 
     def __init__(self, processor: WebhookProcessor) -> None:
         self._processor = processor
 
-    @router.post("/webhooks/payment")
+    @post_mapping("/payment")
     async def receive(self, request: Request) -> Response:
+        # Read the untouched bytes — the HMAC is computed over exactly
+        # what the provider sent (see the warning above).
         raw_body = await request.body()
         headers = {
             "X-Signature": request.headers.get(
@@ -569,8 +784,8 @@ class PaymentWebhookHandler:
                 headers=headers,
             )
         except ValueError:
-            return Response(status=400, body=b"invalid signature")
-        return Response(status=200, body=b"ok")
+            return Response(content=b"invalid signature", status_code=400)
+        return Response(content=b"ok", status_code=200)
 :::
 
 The `process()` signature accepts `signature_header` and `idempotency_header` keyword arguments to override the default header names (`X-Signature` and `X-Idempotency-Key`).
@@ -582,6 +797,50 @@ The `process()` signature accepts `signature_header` and `idempotency_header` ke
 3. The raw body is decoded as JSON; on failure the raw bytes are stored under `body["_raw"]`.
 4. If `idempotency_key` is present and already seen, the event is returned but listeners are **not** called.
 5. Each listener for the source is called in registration order; if one raises, the error is logged and `on_error` is called before continuing to the next listener.
+
+**Run it.** Test the endpoint the way a real provider would — by signing the exact
+body. Pick the same secret you put in `HmacSignatureValidator` (`whsec_REPLACE_ME`
+in Listing 17.9), compute the HMAC with `openssl`, and POST it. Start the app
+(`uv run pyfly run --server uvicorn`), then in a second terminal:
+
+::: listing terminal | Listing 17.10a — Sign and POST a webhook
+BODY='{"type":"payment_intent.succeeded","data":{"object":{"amount_received":25000,"currency":"eur","metadata":{"wallet_id":"<wallet-id>"}}}}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "whsec_REPLACE_ME" | sed 's/^.* //')
+
+curl -s -X POST localhost:8080/webhooks/payment \
+  -H "X-Webhook-Signature: sha256=$SIG" \
+  -H "X-Idempotency-Key: evt-001" \
+  -H 'content-type: application/json' \
+  -d "$BODY"
+:::
+
+A correctly signed request returns `ok` and credits the wallet (you will see the
+`FundsDeposited` notification logs from earlier fire too):
+
+```text
+ok
+```
+
+Now prove the two guarantees. POST the **same** command again with the same
+`X-Idempotency-Key` — it still returns `ok`, but the wallet is *not* credited a
+second time (the duplicate is dropped before any listener runs). Then tamper with
+one byte of `$BODY` *without* recomputing `$SIG` and POST again — the signature
+no longer matches, so the handler returns:
+
+```text
+invalid signature
+```
+
+That is the verify-dedupe-dispatch pipeline working end to end, and it mirrors
+Exercise 3 almost exactly.
+
+!!! note "What just happened"
+    A stranger on the internet POSTed JSON to your service, and three guards ran
+    before a single line of your business logic: the signature check rejected
+    forgeries, the idempotency store rejected replays, and only then did the
+    typed listener translate the event into a CQRS `DepositFunds` command — so
+    the wallet aggregate still enforced its own invariants. You wrote the
+    `handle()` body; PyFly supplied the gauntlet around it.
 
 !!! note "In-memory idempotency store"
     The default `InMemoryWebhookEventStore` holds seen keys in a Python
@@ -602,9 +861,36 @@ The `process()` signature accepts `signature_header` and `idempotency_header` ke
 
 When Lumen books a disbursement to a partner bank, that partner expects a `DisbursementSettled` POST to their webhook URL — signed, retried on failure, and auditable. PyFly's `pyfly.callbacks` module handles the outbound side.
 
+!!! note "New term: outbound callback"
+    A *callback* here is the reverse of the inbound webhook you just built:
+    *Lumen* is now the sender, POSTing an event *to* a partner's URL. The
+    module gives you the same trust and reliability machinery on the way out —
+    it signs each payload (so the partner can verify it), retries transient
+    failures with backoff, and records every attempt so you have an audit trail
+    when a partner asks "did you ever tell us about transaction X?".
+
 ### Subscriptions and config
 
-Each partner is modelled as a **`CallbackConfig`** — a tenant-scoped record that holds the webhook secret, event subscriptions, and retry policy:
+Each partner is modelled as a **`CallbackConfig`** — a tenant-scoped record that holds the webhook secret, event subscriptions, and retry policy.
+
+!!! note "New term: tenant"
+    A *tenant* is one isolated customer or organisation inside a shared
+    application — here, `"lumen"`. Callbacks are tenant-scoped so a multi-tenant
+    deployment can hold each tenant's partner URLs, secrets, and retry policy
+    separately and never cross the wires. With a single tenant you simply pass
+    the same `tenant_id` everywhere.
+
+**Step 1 — Describe each subscription.** A `CallbackSubscription` pairs an
+`event_type` with the `target_url` to POST it to. Use the exact event name
+(`"DisbursementSettled"`) to route one event, or `"*"` as a catch-all that
+matches every event for the tenant — handy for an audit endpoint that wants the
+full firehose.
+
+**Step 2 — Wrap them in a `CallbackConfig` and save it.** The config carries the
+shared `secret` (used to sign every payload), the retry policy (`max_attempts`,
+`backoff_ms`), and the list of subscriptions. Persist it through a
+`CallbackConfigRepository` — `InMemoryCallbackConfigRepository` for now, a
+database-backed one in production.
 
 ::: listing lumen/callbacks/register_partner.py | Listing 17.11 — Registering a partner callback
 from pyfly.callbacks import (
@@ -693,6 +979,69 @@ results = await dispatcher.dispatch(
 
 `dispatch()` returns one `CallbackExecution` record per matching subscription, each with `status`, `attempts`, `response_status`, and `delivered_at`.
 
+**Run it.** The dispatcher's default HTTP sender does not actually call the
+network — it logs the request it *would* make and returns `200` — which is
+perfect for seeing the wiring without standing up a partner server. Drop this
+into a script (or `uv run python`) from `samples/lumen`:
+
+::: listing lumen/callbacks/try_dispatch.py | Listing 17.12a — Dispatch against the default (log-only) sender
+import asyncio
+
+from pyfly.callbacks import (
+    CallbackConfig,
+    CallbackDispatcher,
+    CallbackSubscription,
+    InMemoryCallbackConfigRepository,
+    InMemoryCallbackExecutionRepository,
+)
+
+
+async def main() -> None:
+    configs = InMemoryCallbackConfigRepository()
+    await configs.save(CallbackConfig(
+        tenant_id="lumen",
+        name="clearance-bank",
+        secret="cb-secret-xyz",
+        subscriptions=[CallbackSubscription(
+            event_type="DisbursementSettled",
+            target_url="https://api.clearancebank.example.com/hooks/lumen",
+        )],
+    ))
+    dispatcher = CallbackDispatcher(
+        configs=configs,
+        executions=InMemoryCallbackExecutionRepository(),
+    )
+    results = await dispatcher.dispatch(
+        "lumen",
+        "DisbursementSettled",
+        {"id": "txn-009", "amount": 50_000, "currency": "EUR"},
+    )
+    for r in results:
+        print(r.status, r.attempts, r.response_status, r.target_url)
+
+
+asyncio.run(main())
+:::
+
+You should see one delivered execution, with the signed request logged just
+above it:
+
+```text
+would POST https://api.clearancebank.example.com/hooks/lumen headers={'X-Pyfly-Signature': 'sha256=...', 'Content-Type': 'application/json'} body={'id': 'txn-009', 'amount': 50000, 'currency': 'EUR'}
+DELIVERED 1 200 https://api.clearancebank.example.com/hooks/lumen
+```
+
+`DELIVERED 1 200` reads as: status `DELIVERED`, succeeded on attempt `1`, HTTP
+`200`. To send for real, pass your own `http=` sender (an `httpx`/`aiohttp` POST)
+to `CallbackDispatcher`; the signing, retry, and audit logic stay identical.
+
+!!! note "What just happened"
+    One `dispatch()` call looked up every subscription the tenant has for that
+    event type, signed the payload, POSTed it, and wrote a `CallbackExecution`
+    record for each — all without your domain service knowing how many partners
+    are listening or how retries work. Adding a partner later is just another
+    saved `CallbackConfig`; the disbursement code never changes.
+
 ### HMAC signing and retry logic
 
 When `CallbackConfig.secret` is set, `CallbackDispatcher` signs the canonical JSON payload before every POST using HMAC-SHA256:
@@ -748,6 +1097,18 @@ config = CallbackConfig(
 
 Subdomains of allowed domains are also accepted (e.g. `api.clearancebank.example.com`).
 
+!!! note "New term: SSRF"
+    *Server-Side Request Forgery* is an attack where a malicious value tricks
+    your server into making an HTTP request it should not — for example, a
+    partner URL pointing at `http://169.254.169.254/` (a cloud metadata
+    endpoint) to steal credentials. Because callback URLs can come from
+    partner-supplied config, the `authorized_domains` allowlist closes that door:
+    a host that is not on the list is marked `FAILED` *before* any request
+    leaves the process. To verify, add an `AuthorizedDomain` for one host, then
+    dispatch a subscription whose `target_url` points elsewhere — the returned
+    `CallbackExecution` will read `status=FAILED`, `attempts=0`, and
+    `last_error="Domain not authorized"`, and nothing is sent.
+
 !!! spring "Spring parity"
     PyFly's `@scheduled` / `CronExpression` / `TaskScheduler` trio
     mirrors Spring's `@Scheduled` / `CronExpression` /
@@ -757,6 +1118,26 @@ Subdomains of allowed domains are also accepted (e.g. `api.clearancebank.example
     `HmacRequestMatcher`. `CallbackDispatcher` with HMAC signing and
     retry mirrors Spring's `WebhookPublisher` pattern from Spring
     Modulith.
+
+---
+
+**Run it — confirm the suite is still green.** You added four new integration
+patterns; make sure nothing else regressed. From the `samples/lumen` directory:
+
+```bash
+uv run --extra dev pytest -q
+```
+
+You should see every existing test still pass:
+
+```text
+.........................................                                [100%]
+41 passed in 0.28s
+```
+
+The three exercises below add scheduling, notification, and webhook tests of
+their own — re-run this command after each to watch the count climb. Remember the
+`--extra dev` flag; the bare `uv sync` omits pytest.
 
 ---
 
@@ -785,9 +1166,10 @@ You extended Lumen into a connected system that operates independently of incomi
 2. **Provider swap.** Replace `SmtpEmailProvider` with a
    `DummyEmailProvider` in the test suite. Write a test that deposits
    EUR 100 (10 000 minor units) into wallet `w-001` via the deposit
-   handler, triggering a `FundsDeposited` event. Assert that
-   `DummyEmailProvider.last_message` contains the wallet ID and the
-   formatted amount (`100.00 EUR`) in its `body_text`.
+   handler, triggering a `FundsDeposited` event. The provider records
+   every message it received in its `.sent` list, so assert that
+   `provider.sent[-1].body_text` contains the wallet ID and the
+   formatted amount (`100.00 EUR`).
 
 3. **Signature replay attack.** Write a test that calls
    `PaymentWebhookHandler.receive()` twice with the same raw body,

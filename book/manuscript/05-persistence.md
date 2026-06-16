@@ -8,7 +8,37 @@ Lumen has a wallet API that works — but every wallet disappears the moment you
 
 The naïve approach is to scatter SQLAlchemy `select()` and `session.commit()` calls through the command handlers. PyFly offers something far better: a **Spring-Data-style repository layer**. You declare an interface — `class WalletRepository(Repository[WalletEntity, str])` — and the framework *implements it for you*. Full async CRUD comes for free. Query methods are derived from their **names**. Pagination, sorting, composable filters, and read projections are first-class. There is no hand-written adapter and no SQL in the application code.
 
-This chapter rebuilds Lumen's persistence on that layer, exactly as the running sample does it: the SQLAlchemy entity, the repository with its derived and specification queries, `Page`/`Pageable`/`Sort`, projections for read views, and the transaction seam that keeps the `Wallet` aggregate intact. Everything here runs against a real SQLite file with zero external infrastructure — the sample's 41 tests are green on it.
+This chapter rebuilds Lumen's persistence on that layer, exactly as the running sample does it: the SQLAlchemy entity, the repository with its derived and specification queries, `Page`/`Pageable`/`Sort`, projections for read views, and the transaction seam that keeps the `Wallet` aggregate intact. Everything here runs against a real SQLite file with zero external infrastructure — the sample's 41 tests are green on it. This chapter targets PyFly **v26.6.110**.
+
+We will build the persistence layer one piece at a time, and at every milestone there is a **Run it** box with the exact command to type and the output you should see. If you are following along in the Lumen sample, work from the project root (`samples/lumen`) where `pyfly.yaml` and `pyproject.toml` live; every command below assumes that directory.
+
+!!! note "Run it: see the problem first"
+    Before adding persistence, it is worth feeling the gap it closes. Open a wallet, then stop and restart the process — with the in-memory store from Part I the wallet is gone. The rest of this chapter makes it survive that restart.
+
+    ```bash
+    # Terminal 1 — start the app
+    uv run pyfly run --server uvicorn
+    # ... startup banner, then: Uvicorn running on http://0.0.0.0:8080
+
+    # Terminal 2 — open a wallet, then read it back
+    curl -s -X POST localhost:8080/api/v1/wallets \
+      -H 'content-type: application/json' \
+      -d '{"owner_id": "alice", "currency": "EUR"}'
+    ```
+
+    You get back the new id, then the balance read confirms it exists:
+
+    ```
+    {"wallet_id": "wlt-7f3c..."}
+    ```
+
+    Now press `Ctrl+C` in Terminal 1, start the app again, and ask for that wallet's balance. Before this chapter, the row was never written to disk, so it is gone:
+
+    ```
+    {"detail": "Wallet 'wlt-7f3c...' not found", "code": "WALLET_NOT_FOUND"}
+    ```
+
+    By the end of this chapter the same sequence returns the balance after a restart.
 
 ---
 
@@ -27,7 +57,17 @@ This is the Repository pattern as Spring Data popularised it, translated to idio
 
 ## The entity: one row per wallet
 
-Before a repository can store anything, it needs an **entity** — the on-disk shape of a wallet, one flat row per aggregate. PyFly entities are ordinary SQLAlchemy 2.0 models built on a declarative base the framework exports:
+Before a repository can store anything, it needs an **entity** — the on-disk shape of a wallet, one flat row per aggregate. (An *entity*, in this layer, is just a Python class that maps to one database table; each instance is one row.) PyFly entities are ordinary SQLAlchemy 2.0 models built on a declarative base the framework exports.
+
+We will build it field by field. Create the file `src/lumen/models/entities/v1/wallet_orm.py` and add the pieces in order.
+
+**Step 1 — import the framework's declarative base.** Every entity inherits from a *declarative base*: a SQLAlchemy class that records each table you define so the framework can create them all on startup. PyFly exports one as `Base`:
+
+```python
+from pyfly.data.relational.sqlalchemy import Base
+```
+
+**Step 2 — name the table and declare the columns.** Subclass `Base`, set `__tablename__`, and write one typed attribute per column. The full entity is short:
 
 ::: listing lumen/models/entities/v1/wallet_orm.py | Listing 5.1 — WalletEntity: the SQLAlchemy persistence row
 from __future__ import annotations
@@ -56,7 +96,10 @@ class WalletEntity(Base):
     )
 :::
 
-The `Mapped[T]` / `mapped_column(...)` syntax is SQLAlchemy 2.0 style: each type annotation drives both the Python attribute type and the generated column DDL, so every column has a single source of truth. Because `WalletEntity` subclasses `Base`, importing this module registers the `wallets` table in `Base.metadata`; the framework's engine lifecycle then creates it on startup.
+The `Mapped[T]` / `mapped_column(...)` syntax is SQLAlchemy 2.0 style: each type annotation drives both the Python attribute type and the generated column DDL (the `CREATE TABLE` statement), so every column has a single source of truth. Because `WalletEntity` subclasses `Base`, importing this module registers the `wallets` table in `Base.metadata` — the registry of every table the base knows about — and the framework's engine lifecycle then creates it on startup.
+
+!!! note "What just happened"
+    You wrote one class, no SQL. The five typed attributes became five columns; `primary_key=True` marked `id` as the key; `index=True` on `owner_id` will speed up the "wallets owned by X" query you build later; `nullable=False` and `default=...` set the constraints. Importing this module is enough for the framework to know the table exists — you never call `CREATE TABLE` yourself.
 
 Two design choices are worth calling out.
 
@@ -71,7 +114,19 @@ Two design choices are worth calling out.
 
 ## The repository: CRUD for free
 
-Now the centrepiece. Lumen's `WalletRepository` subclasses `Repository[WalletEntity, str]` — entity type `WalletEntity`, primary-key type `str` — and is registered with `@repository`. That single declaration is enough for the framework to supply the entire CRUD surface:
+Now the centrepiece. Lumen's `WalletRepository` subclasses `Repository[WalletEntity, str]` — entity type `WalletEntity`, primary-key type `str` — and is registered with `@repository`. (A *stereotype* like `@repository` is a class decorator that tells the framework's container, "manage an instance of this for me." That managed instance is a **bean** — an object the container creates once and hands to anything that asks for it. *Dependency injection*, or *DI*, is the container doing that handing-over for you, so a handler never constructs its own repository.) That single declaration is enough for the framework to supply the entire CRUD surface — *CRUD* being the four basic table operations: Create, Read, Update, Delete.
+
+Create `src/lumen/models/repositories/wallet_repository.py` in two steps.
+
+**Step 1 — import what the declaration needs.** Three imports: your entity, the `@repository` stereotype, and the generic `Repository` base.
+
+```python
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from pyfly.container import repository
+from pyfly.data.relational.sqlalchemy import Repository
+```
+
+**Step 2 — subclass the generic base and mark it `@repository`.** The two type parameters carry all the wiring:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.2 — WalletRepository: subclass the framework repository
 from __future__ import annotations
@@ -118,15 +173,36 @@ There is no `__init__`, no SQL, and no adapter class. With just that declaration
 
 That is more than enough for most entities. Lumen adds three methods of its own on top — a derived query, a specification query, and an upsert — which the next sections build up.
 
+!!! spring "Spring parity"
+    This inherited surface is exactly Spring Data's repository hierarchy, carried over name-for-name and stable as of PyFly **v26.6.110**: `CrudRepository` → `ReactiveSortingRepository` → `PagingAndSortingRepository`. `save`/`save_all`, `find_by_id`, `find_all`, `exists_by_id`, `count`, and the `delete*` family map to their Spring equivalents; `find_all(pageable) -> Page[T]` is `findAll(Pageable)`, and `find_all_by_spec*` is the `JpaSpecificationExecutor`. If you know `JpaRepository<T, ID>`, you already know this table.
+
 ### How the framework knows the types
 
-When you write `Repository[WalletEntity, str]`, the base class's `__init_subclass__` hook inspects `__orig_bases__` at class-definition time and pulls the entity type (`WalletEntity`) and id type (`str`) out of the generic parameters. The `AsyncSession` is then supplied as an injected dependency by the relational auto-configuration. Nothing is passed manually — the type parameters *are* the wiring.
+When you write `Repository[WalletEntity, str]`, the base class's `__init_subclass__` hook inspects `__orig_bases__` at class-definition time and pulls the entity type (`WalletEntity`) and id type (`str`) out of the generic parameters. (`__init_subclass__` is a Python hook that runs once, automatically, when a subclass is *defined* — so this happens at import time, before any object is created.) The `AsyncSession` — the database connection-and-transaction handle every query runs through — is then supplied as an injected dependency by the relational auto-configuration. Nothing is passed manually — the type parameters *are* the wiring.
+
+!!! note "Run it: confirm the repository wires up"
+    The fastest proof that the entity and repository are sound is the test suite, which exercises the repository against a real SQLite file with no server. From the Lumen project root:
+
+    ```bash
+    uv run --extra dev pytest tests/test_sql_wallet_repository.py -q
+    ```
+
+    You should see every repository test pass:
+
+    ```
+    ......                                                            [100%]
+    6 passed in 0.30s
+    ```
+
+    These tests construct the repository directly and drive `upsert`, `find_by_id`, `count`, the derived query, and the specification path — the same methods this chapter builds. If they are green, your entity columns and the `Repository[WalletEntity, str]` declaration are correct.
 
 ---
 
 ## Derived queries: the method name is the query
 
-CRUD covers lookups by primary key. Real applications also need to query by other columns — "all wallets owned by this customer." In most frameworks you would write the SQL by hand. In PyFly you declare a **stub** and let the framework compile the query *from the method name*:
+CRUD covers lookups by primary key. Real applications also need to query by other columns — "all wallets owned by this customer." In most frameworks you would write the SQL by hand. In PyFly you declare a **stub** — a method with no body, just `...` — and let the framework compile the query *from the method name*.
+
+**Step 1 — declare the stub.** Add a method to `WalletRepository`. The *name* describes the query; the body is literally `...`:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.3 — A derived query: declared as a stub, compiled from its name
 @repository
@@ -140,7 +216,10 @@ class WalletRepository(Repository[WalletEntity, str]):
         ...
 :::
 
-The body is literally `...`. At startup a `BeanPostProcessor` — the `RepositoryBeanPostProcessor` — scans the repository, spots that `find_by_owner_id` is a stub, parses the **name** into a parsed query, and replaces the stub with a real implementation that runs `SELECT … FROM wallets WHERE owner_id = :owner_id`. Calling `await repo.find_by_owner_id("alice")` now returns exactly the rows for that owner.
+**Step 2 — let the framework fill in the body.** You write no more code. At startup a `BeanPostProcessor` — the `RepositoryBeanPostProcessor` — does the work. (A *BeanPostProcessor* is a hook the container runs over every bean just after it is created; this one specialises in repositories.) It scans the repository, spots that `find_by_owner_id` is a stub, parses the **name** into a parsed query, and replaces the stub with a real implementation that runs `SELECT … FROM wallets WHERE owner_id = :owner_id`. Calling `await repo.find_by_owner_id("alice")` now returns exactly the rows for that owner.
+
+!!! note "What just happened"
+    You declared a method and got a working query — the framework read the *intent* from the name `find_by_owner_id` and wrote the SQL for you. The naming is not magic; it follows a grammar, covered next. The key idea: in this layer you describe *what* you want by how you name the method, and the post-processor supplies the *how*.
 
 The grammar is the Spring Data convention. A method name is a **prefix** followed by a **subject** built from field names, operators, connectors, and an optional ordering clause:
 
@@ -188,7 +267,9 @@ The prefix decides the *shape* of the result: `find_by` returns a list, `count_b
 
 ## Pagination: Page, Pageable, and Sort
 
-A list endpoint should never return *every* wallet. PyFly's pagination types — `Pageable` (what page, what size, what sort), `Sort` (the ordering), and `Page[T]` (the slice plus metadata) — are inherited straight from the CRUD surface via `find_all(pageable)`.
+A list endpoint should never return *every* wallet. *Pagination* is the standard fix: return one fixed-size **page** of rows at a time, plus enough metadata for the client to ask for the next one. PyFly's pagination types — `Pageable` (what page, what size, what sort), `Sort` (the ordering), and `Page[T]` (the slice plus metadata) — are inherited straight from the CRUD surface via `find_all(pageable)`.
+
+There are three small pieces to assemble: the handler that calls `find_all(pageable)`, the `Page[T]` it returns, and the controller that builds the `Pageable` from the request. We will take them in that order.
 
 Lumen's `ListWallets` query handler is the whole story in three lines:
 
@@ -246,13 +327,37 @@ async def list_wallets(
 
 `Sort.by("created_at").descending()` names the column and the direction; `Pageable.of(page, size, sort)` packages it with the page coordinates. The handler returns a framework `Page`, and the controller folds it into a serialisable `PageDto` — a plain Pydantic mirror of the page — so `GET /api/v1/wallets?page=1&size=20` returns JSON like `{"items": [...], "total": 42, "page": 1, "total_pages": 3, "has_next": true, ...}`.
 
+!!! note "Run it: page through the wallets"
+    With the relational layer turned on (the "Turning it on" section below switches it on; the Lumen sample ships it already enabled), open a couple of wallets, then ask for the first page. From a running app:
+
+    ```bash
+    curl -s 'localhost:8080/api/v1/wallets?page=1&size=20'
+    ```
+
+    The response carries the rows *and* the pager metadata — note `total`, `page`, `total_pages`, and `has_next` alongside `items`:
+
+    ```json
+    {
+      "items": [
+        {"id": "wlt-...", "owner_id": "alice", "currency": "EUR",
+         "balance_minor": 0, "balance": 0.0, "created_at": "..."}
+      ],
+      "total": 1, "page": 1, "size": 20, "total_pages": 1,
+      "has_next": false, "has_previous": false
+    }
+    ```
+
+    Those are exactly the `Page[T]` members from the table above, serialised by `PageDto`. The client renders a pager straight from this shape — no extra count query needed.
+
 ---
 
 ## Specifications: composable, reusable filters
 
-Derived queries answer fixed questions. Sometimes you want a **reusable predicate** you can compose at the call site — "wallets with at least this balance," combined freely with other conditions. That is what a `Specification` is: a small object wrapping a `WHERE` fragment, composable with `&`, `|`, and `~`.
+Derived queries answer fixed questions. Sometimes you want a **reusable predicate** — a `WHERE` condition you can name once and reuse — that you compose at the call site: "wallets with at least this balance," combined freely with other conditions. That is what a `Specification` is: a small object wrapping a `WHERE` fragment, composable with `&` (AND), `|` (OR), and `~` (NOT).
 
-Lumen defines one as a module-level factory and uses it in a `find_rich` method:
+We build it in two steps: a factory that *returns* a `Specification`, then a repository method that *runs* it.
+
+**Step 1 — write a factory that returns a `Specification`.** It takes the parameter (the minimum balance) and returns a predicate object. **Step 2 — add a repository method that runs it** through the inherited `find_all_by_spec_paged`. Lumen does both in one file:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.6 — A Specification factory and a method that runs it paged
 def balance_at_least(min_minor: int) -> Specification[WalletEntity]:
@@ -313,6 +418,22 @@ class ListRichWalletsHandler(
 
 `GET /api/v1/wallets/rich?min_minor=1000&page=1&size=20` now returns a page of wallets at or above €10.00, newest first.
 
+!!! note "Run it: filter to the rich wallets"
+    Open one wallet and deposit €25.00 into it (2500 minor units), open another and leave it empty, then ask for wallets with at least €10.00:
+
+    ```bash
+    curl -s 'localhost:8080/api/v1/wallets/rich?min_minor=1000&page=1&size=20'
+    ```
+
+    Only the funded wallet comes back, and `total` counts just the matches — the empty wallet is filtered out by the `Specification`:
+
+    ```json
+    {"items": [{"id": "wlt-...", "balance_minor": 2500, "balance": 25.0, ...}],
+     "total": 1, "page": 1, "total_pages": 1, "has_next": false}
+    ```
+
+    The same predicate (`balance_at_least`) that runs here can be combined with others using `&`, `|`, and `~` — that is the payoff of writing the filter as a `Specification` instead of a one-off query.
+
 !!! note "Filters without lambdas"
     For the common case — equality and a handful of comparisons — you don't even need to write a lambda. `FilterOperator.gte("balance_minor", 1000) & FilterOperator.eq("currency", "EUR")` produces the same composable `Specification` from static factory methods, and `FilterUtils.by(currency="EUR")` builds one from keyword arguments (Query-by-Example). Lumen uses an explicit lambda here because the intent reads clearly; both styles produce a `Specification` you can pass to the same repository methods.
 
@@ -320,9 +441,11 @@ class ListRichWalletsHandler(
 
 ## Projections: read only the columns you need
 
-The balance endpoint does not need the whole row — just the id, currency, and a computed balance. PyFly supports **interface projections**, Spring Data's idea of declaring the subset of fields a read-view wants and letting the framework copy exactly those.
+The balance endpoint does not need the whole row — just the id, currency, and a computed balance. PyFly supports **interface projections**, Spring Data's idea of declaring the subset of fields a read-view wants and letting the framework copy exactly those. (A *projection* is a read-only view onto a subset of an entity's columns — you name the few fields you care about, and the framework copies only those, leaving the rest of the row unread.)
 
-A projection is a class marked `@projection`. In Lumen it is a concrete dataclass:
+Building one takes three pieces: the projection class, the mapper that knows how to fill it, and the handler that uses it. We take them in order.
+
+**Step 1 — declare the projection.** A projection is a class marked `@projection`. In Lumen it is a concrete dataclass:
 
 ::: listing lumen/interfaces/dtos/v1/balance_dto.py | Listing 5.8 — BalanceView: a @projection of just the balance fields
 from dataclasses import dataclass
@@ -346,7 +469,7 @@ class BalanceView:
     balance: float
 :::
 
-The mapper reads those four fields off a `WalletEntity` and constructs the view. Three (`id`, `currency`, `balance_minor`) are copied straight across; the fourth (`balance`, the major-unit decimal) is supplied by a transform registered on the mapper:
+**Step 2 — register the projection on a `Mapper`.** A `Mapper` is the framework helper that copies entity fields onto a projection. It reads those four fields off a `WalletEntity` and constructs the view. Three (`id`, `currency`, `balance_minor`) are copied straight across; the fourth (`balance`, the major-unit decimal) is supplied by a *transform* — a small function registered against a field name that computes a value the entity does not store directly:
 
 ::: listing lumen/core/mappers/wallet_mapper.py | Listing 5.9 — Registering and running the projection via Mapper
 from pyfly.data import Mapper
@@ -370,7 +493,7 @@ def entity_to_balance_dto(entity: WalletEntity) -> BalanceDto:
     )
 :::
 
-`Mapper.project(entity, BalanceView)` reads only the declared fields, applies the `balance` transform, and returns a `BalanceView`. The query handler then loads the row by id and projects it:
+**Step 3 — use the projection from a read handler.** `Mapper.project(entity, BalanceView)` reads only the declared fields, applies the `balance` transform, and returns a `BalanceView`. The query handler then loads the row by id and projects it:
 
 ::: listing lumen/core/services/wallets/get_balance_handler.py | Listing 5.10 — The balance read handler: find by id, then project
 @query_handler
@@ -391,6 +514,19 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
         )
 :::
 
+!!! note "Run it: read just the balance"
+    The balance endpoint returns only the four projected fields, not the whole row. Against a running app with a funded wallet:
+
+    ```bash
+    curl -s localhost:8080/api/v1/wallets/wlt-.../balance
+    ```
+
+    ```json
+    {"id": "wlt-...", "currency": "EUR", "balance_minor": 2500, "balance": 25.0}
+    ```
+
+    No `owner_id`, no `created_at` — the projection declared four fields, so four fields are read and returned. `balance` (the major-unit `25.0`) is the computed transform; the rest are copied straight from the row.
+
 !!! warning "A projection must be instantiable"
     Spring lets a projection be a bare interface and returns a runtime proxy. Python has no such proxy, so a PyFly projection must be a **concrete** type the mapper can construct — here, a `@dataclass`. Marking a *Protocol* `@projection` will not work: a Protocol cannot be instantiated, and `Mapper.project` has nothing to build. Use a dataclass (or any plain class with matching fields) and you are safe.
 
@@ -402,9 +538,11 @@ The repository surface is clean — but two honest subtleties decide whether you
 
 ### save() flushes; it does not commit
 
-This is the single most important thing to understand about the data layer. The framework uses **one shared `AsyncSession`**, and `Repository.save()` calls `session.add()` followed by `session.flush()` and `session.refresh()` — it **flushes**, making the write visible *within* the current session, but it never **commits**. If nothing commits, the write is rolled back when the session closes and the wallet does not survive a restart.
+This is the single most important thing to understand about the data layer. Two database verbs are easy to confuse. To **flush** is to send the pending SQL (the `INSERT`/`UPDATE`) to the database so it is visible to *this* connection's later reads — but still inside an open transaction that can be undone. To **commit** is to make those changes permanent and visible to everyone. A flush without a commit is rolled back when the session closes.
 
-The commit happens at the **unit-of-work boundary**, and you declare that boundary with `@transactional()`. A handler that writes decorates its `do_handle` with `@transactional()`, injects the `async_sessionmaker` as `self._session_factory`, and the decorator opens a unit of work, swaps that transactional session onto the repository for the call, **commits on success**, and rolls back on failure:
+The framework uses **one shared `AsyncSession`**, and `Repository.save()` calls `session.add()` followed by `session.flush()` and `session.refresh()` — it **flushes**, making the write visible *within* the current session, but it never **commits**. If nothing commits, the write is rolled back when the session closes and the wallet does not survive a restart. (This is exactly the disappearing-wallet problem from the opening **Run it** box.)
+
+The commit happens at the **unit-of-work boundary**. (A *unit of work* is one all-or-nothing batch of changes: either every write in it commits together, or — if anything fails — none of them do.) You declare that boundary with `@transactional()`. A handler that writes decorates its `do_handle` with `@transactional()`, injects the `async_sessionmaker` — the factory that hands out sessions — as `self._session_factory`, and the decorator opens a unit of work, swaps that transactional session onto the repository for the call, **commits on success**, and rolls back on failure:
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 5.11 — A write handler: @transactional() commits the unit of work
 @command_handler
@@ -444,9 +582,12 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
 
 `@transactional()` (imported from `pyfly.data.relational.sqlalchemy`) resolves the `async_sessionmaker` from `self._session_factory`, runs the body inside a `session.begin()` block, and commits at the end. Drop the decorator and the `upsert` would only flush — the wallet would never reach disk. The read handlers earlier in this chapter need no `@transactional`: a read makes no changes to commit.
 
+!!! note "What just happened"
+    The rule in one line: **reads need nothing; writes need `@transactional()`.** `save`/`upsert` only *flush*, so a write handler must run inside a unit of work that commits. The decorator does three things for you — opens the transaction, hands the repository the right session for the call, and commits (or rolls back on an exception). This is why the opening wallet survived once persistence was on, and why removing the decorator would silently lose it.
+
 ### upsert, not save, for an aggregate that owns its id
 
-Notice the handler calls `self._repository.upsert(...)`, not `save(...)`. That is the second subtlety. The framework's `save()` issues `session.add()`, which SQLAlchemy treats as a **pending INSERT**. But the `Wallet` aggregate generates its *own* primary key up front (`wlt-…`), so by the time a deposit or withdrawal persists an already-loaded wallet, a row with that id already exists — and a second `INSERT` on the same primary key raises `IntegrityError`.
+Notice the handler calls `self._repository.upsert(...)`, not `save(...)`. (*Upsert* is the portmanteau verb for "insert if new, update if already present" — one call for both cases.) That is the second subtlety. The framework's `save()` issues `session.add()`, which SQLAlchemy treats as a **pending INSERT**. But the `Wallet` aggregate generates its *own* primary key up front (`wlt-…`), so by the time a deposit or withdrawal persists an already-loaded wallet, a row with that id already exists — and a second `INSERT` on the same primary key raises `IntegrityError`.
 
 The fix is `session.merge`, which inserts when the id is new and updates when it already exists. Lumen wraps it in an `upsert` convenience method:
 
@@ -470,6 +611,9 @@ class WalletRepository(Repository[WalletEntity, str]):
 :::
 
 `_require_session()` is the inherited accessor that returns the active session (the transactional one, once `@transactional` has swapped it in). `merge` keys on the primary key, so both the first write (open) and every later write (deposit, withdraw) take the same code path with no `IntegrityError`. For entities whose ids are database-generated, `save` is the natural choice; for an aggregate that owns its id, `upsert` is.
+
+!!! note "What just happened"
+    Two questions decide every write: *did this row commit?* and *did this write insert or update?* `@transactional()` answers the first (it commits the unit of work); `upsert`/`merge` answers the second (one code path for both INSERT and UPDATE, because the aggregate owns its id). Get both right and a wallet you open, then deposit into, then read back after a restart returns the correct balance — which is exactly what the repository test below asserts against a *fresh* engine.
 
 ### The aggregate ↔ entity mapper seam
 
@@ -513,7 +657,7 @@ The write side calls `to_entity` before `upsert`; the read side either rehydrate
 
 ## Turning it on
 
-Activating the relational layer is configuration, not code. Lumen's `pyfly.yaml` carries a `data.relational` block:
+Activating the relational layer is configuration, not code — three keys in `pyfly.yaml`. Add a `data.relational` block:
 
 ::: listing pyfly.yaml | Listing 5.14 — Relational data layer configuration
 pyfly:
@@ -527,6 +671,31 @@ pyfly:
 `enabled: true` activates the relational auto-configuration, which builds the async SQLAlchemy engine and the `async_sessionmaker`, registers the `AsyncSession` and `session_factory` beans the repository and handlers inject, and installs the `RepositoryBeanPostProcessor` that compiles your derived-query stubs. `url` is a standard SQLAlchemy connection string — SQLite via `aiosqlite` here for zero-infrastructure development, `postgresql+asyncpg://…` in production. `ddl-auto: create` runs `Base.metadata.create_all` on startup, so the `wallets` table (discovered because `WalletEntity` subclasses `Base`) is built automatically the first time the app boots.
 
 The dependency footprint is tiny: `pyfly[data-relational]` pulls in `sqlalchemy[asyncio]` and `aiosqlite`, and nothing else. No database server, no driver install — which is exactly why the sample runs anywhere.
+
+!!! note "Run it: the disappearing wallet, fixed"
+    Re-run the opening experiment, now with persistence on. Open a wallet, stop the app, start it again, and read the balance back:
+
+    ```bash
+    # Terminal 1
+    uv run pyfly run --server uvicorn
+
+    # Terminal 2 — open a wallet
+    curl -s -X POST localhost:8080/api/v1/wallets \
+      -H 'content-type: application/json' \
+      -d '{"owner_id": "alice", "currency": "EUR"}'
+    # -> {"wallet_id": "wlt-..."}
+
+    # Ctrl+C in Terminal 1, then start it again, then:
+    curl -s localhost:8080/api/v1/wallets/wlt-.../balance
+    ```
+
+    This time the wallet survives — its row was committed to `lumen.db` on disk:
+
+    ```json
+    {"id": "wlt-...", "currency": "EUR", "balance_minor": 0, "balance": 0.0}
+    ```
+
+    Look in the project directory and you will see the `lumen.db` SQLite file the engine created on first boot, with the `wallets` table inside it. The whole chapter comes down to this: the wallet outlives the process.
 
 !!! tip "Schema lifecycle in production"
     `ddl-auto: create` is right for development and samples: it creates missing tables and leaves existing ones alone. In production set `ddl-auto: none` and manage the schema with a migration tool (Alembic), which generates versioned scripts from the diff between `Base.metadata` and the live database. The application code does not change — only the `ddl-auto` setting and the migration pipeline.
@@ -589,6 +758,26 @@ async def test_specification_find_rich_paged_and_sorted(
 The first test drives the derived query: three wallets in, two owners out, and `find_by_owner_id("alice")` returns exactly the two — proof that the framework compiled `WHERE owner_id = :owner_id` from the method name. The second drives the `Specification` path: it asserts the threshold filter (`total == 2`, only mid and rich match `>= 1000`), the newest-first sort (`wlt-rich` is the newest of the two), the page metadata (`total_pages == 2`, `has_next`), and that the same `balance_at_least` predicate also runs unpaged through `find_all_by_spec`.
 
 The fixture mirrors what the framework does at startup — build the engine, run `Base.metadata.create_all` inside a `begin()` block so the DDL commits, hand back a session factory — so the test exercises the exact table the application creates. Other tests in the same file prove `upsert` round-trips through a *fresh* engine (durability across reconnect) and that `find_all(pageable)` counts and slices a five-wallet table correctly.
+
+!!! note "Run it: prove the whole layer green"
+    Run the repository test file end to end. From the Lumen project root:
+
+    ```bash
+    uv run --extra dev pytest tests/test_sql_wallet_repository.py -v
+    ```
+
+    Each named test reports `PASSED` — CRUD round-trip, durability across reconnect, the derived query, the specification path, and pagination:
+
+    ```
+    tests/test_sql_wallet_repository.py::test_upsert_inserts_then_updates_and_persists PASSED
+    tests/test_sql_wallet_repository.py::test_find_by_id_unknown_returns_none PASSED
+    tests/test_sql_wallet_repository.py::test_derived_find_by_owner_id PASSED
+    tests/test_sql_wallet_repository.py::test_specification_find_rich_paged_and_sorted PASSED
+    tests/test_sql_wallet_repository.py::test_find_all_pageable_counts_and_pages PASSED
+    6 passed in 0.31s
+    ```
+
+    Run the whole suite (`uv run --extra dev pytest -q`) to confirm the rest of Lumen still passes alongside the persistence layer.
 
 !!! spring "Spring parity"
     Constructing the repository directly against a real in-process database mirrors Spring's `@DataJpaTest` slice, which boots an H2 database and the JPA layer in isolation to test repositories without the full context. `Base.metadata.create_all` is the analogue of `spring.jpa.hibernate.ddl-auto=create`, and running `RepositoryBeanPostProcessor` by hand stands in for the Spring proxy that materialises derived queries on a `JpaRepository` at startup.

@@ -12,6 +12,11 @@ This chapter takes Lumen's event-driven foundation across that boundary. You wil
 
 By the end of the chapter Lumen's integration events flow across process boundaries, ready for the Part IV services that will consume them.
 
+We will build this gradually, one piece at a time. Each feature comes with a numbered walkthrough, the exact command to run, and the output you should expect to see. If you have followed along from Chapter 8 you already have `EventPublisher` wired into the wallet command handlers and the `WalletAuditListener` reacting in-process; this chapter is verified against PyFly v26.6.110 and the Lumen sample under `samples/lumen`. Nothing here requires a running Kafka or RabbitMQ cluster to follow along: PyFly ships an in-memory broker that satisfies the same contract, so you can read, run, and test every listing before you ever touch Docker.
+
+!!! note "Jargon, in plain language"
+    A handful of terms recur in this chapter. A **message broker** is a separate server (Kafka or RabbitMQ) that stores messages and hands them to other processes. A **topic** is a named channel on the broker; publishers write to it and subscribers read from it. A **producer** (or *publisher*) puts messages onto a topic; a **consumer** (or *listener*) pulls them off and reacts. A **consumer group** is a label that lets several copies of the same service share the work, so each message is handled once. A **serialiser** turns a Python object into the raw `bytes` the broker stores; a **deserialiser** turns those bytes back into an object on the other side. A **dead-letter queue** (DLQ) is a holding area for messages that could not be processed. An **adapter** is the concrete broker driver hiding behind the `MessageBrokerPort` interface. Keep these eight in mind; the rest of the chapter is mostly about connecting them.
+
 ---
 
 ## One abstraction, many brokers
@@ -119,9 +124,65 @@ For Lumen, Kafka is the natural fit: wallet events form an ordered stream per wa
 
 ## Configuring the adapters
 
+Wiring a broker into Lumen is a configuration task, not a coding one. You add one extra to the project, add a `pyfly.messaging` block to `pyfly.yaml`, and PyFly does the rest: it constructs the right adapter and registers it under the `MessageBrokerPort` bean so anything that asks for that port gets the running broker injected. We will start with the broker that needs no infrastructure at all, then graduate to Kafka and RabbitMQ.
+
+!!! note "Turn messaging on with one key"
+    In v26.6.110 the messaging subsystem only wires itself up when the
+    `pyfly.messaging.provider` key is **present** in your configuration. No
+    key means no `MessageBrokerPort` bean — a deliberate "off by default"
+    so that an app with no messaging needs pull no broker libraries.
+    Once the key is set, its value (`"memory"`, `"kafka"`, `"rabbitmq"`,
+    or `"auto"`) selects the adapter. The companion keys live under the
+    same block: `pyfly.messaging.kafka.bootstrap-servers` and
+    `pyfly.messaging.rabbitmq.url`.
+
+### Start with the in-memory broker
+
+Lumen's `pyfly.yaml` already runs on the in-memory EDA bus from Chapter 8. To bring the *messaging* abstraction online without standing up Docker, add a single `provider` line.
+
+**Step 1 — Enable the in-memory broker.** Open `pyfly.yaml` and add a `messaging` block under `pyfly`:
+
+```yaml
+pyfly:
+  messaging:
+    provider: "memory"
+```
+
+**Step 2 — Add a listener so there is something to wake up.** Drop the standalone listener from Listing 10.4 (a few pages on) into `src/lumen/messaging/payments_consumer.py`. At startup PyFly discovers the stamped function and subscribes it for you — you write no `subscribe()` call.
+
+!!! tip "Run it"
+    Start the app. The in-memory broker needs no external server, so this
+    works on a laptop with nothing installed:
+
+    ```bash
+    uv run pyfly run
+    ```
+
+    The boot banner reports the framework version and the bound port
+    (`pyfly.server.port`, `8080` by default in v26.6.110):
+
+    ```
+    :: PyFly Framework :: (v26.06.110) (Python 3.13.13)
+    app=lumen version=1.0.0 ... started_in=0.42s port=8080
+    ```
+
+    Nothing else is printed yet — no message has been published. That is
+    expected: the broker is running and the listener is subscribed,
+    waiting. The next sections give it events to carry.
+
+**What just happened.** One YAML line switched the `MessageBrokerPort` bean from "not present" to a working in-memory broker, and the framework auto-subscribed your `@message_listener` to it during startup. No Kafka, no RabbitMQ, no Docker — yet the *exact same code* will run against a real broker once you change that one line to `"kafka"`. That swap-without-recompile property is the whole point of the abstraction.
+
 ### Kafka
 
-Add `pyfly[kafka]` to your project and declare the broker in `pyfly.yaml`:
+When you are ready for a real broker, add `pyfly[kafka]` to your project and point the provider at Kafka.
+
+**Step 1 — Install the Kafka extra.** This pulls in `aiokafka`, the async driver PyFly's `KafkaAdapter` wraps:
+
+```bash
+uv add "pyfly[kafka]"
+```
+
+**Step 2 — Declare the broker in `pyfly.yaml`.** Switch the provider and list your brokers:
 
 ```yaml
 pyfly:
@@ -131,7 +192,7 @@ pyfly:
       bootstrap-servers: "kafka-1:9092,kafka-2:9092"
 ```
 
-That is all PyFly needs to auto-configure a `KafkaAdapter` and register it as the `MessageBrokerPort` bean. For most services the YAML is sufficient; if you need advanced producer options, construct the adapter manually as a `@bean` inside a `@configuration` class.
+That is all PyFly needs to auto-configure a `KafkaAdapter` and register it as the `MessageBrokerPort` bean. (`bootstrap-servers` is a comma-separated list of `host:port` pairs — the addresses of one or more brokers in the cluster; the client discovers the rest from any one of them.) For most services the YAML is sufficient; if you need advanced producer options, construct the adapter manually as a `@bean` inside a `@configuration` class.
 
 ### RabbitMQ
 
@@ -167,7 +228,7 @@ class BrokerConfig:
 
 ### Auto-detection
 
-When `provider` is `"memory"` (the default) or `"auto"`, PyFly probes installed packages in order:
+When `provider` is `"auto"`, PyFly probes installed packages in order and picks the first broker it finds:
 
 | Priority | Library checked | Adapter selected |
 |---|---|---|
@@ -175,7 +236,27 @@ When `provider` is `"memory"` (the default) or `"auto"`, PyFly probes installed 
 | 2 | `aio_pika` | `RabbitMQAdapter` |
 | 3 | *(fallback)* | `InMemoryMessageBroker` |
 
-Set `provider: "memory"` in `pyfly-test.yaml` and `provider: "kafka"` in `pyfly-prod.yaml`, and every test and production run uses the appropriate adapter without code changes.
+`provider: "memory"` is different from `"auto"`: it *always* selects the in-memory broker regardless of what is installed, which is exactly what you want in tests. An explicit `provider: "kafka"` or `"rabbitmq"` skips probing entirely and demands that adapter's library be present.
+
+The practical pattern is per-environment YAML. Set `provider: "memory"` in `pyfly-test.yaml` and `provider: "kafka"` in `pyfly-prod.yaml`, and every test and production run uses the appropriate adapter without code changes.
+
+!!! tip "Run it"
+    You can confirm which adapter PyFly selected without sending a single
+    message. With messaging enabled, start the app and look for the broker
+    line in the startup log:
+
+    ```bash
+    uv run pyfly run
+    ```
+
+    ```
+    pyfly.messaging  provider=memory broker=InMemoryMessageBroker started
+    ```
+
+    Change `provider` to `"kafka"` (with `pyfly[kafka]` installed and a
+    broker reachable) and restart; the same line now reports
+    `broker=KafkaAdapter`. The business code that publishes and consumes
+    did not change — only the YAML did.
 
 ---
 
@@ -296,7 +377,15 @@ When `publish_domain_events` publishes this event, `event_type` is the class nam
 
 ### Publishing an integration event directly to the broker
 
-When a separate service running in a different process needs to receive Lumen's wallet events, the EDA bus must be backed by a real broker adapter. The payload flowing over the wire is the same dict the in-process listeners see. A dedicated `OutboxRelay` (covered in the resilience section) or a broker-backed `EventPublisher` handles the transport:
+When a separate service running in a different process needs to receive Lumen's wallet events, the EDA bus must be backed by a real broker adapter. The payload flowing over the wire is the same dict the in-process listeners see. A dedicated `OutboxRelay` (covered in the resilience section) or a broker-backed `EventPublisher` handles the transport.
+
+It helps to see the publish in its smallest possible form first. The next listing is a plain `async` function — no class, no decorator — that takes a `MessageBrokerPort`, builds the payload, and calls `publish`. Build it in three moves:
+
+**Step 1 — Encode the payload to bytes.** `MessageBrokerPort.publish` only ever sees `bytes`, so the function serialises the event with `json.dumps(...).encode()`. The `.encode()` turns the JSON string into UTF-8 bytes the broker can store verbatim.
+
+**Step 2 — Choose a partition key.** Passing `key=wallet_id.encode()` tells Kafka to route every message for a given wallet to the same partition, which preserves their order. (RabbitMQ ignores the key, so including it is harmless either way.)
+
+**Step 3 — Attach the event-type header.** `headers={"event-type": "FundsDeposited"}` lets a consumer decide whether it cares about this message *before* deserialising the body — cheap routing.
 
 ::: listing lumen/messaging/deposit_publisher.py | Listing 10.3 — Publishing a wallet integration event to a Kafka topic
 from __future__ import annotations
@@ -337,6 +426,8 @@ async def publish_deposit_event(
 `key=wallet_id.encode()` is the routing key. On Kafka, all messages sharing the same key land on the same partition, delivering them to consumers in publication order — critical for a ledger where deposit before withdraw must be preserved. On RabbitMQ the key is ignored (routing uses the exchange binding), so this field is safe to include regardless of which broker is running.
 
 `headers={"event-type": "FundsDeposited"}` uses the domain event class name — not a dotted path like `"wallet.fundsdeposited"`. Consumers can inspect the event type without decoding the payload, which is useful for routing and filtering without full deserialisation.
+
+**What just happened.** You crossed the process boundary. The same `FundsDeposited` fact that `WalletAuditListener` consumed in-process in Chapter 8 is now bytes on a topic, addressable by any service that connects to the broker — and the function that put it there names no broker, only the `MessageBrokerPort` port. Swap the configured adapter and this code is unchanged.
 
 !!! warning "Publish after save, not before"
     Always drain and publish events *after* `repository.add(wallet)`. If
@@ -380,6 +471,14 @@ def message_listener(
 | `retry_delay` | `float` | `0.0` | Base delay (seconds) between retries — attempt N waits `retry_delay * N`. |
 | `dead_letter_topic` | `str \| None` | `None` | When set, a message still failing after `retries` is re-published here. |
 
+The first listener is a free-standing function — the simplest shape. Build it in three moves:
+
+**Step 1 — Write an async function that takes a `Message`.** Every listener receives one argument: the frozen `Message` envelope (`topic`, `value`, `key`, `headers`). The function must be `async` because the broker awaits it.
+
+**Step 2 — Decorate it with the topic and group.** `@message_listener(topic="wallet.events", group="payments-service")` is the entire subscription. There is no `subscribe()` call to write and no bus to import — the decorator stamps the function with metadata the framework reads at startup.
+
+**Step 3 — Decode inside the handler.** The body checks the `event-type` header, then `json.loads(msg.value)` turns the raw bytes back into a dict. The handler decides what it cares about; here it reacts only to `FundsDeposited`.
+
 ::: listing lumen/messaging/payments_consumer.py | Listing 10.4 — @message_listener on a standalone function
 from __future__ import annotations
 
@@ -411,9 +510,58 @@ async def on_wallet_event(msg: Message) -> None:
 
 Inside the handler, `msg.headers.get("event-type", "unknown")` inspects the envelope metadata before touching the payload. The header value is the domain event class name — `"FundsDeposited"`, `"WalletOpened"`, or `"FundsWithdrawn"` — matching what Lumen sets on the publisher side.
 
+!!! tip "Run it"
+    With `provider: "memory"` set (no Docker), this is the full publish →
+    consume round-trip in one place. Save the snippet below as
+    `roundtrip.py` and run it with `uv run python roundtrip.py`:
+
+    ```python
+    import asyncio, json
+    from pyfly.messaging.adapters.memory import InMemoryMessageBroker
+    from lumen.messaging.payments_consumer import on_wallet_event
+
+    async def main() -> None:
+        broker = InMemoryMessageBroker()
+        await broker.subscribe(
+            "wallet.events", on_wallet_event, group="payments-service"
+        )
+        await broker.start()
+        await broker.publish(
+            "wallet.events",
+            json.dumps({
+                "wallet_id": "w-001", "amount": 5000,
+                "currency": "EUR", "balance": 5000,
+            }).encode(),
+            headers={"event-type": "FundsDeposited"},
+        )
+        await asyncio.sleep(0.1)   # let the listener run
+        await broker.stop()
+
+    asyncio.run(main())
+    ```
+
+    The listener prints the line it built from the decoded payload:
+
+    ```
+    [Payments] Deposit received: wallet=w-001 amount=5000 EUR
+    ```
+
+    Inside a running app you would *not* write this wiring by hand — the
+    `@message_listener` decorator and the configured broker bean do the
+    `subscribe`/`start`/`stop` for you. This standalone script just makes
+    the round-trip visible in isolation.
+
+**What just happened.** A message you published to `wallet.events` arrived at a function you never explicitly connected to anything. The decorator carried the topic and group; the broker (here in-memory, in production Kafka) did the delivery. That is the consume side of the same abstraction you used to publish — and the function body is broker-agnostic from top to bottom.
+
 ### Listeners on service classes
 
-When a listener needs collaborators — a repository, another service — declare it as a method on a `@service` class. PyFly injects the dependencies through the constructor and wires the listener subscription after the bean is initialised:
+When a listener needs collaborators — a repository, another service — declare it as a method on a `@service` class. PyFly injects the dependencies through the constructor and wires the listener subscription after the bean is initialised. The shape changes only slightly from the standalone version:
+
+**Step 1 — Make the class a `@service`.** This registers it in the DI container so the framework can both inject its constructor and discover its listener method.
+
+**Step 2 — Declare collaborators in the constructor.** Here `smtp_client` stands in for an email or push service; the container supplies it. Listing 10.4's free function had nowhere to keep such a dependency — that is the reason to reach for a class.
+
+**Step 3 — Decorate a *method* with `@message_listener`.** The signature gains `self`, but otherwise the decorator and body are identical to the function form. Because the bean is created first, `self._smtp` is ready by the time a message arrives.
 
 ::: listing lumen/messaging/notifications_consumer.py | Listing 10.5 — @message_listener on a @service method with dependencies
 from __future__ import annotations
@@ -481,6 +629,8 @@ Three formats are worth knowing: JSON for simplicity, Avro for schema-registry-b
 
 ### JSON — start here
 
+*Serialisation* is just the act of turning an in-memory object into a flat sequence of bytes you can store or send, and *deserialisation* is the reverse. The three formats below differ only in how compact those bytes are and how strictly they police the shape of the data.
+
 JSON is the right default. It requires no tooling beyond the standard library, every language can parse it, and the payload is readable in broker monitoring UIs. The encoding pattern is two lines:
 
 ```python
@@ -507,7 +657,13 @@ JSON's weakness is that the schema is unenforced. If a publisher adds a required
 
 ### Avro — schema-registry-backed evolution
 
-Avro schemas are JSON documents describing the shape of a message. A Schema Registry (Confluent's is the most common, but open-source alternatives exist) stores those schemas and enforces compatibility rules when producers register new versions. The `fastavro` library encodes and decodes the binary payload:
+Avro schemas are JSON documents describing the shape of a message. A Schema Registry (Confluent's is the most common, but open-source alternatives exist) stores those schemas and enforces compatibility rules when producers register new versions. The `fastavro` library encodes and decodes the binary payload. The publish path is the same `broker.publish(...)` you already know; only the encoding step changes:
+
+**Step 1 — Declare the schema once.** `WALLET_DEPOSITED_SCHEMA` lists each field and its Avro type (`string`, `long`). It is a module-level constant so it is written once, not per message.
+
+**Step 2 — Compile it once.** `fastavro.parse_schema(...)` is called at import time and the result cached in `_PARSED`. Parsing on every publish would be wasted work on the hot path.
+
+**Step 3 — Encode and publish.** `fastavro.schemaless_writer` serialises the record into a `BytesIO` buffer; `buf.getvalue()` hands the bytes to `broker.publish` exactly as the JSON path did.
 
 ::: listing lumen/messaging/avro_publisher.py | Listing 10.6 — Publishing a wallet event with Avro encoding
 from __future__ import annotations
@@ -616,7 +772,13 @@ Without a dead-letter strategy, a failed consumer either drops the message (data
 
 ### Decorator-native retry and DLQ
 
-In PyFly, retry and dead-letter routing are built into `@message_listener` — no try/except scaffolding, no manual publish to the DLQ. Declare `retries` and `dead_letter_topic` directly on the decorator:
+In PyFly, retry and dead-letter routing are built into `@message_listener` — no try/except scaffolding, no manual publish to the DLQ. Declare `retries` and `dead_letter_topic` directly on the decorator. You add resilience by adding *arguments*, not code:
+
+**Step 1 — Start from a normal listener.** The handler body in the next listing is an ordinary consumer that decodes the payload and calls a worker (`_charge`).
+
+**Step 2 — Add `retries` (and optionally `retry_delay`).** `retries=3` tells the framework to re-invoke the handler up to three more times if it raises. `retry_delay=0.5` spaces those attempts out with linear back-off.
+
+**Step 3 — Add `dead_letter_topic`.** When all retries are exhausted, the framework re-publishes the message there instead of letting the exception crash the consumer. You write neither the retry loop nor the DLQ publish.
 
 ::: listing lumen/messaging/resilient_consumer.py | Listing 10.7 — Retry and DLQ wired through @message_listener
 from __future__ import annotations
@@ -672,6 +834,55 @@ class ResilientWalletConsumer:
 
 The exception is then swallowed so the consumer keeps running — the message is parked, not lost, and the next message on the topic is processed normally.
 
+!!! tip "Run it"
+    You can watch a poisoned message land in the DLQ without a real broker.
+    At wiring time the framework wraps every listener with
+    `pyfly.messaging.error_handling.wrap_listener` — the same helper does
+    the retrying and dead-lettering. Drive it directly so the flow is
+    visible. Save this as `dlq_demo.py` and run `uv run python dlq_demo.py`:
+
+    ```python
+    import asyncio, json
+    from pyfly.messaging.adapters.memory import InMemoryMessageBroker
+    from pyfly.messaging.error_handling import wrap_listener
+    from pyfly.messaging.types import Message
+
+    async def always_fails(msg: Message) -> None:
+        raise RuntimeError("downstream unavailable")
+
+    async def main() -> None:
+        broker = InMemoryMessageBroker()
+        await broker.start()
+
+        async def show_dlq(msg: Message) -> None:
+            print("DLQ:", msg.headers["x-original-topic"],
+                  msg.headers["x-exception"])
+        await broker.subscribe("wallet.events.DLQ", show_dlq)
+
+        handler = wrap_listener(
+            always_fails, broker,
+            retries=2, dead_letter_topic="wallet.events.DLQ",
+        )
+        await handler(Message(
+            topic="wallet.events",
+            value=json.dumps({"wallet_id": "w-001"}).encode(),
+        ))
+        await broker.stop()
+
+    asyncio.run(main())
+    ```
+
+    After two retries the wrapper gives up and re-publishes to the DLQ,
+    where your monitor prints the diagnostic headers:
+
+    ```
+    DLQ: wallet.events RuntimeError
+    ```
+
+    The handler returned normally — the exception was swallowed, not
+    propagated — so in a real app the consumer would simply move on to the
+    next message.
+
 ### Monitoring the DLQ
 
 Subscribe to the DLQ topic like any other listener to observe and alert on dead-lettered messages:
@@ -722,7 +933,15 @@ A healthy broker is not guaranteed. Network partitions, rolling upgrades, and re
 
 Neither is acceptable. The transactional outbox (Chapter 9) is the atomic solution — the event is captured in the database and a relay publishes it asynchronously, so a broker outage adds only latency, not data loss. Alongside the outbox, **circuit breakers** and **retries** protect the relay and any broker-calling code from cascading failures.
 
-PyFly's resilience module (`pyfly.resilience`) provides both primitives. The circuit breaker opens after a configurable failure threshold and blocks calls to the broker during a cool-down period, preventing a thundering-herd reconnection storm. The retry decorator handles transient errors with configurable back-off:
+A **circuit breaker** is the electrical metaphor made into code: after too many failures in a row it "trips" and stops letting calls through for a cool-down period, so a struggling broker is not hammered by thousands of doomed reconnection attempts. A **retry** is the complementary tactic — try the same call again a few times, because many failures are momentary.
+
+PyFly's resilience module (`pyfly.resilience`) provides both primitives. The circuit breaker opens after a configurable failure threshold and blocks calls to the broker during a cool-down period, preventing a thundering-herd reconnection storm. The retry decorator handles transient errors with configurable back-off. You apply them as a pair of decorators on the publish method:
+
+**Step 1 — Write the plain publish method.** `forward` does one thing: encode the record and call `self._broker.publish(...)`. No resilience logic lives in the body.
+
+**Step 2 — Wrap it in `@circuit_breaker`.** Pass a shared `CircuitBreaker` instance so the failure count accumulates across calls, not per call. When the broker is down, the breaker trips and fails fast.
+
+**Step 3 — Wrap that in `@retry` on the outside.** Decorator order matters: `@retry` sits above `@circuit_breaker`, so all of one call's retry attempts happen before the breaker registers a single failure. Keep `max_attempts` low and let the breaker absorb sustained outages.
 
 ::: listing lumen/messaging/resilient_publisher.py | Listing 10.9 — Resilient broker publishing with retry and circuit breaker
 from __future__ import annotations
@@ -828,6 +1047,26 @@ Part IV introduces the `PaymentsService` and `NotificationsService`. Both subscr
 ---
 
 ## Try it yourself {.exercises}
+
+!!! note "Run it"
+    Each exercise below ends in a test. Because `provider: "memory"` needs
+    no broker, you can run them with nothing installed beyond the dev
+    extra. From the Lumen project root:
+
+    ```bash
+    uv run --extra dev pytest tests/test_messaging.py -q
+    ```
+
+    A green run looks like:
+
+    ```text
+    ...                                                                      [100%]
+    3 passed in 0.XXs
+    ```
+
+    If a test fails with a missing-attribute error such as
+    `__pyfly_message_listener__`, the `@message_listener` decorator is not
+    applied to your handler — recheck Step 2 of "Declarative listeners."
 
 1. **Swap the adapter in one line.** Start with `provider: "memory"` in
    `pyfly.yaml` and add the `@message_listener` from Listing 10.4. Write

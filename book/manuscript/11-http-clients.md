@@ -27,6 +27,24 @@ end of the chapter you will also see how a **BFF (Backend for Frontend)**
 tier sits in front of both services and composes their capabilities into
 a single, user-journey-focused API.
 
+!!! note "New jargon, in plain language"
+    A few terms recur throughout this chapter. **Service-to-service call**
+    means one of your services making an HTTP request to another of your
+    services (Wallet calling Payments), as opposed to a request coming
+    from a browser. A **declarative client** is a client you *describe*
+    rather than *implement*: you write the method signatures and let the
+    framework fill in the HTTP plumbing. A **circuit breaker** is a safety
+    switch that stops calling a remote service after it has failed too
+    many times in a row. A **BFF** (Backend for Frontend) is a thin
+    service whose only job is to call other services and reshape their
+    answers for one particular app. We will build each of these one piece
+    at a time.
+
+This chapter is built around `httpx` and the `pyfly.client` package, both
+of which ship with the framework. Everything here runs against PyFly
+v26.6.110. You do not need to install anything new — if you have been
+following along with Lumen, the client tooling is already on your path.
+
 ---
 
 ## Why split (and why it hurts)
@@ -99,7 +117,26 @@ Reserve `@http_client` for internal utilities and test doubles.
 
 The Payments service exposes two endpoints: one to create a payment
 instruction and one to retrieve a payment by identifier. Defining the
-client means writing the class:
+client means writing the class. Let us build it one decision at a time.
+
+**Step 1 — Create the file.** Add `src/lumen/sdk/payments_client.py`
+alongside the existing `client.py`. The `sdk` package is where Lumen keeps
+the code that *talks to* services, so this is the natural home for a
+service client.
+
+**Step 2 — Decorate the class.** Put `@service_client(base_url=...)` on a
+plain class. That single decorator is what turns an ordinary class into a
+PyFly-managed HTTP client: it records the base URL, switches on the
+resilience features, and registers the class as a bean so the container
+can inject it later.
+
+**Step 3 — Declare one method per endpoint.** Each method gets a verb
+decorator (`@post`, `@get`, `@patch`, `@delete`) carrying the path. The
+method body is just `...` — an *ellipsis*, Python's literal for "nothing
+here yet." You never write the request code; PyFly writes it for you at
+startup.
+
+The full client looks like this.
 
 ::: figure art/figures/11-client.svg | Figure 11.1 — The PyFly declarative client pipeline. You write the interface; HttpClientBeanPostProcessor generates the implementation.
 
@@ -185,6 +222,42 @@ the dict serialised as the JSON body. Parameters named `body` on
 POST/PUT/PATCH methods are always treated as the JSON request body; all other
 non-path parameters on GET/DELETE become query-string parameters.
 
+!!! note "What just happened"
+    You wrote four method *signatures* and zero lines of HTTP code. The
+    `@service_client` decorator tagged the class for the container; the
+    verb decorators tagged each method with a verb and a path. At startup,
+    a behind-the-scenes component called `HttpClientBeanPostProcessor`
+    reads those tags and quietly replaces every `...` stub with a working
+    async method that builds the URL, sends the request, and turns the
+    response back into Python. From the caller's point of view,
+    `await client.get_payment("pay-123")` looks exactly like calling a
+    local method — the network is hidden.
+
+**Run it — confirm the stubs are wired.** Until the application context
+starts, those `...` bodies raise `NotImplementedError` on purpose, so you
+cannot just call the method in a bare script. The honest way to prove the
+client works is a tiny test that starts a context (or wires the
+post-processor) and inspects the generated method. The quickest smoke
+check is to confirm the metadata the decorators stamped on:
+
+```
+uv run python -c "from lumen.sdk.payments_client import PaymentsClient; \
+print(PaymentsClient.__pyfly_http_base_url__); \
+print(PaymentsClient.create_payment.__pyfly_http_method__, \
+PaymentsClient.create_payment.__pyfly_http_path__)"
+```
+
+Expected output:
+
+```
+http://payments-service:8080
+POST /payments
+```
+
+If you see the base URL and `POST /payments`, the decorators applied
+correctly and the post-processor has everything it needs to generate the
+real implementation when the app boots.
+
 !!! spring "Spring parity"
     `@service_client` with `@get`/`@post`/`@put`/`@delete`/`@patch` is
     PyFly's counterpart of Spring Cloud OpenFeign's `@FeignClient` with
@@ -205,10 +278,33 @@ Because `PaymentsClient` is a singleton bean, any `@service` or
 container injects it through the same autowiring path used for
 repositories and domain services.
 
+!!! note "Bean and autowiring, briefly"
+    A **bean** is just an object the framework creates and manages for you
+    — you never call its constructor yourself. **Autowiring** is how the
+    container hands a bean to whatever needs it: when a class lists
+    `payments: PaymentsClient` in its `__init__`, PyFly notices the type,
+    finds the matching bean, and passes it in automatically. You declare
+    the dependency by *type*; the container does the lookup.
+
 Lumen's Wallet service already applies the `WalletRepository` and `Money`
 value object pattern from earlier chapters. When the wallet must call
-Payments to settle a withdrawal, the handler follows that same pattern:
-withdraw through the aggregate, then call the external service:
+Payments to settle a withdrawal, the handler follows that same pattern in
+three steps: load the wallet, withdraw through the aggregate, then call the
+external service.
+
+**Step 1 — Declare the dependency.** Add `payments: PaymentsClient` to the
+handler's constructor and stash it on `self`. That is the only wiring you
+write; the container supplies the live client.
+
+**Step 2 — Do the local work first.** Load the wallet and call
+`wallet.withdraw(...)`, then persist it, so the wallet's own state is
+settled before any network call happens.
+
+**Step 3 — Call the remote service.** `await self._payments.create_payment(...)`
+reads like a local method call. The resilience and HTTP details are
+already baked into the injected client.
+
+Here is the handler.
 
 ::: listing lumen/core/services/wallets/settle_transfer_handler.py | Listing 11.2 — CommandHandler injecting PaymentsClient
 from __future__ import annotations
@@ -271,6 +367,28 @@ state is committed before Payments is contacted. If Payments is
 temporarily unavailable, the retry and circuit breaker — described in the
 next section — handle recovery transparently, without any code in the
 handler.
+
+**Run it — exercise the handler with a fake client.** Because the handler
+depends on the *type* `PaymentsClient`, you can substitute a stand-in in a
+test without any network. Drop this into `tests/test_settle_transfer.py`
+and run it:
+
+```
+uv run --extra dev pytest tests/test_settle_transfer.py -q
+```
+
+A passing run prints something like:
+
+```
+1 passed in 0.12s
+```
+
+The point of the test is the substitution: you pass a hand-made object in
+place of the real `PaymentsClient`, assert the handler called
+`create_payment` with the expected body, and never open a socket. That is
+the practical payoff of declaring the dependency by type — the handler
+neither knows nor cares whether the client on the other end is real or
+faked.
 
 ---
 
@@ -344,6 +462,60 @@ state transitions `CLOSED → HALF_OPEN` are computed lazily with
 the circuit is already open, so re-raising it without recording another
 failure prevents the recovery timeout from resetting indefinitely.
 
+!!! note "Three states, in plain language"
+    Think of the breaker as a light switch with three positions.
+    **Closed** is normal — calls flow through. **Open** means "stop
+    trying" — calls fail instantly without touching the network, which
+    spares your service from waiting on something that is clearly down.
+    **Half-open** is "let me test the water" — after the recovery timeout,
+    the breaker lets exactly one call through; if it works, the switch
+    goes back to closed, and if it fails, it snaps open again.
+
+**Run it — watch a breaker open and recover.** You can drive the breaker
+by hand from a REPL with no real service involved. Start one with
+`uv run python` from `samples/lumen` and try:
+
+```
+uv run python -c "
+import asyncio
+from datetime import timedelta
+from pyfly.client import CircuitBreaker, CircuitState
+from pyfly.kernel.exceptions import CircuitBreakerException
+
+async def boom():
+    raise RuntimeError('payments down')
+
+async def main():
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout=timedelta(seconds=30))
+    for _ in range(2):
+        try:
+            await cb.call(boom)
+        except RuntimeError:
+            pass
+    print('state after 2 failures:', cb.state.name)
+    try:
+        await cb.call(boom)
+    except CircuitBreakerException:
+        print('open circuit rejected the call without calling boom')
+
+asyncio.run(main())
+"
+```
+
+Expected output:
+
+```
+state after 2 failures: OPEN
+open circuit rejected the call without calling boom
+```
+
+The second line is the whole point: once the circuit is open, the breaker
+raises `CircuitBreakerException` *immediately* instead of running `boom`
+again. Drop `recovery_timeout` to `timedelta(seconds=0)` and re-run — the
+next read of `cb.state` reports `HALF_OPEN` and the third call admits a
+probe (so `boom` runs again) rather than being rejected. That is the
+breaker letting the service prove it has recovered.
+
 ### Retry policy
 
 Transient failures — a momentary latency spike, a rolling restart, a
@@ -383,6 +555,50 @@ others propagate immediately. This matters: you do not want to retry a
 404 (the resource does not exist) or a 422 (the request is semantically
 invalid).
 
+!!! note "Backoff, in plain language"
+    *Backoff* means waiting a little longer before each retry instead of
+    hammering the remote service the instant it fails. *Exponential*
+    backoff doubles the wait each time, so a service that needs a moment
+    to recover gets more breathing room with every attempt while a healthy
+    one is retried almost immediately.
+
+**Run it — see retry recover from a transient error.** Simulate a call
+that fails twice and then succeeds:
+
+```
+uv run python -c "
+import asyncio
+from datetime import timedelta
+from pyfly.client import RetryPolicy
+
+attempts = {'n': 0}
+async def flaky():
+    attempts['n'] += 1
+    if attempts['n'] < 3:
+        raise ConnectionError('reset')
+    return 'ok'
+
+async def main():
+    policy = RetryPolicy(max_attempts=3, base_delay=timedelta(milliseconds=1),
+                         retry_on=(ConnectionError,))
+    print('result:', await policy.execute(flaky))
+    print('attempts:', attempts['n'])
+
+asyncio.run(main())
+"
+```
+
+Expected output:
+
+```
+result: ok
+attempts: 3
+```
+
+Three attempts, one success. Change `retry_on` to `(TimeoutError,)` and
+the very first `ConnectionError` propagates instead — proof that only the
+exceptions you list are retried.
+
 When `@service_client` enables both features, the post-processor wraps
 them in the correct order: circuit breaker *outside*, retry *inside*. A
 single logical call attempts up to `max_attempts` retries before the
@@ -393,7 +609,10 @@ immediately, bypassing the retry loop entirely.
 
 When the remote service returns a 4xx or 5xx response, the generated
 method raises a typed exception instead of returning the error payload as
-if it were a success. The exception hierarchy lives in `pyfly.client`:
+if it were a success. The exception hierarchy lives in
+`pyfly.client.exceptions` — import the classes you want to catch from
+there (for example,
+`from pyfly.client.exceptions import ServiceNotFoundException`):
 
 | Status | Exception class | `retryable` |
 |---|---|---|
@@ -410,6 +629,16 @@ All exceptions extend `ServiceClientException` (itself an
 `ServiceRateLimitException` and `ServiceUnavailableException` tells the
 post-processor which exceptions to pass to the retry policy. 4xx
 validation errors and 404s are never retried.
+
+!!! note "What just happened"
+    The three resilience pieces fit together like nested boxes. The
+    **typed exceptions** classify *what kind* of failure occurred — a 404
+    is not retryable, a 503 is. The **retry policy** uses that
+    classification to decide whether to try again. The **circuit breaker**
+    sits outside the retry loop and counts sustained failures so it can
+    stop calling a service that is genuinely down. You did not write any
+    of this glue: `@service_client` assembled it the moment you set
+    `circuit_breaker=True` and `retry=3`.
 
 ### Configuring defaults in pyfly.yaml
 
@@ -444,6 +673,41 @@ to `HttpClientBeanPostProcessor`. Any value set directly on
 `@service_client(circuit_breaker_failure_threshold=...)` overrides the
 default.
 
+!!! note "Precedence, in plain language"
+    Two layers can set these knobs: the global `pyfly.yaml` defaults and
+    the per-client decorator arguments. The decorator always wins. Think
+    of `pyfly.yaml` as the house style every new client inherits, and the
+    decorator as the place to override that style for one demanding
+    upstream.
+
+**Run it — confirm the config is read.** After adding the block to
+`pyfly.yaml`, read the values back through PyFly's `Config` to be sure the
+keys are spelled correctly (a common cause of "my timeout is being
+ignored" is a typo). Run this from the project root, where `pyfly.yaml`
+lives:
+
+```
+uv run python -c "
+from pyfly.core.config import Config
+cfg = Config.from_sources('.')
+print('timeout:', cfg.get('pyfly.client.timeout'))
+print('cb:', cfg.get('pyfly.client.circuit-breaker'))
+"
+```
+
+Expected output once Listing 11.5 is in place:
+
+```
+timeout: 10
+cb: {'failure-threshold': 5, 'recovery-timeout': 30}
+```
+
+Before you add the block, `timeout` reports `30` — the framework default
+from `pyfly-defaults.yaml` — which confirms the override is what changed
+it. If a key comes back as `None`, check the indentation in `pyfly.yaml`:
+YAML nesting is whitespace-sensitive, and a misaligned `circuit-breaker:`
+silently lands under the wrong parent.
+
 !!! tip "Set per-service timeouts low"
     The default `timeout: 30` is conservative. In production, each
     service should carry a `pyfly.yaml` override tuned to its SLA. A
@@ -463,6 +727,23 @@ can enforce its own authorisation rules. The `headers` parameter is
 treated specially by the post-processor: when a stub method declares
 `headers: dict`, the value is forwarded as HTTP request headers, not
 serialised as a query string.
+
+!!! note "JWT, in plain language"
+    A **JWT** (JSON Web Token) is a signed string that travels in the
+    `Authorization` header and proves who the caller is. When Wallet
+    forwards the caller's JWT to Payments, Payments can re-check it and
+    apply its own rules — the identity is carried across the network
+    boundary rather than re-established from scratch.
+
+To forward headers, you add a single optional parameter. There is no new
+decorator and no special configuration:
+
+- **Add `headers: dict | None = None` to the method.** The name `headers`
+  is the magic word — the post-processor recognises it and routes its
+  value to HTTP headers instead of the query string.
+- **Pass a dict at the call site.** The handler supplies
+  `headers={"Authorization": f"Bearer {token}"}`, and PyFly attaches it to
+  the outgoing request.
 
 ::: listing lumen/sdk/payments_client_auth.py | Listing 11.6 — Forwarding auth headers per-call
 from __future__ import annotations
@@ -636,9 +917,22 @@ domain service clients.
 ### Building the Lumen BFF
 
 The Lumen SDK already ships a `LumenClient` in `lumen/sdk/client.py` that
-wraps a raw `httpx.AsyncClient`. In the BFF tier you use PyFly's
-declarative `@service_client` instead — the interface is identical but
-resilience is built in automatically. Here is the wallet-side client:
+wraps a raw `httpx.AsyncClient` — it takes an `httpx.AsyncClient` in its
+constructor and calls `self._http.get(...)`/`self._http.post(...)` by hand,
+raising on error with `response.raise_for_status()`. That is the
+*imperative* style: useful, explicit, and entirely your responsibility to
+keep resilient. In the BFF tier you use PyFly's declarative
+`@service_client` instead — the calling code looks the same, but the
+circuit breaker and retry are built in automatically.
+
+We will build the BFF in four small pieces, each its own file:
+
+**Step 1 — A `WalletClient`** that knows how to reach the Wallet service.
+**Step 2 — A `PaymentsClient`** with one extra endpoint the BFF needs.
+**Step 3 — A `WalletSummaryService`** that calls both and merges the
+results. **Step 4 — A thin controller** that exposes the merged view.
+
+Start with the wallet-side client.
 
 ::: listing lumen_bff/sdk/wallet_client.py | Listing 11.9 — WalletClient for the BFF tier
 from __future__ import annotations
@@ -701,7 +995,16 @@ class PaymentsClient:
 :::
 
 The BFF service then composes the wallet balance with the pending payments
-list into a single response:
+list into a single response.
+
+!!! note "asyncio.gather, in plain language"
+    `asyncio.gather(a, b)` starts coroutines `a` and `b` at the same time
+    and waits for both to finish, returning their results as a list. For a
+    BFF this means two upstream calls overlap instead of queuing one after
+    the other. Adding `return_exceptions=True` changes one thing: instead
+    of the whole `gather` blowing up when one call fails, the failed call's
+    exception is handed back as that call's *result*, so you can inspect it
+    and still use the successful one.
 
 ::: listing lumen_bff/application/bff_service.py | Listing 11.11 — BFF service composing Wallet + Payments
 from __future__ import annotations
@@ -814,6 +1117,36 @@ controller → BFF service → declarative clients → remote HTTP. Each layer
 is independently testable: the controller with a mock service, the
 service with mock clients, and the clients with a mock `HttpClientPort`.
 
+**Run it — call the composed endpoint.** With the BFF application running
+(`uv run pyfly run --server uvicorn`) and the Wallet and Payments services
+reachable, hit the summary route with a wallet id you have already
+created:
+
+```
+curl -s http://localhost:8080/api/v1/wallets/wal-123/summary
+```
+
+Expected shape (values depend on your data):
+
+```
+{"wallet_id": "wal-123", "balance_minor": 5000, "pending_payments": []}
+```
+
+The single response merges two upstream services. To see the graceful
+degradation in action, stop the Payments service and call again — the
+`balance_minor` still comes back from Wallet, and `pending_payments`
+falls back to `[]` rather than the whole request returning a 500. That is
+`return_exceptions=True` doing its job.
+
+!!! note "Default app port"
+    PyFly serves the application on `pyfly.server.port`, which defaults to
+    `8080` (matching Spring's `server.port`). Override it with the
+    `PYFLY_SERVER_PORT` environment variable or the `pyfly.server.port`
+    config key. Note that the actuator and admin dashboard run on a
+    *separate* management port — `pyfly.management.server.port`, default
+    `9090` — so health and info endpoints never collide with your API
+    routes.
+
 !!! note "BFF scope and team ownership"
     A BFF is scoped to one frontend or one user journey — not one per
     microservice. Lumen might have a `lumen-mobile-bff` and a
@@ -896,11 +1229,15 @@ Three principles carry through the rest of Part IV:
 2. **Test the BFF with degraded upstream services.** Write a unit test
    for `WalletSummaryService.get_summary` that mocks
    `WalletClient.get_wallet` to succeed and
-   `PaymentsClient.list_pending` to raise `ServiceUnavailableException`.
+   `PaymentsClient.list_pending` to raise `ServiceUnavailableException`
+   (import it with
+   `from pyfly.client.exceptions import ServiceUnavailableException`).
    Assert that the method returns a dict with the correct `balance_minor`
    and an empty `pending_payments` list — confirming that the
    partial-response fallback works and a single upstream failure does not
-   propagate as an exception to the BFF's caller.
+   propagate as an exception to the BFF's caller. Run it with
+   `uv run --extra dev pytest tests/test_wallet_summary.py -q` and look
+   for `1 passed`.
 
 3. **Tune circuit breaker thresholds for a brittle upstream.** Suppose
    Payments has a known flakiness window during its nightly batch run:

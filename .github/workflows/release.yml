@@ -75,12 +75,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${USE_NOTES_FILE}" = "1" ]; then
-            gh release create "$TAG_NAME" dist/* \
+            gh release create "$TAG_NAME" dist/* book/dist/*.epub book/dist/*.pdf \
               --repo "$REPO" \
               --title "$TAG_NAME" \
               --notes-file RELEASE_NOTES.md
           else
-            gh release create "$TAG_NAME" dist/* \
+            gh release create "$TAG_NAME" dist/* book/dist/*.epub book/dist/*.pdf \
               --repo "$REPO" \
               --title "$TAG_NAME" \
               --generate-notes
