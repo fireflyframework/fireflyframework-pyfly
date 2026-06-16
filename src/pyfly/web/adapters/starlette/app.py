@@ -460,6 +460,15 @@ def create_app(
     app.state.pyfly_route_metadata = route_metadata
     app.state.pyfly_docs_enabled = docs_enabled
 
+    # Expose the live actuator HealthAggregator so consumers can register extra
+    # health indicators after create_app (e.g. a readiness-only probe for an
+    # external dependency). This is the SAME aggregator the live health routes
+    # use — whether actuator runs on the main app (shared mode) or on the
+    # separate management app — so indicators added here are reflected on
+    # /actuator/health regardless of management mode.
+    if agg is not None:
+        app.state.pyfly_health_aggregator = agg
+
     # Expose the post-start rescan for callers that manage their own lifespan.
     app.state.pyfly_install_dynamic_wiring = lambda: _install_dynamic_wiring(app)
     if actuator_active:

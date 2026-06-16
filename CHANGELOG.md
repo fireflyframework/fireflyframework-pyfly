@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.108 (2026-06-16)
+
+### Added
+
+- **The live actuator ``HealthAggregator`` is exposed on
+  ``app.state.pyfly_health_aggregator``.** Consumers can now register extra
+  health indicators after ``create_app`` (e.g. a readiness-only probe for an
+  external dependency) without introspecting route closures. It is the *same*
+  aggregator the live health routes use — whether actuator runs on the main app
+  (shared management mode) or on the separate management port — so indicators
+  added through it are reflected on ``/actuator/health`` in either mode.
+
+---
+
 ## v26.06.107 (2026-06-16)
 
 ### Added

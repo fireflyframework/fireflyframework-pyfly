@@ -129,6 +129,71 @@ async def test_separate_mode_without_lifespan_degrades_to_shared() -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_aggregator_exposed_and_live_in_shared_mode() -> None:
+    # app.state.pyfly_health_aggregator must be the SAME aggregator backing the
+    # live health routes: an indicator added to it post-create_app shows up on
+    # /actuator/health (the mechanism cdm-mexico uses for its Fabric readiness probe).
+    from starlette.testclient import TestClient
+
+    from pyfly.actuator.health import HealthAggregator, HealthStatus, ProbeGroup
+
+    class _DownDep:
+        async def health(self) -> HealthStatus:
+            return HealthStatus(status="DOWN", details={"reason": "offline"})
+
+    ctx = ApplicationContext(
+        Config({"pyfly": {"management": {"endpoints": {"web": {"exposure": {"include": "health"}}}}}})
+    )
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(app_: Any):
+        await ctx.start()
+        app_.state.pyfly_install_dynamic_wiring()
+        yield
+        await ctx.stop()
+
+    app = create_app(context=ctx, docs_enabled=False, lifespan=_lifespan)
+    agg = getattr(app.state, "pyfly_health_aggregator", None)
+    assert isinstance(agg, HealthAggregator)
+
+    with TestClient(app) as client:
+        assert client.get("/actuator/health/readiness").status_code == 200
+        # Register a readiness-only DOWN indicator on the exposed aggregator.
+        agg.add_indicator("dep", _DownDep(), groups={ProbeGroup.READINESS})
+        readiness = client.get("/actuator/health/readiness")
+        assert readiness.status_code == 503
+        assert readiness.json()["components"]["dep"]["status"] == "DOWN"
+        # Readiness-only: liveness stays UP (the probe-group semantics hold).
+        assert client.get("/actuator/health/liveness").status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_health_aggregator_exposed_in_separate_mode() -> None:
+    # Even when actuator runs on a separate management port, the aggregator is
+    # exposed on the main app's state (it is the same instance the management app
+    # serves), so consumers holding the main app can still register indicators.
+    ctx = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "server": {"port": 8080},
+                    "management": {"server": {"port": 9096}, "endpoints": {"web": {"exposure": {"include": "*"}}}},
+                }
+            }
+        )
+    )
+    await ctx.start()
+    try:
+        from pyfly.actuator.health import HealthAggregator
+
+        # No lifespan entry → the management listener never binds a real port.
+        app = create_app(context=ctx, docs_enabled=False, lifespan=_noop_lifespan)
+        assert isinstance(getattr(app.state, "pyfly_health_aggregator", None), HealthAggregator)
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.asyncio
 async def test_equal_port_stays_shared() -> None:
     paths = await _main_paths(
         {
