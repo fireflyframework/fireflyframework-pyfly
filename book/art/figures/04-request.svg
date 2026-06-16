@@ -1,129 +1,92 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 220"
-     role="img" aria-label="HTTP request flow: Client through Filter chain, Controller, Service, Repository, back to Client with 200/JSON"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300"
+     role="img" aria-label="HTTP request lifecycle: a request flows through the Client, Filter chain, Controller, Service and Repository, then a 200/JSON response returns to the Client"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="220" fill="#eaf6df"/>
-
-  <!-- ── Arrow markers ── -->
   <defs>
-    <marker id="req-arrow-fwd" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    <linearGradient id="rq-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="rq-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
     </marker>
-    <marker id="req-arrow-bwd" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+    <marker id="rq-bwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
     </marker>
-    <filter id="req-shadow" x="-12%" y="-12%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.20"/>
+    <filter id="rq-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
   </defs>
 
-  <!-- Node layout: 5 nodes across 700px
-       Client:       x=20,  w=72
-       Filter chain: x=120, w=92
-       Controller:   x=250, w=90
-       Service:      x=378, w=80
-       Repository:   x=490, w=90 (right edge ~580)
-       All at y=70, h=50
-  -->
+  <!-- card -->
+  <rect x="6" y="6" width="748" height="288" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── Forward request arrow (top, left→right) ── -->
-  <line x1="30" y1="55" x2="660" y2="55"
-        stroke="#43b02a" stroke-width="1.5" stroke-dasharray="4,3"
-        marker-end="url(#req-arrow-fwd)"/>
-  <text x="345" y="46" text-anchor="middle"
-        fill="#43b02a" font-size="10" font-weight="600">request</text>
+  <!-- forward flow rail label -->
+  <text x="34" y="50" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">REQUEST</text>
+  <path d="M92 44 L104 44 M100 41 L104 44 L100 47" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- return rail label -->
+  <path d="M46 248 L34 248 M38 245 L34 248 L38 251" fill="none" stroke="#5b7a9d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="52" y="252" fill="#5b7a9d" font-size="11" font-weight="700" letter-spacing="0.08em">RESPONSE</text>
 
-  <!-- ── Return arrow (bottom, right→left) carrying 200/JSON tag ── -->
-  <line x1="660" y1="160" x2="32" y2="160"
-        stroke="#8aa07e" stroke-width="1.5" stroke-dasharray="4,3"
-        marker-end="url(#req-arrow-bwd)"/>
-  <!-- 200/JSON tag centered on return arrow -->
-  <rect x="294" y="151" width="74" height="18" rx="9" ry="9"
-        fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-  <text x="331" y="160" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10" font-weight="600">200 / JSON</text>
+  <!-- ===== nodes: 5 across; x = 40,180,320,460,600 ; w=120 h=78 y=96 ===== -->
+  <!-- forward arrows between nodes (y=135) -->
+  <line x1="162" y1="135" x2="178" y2="135" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rq-fwd)"/>
+  <line x1="302" y1="135" x2="318" y2="135" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rq-fwd)"/>
+  <line x1="442" y1="135" x2="458" y2="135" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rq-fwd)"/>
+  <line x1="582" y1="135" x2="598" y2="135" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rq-fwd)"/>
 
-  <!-- ── Client node ── -->
-  <rect x="20" y="68" width="72" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
-  <!-- Header bar -->
-  <rect x="20" y="68" width="72" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="20" y="78" width="72" height="10" fill="#43b02a"/>
-  <text x="56" y="78" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Client</text>
-  <text x="56" y="104" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">browser /</text>
-  <text x="56" y="114" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">curl</text>
+  <!-- node 1 Client -->
+  <g filter="url(#rq-sh)">
+    <rect x="40" y="96" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 107a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H40Z" fill="url(#rq-head)"/>
+    <text x="100" y="113" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Client</text>
+  </g>
+  <text x="100" y="146" text-anchor="middle" fill="#33402e" font-size="10.5">browser / curl</text>
+  <text x="100" y="162" text-anchor="middle" fill="#7a8472" font-size="9.5">sends the request</text>
+  <circle cx="52" cy="108" r="11" fill="#1f5e16"/><text x="52" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- ── Filter chain node ── -->
-  <rect x="120" y="68" width="92" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#req-shadow)"/>
-  <rect x="120" y="68" width="92" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="120" y="78" width="92" height="10" fill="#43b02a"/>
-  <text x="166" y="78" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Filter chain</text>
-  <text x="166" y="103" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">auth · logging</text>
-  <text x="166" y="113" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">rate-limit</text>
+  <!-- node 2 Filter chain -->
+  <g filter="url(#rq-sh)">
+    <rect x="180" y="96" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M180 107a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H180Z" fill="url(#rq-head)"/>
+    <text x="240" y="113" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Filter chain</text>
+  </g>
+  <text x="240" y="146" text-anchor="middle" fill="#33402e" font-size="10.5">auth &#183; logging</text>
+  <text x="240" y="162" text-anchor="middle" fill="#7a8472" font-size="9.5">rate-limit, CORS</text>
+  <circle cx="192" cy="108" r="11" fill="#1f5e16"/><text x="192" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- ── Controller node ── -->
-  <rect x="250" y="68" width="90" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#req-shadow)"/>
-  <rect x="250" y="68" width="90" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="250" y="78" width="90" height="10" fill="#43b02a"/>
-  <text x="295" y="78" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Controller</text>
-  <text x="295" y="104" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">@get_mapping</text>
-  <text x="295" y="114" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">route handler</text>
+  <!-- node 3 Controller -->
+  <g filter="url(#rq-sh)">
+    <rect x="320" y="96" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M320 107a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H320Z" fill="url(#rq-head)"/>
+    <text x="380" y="113" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Controller</text>
+  </g>
+  <text x="380" y="146" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@get_mapping</text>
+  <text x="380" y="162" text-anchor="middle" fill="#7a8472" font-size="9.5">route handler</text>
+  <circle cx="332" cy="108" r="11" fill="#1f5e16"/><text x="332" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── Service node ── -->
-  <rect x="378" y="68" width="80" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#req-shadow)"/>
-  <rect x="378" y="68" width="80" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="378" y="78" width="80" height="10" fill="#43b02a"/>
-  <text x="418" y="78" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Service</text>
-  <text x="418" y="104" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">@service</text>
-  <text x="418" y="114" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">business logic</text>
+  <!-- node 4 Service -->
+  <g filter="url(#rq-sh)">
+    <rect x="460" y="96" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M460 107a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H460Z" fill="url(#rq-head)"/>
+    <text x="520" y="113" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Service</text>
+  </g>
+  <text x="520" y="146" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@service</text>
+  <text x="520" y="162" text-anchor="middle" fill="#7a8472" font-size="9.5">business logic</text>
+  <circle cx="472" cy="108" r="11" fill="#1f5e16"/><text x="472" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
-  <!-- ── Repository node ── -->
-  <rect x="490" y="68" width="90" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#req-shadow)"/>
-  <rect x="490" y="68" width="90" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="490" y="78" width="90" height="10" fill="#43b02a"/>
-  <text x="535" y="78" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Repository</text>
-  <text x="535" y="104" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">@repository</text>
-  <text x="535" y="114" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">data access</text>
+  <!-- node 5 Repository -->
+  <g filter="url(#rq-sh)">
+    <rect x="600" y="96" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M600 107a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H600Z" fill="url(#rq-head)"/>
+    <text x="660" y="113" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Repository</text>
+  </g>
+  <text x="660" y="146" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@repository</text>
+  <text x="660" y="162" text-anchor="middle" fill="#7a8472" font-size="9.5">data access</text>
+  <circle cx="612" cy="108" r="11" fill="#1f5e16"/><text x="612" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">5</text>
 
-  <!-- Vertical connectors from forward arrow down to node tops -->
-  <line x1="56" y1="55" x2="56" y2="68" stroke="#43b02a" stroke-width="1.5"/>
-  <line x1="166" y1="55" x2="166" y2="68" stroke="#43b02a" stroke-width="1.5"/>
-  <line x1="295" y1="55" x2="295" y2="68" stroke="#43b02a" stroke-width="1.5"/>
-  <line x1="418" y1="55" x2="418" y2="68" stroke="#43b02a" stroke-width="1.5"/>
-  <line x1="535" y1="55" x2="535" y2="68" stroke="#43b02a" stroke-width="1.5"/>
-
-  <!-- Vertical connectors from node bottoms to return arrow -->
-  <line x1="56" y1="118" x2="56" y2="160" stroke="#8aa07e" stroke-width="1.5"/>
-  <line x1="166" y1="118" x2="166" y2="160" stroke="#8aa07e" stroke-width="1.5"/>
-  <line x1="295" y1="118" x2="295" y2="160" stroke="#8aa07e" stroke-width="1.5"/>
-  <line x1="418" y1="118" x2="418" y2="160" stroke="#8aa07e" stroke-width="1.5"/>
-  <line x1="535" y1="118" x2="535" y2="160" stroke="#8aa07e" stroke-width="1.5"/>
-
+  <!-- return path: from repo bottom back along y=212 to client, dashed -->
+  <path d="M660 174 L660 212 L100 212 L100 174" fill="none" stroke="#5b7a9d" stroke-width="2"
+        stroke-dasharray="5,4" marker-end="url(#rq-bwd)"/>
+  <rect x="342" y="201" width="76" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="380" y="216" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-weight="600">200 / JSON</text>
 </svg>

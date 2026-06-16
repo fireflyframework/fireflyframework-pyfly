@@ -1,140 +1,118 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 300"
-     role="img" aria-label="CQRS two-lane diagram: Controller dispatches Commands via CommandBus to TransferFundsHandler writing to DB; and Queries via QueryBus to GetBalanceHandler reading from read model"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 348"
+     role="img" aria-label="CQRS two-lane diagram: the Controller dispatches commands through the CommandBus to TransferFundsHandler which writes to the write DB; and queries through the QueryBus to GetBalanceHandler which reads from the read model"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="300" fill="#eaf6df"/>
-
   <defs>
-    <filter id="cqrs-shadow" x="-10%" y="-10%" width="126%" height="126%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="cq-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="cq-head-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b7a9d"/>
+      <stop offset="1" stop-color="#3f5b7a"/>
+    </linearGradient>
+    <marker id="cq-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="cq-read" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <filter id="cq-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="cqrs-arrow-write" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="cqrs-arrow-read" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
   </defs>
 
-  <!-- ── Lane backgrounds ── -->
-  <!-- Write lane: top half -->
-  <rect x="0" y="0" width="700" height="148" rx="0" ry="0" fill="#f2faf0" opacity="0.7"/>
-  <!-- Read lane: bottom half -->
-  <rect x="0" y="150" width="700" height="150" rx="0" ry="0" fill="#f8fbf6" opacity="0.7"/>
+  <!-- card -->
+  <rect x="6" y="6" width="788" height="336" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- Lane separator -->
-  <line x1="0" y1="150" x2="700" y2="150" stroke="#b8d9a0" stroke-width="2" stroke-dasharray="8,6"/>
+  <!-- lane separator -->
+  <line x1="200" y1="174" x2="770" y2="174" stroke="#e7ece1" stroke-width="1.5" stroke-dasharray="6,5"/>
 
-  <!-- Lane labels -->
-  <text x="12" y="30" dominant-baseline="middle"
-        fill="#43b02a" font-size="12" font-weight="700">writes</text>
-  <text x="12" y="215" dominant-baseline="middle"
-        fill="#8aa07e" font-size="12" font-weight="700">reads</text>
+  <!-- ===== lane labels ===== -->
+  <!-- write lane label -->
+  <text x="240" y="50" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">WRITES &#183; COMMANDS</text>
+  <path d="M392 44 L406 44 M401 41 L406 44 L401 47" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- read lane label -->
+  <text x="240" y="316" fill="#5b7a9d" font-size="11" font-weight="700" letter-spacing="0.08em">READS &#183; QUERIES</text>
+  <path d="M380 310 L394 310 M389 307 L394 310 L389 313" fill="none" stroke="#5b7a9d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- ── Controller box (left, spans both lanes) ── -->
-  <rect x="36" y="96" width="100" height="60" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#cqrs-shadow)"/>
-  <!-- Header -->
-  <rect x="36" y="96" width="100" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="36" y="108" width="100" height="12" fill="#43b02a"/>
-  <text x="86" y="108" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">Controller</text>
-  <text x="86" y="136" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">POST / GET</text>
+  <!-- ===== Controller (left, spans both lanes) ===== -->
+  <g filter="url(#cq-sh)">
+    <rect x="34" y="135" width="130" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M34 146a11 11 0 0 1 11-11h108a11 11 0 0 1 11 11v17H34Z" fill="url(#cq-head)"/>
+    <text x="99" y="152" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Controller</text>
+  </g>
+  <text x="99" y="185" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">POST / GET</text>
+  <text x="99" y="201" text-anchor="middle" fill="#7a8472" font-size="9.5">route handler</text>
+  <circle cx="46" cy="147" r="11" fill="#1f5e16"/><text x="46" y="151" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- Fork arrows from Controller -->
-  <!-- Up-right to CommandBus -->
-  <polyline points="136,114 162,90 196,90"
-            fill="none" stroke="#43b02a" stroke-width="2"
-            marker-end="url(#cqrs-arrow-write)"/>
-  <!-- Down-right to QueryBus -->
-  <polyline points="136,144 162,210 196,210"
-            fill="none" stroke="#8aa07e" stroke-width="2"
-            marker-end="url(#cqrs-arrow-read)"/>
+  <!-- ===== fork connectors from Controller ===== -->
+  <!-- up to CommandBus -->
+  <path d="M164 158 L184 158 L184 96 L222 96" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#cq-fwd)"/>
+  <!-- down to QueryBus -->
+  <path d="M164 190 L184 190 L184 252 L222 252" fill="none" stroke="#5b7a9d" stroke-width="2.4" stroke-dasharray="5,4" marker-end="url(#cq-read)"/>
 
-  <!-- ── CommandBus box (write lane) ── -->
-  <rect x="198" y="66" width="110" height="48" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#cqrs-shadow)"/>
-  <!-- Header -->
-  <rect x="198" y="66" width="110" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="198" y="78" width="110" height="10" fill="#43b02a"/>
-  <text x="253" y="77" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">CommandBus</text>
-  <text x="253" y="102" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">dispatch(cmd)</text>
+  <!-- ===== WRITE LANE: CommandBus -> TransferFundsHandler -> write DB (y center 96) ===== -->
+  <!-- arrows -->
+  <line x1="356" y1="96" x2="382" y2="96" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#cq-fwd)"/>
+  <line x1="556" y1="96" x2="582" y2="96" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#cq-fwd)"/>
 
-  <!-- CommandBus → TransferFundsHandler -->
-  <line x1="308" y1="90" x2="348" y2="90"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#cqrs-arrow-write)"/>
+  <!-- CommandBus -->
+  <g filter="url(#cq-sh)">
+    <rect x="224" y="62" width="130" height="68" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M224 73a11 11 0 0 1 11-11h108a11 11 0 0 1 11 11v17H224Z" fill="url(#cq-head)"/>
+    <text x="289" y="79" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">CommandBus</text>
+  </g>
+  <text x="289" y="112" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">send(cmd)</text>
+  <circle cx="236" cy="74" r="11" fill="#1f5e16"/><text x="236" y="78" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- ── TransferFundsHandler box ── -->
-  <rect x="350" y="62" width="158" height="56" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#cqrs-shadow)"/>
-  <!-- Header -->
-  <rect x="350" y="62" width="158" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="350" y="74" width="158" height="10" fill="#43b02a"/>
-  <text x="429" y="73" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">TransferFundsHandler</text>
-  <text x="429" y="100" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">handle(cmd)</text>
+  <!-- TransferFundsHandler -->
+  <g filter="url(#cq-sh)">
+    <rect x="384" y="56" width="172" height="80" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M384 67a11 11 0 0 1 11-11h150a11 11 0 0 1 11 11v17H384Z" fill="url(#cq-head)"/>
+    <text x="470" y="73" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">TransferFundsHandler</text>
+  </g>
+  <text x="470" y="106" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">handle(cmd)</text>
+  <text x="470" y="122" text-anchor="middle" fill="#7a8472" font-size="9.5">mutates state</text>
+  <circle cx="396" cy="68" r="11" fill="#1f5e16"/><text x="396" y="72" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- TransferFundsHandler → write model DB -->
-  <line x1="508" y1="90" x2="548" y2="90"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#cqrs-arrow-write)"/>
+  <!-- write DB cylinder -->
+  <g filter="url(#cq-sh)">
+    <path d="M584 78 a32 11 0 0 1 64 0 v32 a32 11 0 0 1 -64 0 Z" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <ellipse cx="616" cy="78" rx="32" ry="11" fill="url(#cq-head)" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <text x="616" y="104" text-anchor="middle" fill="#1c2420" font-size="11" font-weight="700">write DB</text>
+  <text x="616" y="132" text-anchor="middle" fill="#7a8472" font-size="9.5">source of truth</text>
 
-  <!-- Write model DB cylinder (small) -->
-  <ellipse cx="590" cy="78" rx="36" ry="11" fill="#43b02a" stroke="#2f7d1c" stroke-width="1.8"/>
-  <rect x="554" y="78" width="72" height="40" fill="#5fd13a" stroke="#2f7d1c" stroke-width="1.8"/>
-  <ellipse cx="590" cy="118" rx="36" ry="11" fill="#43b02a" stroke="#2f7d1c" stroke-width="1.8"/>
-  <ellipse cx="580" cy="75" rx="12" ry="4" fill="#a0e070" opacity="0.5"/>
-  <text x="590" y="100" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">write DB</text>
+  <!-- ===== READ LANE: QueryBus -> GetBalanceHandler -> read model (y center 252) ===== -->
+  <!-- arrows -->
+  <line x1="356" y1="252" x2="382" y2="252" stroke="#5b7a9d" stroke-width="2.4" stroke-dasharray="5,4" marker-end="url(#cq-read)"/>
+  <line x1="556" y1="252" x2="582" y2="252" stroke="#5b7a9d" stroke-width="2.4" stroke-dasharray="5,4" marker-end="url(#cq-read)"/>
 
-  <!-- ── QueryBus box (read lane) ── -->
-  <rect x="198" y="186" width="110" height="48" rx="10" ry="10"
-        fill="#eaf6df" stroke="#8aa07e" stroke-width="2" filter="url(#cqrs-shadow)"/>
-  <!-- Header -->
-  <rect x="198" y="186" width="110" height="22" rx="10" ry="10" fill="#8aa07e"/>
-  <rect x="198" y="198" width="110" height="10" fill="#8aa07e"/>
-  <text x="253" y="197" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">QueryBus</text>
-  <text x="253" y="222" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">dispatch(qry)</text>
+  <!-- QueryBus -->
+  <g filter="url(#cq-sh)">
+    <rect x="224" y="218" width="130" height="68" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M224 229a11 11 0 0 1 11-11h108a11 11 0 0 1 11 11v17H224Z" fill="url(#cq-head-slate)"/>
+    <text x="289" y="235" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">QueryBus</text>
+  </g>
+  <text x="289" y="268" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">query(qry)</text>
+  <circle cx="236" cy="230" r="11" fill="#1f5e16"/><text x="236" y="234" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- QueryBus → GetBalanceHandler -->
-  <line x1="308" y1="210" x2="348" y2="210"
-        stroke="#8aa07e" stroke-width="2"
-        marker-end="url(#cqrs-arrow-read)"/>
+  <!-- GetBalanceHandler -->
+  <g filter="url(#cq-sh)">
+    <rect x="384" y="212" width="172" height="80" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M384 223a11 11 0 0 1 11-11h150a11 11 0 0 1 11 11v17H384Z" fill="url(#cq-head-slate)"/>
+    <text x="470" y="229" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">GetBalanceHandler</text>
+  </g>
+  <text x="470" y="262" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">handle(qry)</text>
+  <text x="470" y="278" text-anchor="middle" fill="#7a8472" font-size="9.5">returns a DTO</text>
+  <circle cx="396" cy="224" r="11" fill="#1f5e16"/><text x="396" y="228" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── GetBalanceHandler box ── -->
-  <rect x="350" y="182" width="158" height="56" rx="10" ry="10"
-        fill="#eaf6df" stroke="#8aa07e" stroke-width="2" filter="url(#cqrs-shadow)"/>
-  <!-- Header -->
-  <rect x="350" y="182" width="158" height="22" rx="10" ry="10" fill="#8aa07e"/>
-  <rect x="350" y="194" width="158" height="10" fill="#8aa07e"/>
-  <text x="429" y="193" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">GetBalanceHandler</text>
-  <text x="429" y="220" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">handle(qry)</text>
-
-  <!-- GetBalanceHandler → read model -->
-  <line x1="508" y1="210" x2="548" y2="210"
-        stroke="#8aa07e" stroke-width="2"
-        marker-end="url(#cqrs-arrow-read)"/>
-
-  <!-- Read model box -->
-  <rect x="550" y="186" width="110" height="48" rx="10" ry="10"
-        fill="#f0f8ea" stroke="#8aa07e" stroke-width="2"/>
-  <rect x="550" y="186" width="110" height="22" rx="10" ry="10" fill="#8aa07e"/>
-  <rect x="550" y="198" width="110" height="10" fill="#8aa07e"/>
-  <text x="605" y="197" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">read model</text>
-  <text x="605" y="222" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">view / cache</text>
-
+  <!-- read model -->
+  <g filter="url(#cq-sh)">
+    <rect x="582" y="218" width="130" height="68" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M582 229a11 11 0 0 1 11-11h108a11 11 0 0 1 11 11v17H582Z" fill="url(#cq-head-slate)"/>
+    <text x="647" y="235" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">read model</text>
+  </g>
+  <text x="647" y="268" text-anchor="middle" fill="#33402e" font-size="10.5">view / cache</text>
+  <text x="647" y="283" text-anchor="middle" fill="#7a8472" font-size="9.5">read-optimized</text>
 </svg>

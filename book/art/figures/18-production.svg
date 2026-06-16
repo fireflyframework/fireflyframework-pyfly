@@ -1,120 +1,120 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 240"
-     role="img" aria-label="Production figure: Plugins and Rule Engine feed into Lumen runtime core; Lumen ships to Docker container deploy, then to cloud"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 400"
+     role="img" aria-label="Production deployment: an ingress exposes only port 8080 to the internet; one PyFly process listens on two ports - application 8080 for business traffic and management 9090 for actuator and admin; observability (Prometheus, health probes, admin console) reaches 9090 from inside the cluster"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="240" fill="#eaf6df"/>
-
   <defs>
-    <filter id="prd-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="pr-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="pr-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="pr-mgmt" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <filter id="pr-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="prd-arr" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="prd-arr-g" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
   </defs>
 
-  <!-- Section label -->
-  <text x="28" y="26" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">production — plugins · rule engine · Lumen → deploy → cloud</text>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="388" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── Plugins box ── -->
-  <rect x="28" y="56" width="106" height="56" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#prd-shadow)"/>
-  <rect x="28" y="56" width="106" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="28" y="68" width="106" height="10" fill="#43b02a"/>
-  <text x="81" y="67" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">Plugins</text>
-  <text x="81" y="92" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">hook registry</text>
-  <text x="81" y="104" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">extension points</text>
+  <!-- rail labels -->
+  <text x="34" y="44" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.07em">PUBLIC TRAFFIC</text>
+  <path d="M170 39 L182 39 M178 36 L182 39 L178 42" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="200" y="44" fill="#3f5b7a" font-size="11" font-weight="700" letter-spacing="0.07em">port 8080 only</text>
 
-  <!-- ── Config server chip ── -->
-  <rect x="28" y="130" width="106" height="38" rx="8" ry="8"
-        fill="#fff" stroke="#5fd13a" stroke-width="1.8" filter="url(#prd-shadow)"/>
-  <rect x="28" y="130" width="106" height="18" rx="8" ry="8" fill="#5fd13a"/>
-  <rect x="28" y="140" width="106" height="8" fill="#5fd13a"/>
-  <text x="81" y="139" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="10" font-weight="700">Config server</text>
-  <text x="81" y="160" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5">remote config reload</text>
+  <path d="M580 39 L568 39 M572 36 L568 39 L572 42" fill="none" stroke="#5b7a9d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="586" y="44" fill="#5b7a9d" font-size="11" font-weight="700" letter-spacing="0.07em">cluster-internal · 9090</text>
 
-  <!-- ── Rule Engine chip ── -->
-  <rect x="28" y="184" width="106" height="40" rx="8" ry="8"
-        fill="#fff" stroke="#2c8a1c" stroke-width="1.8" filter="url(#prd-shadow)"/>
-  <rect x="28" y="184" width="106" height="18" rx="8" ry="8" fill="#2c8a1c"/>
-  <rect x="28" y="194" width="106" height="8" fill="#2c8a1c"/>
-  <text x="81" y="193" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="10" font-weight="700">Rule Engine</text>
-  <text x="81" y="214" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5">hot-reload rules</text>
+  <!-- ===================== NODE 1: Internet / Ingress ===================== -->
+  <line x1="162" y1="150" x2="200" y2="150" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#pr-fwd)"/>
 
-  <!-- Arrows → Lumen -->
-  <line x1="134" y1="84" x2="210" y2="110"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
-  <line x1="134" y1="149" x2="210" y2="120"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
-  <line x1="134" y1="204" x2="210" y2="130"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#prd-arr)"/>
-
-  <!-- ── Lumen (central runtime) ── -->
-  <rect x="212" y="80" width="130" height="80" rx="12" ry="12"
-        fill="#fff" stroke="#2c8a1c" stroke-width="3" filter="url(#prd-shadow)"/>
-  <rect x="212" y="80" width="130" height="28" rx="12" ry="12" fill="#2c8a1c"/>
-  <rect x="212" y="96" width="130" height="12" fill="#2c8a1c"/>
-  <text x="277" y="94" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="14" font-weight="700">Lumen</text>
-  <text x="277" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">PyFly runtime core</text>
-  <text x="277" y="148" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">DI · web · data · events</text>
-
-  <!-- Arrow Lumen → Docker -->
-  <line x1="342" y1="120" x2="386" y2="120"
-        stroke="#43b02a" stroke-width="2.5" marker-end="url(#prd-arr-g)"/>
-  <text x="364" y="110" text-anchor="middle"
-        fill="#43b02a" font-size="9" font-weight="600">ship</text>
-
-  <!-- ── Docker deploy box ── -->
-  <rect x="388" y="80" width="120" height="80" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#prd-shadow)"/>
-  <rect x="388" y="80" width="120" height="28" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="388" y="96" width="120" height="12" fill="#43b02a"/>
-  <text x="448" y="94" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">Docker</text>
-  <!-- Container with up-arrow inside -->
-  <rect x="420" y="118" width="56" height="28" rx="4" ry="4"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="448" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="9" font-weight="600">container</text>
-  <line x1="448" y1="138" x2="448" y2="148" stroke="#43b02a" stroke-width="2"
-        marker-end="url(#prd-arr-g)"/>
-
-  <!-- Arrow Docker → cloud -->
-  <line x1="508" y1="120" x2="552" y2="120"
-        stroke="#43b02a" stroke-width="2" marker-end="url(#prd-arr-g)"/>
-
-  <!-- ── Cloud target ── -->
-  <!-- Cloud shape -->
-  <ellipse cx="600" cy="114" rx="46" ry="28" fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#prd-shadow)"/>
-  <ellipse cx="578" cy="118" rx="20" ry="16" fill="#fff" stroke="#43b02a" stroke-width="2"/>
-  <ellipse cx="622" cy="118" rx="20" ry="16" fill="#fff" stroke="#43b02a" stroke-width="2"/>
-  <!-- Cloud inner fill to hide seams -->
-  <ellipse cx="600" cy="120" rx="48" ry="22" fill="#fff"/>
-  <text x="600" y="118" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="12" font-weight="700">cloud</text>
-  <text x="600" y="152" text-anchor="middle"
-        fill="#6a7a64" font-size="9">AWS / GCP / bare metal</text>
-
-  <!-- Amber sparkle -->
-  <g transform="translate(666, 40)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <g filter="url(#pr-sh)">
+    <rect x="40" y="112" width="122" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 123a11 11 0 0 1 11-11h100a11 11 0 0 1 11 11v17H40Z" fill="url(#pr-head)"/>
+    <text x="101" y="129" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Ingress</text>
   </g>
+  <text x="101" y="162" text-anchor="middle" fill="#33402e" font-size="10.5">internet edge</text>
+  <text x="101" y="178" text-anchor="middle" fill="#7a8472" font-size="9.5">exposes 8080 only</text>
+  <text x="101" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">TLS · routing</text>
+  <circle cx="52" cy="124" r="11" fill="#1f5e16"/><text x="52" y="128" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
+  <!-- ===================== NODE 2: PyFly process (one card, two ports) ===================== -->
+  <g filter="url(#pr-sh)">
+    <rect x="202" y="86" width="356" height="228" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M202 97a11 11 0 0 1 11-11h334a11 11 0 0 1 11 11v17H202Z" fill="url(#pr-head)"/>
+    <text x="380" y="103" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">PyFly process (one process)</text>
+  </g>
+  <text x="380" y="135" text-anchor="middle" fill="#7a8472" font-size="9.5">two in-process listeners - not extra workers</text>
+  <circle cx="214" cy="98" r="11" fill="#1f5e16"/><text x="214" y="102" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
+
+  <!-- inner: application port listener -->
+  <rect x="222" y="150" width="150" height="142" rx="9" fill="#ffffff" stroke="#3a9e23" stroke-width="1.6"/>
+  <rect x="222" y="150" width="150" height="26" rx="9" fill="#eef3f8"/>
+  <rect x="222" y="166" width="150" height="10" fill="#eef3f8"/>
+  <text x="297" y="167" text-anchor="middle" fill="#2c8a1c" font-size="11" font-weight="700">application port</text>
+  <text x="297" y="195" text-anchor="middle" fill="#1c2420" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">:8080</text>
+  <text x="297" y="216" text-anchor="middle" fill="#33402e" font-size="10">business API</text>
+  <text x="297" y="232" text-anchor="middle" fill="#33402e" font-size="10">WebSocket feeds</text>
+  <text x="297" y="248" text-anchor="middle" fill="#33402e" font-size="10">OpenAPI spec</text>
+  <text x="297" y="264" text-anchor="middle" fill="#33402e" font-size="10">config-server routes</text>
+  <text x="297" y="282" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">pyfly.server.port</text>
+
+  <!-- inner: management port listener -->
+  <rect x="388" y="150" width="150" height="142" rx="9" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.6"/>
+  <rect x="388" y="150" width="150" height="26" rx="9" fill="#eef3f8"/>
+  <rect x="388" y="166" width="150" height="10" fill="#eef3f8"/>
+  <text x="463" y="167" text-anchor="middle" fill="#3f5b7a" font-size="11" font-weight="700">management port</text>
+  <text x="463" y="195" text-anchor="middle" fill="#1c2420" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">:9090</text>
+  <text x="463" y="216" text-anchor="middle" fill="#33402e" font-size="10" font-family="ui-monospace,Menlo,monospace">/actuator/*</text>
+  <text x="463" y="232" text-anchor="middle" fill="#33402e" font-size="10" font-family="ui-monospace,Menlo,monospace">/admin</text>
+  <text x="463" y="248" text-anchor="middle" fill="#33402e" font-size="10">health probes</text>
+  <text x="463" y="264" text-anchor="middle" fill="#33402e" font-size="10">Prometheus scrape</text>
+  <text x="463" y="282" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">management.server.port</text>
+
+  <!-- open-by-default warning badge on management port -->
+  <g transform="translate(530,150)">
+    <circle cx="0" cy="0" r="10" fill="#ffffff" stroke="#c2410c" stroke-width="1.6"/>
+    <rect x="-1" y="-5.5" width="2" height="6.5" rx="1" fill="#c2410c"/>
+    <circle cx="0" cy="4" r="1.4" fill="#c2410c"/>
+  </g>
+  <text x="463" y="312" text-anchor="middle" fill="#c2410c" font-size="9" font-weight="600">open by default - keep inside the cluster</text>
+
+  <!-- ===================== NODE 3: Observability ===================== -->
+  <line x1="558" y1="221" x2="598" y2="221" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#pr-mgmt)"/>
+
+  <g filter="url(#pr-sh)">
+    <rect x="600" y="112" width="146" height="218" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M600 123a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v17H600Z" fill="url(#pr-head)"/>
+    <text x="673" y="129" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Observability</text>
+  </g>
+  <circle cx="612" cy="124" r="11" fill="#1f5e16"/><text x="612" y="128" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
+
+  <!-- consumer rows -->
+  <rect x="616" y="152" width="114" height="32" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.4"/>
+  <text x="673" y="167" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-weight="600">Prometheus</text>
+  <text x="673" y="179" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">/actuator/prometheus</text>
+
+  <rect x="616" y="192" width="114" height="32" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.4"/>
+  <text x="673" y="207" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-weight="600">K8s probes</text>
+  <text x="673" y="219" text-anchor="middle" fill="#7a8472" font-size="9">liveness · readiness</text>
+
+  <rect x="616" y="232" width="114" height="32" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.4"/>
+  <text x="673" y="247" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-weight="600">Admin console</text>
+  <text x="673" y="259" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">/admin</text>
+
+  <rect x="616" y="272" width="114" height="32" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.4"/>
+  <text x="673" y="287" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-weight="600">Metrics drill-down</text>
+  <text x="673" y="299" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">/actuator/metrics</text>
+
+  <!-- ===================== bottom legend ===================== -->
+  <line x1="40" y1="346" x2="64" y2="346" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#pr-fwd)"/>
+  <text x="74" y="350" fill="#33402e" font-size="9.5">public request flow (8080, exposed to internet)</text>
+
+  <line x1="402" y1="346" x2="426" y2="346" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#pr-mgmt)"/>
+  <text x="436" y="350" fill="#33402e" font-size="9.5">management access (9090, cluster-internal only)</text>
+
+  <text x="40" y="372" fill="#7a8472" font-size="9.5">Set management.server.port equal to server.port to collapse onto one port, or -1 to disable management endpoints.</text>
 </svg>

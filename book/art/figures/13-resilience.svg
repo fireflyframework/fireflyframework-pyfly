@@ -1,134 +1,109 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220"
-     role="img" aria-label="Resilience chain figure: request passes through Rate limiter, Bulkhead, Timeout, Circuit breaker gate chips left to right reaching Service; Fallback box below catches failures via red dashed arrow"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 330"
+     role="img" aria-label="Resilience chain: a request passes through Rate limiter, Bulkhead, Timeout and Circuit breaker gates left to right before reaching the Service; when a gate trips or rejects, a warn-orange failure path drops down to a Fallback that returns a default or cached response"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="720" height="220" fill="#eaf6df"/>
-
   <defs>
-    <filter id="res-shadow" x="-10%" y="-10%" width="126%" height="126%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="rs-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="rs-head-warn" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d4541a"/>
+      <stop offset="1" stop-color="#c2410c"/>
+    </linearGradient>
+    <marker id="rs-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="rs-fail" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#c2410c"/>
+    </marker>
+    <filter id="rs-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="res-arrow-green" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="res-arrow-red" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#d9534f"/>
-    </marker>
-    <marker id="res-arrow-muted" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
   </defs>
 
-  <!-- ── Request entry (left) ── -->
-  <text x="18" y="88" dominant-baseline="middle"
-        fill="#23402a" font-size="11" font-weight="700">Request</text>
-  <line x1="18" y1="100" x2="50" y2="100"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#res-arrow-green)"/>
+  <!-- card -->
+  <rect x="6" y="6" width="788" height="318" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- helper macro: shield gate chip is a rounded rect with a small shield icon -->
+  <!-- title rail label -->
+  <text x="32" y="50" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">RESILIENCE CHAIN</text>
+  <path d="M168 45 L182 45 M177 42 L182 45 L177 48" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Request entry -->
+  <text x="42" y="160" text-anchor="middle" fill="#33402e" font-size="11" font-weight="700">Request</text>
+  <line x1="42" y1="170" x2="116" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rs-fwd)"/>
+
+  <!-- forward arrows between gates (y=170) -->
+  <line x1="230" y1="170" x2="244" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rs-fwd)"/>
+  <line x1="356" y1="170" x2="370" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rs-fwd)"/>
+  <line x1="482" y1="170" x2="496" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rs-fwd)"/>
+  <line x1="608" y1="170" x2="634" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#rs-fwd)"/>
+
+  <!-- ===== Gate nodes: w=110 h=86 y=128 ; x = 120,246,372,498 ===== -->
+
   <!-- Gate 1: Rate limiter -->
-  <rect x="52" y="76" width="96" height="48" rx="16" ry="16"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#res-shadow)"/>
-  <!-- shield icon inside -->
-  <path d="M78 90 C78 90 72 93 72 100 C72 107 77 111 78 112 C79 111 84 107 84 100 C84 93 78 90 78 90 Z"
-        fill="#43b02a" opacity="0.3"/>
-  <text x="100" y="94" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">Rate</text>
-  <text x="100" y="108" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">limiter</text>
-
-  <!-- Gate 1 → Gate 2 -->
-  <line x1="148" y1="100" x2="162" y2="100"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#res-arrow-green)"/>
+  <g filter="url(#rs-sh)">
+    <rect x="120" y="128" width="110" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M120 139a11 11 0 0 1 11-11h88a11 11 0 0 1 11 11v17H120Z" fill="url(#rs-head)"/>
+    <text x="175" y="145" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Rate limiter</text>
+  </g>
+  <text x="175" y="174" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@rate_limiter</text>
+  <text x="183" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">drops excess</text>
+  <circle cx="133" cy="195" r="10" fill="#1f5e16"/><text x="133" y="198.5" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="700">1</text>
 
   <!-- Gate 2: Bulkhead -->
-  <rect x="164" y="76" width="96" height="48" rx="16" ry="16"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#res-shadow)"/>
-  <path d="M190 90 C190 90 184 93 184 100 C184 107 189 111 190 112 C191 111 196 107 196 100 C196 93 190 90 190 90 Z"
-        fill="#43b02a" opacity="0.3"/>
-  <text x="212" y="94" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">Bulk-</text>
-  <text x="212" y="108" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">head</text>
-
-  <!-- Gate 2 → Gate 3 -->
-  <line x1="260" y1="100" x2="274" y2="100"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#res-arrow-green)"/>
+  <g filter="url(#rs-sh)">
+    <rect x="246" y="128" width="110" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 139a11 11 0 0 1 11-11h88a11 11 0 0 1 11 11v17H246Z" fill="url(#rs-head)"/>
+    <text x="301" y="145" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Bulkhead</text>
+  </g>
+  <text x="301" y="174" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@bulkhead</text>
+  <text x="309" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">caps concurrency</text>
+  <circle cx="259" cy="195" r="10" fill="#1f5e16"/><text x="259" y="198.5" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="700">2</text>
 
   <!-- Gate 3: Timeout -->
-  <rect x="276" y="76" width="96" height="48" rx="16" ry="16"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#res-shadow)"/>
-  <path d="M302 90 C302 90 296 93 296 100 C296 107 301 111 302 112 C303 111 308 107 308 100 C308 93 302 90 302 90 Z"
-        fill="#43b02a" opacity="0.3"/>
-  <text x="324" y="100" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">Timeout</text>
-
-  <!-- Gate 3 → Gate 4 -->
-  <line x1="372" y1="100" x2="386" y2="100"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#res-arrow-green)"/>
+  <g filter="url(#rs-sh)">
+    <rect x="372" y="128" width="110" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M372 139a11 11 0 0 1 11-11h88a11 11 0 0 1 11 11v17H372Z" fill="url(#rs-head)"/>
+    <text x="427" y="145" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Timeout</text>
+  </g>
+  <text x="427" y="174" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@time_limiter</text>
+  <text x="435" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">cancels slow calls</text>
+  <circle cx="385" cy="195" r="10" fill="#1f5e16"/><text x="385" y="198.5" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="700">3</text>
 
   <!-- Gate 4: Circuit breaker -->
-  <rect x="388" y="76" width="108" height="48" rx="16" ry="16"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#res-shadow)"/>
-  <path d="M414 90 C414 90 408 93 408 100 C408 107 413 111 414 112 C415 111 420 107 420 100 C420 93 414 90 414 90 Z"
-        fill="#43b02a" opacity="0.3"/>
-  <text x="444" y="94" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">Circuit</text>
-  <text x="444" y="108" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9.5" font-weight="700">breaker</text>
-
-  <!-- Gate 4 → Service -->
-  <line x1="496" y1="100" x2="532" y2="100"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#res-arrow-green)"/>
-
-  <!-- ── Service box (right) ── -->
-  <rect x="534" y="72" width="120" height="56" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#res-shadow)"/>
-  <rect x="534" y="72" width="120" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="534" y="84" width="120" height="12" fill="#43b02a"/>
-  <text x="594" y="84" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">Service</text>
-  <text x="594" y="112" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">business logic</text>
-
-  <!-- Failure path: gates → Fallback (red dashed down) -->
-  <!-- From circuit breaker down to fallback -->
-  <line x1="442" y1="124" x2="442" y2="168"
-        stroke="#d9534f" stroke-width="2" stroke-dasharray="5,4"/>
-  <line x1="442" y1="168" x2="536" y2="168"
-        stroke="#d9534f" stroke-width="2" stroke-dasharray="5,4"
-        marker-end="url(#res-arrow-red)"/>
-
-  <!-- Failure label -->
-  <text x="442" y="148" text-anchor="middle"
-        fill="#d9534f" font-size="8.5" font-style="italic" transform="rotate(-90 442 148)">open / rejected</text>
-
-  <!-- ── Fallback box ── -->
-  <rect x="538" y="156" width="130" height="50" rx="10" ry="10"
-        fill="#fff5f5" stroke="#d9534f" stroke-width="2" filter="url(#res-shadow)"/>
-  <rect x="538" y="156" width="130" height="22" rx="10" ry="10" fill="#d9534f"/>
-  <rect x="538" y="168" width="130" height="10" fill="#d9534f"/>
-  <text x="603" y="167" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Fallback</text>
-  <text x="603" y="192" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">default / cached resp.</text>
-
-  <!-- Amber sparkle top-right -->
-  <g transform="translate(686, 38)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <g filter="url(#rs-sh)">
+    <rect x="498" y="128" width="110" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M498 139a11 11 0 0 1 11-11h88a11 11 0 0 1 11 11v17H498Z" fill="url(#rs-head)"/>
+    <text x="553" y="145" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Circuit breaker</text>
   </g>
+  <text x="557" y="173" text-anchor="middle" fill="#33402e" font-size="10">closed -&gt; open</text>
+  <text x="557" y="187" text-anchor="middle" fill="#33402e" font-size="10">-&gt; half-open</text>
+  <text x="565" y="203" text-anchor="middle" fill="#7a8472" font-size="9">trips on failure</text>
+  <circle cx="511" cy="195" r="10" fill="#1f5e16"/><text x="511" y="198.5" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="700">4</text>
 
-  <!-- Label: happy path -->
-  <text x="282" y="56" text-anchor="middle"
-        fill="#43b02a" font-size="10" font-weight="700">resilience chain</text>
+  <!-- ===== Service node (right) ===== -->
+  <g filter="url(#rs-sh)">
+    <rect x="636" y="128" width="120" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M636 139a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H636Z" fill="url(#rs-head)"/>
+    <text x="696" y="145" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Service</text>
+  </g>
+  <text x="696" y="182" text-anchor="middle" fill="#33402e" font-size="10.5">downstream call</text>
+  <text x="696" y="198" text-anchor="middle" fill="#7a8472" font-size="9.5">AccountService</text>
 
+  <!-- ===== Failure path: gate trips / rejects -> Fallback (warn orange, dashed) ===== -->
+  <!-- drop from circuit breaker, run right, into the Fallback left edge -->
+  <path d="M553 214 L553 270 L626 270" fill="none" stroke="#c2410c" stroke-width="2.4"
+        stroke-dasharray="5,4" marker-end="url(#rs-fail)"/>
+
+  <!-- failure label chip on the failure rail -->
+  <rect x="248" y="259" width="170" height="22" rx="11" fill="#fff5f0" stroke="#c2410c" stroke-width="1.5"/>
+  <text x="333" y="274" text-anchor="middle" fill="#c2410c" font-size="10" font-weight="600">open / rejected / timed out</text>
+
+  <!-- ===== Fallback node ===== -->
+  <g filter="url(#rs-sh)">
+    <rect x="630" y="242" width="148" height="56" rx="11" fill="#fff5f0" stroke="#c2410c" stroke-width="2"/>
+    <path d="M630 253a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v13H630Z" fill="url(#rs-head-warn)"/>
+    <text x="704" y="259" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Fallback</text>
+  </g>
+  <text x="704" y="284" text-anchor="middle" fill="#33402e" font-size="10.5">default / cached response</text>
 </svg>

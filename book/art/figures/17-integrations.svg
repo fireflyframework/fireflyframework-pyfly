@@ -1,153 +1,169 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260"
-     role="img" aria-label="Integrations figure: @scheduled clock triggers a Job; a Notifier sends to email, SMS, and push; inbound Webhook verifies and dispatches; outbound Callback uses HMAC and retry"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 408"
+     role="img" aria-label="Outbound integrations: a Scheduler fires internal jobs on a clock; a Notifier sends email, SMS and push to users; an inbound Webhook arrives from a partner and is HMAC-verified; an outbound Callback signs and retries to the outside world"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="260" fill="#eaf6df"/>
-
   <defs>
-    <filter id="int-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="in-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="in-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="in-bwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <marker id="in-amb" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#c2410c"/>
+    </marker>
+    <filter id="in-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="int-arr" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="int-arr-g" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="int-arr-b" markerWidth="10" markerHeight="7"
-            refX="1" refY="3.5" orient="auto">
-      <polygon points="10 0, 0 3.5, 10 7" fill="#8aa07e"/>
-    </marker>
   </defs>
 
-  <!-- Section label -->
-  <text x="28" y="24" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">integrations — schedule · notify · webhook · callback</text>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="396" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- LEFT HALF: Scheduling + Notifications                              -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- title -->
+  <text x="34" y="42" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">OUTBOUND INTEGRATIONS</text>
+  <text x="34" y="58" fill="#7a8472" font-size="9.5">schedule &#183; notify &#183; webhook &#183; callback - reaching the outside world</text>
 
-  <!-- ── Clock (@scheduled) ── -->
-  <circle cx="76" cy="90" r="36" fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#int-shadow)"/>
-  <circle cx="76" cy="90" r="4" fill="#43b02a"/>
-  <line x1="76" y1="90" x2="76" y2="66" stroke="#2c8a1c" stroke-width="2.5" stroke-linecap="round"/>
-  <line x1="76" y1="90" x2="96" y2="90" stroke="#2c8a1c" stroke-width="2.5" stroke-linecap="round"/>
-  <!-- Tick marks -->
-  <line x1="76" y1="56" x2="76" y2="62" stroke="#43b02a" stroke-width="2"/>
-  <line x1="76" y1="118" x2="76" y2="124" stroke="#43b02a" stroke-width="2"/>
-  <line x1="42" y1="90" x2="48" y2="90" stroke="#43b02a" stroke-width="2"/>
-  <line x1="104" y1="90" x2="110" y2="90" stroke="#43b02a" stroke-width="2"/>
+  <!-- ===== inside-the-app boundary ===== -->
+  <rect x="34" y="76" width="430" height="304" rx="12" fill="#f6faf2" stroke="#e7ece1" stroke-width="1.5"/>
+  <text x="46" y="96" fill="#2c8a1c" font-size="10" font-weight="700" letter-spacing="0.06em">INSIDE THE APP</text>
 
-  <text x="76" y="140" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="10" font-weight="700">@scheduled</text>
+  <!-- ===== outside boundary ===== -->
+  <rect x="486" y="76" width="262" height="304" rx="12" fill="#eef3f8" stroke="#e0e8d6" stroke-width="1.5"/>
+  <text x="498" y="96" fill="#3f5b7a" font-size="10" font-weight="700" letter-spacing="0.06em">THE OUTSIDE WORLD</text>
 
-  <!-- Arrow clock → Job -->
-  <line x1="112" y1="90" x2="146" y2="90"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#int-arr)"/>
+  <!-- ============================================================= -->
+  <!-- 1. Scheduler (internal trigger) -->
+  <!-- ============================================================= -->
+  <!-- clock glyph -->
+  <g filter="url(#in-sh)">
+    <circle cx="78" cy="146" r="22" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <circle cx="78" cy="146" r="2.6" fill="#3a9e23"/>
+  <line x1="78" y1="146" x2="78" y2="132" stroke="#2c8a1c" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="78" y1="146" x2="90" y2="146" stroke="#2c8a1c" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="78" y1="127" x2="78" y2="131" stroke="#43b02a" stroke-width="1.8"/>
+  <line x1="78" y1="161" x2="78" y2="165" stroke="#43b02a" stroke-width="1.8"/>
+  <line x1="59" y1="146" x2="63" y2="146" stroke="#43b02a" stroke-width="1.8"/>
+  <line x1="93" y1="146" x2="97" y2="146" stroke="#43b02a" stroke-width="1.8"/>
 
-  <!-- Job box -->
-  <rect x="148" y="68" width="80" height="44" rx="8" ry="8"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#int-shadow)"/>
-  <rect x="148" y="68" width="80" height="18" rx="8" ry="8" fill="#43b02a"/>
-  <rect x="148" y="78" width="80" height="8" fill="#43b02a"/>
-  <text x="188" y="77" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="10" font-weight="700">Job</text>
-  <text x="188" y="100" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">cron / interval</text>
+  <!-- step badge 1 -->
+  <circle cx="58" cy="124" r="11" fill="#1f5e16"/><text x="58" y="128" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- Divider between schedule and notify sections -->
-  <line x1="28" y1="156" x2="320" y2="156" stroke="#b8d9a0" stroke-width="1" stroke-dasharray="6,4"/>
+  <!-- clock -> Job arrow -->
+  <line x1="104" y1="146" x2="138" y2="146" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#in-fwd)"/>
 
-  <!-- ── Notifier ── -->
-  <!-- Envelope -->
-  <rect x="46" y="176" width="56" height="40" rx="6" ry="6"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#int-shadow)"/>
-  <polyline points="46,176 74,196 102,176" fill="none" stroke="#43b02a" stroke-width="1.8"/>
-  <text x="74" y="232" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="10" font-weight="700">Notifier</text>
+  <!-- Job / Scheduler node -->
+  <g filter="url(#in-sh)">
+    <rect x="142" y="116" width="146" height="62" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M142 127a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v15H142Z" fill="url(#in-head)"/>
+    <text x="215" y="132" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Scheduler</text>
+  </g>
+  <text x="215" y="158" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@scheduled</text>
+  <text x="215" y="172" text-anchor="middle" fill="#7a8472" font-size="9.5">cron / interval - fires internally</text>
 
-  <!-- Notifier → channels -->
-  <line x1="102" y1="196" x2="136" y2="183"
-        stroke="#8aa07e" stroke-width="1.5" marker-end="url(#int-arr)"/>
-  <line x1="102" y1="196" x2="136" y2="196"
-        stroke="#8aa07e" stroke-width="1.5" marker-end="url(#int-arr)"/>
-  <line x1="102" y1="196" x2="136" y2="210"
-        stroke="#8aa07e" stroke-width="1.5" marker-end="url(#int-arr)"/>
+  <!-- ============================================================= -->
+  <!-- 2. Notifier (outward to users) -->
+  <!-- ============================================================= -->
+  <!-- envelope glyph -->
+  <g filter="url(#in-sh)">
+    <rect x="56" y="232" width="44" height="32" rx="5" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <polyline points="56,234 78,250 100,234" fill="none" stroke="#3a9e23" stroke-width="1.8"/>
 
-  <!-- Channel chips -->
-  <rect x="138" y="174" width="52" height="18" rx="6" ry="6"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
-  <text x="164" y="183" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="600">email</text>
-  <rect x="138" y="187" width="52" height="18" rx="6" ry="6"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
-  <text x="164" y="196" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="600">SMS</text>
-  <rect x="138" y="200" width="52" height="18" rx="6" ry="6"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
-  <text x="164" y="209" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="600">push</text>
+  <!-- step badge 2 -->
+  <circle cx="58" cy="220" r="11" fill="#1f5e16"/><text x="58" y="224" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
-  <!-- RIGHT HALF: Webhook + Callback                                     -->
-  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- envelope -> Notifier arrow -->
+  <line x1="104" y1="248" x2="138" y2="248" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#in-fwd)"/>
 
-  <!-- Vertical divider -->
-  <line x1="332" y1="40" x2="332" y2="250" stroke="#b8d9a0" stroke-width="1" stroke-dasharray="6,4"/>
+  <!-- Notifier node -->
+  <g filter="url(#in-sh)">
+    <rect x="142" y="218" width="146" height="62" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M142 229a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v15H142Z" fill="url(#in-head)"/>
+    <text x="215" y="234" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Notifier</text>
+  </g>
+  <text x="215" y="260" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@notification</text>
+  <text x="215" y="274" text-anchor="middle" fill="#7a8472" font-size="9.5">flows outward to users</text>
 
-  <!-- ── Inbound Webhook ── -->
-  <rect x="350" y="48" width="150" height="72" rx="10" ry="10"
-        fill="#fff" stroke="#5fd13a" stroke-width="2.5" filter="url(#int-shadow)"/>
-  <rect x="350" y="48" width="150" height="24" rx="10" ry="10" fill="#5fd13a"/>
-  <rect x="350" y="60" width="150" height="12" fill="#5fd13a"/>
-  <text x="425" y="60" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="12" font-weight="700">Webhook ↓ inbound</text>
-  <text x="425" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">HMAC-SHA256 verify</text>
-  <text x="425" y="106" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">dispatch to handler</text>
+  <!-- channel chips -->
+  <rect x="306" y="219" width="58" height="19" rx="9.5" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.3"/>
+  <text x="335" y="232" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-weight="600">email</text>
+  <rect x="306" y="240" width="58" height="19" rx="9.5" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.3"/>
+  <text x="335" y="253" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-weight="600">SMS</text>
+  <rect x="306" y="261" width="58" height="19" rx="9.5" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.3"/>
+  <text x="335" y="274" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-weight="600">push</text>
 
-  <!-- Inbound arrow from 3rd party (right) -->
-  <line x1="568" y1="84" x2="500" y2="84"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#int-arr)"/>
-  <text x="537" y="74" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">POST /webhook</text>
+  <!-- Notifier -> channels (3 dashed slate fan-out, secondary/outward) -->
+  <line x1="290" y1="240" x2="304" y2="229" stroke="#5b7a9d" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#in-bwd)"/>
+  <line x1="290" y1="249" x2="304" y2="249" stroke="#5b7a9d" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#in-bwd)"/>
+  <line x1="290" y1="258" x2="304" y2="270" stroke="#5b7a9d" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#in-bwd)"/>
 
-  <!-- ── Outbound Callback ── -->
-  <rect x="350" y="156" width="150" height="72" rx="10" ry="10"
-        fill="#fff" stroke="#2c8a1c" stroke-width="2.5" filter="url(#int-shadow)"/>
-  <rect x="350" y="156" width="150" height="24" rx="10" ry="10" fill="#2c8a1c"/>
-  <rect x="350" y="168" width="150" height="12" fill="#2c8a1c"/>
-  <text x="425" y="168" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">Callback ↑ outbound</text>
-  <text x="425" y="198" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">HMAC-SHA256 sign</text>
-  <text x="425" y="214" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">exponential retry</text>
+  <!-- ============================================================= -->
+  <!-- 3. Inbound Webhook -->
+  <!-- ============================================================= -->
+  <!-- step badge 3 -->
+  <circle cx="58" cy="324" r="11" fill="#1f5e16"/><text x="58" y="328" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- Outbound arrow to 3rd party -->
-  <line x1="500" y1="192" x2="562" y2="192"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#int-arr)"/>
-  <text x="534" y="182" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">POST callback</text>
+  <!-- Webhook node -->
+  <g filter="url(#in-sh)">
+    <rect x="142" y="316" width="146" height="50" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M142 327a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v15H142Z" fill="url(#in-head)"/>
+    <text x="215" y="332" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Webhook</text>
+  </g>
+  <text x="215" y="358" text-anchor="middle" fill="#7a8472" font-size="9.5">verify HMAC - dispatch</text>
 
-  <!-- 3rd party box -->
-  <rect x="566" y="68" width="106" height="140" rx="10" ry="10"
-        fill="#fff" stroke="#8aa07e" stroke-width="1.8" filter="url(#int-shadow)"/>
-  <rect x="566" y="68" width="106" height="22" rx="10" ry="10" fill="#8aa07e"/>
-  <rect x="566" y="80" width="106" height="10" fill="#8aa07e"/>
-  <text x="619" y="79" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="10" font-weight="700">3rd party</text>
-  <text x="619" y="138" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">external service</text>
+  <!-- ============================================================= -->
+  <!-- 4. Outbound Callback -->
+  <!-- ============================================================= -->
+  <!-- step badge 4 -->
+  <circle cx="498" cy="324" r="11" fill="#1f5e16"/><text x="498" y="328" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
-  <!-- Amber sparkle -->
-  <g transform="translate(666, 36)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <!-- Callback node -->
+  <g filter="url(#in-sh)">
+    <rect x="582" y="316" width="146" height="50" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M582 327a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v15H582Z" fill="url(#in-head)"/>
+    <text x="655" y="332" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Callback</text>
+  </g>
+  <text x="655" y="358" text-anchor="middle" fill="#7a8472" font-size="9.5">sign HMAC - retry</text>
+
+  <!-- ============================================================= -->
+  <!-- Partner / external service node (outside) -->
+  <!-- ============================================================= -->
+  <g filter="url(#in-sh)">
+    <rect x="582" y="120" width="146" height="110" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M582 131a11 11 0 0 1 11-11h124a11 11 0 0 1 11 11v15H582Z" fill="#5b7a9d"/>
+    <text x="655" y="136" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Partner</text>
+  </g>
+  <text x="655" y="166" text-anchor="middle" fill="#33402e" font-size="10.5">external service</text>
+  <text x="655" y="182" text-anchor="middle" fill="#7a8472" font-size="9.5">users &#183; SaaS &#183; 3rd party</text>
+  <!-- globe glyph -->
+  <circle cx="655" cy="206" r="13" fill="none" stroke="#5b7a9d" stroke-width="1.6"/>
+  <ellipse cx="655" cy="206" rx="5" ry="13" fill="none" stroke="#5b7a9d" stroke-width="1.3"/>
+  <line x1="642" y1="206" x2="668" y2="206" stroke="#5b7a9d" stroke-width="1.3"/>
+  <line x1="644" y1="199" x2="666" y2="199" stroke="#5b7a9d" stroke-width="1.1"/>
+  <line x1="644" y1="213" x2="666" y2="213" stroke="#5b7a9d" stroke-width="1.1"/>
+
+  <!-- amber accent sparkle -->
+  <g transform="translate(718,108)">
+    <path d="M0,-8 L1.8,-1.8 L8,0 L1.8,1.8 L0,8 L-1.8,1.8 L-8,0 L-1.8,-1.8 Z" fill="#ffc24b"/>
   </g>
 
+  <!-- ============================================================= -->
+  <!-- inbound webhook arrow: Partner -> Webhook (dashed slate, return/read) -->
+  <!-- ============================================================= -->
+  <path d="M582 224 L538 224 L538 341 L292 341" fill="none" stroke="#5b7a9d" stroke-width="2"
+        stroke-dasharray="5,4" marker-end="url(#in-bwd)"/>
+  <rect x="396" y="330" width="116" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="454" y="345" text-anchor="middle" fill="#3f5b7a" font-size="10" font-weight="600" font-family="ui-monospace,Menlo,monospace">POST /webhook</text>
+
+  <!-- outbound callback arrow: Callback -> Partner (green forward + amber retry hint) -->
+  <path d="M641 316 L641 234" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#in-fwd)"/>
+  <text x="630" y="282" text-anchor="end" fill="#2c8a1c" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">POST</text>
+  <!-- retry curl in warn orange -->
+  <path d="M681 296 a14 14 0 1 1 -7 -12" fill="none" stroke="#c2410c" stroke-width="1.8" marker-end="url(#in-amb)"/>
+  <text x="700" y="291" text-anchor="start" fill="#c2410c" font-size="8.5" font-weight="600">retry</text>
 </svg>

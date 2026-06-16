@@ -1,122 +1,122 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 240"
-     role="img" aria-label="Security figure: HTTP request passes through JWT auth filter and @secure RBAC check before reaching the Service; an IDP box feeds the JWT filter with tokens"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 332"
+     role="img" aria-label="Security flow: a bearer JWT is validated by the resource-server filter against JWKS, issuer and audience; claims are mapped to roles in the SecurityContext; the authorization gate then allows the call into the Service or returns 403 Forbidden"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="240" fill="#eaf6df"/>
-
   <defs>
-    <filter id="sec-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="sec-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="sec-head-amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd86b"/>
+      <stop offset="1" stop-color="#ffc24b"/>
+    </linearGradient>
+    <marker id="sec-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="sec-amb" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#ffc24b"/>
+    </marker>
+    <marker id="sec-warn" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#c2410c"/>
+    </marker>
+    <filter id="sec-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="sec-arr-muted" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="sec-arr-green" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="sec-arr-amber" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#ffc24b"/>
-    </marker>
   </defs>
 
-  <!-- Section label -->
-  <text x="28" y="28" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">security filter chain — JWT auth + RBAC</text>
+  <!-- card -->
+  <rect x="6" y="6" width="788" height="320" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── Request ── -->
-  <rect x="28" y="86" width="90" height="56" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#sec-shadow)"/>
-  <rect x="28" y="86" width="90" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="28" y="98" width="90" height="10" fill="#43b02a"/>
-  <text x="73" y="97" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">Request</text>
-  <text x="73" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">Bearer token</text>
+  <!-- forward flow rail label -->
+  <text x="34" y="52" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">AUTHENTICATE</text>
+  <path d="M132 46 L146 46 M141 43 L146 46 L141 49" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="156" y="52" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">AUTHORIZE</text>
 
-  <!-- Arrow → JWT Filter -->
-  <line x1="118" y1="114" x2="154" y2="114"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#sec-arr-muted)"/>
+  <!-- ===== nodes: 4 across; x = 32,222,412,602 ; w=146 h=92 y=110 ===== -->
+  <!-- forward arrows between nodes (y=156) -->
+  <line x1="180" y1="156" x2="220" y2="156" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#sec-fwd)"/>
+  <line x1="370" y1="156" x2="410" y2="156" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#sec-fwd)"/>
+  <line x1="560" y1="156" x2="600" y2="156" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#sec-fwd)"/>
 
-  <!-- ── JWT Auth filter ── -->
-  <!-- Shield shape using path -->
-  <path d="M195 56 Q195 50 188 50 Q180 50 180 56 L180 62 Q180 70 188 74 Q196 70 196 62 Z"
-        fill="#43b02a" opacity="0.2"/>
-  <path d="M188 52 L193 56 L193 63 Q193 68 188 71 Q183 68 183 63 L183 56 Z"
-        fill="#43b02a" opacity="0.7"/>
+  <!-- arrow inline labels -->
+  <text x="200" y="148" text-anchor="middle" fill="#7a8472" font-size="9" font-style="italic">token</text>
+  <text x="390" y="148" text-anchor="middle" fill="#7a8472" font-size="9" font-style="italic">claims</text>
+  <text x="580" y="148" text-anchor="middle" fill="#2c8a1c" font-size="9" font-weight="700" font-style="italic">allowed</text>
 
-  <rect x="156" y="86" width="100" height="56" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#sec-shadow)"/>
-  <rect x="156" y="86" width="100" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="156" y="98" width="100" height="10" fill="#43b02a"/>
-  <text x="206" y="97" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">JWT auth</text>
-  <text x="206" y="120" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">verify signature</text>
-  <text x="206" y="132" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">decode claims</text>
-
-  <!-- Arrow → @secure -->
-  <line x1="256" y1="114" x2="294" y2="114"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#sec-arr-muted)"/>
-  <text x="275" y="106" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">principal</text>
-
-  <!-- ── @secure check ── -->
-  <rect x="296" y="86" width="100" height="56" rx="10" ry="10"
-        fill="#fff" stroke="#2c8a1c" stroke-width="2.5" filter="url(#sec-shadow)"/>
-  <rect x="296" y="86" width="100" height="22" rx="10" ry="10" fill="#2c8a1c"/>
-  <rect x="296" y="98" width="100" height="10" fill="#2c8a1c"/>
-  <text x="346" y="97" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">@secure</text>
-  <text x="346" y="120" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">role check</text>
-  <text x="346" y="132" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">expression eval</text>
-
-  <!-- Arrow → Service -->
-  <line x1="396" y1="114" x2="432" y2="114"
-        stroke="#43b02a" stroke-width="2" marker-end="url(#sec-arr-green)"/>
-  <text x="414" y="106" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">allowed</text>
-
-  <!-- ── Service ── -->
-  <rect x="434" y="86" width="100" height="56" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#sec-shadow)"/>
-  <rect x="434" y="86" width="100" height="22" rx="10" ry="10" fill="#5fd13a"/>
-  <rect x="434" y="98" width="100" height="10" fill="#5fd13a"/>
-  <text x="484" y="97" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="11" font-weight="700">Service</text>
-  <text x="484" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">business logic</text>
-
-  <!-- ── IDP box (below JWT filter) ── -->
-  <rect x="156" y="176" width="100" height="48" rx="10" ry="10"
-        fill="#fff" stroke="#ffc24b" stroke-width="2.5" filter="url(#sec-shadow)"/>
-  <rect x="156" y="176" width="100" height="22" rx="10" ry="10" fill="#ffc24b"/>
-  <rect x="156" y="188" width="100" height="10" fill="#ffc24b"/>
-  <text x="206" y="187" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="11" font-weight="700">IDP</text>
-  <text x="206" y="212" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">token issuer / OIDC</text>
-
-  <!-- Dashed arrow IDP → JWT filter -->
-  <line x1="206" y1="176" x2="206" y2="142"
-        stroke="#ffc24b" stroke-width="1.8" stroke-dasharray="5,3"
-        marker-end="url(#sec-arr-amber)"/>
-  <text x="218" y="162" fill="#6a7a64" font-size="8.5" font-style="italic">issues JWT</text>
-
-  <!-- Rejected path (dashed red line from @secure down) -->
-  <line x1="346" y1="142" x2="346" y2="170"
-        stroke="#d9534f" stroke-width="1.8" stroke-dasharray="5,3"/>
-  <text x="358" y="164" fill="#d9534f" font-size="9" font-weight="700">403 Forbidden</text>
-
-  <!-- Amber sparkle -->
-  <g transform="translate(666, 44)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <!-- node 1: Bearer JWT (Request) -->
+  <g filter="url(#sec-sh)">
+    <rect x="32" y="110" width="148" height="92" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M32 121a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H32Z" fill="url(#sec-head)"/>
+    <text x="106" y="127" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Bearer JWT</text>
   </g>
+  <text x="106" y="160" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">Authorization:</text>
+  <text x="106" y="175" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">Bearer eyJ...</text>
+  <text x="106" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">signed token per request</text>
+  <circle cx="44" cy="122" r="11" fill="#1f5e16"/><text x="44" y="126" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
+  <!-- node 2: Resource-server filter -->
+  <g filter="url(#sec-sh)">
+    <rect x="222" y="110" width="148" height="92" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M222 121a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H222Z" fill="url(#sec-head)"/>
+    <text x="296" y="127" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Resource filter</text>
+  </g>
+  <text x="296" y="160" text-anchor="middle" fill="#33402e" font-size="10.5">validate signature</text>
+  <text x="296" y="176" text-anchor="middle" fill="#7a8472" font-size="9.5">JWKS &#183; issuer &#183; audience</text>
+  <text x="296" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">check exp</text>
+  <circle cx="234" cy="122" r="11" fill="#1f5e16"/><text x="234" y="126" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
+
+  <!-- node 3: claims -> roles (SecurityContext) -->
+  <g filter="url(#sec-sh)">
+    <rect x="412" y="110" width="148" height="92" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M412 121a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H412Z" fill="url(#sec-head)"/>
+    <text x="486" y="127" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">claims -&gt; roles</text>
+  </g>
+  <text x="486" y="160" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">SecurityContext</text>
+  <text x="486" y="176" text-anchor="middle" fill="#7a8472" font-size="9.5">sub &#183; roles &#183; permissions</text>
+  <text x="486" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">readable by handlers</text>
+  <circle cx="424" cy="122" r="11" fill="#1f5e16"/><text x="424" y="126" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
+
+  <!-- node 4: authorization gate (@secure) -->
+  <g filter="url(#sec-sh)">
+    <rect x="602" y="110" width="148" height="92" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M602 121a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H602Z" fill="url(#sec-head)"/>
+    <text x="676" y="127" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Authz gate</text>
+  </g>
+  <text x="676" y="160" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@secure</text>
+  <text x="676" y="176" text-anchor="middle" fill="#7a8472" font-size="9.5">role / permission</text>
+  <text x="676" y="191" text-anchor="middle" fill="#7a8472" font-size="9.5">expression eval</text>
+  <circle cx="614" cy="122" r="11" fill="#1f5e16"/><text x="614" y="126" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
+
+  <!-- ===== IDP / JWKS source feeding the filter (amber accent) ===== -->
+  <g filter="url(#sec-sh)">
+    <rect x="222" y="248" width="148" height="60" rx="11" fill="#ffffff" stroke="#ffc24b" stroke-width="2"/>
+    <path d="M222 259a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v15H222Z" fill="url(#sec-head-amber)"/>
+    <text x="296" y="265" text-anchor="middle" fill="#1c2420" font-size="12.5" font-weight="700">Identity provider</text>
+  </g>
+  <text x="296" y="289" text-anchor="middle" fill="#33402e" font-size="10.5">OIDC issuer</text>
+  <text x="296" y="303" text-anchor="middle" fill="#7a8472" font-size="9.5">publishes JWKS keys</text>
+
+  <!-- amber dashed feed: IDP -> resource filter -->
+  <line x1="296" y1="248" x2="296" y2="206" stroke="#ffc24b" stroke-width="2"
+        stroke-dasharray="5,4" marker-end="url(#sec-amb)"/>
+  <text x="306" y="228" fill="#7a8472" font-size="9" font-style="italic">signing keys</text>
+
+  <!-- ===== Service: allowed call lands here ===== -->
+  <g filter="url(#sec-sh)">
+    <rect x="602" y="248" width="148" height="60" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M602 259a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v15H602Z" fill="url(#sec-head)"/>
+    <text x="676" y="265" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">Service</text>
+  </g>
+  <text x="676" y="289" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@service</text>
+  <text x="676" y="303" text-anchor="middle" fill="#7a8472" font-size="9.5">business logic runs</text>
+
+  <!-- green: gate -> service (allowed) -->
+  <line x1="676" y1="202" x2="676" y2="246" stroke="#3a9e23" stroke-width="2.4"
+        marker-end="url(#sec-fwd)"/>
+
+  <!-- warn: gate -> denied (403) -->
+  <path d="M602 175 L548 175 L548 270 L394 270" fill="none" stroke="#c2410c" stroke-width="2"
+        stroke-dasharray="5,4" marker-end="url(#sec-warn)"/>
+  <rect x="446" y="259" width="96" height="22" rx="11" fill="#ffffff" stroke="#c2410c" stroke-width="1.5"/>
+  <text x="494" y="274" text-anchor="middle" fill="#c2410c" font-size="10.5" font-weight="700">403 Forbidden</text>
 </svg>

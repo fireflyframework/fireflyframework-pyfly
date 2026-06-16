@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 330"
+     role="img" aria-label="Pagination: a Pageable (page, size, sort) goes into the repository's find_all, which returns a Page carrying the row slice plus total counts"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="pg-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/><stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="pg-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6f8fae"/><stop offset="1" stop-color="#5b7a9d"/>
+    </linearGradient>
+    <marker id="pg-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/></marker>
+    <filter id="pg-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/></filter>
+  </defs>
+
+  <rect x="6" y="6" width="808" height="318" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
+  <text x="34" y="42" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">ONE ROUND-TRIP</text>
+  <text x="170" y="42" fill="#7a8472" font-size="10.5">the slice and the counts come back together</text>
+
+  <!-- forward arrows -->
+  <line x1="262" y1="150" x2="298" y2="150" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#pg-fwd)"/>
+  <line x1="492" y1="150" x2="528" y2="150" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#pg-fwd)"/>
+
+  <!-- 1: Pageable -->
+  <g filter="url(#pg-sh)">
+    <rect x="40" y="86" width="222" height="128" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 97a11 11 0 0 1 11-11h200a11 11 0 0 1 11 11v17H40Z" fill="url(#pg-head)"/>
+    <text x="151" y="103" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Pageable</text>
+  </g>
+  <text x="64" y="142" fill="#33402e" font-size="11" font-family="ui-monospace,Menlo,monospace">page   = 2</text>
+  <text x="64" y="162" fill="#33402e" font-size="11" font-family="ui-monospace,Menlo,monospace">size   = 20</text>
+  <text x="64" y="182" fill="#33402e" font-size="11" font-family="ui-monospace,Menlo,monospace">sort   = balance DESC</text>
+  <text x="64" y="202" fill="#7a8472" font-size="9.5">what slice do you want?</text>
+  <circle cx="52" cy="98" r="11" fill="#1f5e16"/><text x="52" y="102" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
+
+  <!-- 2: Repository -->
+  <g filter="url(#pg-sh)">
+    <rect x="298" y="110" width="194" height="80" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M298 121a11 11 0 0 1 11-11h172a11 11 0 0 1 11 11v17H298Z" fill="url(#pg-head)"/>
+    <text x="395" y="127" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Repository</text>
+  </g>
+  <text x="395" y="160" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">find_all(pageable)</text>
+  <text x="395" y="178" text-anchor="middle" fill="#7a8472" font-size="9.5">SELECT ... LIMIT 20 OFFSET 40 + COUNT(*)</text>
+  <circle cx="310" cy="122" r="11" fill="#1f5e16"/><text x="310" y="126" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
+
+  <!-- 3: Page result (slate = read result) -->
+  <g filter="url(#pg-sh)">
+    <rect x="528" y="64" width="258" height="200" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M528 75a11 11 0 0 1 11-11h236a11 11 0 0 1 11 11v17H528Z" fill="url(#pg-slate)"/>
+    <text x="657" y="81" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Page[WalletDto]</text>
+  </g>
+  <text x="548" y="110" fill="#3f5b7a" font-size="10" font-weight="700" letter-spacing="0.06em">CONTENT</text>
+  <rect x="548" y="118" width="218" height="14" rx="4" fill="#eef3f8" stroke="#cdd9e6"/>
+  <rect x="548" y="136" width="218" height="14" rx="4" fill="#eef3f8" stroke="#cdd9e6"/>
+  <rect x="548" y="154" width="218" height="14" rx="4" fill="#eef3f8" stroke="#cdd9e6"/>
+  <text x="657" y="184" text-anchor="middle" fill="#7a8472" font-size="9.5">20 rows (this page)</text>
+  <text x="548" y="208" fill="#3f5b7a" font-size="10" font-weight="700" letter-spacing="0.06em">METADATA</text>
+  <rect x="548" y="216" width="104" height="18" rx="9" fill="#eef3f8" stroke="#5b7a9d"/>
+  <text x="600" y="228" text-anchor="middle" fill="#3f5b7a" font-size="9" font-family="ui-monospace,Menlo,monospace">total = 137</text>
+  <rect x="662" y="216" width="104" height="18" rx="9" fill="#eef3f8" stroke="#5b7a9d"/>
+  <text x="714" y="228" text-anchor="middle" fill="#3f5b7a" font-size="9" font-family="ui-monospace,Menlo,monospace">pages = 7</text>
+  <rect x="548" y="240" width="104" height="18" rx="9" fill="#eef3f8" stroke="#5b7a9d"/>
+  <text x="600" y="252" text-anchor="middle" fill="#3f5b7a" font-size="9" font-family="ui-monospace,Menlo,monospace">number = 2</text>
+  <rect x="662" y="240" width="104" height="18" rx="9" fill="#eef3f8" stroke="#5b7a9d"/>
+  <text x="714" y="252" text-anchor="middle" fill="#3f5b7a" font-size="9" font-family="ui-monospace,Menlo,monospace">has_next</text>
+  <circle cx="540" cy="76" r="11" fill="#3f5b7a"/><text x="540" y="80" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
+</svg>

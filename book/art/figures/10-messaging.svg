@@ -1,135 +1,112 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
-     role="img" aria-label="Messaging diagram: Wallet service writes to outbox table, outbox relay publishes to broker topic wallet-events, Payments consumer subscribes; failed messages route to DLQ"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 380"
+     role="img" aria-label="Messaging: the Wallet service publishes domain events through MessageBrokerPort, the Kafka or RabbitMQ adapter writes them to the wallet-events topic, and the Payments service consumes them; messages that exceed max retries route to a dead-letter queue"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="720" height="280" fill="#eaf6df"/>
-
   <defs>
-    <filter id="msg-shadow" x="-10%" y="-10%" width="126%" height="126%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="mg-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="mg-head-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b7a9d"/>
+      <stop offset="1" stop-color="#3f5b7a"/>
+    </linearGradient>
+    <linearGradient id="mg-topic" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#2c8a1c"/>
+    </linearGradient>
+    <marker id="mg-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="mg-warn" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#c2410c"/>
+    </marker>
+    <filter id="mg-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="msg-arrow-green" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="msg-arrow-muted" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="msg-arrow-red" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#e8334a"/>
-    </marker>
   </defs>
 
-  <!-- Happy path label -->
-  <text x="14" y="26" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">happy path</text>
-  <!-- Failure path label -->
-  <text x="14" y="208" dominant-baseline="middle"
-        fill="#e8334a" font-size="11" font-weight="700">on failure</text>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="368" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- Lane separator -->
-  <line x1="0" y1="190" x2="720" y2="190" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,5"/>
+  <!-- ===== flow rail labels ===== -->
+  <text x="34" y="48" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">PUBLISH</text>
+  <path d="M104 42 L116 42 M112 39 L116 42 L112 45" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="124" y="48" fill="#33402e" font-size="11">domain events cross the network to other services</text>
 
-  <!-- ── Wallet service (left) ── -->
-  <rect x="24" y="86" width="100" height="52" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#msg-shadow)"/>
-  <rect x="24" y="86" width="100" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="24" y="98" width="100" height="12" fill="#43b02a"/>
-  <text x="74" y="98" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">Wallet</text>
-  <text x="74" y="125" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">service</text>
+  <!-- forward connectors between the main nodes (y=130) -->
+  <line x1="160" y1="130" x2="186" y2="130" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#mg-fwd)"/>
+  <line x1="386" y1="130" x2="420" y2="130" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#mg-fwd)"/>
+  <text x="403" y="120" text-anchor="middle" fill="#2c8a1c" font-size="9" font-weight="600">write</text>
+  <line x1="512" y1="130" x2="616" y2="130" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#mg-fwd)"/>
+  <text x="564" y="120" text-anchor="middle" fill="#2c8a1c" font-size="9" font-weight="600" font-family="ui-monospace,Menlo,monospace">consume</text>
 
-  <!-- Wallet → outbox arrow -->
-  <line x1="124" y1="112" x2="172" y2="112"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#msg-arrow-green)"/>
-  <text x="148" y="103" text-anchor="middle" fill="#43b02a" font-size="9" font-weight="600">write</text>
-
-  <!-- ── Outbox table ── -->
-  <rect x="174" y="88" width="94" height="48" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#msg-shadow)"/>
-  <rect x="174" y="88" width="94" height="20" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="174" y="98" width="94" height="10" fill="#43b02a"/>
-  <text x="221" y="98" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="10.5" font-weight="700">outbox</text>
-  <text x="221" y="123" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">DB table</text>
-
-  <!-- outbox → relay arrow -->
-  <line x1="268" y1="112" x2="316" y2="112"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#msg-arrow-green)"/>
-  <text x="292" y="103" text-anchor="middle" fill="#43b02a" font-size="9" font-weight="600">poll</text>
-
-  <!-- ── Broker topic pill (center, Kafka-ish cylinder) ── -->
-  <!-- Cylinder body -->
-  <rect x="318" y="92" width="120" height="40" rx="6" ry="6"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#msg-shadow)"/>
-  <!-- Top ellipse (cylinder cap) -->
-  <ellipse cx="378" cy="92" rx="60" ry="10"
-        fill="#43b02a" stroke="#2f7d1c" stroke-width="1.8"/>
-  <!-- Bottom ellipse (cylinder bottom) -->
-  <ellipse cx="378" cy="132" rx="60" ry="10"
-        fill="#5fd13a" stroke="#2f7d1c" stroke-width="1.8"/>
-  <!-- Cylinder sides fill -->
-  <rect x="318" y="92" width="120" height="40" fill="#5fd13a"/>
-  <!-- Top highlight -->
-  <ellipse cx="360" cy="89" rx="20" ry="5" fill="#a0e070" opacity="0.5"/>
-  <!-- Topic label -->
-  <text x="378" y="112" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="11" font-weight="700">wallet-events</text>
-
-  <!-- Envelope icon above topic -->
-  <rect x="366" y="70" width="22" height="16" rx="2" ry="2"
-        fill="#fff" stroke="#43b02a" stroke-width="1.5"/>
-  <polyline points="366,70 377,79 388,70"
-            fill="none" stroke="#43b02a" stroke-width="1.4"/>
-
-  <!-- Amber event star -->
-  <g transform="translate(450, 78)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <!-- ===== node 1: Wallet service ===== -->
+  <g filter="url(#mg-sh)">
+    <rect x="40" y="92" width="120" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 103a11 11 0 0 1 11-11h98a11 11 0 0 1 11 11v17H40Z" fill="url(#mg-head)"/>
+    <text x="100" y="109" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Wallet</text>
   </g>
+  <text x="100" y="142" text-anchor="middle" fill="#33402e" font-size="10.5">service</text>
+  <text x="100" y="158" text-anchor="middle" fill="#7a8472" font-size="9.5">emits domain events</text>
+  <circle cx="52" cy="104" r="11" fill="#1f5e16"/><text x="52" y="108" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- topic → Payments consumer arrow -->
-  <line x1="438" y1="112" x2="496" y2="112"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#msg-arrow-green)"/>
-  <text x="467" y="103" text-anchor="middle" fill="#43b02a" font-size="9" font-weight="600">consume</text>
+  <!-- ===== node 2: MessageBrokerPort + adapter ===== -->
+  <g filter="url(#mg-sh)">
+    <rect x="186" y="92" width="200" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M186 103a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H186Z" fill="url(#mg-head)"/>
+    <text x="286" y="109" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">MessageBrokerPort</text>
+  </g>
+  <text x="286" y="140" text-anchor="middle" fill="#33402e" font-size="10.5">one abstraction, many brokers</text>
+  <!-- adapter chips -->
+  <rect x="206" y="148" width="78" height="16" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.2"/>
+  <text x="245" y="159" text-anchor="middle" fill="#3f5b7a" font-size="9" font-weight="600">Kafka adapter</text>
+  <rect x="290" y="148" width="78" height="16" rx="8" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.2"/>
+  <text x="329" y="159" text-anchor="middle" fill="#3f5b7a" font-size="9" font-weight="600">RabbitMQ adapter</text>
+  <circle cx="198" cy="104" r="11" fill="#1f5e16"/><text x="198" y="108" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- ── Payments consumer (right) ── -->
-  <rect x="498" y="86" width="110" height="52" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#msg-shadow)"/>
-  <rect x="498" y="86" width="110" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="498" y="98" width="110" height="12" fill="#43b02a"/>
-  <text x="553" y="98" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">Payments</text>
-  <text x="553" y="125" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">consumer</text>
+  <!-- ===== node 3: broker topic (cylinder) ===== -->
+  <!-- envelope event icon above topic -->
+  <rect x="491" y="58" width="22" height="15" rx="2" fill="#ffffff" stroke="#3a9e23" stroke-width="1.4"/>
+  <polyline points="491,59 502,67 513,59" fill="none" stroke="#3a9e23" stroke-width="1.4"/>
+  <!-- amber accent star marking an event -->
+  <g transform="translate(528,60)">
+    <path d="M0,-7 L1.6,-1.6 L7,0 L1.6,1.6 L0,7 L-1.6,1.6 L-7,0 L-1.6,-1.6 Z" fill="#ffc24b"/>
+  </g>
+  <g filter="url(#mg-sh)">
+    <!-- cylinder: bottom cap, body, top cap -->
+    <path d="M422 102 v56 a40 12 0 0 0 80 0 v-56 Z" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M422 102 a40 12 0 0 0 80 0 v0 a40 12 0 0 0 -80 0 Z" fill="url(#mg-topic)" stroke="#2c8a1c" stroke-width="1.6"/>
+  </g>
+  <text x="462" y="100" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">topic</text>
+  <text x="462" y="138" text-anchor="middle" fill="#1c2420" font-size="10" font-weight="700" font-family="ui-monospace,Menlo,monospace">wallet-events</text>
+  <text x="462" y="185" text-anchor="middle" fill="#7a8472" font-size="9.5">durable, replayable log</text>
+  <circle cx="430" cy="94" r="11" fill="#1f5e16"/><text x="430" y="98" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── Failure branch: topic → DLQ ── -->
-  <!-- Dashed vertical from topic to failure lane -->
-  <line x1="378" y1="142" x2="378" y2="210"
-        stroke="#e8334a" stroke-width="1.8" stroke-dasharray="5,4"/>
-  <!-- failure label -->
-  <text x="388" y="182" fill="#e8334a" font-size="9" font-style="italic">max retries exceeded</text>
+  <!-- ===== node 4: Payments consumer ===== -->
+  <g filter="url(#mg-sh)">
+    <rect x="618" y="92" width="122" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M618 103a11 11 0 0 1 11-11h100a11 11 0 0 1 11 11v17H618Z" fill="url(#mg-head)"/>
+    <text x="679" y="109" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Payments</text>
+  </g>
+  <text x="679" y="140" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@message_listener</text>
+  <text x="679" y="156" text-anchor="middle" fill="#7a8472" font-size="9.5">consumer in another service</text>
+  <circle cx="630" cy="104" r="11" fill="#1f5e16"/><text x="630" y="108" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
-  <!-- Arrow to DLQ -->
-  <line x1="378" y1="210" x2="408" y2="230"
-        stroke="#e8334a" stroke-width="2"
-        marker-end="url(#msg-arrow-red)"/>
+  <!-- ===== failure lane divider ===== -->
+  <line x1="34" y1="250" x2="746" y2="250" stroke="#e7ece1" stroke-width="1.5" stroke-dasharray="6,5"/>
+  <text x="34" y="288" fill="#c2410c" font-size="11" font-weight="700" letter-spacing="0.06em">ON FAILURE</text>
+  <text x="34" y="306" fill="#7a8472" font-size="9.5">a poisoned message cannot be processed</text>
 
-  <!-- ── DLQ box ── -->
-  <rect x="410" y="218" width="110" height="44" rx="10" ry="10"
-        fill="#fff5f5" stroke="#e8334a" stroke-width="2" filter="url(#msg-shadow)"/>
-  <rect x="410" y="218" width="110" height="20" rx="10" ry="10" fill="#e8334a"/>
-  <rect x="410" y="228" width="110" height="10" fill="#e8334a"/>
-  <text x="465" y="228" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">DLQ</text>
-  <text x="465" y="250" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">dead-letter queue</text>
+  <!-- failure branch from Payments down to DLQ -->
+  <path d="M679 170 L679 300 L520 300" fill="none" stroke="#c2410c" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#mg-warn)"/>
+  <text x="612" y="293" text-anchor="middle" fill="#c2410c" font-size="9.5" font-style="italic">max retries exceeded</text>
 
+  <!-- ===== DLQ node ===== -->
+  <g filter="url(#mg-sh)">
+    <rect x="396" y="278" width="124" height="62" rx="11" fill="#ffffff" stroke="#c2410c" stroke-width="2"/>
+    <path d="M396 289a11 11 0 0 1 11-11h102a11 11 0 0 1 11 11v15H396Z" fill="#c2410c"/>
+    <text x="458" y="294" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">DLQ</text>
+  </g>
+  <text x="458" y="320" text-anchor="middle" fill="#33402e" font-size="10">dead-letter queue</text>
+  <text x="458" y="334" text-anchor="middle" fill="#7a8472" font-size="9">holds messages for later inspection</text>
 </svg>

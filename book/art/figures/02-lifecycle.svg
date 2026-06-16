@@ -1,94 +1,108 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 180"
-     role="img" aria-label="Bean lifecycle pipeline: scan → register → resolve → @post_construct → ready → @pre_destroy"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340"
+     role="img" aria-label="Bean lifecycle: the application context scans packages, registers bean definitions, resolves dependencies, runs @post_construct, reaches the ready serving state, then runs @pre_destroy on shutdown"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="680" height="180" fill="#eaf6df"/>
-
-  <!-- ── Arrow marker ── -->
   <defs>
-    <marker id="lc-arrow" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    <linearGradient id="lc-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="lc-ready" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#43b02a"/>
+      <stop offset="1" stop-color="#2c8a1c"/>
+    </linearGradient>
+    <marker id="lc-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
     </marker>
+    <marker id="lc-warn" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#c2410c"/>
+    </marker>
+    <filter id="lc-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
+    </filter>
   </defs>
 
-  <!-- Shared y-center for pipeline -->
-  <!-- Pipeline nodes at y=90; step boxes 80px wide, 40px tall, rx=10 -->
-  <!-- x positions: 20, 120, 220, 330, 450, 570 (last one amber = shutdown) -->
+  <!-- card -->
+  <rect x="6" y="6" width="788" height="328" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- Step 1: scan -->
-  <rect x="20" y="70" width="80" height="40" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
-  <text x="60" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="13" font-weight="600">scan</text>
+  <!-- startup rail label -->
+  <text x="34" y="52" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">STARTUP</text>
+  <path d="M105 46 L119 46 M114 43 L119 46 L114 49" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- shutdown rail label -->
+  <text x="612" y="52" fill="#c2410c" font-size="11" font-weight="700" letter-spacing="0.08em">SHUTDOWN</text>
+  <path d="M705 46 L719 46 M714 43 L719 46 L714 49" fill="none" stroke="#c2410c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Arrow 1→2 -->
-  <line x1="100" y1="90" x2="118" y2="90"
-        stroke="#43b02a" stroke-width="2.5"
-        marker-end="url(#lc-arrow)"/>
+  <!-- ===== row 1: scan / register / resolve  (x = 40, 290, 540 ; w=200 h=86 y=82) ===== -->
+  <!-- forward arrows row 1 (y=125) -->
+  <line x1="242" y1="125" x2="288" y2="125" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#lc-fwd)"/>
+  <line x1="492" y1="125" x2="538" y2="125" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#lc-fwd)"/>
 
-  <!-- Step 2: register -->
-  <rect x="120" y="70" width="84" height="40" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
-  <text x="162" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="13" font-weight="600">register</text>
+  <!-- node 1 scan -->
+  <g filter="url(#lc-sh)">
+    <rect x="40" y="82" width="200" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 93a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H40Z" fill="url(#lc-head)"/>
+    <text x="146" y="99" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">scan</text>
+  </g>
+  <text x="146" y="134" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">scan_packages</text>
+  <text x="146" y="151" text-anchor="middle" fill="#7a8472" font-size="9.5">import each package</text>
+  <circle cx="52" cy="94" r="11" fill="#1f5e16"/><text x="52" y="98" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- Arrow 2→3 -->
-  <line x1="204" y1="90" x2="218" y2="90"
-        stroke="#43b02a" stroke-width="2.5"
-        marker-end="url(#lc-arrow)"/>
+  <!-- node 2 register -->
+  <g filter="url(#lc-sh)">
+    <rect x="290" y="82" width="200" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M290 93a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H290Z" fill="url(#lc-head)"/>
+    <text x="390" y="99" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">register</text>
+  </g>
+  <text x="390" y="134" text-anchor="middle" fill="#33402e" font-size="10.5">bean definitions</text>
+  <text x="390" y="151" text-anchor="middle" fill="#7a8472" font-size="9.5">stereotypes collected</text>
+  <circle cx="302" cy="94" r="11" fill="#1f5e16"/><text x="302" y="98" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- Step 3: resolve -->
-  <rect x="220" y="70" width="84" height="40" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2"/>
-  <text x="262" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="13" font-weight="600">resolve</text>
+  <!-- node 3 resolve -->
+  <g filter="url(#lc-sh)">
+    <rect x="540" y="82" width="200" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M540 93a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H540Z" fill="url(#lc-head)"/>
+    <text x="640" y="99" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">resolve</text>
+  </g>
+  <text x="640" y="134" text-anchor="middle" fill="#33402e" font-size="10.5">wire dependencies</text>
+  <text x="640" y="151" text-anchor="middle" fill="#7a8472" font-size="9.5">construct singletons</text>
+  <circle cx="552" cy="94" r="11" fill="#1f5e16"/><text x="552" y="98" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- Arrow 3→4 -->
-  <line x1="304" y1="90" x2="324" y2="90"
-        stroke="#43b02a" stroke-width="2.5"
-        marker-end="url(#lc-arrow)"/>
+  <!-- connector resolve -> post_construct: down and back left -->
+  <path d="M640 168 L640 196 L390 196 L390 218" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#lc-fwd)"/>
 
-  <!-- Step 4: @post_construct -->
-  <rect x="326" y="70" width="120" height="40" rx="10" ry="10"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
-  <text x="386" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="11" font-weight="600">@post_construct</text>
+  <!-- ===== row 2: @post_construct / ready  (x = 290, 540 ; w=200 h=86 y=224) ===== -->
+  <!-- forward arrow row 2 (y=267) -->
+  <line x1="492" y1="267" x2="538" y2="267" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#lc-fwd)"/>
 
-  <!-- Arrow 4→5 -->
-  <line x1="446" y1="90" x2="462" y2="90"
-        stroke="#43b02a" stroke-width="2.5"
-        marker-end="url(#lc-arrow)"/>
+  <!-- node 4 @post_construct -->
+  <g filter="url(#lc-sh)">
+    <rect x="290" y="224" width="200" height="86" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M290 235a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H290Z" fill="url(#lc-head)"/>
+    <text x="390" y="241" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">@post_construct</text>
+  </g>
+  <text x="390" y="276" text-anchor="middle" fill="#33402e" font-size="10.5">init hook</text>
+  <text x="390" y="293" text-anchor="middle" fill="#7a8472" font-size="9.5">runs after injection</text>
+  <circle cx="302" cy="236" r="11" fill="#1f5e16"/><text x="302" y="240" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
-  <!-- Step 5: ready (main running state — green filled) -->
-  <rect x="464" y="70" width="70" height="40" rx="10" ry="10"
-        fill="#43b02a" stroke="#2c8a1c" stroke-width="2"/>
-  <text x="499" y="90" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="13" font-weight="700">ready</text>
+  <!-- node 5 ready (running state - green filled header + tint body) -->
+  <g filter="url(#lc-sh)">
+    <rect x="540" y="224" width="200" height="86" rx="11" fill="#f1faec" stroke="#2c8a1c" stroke-width="2"/>
+    <path d="M540 235a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H540Z" fill="url(#lc-ready)"/>
+    <text x="640" y="241" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">ready</text>
+  </g>
+  <text x="640" y="276" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="600">serving requests</text>
+  <text x="640" y="293" text-anchor="middle" fill="#7a8472" font-size="9.5">application_started</text>
+  <circle cx="552" cy="236" r="11" fill="#1f5e16"/><text x="552" y="240" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">5</text>
 
-  <!-- Ellipsis indicating runtime -->
-  <text x="540" y="93" fill="#6a7a64" font-size="18">…</text>
+  <!-- shutdown path: from ready right edge, dashed warn route up around the top row and down to @pre_destroy -->
+  <path d="M740 267 L774 267 L774 64 L26 64 L26 196 L146 196 L146 218" fill="none" stroke="#c2410c" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#lc-warn)"/>
 
-  <!-- Arrow 5→6 (dashed — shutdown path) -->
-  <line x1="558" y1="90" x2="580" y2="90"
-        stroke="#8aa07e" stroke-width="2" stroke-dasharray="5,3"
-        marker-end="url(#lc-arrow)"/>
-
-  <!-- Step 6: @pre_destroy — amber accent (shutdown) -->
-  <rect x="582" y="70" width="80" height="40" rx="10" ry="10"
-        fill="#fff8ea" stroke="#ffc24b" stroke-width="2.2"/>
-  <text x="622" y="83" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="600">@pre_destroy</text>
-  <text x="622" y="99" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9">(shutdown)</text>
-
-  <!-- Labels below steps -->
-  <text x="60" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">classpath</text>
-  <text x="162" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">definitions</text>
-  <text x="262" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">wire deps</text>
-  <text x="386" y="130" text-anchor="middle" fill="#6a7a64" font-size="10">init hook</text>
-  <text x="499" y="130" text-anchor="middle" fill="#43b02a" font-size="10" font-weight="600">serving</text>
-  <text x="622" y="130" text-anchor="middle" fill="#ffc24b" font-size="10">cleanup</text>
-
+  <!-- node 6 @pre_destroy -->
+  <g filter="url(#lc-sh)">
+    <rect x="46" y="224" width="200" height="86" rx="11" fill="#fff8ea" stroke="#c2410c" stroke-width="2"/>
+    <path d="M46 235a11 11 0 0 1 11-11h178a11 11 0 0 1 11 11v17H46Z" fill="#c2410c"/>
+    <text x="146" y="241" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">@pre_destroy</text>
+  </g>
+  <text x="146" y="276" text-anchor="middle" fill="#33402e" font-size="10.5">cleanup hook</text>
+  <text x="146" y="293" text-anchor="middle" fill="#7a8472" font-size="9.5">reverse init order</text>
+  <circle cx="58" cy="236" r="11" fill="#c2410c"/><text x="58" y="240" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">6</text>
 </svg>

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 320"
+     role="img" aria-label="Value Object versus Entity: Money is an immutable value compared by its fields; Wallet is an entity with a stable identity compared by id"
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="ve-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/><stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="ve-amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd86b"/><stop offset="1" stop-color="#ffc24b"/>
+    </linearGradient>
+    <filter id="ve-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/></filter>
+  </defs>
+
+  <rect x="6" y="6" width="808" height="308" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
+  <text x="34" y="40" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">TWO KINDS OF DOMAIN OBJECT</text>
+
+  <!-- ===== Value Object: Money (amber accent) ===== -->
+  <g filter="url(#ve-sh)">
+    <rect x="40" y="64" width="350" height="216" rx="12" fill="#fffaf0" stroke="#e6b53e" stroke-width="2"/>
+    <path d="M40 76a12 12 0 0 1 12-12h326a12 12 0 0 1 12 12v20H40Z" fill="url(#ve-amber)"/>
+    <text x="215" y="84" text-anchor="middle" fill="#7a4f00" font-size="14" font-weight="700">Value Object</text>
+  </g>
+  <text x="64" y="124" fill="#1c2420" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">Money(amount, currency)</text>
+  <!-- check rows -->
+  <g stroke="#2c8a1c" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M66 146 l5 6 l9 -12"/><path d="M66 174 l5 6 l9 -12"/><path d="M66 202 l5 6 l9 -12"/><path d="M66 230 l5 6 l9 -12"/>
+  </g>
+  <text x="92" y="150" fill="#33402e" font-size="11">No identity - it just <tspan font-weight="700">is</tspan> a value</text>
+  <text x="92" y="178" fill="#33402e" font-size="11">Immutable - frozen, never changes</text>
+  <text x="92" y="206" fill="#33402e" font-size="11">Equality by <tspan font-weight="700">all fields</tspan> (10 EUR == 10 EUR)</text>
+  <text x="92" y="234" fill="#33402e" font-size="11">Interchangeable - replace, do not mutate</text>
+  <text x="64" y="262" fill="#7a8472" font-size="9.5">euro replaced by euro: same value, no history</text>
+
+  <!-- ===== Entity: Wallet (green) ===== -->
+  <g filter="url(#ve-sh)">
+    <rect x="430" y="64" width="350" height="216" rx="12" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M430 76a12 12 0 0 1 12-12h326a12 12 0 0 1 12 12v20H430Z" fill="url(#ve-head)"/>
+    <text x="605" y="84" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="700">Entity</text>
+  </g>
+  <text x="454" y="124" fill="#1c2420" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">Wallet(id, balance)</text>
+  <g stroke="#2c8a1c" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M456 146 l5 6 l9 -12"/><path d="M456 174 l5 6 l9 -12"/><path d="M456 202 l5 6 l9 -12"/><path d="M456 230 l5 6 l9 -12"/>
+  </g>
+  <text x="482" y="150" fill="#33402e" font-size="11">Stable <tspan font-weight="700">id</tspan> - a thread of identity</text>
+  <text x="482" y="178" fill="#33402e" font-size="11">Mutable - balance changes over time</text>
+  <text x="482" y="206" fill="#33402e" font-size="11">Equality by <tspan font-weight="700">id</tspan> (same wallet, new balance)</text>
+  <text x="482" y="234" fill="#33402e" font-size="11">Has a lifecycle - opened, used, closed</text>
+  <text x="454" y="262" fill="#7a8472" font-size="9.5">balance 10 then 750: still the same wallet</text>
+</svg>

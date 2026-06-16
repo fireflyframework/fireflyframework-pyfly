@@ -1,103 +1,124 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 260"
-     role="img" aria-label="Testing figure: pytest box spins up real Postgres, Redis, and Kafka containers via Testcontainers, then asserts with a green check mark"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 430"
+     role="img" aria-label="PyFly testing pyramid: a wide fast base of unit tests, then CQRS flow tests, then repository tests, with a booted-context integration test at the peak"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="680" height="260" fill="#eaf6df"/>
-
   <defs>
-    <filter id="tst-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="ts-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="ts-peak" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#2c8a1c"/>
+    </linearGradient>
+    <marker id="ts-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <filter id="ts-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="tst-arr" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="tst-arr-g" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
   </defs>
 
-  <!-- Section label -->
-  <text x="28" y="26" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">testing — pytest + Testcontainers → real containers → ✓</text>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="418" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── pytest box ── -->
-  <rect x="28" y="90" width="108" height="64" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#tst-shadow)"/>
-  <rect x="28" y="90" width="108" height="24" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="28" y="102" width="108" height="12" fill="#43b02a"/>
-  <text x="82" y="102" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">pytest</text>
-  <text x="82" y="130" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">test suite</text>
-  <text x="82" y="144" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">conftest / fixtures</text>
+  <!-- title -->
+  <text x="34" y="44" fill="#1c2420" font-size="15" font-weight="700">PyFly testing pyramid</text>
+  <text x="34" y="62" fill="#7a8472" font-size="10.5">every layer runs fast - no Docker, SQLite only</text>
 
-  <!-- Arrow pytest → Testcontainers -->
-  <line x1="136" y1="122" x2="172" y2="122"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#tst-arr)"/>
-  <text x="154" y="112" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">spins up</text>
-
-  <!-- ── Testcontainers wrapper ── -->
-  <rect x="174" y="70" width="262" height="104" rx="12" ry="12"
-        fill="#fff" stroke="#5fd13a" stroke-width="2.5" filter="url(#tst-shadow)"/>
-  <rect x="174" y="70" width="262" height="24" rx="12" ry="12" fill="#5fd13a"/>
-  <rect x="174" y="82" width="262" height="12" fill="#5fd13a"/>
-  <text x="305" y="82" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="12" font-weight="700">Testcontainers</text>
-
-  <!-- Container chips -->
-  <!-- Postgres -->
-  <rect x="192" y="106" width="68" height="44" rx="8" ry="8"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
-  <text x="226" y="122" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="10" font-weight="700">Postgres</text>
-  <text x="226" y="138" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5">real DB</text>
-
-  <!-- Redis -->
-  <rect x="272" y="106" width="68" height="44" rx="8" ry="8"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
-  <text x="306" y="122" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="10" font-weight="700">Redis</text>
-  <text x="306" y="138" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5">real cache</text>
-
-  <!-- Kafka -->
-  <rect x="352" y="106" width="68" height="44" rx="8" ry="8"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="1.8"/>
-  <text x="386" y="122" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="10" font-weight="700">Kafka</text>
-  <text x="386" y="138" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5">real broker</text>
-
-  <!-- @service_connection badge -->
-  <rect x="184" y="188" width="242" height="20" rx="8" ry="8"
-        fill="#eaf6df" stroke="#8aa07e" stroke-width="1.2"/>
-  <text x="305" y="198" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9" font-weight="600">@service_connection — auto-wired to fixtures</text>
-
-  <!-- Arrow Testcontainers → assert -->
-  <line x1="436" y1="122" x2="476" y2="122"
-        stroke="#43b02a" stroke-width="2" marker-end="url(#tst-arr-g)"/>
-  <text x="456" y="112" text-anchor="middle"
-        fill="#6a7a64" font-size="8.5" font-style="italic">asserts</text>
-
-  <!-- ── Green check badge ── -->
-  <circle cx="530" cy="122" r="44" fill="#43b02a" opacity="0.12"/>
-  <circle cx="530" cy="122" r="34" fill="#43b02a"/>
-  <text x="530" y="122" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="36" font-weight="700">✓</text>
-
-  <text x="530" y="176" text-anchor="middle"
-        fill="#43b02a" font-size="11" font-weight="700">all tests pass</text>
-
-  <!-- Amber sparkle -->
-  <g transform="translate(646, 40)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <!-- ===== axis annotations (left = many/fast, top = few/slow) ===== -->
+  <!-- speed / count axis on far left -->
+  <g>
+    <line x1="40" y1="350" x2="40" y2="120" stroke="#5b7a9d" stroke-width="1.6"
+          stroke-dasharray="5,4" marker-end="url(#ts-fwd)"/>
+    <text x="40" y="372" text-anchor="middle" fill="#5b7a9d" font-size="9.5" font-weight="700">MANY / FAST</text>
+    <text x="40" y="104" text-anchor="middle" fill="#5b7a9d" font-size="9.5" font-weight="700">FEWER</text>
   </g>
 
+  <!-- ===== pyramid tiers: centered on x=300, base wide, peak narrow ===== -->
+  <!-- tier geometry: base y=300..348, then 246..298, 192..244, peak 96..190 -->
+
+  <!-- Tier 4 - peak: Booted-context -->
+  <g filter="url(#ts-sh)">
+    <path d="M300 96 L378 174 L222 174 Z" fill="#ffffff" stroke="#2c8a1c" stroke-width="2"/>
+    <path d="M300 96 L341 137 L259 137 Z" fill="url(#ts-peak)"/>
+  </g>
+  <circle cx="300" cy="118" r="11" fill="#1f5e16"/>
+  <text x="300" y="122" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">4</text>
+  <text x="300" y="160" text-anchor="middle" fill="#16331a" font-size="11.5" font-weight="700">Booted-context</text>
+
+  <!-- Tier 3 - Repository -->
+  <g filter="url(#ts-sh)">
+    <path d="M214 182 L386 182 L408 244 L192 244 Z" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M214 182 L386 182 L391 196 L209 196 Z" fill="url(#ts-head)"/>
+  </g>
+  <circle cx="234" cy="189" r="11" fill="#1f5e16"/>
+  <text x="234" y="193" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">3</text>
+  <text x="300" y="193" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Repository</text>
+  <text x="300" y="222" text-anchor="middle" fill="#33402e" font-size="10" font-family="ui-monospace,Menlo,monospace">derived queries</text>
+  <text x="300" y="237" text-anchor="middle" fill="#7a8472" font-size="9.5">pagination + Specification</text>
+
+  <!-- Tier 2 - CQRS flow -->
+  <g filter="url(#ts-sh)">
+    <path d="M184 252 L416 252 L438 314 L162 314 Z" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M184 252 L416 252 L421 266 L179 266 Z" fill="url(#ts-head)"/>
+  </g>
+  <circle cx="204" cy="259" r="11" fill="#1f5e16"/>
+  <text x="204" y="263" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">2</text>
+  <text x="300" y="263" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">CQRS flow</text>
+  <text x="300" y="292" text-anchor="middle" fill="#33402e" font-size="10">open / deposit / withdraw / query</text>
+  <text x="300" y="307" text-anchor="middle" fill="#7a8472" font-size="9.5">real bus + repository</text>
+
+  <!-- Tier 1 - base: Unit -->
+  <g filter="url(#ts-sh)">
+    <path d="M154 322 L446 322 L468 384 L132 384 Z" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M154 322 L446 322 L451 336 L149 336 Z" fill="url(#ts-head)"/>
+  </g>
+  <circle cx="174" cy="329" r="11" fill="#1f5e16"/>
+  <text x="174" y="333" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">1</text>
+  <text x="300" y="333" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Unit</text>
+  <text x="300" y="362" text-anchor="middle" fill="#33402e" font-size="10">Money + Wallet domain model</text>
+  <text x="300" y="377" text-anchor="middle" fill="#7a8472" font-size="9.5">no dependencies - plain pytest</text>
+
+  <!-- ===== side legend: dependencies + Lumen approach per tier ===== -->
+  <!-- connector lines from each tier to its legend card -->
+  <line x1="378" y1="135" x2="528" y2="135" stroke="#3a9e23" stroke-width="2.2" marker-end="url(#ts-fwd)"/>
+  <line x1="408" y1="213" x2="528" y2="213" stroke="#3a9e23" stroke-width="2.2" marker-end="url(#ts-fwd)"/>
+  <line x1="438" y1="283" x2="528" y2="283" stroke="#3a9e23" stroke-width="2.2" marker-end="url(#ts-fwd)"/>
+  <line x1="468" y1="353" x2="528" y2="353" stroke="#3a9e23" stroke-width="2.2" marker-end="url(#ts-fwd)"/>
+
+  <!-- legend card 4 -->
+  <g filter="url(#ts-sh)">
+    <rect x="534" y="108" width="208" height="56" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <text x="546" y="128" fill="#16331a" font-size="11" font-weight="700">Full ApplicationContext</text>
+  <text x="546" y="143" fill="#33402e" font-size="9.5">DI scan + CQRS + transactional + EDA</text>
+  <text x="546" y="157" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">monkeypatch env</text>
+
+  <!-- legend card 3 -->
+  <g filter="url(#ts-sh)">
+    <rect x="534" y="186" width="208" height="54" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <text x="546" y="206" fill="#16331a" font-size="11" font-weight="700">SQLite + aiosqlite</text>
+  <text x="546" y="221" fill="#33402e" font-size="9.5">real DB, no mocks</text>
+  <text x="546" y="234" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">tmp_path + SQLAlchemy</text>
+
+  <!-- legend card 2 -->
+  <g filter="url(#ts-sh)">
+    <rect x="534" y="256" width="208" height="54" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <text x="546" y="276" fill="#16331a" font-size="11" font-weight="700">Real bus + repo over SQLite</text>
+  <text x="546" y="291" fill="#33402e" font-size="9.5">wired once, shared by tests</text>
+  <text x="546" y="304" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">conftest.py fixtures</text>
+
+  <!-- legend card 1 -->
+  <g filter="url(#ts-sh)">
+    <rect x="534" y="326" width="208" height="54" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+  </g>
+  <text x="546" y="346" fill="#16331a" font-size="11" font-weight="700">No dependencies</text>
+  <text x="546" y="361" fill="#33402e" font-size="9.5">construct, call, assert</text>
+  <text x="546" y="374" fill="#7a8472" font-size="9.5">no fixtures, no async</text>
+
+  <!-- header row labels over the two columns -->
+  <text x="300" y="84" text-anchor="middle" fill="#2c8a1c" font-size="10" font-weight="700" letter-spacing="0.06em">PYRAMID</text>
+  <text x="638" y="84" text-anchor="middle" fill="#2c8a1c" font-size="10" font-weight="700" letter-spacing="0.06em">DEPENDENCIES + LUMEN APPROACH</text>
 </svg>

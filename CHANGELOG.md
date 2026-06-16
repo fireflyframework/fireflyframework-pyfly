@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.112 (2026-06-16)
+
+### Changed
+
+- **"PyFly by Example" — all diagrams redesigned.** Every content figure in both
+  the English and Spanish editions was rebuilt in a single, polished design
+  language (consistent cards, gradient headers, numbered step flows, monospace
+  code tokens, brand palette, vector iconography). This fixes real defects in the
+  previous artwork — broken/tofu glyphs (font-dependent arrows, circled numbers
+  and check marks) and clipped/overflowing content — by drawing all arrows,
+  checkmarks and numbered badges as vector shapes and keeping figure text to
+  ASCII/Latin-1 only.
+- **Two new figures** where they help most: *Page / Pageable / Sort* (Chapter 5)
+  and *Value Object vs Entity* (Chapter 6). Both editions rebuilt and re-attached
+  to the release.
+
+---
+
 ## v26.06.111 (2026-06-16)
 
 ### Added
