@@ -181,6 +181,72 @@ class TestEntraID:
         assert ctx.attributes["preferred_username"] == "ana@faes.mx"
 
 
+class TestCdMMexicoUseCase:
+    """cdm-mexico (FAES México) Entra ID resource-server contract.
+
+    Proves the use case is covered by **pure configuration** — the framework now
+    reproduces what cdm's ``EntraClaimsValidator`` subclass did (roles + groups,
+    ``scp`` scopes, ``oid`` principal, ``tid``/``cdm_entidad_id`` attributes), so
+    an adopter can either configure claim mapping or still subclass.
+    """
+
+    def test_entra_token_maps_like_entra_claims_validator(self, jwks: tuple[str, str, _JwksState]) -> None:
+        jwks_uri, _, _ = jwks
+        tid = "11111111-2222-3333-4444-555555555555"
+        iss = f"https://login.microsoftonline.com/{tid}/v2.0"
+        # The cdm-mexico claim mapping, expressed as config (no subclass needed).
+        mappings = ClaimMappings(
+            principal_claims=("oid", "sub"),
+            authority_claims=("roles", "groups"),  # cdm appends groups to roles
+            scope_claims=("scp",),
+            attribute_claims=("tid", "preferred_username", "cdm_entidad_id", "employeeid", "oid"),
+        )
+        v = JWKSTokenValidator(jwks_uri=jwks_uri, issuer=iss, audiences=["api://cdm-backend"], claim_mappings=mappings)
+        token = _mint(
+            {
+                "iss": iss,
+                "aud": "api://cdm-backend",
+                "sub": "entra-sub",
+                "oid": "oid-stable",
+                "tid": tid,
+                "roles": ["CdM.Gn"],
+                "groups": ["grp-guid-1"],
+                "scp": "Cdm.Read",
+                "preferred_username": "director@faes.mx",
+                "cdm_entidad_id": "MX0000064",
+            }
+        )
+        ctx = v.to_security_context(token)
+
+        # Principal prefers the stable Entra object id.
+        assert ctx.user_id == "oid-stable"
+        # Raw role claim is preserved verbatim, and the admin gate's exact-match
+        # check (cdm checks the raw "CdM.Gn") works.
+        assert ctx.has_role("CdM.Gn")
+        assert "grp-guid-1" in ctx.roles  # group object-ids drive role mapping too
+        # Entra delegated scopes (scp) become permissions.
+        assert ctx.permissions == ["Cdm.Read"]
+        # Row-scope attributes are carried through.
+        assert ctx.attributes["cdm_entidad_id"] == "MX0000064"
+        assert ctx.attributes["tid"] == tid
+        assert ctx.attributes["preferred_username"] == "director@faes.mx"
+
+    def test_gn_admin_gate_denies_non_gn_principal(self, jwks: tuple[str, str, _JwksState]) -> None:
+        jwks_uri, _, _ = jwks
+        iss = "https://login.microsoftonline.com/tid/v2.0"
+        v = JWKSTokenValidator(
+            jwks_uri=jwks_uri,
+            issuer=iss,
+            audiences=["api://cdm-backend"],
+            claim_mappings=ClaimMappings(authority_claims=("roles",)),
+        )
+        token = _mint({"iss": iss, "aud": "api://cdm-backend", "sub": "rep", "roles": ["CdM.Rep"]})
+        ctx = v.to_security_context(token)
+        # The admin URL gate / @pre_authorize checks the raw "CdM.Gn"; a rep must fail it.
+        assert ctx.has_role("CdM.Rep")
+        assert not ctx.has_role("CdM.Gn")
+
+
 class TestCognito:
     def test_access_token_no_audience(self, jwks: tuple[str, str, _JwksState]) -> None:
         jwks_uri, _, _ = jwks
