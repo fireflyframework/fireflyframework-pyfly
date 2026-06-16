@@ -1,84 +1,83 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300"
-     role="img" aria-label="Constructor injection: WalletService receives WalletRepository and EventPublisher from ApplicationContext"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360"
+     role="img" aria-label="Dependency injection: the ApplicationContext reads the WalletService __init__ type hints, builds the WalletRepository and EventPublisher beans, and injects them into the constructor"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="640" height="300" fill="#eaf6df"/>
-
-  <!-- ── ApplicationContext outer container ── -->
-  <rect x="20" y="20" width="600" height="260" rx="18" ry="18"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" opacity="0.55"/>
-  <!-- Faint label top-left -->
-  <text x="40" y="44" dominant-baseline="middle"
-        fill="#6a7a64" font-size="12" font-weight="600" font-style="italic">ApplicationContext</text>
-
-  <!-- ── Port chips (dependencies) ── -->
-
-  <!-- WalletRepository port chip -->
-  <rect x="48" y="88" width="148" height="44" rx="10" ry="10"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
-  <!-- Header bar -->
-  <rect x="48" y="88" width="148" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="48" y="98" width="148" height="10" fill="#43b02a"/>
-  <text x="122" y="98" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">WalletRepository</text>
-  <text x="122" y="119" text-anchor="middle" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="10">@repository</text>
-
-  <!-- EventPublisher port chip -->
-  <rect x="48" y="168" width="148" height="44" rx="10" ry="10"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
-  <!-- Header bar -->
-  <rect x="48" y="168" width="148" height="20" rx="10" ry="10"
-        fill="#43b02a"/>
-  <rect x="48" y="178" width="148" height="10" fill="#43b02a"/>
-  <text x="122" y="178" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">EventPublisher</text>
-  <text x="122" y="199" text-anchor="middle" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="10">@component</text>
-
-  <!-- ── WalletService central box ── -->
   <defs>
-    <filter id="di-shadow" x="-12%" y="-12%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#2c8a1c" flood-opacity="0.28"/>
-    </filter>
-    <marker id="di-arrow" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+    <linearGradient id="di-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="di-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
     </marker>
+    <marker id="di-read" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <filter id="di-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
+    </filter>
   </defs>
 
-  <rect x="276" y="98" width="164" height="104" rx="14" ry="14"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#di-shadow)"/>
-  <!-- Header bar -->
-  <rect x="276" y="98" width="164" height="28" rx="14" ry="14"
-        fill="#43b02a"/>
-  <rect x="276" y="112" width="164" height="14" fill="#43b02a"/>
-  <text x="358" y="112" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="13" font-weight="700">WalletService</text>
-  <text x="358" y="147" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">__init__(</text>
-  <text x="358" y="162" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">  repo, publisher</text>
-  <text x="358" y="177" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">)</text>
+  <!-- card -->
+  <rect x="6" y="6" width="748" height="348" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── Arrows from port chips to WalletService ── -->
-  <!-- WalletRepository → WalletService -->
-  <line x1="196" y1="110" x2="274" y2="130"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#di-arrow)"/>
-  <!-- "injected" label on arrow 1 -->
-  <text x="228" y="113" text-anchor="middle"
-        fill="#43b02a" font-size="10" font-weight="600">injected</text>
+  <!-- ===== ApplicationContext (the DI container boundary) ===== -->
+  <rect x="30" y="64" width="700" height="266" rx="14" fill="#f6faf1" stroke="#43b02a" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="50" y="50" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">AUTOWIRING</text>
+  <text x="50" y="88" fill="#3a9e23" font-size="12" font-weight="700" font-style="italic">ApplicationContext</text>
+  <text x="50" y="104" fill="#7a8472" font-size="9.5" font-style="italic">the DI container</text>
 
-  <!-- EventPublisher → WalletService -->
-  <line x1="196" y1="190" x2="274" y2="170"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#di-arrow)"/>
-  <!-- "injected" label on arrow 2 -->
-  <text x="228" y="196" text-anchor="middle"
-        fill="#43b02a" font-size="10" font-weight="600">injected</text>
+  <!-- ===== Dependency beans (built by the container) ===== -->
+  <!-- WalletRepository bean -->
+  <g filter="url(#di-sh)">
+    <rect x="58" y="132" width="178" height="76" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M58 143a11 11 0 0 1 11-11h156a11 11 0 0 1 11 11v17H58Z" fill="url(#di-head)"/>
+    <text x="147" y="149" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">WalletRepository</text>
+  </g>
+  <text x="147" y="182" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@repository</text>
+  <text x="147" y="198" text-anchor="middle" fill="#7a8472" font-size="9.5">CRUD bean</text>
+  <circle cx="70" cy="144" r="11" fill="#1f5e16"/><text x="70" y="148" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
+  <!-- EventPublisher bean -->
+  <g filter="url(#di-sh)">
+    <rect x="58" y="232" width="178" height="76" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M58 243a11 11 0 0 1 11-11h156a11 11 0 0 1 11 11v17H58Z" fill="url(#di-head)"/>
+    <text x="147" y="249" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">EventPublisher</text>
+  </g>
+  <text x="147" y="282" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">@component</text>
+  <text x="147" y="298" text-anchor="middle" fill="#7a8472" font-size="9.5">event bus bean</text>
+  <circle cx="70" cy="244" r="11" fill="#1f5e16"/><text x="70" y="248" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
+
+  <!-- ===== WalletService (the consumer) ===== -->
+  <g filter="url(#di-sh)">
+    <rect x="450" y="148" width="240" height="144" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2.5"/>
+    <path d="M450 159a11 11 0 0 1 11-11h218a11 11 0 0 1 11 11v19H450Z" fill="url(#di-head)"/>
+    <text x="570" y="166" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">WalletService</text>
+  </g>
+  <circle cx="463" cy="160" r="11" fill="#1f5e16"/><text x="463" y="164" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
+  <text x="470" y="201" fill="#7a8472" font-size="10" font-family="ui-monospace,Menlo,monospace">def __init__(self,</text>
+  <text x="470" y="220" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">    repo: WalletRepository,</text>
+  <text x="470" y="239" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">    publisher: EventPublisher,</text>
+  <text x="470" y="258" fill="#7a8472" font-size="10" font-family="ui-monospace,Menlo,monospace">) -&gt; None:</text>
+  <text x="570" y="281" text-anchor="middle" fill="#7a8472" font-size="9.5" font-style="italic">declares what it needs by type</text>
+
+  <!-- step 1: container reads the type hints -->
+  <text x="343" y="118" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="700">reads type hints</text>
+  <circle cx="262" cy="118" r="11" fill="#1f5e16"/><text x="262" y="122" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
+  <path d="M280 124 L450 178" fill="none" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#di-read)" opacity="0.9"/>
+
+  <!-- injection arrows: beans -> constructor (forward / green) -->
+  <path d="M236 170 L300 170 L300 218 L448 218" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#di-fwd)"/>
+  <path d="M236 270 L320 270 L320 240 L448 240" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#di-fwd)"/>
+
+  <!-- injected labels -->
+  <rect x="338" y="160" width="74" height="20" rx="10" fill="#eaf6df" stroke="#3a9e23" stroke-width="1.2"/>
+  <text x="375" y="174" text-anchor="middle" fill="#2c8a1c" font-size="10" font-weight="700">injected</text>
+  <rect x="343" y="246" width="74" height="20" rx="10" fill="#eaf6df" stroke="#3a9e23" stroke-width="1.2"/>
+  <text x="380" y="260" text-anchor="middle" fill="#2c8a1c" font-size="10" font-weight="700">injected</text>
+
+  <!-- legend -->
+  <line x1="430" y1="48" x2="454" y2="48" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#di-fwd)"/>
+  <text x="460" y="52" fill="#33402e" font-size="9.5">build &amp; inject bean</text>
+  <line x1="588" y1="48" x2="612" y2="48" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4"/>
+  <text x="618" y="52" fill="#33402e" font-size="9.5">inspect hints</text>
 </svg>

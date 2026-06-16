@@ -1,75 +1,63 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360"
-     role="img" aria-label="PyFly four-layer architecture: Cross-Cutting, Infrastructure, Application, Foundation"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 396"
+     role="img" aria-label="PyFly four-layer architecture stacked top to bottom: Cross-Cutting, Infrastructure, Application, Foundation. Each layer depends on the layer below it; Foundation is the base."
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="640" height="360" fill="#eaf6df"/>
-
-  <!-- Shared layout constants:
-       bands start at y=28, each band h=70, gap=12
-       band 1 y=28   (Cross-Cutting)
-       band 2 y=110  (Infrastructure)
-       band 3 y=192  (Application)
-       band 4 y=274  (Foundation)
-       left margin for bands = 70 (arrow area), band width = 550
-  -->
-
-  <!-- ── "depends on" arrow on left margin ── -->
   <defs>
-    <marker id="layers-arrowdown" markerWidth="10" markerHeight="8"
-            refX="5" refY="7" orient="auto">
-      <polygon points="0 0, 10 0, 5 8" fill="#43b02a"/>
+    <linearGradient id="ly-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="ly-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
     </marker>
+    <filter id="ly-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
+    </filter>
   </defs>
 
-  <!-- Arrow shaft: from top of band1 to bottom of band4 -->
-  <line x1="34" y1="50" x2="34" y2="320"
-        stroke="#43b02a" stroke-width="2.5"
-        marker-end="url(#layers-arrowdown)"/>
+  <!-- card -->
+  <rect x="6" y="6" width="748" height="384" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- "depends on" label rotated, centered beside arrow -->
-  <text x="22" y="190" text-anchor="middle"
-        fill="#43b02a" font-size="11" font-weight="600"
-        transform="rotate(-90, 22, 190)">depends on</text>
+  <!-- ===== "depends on" rail (left), points downward toward Foundation ===== -->
+  <line x1="64" y1="56" x2="64" y2="356" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ly-fwd)"/>
+  <text x="40" y="206" text-anchor="middle" fill="#2c8a1c" font-size="11" font-weight="700"
+        letter-spacing="0.08em" transform="rotate(-90, 40, 206)">DEPENDS ON</text>
 
-  <!-- ── Band 1: Cross-Cutting ── -->
-  <rect x="70" y="28" width="550" height="70" rx="12" ry="12"
-        fill="#eaf6df" stroke="#43b02a" stroke-width="2"/>
-  <!-- Bold label -->
-  <text x="88" y="60" dominant-baseline="middle"
-        fill="#16331a" font-size="15" font-weight="700">Cross-Cutting</text>
-  <!-- Module list -->
-  <text x="88" y="82" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="12">aop · observability · logging · testing</text>
+  <!-- ===== layer bands: x=104, w=626, h=66 ; y = 44,124,204,284 ===== -->
 
-  <!-- ── Band 2: Infrastructure ── -->
-  <rect x="70" y="110" width="550" height="70" rx="12" ry="12"
-        fill="#d8efc6" stroke="#43b02a" stroke-width="2"/>
-  <text x="88" y="142" dominant-baseline="middle"
-        fill="#16331a" font-size="15" font-weight="700">Infrastructure</text>
-  <text x="88" y="164" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="12">web · data · messaging · cache · security</text>
+  <!-- Band 1: Cross-Cutting -->
+  <g filter="url(#ly-sh)">
+    <rect x="104" y="44" width="626" height="66" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M104 55a11 11 0 0 1 11-11h604a11 11 0 0 1 11 11v15H104Z" fill="url(#ly-head)"/>
+    <text x="142" y="62" fill="#ffffff" font-size="13" font-weight="700">Cross-Cutting</text>
+  </g>
+  <text x="142" y="93" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">aop &#183; observability &#183; logging &#183; testing</text>
+  <circle cx="124" cy="57" r="11" fill="#1f5e16"/><text x="124" y="61" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- ── Band 3: Application ── -->
-  <rect x="70" y="192" width="550" height="70" rx="12" ry="12"
-        fill="#bfe3a6" stroke="#43b02a" stroke-width="2"/>
-  <text x="88" y="224" dominant-baseline="middle"
-        fill="#16331a" font-size="15" font-weight="700">Application</text>
-  <text x="88" y="246" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="12">validation · cqrs · eda</text>
+  <!-- Band 2: Infrastructure -->
+  <g filter="url(#ly-sh)">
+    <rect x="104" y="124" width="626" height="66" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M104 135a11 11 0 0 1 11-11h604a11 11 0 0 1 11 11v15H104Z" fill="url(#ly-head)"/>
+    <text x="142" y="142" fill="#ffffff" font-size="13" font-weight="700">Infrastructure</text>
+  </g>
+  <text x="142" y="173" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">web &#183; data &#183; messaging &#183; cache &#183; security</text>
+  <circle cx="124" cy="137" r="11" fill="#1f5e16"/><text x="124" y="141" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- ── Band 4: Foundation ── -->
-  <rect x="70" y="274" width="550" height="70" rx="12" ry="12"
-        fill="#a7e76a" stroke="#43b02a" stroke-width="2"/>
-  <text x="88" y="306" dominant-baseline="middle"
-        fill="#16331a" font-size="15" font-weight="700">Foundation</text>
-  <text x="88" y="328" dominant-baseline="middle"
-        fill="#2c5a1f" font-size="12">kernel · core · container · context · config</text>
+  <!-- Band 3: Application -->
+  <g filter="url(#ly-sh)">
+    <rect x="104" y="204" width="626" height="66" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M104 215a11 11 0 0 1 11-11h604a11 11 0 0 1 11 11v15H104Z" fill="url(#ly-head)"/>
+    <text x="142" y="222" fill="#ffffff" font-size="13" font-weight="700">Application</text>
+  </g>
+  <text x="142" y="253" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">validation &#183; cqrs &#183; eda</text>
+  <circle cx="124" cy="217" r="11" fill="#1f5e16"/><text x="124" y="221" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── Gap tick marks between bands (subtle) ── -->
-  <!-- Between band 1 and 2: y=98..110 -->
-  <!-- Between band 2 and 3: y=180..192 -->
-  <!-- Between band 3 and 4: y=262..274 -->
-  <!-- (gaps are just whitespace; no extra elements needed) -->
-
+  <!-- Band 4: Foundation (base) -->
+  <g filter="url(#ly-sh)">
+    <rect x="104" y="284" width="626" height="66" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M104 295a11 11 0 0 1 11-11h604a11 11 0 0 1 11 11v15H104Z" fill="url(#ly-head)"/>
+    <text x="142" y="302" fill="#ffffff" font-size="13" font-weight="700">Foundation</text>
+    <text x="722" y="302" text-anchor="end" fill="#dff3d4" font-size="9.5" font-weight="600" letter-spacing="0.06em">BASE LAYER</text>
+  </g>
+  <text x="142" y="333" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">kernel &#183; core &#183; container &#183; context &#183; config</text>
+  <circle cx="124" cy="297" r="11" fill="#1f5e16"/><text x="124" y="301" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 </svg>

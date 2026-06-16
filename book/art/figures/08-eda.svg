@@ -1,106 +1,95 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 280"
-     role="img" aria-label="EDA diagram: EventPublisher sends to InMemoryEventBus which fans out to BalanceProjection, Notifier, and AuditLog listeners. Publisher does not know the listeners."
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 340"
+     role="img" aria-label="Event-driven architecture: EventPublisher publishes a FundsDeposited event to the InMemoryEventBus, which fans out to three independent listeners - BalanceProjection, Notifier, and AuditLog. The publisher has no knowledge of the listeners."
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="680" height="280" fill="#eaf6df"/>
-
   <defs>
-    <filter id="eda-shadow" x="-10%" y="-10%" width="126%" height="126%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="eda-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <marker id="eda-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <filter id="eda-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="eda-arrow" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="eda-arrow-pub" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
   </defs>
 
-  <!-- ── EventPublisher (left) ── -->
-  <rect x="30" y="110" width="128" height="56" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#eda-shadow)"/>
-  <rect x="30" y="110" width="128" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="30" y="122" width="128" height="12" fill="#43b02a"/>
-  <text x="94" y="122" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">EventPublisher</text>
-  <text x="94" y="150" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">publish(event)</text>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="328" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- Publisher → Bus arrow -->
-  <line x1="158" y1="138" x2="248" y2="138"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#eda-arrow-pub)"/>
+  <!-- rail label -->
+  <text x="34" y="46" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">PUBLISH</text>
+  <path d="M104 40 L116 40 M112 37 L116 40 L112 43" fill="none" stroke="#2c8a1c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="124" y="46" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">FAN-OUT</text>
 
-  <!-- Decoupling note above arrow -->
-  <text x="203" y="127" text-anchor="middle"
-        fill="#6a7a64" font-size="9" font-style="italic">no listener knowledge</text>
+  <!-- ===== forward arrows ===== -->
+  <!-- publisher -> bus (y=170) -->
+  <line x1="186" y1="170" x2="244" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#eda-fwd)"/>
+  <!-- bus -> BalanceProjection (top) -->
+  <path d="M404 154 L444 154 L444 90 L496 90" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#eda-fwd)"/>
+  <!-- bus -> Notifier (middle) -->
+  <line x1="404" y1="170" x2="496" y2="170" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#eda-fwd)"/>
+  <!-- bus -> AuditLog (bottom) -->
+  <path d="M404 186 L444 186 L444 250 L496 250" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#eda-fwd)"/>
 
-  <!-- ── InMemoryEventBus (center) ── -->
-  <rect x="250" y="104" width="136" height="68" rx="14" ry="14"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#eda-shadow)"/>
-  <rect x="250" y="104" width="136" height="26" rx="14" ry="14" fill="#43b02a"/>
-  <rect x="250" y="118" width="136" height="12" fill="#43b02a"/>
-  <text x="318" y="117" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">InMemoryEventBus</text>
-  <text x="318" y="148" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">dispatch → listeners</text>
-
-  <!-- Amber event star on bus -->
-  <g transform="translate(318, 82)">
-    <path d="M0,-12 L3,-3 L12,0 L3,3 L0,12 L-3,3 L-12,0 L-3,-3 Z" fill="#ffc24b"/>
+  <!-- ===== node 1: EventPublisher ===== -->
+  <g filter="url(#eda-sh)">
+    <rect x="44" y="132" width="142" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M44 143a11 11 0 0 1 11-11h120a11 11 0 0 1 11 11v17H44Z" fill="url(#eda-head)"/>
+    <text x="115" y="149" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">EventPublisher</text>
   </g>
-  <text x="318" y="64" text-anchor="middle" fill="#23402a" font-size="9" font-weight="600">FundsDeposited</text>
+  <text x="115" y="182" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">publish(event)</text>
+  <text x="115" y="198" text-anchor="middle" fill="#7a8472" font-size="9.5">aggregate raises a fact</text>
+  <circle cx="56" cy="144" r="11" fill="#1f5e16"/><text x="56" y="148" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- Bus → BalanceProjection (top) -->
-  <polyline points="386,120 440,68 472,68"
-            fill="none" stroke="#8aa07e" stroke-width="2"
-            marker-end="url(#eda-arrow)"/>
+  <!-- ===== node 2: InMemoryEventBus ===== -->
+  <g filter="url(#eda-sh)">
+    <rect x="246" y="132" width="158" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 143a11 11 0 0 1 11-11h136a11 11 0 0 1 11 11v17H246Z" fill="url(#eda-head)"/>
+    <text x="325" y="149" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">InMemoryEventBus</text>
+  </g>
+  <text x="325" y="182" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">dispatch()</text>
+  <text x="325" y="198" text-anchor="middle" fill="#7a8472" font-size="9.5">routes to listeners</text>
+  <circle cx="258" cy="144" r="11" fill="#1f5e16"/><text x="258" y="148" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- Bus → Notifier (middle) -->
-  <line x1="386" y1="138" x2="472" y2="138"
-        fill="none" stroke="#8aa07e" stroke-width="2"
-        marker-end="url(#eda-arrow)"/>
+  <!-- amber event badge above the bus -->
+  <g transform="translate(325,86)">
+    <path d="M0 -13 L3.5 -4 L13 -4 L5.5 2 L8 11 L0 5.5 L-8 11 L-5.5 2 L-13 -4 L-3.5 -4 Z"
+          fill="#ffc24b" stroke="#1f5e16" stroke-width="0.6"/>
+  </g>
+  <rect x="263" y="100" width="124" height="20" rx="10" fill="#ffd86b" stroke="#1f5e16" stroke-width="1"/>
+  <text x="325" y="114" text-anchor="middle" fill="#1c2420" font-size="10" font-weight="700" font-family="ui-monospace,Menlo,monospace">FundsDeposited</text>
+  <!-- connector from event badge down to bus header -->
+  <line x1="325" y1="120" x2="325" y2="132" stroke="#ffc24b" stroke-width="2"/>
 
-  <!-- Bus → AuditLog (bottom) -->
-  <polyline points="386,156 440,208 472,208"
-            fill="none" stroke="#8aa07e" stroke-width="2"
-            marker-end="url(#eda-arrow)"/>
+  <!-- ===== node 3: BalanceProjection (top) ===== -->
+  <g filter="url(#eda-sh)">
+    <rect x="498" y="58" width="240" height="64" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M498 69a11 11 0 0 1 11-11h218a11 11 0 0 1 11 11v17H498Z" fill="url(#eda-head)"/>
+    <text x="618" y="75" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">BalanceProjection</text>
+  </g>
+  <text x="618" y="106" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">on_funds_deposited()</text>
+  <circle cx="510" cy="70" r="11" fill="#1f5e16"/><text x="510" y="74" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── BalanceProjection (top right) ── -->
-  <rect x="474" y="46" width="148" height="44" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#eda-shadow)"/>
-  <rect x="474" y="46" width="148" height="20" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="474" y="56" width="148" height="10" fill="#43b02a"/>
-  <text x="548" y="56" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">BalanceProjection</text>
-  <text x="548" y="80" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">on_funds_deposited()</text>
+  <!-- ===== node 4: Notifier (middle) ===== -->
+  <g filter="url(#eda-sh)">
+    <rect x="498" y="138" width="240" height="64" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M498 149a11 11 0 0 1 11-11h218a11 11 0 0 1 11 11v17H498Z" fill="url(#eda-head)"/>
+    <text x="618" y="155" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Notifier</text>
+  </g>
+  <text x="618" y="186" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">send_email()</text>
+  <circle cx="510" cy="150" r="11" fill="#1f5e16"/><text x="510" y="154" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── Notifier (middle right) ── -->
-  <rect x="474" y="116" width="148" height="44" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#eda-shadow)"/>
-  <rect x="474" y="116" width="148" height="20" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="474" y="126" width="148" height="10" fill="#43b02a"/>
-  <text x="548" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Notifier</text>
-  <text x="548" y="150" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">send_email()</text>
+  <!-- ===== node 5: AuditLog (bottom) ===== -->
+  <g filter="url(#eda-sh)">
+    <rect x="498" y="218" width="240" height="64" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M498 229a11 11 0 0 1 11-11h218a11 11 0 0 1 11 11v17H498Z" fill="url(#eda-head)"/>
+    <text x="618" y="235" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">AuditLog</text>
+  </g>
+  <text x="618" y="266" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">append_entry()</text>
+  <circle cx="510" cy="230" r="11" fill="#1f5e16"/><text x="510" y="234" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <!-- ── AuditLog (bottom right) ── -->
-  <rect x="474" y="186" width="148" height="44" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#eda-shadow)"/>
-  <rect x="474" y="186" width="148" height="20" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="474" y="196" width="148" height="10" fill="#43b02a"/>
-  <text x="548" y="196" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">AuditLog</text>
-  <text x="548" y="220" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">append_entry()</text>
-
-  <!-- Decoupling label bottom -->
-  <text x="203" y="238" text-anchor="middle"
-        fill="#43b02a" font-size="10" font-weight="600" font-style="italic">publisher ↔ listeners: zero coupling</text>
-
+  <!-- decoupling note -->
+  <rect x="44" y="288" width="410" height="30" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="64" y="307" fill="#3f5b7a" font-size="10.5"><tspan font-weight="700">Zero coupling:</tspan><tspan font-weight="400"> the publisher never names a listener - add one, no edits.</tspan></text>
 </svg>

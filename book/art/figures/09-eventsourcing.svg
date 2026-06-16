@@ -1,170 +1,156 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 340"
-     role="img" aria-label="Event Sourcing diagram: TransferFunds command appends events into append-only EventStore; replay arrow rebuilds Wallet aggregate state; snapshot every N events; Projection produces read model"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 460"
+     role="img" aria-label="Event sourcing: a TransferFunds command appends events to an append-only event store (WalletOpened, FundsDeposited, FundsWithdrawn); replaying the immutable stream rebuilds the Wallet aggregate state, an optional snapshot accelerates replay, and a projection builds a read model"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="340" fill="#eaf6df"/>
-
   <defs>
-    <filter id="es-shadow" x="-10%" y="-10%" width="126%" height="126%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="es-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="es-head-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b7a9d"/>
+      <stop offset="1" stop-color="#3f5b7a"/>
+    </linearGradient>
+    <marker id="es-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="es-read" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <marker id="es-amber" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#ffc24b"/>
+    </marker>
+    <filter id="es-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="es-arrow-green" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
-    <marker id="es-arrow-muted" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
   </defs>
 
-  <!-- ── Section labels ── -->
-  <text x="20" y="22" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">① command</text>
-  <text x="20" y="210" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">② replay → state</text>
-  <text x="440" y="210" dominant-baseline="middle"
-        fill="#8aa07e" font-size="11" font-weight="700">③ projection</text>
+  <!-- outer card -->
+  <rect x="6" y="6" width="788" height="448" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── TransferFunds command box ── -->
-  <rect x="20" y="30" width="120" height="50" rx="10" ry="10"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#es-shadow)"/>
-  <rect x="20" y="30" width="120" height="22" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="20" y="42" width="120" height="10" fill="#43b02a"/>
-  <text x="80" y="41" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">TransferFunds</text>
-  <text x="80" y="67" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">Command</text>
+  <!-- ===================== row 1: command -> append ===================== -->
+  <text x="34" y="48" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">WRITE</text>
+  <path d="M84 43 L98 43 M93 39.5 L98 43 L93 46.5" fill="none" stroke="#2c8a1c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Command → EventStore arrow -->
-  <line x1="140" y1="55" x2="220" y2="55"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#es-arrow-green)"/>
-  <text x="180" y="46" text-anchor="middle" fill="#43b02a" font-size="9" font-weight="600">append</text>
+  <!-- node 1: TransferFunds command -->
+  <g filter="url(#es-sh)">
+    <rect x="34" y="62" width="148" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M34 73a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H34Z" fill="url(#es-head)"/>
+    <text x="108" y="79" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">TransferFunds</text>
+  </g>
+  <text x="108" y="112" text-anchor="middle" fill="#33402e" font-size="10.5">command</text>
+  <text x="108" y="128" text-anchor="middle" fill="#7a8472" font-size="9.5">applies new events</text>
+  <circle cx="46" cy="74" r="11" fill="#1f5e16"/>
+  <text x="46" y="78.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
-  <!-- ── EventStore: append-only log (stacked cards) ── -->
-  <text x="350" y="22" text-anchor="middle" fill="#43b02a" font-size="11" font-weight="700">EventStore (append-only / immutable)</text>
+  <!-- command -> event store -->
+  <line x1="184" y1="101" x2="218" y2="101" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
+  <text x="201" y="92" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">append</text>
 
-  <!-- Card 1: WalletOpened -->
-  <rect x="222" y="30" width="110" height="34" rx="6" ry="6"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#es-shadow)"/>
-  <rect x="222" y="30" width="110" height="15" rx="6" ry="6" fill="#43b02a"/>
-  <rect x="222" y="37" width="110" height="8" fill="#43b02a"/>
-  <text x="277" y="37" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="9.5" font-weight="700">WalletOpened</text>
-  <text x="277" y="55" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8">seq 1 · owner_id</text>
+  <!-- ===================== event store (append-only log) ===================== -->
+  <g filter="url(#es-sh)">
+    <rect x="224" y="46" width="416" height="110" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M224 57a11 11 0 0 1 11-11h394a11 11 0 0 1 11 11v17H224Z" fill="url(#es-head)"/>
+    <text x="432" y="63" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">EventStore  -  append-only log</text>
+  </g>
+  <circle cx="236" cy="58" r="11" fill="#1f5e16"/>
+  <text x="236" y="62.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
-  <!-- Card 2: FundsDeposited -->
-  <rect x="340" y="30" width="110" height="34" rx="6" ry="6"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#es-shadow)"/>
-  <rect x="340" y="30" width="110" height="15" rx="6" ry="6" fill="#43b02a"/>
-  <rect x="340" y="37" width="110" height="8" fill="#43b02a"/>
-  <text x="395" y="37" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="9.5" font-weight="700">FundsDeposited</text>
-  <text x="395" y="55" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8">seq 2 · amount</text>
+  <!-- event chip 1: WalletOpened -->
+  <rect x="240" y="90" width="120" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
+  <text x="300" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">WalletOpened</text>
+  <text x="300" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 1 &#183; owner_id</text>
 
-  <!-- Card 3: FundsWithdrawn -->
-  <rect x="458" y="30" width="110" height="34" rx="6" ry="6"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2" filter="url(#es-shadow)"/>
-  <rect x="458" y="30" width="110" height="15" rx="6" ry="6" fill="#43b02a"/>
-  <rect x="458" y="37" width="110" height="8" fill="#43b02a"/>
-  <text x="513" y="37" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="9.5" font-weight="700">FundsWithdrawn</text>
-  <text x="513" y="55" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8">seq 3 · amount</text>
+  <line x1="362" y1="115" x2="376" y2="115" stroke="#3a9e23" stroke-width="2" marker-end="url(#es-fwd)"/>
 
-  <!-- Immutability badge -->
-  <rect x="578" y="32" width="100" height="28" rx="12" ry="12"
-        fill="#ffc24b" stroke="#e89c00" stroke-width="1.5"/>
-  <text x="628" y="46" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="700">immutable ✓</text>
+  <!-- event chip 2: FundsDeposited -->
+  <rect x="378" y="90" width="124" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
+  <text x="440" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">FundsDeposited</text>
+  <text x="440" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 2 &#183; amount</text>
 
-  <!-- ── Separator line ── -->
-  <line x1="10" y1="90" x2="690" y2="90" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,5"/>
+  <line x1="504" y1="115" x2="518" y2="115" stroke="#3a9e23" stroke-width="2" marker-end="url(#es-fwd)"/>
 
-  <!-- ── Replay section ── -->
-  <!-- replay arrow label -->
-  <text x="180" y="112" text-anchor="middle" fill="#43b02a" font-size="11" font-weight="700">replay all events</text>
+  <!-- event chip 3: FundsWithdrawn -->
+  <rect x="520" y="90" width="116" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
+  <text x="578" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">FundsWithdrawn</text>
+  <text x="578" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 3 &#183; amount</text>
 
-  <!-- Events mini-chips for replay row -->
-  <rect x="22" y="120" width="80" height="24" rx="5" ry="5"
-        fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="62" y="132" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="8.5" font-weight="600">WalletOpened</text>
+  <!-- immutable badge -->
+  <rect x="650" y="62" width="116" height="28" rx="14" fill="#ffd86b" stroke="#ffc24b" stroke-width="1.5"/>
+  <path d="M664 76 L669 81 L678 70" fill="none" stroke="#1f5e16" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="722" y="80" text-anchor="middle" fill="#1c2420" font-size="10" font-weight="700">immutable</text>
 
-  <line x1="102" y1="132" x2="118" y2="132"
-        stroke="#43b02a" stroke-width="1.8"
-        marker-end="url(#es-arrow-green)"/>
+  <!-- ===================== row 2: replay -> rebuild state ===================== -->
+  <!-- replay rail from event store down to replay row -->
+  <path d="M432 156 L432 196 L300 196 L300 222" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
+  <text x="318" y="190" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">replay()</text>
 
-  <rect x="120" y="120" width="80" height="24" rx="5" ry="5"
-        fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="160" y="132" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="8.5" font-weight="600">FundsDeposited</text>
+  <text x="34" y="232" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">REBUILD STATE</text>
+  <circle cx="160" cy="227" r="11" fill="#1f5e16"/>
+  <text x="160" y="231.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
-  <line x1="200" y1="132" x2="216" y2="132"
-        stroke="#43b02a" stroke-width="1.8"
-        marker-end="url(#es-arrow-green)"/>
+  <!-- fold caption -->
+  <text x="300" y="255" text-anchor="middle" fill="#7a8472" font-size="9.5">fold the stream, event by event</text>
 
-  <rect x="218" y="120" width="80" height="24" rx="5" ry="5"
-        fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="258" y="132" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="8.5" font-weight="600">FundsWithdrawn</text>
+  <!-- replay chips -->
+  <rect x="222" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
+  <text x="281" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">WalletOpened</text>
+  <line x1="342" y1="275" x2="356" y2="275" stroke="#3a9e23" stroke-width="1.8" marker-end="url(#es-fwd)"/>
 
-  <!-- replay → aggregate -->
-  <line x1="298" y1="132" x2="356" y2="155"
-        stroke="#43b02a" stroke-width="2"
-        marker-end="url(#es-arrow-green)"/>
+  <rect x="358" y="262" width="120" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
+  <text x="418" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">FundsDeposited</text>
+  <line x1="480" y1="275" x2="494" y2="275" stroke="#3a9e23" stroke-width="1.8" marker-end="url(#es-fwd)"/>
 
-  <!-- ── Wallet aggregate current state ── -->
-  <rect x="358" y="145" width="120" height="56" rx="12" ry="12"
-        fill="#ffffff" stroke="#43b02a" stroke-width="2.5" filter="url(#es-shadow)"/>
-  <rect x="358" y="145" width="120" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="358" y="157" width="120" height="12" fill="#43b02a"/>
-  <text x="418" y="157" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="12" font-weight="700">Wallet</text>
-  <text x="418" y="185" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="10">balance: £750</text>
+  <rect x="496" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
+  <text x="555" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">FundsWithdrawn</text>
 
-  <!-- ── Snapshot tag (side note) ── -->
-  <line x1="448" y1="90" x2="448" y2="148"
-        stroke="#ffc24b" stroke-width="1.5" stroke-dasharray="4,3"/>
-  <rect x="448" y="94" width="78" height="22" rx="10" ry="10"
-        fill="#ffc24b" stroke="#e89c00" stroke-width="1.5"/>
-  <text x="487" y="105" text-anchor="middle" dominant-baseline="middle"
-        fill="#23402a" font-size="9" font-weight="700">snapshot @N</text>
+  <!-- chips -> Wallet aggregate -->
+  <line x1="616" y1="275" x2="644" y2="289" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
 
-  <!-- ── Separator line ── -->
-  <line x1="10" y1="218" x2="690" y2="218" stroke="#b8d9a0" stroke-width="1.5" stroke-dasharray="6,5"/>
+  <!-- Wallet aggregate -->
+  <g filter="url(#es-sh)">
+    <rect x="648" y="252" width="118" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M648 263a11 11 0 0 1 11-11h96a11 11 0 0 1 11 11v17H648Z" fill="url(#es-head)"/>
+    <text x="707" y="269" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Wallet</text>
+  </g>
+  <text x="707" y="302" text-anchor="middle" fill="#33402e" font-size="10.5">rebuilt state</text>
+  <text x="707" y="318" text-anchor="middle" fill="#7a8472" font-size="10" font-family="ui-monospace,Menlo,monospace">balance: 750</text>
 
-  <!-- ── Projection → read model (bottom) ── -->
-  <!-- EventStore → Projection arrow -->
-  <polyline points="350,64 350,232 500,232"
-            fill="none" stroke="#8aa07e" stroke-width="2"
-            marker-end="url(#es-arrow-muted)"/>
-  <text x="380" y="225" fill="#6a7a64" font-size="9" font-style="italic">fan-out</text>
+  <!-- snapshot (optional) -->
+  <rect x="222" y="306" width="200" height="36" rx="11" fill="#fff7e6" stroke="#ffc24b" stroke-width="1.6"/>
+  <text x="240" y="321" fill="#1c2420" font-size="10" font-weight="700">snapshot every N events</text>
+  <text x="240" y="335" fill="#7a8472" font-size="9">optional - skips early replay</text>
+  <!-- snapshot fast-path arrow into Wallet -->
+  <path d="M422 322 L520 322 L520 295 L644 295" fill="none" stroke="#ffc24b" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-amber)"/>
 
-  <!-- Projection box -->
-  <rect x="502" y="218" width="110" height="48" rx="10" ry="10"
-        fill="#eaf6df" stroke="#8aa07e" stroke-width="2" filter="url(#es-shadow)"/>
-  <rect x="502" y="218" width="110" height="22" rx="10" ry="10" fill="#8aa07e"/>
-  <rect x="502" y="230" width="110" height="10" fill="#8aa07e"/>
-  <text x="557" y="229" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="11" font-weight="700">Projection</text>
-  <text x="557" y="253" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">on_event(e)</text>
+  <!-- ===================== divider ===================== -->
+  <line x1="34" y1="362" x2="766" y2="362" stroke="#e7ece1" stroke-width="1.5" stroke-dasharray="6,5"/>
 
-  <!-- Projection → read model -->
-  <line x1="612" y1="242" x2="652" y2="242"
-        stroke="#8aa07e" stroke-width="2"
-        marker-end="url(#es-arrow-muted)"/>
+  <!-- ===================== row 3: projection -> read model ===================== -->
+  <text x="34" y="394" fill="#3f5b7a" font-size="11" font-weight="700" letter-spacing="0.08em">READ</text>
+  <path d="M70 389 L84 389 M79 385.5 L84 389 L79 392.5" fill="none" stroke="#3f5b7a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="160" cy="389" r="11" fill="#1f5e16"/>
+  <text x="160" y="393.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
-  <!-- read model box -->
-  <rect x="654" y="218" width="36" height="48" rx="8" ry="8"
-        fill="#f0f8ea" stroke="#8aa07e" stroke-width="2"/>
-  <text x="672" y="242" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="8.5" font-weight="700">read&#10;model</text>
+  <!-- event store -> projection (read path, dashed slate) -->
+  <path d="M260 156 L260 410 L296 410" fill="none" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-read)"/>
+  <text x="216" y="406" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-style="italic">fan-out</text>
 
+  <!-- Projection node -->
+  <g filter="url(#es-sh)">
+    <rect x="298" y="384" width="150" height="56" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M298 395a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v15H298Z" fill="url(#es-head-slate)"/>
+    <text x="373" y="399" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Projection</text>
+  </g>
+  <text x="373" y="427" text-anchor="middle" fill="#33402e" font-size="10" font-family="ui-monospace,Menlo,monospace">on_event(e)</text>
+
+  <!-- projection -> read model -->
+  <line x1="450" y1="412" x2="486" y2="412" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-read)"/>
+
+  <!-- read model node -->
+  <g filter="url(#es-sh)">
+    <rect x="488" y="384" width="150" height="56" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="2"/>
+    <path d="M488 395a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v15H488Z" fill="url(#es-head-slate)"/>
+    <text x="563" y="399" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Read model</text>
+  </g>
+  <text x="563" y="427" text-anchor="middle" fill="#7a8472" font-size="10">fast queries</text>
 </svg>

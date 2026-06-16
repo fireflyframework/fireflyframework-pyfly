@@ -1,81 +1,100 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 260"
-     role="img" aria-label="Many scattered tools converge into PyFly, one cohesive stack"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 330"
+     role="img" aria-label="The choice: hand-wiring a dozen scattered libraries versus one cohesive PyFly framework"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="640" height="260" fill="#eaf6df"/>
-
-  <!-- ── LEFT: Chaotic scattered tool labels ── -->
-
-  <!-- FastAPI — tilted right -->
-  <g transform="translate(50, 62) rotate(6)">
-    <rect x="-44" y="-16" width="88" height="32" rx="16" ry="16"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="13">FastAPI</text>
-  </g>
-
-  <!-- Flask — overlapping, tilted left -->
-  <g transform="translate(130, 40) rotate(-9)">
-    <rect x="-32" y="-15" width="64" height="30" rx="15" ry="15"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="13">Flask</text>
-  </g>
-
-  <!-- SQLAlchemy — large pill, tilted -->
-  <g transform="translate(90, 108) rotate(4)">
-    <rect x="-60" y="-16" width="120" height="32" rx="16" ry="16"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="13">SQLAlchemy</text>
-  </g>
-
-  <!-- aiokafka — tilted left, overlapping -->
-  <g transform="translate(60, 154) rotate(-7)">
-    <rect x="-44" y="-16" width="88" height="32" rx="16" ry="16"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="13">aiokafka</text>
-  </g>
-
-  <!-- Redis — small pill, tilted right -->
-  <g transform="translate(148, 178) rotate(10)">
-    <rect x="-30" y="-15" width="60" height="30" rx="15" ry="15"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="13">Redis</text>
-  </g>
-
-  <!-- dependency-injector — wide pill, tilted left -->
-  <g transform="translate(105, 215) rotate(-5)">
-    <rect x="-74" y="-16" width="148" height="32" rx="16" ry="16"
-          fill="#ffffff" stroke="#8aa07e" stroke-width="1.5"/>
-    <text x="0" y="5" text-anchor="middle" fill="#6a7a64" font-size="12">dependency-injector</text>
-  </g>
-
-  <!-- ── CENTER: Arrow ── -->
   <defs>
-    <marker id="choice-arrowhead" markerWidth="12" markerHeight="8"
-            refX="10" refY="4" orient="auto">
-      <polygon points="0 0, 12 4, 0 8" fill="#43b02a"/>
+    <linearGradient id="ch-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="ch-slatehead" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b7a9d"/>
+      <stop offset="1" stop-color="#3f5b7a"/>
+    </linearGradient>
+    <marker id="ch-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
     </marker>
-  </defs>
-  <line x1="280" y1="130" x2="368" y2="130"
-        stroke="#43b02a" stroke-width="5"
-        marker-end="url(#choice-arrowhead)"/>
-
-  <!-- ── RIGHT: Single tidy PyFly box ── -->
-  <defs>
-    <filter id="choice-shadow" x="-15%" y="-15%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#2c8a1c" flood-opacity="0.30"/>
+    <filter id="ch-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
   </defs>
 
-  <rect x="390" y="80" width="210" height="100" rx="18" ry="18"
-        fill="#43b02a" filter="url(#choice-shadow)"/>
+  <!-- card -->
+  <rect x="6" y="6" width="768" height="318" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- PyFly label -->
-  <text x="495" y="120" text-anchor="middle" dominant-baseline="middle"
-        fill="#ffffff" font-size="28" font-weight="700" letter-spacing="0.5">PyFly</text>
+  <!-- ===== LEFT panel: scattered hand-wired libraries ===== -->
+  <text x="40" y="48" fill="#3f5b7a" font-size="11" font-weight="700" letter-spacing="0.08em">HAND-WIRED</text>
+  <text x="40" y="64" fill="#7a8472" font-size="9.5">a dozen libraries, your glue code</text>
 
-  <!-- subtitle -->
-  <text x="495" y="148" text-anchor="middle" dominant-baseline="middle"
-        fill="#b8f090" font-size="13">one cohesive stack</text>
+  <!-- dashed container suggesting loose, ad-hoc assembly -->
+  <rect x="34" y="76" width="320" height="218" rx="12" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5" stroke-dasharray="5,4"/>
 
+  <!-- scattered library pills (slate-toned, tilted) -->
+  <g filter="url(#ch-sh)">
+    <g transform="translate(118, 110) rotate(-6)">
+      <rect x="-50" y="-15" width="100" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="11.5" font-family="ui-monospace,Menlo,monospace">FastAPI</text>
+    </g>
+    <g transform="translate(238, 100) rotate(7)">
+      <rect x="-42" y="-15" width="84" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="11.5" font-family="ui-monospace,Menlo,monospace">Flask</text>
+    </g>
+    <g transform="translate(150, 152) rotate(4)">
+      <rect x="-66" y="-15" width="132" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="11.5" font-family="ui-monospace,Menlo,monospace">SQLAlchemy</text>
+    </g>
+    <g transform="translate(268, 156) rotate(-5)">
+      <rect x="-40" y="-15" width="80" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="11.5" font-family="ui-monospace,Menlo,monospace">Redis</text>
+    </g>
+    <g transform="translate(110, 200) rotate(-8)">
+      <rect x="-46" y="-15" width="92" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="11.5" font-family="ui-monospace,Menlo,monospace">aiokafka</text>
+    </g>
+    <g transform="translate(238, 206) rotate(6)">
+      <rect x="-58" y="-15" width="116" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-family="ui-monospace,Menlo,monospace">pydantic-settings</text>
+    </g>
+    <g transform="translate(176, 252) rotate(-4)">
+      <rect x="-78" y="-15" width="156" height="30" rx="11" fill="#ffffff" stroke="#5b7a9d" stroke-width="1.5"/>
+      <text x="0" y="5" text-anchor="middle" fill="#3f5b7a" font-size="10.5" font-family="ui-monospace,Menlo,monospace">dependency-injector</text>
+    </g>
+  </g>
+
+  <!-- ===== CENTER: forward arrow (the choice resolved) ===== -->
+  <text x="390" y="146" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700" letter-spacing="0.06em">CHOOSE</text>
+  <line x1="362" y1="185" x2="416" y2="185" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ch-fwd)"/>
+
+  <!-- ===== RIGHT panel: one cohesive PyFly framework ===== -->
+  <text x="740" y="48" text-anchor="end" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">COHESIVE</text>
+  <text x="740" y="64" text-anchor="end" fill="#7a8472" font-size="9.5">one framework, integrated</text>
+
+  <!-- PyFly node -->
+  <g filter="url(#ch-sh)">
+    <rect x="430" y="76" width="310" height="218" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M430 87a11 11 0 0 1 11-11h288a11 11 0 0 1 11 11v22H430Z" fill="url(#ch-head)"/>
+    <text x="585" y="93" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="700">PyFly</text>
+    <text x="585" y="105" text-anchor="middle" fill="#eaf6df" font-size="9">one cohesive stack</text>
+  </g>
+
+  <!-- integrated capability chips inside PyFly -->
+  <g font-size="10.5" font-family="ui-monospace,Menlo,monospace">
+    <rect x="448" y="126" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="512" y="144" text-anchor="middle" fill="#1f5e16">HTTP routing</text>
+    <rect x="594" y="126" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="658" y="144" text-anchor="middle" fill="#1f5e16">data access</text>
+
+    <rect x="448" y="162" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="512" y="180" text-anchor="middle" fill="#1f5e16">messaging</text>
+    <rect x="594" y="162" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="658" y="180" text-anchor="middle" fill="#1f5e16">caching</text>
+
+    <rect x="448" y="198" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="512" y="216" text-anchor="middle" fill="#1f5e16">DI container</text>
+    <rect x="594" y="198" width="128" height="28" rx="9" fill="#eaf6df" stroke="#43b02a" stroke-width="1.2"/>
+    <text x="658" y="216" text-anchor="middle" fill="#1f5e16">config</text>
+  </g>
+
+  <!-- foundation strip: production-ready defaults -->
+  <rect x="448" y="240" width="274" height="36" rx="9" fill="#1f5e16"/>
+  <text x="585" y="263" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">production-ready defaults</text>
 </svg>

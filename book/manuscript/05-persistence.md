@@ -269,6 +269,8 @@ The prefix decides the *shape* of the result: `find_by` returns a list, `count_b
 
 A list endpoint should never return *every* wallet. *Pagination* is the standard fix: return one fixed-size **page** of rows at a time, plus enough metadata for the client to ask for the next one. PyFly's pagination types — `Pageable` (what page, what size, what sort), `Sort` (the ordering), and `Page[T]` (the slice plus metadata) — are inherited straight from the CRUD surface via `find_all(pageable)`.
 
+::: figure art/figures/05-pagination.svg | Figure 5.2 — One round-trip: a Pageable (page, size, sort) goes into find_all, and a Page comes back carrying the row slice plus the total counts the client needs to render pagination controls.
+
 There are three small pieces to assemble: the handler that calls `find_all(pageable)`, the `Page[T]` it returns, and the controller that builds the `Pageable` from the request. We will take them in that order.
 
 Lumen's `ListWallets` query handler is the whole story in three lines:

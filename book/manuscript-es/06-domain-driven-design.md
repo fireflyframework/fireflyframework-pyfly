@@ -30,6 +30,8 @@ El DDD da nombre a estos dos roles: **entidades** y **objetos de valor**, y el m
 
 Las entidades transitorias (las que tienen `id=None`) se comparan iguales solo por la identidad de objeto de Python, así que puedes meter entidades en conjuntos y diccionarios sin preocuparte por colisiones de hash de objetos sin guardar.
 
+::: figure art/figures/06-vo-entity.svg | Figura 6.1 — Dos clases de objeto de dominio: un objeto de valor Money (sin identidad, inmutable, comparado por sus campos) frente a una entidad Wallet (con identidad estable, mutable, comparada por id).
+
 El dinero es el objeto de valor de manual. Un importe de cien euros no es un objeto específico que sigues en el tiempo; es un valor. Dos instancias separadas de `Money(100, "EUR")` son iguales. Un depósito no muta el importe existente: produce uno nuevo, dejando el original intacto y el modelo libre de efectos secundarios ocultos.
 
 Aquí está el objeto de valor `Money` para Lumen:
@@ -367,7 +369,7 @@ uv run --extra dev pytest tests/test_wallet_aggregate.py -q
 
 El diagrama de abajo muestra el panorama completo: estado, invariantes y los eventos que el monedero emite.
 
-::: figure art/figures/06-aggregate.svg | Figura 6.1 — El agregado Wallet: estado, invariantes y los eventos que emite.
+::: figure art/figures/06-aggregate.svg | Figura 6.2 — El agregado Wallet: estado, invariantes y los eventos que emite.
 
 !!! spring "Equivalencia con Spring"
     `AggregateRoot[str]` se corresponde con `org.jmolecules.ddd.types.AggregateRoot<A, ID>` de jMolecules y con `AbstractAggregateRoot<A>` de Spring Data, que ofrece el mismo mecanismo `registerEvent()` / `@DomainEvents` / `@AfterDomainEventPublication`. El patrón es idéntico en espíritu: el agregado acumula eventos en un búfer; el repositorio los vacía tras un guardado exitoso; un `DomainEventPublisher` los despacha. El `raise_event` + `clear_events` de PyFly es el equivalente Python de `registerEvent` + `@AfterDomainEventPublication`.

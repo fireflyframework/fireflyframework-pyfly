@@ -269,6 +269,8 @@ El prefijo decide la *forma* del resultado: `find_by` devuelve una lista, `count
 
 Un endpoint de listado nunca debería devolver *todos* los monederos. La *paginación* es la solución estándar: devolver una **página** de filas de tamaño fijo a la vez, más los metadatos suficientes para que el cliente pueda pedir la siguiente. Los tipos de paginación de PyFly —`Pageable` (qué página, qué tamaño, qué orden), `Sort` (la ordenación) y `Page[T]` (el fragmento más los metadatos)— se heredan directamente de la superficie CRUD a través de `find_all(pageable)`.
 
+::: figure art/figures/05-pagination.svg | Figura 5.2 — Un solo viaje de ida y vuelta: un Pageable (página, tamaño, orden) entra en find_all y vuelve un Page con el fragmento de filas más los totales que el cliente necesita para dibujar los controles de paginación.
+
 Hay tres piezas pequeñas que ensamblar: el manejador que llama a `find_all(pageable)`, el `Page[T]` que devuelve y el controlador que construye el `Pageable` a partir de la petición. Las veremos en ese orden.
 
 El manejador de consulta `ListWallets` de Lumen es toda la historia en tres líneas:

@@ -1,98 +1,165 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260"
-     role="img" aria-label="Observability figure: three pillars (Logs, Metrics, Traces) each feed into the Admin dashboard and actuator endpoints"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 470"
+     role="img" aria-label="Observability: the app exposes metrics, traces, logs and health on the separate management port 9090; ops tooling and the admin dashboard consume the actuator endpoints, while user traffic stays on the business port 8080"
      font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-
-  <!-- Background -->
-  <rect width="700" height="260" fill="#eaf6df"/>
-
   <defs>
-    <filter id="obs-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+    <linearGradient id="ob-head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4cbb2f"/>
+      <stop offset="1" stop-color="#3a9e23"/>
+    </linearGradient>
+    <linearGradient id="ob-head-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b7a9d"/>
+      <stop offset="1" stop-color="#3f5b7a"/>
+    </linearGradient>
+    <marker id="ob-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+    </marker>
+    <marker id="ob-read" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
+    </marker>
+    <filter id="ob-sh" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
     </filter>
-    <marker id="obs-arr" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
-    </marker>
-    <marker id="obs-arr-g" markerWidth="10" markerHeight="7"
-            refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
-    </marker>
   </defs>
 
-  <!-- Section label -->
-  <text x="28" y="26" dominant-baseline="middle"
-        fill="#43b02a" font-size="11" font-weight="700">observability pillars — logs · metrics · traces → dashboard</text>
+  <!-- card -->
+  <rect x="6" y="6" width="788" height="458" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
 
-  <!-- ── Logs pillar ── -->
-  <rect x="28" y="56" width="120" height="110" rx="10" ry="10"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#obs-shadow)"/>
-  <rect x="28" y="56" width="120" height="24" rx="10" ry="10" fill="#43b02a"/>
-  <rect x="28" y="68" width="120" height="12" fill="#43b02a"/>
-  <text x="88" y="68" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">Logs</text>
-  <!-- Log lines simulation -->
-  <rect x="40" y="96" width="96" height="6" rx="3" ry="3" fill="#eaf6df"/>
-  <rect x="40" y="108" width="78" height="6" rx="3" ry="3" fill="#eaf6df"/>
-  <rect x="40" y="120" width="88" height="6" rx="3" ry="3" fill="#eaf6df"/>
-  <rect x="40" y="132" width="60" height="6" rx="3" ry="3" fill="#eaf6df"/>
-  <text x="88" y="154" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">structured JSON</text>
+  <!-- title rail -->
+  <text x="34" y="44" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">OBSERVABILITY</text>
+  <text x="172" y="44" fill="#7a8472" font-size="11">metrics &#183; traces &#183; logs &#183; health, served on the management port</text>
 
-  <!-- ── Metrics pillar ── -->
-  <rect x="185" y="56" width="120" height="110" rx="10" ry="10"
-        fill="#fff" stroke="#5fd13a" stroke-width="2.5" filter="url(#obs-shadow)"/>
-  <rect x="185" y="56" width="120" height="24" rx="10" ry="10" fill="#5fd13a"/>
-  <rect x="185" y="68" width="120" height="12" fill="#5fd13a"/>
-  <text x="245" y="68" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="12" font-weight="700">Metrics</text>
-  <!-- Bar chart -->
-  <line x1="197" y1="148" x2="293" y2="148" stroke="#b8d9a0" stroke-width="1"/>
-  <rect x="205" y="126" width="12" height="22" fill="#43b02a" opacity="0.6"/>
-  <rect x="222" y="110" width="12" height="38" fill="#43b02a" opacity="0.8"/>
-  <rect x="239" y="118" width="12" height="30" fill="#43b02a"/>
-  <rect x="256" y="104" width="12" height="44" fill="#2c8a1c"/>
-  <rect x="273" y="114" width="12" height="34" fill="#43b02a" opacity="0.7"/>
-  <text x="245" y="154" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">Prometheus-style</text>
-
-  <!-- ── Traces pillar ── -->
-  <rect x="342" y="56" width="120" height="110" rx="10" ry="10"
-        fill="#fff" stroke="#2c8a1c" stroke-width="2.5" filter="url(#obs-shadow)"/>
-  <rect x="342" y="56" width="120" height="24" rx="10" ry="10" fill="#2c8a1c"/>
-  <rect x="342" y="68" width="120" height="12" fill="#2c8a1c"/>
-  <text x="402" y="68" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">Traces</text>
-  <!-- Span visualization -->
-  <rect x="354" y="94" width="96" height="8" rx="4" ry="4" fill="#43b02a" opacity="0.85"/>
-  <text x="402" y="98" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="7">root span</text>
-  <rect x="360" y="108" width="70" height="8" rx="4" ry="4" fill="#5fd13a" opacity="0.85"/>
-  <text x="395" y="112" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="7">db query</text>
-  <rect x="366" y="122" width="48" height="8" rx="4" ry="4" fill="#43b02a" opacity="0.6"/>
-  <text x="390" y="126" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="7">redis get</text>
-  <text x="402" y="154" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9">OpenTelemetry</text>
-
-  <!-- Arrows → Admin dashboard -->
-  <line x1="88" y1="166" x2="510" y2="210" stroke="#8aa07e" stroke-width="1.8" marker-end="url(#obs-arr)"/>
-  <line x1="245" y1="166" x2="514" y2="210" stroke="#8aa07e" stroke-width="1.8" marker-end="url(#obs-arr)"/>
-  <line x1="402" y1="166" x2="518" y2="210" stroke="#8aa07e" stroke-width="1.8" marker-end="url(#obs-arr)"/>
-
-  <!-- ── Admin dashboard ── -->
-  <rect x="494" y="186" width="180" height="60" rx="12" ry="12"
-        fill="#fff" stroke="#43b02a" stroke-width="2.5" filter="url(#obs-shadow)"/>
-  <rect x="494" y="186" width="180" height="24" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="494" y="198" width="180" height="12" fill="#43b02a"/>
-  <text x="584" y="198" text-anchor="middle" dominant-baseline="middle"
-        fill="#fff" font-size="12" font-weight="700">Admin dashboard</text>
-  <text x="584" y="228" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="9.5">/admin · actuator endpoints</text>
-
-  <!-- Amber sparkle -->
-  <g transform="translate(666, 40)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+  <!-- ===== App node (left, center) ===== -->
+  <g filter="url(#ob-sh)">
+    <rect x="40" y="150" width="158" height="118" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M40 161a11 11 0 0 1 11-11h136a11 11 0 0 1 11 11v17H40Z" fill="url(#ob-head)"/>
+    <text x="119" y="167" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">PyFly app</text>
   </g>
+  <text x="119" y="201" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">create_app()</text>
+  <text x="119" y="222" text-anchor="middle" fill="#33402e" font-size="10.5">business API</text>
+  <rect x="64" y="234" width="110" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="119" y="249" text-anchor="middle" fill="#3f5b7a" font-size="10" font-weight="600" font-family="ui-monospace,Menlo,monospace">port 8080</text>
 
+  <!-- user traffic note off the business port -->
+  <line x1="40" y1="245" x2="20" y2="245" stroke="#5b7a9d" stroke-width="0" />
+  <path d="M40 245 L24 245 M30 242 L24 245 L30 248" fill="none" stroke="#5b7a9d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="119" y="288" text-anchor="middle" fill="#7a8472" font-size="9.5">user traffic stays on 8080</text>
+
+  <!-- ===== Four signal cards (middle column) ===== -->
+  <!-- forward arrows from app to each signal -->
+  <line x1="198" y1="86" x2="244" y2="86" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="198" y1="160" x2="244" y2="160" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="198" y1="234" x2="244" y2="234" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="198" y1="308" x2="244" y2="308" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <!-- connector from app body down to the lower fan-out -->
+  <path d="M198 209 L221 209 L221 86 L244 86" fill="none" stroke="#3a9e23" stroke-width="2.4"/>
+  <path d="M221 234 L244 234" fill="none" stroke="#3a9e23" stroke-width="2.4"/>
+  <path d="M221 209 L221 308 L244 308" fill="none" stroke="#3a9e23" stroke-width="2.4"/>
+
+  <!-- Metrics -->
+  <g filter="url(#ob-sh)">
+    <rect x="246" y="62" width="150" height="48" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 73a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v9H246Z" fill="url(#ob-head)"/>
+    <text x="321" y="76" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Metrics</text>
+  </g>
+  <text x="287" y="103" text-anchor="middle" fill="#7a8472" font-size="9.5">Prometheus</text>
+  <!-- mini bar chart -->
+  <rect x="346" y="98" width="6" height="6" fill="#43b02a" opacity="0.6"/>
+  <rect x="356" y="94" width="6" height="10" fill="#3a9e23" opacity="0.8"/>
+  <rect x="366" y="90" width="6" height="14" fill="#2c8a1c"/>
+  <rect x="376" y="96" width="6" height="8" fill="#43b02a" opacity="0.7"/>
+
+  <!-- Traces -->
+  <g filter="url(#ob-sh)">
+    <rect x="246" y="136" width="150" height="48" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 147a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v9H246Z" fill="url(#ob-head)"/>
+    <text x="321" y="150" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Traces</text>
+  </g>
+  <text x="287" y="177" text-anchor="middle" fill="#7a8472" font-size="9.5">OpenTelemetry</text>
+  <!-- mini spans -->
+  <rect x="344" y="170" width="40" height="4" rx="2" fill="#3a9e23" opacity="0.85"/>
+  <rect x="350" y="176" width="26" height="4" rx="2" fill="#43b02a" opacity="0.7"/>
+
+  <!-- Logs -->
+  <g filter="url(#ob-sh)">
+    <rect x="246" y="210" width="150" height="48" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 221a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v9H246Z" fill="url(#ob-head)"/>
+    <text x="321" y="224" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Logs</text>
+  </g>
+  <text x="287" y="251" text-anchor="middle" fill="#7a8472" font-size="9.5">structured JSON</text>
+  <!-- mini log lines -->
+  <rect x="344" y="244" width="44" height="3.5" rx="1.75" fill="#7a8472" opacity="0.5"/>
+  <rect x="344" y="250" width="34" height="3.5" rx="1.75" fill="#7a8472" opacity="0.5"/>
+
+  <!-- Health -->
+  <g filter="url(#ob-sh)">
+    <rect x="246" y="284" width="150" height="48" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
+    <path d="M246 295a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v9H246Z" fill="url(#ob-head)"/>
+    <text x="321" y="298" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Health</text>
+  </g>
+  <text x="282" y="325" text-anchor="middle" fill="#7a8472" font-size="9.5">UP / DOWN</text>
+  <!-- vector check mark -->
+  <circle cx="372" cy="320" r="9" fill="#1f5e16"/>
+  <path d="M367.5 320 L370.8 323.3 L376.5 316.5" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- ===== Management port band (9090) ===== -->
+  <line x1="396" y1="86" x2="448" y2="160" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="396" y1="160" x2="448" y2="186" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="396" y1="234" x2="448" y2="212" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+  <line x1="396" y1="308" x2="448" y2="238" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#ob-fwd)"/>
+
+  <g filter="url(#ob-sh)">
+    <rect x="450" y="120" width="150" height="158" rx="11" fill="#ffffff" stroke="#3f5b7a" stroke-width="2"/>
+    <path d="M450 131a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v17H450Z" fill="url(#ob-head-slate)"/>
+    <text x="525" y="137" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Management port</text>
+  </g>
+  <rect x="474" y="156" width="102" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="525" y="171" text-anchor="middle" fill="#3f5b7a" font-size="10" font-weight="700" font-family="ui-monospace,Menlo,monospace">port 9090</text>
+  <text x="525" y="196" text-anchor="middle" fill="#33402e" font-size="10.5">Actuator endpoints</text>
+  <text x="525" y="214" text-anchor="middle" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">/actuator/health</text>
+  <text x="525" y="230" text-anchor="middle" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">/actuator/prometheus</text>
+  <text x="525" y="246" text-anchor="middle" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">/actuator/loggers</text>
+  <text x="525" y="262" text-anchor="middle" fill="#7a8472" font-size="9.5" font-family="ui-monospace,Menlo,monospace">/actuator/beans</text>
+
+  <!-- ===== Consumers (right) ===== -->
+  <line x1="600" y1="160" x2="646" y2="138" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#ob-read)"/>
+  <line x1="600" y1="226" x2="646" y2="248" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#ob-read)"/>
+
+  <!-- Admin dashboard -->
+  <g filter="url(#ob-sh)">
+    <rect x="648" y="112" width="128" height="62" rx="11" fill="#ffffff" stroke="#3f5b7a" stroke-width="2"/>
+    <path d="M648 123a11 11 0 0 1 11-11h106a11 11 0 0 1 11 11v17H648Z" fill="url(#ob-head-slate)"/>
+    <text x="712" y="129" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Admin dashboard</text>
+  </g>
+  <text x="712" y="158" text-anchor="middle" fill="#33402e" font-size="10.5" font-family="ui-monospace,Menlo,monospace">/admin</text>
+
+  <!-- Ops tooling -->
+  <g filter="url(#ob-sh)">
+    <rect x="648" y="216" width="128" height="78" rx="11" fill="#ffffff" stroke="#3f5b7a" stroke-width="2"/>
+    <path d="M648 227a11 11 0 0 1 11-11h106a11 11 0 0 1 11 11v17H648Z" fill="url(#ob-head-slate)"/>
+    <text x="712" y="233" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Ops tooling</text>
+  </g>
+  <text x="712" y="261" text-anchor="middle" fill="#7a8472" font-size="9.5">Prometheus scrape</text>
+  <text x="712" y="278" text-anchor="middle" fill="#7a8472" font-size="9.5">Grafana / kubectl</text>
+
+  <!-- ===== Kubernetes probes (bottom) ===== -->
+  <line x1="500" y1="278" x2="500" y2="356" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#ob-read)"/>
+
+  <g filter="url(#ob-sh)">
+    <rect x="246" y="358" width="508" height="84" rx="11" fill="#ffffff" stroke="#3f5b7a" stroke-width="2"/>
+    <path d="M246 369a11 11 0 0 1 11-11h486a11 11 0 0 1 11 11v17H246Z" fill="url(#ob-head-slate)"/>
+    <text x="500" y="375" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Kubernetes probes</text>
+  </g>
+  <text x="500" y="404" text-anchor="middle" fill="#33402e" font-size="10.5">liveness and readiness hit the dedicated health sub-paths on 9090</text>
+
+  <!-- liveness chip -->
+  <rect x="300" y="414" width="200" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="400" y="429" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">/actuator/health/liveness</text>
+  <!-- readiness chip -->
+  <rect x="510" y="414" width="206" height="22" rx="11" fill="#eef3f8" stroke="#5b7a9d" stroke-width="1.5"/>
+  <text x="613" y="429" text-anchor="middle" fill="#3f5b7a" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">/actuator/health/readiness</text>
+
+  <!-- amber accent on the management port (the secured/isolated highlight) -->
+  <g transform="translate(588, 132)">
+    <path d="M0,-8 L1.8,-1.8 L8,0 L1.8,1.8 L0,8 L-1.8,1.8 L-8,0 L-1.8,-1.8 Z" fill="#ffc24b"/>
+  </g>
 </svg>
