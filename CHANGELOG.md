@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.107 (2026-06-16)
+
+### Added
+
+- **OAuth2 resource server: config-driven, multi-IdP, Spring-parity.** The
+  bearer-token resource server now works out of the box with **Keycloak**,
+  **Microsoft Entra ID** (v1.0 + v2.0) and **AWS Cognito** via configuration
+  alone (no subclassing), and reaches Spring-Security parity:
+  - **`issuer-uri` OIDC discovery** — derive the JWKS endpoint + issuer from
+    `<issuer-uri>/.well-known/openid-configuration` (alternative to `jwks-uri`).
+  - **Config-driven claim mapping** (`pyfly.security.oauth2.resource-server.*`):
+    `principal-claim-names`, `authorities-claim-names`, `scope-claim-names`,
+    `attribute-claims`, `authority-prefix`. Claim names accept **dotted paths**
+    with a `*` wildcard and are colon-safe, so authorities resolve from
+    `realm_access.roles`, `resource_access.*.roles` (Keycloak), `roles` + `groups`
+    (Entra), and `cognito:groups` (Cognito) with zero code.
+  - **`audiences`** (a list; `aud` must match any) and **`validate-audience`**
+    (disable for Cognito *access* tokens, which carry no `aud`).
+  - Configurable **`algorithms`**, **`clock-skew-seconds`**, **`jwks-timeout-seconds`**,
+    **`jwks-cache-seconds`**.
+  - New typed **`ResourceServerProperties`** (`@config_properties`) and
+    **`ClaimMappings`**.
+
+### Fixed
+
+- **OAuth2 resource server — clock-skew leeway.** JWT validation now allows 60s
+  of clock skew by default (configurable). Previously a token whose `iat`/`nbf`
+  was a few seconds ahead of the server clock — routine with real IdPs — was
+  rejected as "not yet valid", causing intermittent 401s.
+- **OAuth2 resource server — event-loop stall.** The bearer filter now runs JWKS
+  validation (which does blocking network I/O on a cache miss) in a worker thread
+  (`anyio.to_thread`) instead of inline on the event loop.
+- **OAuth2 resource server — multi-IdP claim coverage.** Token-to-`SecurityContext`
+  mapping previously read only `realm_access.roles` and `scope`/`permissions`,
+  silently dropping Keycloak `resource_access` client roles, Entra `groups` /
+  `scp`, Cognito `cognito:groups`, and any token `attributes`. All are now mapped
+  (configurably).
+- **OAuth2 resource server — case-insensitive `Bearer` scheme** (RFC 7235): a
+  `bearer …` / `BEARER …` Authorization header is now accepted.
+- **OAuth2 resource server — opt-in strict rejection.** New
+  `authenticate-error-mode: "401"` rejects a *present-but-invalid* token at the
+  filter with `401` + `WWW-Authenticate: Bearer error="invalid_token"` (RFC
+  6750). Default remains `"anonymous"` (the gate decides) — no behavioural change
+  unless opted in.
+
 ## v26.06.106 (2026-06-16)
 
 ### Fixed
