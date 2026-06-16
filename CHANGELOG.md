@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.109 (2026-06-16)
+
+### Fixed
+
+- **CORS preflight is no longer rejected by the security gate.** The
+  ``CORSMiddleware`` is now the **outermost** middleware (ahead of the
+  ``WebFilterChain`` that holds the ``HttpSecurity`` gate) on both the Starlette
+  and FastAPI adapters. Previously the filter chain wrapped CORS, so a browser
+  ``OPTIONS`` preflight (which carries no credentials) to a gated route was
+  answered with ``401`` and *without* ``Access-Control-*`` headers — the browser
+  then blocked the real request ("Load failed"/"Failed to fetch"). The preflight
+  is now answered by CORS before the gate runs, and ``Access-Control-*`` headers
+  are added to every response.
+
+---
+
 ## v26.06.108 (2026-06-16)
 
 ### Added

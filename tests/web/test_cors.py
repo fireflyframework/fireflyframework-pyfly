@@ -145,6 +145,61 @@ class TestCORSSimpleRequest:
         assert resp.headers["access-control-allow-origin"] == "http://example.com"
 
 
+class TestCORSPreflightBypassesSecurityGate:
+    """A CORS preflight (OPTIONS, no credentials) must NOT be rejected by a
+    security-gate WebFilter: CORS middleware is the OUTERMOST middleware and
+    answers the preflight before the filter chain runs. Regression for the
+    browser "Load failed" when a 401-ing gate sat in front of CORS."""
+
+    def setup_method(self):
+        import contextlib
+        from collections.abc import AsyncIterator
+        from typing import Any
+
+        from starlette.responses import PlainTextResponse
+
+        from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.web.filters import OncePerRequestFilter
+        from pyfly.web.ports.filter import WebFilter
+
+        @order(HIGHEST_PRECEDENCE + 350)
+        class _DenyAll(OncePerRequestFilter):
+            async def do_filter(self, request, call_next):  # type: ignore[no-untyped-def]
+                return PlainTextResponse("denied", status_code=401)
+
+        ctx = ApplicationContext(Config({}))
+        ctx.container.register_instance(WebFilter, _DenyAll(), name="deny_all")
+
+        @contextlib.asynccontextmanager
+        async def _ls(app_: Any) -> AsyncIterator[None]:
+            await ctx.start()
+            app_.state.pyfly_install_dynamic_wiring()
+            yield
+            await ctx.stop()
+
+        self.app = create_app(
+            title="test",
+            context=ctx,
+            cors=CORSConfig(allowed_origins=["http://example.com"], allowed_methods=["GET", "POST"]),
+            extra_routes=[HELLO_ROUTE],
+            lifespan=_ls,
+        )
+
+    def test_preflight_bypasses_gate(self):
+        with TestClient(self.app) as client:
+            # Preflight is answered by CORS (200 + ACAO), NOT 401'd by the gate.
+            pre = client.options(
+                "/hello",
+                headers={"Origin": "http://example.com", "Access-Control-Request-Method": "POST"},
+            )
+            assert pre.status_code == 200
+            assert pre.headers["access-control-allow-origin"] == "http://example.com"
+            # The gate is still active for real requests (proves it IS wired).
+            assert client.get("/hello", headers={"Origin": "http://example.com"}).status_code == 401
+
+
 class TestNoCORSWhenNotConfigured:
     """create_app() without cors param has no CORS headers."""
 
