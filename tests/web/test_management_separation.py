@@ -167,6 +167,50 @@ async def test_health_aggregator_exposed_and_live_in_shared_mode() -> None:
         assert client.get("/actuator/health/liveness").status_code == 200
 
 
+def test_management_port_open_by_default_ignores_user_security_filters() -> None:
+    # The management app must NOT apply the app's user security filters by default
+    # (a deny-all HttpSecurity gate scoped to the main app would 403 /admin etc.).
+    import asyncio
+
+    from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
+    from pyfly.web.adapters.starlette.management_app import create_management_app
+    from pyfly.web.filters import OncePerRequestFilter
+    from pyfly.web.ports.filter import WebFilter
+
+    @order(HIGHEST_PRECEDENCE + 350)
+    class _DenyAll(OncePerRequestFilter):
+        async def do_filter(self, request, call_next):  # type: ignore[no-untyped-def]
+            from starlette.responses import PlainTextResponse
+
+            return PlainTextResponse("denied", status_code=403)
+
+    async def _mgmt_filter_names(config: dict) -> list[str]:
+        ctx = ApplicationContext(Config(config))
+        ctx.container.register_instance(WebFilter, _DenyAll(), name="deny_all")
+        await ctx.start()
+        try:
+            app = create_management_app(
+                ctx,
+                health_agg=None,
+                http_exchange_recorder=None,
+                admin_trace_collector=None,
+                actuator_active=True,
+                admin_enabled=False,
+            )
+            return [
+                type(f).__name__
+                for mw in app.user_middleware
+                for f in (getattr(mw, "kwargs", {}) or {}).get("filters", []) or []
+            ]
+        finally:
+            await ctx.stop()
+
+    # Default: the deny-all gate is NOT on the management app → actuator/admin open.
+    assert "_DenyAll" not in asyncio.run(_mgmt_filter_names({"pyfly": {}}))
+    # Opt in: pyfly.management.security.enabled=true applies it.
+    assert "_DenyAll" in asyncio.run(_mgmt_filter_names({"pyfly": {"management": {"security": {"enabled": "true"}}}}))
+
+
 @pytest.mark.asyncio
 async def test_health_aggregator_exposed_in_separate_mode() -> None:
     # Even when actuator runs on a separate management port, the aggregator is
