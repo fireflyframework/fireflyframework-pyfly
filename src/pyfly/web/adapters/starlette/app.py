@@ -131,6 +131,26 @@ def create_app(
             except (ImportError, AssertionError):
                 metrics_filter_instance = None  # prometheus_client not installed
 
+    # Server-layer observability (pyfly.server.observability.*). The pure-ASGI
+    # server-metrics middleware (added as the OUTERMOST middleware below) is the
+    # PRIMARY source for live connection / in-flight / request gauges — it runs
+    # in every worker, for every server and worker count, unlike a server's native
+    # stats which on the forked uvicorn.run path live in objects the in-worker
+    # lifespan cannot reach. The ServerMetricsBinder (started in the lifespan)
+    # adds worker / uptime / lifecycle meters. Both no-op without prometheus_client.
+    server_obs_enabled = False
+    server_obs_interval = 5.0
+    if context is not None:
+        server_obs_enabled = str(context.config.get("pyfly.server.observability.enabled", "true")).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        try:
+            server_obs_interval = float(context.config.get("pyfly.server.observability.sample-interval-seconds", 5.0))
+        except (TypeError, ValueError):
+            server_obs_interval = 5.0
+
     # Resolve actuator state early so the httpexchanges recorder filter (if any)
     # can join the chain alongside the metrics filter and trace collector.
     from pyfly.actuator.wiring import make_http_exchange_filter, resolve_actuator_active
@@ -245,6 +265,12 @@ def create_app(
     # the real request ("Load failed"). Starlette applies middleware outermost
     # first, so CORS is prepended ahead of WebFilterChainMiddleware.
     middleware: list[Middleware] = []
+    # Server-metrics counter is the OUTERMOST middleware so it observes every raw
+    # ASGI connection (incl. websockets + CORS preflights) before any other layer.
+    if server_obs_enabled:
+        from pyfly.web.adapters.starlette.asgi_server_metrics import ServerMetricsASGIMiddleware
+
+        middleware.append(Middleware(ServerMetricsASGIMiddleware, enabled=True))
     if cors is not None:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -424,6 +450,13 @@ def create_app(
             async with _user_lifespan(app_):  # type: ignore[operator]
                 _install_dynamic_wiring(app_)  # beans are now instantiated
                 mgmt_server = None
+                server_binder = None
+                if server_obs_enabled:
+                    from pyfly.observability.server_metrics import build_binder_for_context
+
+                    server_binder = build_binder_for_context(context, sample_interval=server_obs_interval)
+                    if server_binder is not None:
+                        await server_binder.start()
                 try:
                     if _serve_separately and management_props is not None and context is not None:
                         from pyfly.config.properties.server import resolve_app_host
@@ -448,6 +481,8 @@ def create_app(
                         await mgmt_server.start()
                     yield
                 finally:
+                    if server_binder is not None:
+                        await server_binder.stop()
                     if mgmt_server is not None:
                         await mgmt_server.stop()
 
