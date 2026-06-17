@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.113 (2026-06-17)
+
+### Added
+
+- **Server-layer observability.** Observability is no longer only application-layer
+  (the `http_server_requests_seconds` filter, tracing/correlation, process metrics):
+  pyfly now emits metrics about the ASGI **server itself** across Uvicorn, Granian,
+  and Hypercorn. A pure-ASGI `ServerMetricsASGIMiddleware` (the uniform primary
+  source, running in every worker) emits `server_active_connections`,
+  `server_in_flight_requests`, and `server_requests_total`; a `ServerMetricsBinder`
+  bound from the in-worker ASGI lifespan emits `server_workers`,
+  `server_uptime_seconds`, and `server_started_total` / `server_stopped_total`; and
+  a best-effort `ServerStatsPort` surfaces Uvicorn's true socket count
+  (`server_native_connections`) on the in-process `serve_async` path. Every meter is
+  labeled `server` and `worker_pid`.
+- **Correct multi-worker aggregation.** With `workers > 1`, `pyfly run` enables
+  `prometheus_client` multiprocess mode (sets `PROMETHEUS_MULTIPROC_DIR` before
+  forking), so a single `/actuator/prometheus` scrape aggregates across all workers
+  via `MultiProcessCollector` — this also fixes the previous per-worker gap for
+  `http_server_requests_*`.
+- **Live admin Observability dashboard.** A new real-time **Observability** view
+  (under Monitoring) shows server workers, uptime, active connections, in-flight
+  requests, requests/sec, a per-worker breakdown, and worker lifecycle, with links
+  to the Metrics and Traces views. Backed by `GET /admin/api/observability` and the
+  `observability` SSE stream.
+- **Configuration.** New `pyfly.server.observability.*` keys — `enabled`
+  (default `true`, activated by the web/core starters), `sample-interval-seconds`
+  (`5.0`), and `access-log` (`false`, opt-in). Requires the observability extra
+  (`prometheus_client`); degrades to a no-op without it.
+- **Local observability stack.** `docker-compose.yml` gained loopback-bound
+  Prometheus + Grafana services (config in `ops/prometheus/prometheus.yml`) that
+  scrape `/actuator/prometheus`.
+
+> Scope: gunicorn is intentionally not added (the stack stays async-only ASGI:
+> Granian > Uvicorn > Hypercorn), but the `ServerStatsPort` + multiprocess design is
+> gunicorn-ready for a future adapter.
+
+---
+
 ## v26.06.112 (2026-06-16)
 
 ### Changed

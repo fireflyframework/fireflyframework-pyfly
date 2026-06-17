@@ -15,7 +15,11 @@
 
 from __future__ import annotations
 
-from pyfly.config.properties.server import GranianProperties, ServerProperties
+from pyfly.config.properties.server import (
+    GranianProperties,
+    ServerObservabilityProperties,
+    ServerProperties,
+)
 
 
 class TestServerProperties:
@@ -55,3 +59,25 @@ class TestServerProperties:
     def test_has_config_properties_prefix(self):
         assert hasattr(ServerProperties, "__pyfly_config_prefix__")
         assert ServerProperties.__pyfly_config_prefix__ == "pyfly.server"
+
+    def test_observability_defaults(self):
+        props = ServerProperties()
+        assert props.observability.enabled is True
+        assert props.observability.sample_interval_seconds == 5.0
+        assert props.observability.access_log is False
+
+    def test_observability_custom_values(self):
+        props = ServerProperties(
+            observability=ServerObservabilityProperties(enabled=False, sample_interval_seconds=2.0, access_log=True)
+        )
+        assert props.observability.enabled is False
+        assert props.observability.sample_interval_seconds == 2.0
+        assert props.observability.access_log is True
+
+
+class TestServerObservabilityProperties:
+    def test_defaults(self):
+        obs = ServerObservabilityProperties()
+        assert obs.enabled is True
+        assert obs.sample_interval_seconds == 5.0
+        assert obs.access_log is False

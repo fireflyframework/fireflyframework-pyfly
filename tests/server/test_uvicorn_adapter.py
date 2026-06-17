@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pyfly.config.properties.server import ServerProperties
 from pyfly.server.adapters.uvicorn.adapter import UvicornServerAdapter
 from pyfly.server.ports.outbound import ApplicationServerPort
+from pyfly.server.ports.server_stats import ServerStats, ServerStatsPort
 from pyfly.server.types import ServerInfo
 
 
@@ -47,3 +49,43 @@ class TestUvicornServerAdapter:
     def test_shutdown_does_not_raise(self):
         adapter = UvicornServerAdapter()
         adapter.shutdown()
+
+
+class TestUvicornServerStats:
+    def test_implements_server_stats_port(self):
+        assert isinstance(UvicornServerAdapter(), ServerStatsPort)
+
+    def test_sample_without_server_returns_none_connection_fields(self):
+        adapter = UvicornServerAdapter()
+        stats = adapter.sample()
+        assert isinstance(stats, ServerStats)
+        assert stats.active_connections is None
+        assert stats.total_requests is None
+        assert stats.workers == 1
+
+    def test_on_serve_start_makes_uptime_advance(self):
+        adapter = UvicornServerAdapter()
+        adapter.on_serve_start()
+        stats = adapter.sample()
+        assert stats.server_uptime_seconds >= 0.0
+
+    def test_sample_reads_server_state_when_present(self):
+        adapter = UvicornServerAdapter()
+        adapter._server = SimpleNamespace(server_state=SimpleNamespace(total_requests=5, connections={1, 2, 3}))
+        adapter._info = ServerInfo(
+            name="uvicorn", version="x", workers=4, event_loop="asyncio", http_protocol="h1", host="0.0.0.0", port=8000
+        )
+        stats = adapter.sample()
+        assert stats.active_connections == 3
+        assert stats.total_requests == 5
+        assert stats.workers == 4
+
+    def test_on_serve_stop_clears_global_active_server(self):
+        from pyfly.server.adapters.uvicorn import adapter as mod
+
+        adapter = UvicornServerAdapter()
+        sentinel = SimpleNamespace(server_state=SimpleNamespace(total_requests=0, connections=set()))
+        adapter._server = sentinel
+        mod._active_server = sentinel
+        adapter.on_serve_stop()
+        assert mod._active_server is None

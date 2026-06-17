@@ -37,6 +37,7 @@ export const NAV_ITEMS = [
     { id: 'config',    label: 'Configuration',  icon: 'cog' },
     { id: 'loggers',   label: 'Loggers',        icon: 'list' },
     { id: 'metrics',   label: 'Metrics',        icon: 'chart',    section: 'Monitoring' },
+    { id: 'observability', label: 'Observability', icon: 'activity' },
     { id: 'scheduled', label: 'Scheduled',      icon: 'clock' },
     { id: 'traces',    label: 'Traces',         icon: 'activity' },
     { id: 'mappings',  label: 'Mappings',       icon: 'route',    section: 'Infrastructure' },

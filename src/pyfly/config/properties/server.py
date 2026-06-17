@@ -34,6 +34,22 @@ class GranianProperties:
     respawn_failed_workers: bool = True
 
 
+@dataclass
+class ServerObservabilityProperties:
+    """Server-layer observability tuning (pyfly.server.observability.*).
+
+    ``enabled`` gates the pure-ASGI server-metrics middleware + the
+    ServerMetricsBinder (mirrors ``pyfly.observability.metrics.enabled``).
+    ``sample_interval_seconds`` is how often the binder refreshes the
+    worker/uptime gauges. ``access_log`` opts into the server's native
+    access logging (off by default to preserve the WARNING-only posture).
+    """
+
+    enabled: bool = True
+    sample_interval_seconds: float = 5.0
+    access_log: bool = False
+
+
 @config_properties(prefix="pyfly.server")
 @dataclass
 class ServerProperties:
@@ -58,6 +74,7 @@ class ServerProperties:
     max_concurrent_connections: int | None = None
     max_requests_per_worker: int | None = None
     granian: GranianProperties = field(default_factory=GranianProperties)
+    observability: ServerObservabilityProperties = field(default_factory=ServerObservabilityProperties)
 
 
 def resolve_app_port(config: Config) -> int:

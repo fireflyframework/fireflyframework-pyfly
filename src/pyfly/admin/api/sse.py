@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.beans_provider import BeansProvider
     from pyfly.admin.providers.health_provider import HealthProvider
     from pyfly.admin.providers.metrics_provider import MetricsProvider
+    from pyfly.admin.providers.observability_provider import ObservabilityProvider
     from pyfly.admin.providers.runtime_provider import RuntimeProvider
     from pyfly.admin.providers.server_provider import ServerProvider
 
@@ -137,6 +138,37 @@ async def server_stream(
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         _logger.debug("sse_stream_closed", extra={"stream": "server"})
+
+
+async def observability_stream(
+    observability_provider: ObservabilityProvider,
+    interval: float = 5.0,
+) -> AsyncGenerator[str, None]:
+    # requests/second is computed PER STREAM from successive snapshots, so it is
+    # not corrupted by sharing the provider across the REST endpoint and multiple
+    # concurrent SSE consumers.
+    prev_total: float | None = None
+    prev_ts: float | None = None
+    try:
+        while True:
+            data = await observability_provider.get_observability()
+            total = data.get("requests_total")
+            ts = data.get("timestamp")
+            if (
+                prev_total is not None
+                and prev_ts is not None
+                and total is not None
+                and ts is not None
+                and ts > prev_ts
+                and total >= prev_total
+            ):
+                data["requests_per_second"] = round((total - prev_total) / (ts - prev_ts), 3)
+            if total is not None and ts is not None:
+                prev_total, prev_ts = total, ts
+            yield _sse_event(data, event="observability")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        _logger.debug("sse_stream_closed", extra={"stream": "observability"})
 
 
 async def beans_stream(

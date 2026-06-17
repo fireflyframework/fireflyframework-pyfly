@@ -119,6 +119,23 @@ def create_app(
         except (ImportError, AssertionError):
             metrics_filter_instance = None
 
+    # Server-layer observability (pyfly.server.observability.*) — see the matching
+    # block in pyfly.web.adapters.starlette.app for the full rationale. The pure-ASGI
+    # server-metrics middleware (added OUTERMOST below) is the primary source; the
+    # ServerMetricsBinder (started in the lifespan) adds worker/uptime/lifecycle meters.
+    server_obs_enabled = False
+    server_obs_interval = 5.0
+    if context is not None:
+        server_obs_enabled = str(context.config.get("pyfly.server.observability.enabled", "true")).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        try:
+            server_obs_interval = float(context.config.get("pyfly.server.observability.sample-interval-seconds", 5.0))
+        except (TypeError, ValueError):
+            server_obs_interval = 5.0
+
     # Resolve actuator state early so the httpexchanges recorder filter can join.
     from pyfly.actuator.wiring import make_http_exchange_filter, resolve_actuator_active
 
@@ -220,6 +237,12 @@ def create_app(
     # rejects the credential-less preflight with 401 and the browser blocks the
     # real request. Starlette applies middleware outermost first.
     middleware: list[Middleware] = []
+    # Server-metrics counter is the OUTERMOST middleware so it observes every raw
+    # ASGI connection (incl. websockets + CORS preflights) before any other layer.
+    if server_obs_enabled:
+        from pyfly.web.adapters.starlette.asgi_server_metrics import ServerMetricsASGIMiddleware
+
+        middleware.append(Middleware(ServerMetricsASGIMiddleware, enabled=True))
     if cors is not None:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -416,6 +439,13 @@ def create_app(
             async with _inner_lifespan_ctx(app_):
                 _install_dynamic_wiring()
                 mgmt_server = None
+                server_binder = None
+                if server_obs_enabled:
+                    from pyfly.observability.server_metrics import build_binder_for_context
+
+                    server_binder = build_binder_for_context(context, sample_interval=server_obs_interval)
+                    if server_binder is not None:
+                        await server_binder.start()
                 try:
                     if _serve_separately and management_props is not None and context is not None:
                         from pyfly.config.properties.server import resolve_app_host
@@ -440,6 +470,8 @@ def create_app(
                         await mgmt_server.start()
                     yield
                 finally:
+                    if server_binder is not None:
+                        await server_binder.stop()
                     if mgmt_server is not None:
                         await mgmt_server.stop()
 

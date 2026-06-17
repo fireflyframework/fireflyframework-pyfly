@@ -15,11 +15,22 @@
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Any
 
 import uvicorn
 
+from pyfly.server.ports.server_stats import ServerStats
 from pyfly.server.types import ServerInfo
+
+# Process-global reference to the live ``uvicorn.Server`` when this process runs
+# the server in-process (the ``serve_async`` embedding path). It lets the
+# ServerMetricsBinder read native ``server_state`` even when it holds a different
+# adapter *instance* than the one serving. It is NOT set on the forked
+# ``uvicorn.run(workers=N)`` production path — each worker builds its own Server
+# inside uvicorn, so the binder falls back to the pure-ASGI middleware there.
+_active_server: Any = None
 
 
 class UvicornServerAdapter:
@@ -27,11 +38,16 @@ class UvicornServerAdapter:
 
     The most widely used Python ASGI server. Uses httptools + uvloop
     for optimal performance when ``uvicorn[standard]`` is installed.
+
+    Also implements the optional :class:`~pyfly.server.ports.server_stats.ServerStatsPort`
+    (best-effort): on the ``serve_async`` path it surfaces uvicorn's true socket
+    connection count and total requests from ``Server.server_state``.
     """
 
     def __init__(self) -> None:
         self._server: Any = None
         self._info: ServerInfo | None = None
+        self._serve_start_monotonic: float | None = None
 
     @staticmethod
     def _build_kwargs(host: str, port: int, loop: str, config: Any) -> dict[str, Any]:
@@ -102,12 +118,61 @@ class UvicornServerAdapter:
             host=host,
             port=port,
         )
-        await server.serve()
+        global _active_server
+        _active_server = server
+        self.on_serve_start()
+        try:
+            await server.serve()
+        finally:
+            self.on_serve_stop()
 
     def shutdown(self) -> None:
         """Request graceful shutdown."""
         if self._server is not None:
             self._server.should_exit = True
+
+    # -- ServerStatsPort (best-effort) --------------------------------------
+
+    def on_serve_start(self) -> None:
+        """Record the server-bind moment (basis for ``server_uptime_seconds``)."""
+        self._serve_start_monotonic = time.monotonic()
+
+    def on_serve_stop(self) -> None:
+        """Clear the process-global live-server reference."""
+        global _active_server
+        if _active_server is self._server:
+            _active_server = None
+
+    def sample(self) -> ServerStats | None:
+        """Sample live uvicorn stats when a server runs in this process.
+
+        Reads ``Server.server_state`` (total requests + the live connection set)
+        from this adapter's own server or, failing that, the process-global
+        ``_active_server``. Returns ``None`` connection/request fields when no
+        in-process server handle is available (the forked production path).
+        """
+        srv = self._server or _active_server
+        active_connections: int | None = None
+        total_requests: int | None = None
+        state = getattr(srv, "server_state", None)
+        if state is not None:
+            conns = getattr(state, "connections", None)
+            if conns is not None:
+                active_connections = len(conns)
+            total_requests = getattr(state, "total_requests", None)
+        workers = self._info.workers if self._info is not None else 1
+        return ServerStats(
+            workers=workers,
+            server_uptime_seconds=self._uptime_seconds(),
+            worker_pid=os.getpid(),
+            active_connections=active_connections,
+            total_requests=total_requests,
+        )
+
+    def _uptime_seconds(self) -> float:
+        if self._serve_start_monotonic is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._serve_start_monotonic)
 
     @property
     def server_info(self) -> ServerInfo:

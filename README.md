@@ -1057,7 +1057,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 | Module | Description | Firefly Java Equivalent |
 |--------|-------------|------------------------|
 | **AOP** | Aspect-oriented programming | Spring AOP |
-| **Observability** | Prometheus metrics, OpenTelemetry tracing | `fireflyframework-observability` |
+| **Observability** | Prometheus metrics, OpenTelemetry tracing, server-layer metrics (workers, connections, in-flight requests, uptime) across Uvicorn/Granian/Hypercorn with multi-worker Prometheus aggregation, surfaced in a live admin Observability dashboard | `fireflyframework-observability` |
 | **Actuator** | Health checks, monitoring endpoints | `fireflyframework-starter-core` (actuator) |
 | **Admin** | Embedded management dashboard with 15 views, SSE streams, server mode fleet monitoring | Spring Boot Admin |
 | **Testing** | Test fixtures and assertions | Spring Test |

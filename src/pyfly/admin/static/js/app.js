@@ -32,6 +32,7 @@ const routes = {
     'instances':  () => import('./views/instances.js'),
     'bean-graph': () => import('./views/bean-graph.js'),
     'runtime':    () => import('./views/runtime.js'),
+    'observability': () => import('./views/observability.js'),
     'wallboard':  () => import('./views/wallboard.js'),
 };
 

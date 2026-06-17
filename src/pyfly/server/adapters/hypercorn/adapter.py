@@ -16,8 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from typing import Any
 
+from pyfly.server.ports.server_stats import ServerStats
 from pyfly.server.types import ServerInfo
 
 
@@ -26,11 +29,17 @@ class HypercornServerAdapter:
 
     The only mainstream Python ASGI server with HTTP/3 (QUIC) support.
     Also supports Trio as an alternative to asyncio.
+
+    Implements the optional :class:`~pyfly.server.ports.server_stats.ServerStatsPort`
+    for workers + uptime only — ``hypercorn.asyncio.serve`` returns no server
+    object, so connection/request fields are always ``None`` (the pure-ASGI
+    server-metrics middleware supplies them uniformly instead).
     """
 
     def __init__(self) -> None:
         self._shutdown_event: asyncio.Event | None = None
         self._info: ServerInfo | None = None
+        self._serve_start_monotonic: float | None = None
 
     def serve(self, app: str | Any, config: Any) -> None:
         """Start Hypercorn (blocking)."""
@@ -74,12 +83,32 @@ class HypercornServerAdapter:
             port=port,
         )
 
+        self.on_serve_start()
         await serve(app, hc_config, shutdown_trigger=self._shutdown_event.wait)  # type: ignore[arg-type,unused-ignore]
 
     def shutdown(self) -> None:
         """Request graceful shutdown."""
         if self._shutdown_event is not None:
             self._shutdown_event.set()
+
+    # -- ServerStatsPort (best-effort) --------------------------------------
+
+    def on_serve_start(self) -> None:
+        """Record the server-bind moment (basis for ``server_uptime_seconds``)."""
+        self._serve_start_monotonic = time.monotonic()
+
+    def on_serve_stop(self) -> None:
+        """No-op — Hypercorn exposes no server handle to release."""
+
+    def sample(self) -> ServerStats:
+        """Workers + uptime only; connection/request fields are always ``None``."""
+        workers = self._info.workers if self._info is not None else 1
+        return ServerStats(workers=workers, server_uptime_seconds=self._uptime_seconds(), worker_pid=os.getpid())
+
+    def _uptime_seconds(self) -> float:
+        if self._serve_start_monotonic is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._serve_start_monotonic)
 
     @property
     def server_info(self) -> ServerInfo:

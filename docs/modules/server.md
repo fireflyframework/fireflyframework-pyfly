@@ -22,6 +22,7 @@ The PyFly server module provides a pluggable ASGI server and event loop abstract
 - [Configuration Reference](#configuration-reference)
   - [ServerProperties](#serverproperties)
   - [Full YAML Reference](#full-yaml-reference)
+- [Server Observability](#server-observability)
 - [CLI: pyfly run](#cli-pyfly-run)
 - [Custom Server Adapter](#custom-server-adapter)
 - [Spring Boot Comparison](#spring-boot-comparison)
@@ -343,6 +344,37 @@ pyfly:
 **HTTP version:** When `http: "auto"`, the server selects the best HTTP version it supports. Granian defaults to HTTP/2; Uvicorn defaults to HTTP/1.1; Hypercorn supports HTTP/1.1, HTTP/2, and HTTP/3.
 
 **Management port:** The application binds to `pyfly.server.port` (env `PYFLY_SERVER_PORT`, default 8080). Actuator endpoints and admin are served separately on `pyfly.management.server.port` (env `PYFLY_MANAGEMENT_SERVER_PORT`, default 9090).
+
+---
+
+## Server Observability
+
+Beyond the application-layer metrics (`http_server_requests_seconds`, tracing/correlation, process metrics), the server adapters emit `server_*` meters describing the ASGI server itself. They are written to the Prometheus registry and auto-exposed at `/actuator/prometheus` (and `/actuator/metrics`). Every meter is labeled `server` (server type) and `worker_pid`.
+
+The catalog covers connection and request activity (`server_active_connections`, `server_in_flight_requests`, `server_requests_total`), worker lifecycle and uptime (`server_workers`, `server_uptime_seconds`, `server_started_total`, `server_stopped_total`), and, on the Uvicorn in-process serve path only, true socket counts including idle keep-alive (`server_native_connections`; absent for Granian/Hypercorn). The primary source is a pure-ASGI middleware that runs in every worker for every server, so the meters are uniform across the stack. See the [Observability module guide](observability.md) for the full catalog, label semantics, and exposition details.
+
+### Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `true` | Enable server-layer metrics (mirrors `pyfly.observability.metrics.enabled`; on with the web and core starters) |
+| `sample-interval-seconds` | `float` | `5.0` | Interval at which gauges are sampled |
+| `access-log` | `bool` | `false` | Opt-in native server access logging |
+
+```yaml
+pyfly:
+  server:
+    observability:
+      enabled: true               # mirrors pyfly.observability.metrics.enabled
+      sample-interval-seconds: 5.0
+      access-log: false           # opt-in native access logging
+```
+
+Server observability requires the observability extra (`prometheus_client`); without it, it degrades to a no-op.
+
+### Multi-worker aggregation
+
+When `workers > 1`, `pyfly run` enables `prometheus_client` multiprocess mode (setting `PROMETHEUS_MULTIPROC_DIR` before forking workers). Each worker writes its own mmap files, and `/actuator/prometheus` aggregates across all workers, so a single scrape reflects every worker. The `server_*` and `http_server_requests_*` meters aggregate correctly; note that custom Python collectors (the `process_*`/`system_*` metrics) are not aggregated by multiprocess mode.
 
 ---
 

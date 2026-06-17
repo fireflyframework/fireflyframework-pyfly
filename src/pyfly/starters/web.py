@@ -67,6 +67,8 @@ WEB_STACK_PROPERTIES: dict[str, str] = {
     "pyfly.web.enabled": "true",
     # ASGI server — Granian / Uvicorn / Hypercorn auto-detected.
     "pyfly.server.enabled": "true",
+    # Server-layer observability — worker/connection/uptime metrics + lifecycle.
+    "pyfly.server.observability.enabled": "true",
     # Observability — metrics + tracing.
     "pyfly.observability.enabled": "true",
     "pyfly.metrics.enabled": "true",

@@ -66,7 +66,7 @@ http://localhost:8080/admin
 
 That is all. The dashboard auto-discovers beans, health indicators, loggers,
 scheduled tasks, HTTP mappings, caches, CQRS handlers, transactions, and
-metrics from the running `ApplicationContext` and presents them in 15 built-in
+metrics from the running `ApplicationContext` and presents them in 16 built-in
 views with real-time updates.
 
 ---
@@ -212,7 +212,7 @@ pyfly:
 
 ## Built-in Views
 
-The dashboard ships with 15 views organized into four sections in the sidebar.
+The dashboard ships with 16 views organized into four sections in the sidebar.
 Each view has a corresponding REST API endpoint and (where applicable) an SSE
 stream for live updates.
 
@@ -237,6 +237,7 @@ stream for live updates.
 | View | Sidebar ID | Description |
 |------|-----------|-------------|
 | **Metrics** | `metrics` | Built-in process metrics (CPU, memory, threads, GC, uptime) always available without external dependencies. Optional Prometheus metrics included when `prometheus_client` is installed. Selecting a numeric metric opens a **live time-series trend** — a rolling chart polled at the configured refresh interval with a Value / Rate (Δ/s) toggle, pause/resume, Current/Min/Max/Avg summary, a measurement selector for multi-series (tagged) metrics, and a live-refreshing measurements table. Non-numeric metrics show a snapshot instead. |
+| **Observability** | `observability` | Live server-layer observability for the ASGI server (uvicorn, granian, hypercorn). Stat cards for workers, uptime, active connections, in-flight requests, and requests/sec, plus rolling charts and a per-worker breakdown table. Shows worker lifecycle (started/stopped) and links across to the Metrics and Traces views. Backed by the `server_*` meters exposed at `/actuator/prometheus`. Real-time SSE updates. |
 | **Scheduled Tasks** | `scheduled` | All `@scheduled` tasks with cron expressions, fixed-rate/delay configuration, and execution status. |
 | **HTTP Traces** | `traces` | Recent HTTP request/response traces captured by `TraceCollectorFilter`. **Live request analytics**: total requests, average/max latency, error rate (4xx+5xx), a status-code mix bar (2xx/3xx/4xx/5xx), a latency-distribution histogram and latency percentiles (p50/p90/p95/p99) — all updating live as requests arrive. Shows method, path, status code, duration, query string, client host, content type, user agent, and response content-length. Click-to-detail panel. Status code filter pills (All, 2xx, 3xx, 4xx, 5xx). Real-time SSE for new traces. Client buffer bounded to the 500-entry ring buffer. |
 
@@ -270,6 +271,7 @@ following SSE endpoints are available:
 | `GET /admin/api/sse/traces` | `trace` | Emits individual new HTTP trace events as they are captured by the `TraceCollectorFilter`. Polled every 2 seconds. |
 | `GET /admin/api/sse/logfile` | `log` | Emits new log records captured by the `AdminLogHandler`. Uses incremental polling (records with id > last seen) every 1 second. Each event contains `id`, `timestamp`, `level`, `logger`, `message`, `context`, and `thread`. |
 | `GET /admin/api/sse/beans` | `beans` | Emits the bean registry snapshot at each interval (poll interval is `refresh_interval / 1000` seconds) so the Beans view stays live. |
+| `GET /admin/api/sse/observability` | `observability` | Emits a server-layer observability snapshot (workers, uptime, active connections, in-flight requests, requests/sec, per-worker breakdown) at each interval so the Observability view stays live. |
 
 Each SSE stream sends JSON payloads in the standard `data:` format with
 appropriate `Cache-Control: no-cache` and `X-Accel-Buffering: no` headers for
@@ -306,6 +308,7 @@ All API endpoints return JSON responses. The base path defaults to `/admin/api`
 | `POST` | `/admin/api/loggers/{name}` | Set logger level. Body: `{"level": "DEBUG"}`. Valid levels: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, `OFF` (an unknown level returns HTTP 400). `TRACE` and `OFF` are applied as numeric level 5 and a disabled logger respectively. |
 | `GET` | `/admin/api/metrics` | List metric names. |
 | `GET` | `/admin/api/metrics/{name}` | Metric detail by name. |
+| `GET` | `/admin/api/observability` | Server-layer observability snapshot: workers, uptime, active connections, in-flight requests, requests/sec, and per-worker breakdown. |
 | `GET` | `/admin/api/scheduled` | List scheduled tasks. |
 | `GET` | `/admin/api/mappings` | List HTTP route mappings. |
 | `GET` | `/admin/api/caches` | Cache stats: adapter type, entry count, key list. |
@@ -328,6 +331,7 @@ All API endpoints return JSON responses. The base path defaults to `/admin/api`
 | `GET` | `/admin/api/sse/traces` | Real-time HTTP trace stream. |
 | `GET` | `/admin/api/sse/logfile` | Real-time log record stream. |
 | `GET` | `/admin/api/sse/beans` | Real-time bean registry stream. |
+| `GET` | `/admin/api/sse/observability` | Real-time server-layer observability stream. |
 
 ### Instance Registry Endpoints (Server Mode)
 

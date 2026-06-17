@@ -64,6 +64,8 @@ CORE_STACK_PROPERTIES: dict[str, str] = {
     # Web tier — Starlette/FastAPI auto-config + ASGI server selection
     "pyfly.web.enabled": "true",
     "pyfly.server.enabled": "true",
+    # Server-layer observability — worker/connection/uptime metrics + lifecycle
+    "pyfly.server.observability.enabled": "true",
     # Observability — Prometheus + OpenTelemetry
     "pyfly.observability.enabled": "true",
     "pyfly.metrics.enabled": "true",

@@ -55,3 +55,27 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports: ["8080:8080"]
+  # Observability stack — scrapes a locally-running PyFly app's
+  # /actuator/prometheus (server_* + http_server_requests_* meters) and renders
+  # them in Grafana. Start with: docker compose up -d prometheus grafana
+  #
+  # LOCAL-DEV ONLY: both services bind to 127.0.0.1 (loopback) so they are not
+  # reachable from other hosts. Prometheus has no auth; Grafana allows anonymous
+  # READ-ONLY (Viewer) access for convenience. For the Grafana admin login, set
+  # GRAFANA_ADMIN_PASSWORD in the environment (otherwise Grafana's default applies
+  # and must be changed on first login). Do NOT expose these ports publicly.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # reach the app on the host (Linux)
+    ports: ["127.0.0.1:9091:9090"]
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus]

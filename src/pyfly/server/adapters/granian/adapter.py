@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Any
 
+from pyfly.server.ports.server_stats import ServerStats
 from pyfly.server.types import ServerInfo
 
 
@@ -25,11 +28,17 @@ class GranianServerAdapter:
 
     Granian uses Rust's Hyper + Tokio for network I/O, achieving
     ~3x the throughput of Uvicorn with significantly lower tail latency.
+
+    Implements the optional :class:`~pyfly.server.ports.server_stats.ServerStatsPort`
+    for workers + uptime only — Granian's Rust runtime exposes no Python-side
+    connection/request handle, so those fields are always ``None`` (the pure-ASGI
+    server-metrics middleware supplies them uniformly instead).
     """
 
     def __init__(self) -> None:
         self._server: Any = None
         self._info: ServerInfo | None = None
+        self._serve_start_monotonic: float | None = None
 
     def serve(self, app: str | Any, config: Any) -> None:
         """Start Granian (blocking)."""
@@ -87,6 +96,7 @@ class GranianServerAdapter:
             host=host,
             port=port,
         )
+        self.on_serve_start()
         server.serve()
 
     async def serve_async(self, app: str | Any, config: Any) -> None:
@@ -110,6 +120,25 @@ class GranianServerAdapter:
         part of the normal shutdown path.
         """
         self._server = None
+
+    # -- ServerStatsPort (best-effort) --------------------------------------
+
+    def on_serve_start(self) -> None:
+        """Record the server-bind moment (basis for ``server_uptime_seconds``)."""
+        self._serve_start_monotonic = time.monotonic()
+
+    def on_serve_stop(self) -> None:
+        """No-op — Granian has no Python-side server handle to release."""
+
+    def sample(self) -> ServerStats:
+        """Workers + uptime only; connection/request fields are always ``None``."""
+        workers = self._info.workers if self._info is not None else 1
+        return ServerStats(workers=workers, server_uptime_seconds=self._uptime_seconds(), worker_pid=os.getpid())
+
+    def _uptime_seconds(self) -> float:
+        if self._serve_start_monotonic is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._serve_start_monotonic)
 
     @property
     def server_info(self) -> ServerInfo:

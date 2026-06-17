@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.loggers_provider import LoggersProvider
     from pyfly.admin.providers.mappings_provider import MappingsProvider
     from pyfly.admin.providers.metrics_provider import MetricsProvider
+    from pyfly.admin.providers.observability_provider import ObservabilityProvider
     from pyfly.admin.providers.overview_provider import OverviewProvider
     from pyfly.admin.providers.runtime_provider import RuntimeProvider
     from pyfly.admin.providers.scheduled_provider import ScheduledProvider
@@ -92,6 +93,7 @@ class AdminRouteBuilder:
         logfile: LogfileProvider | None = None,
         runtime: RuntimeProvider | None = None,
         server: ServerProvider | None = None,
+        observability: ObservabilityProvider | None = None,
         instance_registry: InstanceRegistry | None = None,
     ) -> None:
         self._props = properties
@@ -113,6 +115,7 @@ class AdminRouteBuilder:
         self._logfile = logfile
         self._runtime = runtime
         self._server = server
+        self._observability = observability
         self._instance_registry = instance_registry
 
     def _auth_failure(self) -> JSONResponse | None:
@@ -195,6 +198,7 @@ class AdminRouteBuilder:
             (f"{api}/logfile/clear", self._handle_logfile_clear, ["POST"]),
             (f"{api}/runtime", self._handle_runtime, ["GET"]),
             (f"{api}/server", self._handle_server, ["GET"]),
+            (f"{api}/observability", self._handle_observability, ["GET"]),
             (f"{api}/views", self._handle_views, ["GET"]),
             (f"{api}/settings", self._handle_settings, ["GET"]),
             (f"{api}/sse/health", self._handle_sse_health, ["GET"]),
@@ -203,6 +207,7 @@ class AdminRouteBuilder:
             (f"{api}/sse/logfile", self._handle_sse_logfile, ["GET"]),
             (f"{api}/sse/runtime", self._handle_sse_runtime, ["GET"]),
             (f"{api}/sse/server", self._handle_sse_server, ["GET"]),
+            (f"{api}/sse/observability", self._handle_sse_observability, ["GET"]),
             (f"{api}/sse/beans", self._handle_sse_beans, ["GET"]),
         ]
 
@@ -355,6 +360,11 @@ class AdminRouteBuilder:
             return JSONResponse({"available": False})
         return JSONResponse(await self._server.get_server_info())
 
+    async def _handle_observability(self, request: Request) -> JSONResponse:
+        if self._observability is None:
+            return JSONResponse({"available": False})
+        return JSONResponse(await self._observability.get_observability())
+
     async def _handle_views(self, request: Request) -> JSONResponse:
         extensions = self._view_registry.get_extensions()
         views = [{"id": ext.view_id, "name": ext.display_name, "icon": ext.icon} for ext in extensions.values()]
@@ -436,6 +446,14 @@ class AdminRouteBuilder:
             return JSONResponse({"available": False})
         interval = self._props.refresh_interval / 1000
         return make_sse_response(server_stream(self._server, interval))
+
+    async def _handle_sse_observability(self, request: Request) -> Response:
+        from pyfly.admin.api.sse import make_sse_response, observability_stream
+
+        if self._observability is None:
+            return JSONResponse({"available": False})
+        interval = self._props.refresh_interval / 1000
+        return make_sse_response(observability_stream(self._observability, interval))
 
     async def _handle_sse_beans(self, request: Request) -> Response:
         from pyfly.admin.api.sse import beans_stream, make_sse_response

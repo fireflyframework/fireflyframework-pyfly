@@ -77,6 +77,14 @@ pyfly:
       runtime-threads: 1
       runtime-mode: "auto"
       respawn-failed-workers: true
+    # Server-layer observability (worker/connection/uptime metrics + lifecycle).
+    # Emits server_* meters into the Prometheus registry, exposed at
+    # /actuator/prometheus and the admin Observability view. Enabled by the
+    # web/core starters; needs the observability extra (prometheus_client).
+    observability:
+      enabled: true
+      sample-interval-seconds: 5.0
+      access-log: false
   data:
     enabled: false
     url: "sqlite+aiosqlite:///pyfly.db"
