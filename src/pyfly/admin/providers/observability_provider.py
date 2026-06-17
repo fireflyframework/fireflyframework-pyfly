@@ -46,9 +46,6 @@ class ObservabilityProvider:
 
     def __init__(self, context: Any = None) -> None:
         self._context = context
-        # For requests/second: remember the last (timestamp, total) we reported.
-        self._last_ts: float | None = None
-        self._last_requests: float = 0.0
 
     # -- server identity (static ServerInfo, like ServerProvider) -----------
 
@@ -92,14 +89,14 @@ class ObservabilityProvider:
     def _collect_server_samples() -> tuple[list[Any], bool]:
         """Return (samples, multiprocess) for ``server_*`` metric families."""
         try:
-            from prometheus_client import REGISTRY
+            import prometheus_client  # noqa: F401 - availability probe
         except ImportError:
             return [], False
 
-        from pyfly.observability.multiprocess import build_multiprocess_registry, is_multiprocess
+        from pyfly.observability.multiprocess import collect_registry, is_multiprocess
 
         multiprocess = is_multiprocess()
-        registry = build_multiprocess_registry() if multiprocess else REGISTRY
+        registry = collect_registry()
         samples: list[Any] = []
         for metric in registry.collect():
             if not metric.name.startswith("server"):
@@ -112,6 +109,17 @@ class ObservabilityProvider:
         return samples, multiprocess
 
     async def get_observability(self) -> dict[str, Any]:
+        # Honor the feature flag: when server observability is disabled, report
+        # unavailable so the dashboard renders its 'disabled' empty-state instead
+        # of a populated-with-zeros view (the middleware/binder are not installed).
+        if self._context is not None and not self._is_enabled():
+            return {
+                "timestamp": time.time(),
+                "available": False,
+                "has_prometheus": self._has_prometheus(),
+                "multiprocess": False,
+            }
+
         samples, multiprocess = self._collect_server_samples()
         has_prometheus = self._has_prometheus()
 
@@ -144,7 +152,9 @@ class ObservabilityProvider:
             "active_connections": int(active) if active is not None else None,
             "in_flight_requests": int(in_flight),
             "requests_total": int(requests_total) if requests_total is not None else None,
-            "requests_per_second": self._requests_per_second(requests_total),
+            # Snapshot default; the SSE stream computes the live per-consumer rate
+            # from successive samples (so it is not corrupted by shared state).
+            "requests_per_second": 0.0,
             "started_total": int(totals.get(_STARTED, 0.0)),
             "stopped_total": int(totals.get(_STOPPED, 0.0)),
             "per_worker": [self._worker_row(w) for w in per_worker.values()],
@@ -163,22 +173,19 @@ class ObservabilityProvider:
             "in_flight_requests": int(worker.get(_IN_FLIGHT, 0.0)),
             "active_connections": int(worker.get(_ACTIVE, 0.0)),
             "requests_total": int(worker.get(_REQUESTS, 0.0)),
-            "native_connections": int(native) if native else None,
+            # `is not None` (not truthiness) so a real 0 isn't shown as "n/a".
+            "native_connections": int(native) if native is not None else None,
         }
 
-    def _requests_per_second(self, requests_total: float | None) -> float:
-        now = time.monotonic()
-        if requests_total is None:
-            self._last_ts = now
-            return 0.0
-        rps = 0.0
-        if self._last_ts is not None:
-            elapsed = now - self._last_ts
-            if elapsed > 0 and requests_total >= self._last_requests:
-                rps = (requests_total - self._last_requests) / elapsed
-        self._last_ts = now
-        self._last_requests = requests_total
-        return round(rps, 3)
+    def _is_enabled(self) -> bool:
+        try:
+            return str(self._context.config.get("pyfly.server.observability.enabled", "true")).lower() in (
+                "true",
+                "1",
+                "yes",
+            )
+        except Exception:  # noqa: BLE001 - default to enabled if config is unreadable
+            return True
 
     @staticmethod
     def _has_prometheus() -> bool:

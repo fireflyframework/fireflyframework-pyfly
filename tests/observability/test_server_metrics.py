@@ -66,7 +66,7 @@ class TestServerMetricsBinder:
         await binder.start()
         try:
             await asyncio.sleep(0.02)
-            binder._refresh()
+            await binder._refresh()
             value = sm._get_binder_collectors()["uptime"].labels(*binder._labels)._value.get()
             assert value > 0.0
         finally:
@@ -99,6 +99,39 @@ class TestServerMetricsBinder:
         try:
             value = sm._get_binder_collectors()["native_conns"].labels(*binder._labels)._value.get()
             assert value == 0.0
+        finally:
+            await binder.stop()
+
+    async def test_stop_is_resilient_to_a_dead_sampling_task(self) -> None:
+        # A sampling task that ended with a non-cancellation exception must NOT
+        # prevent stop() from recording server_stopped_total or raise out of it.
+        binder = ServerMetricsBinder(server_name="uvicorn", workers=1, sample_interval=60)
+        await binder.start()
+        binder._task.cancel()
+        with __import__("contextlib").suppress(BaseException):
+            await binder._task
+
+        async def _boom() -> None:
+            raise ValueError("simulated dead sampler")
+
+        failed = asyncio.ensure_future(_boom())
+        with __import__("contextlib").suppress(BaseException):
+            await failed
+        binder._task = failed  # type: ignore[assignment]
+
+        await binder.stop()  # must not raise
+        assert sm._get_binder_collectors()["stopped"].labels(*binder._labels)._value.get() == 1.0
+
+    async def test_refresh_never_raises_when_gauge_write_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        binder = ServerMetricsBinder(server_name="uvicorn", workers=1, sample_interval=60)
+        await binder.start()
+        try:
+            # Force a gauge write to blow up; _refresh must swallow it.
+            def _boom(*_a, **_k):
+                raise OSError("mmap full")
+
+            monkeypatch.setattr(sm._get_binder_collectors()["uptime"], "labels", _boom)
+            await binder._refresh()  # must not raise
         finally:
             await binder.stop()
 

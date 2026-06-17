@@ -35,13 +35,16 @@ correctly; process gauges fall back to single-process semantics.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import glob
 import os
+import shutil
 import tempfile
 from typing import Any
 
 _ENV = "PROMETHEUS_MULTIPROC_DIR"
+_DIR_PREFIX = "pyfly-prometheus-mp-"
 
 
 def is_multiprocess() -> bool:
@@ -63,10 +66,21 @@ def init_multiprocess_dir(workers: int) -> str | None:
     existing = os.environ.get(_ENV)
     if existing:
         return existing
-    path = os.path.join(tempfile.gettempdir(), f"pyfly-prometheus-mp-{os.getpid()}")
+    _sweep_stale_dirs()
+    path = os.path.join(tempfile.gettempdir(), f"{_DIR_PREFIX}{os.getpid()}")
     os.makedirs(path, exist_ok=True)
     _clear_dir(path)
     os.environ[_ENV] = path
+    # Clean up our own dir on launcher exit so mmap files don't accumulate in tmp
+    # across restarts. Only the launcher (which created the dir) registers this;
+    # forked workers inherit the env var but not this atexit hook.
+    _launcher_pid = os.getpid()
+
+    def _cleanup() -> None:  # pragma: no cover - runs at interpreter exit
+        if os.getpid() == _launcher_pid:
+            shutil.rmtree(path, ignore_errors=True)
+
+    atexit.register(_cleanup)
     return path
 
 
@@ -74,6 +88,14 @@ def _clear_dir(path: str) -> None:
     for db_file in glob.glob(os.path.join(path, "*.db")):
         with contextlib.suppress(OSError):
             os.remove(db_file)
+
+
+def _sweep_stale_dirs() -> None:
+    """Remove leftover pyfly multiprocess dirs from crashed prior launches."""
+    pattern = os.path.join(tempfile.gettempdir(), f"{_DIR_PREFIX}*")
+    for stale in glob.glob(pattern):
+        with contextlib.suppress(OSError):
+            shutil.rmtree(stale, ignore_errors=True)
 
 
 def build_multiprocess_registry() -> Any:
@@ -87,6 +109,26 @@ def build_multiprocess_registry() -> Any:
     registry = CollectorRegistry()
     MultiProcessCollector(registry)  # type: ignore[no-untyped-call]
     return registry
+
+
+def collect_registry() -> Any:
+    """Return the registry to scrape: aggregating in multiprocess mode, else default.
+
+    Tolerant: if ``PROMETHEUS_MULTIPROC_DIR`` is set but the directory is missing
+    or unreadable, it is (re)created when possible and otherwise falls back to the
+    process default ``REGISTRY`` rather than letting the scrape raise a 500.
+    """
+    from prometheus_client import REGISTRY
+
+    if not is_multiprocess():
+        return REGISTRY
+    try:
+        path = os.environ.get(_ENV)
+        if path and not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+        return build_multiprocess_registry()
+    except Exception:  # noqa: BLE001 - never let multiprocess setup break the scrape
+        return REGISTRY
 
 
 def mark_worker_dead(pid: int) -> None:

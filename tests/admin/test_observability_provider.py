@@ -77,6 +77,32 @@ class TestObservabilityProvider:
         assert snap["requests_total"] == 1
 
 
+class TestDisabledAndEdgeCases:
+    async def test_disabled_flag_reports_unavailable(self) -> None:
+        from types import SimpleNamespace
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(get=lambda key, default=None: "false"),
+            container=SimpleNamespace(_registrations={}),
+        )
+        snap = await ObservabilityProvider(context=ctx).get_observability()
+        assert snap["available"] is False
+
+    async def test_worker_row_keeps_zero_native_connections(self) -> None:
+        row = ObservabilityProvider._worker_row({"pid": "1", "server_native_connections": 0.0})
+        # A real 0 must stay 0 (not collapse to None / "n/a").
+        assert row["native_connections"] == 0
+
+    async def test_worker_row_none_native_connections_stays_none(self) -> None:
+        row = ObservabilityProvider._worker_row({"pid": "1"})
+        assert row["native_connections"] is None
+
+    async def test_snapshot_requests_per_second_is_neutral_default(self) -> None:
+        # The provider no longer keeps shared rps state; the stream computes it.
+        snap = await ObservabilityProvider().get_observability()
+        assert snap["requests_per_second"] == 0.0
+
+
 class TestObservabilityStream:
     async def test_stream_emits_observability_event(self) -> None:
         import json

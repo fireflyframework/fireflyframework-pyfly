@@ -53,9 +53,11 @@ _IN_FLIGHT_METRIC = "server_in_flight_requests"
 _REQUESTS_METRIC = "server_requests"
 _LABELS = ["server", "worker_pid"]
 
-# Long-lived streams must not be counted — they would pin the gauges up for the
-# lifetime of the stream (the admin Observability view itself is an SSE stream).
-_EXCLUDED_PREFIXES = ("/admin/api/sse",)
+# Long-lived SSE streams must not be counted — they would pin the gauges up for
+# the lifetime of the stream (the admin Observability view itself is an SSE
+# stream). Matched as a path SUBSTRING so a non-default admin path
+# (pyfly.admin.path, e.g. /dashboard/api/sse/...) is excluded too.
+_EXCLUDED_SUBSTRINGS = ("/api/sse/",)
 
 # Process-global collectors (created once per process, like the request timer).
 _active: Any = None
@@ -120,7 +122,7 @@ class ServerMetricsASGIMiddleware:
             return
 
         path = scope.get("path", "")
-        if any(path.startswith(p) for p in _EXCLUDED_PREFIXES):
+        if any(s in path for s in _EXCLUDED_SUBSTRINGS):
             await self.app(scope, receive, send)
             return
 

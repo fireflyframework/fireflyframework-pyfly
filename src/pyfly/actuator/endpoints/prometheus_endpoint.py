@@ -54,14 +54,12 @@ class PrometheusEndpoint:
                 "body": "# prometheus_client is not installed\n",
                 "status": 503,
             }
-        from pyfly.observability.multiprocess import build_multiprocess_registry, is_multiprocess
+        from pyfly.observability.multiprocess import collect_registry
 
         # Under multiprocess mode (workers > 1) aggregate every worker's
         # mmap-backed metrics; otherwise scrape the process default registry.
-        if is_multiprocess():
-            output = generate_latest(build_multiprocess_registry()).decode("utf-8")
-        else:
-            output = generate_latest().decode("utf-8")
+        # collect_registry() falls back gracefully if the multiproc dir is missing.
+        output = generate_latest(collect_registry()).decode("utf-8")
         return {
             "content_type": _CONTENT_TYPE,
             "body": output,

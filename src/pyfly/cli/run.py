@@ -183,8 +183,18 @@ def run_command(
 
         init_multiprocess_dir(config.workers)
 
-    # Pass server configuration to workers so they can log server info
-    os.environ["_PYFLY_SERVER_TYPE"] = config.type
+    # Pass server configuration to workers so they can log server info.
+    # Resolve the concrete server type when 'auto' so the value is uvicorn /
+    # granian / hypercorn — not the literal "auto" sentinel — which is what the
+    # startup log and the server_* metric `server` label key off of.
+    resolved_type = config.type
+    if resolved_type == "auto":
+        try:
+            resolved_type = server_adapter.server_info.name
+        except Exception:  # noqa: BLE001 - fall back to the sentinel if unavailable
+            resolved_type = config.type
+    config.type = resolved_type
+    os.environ["_PYFLY_SERVER_TYPE"] = resolved_type
     os.environ["_PYFLY_SERVER_HOST"] = host
     os.environ["_PYFLY_SERVER_PORT"] = str(port)
     os.environ["_PYFLY_EVENT_LOOP"] = config.event_loop
