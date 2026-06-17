@@ -496,6 +496,114 @@ Apunta tus `scrape_configs` de Prometheus a `/actuator/prometheus` y todas las m
 
 ---
 
+## Observabilidad de la capa de servidor
+
+!!! note "Novedad en v26.6.113"
+    Hasta ahora toda la observabilidad de este capítulo ha sido de la **capa de
+    aplicación**: el `MetricsFilter` que mide `http_server_requests_seconds`, los
+    filtros de trazas/correlación y `process_metrics`. Esta versión añade métricas
+    sobre el **servidor en sí** —el servidor ASGI que ejecuta tu aplicación
+    (uvicorn, granian o hypercorn)— para que puedas ver conexiones, peticiones en
+    curso, workers y tiempo de actividad junto a las métricas de negocio.
+
+Todas estas métricas se escriben en el mismo registro de Prometheus y se exponen
+automáticamente en `/actuator/prometheus`, sin código adicional. Tres mecanismos
+cooperan para producirlas:
+
+1. **Un middleware ASGI puro** (`ServerMetricsASGIMiddleware`, en
+   `pyfly/web/adapters/starlette/asgi_server_metrics.py`) envuelve la aplicación en
+   la **capa más externa** y es la fuente **primaria**: corre en cada worker, para
+   cada servidor y cualquier número de workers. Emite `server_active_connections`,
+   `server_in_flight_requests` y `server_requests_total`.
+2. **Un `ServerMetricsBinder`** (`pyfly/observability/server_metrics.py`), arrancado
+   desde el lifespan ASGI dentro del worker (junto a `register_process_metrics` y el
+   `ManagementServer`), emite `server_workers` (a partir de la variable de entorno
+   `_PYFLY_WORKERS` que fija `pyfly run`), `server_uptime_seconds` (desde que el
+   worker se vinculó al socket), `server_started_total`, `server_stopped_total` y,
+   opcionalmente, `server_native_connections`.
+3. **Un `ServerStatsPort` de mejor esfuerzo** (`pyfly/server/ports/server_stats.py`)
+   implementado por cada adaptador: en la ruta en proceso `serve_async`, el
+   adaptador de uvicorn aflora su recuento real de conexiones de socket y el total
+   de peticiones desde `uvicorn.Server.server_state`; granian y hypercorn solo
+   reportan workers y tiempo de actividad (runtime en Rust / sin handle), de modo que
+   ahí los campos de conexión son `None`.
+
+!!! note "¿Por qué no leer simplemente las estadísticas nativas del servidor?"
+    En la ruta de producción `pyfly run`, `uvicorn.run(workers=N)` bifurca
+    subprocesos worker que construyen cada uno su **propio** servidor; el bean del
+    adaptador del worker no es el objeto que está sirviendo, así que `server_state`
+    queda inalcanzable entre procesos. Por eso el middleware ASGI —que sí corre
+    dentro del worker— es la fuente primaria uniforme; las estadísticas nativas son
+    un enriquecimiento de mejor esfuerzo.
+
+### Catálogo de métricas
+
+Todos los nombres son nombres de Prometheus y cada medidor lleva las etiquetas
+`server` (el tipo de servidor) y `worker_pid`:
+
+| Métrica | Tipo | Qué mide |
+|---|---|---|
+| `server_active_connections` | gauge | Conexiones ASGI abiertas (http + websocket); aproximado, **no** sockets reales (los sockets keep-alive ociosos que retiene el servidor son invisibles a ASGI) |
+| `server_in_flight_requests` | gauge | Peticiones http que se están atendiendo ahora mismo |
+| `server_requests_total` | counter | Peticiones http completadas en la capa de servidor |
+| `server_workers` | gauge | Procesos worker configurados |
+| `server_uptime_seconds` | gauge | Segundos desde que este worker se vinculó al socket (distinto de `process_uptime_seconds`) |
+| `server_started_total` / `server_stopped_total` | counter | Ciclo de vida del worker |
+| `server_native_connections` | gauge | Recuento **real** de conexiones de socket de uvicorn, incluido keep-alive ocioso (solo en la ruta `serve_async`; ausente en granian/hypercorn) |
+
+### Modo multi-worker
+
+Cuando `workers > 1`, el **modo multiproceso de `prometheus_client`** se activa
+automáticamente: `pyfly run` fija `PROMETHEUS_MULTIPROC_DIR` antes de bifurcar los
+workers (`pyfly/observability/multiprocess.py`), cada worker escribe sus ficheros
+mmap y `/actuator/prometheus` agrega todos los workers mediante
+`MultiProcessCollector`. Así, una sola recolección refleja **todos** los workers.
+
+!!! warning "Limitación del modo multiproceso"
+    El modo multiproceso solo agrega valores de `Counter`, `Gauge`, `Histogram` y
+    `Summary`. Los colectores Python personalizados (las métricas `process_*` y
+    `system_*`) **no** se agregan entre workers. Los medidores `server_*` y
+    `http_server_requests_*` sí se agregan correctamente.
+
+### Configuración
+
+```yaml
+pyfly:
+  server:
+    observability:
+      enabled: true                  # default; lo activan los starters web y core
+      sample-interval-seconds: 5.0   # default
+      access-log: false              # default; logging de acceso nativo opt-in
+```
+
+`pyfly.server.observability.enabled` está activado por defecto por los starters web
+y core, igual que `pyfly.observability.metrics.enabled`. Requiere el extra
+`observability` (`prometheus_client`); sin él, degrada a no-op.
+
+### Exposición y panel
+
+Los medidores `server_*` aparecen en `/actuator/prometheus` y `/actuator/metrics`.
+El panel de administración gana una nueva sección **Observability** en vivo (dentro
+de Monitoring): tarjetas de estadística (workers, tiempo de actividad, conexiones
+activas, peticiones en curso, peticiones/segundo), gráficos en movimiento, una tabla
+de desglose por worker y enlaces a las vistas de Metrics y Traces. Está respaldada
+por `GET /admin/api/observability` y el SSE `/admin/api/sse/observability`.
+
+!!! note "Alcance: solo ASGI por ahora"
+    Esta versión **no** añade gunicorn: la pila sigue siendo asíncrona, solo ASGI
+    (granian > uvicorn > hypercorn). Aun así, el diseño de `ServerStatsPort` y del
+    modo multiproceso está preparado para gunicorn de cara a un futuro adaptador.
+
+### Stack local — Prometheus y Grafana
+
+Para que puedas ver estas métricas en vivo, `docker-compose.yml` incorpora servicios
+de **prometheus** y **grafana** que recolectan `/actuator/prometheus` (la
+configuración vive en `ops/prometheus/prometheus.yml`). Levanta el stack, lanza unas
+cuantas peticiones contra la API de negocio y observa cómo `server_in_flight_requests`
+y `server_requests_total` se mueven en Grafana.
+
+---
+
 ## Trazas distribuidas
 
 ### @span — decorador de span de OpenTelemetry

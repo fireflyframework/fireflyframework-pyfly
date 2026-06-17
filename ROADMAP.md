@@ -34,6 +34,16 @@ This wave replaced mock-only adapter coverage with provable real-backend correct
 - *Plugins:* `PluginState` lifecycle model (LOADED/STARTED/STOPPED/FAILED), per-plugin start/stop with dependency cascade, typed `PluginException` hierarchy.
 - *Rule Engine:* Rich operator set (`between`, `contains`, `starts_with`, `ends_with`, `exists`, `is_null`, `is_empty`); fluent builder DSL (`pyfly.rule_engine.builder`); `RuleSetLoader.from_json`; `RuleSetValidator`; hexagonal `RuleEnginePort` + `ActionHandler` SPI; `RuleEngineService` facade; `EvaluationMode.ALL`/`FIRST_MATCH`; pluggable action handlers.
 
+### Server-layer observability ✅ **Delivered (v26.06.113)**
+
+Observability was previously application-layer only (the `MetricsFilter` `http_server_requests_seconds`, tracing/correlation filters, `process_metrics`). This release adds metrics about the ASGI **server** itself (uvicorn, granian, hypercorn), written to the Prometheus registry and auto-exposed at `/actuator/prometheus` and `/actuator/metrics`. Every meter is labeled `server` (server type) and `worker_pid`.
+
+Three cooperating mechanisms supply the data. A pure-ASGI `ServerMetricsASGIMiddleware` wraps the app at the outermost layer and is the primary source — it runs in every worker for every server and worker count, emitting `server_active_connections`, `server_in_flight_requests`, and `server_requests_total`. A `ServerMetricsBinder`, started from the in-worker ASGI lifespan, emits `server_workers`, `server_uptime_seconds` (since this worker bound, distinct from `process_uptime_seconds`), `server_started_total`, `server_stopped_total`, and optionally `server_native_connections`. A best-effort `ServerStatsPort` lets each adapter enrich the data on the in-process `serve_async` path — the uvicorn adapter surfaces its true socket connection count (incl. idle keep-alive) and total requests via `server_native_connections`; granian/hypercorn report workers + uptime only.
+
+Multi-worker scrapes aggregate: `pyfly run` sets `PROMETHEUS_MULTIPROC_DIR` before forking workers, and `/actuator/prometheus` merges all workers via `MultiProcessCollector`, so the `server_*` and `http_server_requests_*` meters reflect every worker (custom Python collectors such as `process_*`/`system_*` are not aggregated by multiprocess mode).
+
+New config keys: `pyfly.server.observability.enabled` (default `true`; enabled by the web and core starters), `pyfly.server.observability.sample-interval-seconds` (default `5.0`), and `pyfly.server.observability.access-log` (default `false`). Requires the observability extra (`prometheus_client`); degrades to a no-op without it. The admin dashboard gains a live **Observability** section under Monitoring — stat cards, rolling charts, and a per-worker breakdown table — backed by `GET /admin/api/observability` and SSE `/admin/api/sse/observability`. gunicorn is not added in this release (the stack stays async-only ASGI: granian > uvicorn > hypercorn), but the `ServerStatsPort` + multiprocess design is gunicorn-ready. The local `docker-compose.yml` gained prometheus + grafana services scraping `/actuator/prometheus`.
+
 ---
 
 ## Phase 1 — Core Distributed Patterns ✅ **Complete (v26.05.01)**

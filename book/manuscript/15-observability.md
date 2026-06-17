@@ -488,6 +488,180 @@ Point your Prometheus `scrape_configs` at `/actuator/prometheus` and all `Metric
 
 ---
 
+## Server-layer observability
+
+Everything you metered so far lives *inside* your application: `@timed` wraps a
+handler, `@counted` increments on a method call, `MetricsFilter` records
+`http_server_requests_seconds` as a request passes through the filter chain, and
+`process_metrics` samples CPU and memory. All of that describes the work Lumen
+does — but none of it describes the **server** running Lumen. How many
+connections is uvicorn holding open right now? How many requests are in flight
+*at the server layer*, before they ever reach a handler? How long has this worker
+been bound, as distinct from the Python process uptime? Until now those numbers
+were invisible.
+
+!!! note "New in v26.6.113"
+    Server-layer observability adds a family of `server_*` metrics about the
+    ASGI server itself — uvicorn, granian, or hypercorn — alongside the existing
+    application-layer meters. They are on by default (enabled by the web and core
+    starters, mirroring `pyfly.observability.metrics.enabled`), appear at
+    `/actuator/prometheus` with no extra wiring, and feed a new live
+    **Observability** view in the admin dashboard.
+
+### How it works — three cooperating sources
+
+You might expect PyFly to simply read the server's own statistics. On the
+in-process `serve_async` path it does, but that path is not how you run in
+production. `pyfly run --server uvicorn --workers 4` calls `uvicorn.run(workers=N)`,
+which **forks worker subprocesses** — each builds its *own* server object in its
+own process. The adapter bean your worker holds is not the object actually
+serving traffic, so its `server_state` is unreachable across the process
+boundary. PyFly therefore layers three mechanisms, each writing to the same
+Prometheus registry that `/actuator/prometheus` already exposes:
+
+1. A pure-ASGI middleware (`ServerMetricsASGIMiddleware`) wraps the app at the
+   **outermost** layer. This is the **primary** source: it runs in every worker,
+   for every server type and worker count, and it sees every connection and
+   request before any handler does. It emits `server_active_connections`,
+   `server_in_flight_requests`, and `server_requests_total`.
+2. A `ServerMetricsBinder`, started from the in-worker ASGI lifespan beside
+   `register_process_metrics` and the `ManagementServer`, emits `server_workers`
+   (read from the `_PYFLY_WORKERS` env var that `pyfly run` sets),
+   `server_uptime_seconds` (since this worker bound), `server_started_total`,
+   `server_stopped_total`, and optionally `server_native_connections`.
+3. A best-effort `ServerStatsPort`, implemented per adapter. On the in-process
+   `serve_async` path the uvicorn adapter surfaces its *true* socket connection
+   count and total request count from `uvicorn.Server.server_state`. The granian
+   and hypercorn adapters report workers and uptime only — granian's Rust runtime
+   and hypercorn's lack of a server handle leave the connection fields `None` —
+   so native stats are enrichment, never the foundation.
+
+The middleware is the uniform floor; native stats are best-effort icing on top.
+That split is why the numbers are always present, regardless of how many workers
+you fork or which server you chose.
+
+### The metric catalog
+
+Every meter below carries two labels: `server` (the server type) and
+`worker_pid` (the process that emitted it). Prometheus names follow the usual
+exposition conventions.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `server_active_connections` | gauge | Open ASGI connections (HTTP + WebSocket). Approximate — **not** true sockets; idle keep-alive sockets the server holds are invisible to the ASGI layer. |
+| `server_in_flight_requests` | gauge | HTTP requests currently being handled. |
+| `server_requests_total` | counter | Completed HTTP requests at the server layer. |
+| `server_workers` | gauge | Configured worker processes. |
+| `server_uptime_seconds` | gauge | Seconds since this worker bound — distinct from `process_uptime_seconds`. |
+| `server_started_total` | counter | Worker-start lifecycle events. |
+| `server_stopped_total` | counter | Worker-stop lifecycle events. |
+| `server_native_connections` | gauge | uvicorn's *true* socket connection count, including idle keep-alive. Present only on the `serve_async` path; absent for granian and hypercorn. |
+
+!!! note "Two kinds of connection count, two kinds of uptime"
+    `server_active_connections` counts what the ASGI layer can see; an idle HTTP
+    keep-alive socket holding no live connection is invisible to it, so this
+    gauge under-counts what the kernel sees. `server_native_connections`, when
+    available, is the server's own socket count and *does* include those idle
+    keep-alives — which is exactly why it usually reads higher. Likewise,
+    `server_uptime_seconds` measures how long *this worker* has been bound, while
+    `process_uptime_seconds` measures the Python process; after a worker respawn
+    they diverge.
+
+### Enabling it
+
+Server-layer observability is on by default, so you do not have to do anything to
+get the `server_*` meters. The knobs let you tune the sample cadence, opt into
+native access logging, or turn the whole subsystem off:
+
+```yaml
+pyfly:
+  server:
+    observability:
+      enabled: true                 # default; mirrors pyfly.observability.metrics.enabled
+      sample-interval-seconds: 5.0  # how often the binder samples gauges
+      access-log: false             # opt-in native server access logging
+```
+
+Like the rest of the metrics stack, it requires the `observability` extra
+(`prometheus_client`); without it the subsystem degrades to a silent no-op rather
+than failing startup. Remember that `server_*` is exposed on the **management
+port** (`9090`) alongside the other actuator metrics — and that `prometheus`
+must be in your `pyfly.management.endpoints.web.exposure.include` list for the
+scrape endpoint to appear.
+
+**Run it — scrape the server metrics.** Start Lumen and scrape the management
+port, filtering for the new family:
+
+```bash
+uv run pyfly run --server uvicorn
+curl -s localhost:9090/actuator/prometheus | grep '^server_'
+```
+
+You should see exposition lines like these (your PIDs and numbers will differ):
+
+```
+server_workers{server="uvicorn",worker_pid="48211"} 1.0
+server_uptime_seconds{server="uvicorn",worker_pid="48211"} 37.4
+server_active_connections{server="uvicorn",worker_pid="48211"} 2.0
+server_in_flight_requests{server="uvicorn",worker_pid="48211"} 1.0
+server_requests_total{server="uvicorn",worker_pid="48211"} 128.0
+server_started_total{server="uvicorn",worker_pid="48211"} 1.0
+server_native_connections{server="uvicorn",worker_pid="48211"} 5.0
+```
+
+Notice `server_native_connections` reads higher than `server_active_connections`
+here: the extra sockets are idle keep-alive connections the kernel holds that the
+ASGI layer never sees. Drive a deposit on `8080` and re-scrape to watch
+`server_requests_total` climb. Switch to `--server granian` and re-scrape: the
+gauges and counters are still there, but `server_native_connections` is gone —
+granian's Rust runtime offers no handle to read it.
+
+### Multi-worker aggregation
+
+With `--workers 1` a scrape is trivially complete: one worker, one set of
+mmapped values. With `workers > 1` each forked worker would otherwise expose only
+*its own* numbers on *its own* listener, and a single scrape would see just one
+worker. PyFly closes that gap by auto-enabling `prometheus_client`'s multiprocess
+mode. Before forking, `pyfly run` sets `PROMETHEUS_MULTIPROC_DIR`
+(`pyfly/observability/multiprocess.py`); each worker writes its metrics to mmap
+files in that directory; and `/actuator/prometheus` aggregates across every
+worker through a `MultiProcessCollector`. The upshot: **one scrape reflects the
+whole fleet of workers**, and the `worker_pid` label lets you still break the
+numbers down per process.
+
+!!! warning "Custom collectors are not aggregated"
+    Multiprocess mode aggregates only `Counter`, `Gauge`, `Histogram`, and
+    `Summary` values. Custom Python collectors — the `process_*` and `system_*`
+    metrics — are *not* merged across workers, because the registry cannot
+    serialize arbitrary collector state through the mmap files. The `server_*`
+    and `http_server_requests_*` meters are ordinary counters and gauges, so they
+    aggregate correctly; treat the per-process CPU and memory figures as
+    single-worker samples when reading a multi-worker scrape.
+
+### The admin Observability view
+
+Server metrics are also surfaced in the dashboard, under **Monitoring**, in a new
+live **Observability** view. It opens with stat cards for workers, uptime, active
+connections, in-flight requests, and requests-per-second; below them sit rolling
+charts of the same series, and a per-worker breakdown table keyed on `worker_pid`
+so you can spot one hot or stalled worker in a fleet. The view links across to the
+existing Metrics and Traces views for drill-down. It is backed by
+`GET /admin/api/observability` for the initial snapshot and the SSE stream
+`/admin/api/sse/observability` for live updates — the same push-not-poll model the
+rest of the dashboard uses.
+
+!!! note "Scope: async-only, gunicorn-ready"
+    This release keeps the server stack async-only ASGI — granian, then uvicorn,
+    then hypercorn — and does **not** add gunicorn. The `ServerStatsPort` and the
+    multiprocess design are deliberately gunicorn-ready, though, so a future
+    sync-worker adapter can plug in without reworking the metric plumbing. For
+    local development, `docker-compose.yml` now ships Prometheus and Grafana
+    services that scrape `/actuator/prometheus` (config in
+    `ops/prometheus/prometheus.yml`), so you can watch the `server_*` series on a
+    dashboard end to end.
+
+---
+
 ## Distributed tracing
 
 ### @span — OpenTelemetry span decorator
