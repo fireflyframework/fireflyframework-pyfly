@@ -77,9 +77,7 @@ def _get_server_collectors() -> tuple[Any, Any, Any]:
         _active = Gauge(
             _ACTIVE_METRIC, "Open ASGI connections (http + websocket)", _LABELS, multiprocess_mode="livesum"
         )
-        _in_flight = Gauge(
-            _IN_FLIGHT_METRIC, "In-flight HTTP requests", _LABELS, multiprocess_mode="livesum"
-        )
+        _in_flight = Gauge(_IN_FLIGHT_METRIC, "In-flight HTTP requests", _LABELS, multiprocess_mode="livesum")
         _requests = Counter(_REQUESTS_METRIC, "Total HTTP requests handled at the server layer", _LABELS)
     return _active, _in_flight, _requests
 

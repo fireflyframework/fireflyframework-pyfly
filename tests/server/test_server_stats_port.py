@@ -61,9 +61,7 @@ class TestServerStats:
             stats.workers = 2  # type: ignore[misc]
 
     def test_populated_connection_fields(self) -> None:
-        stats = ServerStats(
-            workers=1, server_uptime_seconds=3.0, worker_pid=1, active_connections=7, total_requests=42
-        )
+        stats = ServerStats(workers=1, server_uptime_seconds=3.0, worker_pid=1, active_connections=7, total_requests=42)
         assert stats.active_connections == 7
         assert stats.total_requests == 42
 

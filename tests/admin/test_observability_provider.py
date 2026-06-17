@@ -119,4 +119,3 @@ class TestObservabilityStream:
         payload = json.loads(next(line[len("data: ") :] for line in event.splitlines() if line.startswith("data: ")))
         assert payload["available"] is True
         assert "server" in payload
-

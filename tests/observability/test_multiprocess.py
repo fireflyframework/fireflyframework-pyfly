@@ -67,10 +67,7 @@ class TestMultiprocessAggregation:
 
         env = dict(os.environ)
         env["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
-        script = (
-            "from prometheus_client import Counter\n"
-            f"Counter({metric!r}, 'x').inc({value})\n"
-        )
+        script = f"from prometheus_client import Counter\nCounter({metric!r}, 'x').inc({value})\n"
         subprocess.run([sys.executable, "-c", script], check=True, env=env)
 
     def test_registry_aggregates_metric_written_by_another_process(
