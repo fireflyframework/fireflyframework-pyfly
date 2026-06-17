@@ -1,0 +1,25 @@
+# Prometheus scrape config for a locally-running PyFly app.
+#
+# Scrapes the framework's Micrometer/Prometheus exposition at
+# /actuator/prometheus — including the server-layer meters (server_workers,
+# server_active_connections, server_in_flight_requests, server_uptime_seconds,
+# server_requests_total) and the http_server_requests_seconds family.
+#
+# By default it targets the management port (9090) where actuator lives when
+# management.server.port is separated (the pyfly default); change to 8080 if you
+# serve actuator on the application port (shared mode).
+#
+# Under multi-worker (workers > 1) the framework enables prometheus_client
+# multiprocess mode, so a single scrape already aggregates across all workers.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: pyfly
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # host.docker.internal lets the container reach the app on the host.
+      - targets: ["host.docker.internal:9090"]
+        labels:
+          application: pyfly-app
