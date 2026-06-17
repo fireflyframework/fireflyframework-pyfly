@@ -175,6 +175,14 @@ def run_command(
     os.environ["_PYFLY_BANNER_PRINTED"] = "1"
     os.environ["_PYFLY_WORKERS"] = str(config.workers)
 
+    # Multi-worker: enable prometheus multiprocess aggregation BEFORE the server
+    # forks workers, so each inherits PROMETHEUS_MULTIPROC_DIR and the server-level
+    # (and http/process) meters aggregate across workers at /actuator/prometheus.
+    if config.workers > 1:
+        from pyfly.observability.multiprocess import init_multiprocess_dir
+
+        init_multiprocess_dir(config.workers)
+
     # Pass server configuration to workers so they can log server info
     os.environ["_PYFLY_SERVER_TYPE"] = config.type
     os.environ["_PYFLY_SERVER_HOST"] = host
