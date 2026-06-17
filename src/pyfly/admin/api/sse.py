@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.beans_provider import BeansProvider
     from pyfly.admin.providers.health_provider import HealthProvider
     from pyfly.admin.providers.metrics_provider import MetricsProvider
+    from pyfly.admin.providers.observability_provider import ObservabilityProvider
     from pyfly.admin.providers.runtime_provider import RuntimeProvider
     from pyfly.admin.providers.server_provider import ServerProvider
 
@@ -137,6 +138,19 @@ async def server_stream(
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         _logger.debug("sse_stream_closed", extra={"stream": "server"})
+
+
+async def observability_stream(
+    observability_provider: ObservabilityProvider,
+    interval: float = 5.0,
+) -> AsyncGenerator[str, None]:
+    try:
+        while True:
+            data = await observability_provider.get_observability()
+            yield _sse_event(data, event="observability")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        _logger.debug("sse_stream_closed", extra={"stream": "observability"})
 
 
 async def beans_stream(
