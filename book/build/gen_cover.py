@@ -2,8 +2,8 @@
 from __future__ import annotations
 import base64
 import math
+import os
 from pathlib import Path
-import cairosvg
 
 ART = Path(__file__).resolve().parents[1] / "art"
 W, H = 1500, 2100  # 7.5 × 9.25 in at 200 dpi
@@ -52,6 +52,42 @@ def quad_path(x1: float, y1: float, x2: float, y2: float) -> str:
     cpx = mx - dy * 0.18
     cpy = my + dx * 0.18
     return f"M{x1:.1f},{y1:.1f} Q{cpx:.1f},{cpy:.1f} {x2:.1f},{y2:.1f}"
+
+
+# ---------------------------------------------------------------------------
+# Maven Pro wordmark — vectorized to paths so the title matches the README
+# banner exactly and renders identically without the font installed.
+# Falls back to <text> (handled by the caller) if fontTools/the font is absent.
+# ---------------------------------------------------------------------------
+def maven_wordmark(text: str, x: float, baseline: float, em: float, fill: str):
+    try:
+        from fontTools.ttLib import TTFont
+        from fontTools.pens.svgPathPen import SVGPathPen
+        from fontTools.pens.transformPen import TransformPen
+        for cand in ("~/Library/Fonts/MavenPro-700.ttf",
+                     "~/Library/Fonts/MavenPro-600.ttf", "/tmp/MavenPro.ttf"):
+            fp = os.path.expanduser(cand)
+            if os.path.exists(fp):
+                break
+        else:
+            return None
+        f = TTFont(fp)
+        upm = f["head"].unitsPerEm
+        cmap = f.getBestCmap()
+        gs = f.getGlyphSet()
+        s = em / upm
+        penx = x
+        paths = []
+        for ch in text:
+            g = cmap[ord(ch)]
+            sp = SVGPathPen(gs)
+            gs[g].draw(TransformPen(sp, (s, 0, 0, -s, penx, baseline)))
+            paths.append(sp.getCommands())
+            penx += gs[g].width * s
+        body = "".join(f'<path d="{d}"/>' for d in paths)
+        return f'<g fill="{fill}">{body}</g>'
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +197,7 @@ def build_svg() -> str:
         parts.append(node(ax, ay, ar, DEEP, GREEN_DIM, 1.4, opacity=0.65))
 
     # 8. Satellite nodes with outer ring + label
-    FONT_SAT = "Avenir Next,Avenir,Helvetica Neue,Helvetica,Arial,sans-serif"
+    FONT_SAT = "Maven Pro,Avenir Next,Avenir,Helvetica Neue,Helvetica,Arial,sans-serif"
     for (sx, sy, sr, lbl) in SATS:
         parts.append(node(sx, sy, sr + 9, "none", GREEN, 1.2, opacity=0.28))
         parts.append(node(sx, sy, sr, GREEN_MID, GREEN, 2.2))
@@ -213,7 +249,7 @@ def build_svg() -> str:
     # -------------------------------------------------------------------------
     # Publisher label — top edge, small caps, generous letter-spacing
     # -------------------------------------------------------------------------
-    FONT = "Avenir Next,Avenir,Helvetica Neue,Helvetica,Arial,sans-serif"
+    FONT = "Maven Pro,Avenir Next,Avenir,Helvetica Neue,Helvetica,Arial,sans-serif"
     parts.append(
         f'<text x="{W // 2}" y="68" text-anchor="middle" '
         f'fill="{MUTED}" font-size="26" font-weight="500" '
@@ -226,12 +262,16 @@ def build_svg() -> str:
     # -------------------------------------------------------------------------
     TY = RULE_Y + 68   # baseline anchor of first title line
 
-    # "PyFly" — ultra-heavy, white
-    parts.append(
-        f'<text x="108" y="{TY + 200}" '
-        f'fill="{WHITE}" font-size="240" font-weight="800" '
-        f'font-family="{FONT}" letter-spacing="-7">PyFly</text>'
-    )
+    # "PyFly" — Maven Pro, vectorized (matches the README banner); <text> fallback
+    _wm = maven_wordmark("PyFly", 108, TY + 200, 236, WHITE)
+    if _wm:
+        parts.append(_wm)
+    else:
+        parts.append(
+            f'<text x="108" y="{TY + 200}" '
+            f'fill="{WHITE}" font-size="240" font-weight="800" '
+            f'font-family="Maven Pro,{FONT}" letter-spacing="-7">PyFly</text>'
+        )
 
     # Thin amber separator under PyFly (visual rhythm)
     RULE2_Y = TY + 218
@@ -285,15 +325,24 @@ def build_svg() -> str:
     return svg
 
 
+def _render_png(svg_path: Path, png_path: Path) -> None:
+    """Rasterize the cover. Prefer cairosvg; fall back to resvg (npx) if absent."""
+    try:
+        import cairosvg
+        cairosvg.svg2png(url=str(svg_path), write_to=str(png_path),
+                         output_width=W, output_height=H)
+        return
+    except Exception:
+        pass
+    import subprocess
+    subprocess.run(["npx", "-y", "@resvg/resvg-js-cli", str(svg_path), str(png_path)],
+                   check=True)
+
+
 def main() -> None:
     svg = build_svg()
     (ART / "cover.svg").write_text(svg, encoding="utf-8")
-    cairosvg.svg2png(
-        bytestring=svg.encode(),
-        write_to=str(ART / "cover.png"),
-        output_width=W,
-        output_height=H,
-    )
+    _render_png(ART / "cover.svg", ART / "cover.png")
     print("wrote cover.svg and cover.png")
 
 

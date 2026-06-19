@@ -1,9 +1,11 @@
 <p align="center">
-  <img src="assets/pyfly-logo.png" alt="PyFly Logo" width="600" />
+  <img src="assets/banner.svg" alt="PyFly — Event-Driven Python Microservices with the Firefly Framework" width="100%" />
 </p>
 
+<h1 align="center">PyFly</h1>
+
 <p align="center">
-  <strong>The Official Python Implementation of the Firefly Framework</strong>
+  <strong>The official Python implementation of the Firefly Framework — Spring Boot's cohesion, native to async Python.</strong>
 </p>
 
 <p align="center">
@@ -11,15 +13,45 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-26.06.103-brightgreen" alt="Version: 26.06.103"></a>
-  <a href="#"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
-  <a href="#"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
-  <a href="#"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.06.113-brightgreen" alt="Version: 26.06.113"></a>
+  <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
+  <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
+  <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
 </p>
 
 <p align="center">
   <em>Build production-grade Python applications with the patterns you trust — dependency injection, CQRS, event-driven architecture, and more — powered by the <a href="https://github.com/fireflyframework">Firefly Framework</a>.</em>
 </p>
+
+<p align="center">
+  <a href="book/"><b>📘 The Book</b></a> &nbsp;·&nbsp;
+  <a href="#quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp;
+  <a href="#why-pyfly">Why PyFly</a> &nbsp;·&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
+  <a href="#featured-patterns">Patterns</a> &nbsp;·&nbsp;
+  <a href="#modules">Modules</a> &nbsp;·&nbsp;
+  <a href="docs/README.md">Docs</a> &nbsp;·&nbsp;
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+- [📘 The Book — *PyFly by Example*](#-the-book--pyfly-by-example)
+- [Why PyFly?](#why-pyfly)
+- [Quickstart](#quickstart)
+- [Philosophy](#philosophy)
+- [Architecture](#architecture) — [Dependency Injection](#dependency-injection) · [Hexagonal](#hexagonal-architecture) · [Auto-Configuration](#auto-configuration) · [Request Lifecycle](#request-lifecycle)
+- [Featured Patterns](#featured-patterns)
+- [Installation](#installation)
+- [CLI & Project Scaffolding](#cli--project-scaffolding)
+- [Modules](#modules)
+- [Documentation](#documentation)
+- [The Firefly Ecosystem](#firefly-framework-ecosystem)
+- [Roadmap](#roadmap) · [Versioning](#versioning) · [Changelog](#changelog)
+- [Requirements](#requirements) · [Contributing](#contributing) · [License](#license)
+
+</details>
 
 ---
 
@@ -33,7 +65,9 @@ It covers the whole stack: dependency injection, configuration & profiles, the w
 
 ---
 
-## The Problem
+## Why PyFly?
+
+### The problem
 
 You've been here before. A new Python microservice needs to ship. Before writing a single line of business logic, you spend the first two weeks making choices:
 
@@ -49,7 +83,7 @@ You assemble a bespoke stack, glue it together, and move on. Six months later, a
 
 ---
 
-## What is PyFly?
+### What PyFly is
 
 PyFly makes these decisions for you.
 
@@ -96,6 +130,30 @@ Coming from Spring Boot? See the [Spring Boot Comparison Guide](docs/spring-comp
 
 ---
 
+## Quickstart
+
+Zero to a running, production-grade service in under a minute:
+
+```bash
+# 1 · Install the CLI + framework (one line)
+curl -fsSL https://get.pyfly.io/ | bash
+
+# 2 · Scaffold a REST API with batteries included
+pyfly new my-service --archetype web-api
+cd my-service
+
+# 3 · Run it — structured logging, health checks, metrics & OpenAPI all on by default
+pyfly run --reload
+
+# 4 · It's live
+curl http://localhost:8080/health      # {"status":"UP"}
+#    └ OpenAPI / Swagger UI at http://localhost:8080/docs
+```
+
+That is a fully wired service — DI container, web layer, actuator, observability, security headers, graceful shutdown — from **one install and one command**. See [Installation](#installation) for uv / pip / Docker options and [CLI & Project Scaffolding](#cli--project-scaffolding) for every archetype.
+
+---
+
 ## Philosophy
 
 Four principles shape every design decision in PyFly. Together, they answer a single question: *how do you build applications that are easy to start, easy to change, and ready for production from the first commit?*
@@ -133,7 +191,13 @@ The first time you run `pyfly run`, your application already has structured logg
 
 ---
 
-## How It Works
+## Architecture
+
+PyFly is **cohesive, layered, and hexagonal**: five layers on an async core, every external system reached through a Protocol port, and the right adapters wired automatically at startup.
+
+<p align="center">
+  <img src="assets/architecture.svg" alt="PyFly architecture at a glance: one front door (pyfly + extras, @pyfly_application) over five layers — Cross-Cutting, Integration, Infrastructure, Application, Foundation — on an async core (asyncio, uvloop, ASGI)." width="100%" />
+</p>
 
 ### Dependency Injection
 
@@ -169,57 +233,23 @@ All stereotypes default to **singleton scope** (one instance per application). Y
 
 **Advanced capabilities:** `Optional[T]` resolves to `None` when no bean is registered. `list[T]` collects all implementations of a type. `Qualifier("name")` selects a specific named bean when multiple candidates exist. `@primary` marks the default when there are multiple implementations of the same port. The container detects circular dependencies at startup and reports them clearly rather than deadlocking at runtime.
 
+### Request Lifecycle
+
+Once the graph is built, a request flows through it end-to-end — filters, controller, service, port, adapter, database — with the response and any domain events on the way back, and you wrote none of the wiring:
+
+<p align="center">
+  <img src="assets/request-lifecycle.svg" alt="PyFly request lifecycle: an HTTP request flows through the web-filter chain, the @rest_controller (with validation), the @service, a repository port, the SQLAlchemy adapter, and PostgreSQL; a domain event is published and a JSON response is returned." width="100%" />
+</p>
+
 ### Hexagonal Architecture
 
 Every PyFly module that touches external systems is split into two halves: **ports** and **adapters**. Ports are abstract `Protocol` interfaces that your business logic depends on. Adapters are concrete implementations backed by real libraries. The DI container connects them at startup.
 
 This separation is not conceptual — it is enforced by package structure:
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    APPLICATION LAYER                     │
-│                                                          │
-│  Your services, controllers, and domain logic.           │
-│  They depend ONLY on ports.                              │
-│                                                          │
-│    @service                                              │
-│    class OrderService:                                   │
-│        repo: RepositoryPort[Order, int]                  │
-│        events: EventPublisher                            │
-│        cache: CacheAdapter                               │
-│                                                          │
-└────────────────────────────┬─────────────────────────────┘
-                             │ depends on
-┌────────────────────────────┴─────────────────────────────┐
-│                 PORTS  (Python Protocols)                │
-│                                                          │
-│  pyfly.data           RepositoryPort[T, ID]              │
-│  pyfly.messaging      MessageBrokerPort                  │
-│  pyfly.cache          CacheAdapter                       │
-│  pyfly.eda            EventPublisher                     │
-│  pyfly.client         HttpClientPort                     │
-│  pyfly.scheduling     TaskExecutorPort                   │
-│  pyfly.shell          ShellRunnerPort                    │
-│  pyfly.web            WebServerPort                      │
-│                                                          │
-└────────────────────────────┬─────────────────────────────┘
-                             │ implements
-┌────────────────────────────┴─────────────────────────────┐
-│            ADAPTERS  (Concrete Implementations)          │
-│                                                          │
-│  pyfly.data.relational.sqlalchemy                        │
-│  pyfly.data.document.mongodb                             │
-│  pyfly.messaging.adapters.kafka                          │
-│  pyfly.messaging.adapters.rabbitmq                       │
-│  pyfly.cache.adapters.redis                              │
-│  pyfly.eda.adapters.memory                               │
-│  pyfly.client.adapters.httpx_adapter                     │
-│  pyfly.scheduling.adapters.asyncio_executor              │
-│  pyfly.shell.adapters.click_adapter                      │
-│  pyfly.web.adapters.starlette                            │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/hexagonal.svg" alt="PyFly hexagonal architecture: an application core that depends only on Protocol ports (RepositoryPort, MessageBrokerPort, CacheAdapter, EventPublisher, HttpClientPort, WebServerPort), with swappable adapters — SQLAlchemy/MongoDB, Kafka/RabbitMQ, Redis, httpx, Starlette/FastAPI — implementing each port." width="100%" />
+</p>
 
 The practical result — swap any adapter without changing a single line of business logic:
 
@@ -246,6 +276,10 @@ class OrderService:
 ### Auto-Configuration
 
 PyFly detects installed libraries at startup and wires the right adapters automatically — no manual bean registration needed.
+
+<p align="center">
+  <img src="assets/auto-configuration.svg" alt="PyFly auto-configuration flow: entry-point discovery finds each @auto_configuration, conditional guards (@conditional_on_class, @conditional_on_missing_bean) decide, and the result is to bind an adapter (e.g. RedisCacheAdapter), fall back (InMemoryCache), or skip when your own bean already wins." width="100%" />
+</p>
 
 This works through two complementary mechanisms:
 
@@ -311,6 +345,10 @@ my-addon = "my_package.auto_configuration:MyAutoConfiguration"
 PyFly is more than a web framework — it ships **production-grade implementations of the distributed patterns** that power real microservices: distributed transactions, durable workflows, event sourcing, identity, content management, multi-channel notifications, inbound/outbound webhooks, business rules, and more. Each one is a first-class module with a port-and-adapter design, CLI scaffolding, REST controllers (where applicable), metrics, tracing, and persistence.
 
 The sections below show one representative example per pattern. The full guides live under [`docs/modules/`](docs/modules/README.md).
+
+<p align="center">
+  <img src="assets/distributed-patterns.svg" alt="PyFly distributed transaction patterns: a saga DAG (reserve → charge → ship) with reverse-order compensation, alongside summary cards for Saga (compensation-based), Workflow (durable, signal-driven), and TCC (try/confirm/cancel)." width="100%" />
+</p>
 
 ### Saga — Distributed Transaction with Compensation
 
@@ -1145,47 +1183,30 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 ## Changelog
 
-See **[CHANGELOG.md](CHANGELOG.md)** for detailed release notes.
+The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
-**Current:** `v26.05.04` (2026-05-08) — `pyfly.security` import-chain fix:
+- **`v26.06.113`** (2026-06-17) — **server-layer observability**: per-server metrics (active connections, in-flight requests, workers, uptime) across Uvicorn / Granian / Hypercorn, correct multi-worker Prometheus aggregation, and a live admin **Observability** dashboard.
+- **`v26.06.112`** (2026-06-16) — *PyFly by Example* figures rebuilt in one polished, vector visual language (English + Spanish editions).
+- **`v26.05.01`** (2026-05-07) — **full Java-framework parity**: the Saga + Workflow + TCC transactional engine, nine new modules (event sourcing, callbacks, webhooks, notifications, IDP, ECM, plugins, rule engine, config server), 12 third-party adapters, and the move to CalVer.
 
-- **Bug fix** — `pyfly.security/__init__.py` no longer eagerly imports a starlette-specific `SecurityMiddleware` that transitively pulls in `pyjwt`. Importing `pyfly` (and instantiating `PyFlyApplication`) now works without `[security]` extras installed. Optional symbols (`SecurityMiddleware`, `JWTService`, `BcryptPasswordEncoder`) only export when their underlying packages (`starlette`, `pyjwt`, `bcrypt`) are present. Regression test pinned in `tests/security/test_optional_imports.py`.
-- Verified: bare wheel install (`pip install pyfly`) now exposes `pyfly.domain` immediately; the `[web,cqrs,transactional,eventsourcing]` extras unblock the full application bootstrap path.
-
-**Previous:** `v26.05.03` (2026-05-08) — Functional starters + Java/.NET parity:
-
-- **Starters now actually do something** — `@enable_*_stack` decorators no longer just set a marker attribute. They now inject their property defaults between framework defaults and the user's `pyfly.yaml`, so the bundle activates the modules it promises (`pyfly.cqrs.enabled`, `pyfly.transactional.enabled`, etc.) while explicit user values still win.
-- **`@enable_web_stack` (new)** — dedicated web-tier starter for HTTP/REST APIs that don't need EDA, CQRS, or cache. Activates web framework adapter (Starlette/FastAPI), ASGI server, validation, actuator, observability, and resilience filters.
-- **Imperative API for parity with .NET** — every starter now ships a `register_*_stack(app)` function (`register_core_stack`, `register_web_stack`, `register_application_stack`, `register_data_stack`, `register_domain_stack`) — the Pythonic counterpart to .NET's `services.AddFireflyXxx(...)` extension methods. Imperative registration is authoritative (last-call-wins).
-- **One-import-line ergonomics** — every starter re-exports the most commonly used decorators and types of its tier. `from pyfly.starters.web import rest_controller, post_mapping, Body, Valid, ...`; `from pyfly.starters.domain import AggregateRoot, BusinessRuleViolation, Command, CommandHandler, command_handler, ...`.
-- **Layered docs** — new [`docs/modules/starters.md`](docs/modules/starters.md) explains the property-layering model (framework defaults < starter defaults < user yaml < profile overlays < env vars) and shows the cross-language correspondence table.
-
-**Previous:** `v26.05.02` (2026-05-08) — DDD primitives + OrderService sample + async-saga fix:
-
-- **`pyfly.domain`** — pure-Python DDD building blocks: `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification` (with `&` / `|` / `~` combinators), `DomainRepository` protocol, `DomainException` / `BusinessRuleViolation` / `AggregateNotFound`. Mirrors `fireflyframework-starter-domain` (Java) and `FireflyFramework.Starter.Domain` (.NET).
-- **OrderService sample** — `samples/order_service/` is a complete DDD-flavoured microservice with the same layered split (interfaces / models / core / web / sdk) used by the firefly-oss Java services and the .NET OrdersService sample. Includes a real `Order` aggregate, CQRS handlers, and a `ConfirmOrderSaga` that walks the order through `PLACED → INVENTORY_RESERVED → PAID → SHIPPED` with full compensation. 13/13 tests pass end-to-end.
-- **Async-saga fix** — `@saga_step` / `@try_method` / `@confirm_method` / `@cancel_method` no longer wrap the function with a sync adapter that masked `inspect.iscoroutinefunction`. `async def` saga and TCC steps are now correctly awaited by the engine. Regression test pinned in `tests/transactional/saga/test_async_steps.py`.
-
-**Previous:** `v26.05.01` (2026-05-07) — Full Java framework parity:
-
-- **Transactional engine rewrite** — `pyfly.transactional` now ships Saga + Workflow + TCC patterns on a shared core (DAG topology, retries with jitter, backpressure, idempotency, DLQ, recovery, REST controllers, health indicators)
-- **Nine new modules** — `eventsourcing`, `callbacks`, `webhooks`, `notifications`, `idp`, `ecm`, `plugins`, `rule_engine`, `config_server`
-- **12 new third-party adapters** — Keycloak / AWS Cognito / Azure AD (IDP); AWS S3 / Azure Blob (ECM storage); DocuSign / Adobe Sign / Logalty (e-signature); SendGrid / Resend / Twilio / Firebase (notifications)
-- **Four new client protocols** — SOAP, gRPC, GraphQL, WebSocket (joining the existing HTTP / OpenAPI generators)
-- **16 domain validators** — including IBAN, BIC, ISO country/currency codes, phone numbers, dates, national IDs, sort codes, interest rates
-- **CalVer migration** — `YY.MM.PATCH` aligning with all Firefly Framework siblings (Java, .NET, Go)
+See **[CHANGELOG.md](CHANGELOG.md)** for every release and the complete notes.
 
 ---
 
 ## Firefly Framework Ecosystem
 
-PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ecosystem:
+PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ecosystem — one programming model across every runtime:
+
+<p align="center">
+  <img src="assets/ecosystem.svg" alt="The Firefly Framework family: Java/Spring Boot, .NET, PyFly (Python, highlighted), Rust, Go CLI, Angular frontend, and GenAI — all sharing one programming model." width="100%" />
+</p>
 
 | Platform | Repository | Status |
 |----------|-----------|--------|
 | **Java / Spring Boot** | [`fireflyframework-*`](https://github.com/fireflyframework) (40+ modules) | Production |
 | **.NET 9** | [`fireflyframework-dotnet`](https://github.com/fireflyframework/fireflyframework-dotnet) | Beta (CalVer 26.05+) |
 | **Python** | [`fireflyframework-pyfly`](https://github.com/fireflyframework/fireflyframework-pyfly) | Beta (CalVer 26.05+) |
+| **Rust** | [`fireflyframework-rust`](https://github.com/fireflyframework/fireflyframework-rust) | Active Development |
 | **Frontend (Angular)** | [`flyfront`](https://github.com/fireflyframework/flyfront) | Active Development |
 | **GenAI** | [`fireflyframework-genai`](https://github.com/fireflyframework/fireflyframework-genai) | Active Development |
 | **CLI (Go)** | [`fireflyframework-cli`](https://github.com/fireflyframework/fireflyframework-cli) | Active Development |
@@ -1200,6 +1221,21 @@ PyFly is part of the [Firefly Framework](https://github.com/fireflyframework) ec
 | uv | >= 0.5 recommended (pip also supported) |
 | Git | For cloning the repository |
 | OS | macOS, Linux (Windows support planned) |
+
+---
+
+## Contributing
+
+Contributions are welcome. PyFly is type-checked with **mypy (strict)**, formatted and linted with **Ruff**, and tested with **pytest** — the same gates CI enforces:
+
+```bash
+uv sync --all-extras --group dev
+uv run ruff format . && uv run ruff check .
+uv run mypy src
+uv run pytest
+```
+
+Branch from `main`, keep changes focused, add tests for new behaviour, and open a pull request. By contributing you agree your work is licensed under Apache-2.0. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide.
 
 ---
 
