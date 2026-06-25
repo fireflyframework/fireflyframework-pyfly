@@ -27,6 +27,10 @@ docs/plans/
 # Superpowers brainstorming visual companion scratch (local only)
 .superpowers/
 
+# GitHub Pages site build output (assembled by scripts/build_site.py)
+/_site/
+/site/
+
 # The book's build sources are real source, not the Python build/ artifact dir
 !book/build/
 !book/build/**

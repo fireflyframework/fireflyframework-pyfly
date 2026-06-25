@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="PyFly">
+  <defs>
+    <radialGradient id="ffmark" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#f2ffd0"/>
+      <stop offset="0.4" stop-color="#dff58a"/>
+      <stop offset="0.7" stop-color="#9bd24a"/>
+      <stop offset="1" stop-color="#4cbb2f" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g fill="none" stroke="#7ed321" stroke-linecap="round">
+    <path d="M13 51 C26 45 34 37 40 22" stroke-width="2.4" opacity="0.45"/>
+    <path d="M51 50 C41 46 35 40 40 22" stroke-width="2" opacity="0.3"/>
+  </g>
+  <circle cx="42" cy="21" r="15" fill="url(#ffmark)"/>
+  <circle cx="42" cy="21" r="4.6" fill="#f7ffe0"/>
+</svg>

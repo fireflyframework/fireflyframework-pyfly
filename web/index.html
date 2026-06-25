@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PyFly — Spring Boot's cohesion, native to async Python</title>
+  <meta name="description" content="PyFly is the official Python implementation of the Firefly Framework — a cohesive, async-native, type-safe framework for production-grade microservices. Dependency injection, CQRS, sagas, event sourcing, and more, with production-ready defaults from day one." />
+  <meta name="theme-color" content="#07110b" />
+  <link rel="icon" href="assets/pyfly-logo.png" />
+
+  <!-- Open Graph / Twitter -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="PyFly — Spring Boot's cohesion, native to async Python" />
+  <meta property="og:description" content="The official Python implementation of the Firefly Framework. Dependency injection, CQRS, sagas, event sourcing — cohesive, async-native, production-ready from day one." />
+  <meta property="og:image" content="https://fireflyframework.github.io/fireflyframework-pyfly/assets/banner.svg" />
+  <meta property="og:url" content="https://fireflyframework.github.io/fireflyframework-pyfly/" />
+  <meta name="twitter:card" content="summary_large_image" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Maven+Pro:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- ============================== NAV ============================== -->
+  <header class="nav" id="nav">
+    <div class="nav__inner">
+      <a class="brand" href="#home" aria-label="PyFly home">
+        <span class="brand__spark" aria-hidden="true"></span>
+        <span class="brand__word">py<span class="brand__word-cap">Fly</span></span>
+      </a>
+      <nav class="nav__links" aria-label="Primary">
+        <a href="#why">Why</a>
+        <a href="#code">Code</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#patterns">Patterns</a>
+        <a href="#modules">Modules</a>
+        <a href="docs/">Docs</a>
+      </nav>
+      <div class="nav__actions">
+        <a class="ghlink" href="https://github.com/fireflyframework/fireflyframework-pyfly" target="_blank" rel="noopener" aria-label="GitHub repository">
+          <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+        <a class="btn btn--ghost" href="docs/getting-started/">Get Started</a>
+        <button class="nav__burger" aria-label="Toggle menu" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- ============================== HERO ============================== -->
+    <section class="hero" id="home">
+      <div class="hero__sky" aria-hidden="true">
+        <div class="hero__ambient"></div>
+        <div class="fireflies" id="fireflies"></div>
+      </div>
+      <div class="hero__content">
+        <a class="pill" href="https://github.com/fireflyframework" target="_blank" rel="noopener">
+          <span class="pill__dot"></span> The official Python implementation of the Firefly Framework
+        </a>
+        <h1 class="hero__title">
+          <span class="wordmark">py<span class="wordmark__cap">Fly</span></span>
+        </h1>
+        <p class="hero__tagline">Spring Boot's cohesion, native to <span class="accent">async Python</span>.</p>
+        <p class="hero__sub">
+          Build production-grade microservices with the patterns you trust — dependency injection,
+          CQRS, event-driven architecture, sagas, event sourcing — all integrated, all consistent,
+          with production-ready defaults from the first commit.
+        </p>
+
+        <div class="hero__cta">
+          <a class="btn btn--primary" href="docs/getting-started/">Get Started →</a>
+          <a class="btn btn--ghost" href="docs/">Read the Docs</a>
+          <a class="btn btn--ghost" href="https://github.com/fireflyframework/fireflyframework-pyfly" target="_blank" rel="noopener">★ Star on GitHub</a>
+        </div>
+
+        <div class="install" data-copy=":: install">
+          <code class="install__code"><span class="install__prompt">$</span> curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash</code>
+          <button class="install__copy" data-copy-text="curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash" aria-label="Copy install command">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 2a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V2zm2-1a1 1 0 00-1 1v8a1 1 0 001 1h6a1 1 0 001-1V2a1 1 0 00-1-1H6zM2 5a1 1 0 00-1 1v8a1 1 0 001 1h6a1 1 0 001-1v-1h1v1a2 2 0 01-2 2H2a2 2 0 01-2-2V6a2 2 0 012-2h1v1H2z"/></svg>
+            <span class="install__copy-label">Copy</span>
+          </button>
+        </div>
+
+        <div class="hero__badges">
+          <span class="badge">Python 3.12+</span>
+          <span class="badge">Apache 2.0</span>
+          <span class="badge">mypy strict</span>
+          <span class="badge">async-first</span>
+          <span class="badge badge--ver">v26.06.113</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== STATS ============================== -->
+    <section class="stats" aria-label="PyFly at a glance">
+      <div class="wrap stats__inner">
+        <div class="stat"><span class="stat__num">39</span><span class="stat__label">Modules</span></div>
+        <div class="stat"><span class="stat__num">5</span><span class="stat__label">Layers</span></div>
+        <div class="stat"><span class="stat__num">18</span><span class="stat__label">Book Chapters</span></div>
+        <div class="stat"><span class="stat__num">Apache&nbsp;2.0</span><span class="stat__label">Open Source</span></div>
+      </div>
+    </section>
+
+    <!-- ============================== WHY ============================== -->
+    <section class="section" id="why">
+      <div class="wrap">
+        <p class="eyebrow">Why PyFly</p>
+        <h2 class="section__title">Python gives you infinite choice.<br/>What it doesn't give you is <span class="accent">cohesion</span>.</h2>
+        <p class="lede">
+          Every new service starts with two weeks of decisions — web framework, ORM, message broker,
+          DI wiring, project layout. Six months later a second team makes entirely different choices.
+          Now you have two codebases with nothing in common. <strong>PyFly makes these decisions for you</strong> —
+          one cohesive, full-stack programming model where every module is designed to work together.
+        </p>
+        <div class="why-grid">
+          <div class="why-card">
+            <div class="why-card__num">01</div>
+            <h3>One cohesive stack</h3>
+            <p>DI, HTTP, data, messaging, caching, security, observability — integrated, consistent, and wired automatically. No bespoke glue.</p>
+          </div>
+          <div class="why-card">
+            <div class="why-card__num">02</div>
+            <h3>Not a port — native</h3>
+            <p>The same enterprise model Firefly proved on Spring Boot (40+ Java modules), reimagined for <code>async/await</code>, type hints, and Protocols.</p>
+          </div>
+          <div class="why-card">
+            <div class="why-card__num">03</div>
+            <h3>Familiar to Spring devs</h3>
+            <p>Stereotypes, auto-configuration, Spring-Data repositories, actuator. A Spring-parity callout at every turn.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== CODE ============================== -->
+    <section class="section section--tint" id="code">
+      <div class="wrap">
+        <p class="eyebrow">No boilerplate. No manual wiring.</p>
+        <h2 class="section__title">Write the logic. PyFly wires the rest.</h2>
+        <p class="lede">The DI container resolves dependencies from type hints, validates request bodies, and publishes domain events — all out of the box. Same model, whether you're building a controller, a CQRS bus, or a distributed saga.</p>
+
+        <div class="code-panel">
+          <div class="code-top">
+            <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <div class="code-tabs" role="tablist" aria-label="Code examples">
+            <button class="code-tab is-active" role="tab" aria-selected="true" data-tab="di">Dependency Injection</button>
+            <button class="code-tab" role="tab" aria-selected="false" data-tab="cqrs">CQRS</button>
+            <button class="code-tab" role="tab" aria-selected="false" data-tab="saga">Saga</button>
+            </div>
+          </div>
+
+          <div class="code-body is-active" data-pane="di"><pre><code><span class="c-kw">from</span> pyfly.container <span class="c-kw">import</span> rest_controller, service
+<span class="c-kw">from</span> pyfly.web <span class="c-kw">import</span> request_mapping, post_mapping, Body, Valid
+
+<span class="c-dec">@service</span>
+<span class="c-kw">class</span> <span class="c-cls">OrderService</span>:
+    <span class="c-kw">def</span> <span class="c-fn">__init__</span>(<span class="c-self">self</span>, repo: <span class="c-cls">OrderRepository</span>, events: <span class="c-cls">EventPublisher</span>) -> <span class="c-kw">None</span>:
+        <span class="c-self">self</span>._repo = repo
+        <span class="c-self">self</span>._events = events
+
+    <span class="c-kw">async def</span> <span class="c-fn">place_order</span>(<span class="c-self">self</span>, order: <span class="c-cls">Order</span>) -> <span class="c-cls">Order</span>:
+        saved = <span class="c-kw">await</span> <span class="c-self">self</span>._repo.save(order)
+        <span class="c-kw">await</span> <span class="c-self">self</span>._events.publish(<span class="c-cls">OrderPlaced</span>(order_id=saved.id))
+        <span class="c-kw">return</span> saved
+
+<span class="c-dec">@rest_controller</span>
+<span class="c-dec">@request_mapping</span>(<span class="c-str">"/orders"</span>)
+<span class="c-kw">class</span> <span class="c-cls">OrderController</span>:
+    <span class="c-kw">def</span> <span class="c-fn">__init__</span>(<span class="c-self">self</span>, service: <span class="c-cls">OrderService</span>) -> <span class="c-kw">None</span>:
+        <span class="c-self">self</span>._service = service
+
+    <span class="c-dec">@post_mapping</span>(<span class="c-str">""</span>, status_code=<span class="c-num">201</span>)
+    <span class="c-kw">async def</span> <span class="c-fn">create</span>(<span class="c-self">self</span>, order: Valid[Body[<span class="c-cls">Order</span>]]) -> <span class="c-cls">Order</span>:
+        <span class="c-kw">return await</span> <span class="c-self">self</span>._service.place_order(order)</code></pre></div>
+
+          <div class="code-body" data-pane="cqrs"><pre><code><span class="c-kw">from</span> pyfly.cqrs <span class="c-kw">import</span> command, query, CommandHandler, QueryHandler
+
+<span class="c-dec">@command</span>(<span class="c-cls">CreateUser</span>)
+<span class="c-kw">class</span> <span class="c-cls">CreateUserHandler</span>(CommandHandler[<span class="c-cls">CreateUser</span>, <span class="c-cls">int</span>]):
+    <span class="c-kw">def</span> <span class="c-fn">__init__</span>(<span class="c-self">self</span>, repo: <span class="c-cls">UserRepository</span>) -> <span class="c-kw">None</span>:
+        <span class="c-self">self</span>._repo = repo
+
+    <span class="c-kw">async def</span> <span class="c-fn">handle</span>(<span class="c-self">self</span>, cmd: <span class="c-cls">CreateUser</span>) -> <span class="c-cls">int</span>:
+        <span class="c-kw">return</span> (<span class="c-kw">await</span> <span class="c-self">self</span>._repo.save(<span class="c-cls">User</span>(name=cmd.name, email=cmd.email))).id
+
+<span class="c-dec">@query</span>(<span class="c-cls">FindUserById</span>, cache_ttl=<span class="c-num">60</span>)  <span class="c-com"># caching composes declaratively</span>
+<span class="c-kw">class</span> <span class="c-cls">FindUserByIdHandler</span>(QueryHandler[<span class="c-cls">FindUserById</span>, <span class="c-cls">User</span>]):
+    <span class="c-kw">def</span> <span class="c-fn">__init__</span>(<span class="c-self">self</span>, repo: <span class="c-cls">UserRepository</span>) -> <span class="c-kw">None</span>:
+        <span class="c-self">self</span>._repo = repo
+
+    <span class="c-kw">async def</span> <span class="c-fn">handle</span>(<span class="c-self">self</span>, q: <span class="c-cls">FindUserById</span>) -> <span class="c-cls">User</span>:
+        <span class="c-kw">return await</span> <span class="c-self">self</span>._repo.find_by_id(q.user_id)
+
+<span class="c-com"># Dispatch — buses are auto-wired by the CqrsAutoConfiguration entry point</span>
+user_id = <span class="c-kw">await</span> commands.dispatch(<span class="c-cls">CreateUser</span>(name=<span class="c-str">"Ada"</span>, email=<span class="c-str">"ada@example.com"</span>))
+user = <span class="c-kw">await</span> queries.dispatch(<span class="c-cls">FindUserById</span>(user_id=user_id))</code></pre></div>
+
+          <div class="code-body" data-pane="saga"><pre><code><span class="c-kw">from</span> pyfly.transactional.saga <span class="c-kw">import</span> saga, saga_step
+<span class="c-kw">from</span> pyfly.transactional.saga.core.context <span class="c-kw">import</span> SagaContext
+
+<span class="c-dec">@saga</span>(name=<span class="c-str">"place-order"</span>, timeout_ms=<span class="c-num">30_000</span>)
+<span class="c-kw">class</span> <span class="c-cls">PlaceOrderSaga</span>:
+    <span class="c-com"># `compensate=` names a method to invoke if a later step fails.</span>
+    <span class="c-dec">@saga_step</span>(id=<span class="c-str">"reserve-inventory"</span>, retry=<span class="c-num">3</span>, backoff_ms=<span class="c-num">500</span>, compensate=<span class="c-str">"release_inventory"</span>)
+    <span class="c-kw">async def</span> <span class="c-fn">reserve</span>(<span class="c-self">self</span>, ctx: <span class="c-cls">SagaContext</span>) -> <span class="c-cls">str</span>:
+        <span class="c-kw">return await</span> <span class="c-self">self</span>._inventory.reserve(ctx.input[<span class="c-str">"order_id"</span>])
+
+    <span class="c-kw">async def</span> <span class="c-fn">release_inventory</span>(<span class="c-self">self</span>, ctx: <span class="c-cls">SagaContext</span>) -> <span class="c-kw">None</span>:
+        <span class="c-kw">await</span> <span class="c-self">self</span>._inventory.release(ctx.input[<span class="c-str">"order_id"</span>])
+
+    <span class="c-dec">@saga_step</span>(id=<span class="c-str">"charge-payment"</span>, depends_on=[<span class="c-str">"reserve-inventory"</span>], compensate=<span class="c-str">"refund_payment"</span>)
+    <span class="c-kw">async def</span> <span class="c-fn">charge</span>(<span class="c-self">self</span>, ctx: <span class="c-cls">SagaContext</span>) -> <span class="c-cls">str</span>:
+        <span class="c-kw">return await</span> <span class="c-self">self</span>._payments.charge(ctx.input[<span class="c-str">"order_id"</span>], ctx.input[<span class="c-str">"amount"</span>])
+
+    <span class="c-dec">@saga_step</span>(id=<span class="c-str">"ship-order"</span>, depends_on=[<span class="c-str">"charge-payment"</span>])
+    <span class="c-kw">async def</span> <span class="c-fn">ship_order</span>(<span class="c-self">self</span>, ctx: <span class="c-cls">SagaContext</span>) -> <span class="c-kw">None</span>:
+        <span class="c-kw">await</span> <span class="c-self">self</span>._ship.dispatch(ctx.input[<span class="c-str">"order_id"</span>])</code></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== PHILOSOPHY ============================== -->
+    <section class="section" id="philosophy">
+      <div class="wrap">
+        <p class="eyebrow">Philosophy</p>
+        <h2 class="section__title">Easy to start. Easy to change. Ready for production.</h2>
+        <div class="phil-grid">
+          <article class="phil-card">
+            <h3>Convention over Configuration</h3>
+            <p>Production-ready defaults for every module. A complete web service is a few lines of YAML — override only what matters.</p>
+          </article>
+          <article class="phil-card">
+            <h3>Your Code, Not Ours</h3>
+            <p>Business logic never imports <code>sqlalchemy</code>, <code>redis</code>, or <code>aiokafka</code>. Hexagonal ports &amp; adapters keep infrastructure swappable.</p>
+          </article>
+          <article class="phil-card">
+            <h3>Async-Native, Type-Safe</h3>
+            <p>Built for <code>asyncio</code> from the ground up. Every public surface is fully typed and checked by mypy in strict mode.</p>
+          </article>
+          <article class="phil-card">
+            <h3>Production-Ready from Day One</h3>
+            <p>Structured logging, correlation IDs, PII redaction, health checks, Prometheus metrics, OWASP headers, graceful shutdown — the baseline.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== ARCHITECTURE ============================== -->
+    <section class="section section--tint" id="architecture">
+      <div class="wrap">
+        <p class="eyebrow">Architecture</p>
+        <h2 class="section__title">Cohesive, layered, and hexagonal.</h2>
+        <p class="lede">Five layers on an async core. Every external system reached through a Protocol port. The right adapters wired automatically at startup — so you can swap PostgreSQL for MongoDB, or Kafka for RabbitMQ, without touching a line of business logic.</p>
+        <figure class="figure">
+          <img src="assets/architecture.svg" alt="PyFly architecture at a glance: one front door over five layers — Cross-Cutting, Integration, Infrastructure, Application, Foundation — on an async core (asyncio, uvloop, ASGI)." loading="lazy" />
+        </figure>
+        <div class="figure-pair">
+          <figure class="figure">
+            <img src="assets/hexagonal.svg" alt="PyFly hexagonal architecture: an application core depending only on Protocol ports, with swappable adapters implementing each port." loading="lazy" />
+            <figcaption>Ports &amp; adapters — depend on Protocols, swap implementations freely.</figcaption>
+          </figure>
+          <figure class="figure">
+            <img src="assets/auto-configuration.svg" alt="PyFly auto-configuration: entry-point discovery, conditional guards, then bind / fall back / skip." loading="lazy" />
+            <figcaption>Auto-configuration — detect installed libraries, bind the right adapters.</figcaption>
+          </figure>
+        </div>
+        <p class="figure-note"><a href="docs/architecture/">Read the architecture guide →</a></p>
+      </div>
+    </section>
+
+    <!-- ============================== PATTERNS ============================== -->
+    <section class="section" id="patterns">
+      <div class="wrap">
+        <p class="eyebrow">Featured Patterns</p>
+        <h2 class="section__title">More than a web framework.</h2>
+        <p class="lede">PyFly ships production-grade implementations of the distributed patterns that power real microservices — each a first-class module with port-and-adapter design, CLI scaffolding, metrics, tracing, and persistence.</p>
+        <figure class="figure">
+          <img src="assets/distributed-patterns.svg" alt="PyFly distributed transaction patterns: a saga DAG with reverse-order compensation, alongside Saga, Workflow, and TCC summary cards." loading="lazy" />
+        </figure>
+        <div class="pat-grid">
+          <div class="pat-card">
+            <h3>Saga</h3>
+            <p>Distributed transactions with automatic compensation. Parallel DAG execution, per-step retries, idempotency keys, DLQ + recovery.</p>
+            <a href="docs/modules/transactional/">transactional →</a>
+          </div>
+          <div class="pat-card">
+            <h3>Workflow</h3>
+            <p>Durable, signal-driven orchestration. Wait for signals or timers, spawn child workflows, query while running. Temporal-style, native.</p>
+            <a href="docs/modules/transactional/">transactional →</a>
+          </div>
+          <div class="pat-card">
+            <h3>TCC</h3>
+            <p>Try / Confirm / Cancel — strong-consistency three-phase transactions for financial workloads where compensation alone isn't enough.</p>
+            <a href="docs/modules/transactional/">transactional →</a>
+          </div>
+          <div class="pat-card">
+            <h3>Event Sourcing</h3>
+            <p>Append-only event log, aggregates that rebuild from history, snapshots, transactional outbox, projections, upcasting.</p>
+            <a href="docs/modules/eventsourcing/">eventsourcing →</a>
+          </div>
+          <div class="pat-card">
+            <h3>CQRS</h3>
+            <p>Command/Query buses with validation, authorization, and caching composing declaratively as cross-cutting concerns.</p>
+            <a href="docs/modules/cqrs/">cqrs →</a>
+          </div>
+          <div class="pat-card">
+            <h3>Rule Engine</h3>
+            <p>Externalize business rules in a YAML DSL with AST evaluation, audit trails, batch evaluation, and hot reload.</p>
+            <a href="docs/modules/rule-engine/">rule-engine →</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== MODULES ============================== -->
+    <section class="section section--tint" id="modules">
+      <div class="wrap">
+        <p class="eyebrow">Modules</p>
+        <h2 class="section__title">39 modules across 5 layers.</h2>
+        <p class="lede">Everything from HTTP routing and database access to distributed transactions, identity, content management, and DDD building blocks.</p>
+        <div class="layers">
+          <div class="layer">
+            <div class="layer__label">Foundation</div>
+            <div class="chips">
+              <span class="chip">core</span><span class="chip">kernel</span><span class="chip">container</span><span class="chip">context</span><span class="chip">config</span><span class="chip">logging</span>
+            </div>
+          </div>
+          <div class="layer">
+            <div class="layer__label">Application</div>
+            <div class="chips">
+              <span class="chip">web</span><span class="chip">server</span><span class="chip">data</span><span class="chip">data-relational</span><span class="chip">data-document</span><span class="chip">cqrs</span><span class="chip">validation</span>
+            </div>
+          </div>
+          <div class="layer">
+            <div class="layer__label">Infrastructure</div>
+            <div class="chips">
+              <span class="chip">security</span><span class="chip">messaging</span><span class="chip">eda</span><span class="chip">cache</span><span class="chip">client</span><span class="chip">scheduling</span><span class="chip">resilience</span><span class="chip">shell</span><span class="chip">transactional</span><span class="chip">eventsourcing</span><span class="chip">domain</span><span class="chip">plugins</span><span class="chip">rule-engine</span><span class="chip">config-server</span>
+            </div>
+          </div>
+          <div class="layer">
+            <div class="layer__label">Integration</div>
+            <div class="chips">
+              <span class="chip">idp</span><span class="chip">ecm</span><span class="chip">notifications</span><span class="chip">callbacks</span><span class="chip">webhooks</span><span class="chip">starters</span>
+            </div>
+          </div>
+          <div class="layer">
+            <div class="layer__label">Cross-Cutting</div>
+            <div class="chips">
+              <span class="chip">aop</span><span class="chip">observability</span><span class="chip">actuator</span><span class="chip">admin</span><span class="chip">testing</span><span class="chip">cli</span>
+            </div>
+          </div>
+        </div>
+        <p class="figure-note"><a href="docs/modules/">Browse all module guides →</a></p>
+      </div>
+    </section>
+
+    <!-- ============================== QUICKSTART ============================== -->
+    <section class="section" id="quickstart">
+      <div class="wrap">
+        <p class="eyebrow">Quickstart</p>
+        <h2 class="section__title">Zero to a running service in under a minute.</h2>
+        <ol class="steps">
+          <li class="step">
+            <div class="step__num">1</div>
+            <div class="step__body">
+              <h3>Install the CLI + framework</h3>
+              <div class="mini-code"><code>curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash</code><button class="mini-copy" data-copy-text="curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash" aria-label="Copy">⧉</button></div>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step__num">2</div>
+            <div class="step__body">
+              <h3>Scaffold a REST API with batteries included</h3>
+              <div class="mini-code"><code>pyfly new my-service --archetype web-api &amp;&amp; cd my-service</code><button class="mini-copy" data-copy-text="pyfly new my-service --archetype web-api && cd my-service" aria-label="Copy">⧉</button></div>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step__num">3</div>
+            <div class="step__body">
+              <h3>Run it — logging, health, metrics &amp; OpenAPI all on by default</h3>
+              <div class="mini-code"><code>pyfly run --reload</code><button class="mini-copy" data-copy-text="pyfly run --reload" aria-label="Copy">⧉</button></div>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step__num">4</div>
+            <div class="step__body">
+              <h3>It's live</h3>
+              <div class="mini-code"><code>curl http://localhost:8080/health   <span class="c-com"># {"status":"UP"}</span></code></div>
+              <p class="step__note">OpenAPI / Swagger UI at <code>http://localhost:8080/docs</code></p>
+            </div>
+          </li>
+        </ol>
+        <div class="center"><a class="btn btn--primary" href="docs/getting-started/">Follow the full tutorial →</a></div>
+      </div>
+    </section>
+
+    <!-- ============================== BOOK ============================== -->
+    <section class="section section--book" id="book">
+      <div class="wrap book">
+        <div class="book__text">
+          <p class="eyebrow">The Book</p>
+          <h2 class="section__title">PyFly by Example</h2>
+          <p class="lede">The official, project-driven book. Across <strong>18 chapters in five parts</strong> it builds <em>Lumen</em> — a real wallet &amp; ledger microservice — from an empty folder into a secured, observable, event-driven service. Every listing is drawn from a running project. Spring developers get a parity callout at every turn.</p>
+          <div class="hero__cta">
+            <a class="btn btn--primary" href="https://github.com/fireflyframework/fireflyframework-pyfly/raw/main/book/dist/pyfly-by-example.pdf" target="_blank" rel="noopener">Download PDF</a>
+            <a class="btn btn--ghost" href="https://github.com/fireflyframework/fireflyframework-pyfly/raw/main/book/dist/pyfly-by-example.epub" target="_blank" rel="noopener">Download EPUB</a>
+            <a class="btn btn--ghost" href="https://github.com/fireflyframework/fireflyframework-pyfly/tree/main/book" target="_blank" rel="noopener">Source on GitHub</a>
+          </div>
+        </div>
+        <div class="book__art" aria-hidden="true">
+          <div class="book__cover">
+            <span class="book__cover-spark"></span>
+            <span class="book__cover-title">py<span class="wordmark__cap">Fly</span></span>
+            <span class="book__cover-sub">by Example</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== ECOSYSTEM ============================== -->
+    <section class="section" id="ecosystem">
+      <div class="wrap">
+        <p class="eyebrow">The Firefly Ecosystem</p>
+        <h2 class="section__title">One programming model across every runtime.</h2>
+        <p class="lede">PyFly is the green firefly of the Firefly Framework family — the same cohesive model on Java/Spring Boot, .NET, Rust, Go, and Angular.</p>
+        <figure class="figure">
+          <img src="assets/ecosystem.svg" alt="The Firefly Framework family: Java/Spring Boot, .NET, PyFly (Python, highlighted), Rust, Go CLI, Angular frontend, and GenAI — all sharing one programming model." loading="lazy" />
+        </figure>
+      </div>
+    </section>
+
+    <!-- ============================== FINAL CTA ============================== -->
+    <section class="cta-band">
+      <div class="cta-band__sky" aria-hidden="true"><div class="fireflies" id="fireflies2"></div></div>
+      <div class="wrap cta-band__inner">
+        <h2>Build production-grade Python apps — from the first commit.</h2>
+        <div class="hero__cta">
+          <a class="btn btn--primary" href="docs/getting-started/">Get Started →</a>
+          <a class="btn btn--ghost" href="docs/">Read the Docs</a>
+          <a class="btn btn--ghost" href="https://github.com/fireflyframework/fireflyframework-pyfly" target="_blank" rel="noopener">★ GitHub</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================== FOOTER ============================== -->
+  <footer class="footer">
+    <div class="wrap footer__inner">
+      <div class="footer__brand">
+        <span class="brand__word">py<span class="brand__word-cap">Fly</span></span>
+        <p>The official Python implementation of the Firefly Framework.</p>
+        <p class="footer__copy">Apache License 2.0 · © Firefly Software Foundation</p>
+      </div>
+      <nav class="footer__cols" aria-label="Footer">
+        <div class="footer__col">
+          <h4>Docs</h4>
+          <a href="docs/getting-started/">Getting Started</a>
+          <a href="docs/installation/">Installation</a>
+          <a href="docs/architecture/">Architecture</a>
+          <a href="docs/cli/">CLI Reference</a>
+          <a href="docs/spring-comparison/">Spring Comparison</a>
+        </div>
+        <div class="footer__col">
+          <h4>Project</h4>
+          <a href="https://github.com/fireflyframework/fireflyframework-pyfly" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-pyfly/releases" target="_blank" rel="noopener">Releases</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/ROADMAP.md" target="_blank" rel="noopener">Roadmap</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+        </div>
+        <div class="footer__col">
+          <h4>Ecosystem</h4>
+          <a href="https://github.com/fireflyframework" target="_blank" rel="noopener">Firefly Framework</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-dotnet" target="_blank" rel="noopener">.NET</a>
+          <a href="https://github.com/fireflyframework/fireflyframework-rust" target="_blank" rel="noopener">Rust</a>
+          <a href="https://github.com/fireflyframework/flyfront" target="_blank" rel="noopener">Frontend (Angular)</a>
+        </div>
+      </nav>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

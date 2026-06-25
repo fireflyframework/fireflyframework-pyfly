@@ -1,0 +1,196 @@
+# MkDocs Material configuration for the PyFly documentation site.
+# Renders the existing docs/*.md into https://fireflyframework.github.io/fireflyframework-pyfly/docs/
+# The landing page (web/) and brand assets are assembled around this build by scripts/build_site.py.
+
+site_name: PyFly
+site_description: >-
+  The official Python implementation of the Firefly Framework — Spring Boot's
+  cohesion, native to async Python. Dependency injection, CQRS, sagas, event
+  sourcing and more, with production-ready defaults from day one.
+site_author: Firefly Software Foundation
+site_url: https://fireflyframework.github.io/fireflyframework-pyfly/docs/
+
+repo_url: https://github.com/fireflyframework/fireflyframework-pyfly
+repo_name: fireflyframework-pyfly
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+# Keep internal brainstorming specs and the duplicate root index out of the public docs.
+exclude_docs: |
+  /README.md
+  superpowers/
+
+copyright: >-
+  Apache License 2.0 · © Firefly Software Foundation —
+  <a href="https://fireflyframework.github.io/fireflyframework-pyfly/">PyFly home</a>
+
+theme:
+  name: material
+  logo: assets/pyfly-mark.svg
+  favicon: assets/pyfly-mark.svg
+  custom_dir: overrides
+  font:
+    text: Roboto
+    code: Roboto Mono
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+extra_css:
+  - stylesheets/pyfly.css
+
+extra:
+  # Make the header logo/title link back to the landing page instead of the docs index.
+  homepage: https://fireflyframework.github.io/fireflyframework-pyfly/
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fireflyframework/fireflyframework-pyfly
+      name: PyFly on GitHub
+    - icon: fontawesome/brands/python
+      link: https://github.com/fireflyframework
+      name: The Firefly Framework
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Installation: installation.md
+  - Architecture: architecture.md
+  - CLI Reference: cli.md
+  - Spring Comparison: spring-comparison.md
+  - Versioning: versioning.md
+  - Modules:
+      - Overview: modules/README.md
+      - Foundation:
+          - Core: modules/core.md
+          - Dependency Injection: modules/dependency-injection.md
+          - Configuration: modules/configuration.md
+          - Logging: modules/logging.md
+          - Error Handling: modules/error-handling.md
+      - Web & API:
+          - Web Layer: modules/web.md
+          - Web Filters: modules/web-filters.md
+          - Server Layer: modules/server.md
+          - Validation: modules/validation.md
+          - Sessions: modules/session.md
+          - WebSockets: modules/websocket.md
+          - Internationalization: modules/i18n.md
+      - Data:
+          - Data Commons: modules/data.md
+          - Data Relational (SQL): modules/data-relational.md
+          - Data Document (MongoDB): modules/data-document.md
+      - CQRS & Domain:
+          - CQRS: modules/cqrs.md
+          - Domain (DDD): modules/domain.md
+      - Messaging & Eventing:
+          - Messaging: modules/messaging.md
+          - Events (EDA): modules/events.md
+          - Event Sourcing: modules/eventsourcing.md
+      - Distributed Transactions:
+          - Transactional Engine: modules/transactional.md
+      - Business Logic:
+          - Rule Engine: modules/rule-engine.md
+          - Plugins: modules/plugins.md
+      - Security & Identity:
+          - Security: modules/security.md
+          - Identity Provider (IDP): modules/idp.md
+      - Integrations:
+          - Content Management (ECM): modules/ecm.md
+          - Notifications: modules/notifications.md
+          - Callbacks (outbound): modules/callbacks.md
+          - Webhooks (inbound): modules/webhooks.md
+      - Resilience & Clients:
+          - HTTP Client: modules/client.md
+          - Resilience: modules/resilience.md
+          - Caching: modules/caching.md
+          - Scheduling: modules/scheduling.md
+          - Shell: modules/shell.md
+          - Config Server: modules/config-server.md
+      - Observability & Admin:
+          - Observability: modules/observability.md
+          - Actuator: modules/actuator.md
+          - Custom Actuator Endpoints: modules/custom-actuator-endpoints.md
+          - Admin Dashboard: modules/admin.md
+          - AOP: modules/aop.md
+      - Testing:
+          - Testing: modules/testing.md
+          - Integration Testing: modules/integration-testing.md
+      - Starters: modules/starters.md
+  - Adapters:
+      - Overview: adapters/README.md
+      - SQLAlchemy: adapters/sqlalchemy.md
+      - MongoDB: adapters/mongodb.md
+      - Starlette: adapters/starlette.md
+      - FastAPI: adapters/fastapi.md
+      - Granian: adapters/granian.md
+      - Kafka: adapters/kafka.md
+      - RabbitMQ: adapters/rabbitmq.md
+      - Redis: adapters/redis.md
+      - HTTPX: adapters/httpx.md
+      - Click: adapters/click.md

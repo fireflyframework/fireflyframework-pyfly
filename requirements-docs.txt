@@ -1,0 +1,4 @@
+# Documentation site toolchain (PyFly GitHub Pages).
+# Used by scripts/build_site.py and the GitHub Actions Pages workflow.
+#   pip install -r requirements-docs.txt
+mkdocs-material>=9.5,<10
