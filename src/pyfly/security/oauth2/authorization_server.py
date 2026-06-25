@@ -238,6 +238,7 @@ class AuthorizationServer:
         client_secret: str,
         scope: str = "",
         refresh_token: str | None = None,
+        confirmation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Issue tokens based on grant type.
 
@@ -247,6 +248,9 @@ class AuthorizationServer:
             client_secret: The client's secret
             scope: Space-separated scopes (for client_credentials)
             refresh_token: The refresh token (for refresh_token grant)
+            confirmation: Optional ``cnf`` confirmation claim to bind the access
+                token to a key (e.g. ``{"jkt": ...}`` for DPoP, ``{"x5t#S256": ...}``
+                for mTLS) — sender-constraining per RFC 9449 / RFC 8705.
 
         Returns:
             Token response dict with access_token, token_type, expires_in,
@@ -270,18 +274,20 @@ class AuthorizationServer:
                     f"Client '{client_id}' is not authorized for grant type 'client_credentials'",
                     code="UNAUTHORIZED_CLIENT",
                 )
-            return await self._handle_client_credentials(registration, scope)
+            return await self._handle_client_credentials(registration, scope, confirmation)
         elif grant_type == "refresh_token":
             if refresh_token is None:
                 raise SecurityException("Refresh token required", code="INVALID_REQUEST")
-            return await self._handle_refresh_token(registration, refresh_token)
+            return await self._handle_refresh_token(registration, refresh_token, confirmation)
         else:
             raise SecurityException(
                 f"Unsupported grant type: {grant_type}",
                 code="UNSUPPORTED_GRANT_TYPE",
             )
 
-    async def _handle_client_credentials(self, registration: ClientRegistration, scope: str) -> dict[str, Any]:
+    async def _handle_client_credentials(
+        self, registration: ClientRegistration, scope: str, confirmation: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         now = int(time.time())
         # A client may only ever obtain scopes it is registered for. Requesting an
         # unregistered scope is rejected wholesale (RFC 6749 §5.2 ``invalid_scope``)
@@ -309,6 +315,8 @@ class AuthorizationServer:
             access_payload["iss"] = self._issuer
         if self._audience is not None:
             access_payload["aud"] = self._audience
+        if confirmation:
+            access_payload["cnf"] = confirmation
 
         access_token = self._encode(access_payload)
 
@@ -323,7 +331,9 @@ class AuthorizationServer:
             "scope": scope_str,
         }
 
-    async def _handle_refresh_token(self, registration: ClientRegistration, refresh_token: str) -> dict[str, Any]:
+    async def _handle_refresh_token(
+        self, registration: ClientRegistration, refresh_token: str, confirmation: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         token_data = await self._token_store.find(refresh_token)
         if token_data is None:
             raise SecurityException("Invalid refresh token", code="INVALID_GRANT")
@@ -370,6 +380,8 @@ class AuthorizationServer:
             access_payload["iss"] = self._issuer
         if self._audience is not None:
             access_payload["aud"] = self._audience
+        if confirmation:
+            access_payload["cnf"] = confirmation
 
         access_token = self._encode(access_payload)
 

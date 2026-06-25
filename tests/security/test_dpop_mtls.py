@@ -72,9 +72,7 @@ class TestDPoPProofValidator:
         key = _ec_key()
         proof = _proof(key, htm="GET", htu="https://api.example.com/resource")
         # The request URL may carry a query string; htu compares origin+path only.
-        jkt = DPoPProofValidator().validate(
-            proof, http_method="GET", http_url="https://api.example.com/resource?a=1"
-        )
+        jkt = DPoPProofValidator().validate(proof, http_method="GET", http_url="https://api.example.com/resource?a=1")
         assert jkt
 
     def test_method_mismatch_rejected(self) -> None:
@@ -144,6 +142,113 @@ def _self_signed_cert() -> bytes:
         .sign(key, hashes.SHA256())
     )
     return cert.public_bytes(serialization.Encoding.PEM)
+
+
+class TestResourceFilterDPoPEnforcement:
+    """The resource-server filter enforces proof-of-possession for cnf-bound tokens."""
+
+    def _filter_and_request(self, jkt: str, *, dpop_header: str | None):
+        from starlette.requests import Request
+
+        from pyfly.security.context import SecurityContext
+        from pyfly.web.adapters.starlette.filters.oauth2_resource_filter import (
+            ERROR_MODE_401,
+            OAuth2ResourceServerFilter,
+        )
+
+        class _FakeValidator:
+            def validate_and_context(self, token: str) -> tuple[dict, SecurityContext]:
+                return {"sub": "u", "cnf": {"jkt": jkt}}, SecurityContext(user_id="u")
+
+        headers: list[tuple[bytes, bytes]] = [(b"authorization", b"DPoP the-access-token")]
+        if dpop_header is not None:
+            headers.append((b"dpop", dpop_header.encode("latin-1")))
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/r",
+            "headers": headers,
+            "query_string": b"",
+            "scheme": "https",
+            "server": ("api.example.com", 443),
+        }
+        flt = OAuth2ResourceServerFilter(
+            _FakeValidator(),  # type: ignore[arg-type]
+            error_mode=ERROR_MODE_401,
+            enforce_sender_constraints=True,
+        )
+        return flt, Request(scope)
+
+    @pytest.mark.asyncio
+    async def test_valid_dpop_proof_accepted(self) -> None:
+        key = _ec_key()
+        jkt = jwk_thumbprint(_public_jwk(key))
+        # ath must match the access token the filter passes ("the-access-token").
+        from pyfly.security.oauth2.dpop import access_token_hash
+
+        claims = {
+            "htm": "GET",
+            "htu": "https://api.example.com/r",
+            "iat": int(time.time()),
+            "jti": "p1",
+            "ath": access_token_hash("the-access-token"),
+        }
+        proof = pyjwt.encode(claims, key, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": _public_jwk(key)})
+        flt, request = self._filter_and_request(jkt, dpop_header=proof)
+
+        captured = {}
+
+        async def call_next(r):
+            captured["ctx"] = r.state.security_context
+            from starlette.responses import PlainTextResponse
+
+            return PlainTextResponse("ok")
+
+        resp = await flt.do_filter(request, call_next)
+        assert resp.status_code == 200
+        assert captured["ctx"].user_id == "u"
+
+    @pytest.mark.asyncio
+    async def test_missing_dpop_proof_rejected(self) -> None:
+        key = _ec_key()
+        jkt = jwk_thumbprint(_public_jwk(key))
+        flt, request = self._filter_and_request(jkt, dpop_header=None)
+
+        async def call_next(r):
+            from starlette.responses import PlainTextResponse
+
+            return PlainTextResponse("should not reach")
+
+        resp = await flt.do_filter(request, call_next)
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_wrong_key_proof_rejected(self) -> None:
+        bound_key = _ec_key()
+        jkt = jwk_thumbprint(_public_jwk(bound_key))
+        # Attacker presents a proof signed with a DIFFERENT key.
+        attacker = _ec_key()
+        from pyfly.security.oauth2.dpop import access_token_hash
+
+        claims = {
+            "htm": "GET",
+            "htu": "https://api.example.com/r",
+            "iat": int(time.time()),
+            "jti": "p2",
+            "ath": access_token_hash("the-access-token"),
+        }
+        proof = pyjwt.encode(
+            claims, attacker, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": _public_jwk(attacker)}
+        )
+        flt, request = self._filter_and_request(jkt, dpop_header=proof)
+
+        async def call_next(r):
+            from starlette.responses import PlainTextResponse
+
+            return PlainTextResponse("should not reach")
+
+        resp = await flt.do_filter(request, call_next)
+        assert resp.status_code == 401
 
 
 class TestMtlsBinding:

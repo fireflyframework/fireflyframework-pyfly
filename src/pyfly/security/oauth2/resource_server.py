@@ -253,6 +253,14 @@ class JWKSTokenValidator:
         payload = self.validate(token)
         return self._build_context(payload)
 
+    def validate_and_context(self, token: str) -> tuple[dict[str, Any], SecurityContext]:
+        """Validate *token* once and return both the raw claims and the context.
+
+        Lets a filter inspect claims (e.g. ``cnf`` for sender-constraining) without
+        validating the signature twice."""
+        payload = self.validate(token)
+        return payload, self._build_context(payload)
+
     def _build_context(self, payload: dict[str, Any]) -> SecurityContext:
         """Map a validated *payload* onto a :class:`SecurityContext` per the
         configured claim mappings. Subclasses may override for bespoke mapping."""

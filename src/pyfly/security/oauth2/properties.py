@@ -91,6 +91,12 @@ class ResourceServerProperties:
     scope_claim_names: str = "scp,scope"
     attribute_claims: str = ""
 
+    # --- sender-constrained tokens (RFC 9449 DPoP / RFC 8705 mTLS) --------
+    # When true, a token carrying a ``cnf`` claim must be accompanied by proof of
+    # possession (a DPoP proof header, or a client certificate in the mTLS header).
+    enforce_sender_constraints: bool = False
+    mtls_cert_header: str = "x-client-cert"
+
     # --- filter -----------------------------------------------------------
     exclude_patterns: str = ""
     # "anonymous" (default, non-breaking): an invalid/missing token yields an

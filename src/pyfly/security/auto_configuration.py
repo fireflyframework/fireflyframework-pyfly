@@ -344,6 +344,8 @@ class OAuth2ResourceServerAutoConfiguration:
             token_validator=token_validator,
             exclude_patterns=props.exclude_pattern_list(),
             error_mode=props.authenticate_error_mode,
+            enforce_sender_constraints=props.enforce_sender_constraints,
+            mtls_cert_header=props.mtls_cert_header,
         )
 
 

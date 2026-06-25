@@ -60,6 +60,18 @@ class AuthorizationServerEndpoints:
     async def _token(self, request: Request) -> Response:
         form = await request.form()
         client_id, client_secret = self._client_credentials(request, form)
+        # DPoP (RFC 9449): if the client presents a proof on the token request, bind
+        # the issued access token to its key via a cnf.jkt confirmation claim.
+        confirmation: dict[str, Any] | None = None
+        dpop_proof = request.headers.get("dpop")
+        if dpop_proof:
+            from pyfly.security.oauth2.dpop import DPoPProofValidator
+
+            try:
+                jkt = DPoPProofValidator().validate(dpop_proof, http_method="POST", http_url=str(request.url))
+            except SecurityException as exc:
+                return self._error(exc)
+            confirmation = {"jkt": jkt}
         try:
             result = await self._server.token(
                 grant_type=str(form.get("grant_type", "")),
@@ -67,6 +79,7 @@ class AuthorizationServerEndpoints:
                 client_secret=client_secret,
                 scope=str(form.get("scope", "")),
                 refresh_token=(str(form["refresh_token"]) if form.get("refresh_token") else None),
+                confirmation=confirmation,
             )
         except SecurityException as exc:
             return self._error(exc)
