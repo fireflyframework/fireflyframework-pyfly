@@ -483,6 +483,9 @@ class OAuth2ClientAutoConfiguration:
                         # PKCE on by default (RFC 9700 / OAuth 2.1); opt out per
                         # registration with ``use-pkce: false``.
                         use_pkce=_as_bool(props.get("use-pkce", True)),
+                        # RFC 9207 iss enforcement (opt-in; iss is validated when
+                        # present regardless).
+                        require_iss=_as_bool(props.get("require-iss", False)),
                     )
                 )
 

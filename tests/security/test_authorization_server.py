@@ -274,10 +274,7 @@ class TestRefreshTokenGrant:
             refresh_token=old_refresh,
         )
 
-        # Old refresh token should be revoked
-        assert await token_store.find(old_refresh) is None
-
-        # Attempting to reuse the old refresh token should fail
+        # Attempting to reuse the old (rotated) refresh token must fail.
         with pytest.raises(SecurityException) as exc_info:
             await auth_server.token(
                 grant_type="refresh_token",
@@ -286,6 +283,39 @@ class TestRefreshTokenGrant:
                 refresh_token=old_refresh,
             )
         assert exc_info.value.code == "INVALID_GRANT"
+
+
+class TestRefreshTokenReuseDetection:
+    """OAuth 2.1 / RFC 9700: replaying a rotated refresh token revokes the whole family."""
+
+    @pytest.mark.asyncio
+    async def test_reuse_of_rotated_token_revokes_active_descendant(
+        self, auth_server: AuthorizationServer
+    ) -> None:
+        initial = await auth_server.token(
+            grant_type="client_credentials", client_id="test-client", client_secret="test-secret"
+        )
+        rt1 = initial["refresh_token"]
+
+        # Rotate rt1 -> rt2 (rt2 is the live token).
+        second = await auth_server.token(
+            grant_type="refresh_token", client_id="test-client", client_secret="test-secret", refresh_token=rt1
+        )
+        rt2 = second["refresh_token"]
+
+        # Replay the consumed rt1 -> reuse detected.
+        with pytest.raises(SecurityException) as exc_info:
+            await auth_server.token(
+                grant_type="refresh_token", client_id="test-client", client_secret="test-secret", refresh_token=rt1
+            )
+        assert exc_info.value.code == "INVALID_GRANT"
+
+        # The whole family is now revoked: the previously-live rt2 no longer works.
+        with pytest.raises(SecurityException) as exc_info2:
+            await auth_server.token(
+                grant_type="refresh_token", client_id="test-client", client_secret="test-secret", refresh_token=rt2
+            )
+        assert exc_info2.value.code == "INVALID_GRANT"
 
 
 # ---------------------------------------------------------------------------

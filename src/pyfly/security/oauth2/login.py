@@ -178,6 +178,13 @@ class OAuth2LoginHandler:
                 status_code=400,
             )
 
+        # RFC 9207 mix-up defense: validate the issuer that produced this response.
+        # The ``iss`` param is always rejected on mismatch with the registration's
+        # ``issuer_uri``; with ``require_iss`` it must also be present.
+        iss_error = self._validate_iss(registration, request.query_params.get("iss"))
+        if iss_error is not None:
+            return iss_error
+
         # PKCE: retrieve and consume the one-time verifier stashed at authorization time.
         code_verifier = None
         if _uses_pkce(registration):
@@ -263,6 +270,31 @@ class OAuth2LoginHandler:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_iss(registration: Any, received_iss: str | None) -> Response | None:
+        """Validate the RFC 9207 ``iss`` authorization-response parameter.
+
+        Returns a 400 response on a mismatch, or when ``require_iss`` is set and the
+        parameter is absent; otherwise ``None`` (validation passed).
+        """
+        expected = getattr(registration, "issuer_uri", "") or ""
+        require = getattr(registration, "require_iss", False)
+        if received_iss is None:
+            if require:
+                logger.warning("OAuth2 callback missing required 'iss' parameter (RFC 9207)")
+                return JSONResponse(
+                    {"error": "invalid_iss", "message": "Missing required 'iss' parameter"},
+                    status_code=400,
+                )
+            return None
+        if expected and received_iss != expected:
+            logger.warning("OAuth2 'iss' mismatch: expected %r, got %r", expected, received_iss)
+            return JSONResponse(
+                {"error": "invalid_iss", "message": "Issuer (iss) does not match the expected provider"},
+                status_code=400,
+            )
+        return None
 
     async def _exchange_code(self, registration: Any, code: str, code_verifier: str | None = None) -> dict[str, Any]:
         """Exchange an authorization code for tokens via the token endpoint."""

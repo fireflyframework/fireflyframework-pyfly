@@ -45,6 +45,11 @@ class ClientRegistration:
     # this is set False, as it has no other defense against code injection. Set
     # False only for a confidential client talking to an AS that rejects PKCE.
     use_pkce: bool = True
+    # Require the RFC 9207 ``iss`` authorization-response parameter to be present
+    # and match ``issuer_uri`` on callback (mix-up-attack defense). When False
+    # (default) the ``iss`` param is still validated *when present*, but a provider
+    # that omits it is tolerated.
+    require_iss: bool = False
 
 
 # ---------------------------------------------------------------------------
