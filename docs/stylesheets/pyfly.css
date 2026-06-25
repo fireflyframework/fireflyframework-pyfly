@@ -1,0 +1,94 @@
+/* ============================================================
+   PyFly docs theme — MkDocs Material, cosmic-green identity.
+   Mirrors the brand palette in assets/ (banner.svg, diagrams).
+   ============================================================ */
+
+/* ---- custom primary (deep green header in both schemes) ---- */
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: #1f5e16;
+  --md-primary-fg-color--light: #2c8a1c;
+  --md-primary-fg-color--dark: #143f0f;
+  --md-primary-bg-color: #f4f9ee;
+  --md-primary-bg-color--light: #f4f9eeb3;
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: #4cbb2f;
+  --md-accent-fg-color--transparent: #4cbb2f1f;
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: #ffffffb3;
+}
+
+/* ---- light scheme ---- */
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #2c8a1c;
+  --md-footer-bg-color: #0a1410;
+  --md-footer-bg-color--dark: #07110b;
+}
+
+/* ---- dark scheme: cosmic green-tinted ---- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 145;
+  --md-default-bg-color: #0b150e;
+  --md-default-bg-color--light: #0e1812;
+  --md-default-fg-color: #e9f2e2;
+  --md-default-fg-color--light: #bacbb0;
+  --md-default-fg-color--lighter: #85957e;
+  --md-default-fg-color--lightest: #3a4a33;
+  --md-code-bg-color: #07110b;
+  --md-code-fg-color: #cdddc2;
+  --md-typeset-a-color: #7ed321;
+  --md-accent-fg-color: #c2e85f;
+  --md-footer-bg-color: #07110b;
+  --md-footer-bg-color--dark: #060d08;
+}
+
+/* ---- Maven Pro for headings & chrome (matches the wordmark) ---- */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-header__title,
+.md-nav__title,
+.md-tabs__link,
+.md-ellipsis {
+  font-family: "Maven Pro", system-ui, sans-serif;
+}
+.md-typeset h1,
+.md-typeset h2 { letter-spacing: -0.01em; font-weight: 700; }
+
+/* green title rule under H2 — a brand motif from the README/book */
+.md-typeset h2 {
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  padding-bottom: 0.35em;
+}
+.md-typeset h2::before {
+  content: "";
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 0.45em;
+  vertical-align: -1px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #dff58a 0%, #7ed321 45%, rgba(76, 187, 47, 0) 72%);
+}
+
+/* logo: give the firefly mark a soft glow on the header */
+.md-header__button.md-logo img {
+  filter: drop-shadow(0 0 6px rgba(194, 232, 95, 0.5));
+}
+
+/* hero/landing back-link affordance in the header title */
+.md-header__title { font-weight: 700; }
+
+/* code copy + admonition accents stay green via accent var; nudge inline code */
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: rgba(126, 211, 33, 0.1);
+}
+
+/* search highlight + active nav in brand green */
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active { color: var(--md-typeset-a-color); }
+
+/* tables: subtle brand border */
+.md-typeset table:not([class]) th { background: rgba(126, 211, 33, 0.08); }
