@@ -47,6 +47,16 @@ def _generate_pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
+def _uses_pkce(registration: Any) -> bool:
+    """Whether PKCE applies to this registration's authorization_code flow.
+
+    PKCE is on by default (RFC 9700 / OAuth 2.1). It is always enforced for a
+    public client (no ``client_secret``) — which has no other defense against
+    authorization-code injection — even if ``use_pkce`` was explicitly disabled.
+    """
+    return bool(getattr(registration, "use_pkce", True)) or not getattr(registration, "client_secret", "")
+
+
 class OAuth2LoginHandler:
     """Creates Starlette routes for the OAuth2 authorization_code login flow.
 
@@ -110,7 +120,7 @@ class OAuth2LoginHandler:
             "nonce": nonce,
         }
         # PKCE (RFC 7636): stash the verifier in the session, send only the S256 challenge.
-        if getattr(registration, "use_pkce", False):
+        if _uses_pkce(registration):
             verifier, challenge = _generate_pkce()
             session.set_attribute(_OAUTH2_PKCE_VERIFIER_KEY, verifier)
             params["code_challenge"] = challenge
@@ -170,7 +180,7 @@ class OAuth2LoginHandler:
 
         # PKCE: retrieve and consume the one-time verifier stashed at authorization time.
         code_verifier = None
-        if getattr(registration, "use_pkce", False):
+        if _uses_pkce(registration):
             code_verifier = session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
             session.remove_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
 

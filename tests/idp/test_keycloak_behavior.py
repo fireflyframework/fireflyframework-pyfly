@@ -103,7 +103,19 @@ def _adapter() -> KeycloakIdpAdapter:
         realm=REALM,
         client_id="admin-cli",
         client_secret="s3cr3t",
+        allow_password_grant=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_login_refused_without_password_grant_optin() -> None:
+    """ROPC (grant_type=password) is refused unless explicitly enabled (RFC 9700 §2.4)."""
+    from pyfly.kernel.exceptions import SecurityException
+
+    adapter = KeycloakIdpAdapter(base_url=BASE_URL, realm=REALM, client_id="admin-cli", client_secret="s3cr3t")
+    with pytest.raises(SecurityException) as exc:
+        await adapter.login(LoginRequest(username="bob", password="hunter2"))
+    assert exc.value.code == "ROPC_DISABLED"
 
 
 def _inject(adapter: KeycloakIdpAdapter, fake: FakeClient) -> None:

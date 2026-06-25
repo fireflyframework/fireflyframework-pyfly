@@ -27,6 +27,14 @@ class IdpAutoConfiguration:
     @bean
     def idp_adapter(self, config: Config) -> IdpAdapter:
         provider = str(config.get("pyfly.idp.provider", "internal-db")).lower()
+        # ROPC (grant_type=password) against an external IdP is removed by OAuth 2.1
+        # and discouraged by RFC 9700 §2.4; it is off unless explicitly opted in.
+        allow_ropc = str(config.get("pyfly.idp.allow-password-grant", False)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         if provider == "keycloak":
             from pyfly.idp.adapters.keycloak import KeycloakIdpAdapter
@@ -36,6 +44,7 @@ class IdpAutoConfiguration:
                 realm=str(config.get("pyfly.idp.keycloak.realm", "")),
                 client_id=str(config.get("pyfly.idp.keycloak.client-id", "")),
                 client_secret=str(config.get("pyfly.idp.keycloak.client-secret", "")),
+                allow_password_grant=allow_ropc,
             )
         if provider in ("cognito", "aws-cognito"):
             from pyfly.idp.adapters.aws_cognito import AwsCognitoIdpAdapter
@@ -45,6 +54,7 @@ class IdpAutoConfiguration:
                 client_id=str(config.get("pyfly.idp.cognito.client-id", "")),
                 region=str(config.get("pyfly.idp.cognito.region", "")),
                 client_secret=str(config.get("pyfly.idp.cognito.client-secret", "")) or None,
+                allow_password_grant=allow_ropc,
             )
         if provider in ("azure-ad", "azuread", "entra"):
             from pyfly.idp.adapters.azure_ad import AzureAdIdpAdapter
@@ -53,6 +63,7 @@ class IdpAutoConfiguration:
                 tenant_id=str(config.get("pyfly.idp.azure.tenant-id", "")),
                 client_id=str(config.get("pyfly.idp.azure.client-id", "")),
                 client_secret=str(config.get("pyfly.idp.azure.client-secret", "")),
+                allow_password_grant=allow_ropc,
             )
 
         from pyfly.idp.adapters.internal_db import InternalDbIdpAdapter

@@ -108,13 +108,13 @@ class TestClientCredentialsGrant:
         assert "exp" in payload
 
     @pytest.mark.asyncio
-    async def test_client_credentials_custom_scope(self, auth_server: AuthorizationServer) -> None:
-        """Passing a custom scope overrides the registration's default scopes."""
+    async def test_client_credentials_requested_scope_subset(self, auth_server: AuthorizationServer) -> None:
+        """A requested scope that is a subset of the registration's scopes is honoured."""
         result = await auth_server.token(
             grant_type="client_credentials",
             client_id="test-client",
             client_secret="test-secret",
-            scope="admin superuser",
+            scope="read",
         )
 
         payload = pyjwt.decode(
@@ -123,8 +123,100 @@ class TestClientCredentialsGrant:
             algorithms=["HS256"],
         )
 
-        assert payload["scope"] == "admin superuser"
-        assert result["scope"] == "admin superuser"
+        assert payload["scope"] == "read"
+        assert result["scope"] == "read"
+
+    @pytest.mark.asyncio
+    async def test_client_credentials_rejects_unregistered_scope(self, auth_server: AuthorizationServer) -> None:
+        """Requesting a scope the client is not registered for is rejected (RFC 6749 §5.2).
+
+        Prevents privilege escalation: a client registered for ``read write`` must not
+        be able to mint an ``admin`` token by simply asking for it.
+        """
+        with pytest.raises(SecurityException) as exc_info:
+            await auth_server.token(
+                grant_type="client_credentials",
+                client_id="test-client",
+                client_secret="test-secret",
+                scope="admin superuser",
+            )
+        assert exc_info.value.code == "INVALID_SCOPE"
+
+    @pytest.mark.asyncio
+    async def test_client_credentials_partial_unregistered_scope_rejected(
+        self, auth_server: AuthorizationServer
+    ) -> None:
+        """A request mixing a registered and an unregistered scope is rejected wholesale."""
+        with pytest.raises(SecurityException) as exc_info:
+            await auth_server.token(
+                grant_type="client_credentials",
+                client_id="test-client",
+                client_secret="test-secret",
+                scope="read admin",
+            )
+        assert exc_info.value.code == "INVALID_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Audience-restricted tokens
+# ---------------------------------------------------------------------------
+
+
+class TestAudienceClaim:
+    """Tokens carry an ``aud`` claim only when an audience is configured."""
+
+    @pytest.fixture
+    def auth_server_with_aud(
+        self,
+        client_repo: InMemoryClientRegistrationRepository,
+        token_store: InMemoryTokenStore,
+    ) -> AuthorizationServer:
+        return AuthorizationServer(
+            secret="test-signing-secret",
+            client_repository=client_repo,
+            token_store=token_store,
+            issuer="https://auth.example.com",
+            audience="api://lumen",
+        )
+
+    @pytest.mark.asyncio
+    async def test_client_credentials_token_includes_aud(
+        self, auth_server_with_aud: AuthorizationServer
+    ) -> None:
+        result = await auth_server_with_aud.token(
+            grant_type="client_credentials",
+            client_id="test-client",
+            client_secret="test-secret",
+        )
+        payload = pyjwt.decode(
+            result["access_token"], "test-signing-secret", algorithms=["HS256"], audience="api://lumen"
+        )
+        assert payload["aud"] == "api://lumen"
+
+    @pytest.mark.asyncio
+    async def test_refreshed_token_includes_aud(self, auth_server_with_aud: AuthorizationServer) -> None:
+        initial = await auth_server_with_aud.token(
+            grant_type="client_credentials", client_id="test-client", client_secret="test-secret"
+        )
+        refreshed = await auth_server_with_aud.token(
+            grant_type="refresh_token",
+            client_id="test-client",
+            client_secret="test-secret",
+            refresh_token=initial["refresh_token"],
+        )
+        payload = pyjwt.decode(
+            refreshed["access_token"], "test-signing-secret", algorithms=["HS256"], audience="api://lumen"
+        )
+        assert payload["aud"] == "api://lumen"
+
+    @pytest.mark.asyncio
+    async def test_no_aud_claim_when_audience_not_configured(self, auth_server: AuthorizationServer) -> None:
+        """Backward-compatible: tokens carry no ``aud`` unless an audience is set."""
+        result = await auth_server.token(
+            grant_type="client_credentials", client_id="test-client", client_secret="test-secret"
+        )
+        payload = pyjwt.decode(result["access_token"], "test-signing-secret", algorithms=["HS256"])
+        assert "aud" not in payload
 
 
 # ---------------------------------------------------------------------------

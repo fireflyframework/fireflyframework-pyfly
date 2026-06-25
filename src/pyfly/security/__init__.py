@@ -61,8 +61,32 @@ except ImportError:
     pass
 
 try:
-    from pyfly.security.password import BcryptPasswordEncoder, PasswordEncoder
+    from pyfly.security.password import (
+        Argon2PasswordEncoder,
+        BcryptPasswordEncoder,
+        DelegatingPasswordEncoder,
+        PasswordEncoder,
+        Pbkdf2PasswordEncoder,
+        ScryptPasswordEncoder,
+        create_delegating_password_encoder,
+    )
 
-    __all__ += ["BcryptPasswordEncoder", "PasswordEncoder"]
+    __all__ += [
+        "Argon2PasswordEncoder",
+        "BcryptPasswordEncoder",
+        "DelegatingPasswordEncoder",
+        "PasswordEncoder",
+        "Pbkdf2PasswordEncoder",
+        "ScryptPasswordEncoder",
+        "create_delegating_password_encoder",
+    ]
 except ImportError:
     pass
+
+from pyfly.security.user_details import (
+    InMemoryUserDetailsService,
+    UserDetails,
+    UserDetailsService,
+)
+
+__all__ += ["InMemoryUserDetailsService", "UserDetails", "UserDetailsService"]

@@ -50,6 +50,9 @@ data-relational = [
 testing = [
     "jsonpath-ng>=1.8.0",
 ]
+argon2 = [
+    "argon2-cffi>=23.1.0",  # Argon2PasswordEncoder (OWASP-preferred password hashing)
+]
 testcontainers = [
     "testcontainers>=4.0.0",
     "pika>=1.3.0",  # testcontainers' RabbitMqContainer imports pika for its readiness probe
@@ -199,6 +202,7 @@ server = "pyfly.server.auto_configuration:ServerAutoConfiguration"
 event-loop = "pyfly.server.auto_configuration:EventLoopAutoConfiguration"
 security-jwt = "pyfly.security.auto_configuration:JwtAutoConfiguration"
 security-password = "pyfly.security.auto_configuration:PasswordEncoderAutoConfiguration"
+security-http-basic = "pyfly.security.auto_configuration:HttpBasicAutoConfiguration"
 oauth2-resource-server = "pyfly.security.auto_configuration:OAuth2ResourceServerAutoConfiguration"
 oauth2-authorization-server = "pyfly.security.auto_configuration:OAuth2AuthorizationServerAutoConfiguration"
 oauth2-client = "pyfly.security.auto_configuration:OAuth2ClientAutoConfiguration"

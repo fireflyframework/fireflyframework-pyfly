@@ -85,8 +85,13 @@ class HttpSecurityFilter(OncePerRequestFilter):
         path: str = request.url.path
         security_context: SecurityContext = getattr(request.state, "security_context", SecurityContext.anonymous())
 
+        method: str = request.method.upper()
         for security_rule in self._rules:
             if not _matches(path, security_rule.patterns):
+                continue
+            # A rule scoped to specific HTTP methods only applies to those methods;
+            # an empty method list matches any method.
+            if security_rule.methods and method not in security_rule.methods:
                 continue
 
             rule = security_rule.rule

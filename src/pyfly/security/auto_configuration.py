@@ -22,9 +22,10 @@ except ImportError:
     JWTService = object  # type: ignore[misc,assignment]
 
 try:
-    from pyfly.security.password import BcryptPasswordEncoder
+    from pyfly.security.password import BcryptPasswordEncoder, DelegatingPasswordEncoder
 except ImportError:
     BcryptPasswordEncoder = object  # type: ignore[misc,assignment]
+    DelegatingPasswordEncoder = object  # type: ignore[misc,assignment]
 
 try:
     from pyfly.security.oauth2.resource_server import (
@@ -86,6 +87,61 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+from pyfly.kernel.exceptions import SecurityException
+
+# The built-in placeholder secret shipped in defaults. Signing tokens with it
+# would let anyone who knows the (public) framework default forge tokens, so the
+# composition root refuses to start when it is left in place.
+_PLACEHOLDER_SECRET = "change-me-in-production"
+# Minimum HMAC key length for the HS family (RFC 7518 §3.2: a key of the same
+# size as the hash output — 256 bits / 32 bytes — for HS256).
+_MIN_HS_SECRET_BYTES = 32
+
+
+def _resolve_signing_secret(config: Config, key: str, algorithm: str) -> str:
+    """Read a token-signing secret from *key* and refuse insecure values.
+
+    Raises:
+        SecurityException: if the secret is unset (the built-in placeholder) or,
+            for an HMAC (``HS*``) algorithm, shorter than 32 bytes.
+    """
+    secret = str(config.get(key, _PLACEHOLDER_SECRET))
+    if secret == _PLACEHOLDER_SECRET:
+        raise SecurityException(
+            f"Refusing to start: '{key}' is unset, so the built-in placeholder secret "
+            f"would be used to sign tokens. Set '{key}' to a strong, randomly-generated "
+            f'value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`).',
+            code="INSECURE_SIGNING_SECRET",
+        )
+    if algorithm.upper().startswith("HS") and len(secret.encode("utf-8")) < _MIN_HS_SECRET_BYTES:
+        raise SecurityException(
+            f"Refusing to start: '{key}' must be at least {_MIN_HS_SECRET_BYTES} bytes for "
+            f"{algorithm} (RFC 7518 §3.2); got {len(secret.encode('utf-8'))} bytes.",
+            code="WEAK_SIGNING_SECRET",
+        )
+    return secret
+
+
+def _audience(config: Config, key: str) -> str | list[str] | None:
+    """Read a comma-separated / list audience value (single value collapsed to a
+    string), or ``None`` when unset."""
+    raw = config.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        values = [str(a).strip() for a in raw if str(a).strip()]
+    else:
+        values = [a.strip() for a in str(raw).split(",") if a.strip()]
+    if not values:
+        return None
+    return values[0] if len(values) == 1 else values
+
+
+def _as_bool(value: Any) -> bool:
+    """Coerce a config value (bool or string like ``"true"``/``"false"``) to bool."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _exclude_patterns(config: Config, key: str) -> Sequence[str]:
@@ -106,8 +162,16 @@ class JwtAutoConfiguration:
 
     @bean
     def jwt_service(self, config: Config) -> JWTService:
-        secret = str(config.get("pyfly.security.jwt.secret", "change-me-in-production"))
         algorithm = str(config.get("pyfly.security.jwt.algorithm", "HS256"))
+        # The symmetric secret is only enforced when the symmetric JWT filter is
+        # actually serving requests. A resource-server-only app (the recommended
+        # setup) enables ``pyfly.security.enabled`` for the JWKS validator and never
+        # uses this signer, so it must not be forced to invent a symmetric secret.
+        filter_enabled = str(config.get("pyfly.security.jwt.filter.enabled", "false")).lower() == "true"
+        if filter_enabled:
+            secret = _resolve_signing_secret(config, "pyfly.security.jwt.secret", algorithm)
+        else:
+            secret = str(config.get("pyfly.security.jwt.secret", _PLACEHOLDER_SECRET))
         return JWTService(secret=secret, algorithm=algorithm)
 
     @bean
@@ -134,6 +198,86 @@ class PasswordEncoderAutoConfiguration:
     def password_encoder(self, config: Config) -> BcryptPasswordEncoder:
         rounds = int(config.get("pyfly.security.password.bcrypt-rounds", 12))
         return BcryptPasswordEncoder(rounds=rounds)
+
+    @bean
+    @conditional_on_property("pyfly.security.password.delegating.enabled", having_value="true")
+    def delegating_password_encoder(self, config: Config) -> DelegatingPasswordEncoder:
+        # Opt-in Spring-style {id}-prefixed encoder (bcrypt default, recognises
+        # {pbkdf2}/{scrypt}/{argon2}) enabling on-login algorithm migration.
+        from pyfly.security.password import create_delegating_password_encoder
+
+        rounds = int(config.get("pyfly.security.password.bcrypt-rounds", 12))
+        return create_delegating_password_encoder(bcrypt_rounds=rounds)
+
+
+# ---------------------------------------------------------------------------
+# HTTP Basic authentication
+# ---------------------------------------------------------------------------
+
+
+def _csv_or_list(value: Any) -> list[str]:
+    """Parse a comma-separated string or a list into a trimmed string list."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [s.strip() for s in str(value).split(",") if s.strip()]
+
+
+@auto_configuration
+@conditional_on_property("pyfly.security.http-basic.enabled", having_value="true")
+@conditional_on_class("starlette")
+@conditional_on_class("bcrypt")
+class HttpBasicAutoConfiguration:
+    """Auto-configures HTTP Basic authentication from config (opt-in).
+
+    Users are declared (with **pre-hashed** bcrypt passwords) under
+    ``pyfly.security.http-basic.users``::
+
+        pyfly:
+          security:
+            http-basic:
+              enabled: true
+              realm: "PyFly"
+              error-mode: "401"        # or "anonymous"
+              users:
+                alice:
+                  password-hash: "$2b$12$..."   # never plaintext
+                  roles: "ADMIN,USER"
+
+    Apps needing a dynamic user store register their own
+    :class:`HttpBasicAuthenticationFilter` (a ``WebFilter`` bean) instead.
+    """
+
+    @bean
+    def http_basic_filter(self, config: Config) -> WebFilter:
+        from pyfly.security.password import BcryptPasswordEncoder
+        from pyfly.security.user_details import InMemoryUserDetailsService, UserDetails
+        from pyfly.web.adapters.starlette.filters.http_basic_filter import HttpBasicAuthenticationFilter
+
+        raw_users = config.get("pyfly.security.http-basic.users", {})
+        users: list[UserDetails] = []
+        if isinstance(raw_users, dict):
+            for username, props in raw_users.items():
+                if not isinstance(props, dict):
+                    continue
+                users.append(
+                    UserDetails(
+                        username=str(username),
+                        password_hash=str(props.get("password-hash", "")),
+                        roles=_csv_or_list(props.get("roles")),
+                        permissions=_csv_or_list(props.get("permissions")),
+                        enabled=_as_bool(props.get("enabled", True)),
+                    )
+                )
+
+        rounds = int(config.get("pyfly.security.password.bcrypt-rounds", 12))
+        return HttpBasicAuthenticationFilter(
+            InMemoryUserDetailsService(*users),
+            BcryptPasswordEncoder(rounds=rounds),
+            realm=str(config.get("pyfly.security.http-basic.realm", "Realm")),
+            error_mode=str(config.get("pyfly.security.http-basic.error-mode", "anonymous")),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +371,7 @@ class OAuth2AuthorizationServerAutoConfiguration:
         client_registration_repository: InMemoryClientRegistrationRepository,
         container: Container,
     ) -> AuthorizationServer:
-        secret = str(config.get("pyfly.security.oauth2.authorization-server.secret", "change-me-in-production"))
+        secret = _resolve_signing_secret(config, "pyfly.security.oauth2.authorization-server.secret", "HS256")
         issuer = config.get("pyfly.security.oauth2.authorization-server.issuer")
         access_ttl = int(config.get("pyfly.security.oauth2.authorization-server.access-token-ttl", 3600))
         refresh_ttl = int(config.get("pyfly.security.oauth2.authorization-server.refresh-token-ttl", 86400))
@@ -239,6 +383,7 @@ class OAuth2AuthorizationServerAutoConfiguration:
             access_token_ttl=access_ttl,
             refresh_token_ttl=refresh_ttl,
             issuer=str(issuer) if issuer is not None else None,
+            audience=_audience(config, "pyfly.security.oauth2.authorization-server.audience"),
         )
 
     def _build_token_store(self, config: Config, container: Container, refresh_ttl: int) -> Any:
@@ -335,6 +480,9 @@ class OAuth2ClientAutoConfiguration:
                         jwks_uri=str(props.get("jwks-uri", "")),
                         issuer_uri=str(props.get("issuer-uri", "")),
                         provider_name=str(props.get("provider-name", "")),
+                        # PKCE on by default (RFC 9700 / OAuth 2.1); opt out per
+                        # registration with ``use-pkce: false``.
+                        use_pkce=_as_bool(props.get("use-pkce", True)),
                     )
                 )
 

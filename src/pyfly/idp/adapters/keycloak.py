@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pyfly.idp.adapters import _require_password_grant_optin
 from pyfly.idp.models import (
     AuthResult,
     IdpRole,
@@ -49,12 +50,14 @@ class KeycloakIdpAdapter:
         client_id: str,
         client_secret: str,
         verify_ssl: bool = True,
+        allow_password_grant: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._realm = realm
         self._client_id = client_id
         self._client_secret = client_secret
         self._verify = verify_ssl
+        self._allow_password_grant = allow_password_grant
         self._admin_token: str | None = None
         self._admin_token_expiry: float = 0.0  # monotonic deadline
 
@@ -171,6 +174,7 @@ class KeycloakIdpAdapter:
             return [_from_kc(u) for u in resp.json()]
 
     async def login(self, request: LoginRequest) -> AuthResult:
+        _require_password_grant_optin(self._allow_password_grant, "keycloak")
         async with await self._client() as client:
             resp = await client.post(
                 self._token_url,

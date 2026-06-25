@@ -117,7 +117,19 @@ def _adapter(fake: _FakeCognitoClient) -> AwsCognitoIdpAdapter:
         client_id=CLIENT_ID,
         region=REGION,
         client=fake,
+        allow_password_grant=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_login_refused_without_password_grant_optin() -> None:
+    """ROPC (USER_PASSWORD_AUTH) is refused unless explicitly enabled (RFC 9700 §2.4)."""
+    from pyfly.kernel.exceptions import SecurityException
+
+    adapter = AwsCognitoIdpAdapter(user_pool_id=USER_POOL_ID, client_id=CLIENT_ID, region=REGION, client=object())
+    with pytest.raises(SecurityException) as exc:
+        await adapter.login(LoginRequest(username="alice", password="hunter2"))
+    assert exc.value.code == "ROPC_DISABLED"
 
 
 # --------------------------------------------------------------------------- #

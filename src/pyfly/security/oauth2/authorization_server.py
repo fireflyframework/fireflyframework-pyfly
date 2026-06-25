@@ -74,6 +74,10 @@ class AuthorizationServer:
         access_token_ttl: Access token lifetime in seconds (default: 3600 = 1 hour).
         refresh_token_ttl: Refresh token lifetime in seconds (default: 86400 = 24 hours).
         issuer: Token issuer claim (optional).
+        audience: Audience the issued tokens are restricted to (``aud`` claim).
+            Accepts a single value or a list. When unset, no ``aud`` is emitted
+            (backward compatible). Setting it lets resource servers reject tokens
+            minted for a different API (RFC 9700 / OAuth 2.1 audience restriction).
     """
 
     def __init__(
@@ -84,6 +88,7 @@ class AuthorizationServer:
         access_token_ttl: int = 3600,
         refresh_token_ttl: int = 86400,
         issuer: str | None = None,
+        audience: str | list[str] | None = None,
     ) -> None:
         self._secret = secret
         self._client_repository = client_repository
@@ -91,6 +96,13 @@ class AuthorizationServer:
         self._access_token_ttl = access_token_ttl
         self._refresh_token_ttl = refresh_token_ttl
         self._issuer = issuer
+        if audience is None:
+            self._audience: str | list[str] | None = None
+        elif isinstance(audience, str):
+            self._audience = audience
+        else:
+            aud_list = [a for a in audience if a]
+            self._audience = aud_list or None
 
     async def token(
         self,
@@ -146,7 +158,21 @@ class AuthorizationServer:
 
     async def _handle_client_credentials(self, registration: ClientRegistration, scope: str) -> dict[str, Any]:
         now = int(time.time())
-        scopes = scope.split() if scope else registration.scopes
+        # A client may only ever obtain scopes it is registered for. Requesting an
+        # unregistered scope is rejected wholesale (RFC 6749 §5.2 ``invalid_scope``)
+        # rather than silently echoed — otherwise any authenticated client could
+        # mint an arbitrarily-privileged token (e.g. ``admin``) just by asking.
+        if scope:
+            requested = scope.split()
+            unregistered = [s for s in requested if s not in registration.scopes]
+            if unregistered:
+                raise SecurityException(
+                    f"Requested scope(s) not permitted for this client: {' '.join(unregistered)}",
+                    code="INVALID_SCOPE",
+                )
+            scopes = requested
+        else:
+            scopes = registration.scopes
 
         access_payload: dict[str, Any] = {
             "sub": registration.client_id,
@@ -156,6 +182,8 @@ class AuthorizationServer:
         }
         if self._issuer:
             access_payload["iss"] = self._issuer
+        if self._audience is not None:
+            access_payload["aud"] = self._audience
 
         access_token = pyjwt.encode(access_payload, self._secret, algorithm="HS256")
 
@@ -205,6 +233,8 @@ class AuthorizationServer:
         }
         if self._issuer:
             access_payload["iss"] = self._issuer
+        if self._audience is not None:
+            access_payload["aud"] = self._audience
 
         access_token = pyjwt.encode(access_payload, self._secret, algorithm="HS256")
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pyfly.idp.adapters import _require_password_grant_optin
 from pyfly.idp.models import (
     AuthResult,
     IdpRole,
@@ -39,11 +40,13 @@ class AzureAdIdpAdapter:
         client_id: str,
         client_secret: str,
         scope: str = "https://graph.microsoft.com/.default",
+        allow_password_grant: bool = False,
     ) -> None:
         self._tenant_id = tenant_id
         self._client_id = client_id
         self._client_secret = client_secret
         self._scope = scope
+        self._allow_password_grant = allow_password_grant
         self._app_token: str | None = None
 
     @property
@@ -139,6 +142,7 @@ class AzureAdIdpAdapter:
             return [_from_aad(u) for u in resp.json().get("value", [])]
 
     async def login(self, request: LoginRequest) -> AuthResult:
+        _require_password_grant_optin(self._allow_password_grant, "azure-ad")
         async with await self._client() as client:
             resp = await client.post(
                 self._token_url,

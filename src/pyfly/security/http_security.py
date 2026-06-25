@@ -78,10 +78,22 @@ class SecurityRule:
         patterns: Glob patterns (fnmatch-style) to match against the
             request path.  An empty list means "any request".
         rule: The access rule to enforce when a pattern matches.
+        methods: Upper-case HTTP methods this rule applies to.  An empty list
+            (the default) matches any method.
     """
 
     patterns: list[str]
     rule: AccessRule
+    methods: list[str] = field(default_factory=list)
+
+
+def _normalize_methods(methods: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Coerce a method spec (str / list / None) into a list of upper-case methods."""
+    if methods is None:
+        return []
+    if isinstance(methods, str):
+        return [methods.upper()]
+    return [m.upper() for m in methods]
 
 
 # ---------------------------------------------------------------------------
@@ -92,40 +104,46 @@ class SecurityRule:
 class _RequestMatcherBuilder:
     """Intermediate builder returned by ``authorize_requests().request_matchers(...)``."""
 
-    def __init__(self, registry: _AuthorizeRequestsBuilder, patterns: list[str]) -> None:
+    def __init__(
+        self,
+        registry: _AuthorizeRequestsBuilder,
+        patterns: list[str],
+        methods: list[str] | None = None,
+    ) -> None:
         self._registry = registry
         self._patterns = patterns
+        self._methods = methods or []
 
     # -- terminal access-rule methods --
 
     def permit_all(self) -> _AuthorizeRequestsBuilder:
         """Allow all requests matching the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.PERMIT_ALL))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.PERMIT_ALL), self._methods)
         return self._registry
 
     def deny_all(self) -> _AuthorizeRequestsBuilder:
         """Deny all requests matching the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.DENY_ALL))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.DENY_ALL), self._methods)
         return self._registry
 
     def authenticated(self) -> _AuthorizeRequestsBuilder:
         """Require an authenticated user for the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.AUTHENTICATED))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.AUTHENTICATED), self._methods)
         return self._registry
 
     def has_role(self, role: str) -> _AuthorizeRequestsBuilder:
         """Require the user to have *role* for the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_ROLE, role))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_ROLE, role), self._methods)
         return self._registry
 
     def has_any_role(self, roles: list[str]) -> _AuthorizeRequestsBuilder:
         """Require the user to have at least one of *roles* for the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_ANY_ROLE, list(roles)))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_ANY_ROLE, list(roles)), self._methods)
         return self._registry
 
     def has_permission(self, permission: str) -> _AuthorizeRequestsBuilder:
         """Require the user to have *permission* for the current patterns."""
-        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_PERMISSION, permission))
+        self._registry._add_rule(self._patterns, AccessRule(AccessRuleType.HAS_PERMISSION, permission), self._methods)
         return self._registry
 
 
@@ -138,26 +156,32 @@ class _AuthorizeRequestsBuilder:
     def __init__(self, security: HttpSecurity) -> None:
         self._security = security
 
-    def request_matchers(self, *patterns: str) -> _RequestMatcherBuilder:
+    def request_matchers(
+        self, *patterns: str, methods: str | list[str] | tuple[str, ...] | None = None
+    ) -> _RequestMatcherBuilder:
         """Begin a rule for one or more URL glob patterns.
 
         Args:
             *patterns: fnmatch-style glob patterns (e.g. ``"/api/admin/**"``).
+            methods: Optional HTTP method(s) the rule applies to (e.g. ``"POST"``
+                or ``["PUT", "DELETE"]``). When omitted, the rule matches any
+                method — mirroring Spring's ``requestMatchers(HttpMethod.X, ...)``.
 
         Returns:
             A :class:`_RequestMatcherBuilder` to set the access rule.
         """
-        return _RequestMatcherBuilder(self, list(patterns))
+        return _RequestMatcherBuilder(self, list(patterns), _normalize_methods(methods))
 
-    def any_request(self) -> _RequestMatcherBuilder:
+    def any_request(self, *, methods: str | list[str] | tuple[str, ...] | None = None) -> _RequestMatcherBuilder:
         """Begin a catch-all rule that matches any request path.
 
-        This should be the **last** rule in the chain.
+        This should be the **last** rule in the chain. An optional ``methods``
+        restricts the catch-all to specific HTTP methods.
         """
-        return _RequestMatcherBuilder(self, [])
+        return _RequestMatcherBuilder(self, [], _normalize_methods(methods))
 
-    def _add_rule(self, patterns: list[str], rule: AccessRule) -> None:
-        self._security._rules.append(SecurityRule(patterns=patterns, rule=rule))
+    def _add_rule(self, patterns: list[str], rule: AccessRule, methods: list[str] | None = None) -> None:
+        self._security._rules.append(SecurityRule(patterns=patterns, rule=rule, methods=methods or []))
 
 
 # ---------------------------------------------------------------------------

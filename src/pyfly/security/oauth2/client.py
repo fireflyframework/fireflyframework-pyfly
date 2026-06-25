@@ -39,9 +39,12 @@ class ClientRegistration:
     jwks_uri: str = ""
     issuer_uri: str = ""
     provider_name: str = ""
-    # Enable PKCE (RFC 7636, S256) on the authorization_code flow. Recommended for public
-    # clients (no client_secret); harmless and more secure for confidential clients too.
-    use_pkce: bool = False
+    # Enable PKCE (RFC 7636, S256) on the authorization_code flow. On by default —
+    # RFC 9700 / OAuth 2.1 require PKCE for the authorization code grant for all
+    # client types. A public client (empty client_secret) always uses PKCE even if
+    # this is set False, as it has no other defense against code injection. Set
+    # False only for a confidential client talking to an AS that rejects PKCE.
+    use_pkce: bool = True
 
 
 # ---------------------------------------------------------------------------

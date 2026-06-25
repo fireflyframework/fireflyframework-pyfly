@@ -32,6 +32,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
+from pyfly.core.config import Config
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
 from pyfly.security.http_security import HttpSecurity
@@ -145,3 +146,110 @@ class TestHttpSecurityDenyByDefault:
     async def test_empty_httpsecurity_is_a_noop(self) -> None:
         response = await HttpSecurity().build().do_filter(self._request("/anything"), self._call_next)
         assert response.status_code == 200
+
+
+class TestHttpMethodMatchers:
+    """URL authorization rules can be scoped to specific HTTP methods (Spring's
+    ``requestMatchers(HttpMethod.X, ...)``), so a read can be public while a write
+    on the same path requires a role."""
+
+    @staticmethod
+    def _request(path: str, method: str = "GET", ctx: SecurityContext | None = None) -> Request:
+        scope: dict[str, Any] = {"type": "http", "method": method, "path": path, "headers": [], "query_string": b""}
+        request = Request(scope)
+        request.state.security_context = ctx or SecurityContext.anonymous()
+        return request
+
+    @staticmethod
+    async def _call_next(request: Request) -> Response:
+        return PlainTextResponse("ok")
+
+    @pytest.mark.asyncio
+    async def test_method_specific_rule_only_matches_that_method(self) -> None:
+        sec = HttpSecurity()
+        builder = sec.authorize_requests()
+        builder.request_matchers("/api/**", methods="POST").authenticated()
+        builder.request_matchers("/api/**").permit_all()
+        built = sec.build()
+        # GET falls past the POST rule to the permit-all rule.
+        assert (await built.do_filter(self._request("/api/x", "GET"), self._call_next)).status_code == 200
+        # POST (anonymous) matches the method-scoped authenticated rule.
+        assert (await built.do_filter(self._request("/api/x", "POST"), self._call_next)).status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_method_list_matches_any_listed(self) -> None:
+        sec = HttpSecurity()
+        sec.authorize_requests().request_matchers("/api/**", methods=["PUT", "DELETE"]).has_role("ADMIN")
+        built = sec.build()
+        # GET matches no rule -> deny-by-default 403.
+        assert (await built.do_filter(self._request("/api/x", "GET"), self._call_next)).status_code == 403
+        # DELETE matches the method-scoped role rule (anonymous -> 401).
+        assert (await built.do_filter(self._request("/api/x", "DELETE"), self._call_next)).status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_no_method_means_any_method(self) -> None:
+        sec = HttpSecurity()
+        sec.authorize_requests().request_matchers("/api/**").permit_all()
+        built = sec.build()
+        for method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            resp = await built.do_filter(self._request("/api/x", method), self._call_next)
+            assert resp.status_code == 200
+
+
+class TestSigningSecretHardening:
+    """The auto-config composition root refuses to sign tokens with the built-in
+    placeholder secret or a secret too short for the HMAC algorithm (RFC 7518 §3.2)."""
+
+    def _as_config(self, **overrides: Any) -> Config:
+        server: dict[str, Any] = {"enabled": "true"}
+        server.update(overrides)
+        return Config({"pyfly": {"security": {"oauth2": {"authorization-server": server}}}})
+
+    def _build_as(self, config: Config) -> AuthorizationServer:
+        from pyfly.container.container import Container
+        from pyfly.security.auto_configuration import OAuth2AuthorizationServerAutoConfiguration
+
+        ac = OAuth2AuthorizationServerAutoConfiguration()
+        repo = InMemoryClientRegistrationRepository()
+        return ac.authorization_server(config, repo, Container())
+
+    def test_authorization_server_bean_rejects_placeholder_secret(self) -> None:
+        with pytest.raises(SecurityException) as exc:
+            self._build_as(self._as_config())  # no secret -> placeholder default
+        assert exc.value.code == "INSECURE_SIGNING_SECRET"
+
+    def test_authorization_server_bean_rejects_short_secret(self) -> None:
+        with pytest.raises(SecurityException) as exc:
+            self._build_as(self._as_config(secret="too-short"))
+        assert exc.value.code == "WEAK_SIGNING_SECRET"
+
+    def test_authorization_server_bean_accepts_strong_secret(self) -> None:
+        server = self._build_as(self._as_config(secret="a" * 32))
+        assert isinstance(server, AuthorizationServer)
+
+    def test_jwt_service_bean_rejects_placeholder_secret_when_filter_enabled(self) -> None:
+        from pyfly.core.config import Config
+        from pyfly.security.auto_configuration import JwtAutoConfiguration
+
+        cfg = Config({"pyfly": {"security": {"enabled": "true", "jwt": {"filter": {"enabled": "true"}}}}})
+        with pytest.raises(SecurityException) as exc:
+            JwtAutoConfiguration().jwt_service(cfg)
+        assert exc.value.code == "INSECURE_SIGNING_SECRET"
+
+    def test_jwt_service_without_filter_tolerates_placeholder(self) -> None:
+        """A resource-server-only app (symmetric JWT filter off) must still boot even
+        though the symmetric signer is left at its (unused) placeholder secret."""
+        from pyfly.core.config import Config
+        from pyfly.security.auto_configuration import JwtAutoConfiguration
+
+        cfg = Config({"pyfly": {"security": {"enabled": "true"}}})
+        svc = JwtAutoConfiguration().jwt_service(cfg)
+        assert svc is not None
+
+    def test_jwt_service_bean_accepts_strong_secret(self) -> None:
+        from pyfly.core.config import Config
+        from pyfly.security.auto_configuration import JwtAutoConfiguration
+
+        cfg = Config({"pyfly": {"security": {"jwt": {"filter": {"enabled": "true"}, "secret": "z" * 40}}}})
+        svc = JwtAutoConfiguration().jwt_service(cfg)
+        assert svc is not None

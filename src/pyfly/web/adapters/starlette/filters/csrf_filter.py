@@ -73,6 +73,15 @@ class CsrfFilter(OncePerRequestFilter):
 
     exclude_patterns = ["/actuator/*", "/health", "/ready"]
 
+    def __init__(self, *, cookie_gated: bool = True) -> None:
+        # ``cookie_gated`` (default): only enforce CSRF on unsafe requests that
+        # carry cookies — i.e. requests with ambient authority a cross-site forgery
+        # could abuse. A request with no cookies (a stateless API client) has no
+        # CSRF surface and is exempt, so CSRF can be on by default without breaking
+        # token/stateless clients. Set ``cookie_gated=False`` for strict enforcement
+        # of every unsafe request regardless of cookies.
+        self._cookie_gated = cookie_gated
+
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         method: str = request.method
 
@@ -89,6 +98,13 @@ class CsrfFilter(OncePerRequestFilter):
         # -----------------------------------------------------------------
         auth_header: str | None = request.headers.get("authorization")
         if auth_header and auth_header.startswith("Bearer "):
+            return await call_next(request)
+
+        # -----------------------------------------------------------------
+        # Cookie-gated exemption — no cookies means no ambient authority for a
+        # cross-site request to abuse, so there is nothing to protect.
+        # -----------------------------------------------------------------
+        if self._cookie_gated and not request.cookies:
             return await call_next(request)
 
         # -----------------------------------------------------------------
