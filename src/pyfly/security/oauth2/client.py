@@ -50,6 +50,9 @@ class ClientRegistration:
     # (default) the ``iss`` param is still validated *when present*, but a provider
     # that omits it is tolerated.
     require_iss: bool = False
+    # Marks a resource-server client permitted to introspect tokens it does not
+    # own (RFC 7662). Regular clients may only introspect their own tokens.
+    allow_introspection: bool = False
 
 
 # ---------------------------------------------------------------------------

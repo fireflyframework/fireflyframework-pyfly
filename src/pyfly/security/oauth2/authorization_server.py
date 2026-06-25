@@ -156,19 +156,46 @@ class AuthorizationServer:
         return {"keys": [jwk]}
 
     def authenticate_client(self, client_id: str, client_secret: str) -> ClientRegistration | None:
-        """Return the registration iff *client_id*/*client_secret* match (constant time)."""
+        """Return the registration iff *client_id*/*client_secret* match (constant time).
+
+        Client authentication requires real credentials: an empty client id or
+        secret — or a registration that has no secret configured — never
+        authenticates (prevents an empty-credential bypass on the management
+        endpoints and for any client that is not a confidential client).
+        """
+        if not client_id or not client_secret:
+            return None
         registration = self._client_repository.find_by_registration_id(client_id)
-        if registration is None or not secrets.compare_digest(
-            registration.client_secret.encode("utf-8"), client_secret.encode("utf-8")
-        ):
+        if registration is None or not registration.client_secret:
+            return None
+        if not secrets.compare_digest(registration.client_secret.encode("utf-8"), client_secret.encode("utf-8")):
             return None
         return registration
 
     def _verification_key(self) -> Any:
         return self._private_key.public_key() if self._is_asymmetric else self._secret
 
-    async def introspect(self, token: str) -> dict[str, Any]:
-        """RFC 7662 token introspection for an access (JWT) or refresh token."""
+    async def introspect(
+        self, token: str, *, requesting_client_id: str | None = None, allow_any_client: bool = False
+    ) -> dict[str, Any]:
+        """RFC 7662 token introspection for an access (JWT) or refresh token.
+
+        When *requesting_client_id* is given and *allow_any_client* is False, a
+        token owned by a different client is reported as inactive — so a client
+        cannot scan another client's tokens (information disclosure). Designated
+        resource-server clients pass ``allow_any_client=True``.
+        """
+        result = await self._introspect(token)
+        if (
+            result.get("active")
+            and requesting_client_id is not None
+            and not allow_any_client
+            and result.get("client_id") != requesting_client_id
+        ):
+            return {"active": False}
+        return result
+
+    async def _introspect(self, token: str) -> dict[str, Any]:
         # Access token: a self-contained, signature-verified JWT.
         try:
             payload = pyjwt.decode(
@@ -401,9 +428,18 @@ class AuthorizationServer:
         for token_id in family.get("members", []):
             await self._token_store.revoke(token_id)
 
-    async def revoke(self, token_id: str) -> None:
-        """Revoke a refresh token (and, when known, its whole rotation family)."""
+    async def revoke(self, token_id: str, *, requesting_client_id: str | None = None) -> None:
+        """Revoke a refresh token (and, when known, its whole rotation family).
+
+        Per RFC 7009 §2.1, when *requesting_client_id* is given the token is only
+        revoked if it was issued to that client — a client cannot revoke another
+        client's tokens. ``requesting_client_id=None`` (internal callers) revokes
+        unconditionally.
+        """
         token_data = await self._token_store.find(token_id)
+        owner = token_data.get("client_id") if isinstance(token_data, dict) else None
+        if requesting_client_id is not None and owner is not None and owner != requesting_client_id:
+            return  # not the owner — refuse silently (RFC 7009 still returns 200)
         await self._token_store.revoke(token_id)
         family_id = token_data.get("family_id") if isinstance(token_data, dict) else None
         if family_id:

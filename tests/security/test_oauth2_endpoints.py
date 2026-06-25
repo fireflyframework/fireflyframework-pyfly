@@ -119,6 +119,87 @@ class TestEndpoints:
         assert again.json()["active"] is False
 
 
+def _two_client_server() -> AuthorizationServer:
+    repo = InMemoryClientRegistrationRepository(
+        ClientRegistration(
+            registration_id="a",
+            client_id="a",
+            client_secret="a-secret",
+            authorization_grant_type="client_credentials",
+            scopes=["read"],
+        ),
+        ClientRegistration(
+            registration_id="b",
+            client_id="b",
+            client_secret="b-secret",
+            authorization_grant_type="client_credentials",
+            scopes=["read"],
+        ),
+        ClientRegistration(
+            registration_id="rs",
+            client_id="rs",
+            client_secret="rs-secret",
+            allow_introspection=True,
+        ),
+    )
+    return AuthorizationServer(secret=_SECRET, client_repository=repo, token_store=InMemoryTokenStore())
+
+
+class TestEndpointAuthorization:
+    """RFC 7009/7662: a client may only act on its own tokens; introspection by a
+    non-owner is allowed only for designated resource-server clients."""
+
+    def test_introspect_other_clients_token_is_inactive(self) -> None:
+        server = _two_client_server()
+        client = _client(server)
+        b_token = client.post(
+            "/oauth2/token", data={"grant_type": "client_credentials", "client_id": "b", "client_secret": "b-secret"}
+        ).json()["access_token"]
+        # Client 'a' tries to introspect client 'b''s token.
+        resp = client.post("/oauth2/introspect", data={"token": b_token, "client_id": "a", "client_secret": "a-secret"})
+        assert resp.json()["active"] is False
+
+    def test_resource_server_client_can_introspect_any_token(self) -> None:
+        server = _two_client_server()
+        client = _client(server)
+        b_token = client.post(
+            "/oauth2/token", data={"grant_type": "client_credentials", "client_id": "b", "client_secret": "b-secret"}
+        ).json()["access_token"]
+        resp = client.post(
+            "/oauth2/introspect", data={"token": b_token, "client_id": "rs", "client_secret": "rs-secret"}
+        )
+        assert resp.json()["active"] is True
+
+    def test_revoke_other_clients_token_is_noop(self) -> None:
+        server = _two_client_server()
+        client = _client(server)
+        issued = client.post(
+            "/oauth2/token", data={"grant_type": "client_credentials", "client_id": "b", "client_secret": "b-secret"}
+        ).json()
+        b_refresh = issued["refresh_token"]
+        # Client 'a' attempts to revoke client 'b''s refresh token.
+        client.post("/oauth2/revoke", data={"token": b_refresh, "client_id": "a", "client_secret": "a-secret"})
+        # 'b''s token is still usable -> it was NOT revoked.
+        refreshed = client.post(
+            "/oauth2/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": "b",
+                "client_secret": "b-secret",
+                "refresh_token": b_refresh,
+            },
+        )
+        assert refreshed.status_code == 200
+
+    def test_introspect_rejects_empty_credentials(self) -> None:
+        resp = _client(_two_client_server()).post("/oauth2/introspect", data={"token": "x"})
+        assert resp.status_code == 401
+
+    def test_revoke_rejects_empty_credentials(self) -> None:
+        resp = _client(_two_client_server()).post("/oauth2/revoke", data={"token": "x"})
+        assert resp.status_code == 401
+
+
 class TestOpaqueTokenIntrospector:
     def test_active_token_builds_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from pyfly.security.oauth2.resource_server import OpaqueTokenIntrospector

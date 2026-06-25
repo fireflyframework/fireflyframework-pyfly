@@ -34,6 +34,7 @@ from starlette.routing import Route
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.oauth2.authorization_server import AuthorizationServer
+from pyfly.security.oauth2.client import ClientRegistration
 
 # OAuth2 error codes that map to a 401 (client authentication failed); the rest
 # are request/grant errors returned as 400 (RFC 6749 §5.2).
@@ -75,22 +76,30 @@ class AuthorizationServerEndpoints:
 
     async def _introspect(self, request: Request) -> Response:
         form = await request.form()
-        if not self._authenticate(request, form):
+        registration = self._authenticate(request, form)
+        if registration is None:
             return self._error(SecurityException("Invalid client", code="INVALID_CLIENT"))
         token = str(form.get("token", ""))
         if not token:
             return JSONResponse({"active": False})
-        return JSONResponse(await self._server.introspect(token))
+        result = await self._server.introspect(
+            token,
+            requesting_client_id=registration.client_id,
+            allow_any_client=getattr(registration, "allow_introspection", False),
+        )
+        return JSONResponse(result)
 
     # -- revocation (RFC 7009) --------------------------------------------
 
     async def _revoke(self, request: Request) -> Response:
         form = await request.form()
-        if not self._authenticate(request, form):
+        registration = self._authenticate(request, form)
+        if registration is None:
             return self._error(SecurityException("Invalid client", code="INVALID_CLIENT"))
         token = str(form.get("token", ""))
         if token:
-            await self._server.revoke(token)
+            # RFC 7009 §2.1: only the owning client may revoke the token.
+            await self._server.revoke(token, requesting_client_id=registration.client_id)
         # RFC 7009 §2.2: the AS responds 200 regardless of whether the token existed.
         return JSONResponse({})
 
@@ -109,9 +118,9 @@ class AuthorizationServerEndpoints:
             return basic
         return str(form.get("client_id", "")), str(form.get("client_secret", ""))
 
-    def _authenticate(self, request: Request, form: Any) -> bool:
+    def _authenticate(self, request: Request, form: Any) -> ClientRegistration | None:
         client_id, client_secret = self._client_credentials(request, form)
-        return self._server.authenticate_client(client_id, client_secret) is not None
+        return self._server.authenticate_client(client_id, client_secret)
 
     @staticmethod
     def _basic_auth(request: Request) -> tuple[str, str] | None:
