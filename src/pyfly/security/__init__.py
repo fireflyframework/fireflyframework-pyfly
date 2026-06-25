@@ -24,22 +24,33 @@ extras.
 
 from pyfly.security.context import SecurityContext
 from pyfly.security.decorators import secure
-from pyfly.security.expression import get_role_hierarchy, set_role_hierarchy
+from pyfly.security.expression import (
+    get_permission_evaluator,
+    get_role_hierarchy,
+    set_permission_evaluator,
+    set_role_hierarchy,
+)
 from pyfly.security.http_security import AccessRule, AccessRuleType, HttpSecurity, SecurityRule
-from pyfly.security.method_security import post_authorize, pre_authorize
+from pyfly.security.method_security import post_authorize, post_filter, pre_authorize, pre_filter
+from pyfly.security.permission import PermissionEvaluator
 from pyfly.security.role_hierarchy import RoleHierarchy
 
 __all__ = [
     "AccessRule",
     "AccessRuleType",
     "HttpSecurity",
+    "PermissionEvaluator",
     "RoleHierarchy",
     "SecurityContext",
     "SecurityRule",
+    "get_permission_evaluator",
     "get_role_hierarchy",
     "post_authorize",
+    "post_filter",
     "pre_authorize",
+    "pre_filter",
     "secure",
+    "set_permission_evaluator",
     "set_role_hierarchy",
 ]
 
@@ -83,10 +94,40 @@ try:
 except ImportError:
     pass
 
-from pyfly.security.user_details import (
-    InMemoryUserDetailsService,
-    UserDetails,
-    UserDetailsService,
-)
+try:
+    from pyfly.security.user_details import (
+        InMemoryUserDetailsService,
+        UserDetails,
+        UserDetailsService,
+    )
 
-__all__ += ["InMemoryUserDetailsService", "UserDetails", "UserDetailsService"]
+    __all__ += ["InMemoryUserDetailsService", "UserDetails", "UserDetailsService"]
+except ImportError:
+    pass
+
+# AuthenticationProvider/DaoAuthenticationProvider transitively need a
+# PasswordEncoder (bcrypt), so guard the import like the other optional pieces.
+try:
+    from pyfly.security.authentication import (
+        Authentication,
+        AuthenticationException,
+        AuthenticationProvider,
+        BadCredentialsException,
+        DaoAuthenticationProvider,
+        DisabledException,
+        ProviderManager,
+        ProviderNotFoundException,
+    )
+
+    __all__ += [
+        "Authentication",
+        "AuthenticationException",
+        "AuthenticationProvider",
+        "BadCredentialsException",
+        "DaoAuthenticationProvider",
+        "DisabledException",
+        "ProviderManager",
+        "ProviderNotFoundException",
+    ]
+except ImportError:
+    pass

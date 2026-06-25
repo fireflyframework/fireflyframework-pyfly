@@ -36,6 +36,7 @@ from typing import Any
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
+from pyfly.security.permission import PermissionEvaluator
 from pyfly.security.role_hierarchy import RoleHierarchy
 
 _PARAM_RE = re.compile(r"#(\w+)")
@@ -44,6 +45,10 @@ _PARAM_PREFIX = "_pyfly_arg_"
 # Process-wide role hierarchy consulted by hasRole/hasAnyRole/hasAuthority (Spring's
 # RoleHierarchy bean). Configure once at startup via set_role_hierarchy().
 _active_hierarchy: RoleHierarchy | None = None
+
+# Process-wide PermissionEvaluator backing hasPermission(target, perm). When unset,
+# hasPermission falls back to a flat permission check on the SecurityContext.
+_active_permission_evaluator: PermissionEvaluator | None = None
 
 
 def set_role_hierarchy(hierarchy: RoleHierarchy | None) -> None:
@@ -55,6 +60,39 @@ def set_role_hierarchy(hierarchy: RoleHierarchy | None) -> None:
 def get_role_hierarchy() -> RoleHierarchy | None:
     """Return the currently installed role hierarchy, if any."""
     return _active_hierarchy
+
+
+def set_permission_evaluator(evaluator: PermissionEvaluator | None) -> None:
+    """Install the PermissionEvaluator used by ``hasPermission`` (``None`` disables)."""
+    global _active_permission_evaluator
+    _active_permission_evaluator = evaluator
+
+
+def get_permission_evaluator() -> PermissionEvaluator | None:
+    """Return the currently installed PermissionEvaluator, if any."""
+    return _active_permission_evaluator
+
+
+def _eval_permission(ctx: SecurityContext, parts: tuple[Any, ...]) -> bool:
+    """Resolve a ``hasPermission(...)`` call against the evaluator or the context.
+
+    Argument shapes (Spring parity):
+      * ``(permission,)``                    — flat permission check
+      * ``(target, permission)``             — domain-object permission
+      * ``(target_id, target_type, perm)``   — identifier + type permission
+    """
+    if not parts:
+        return False
+    evaluator = _active_permission_evaluator
+    if evaluator is None:
+        # No ACL evaluator: fall back to the principal's flat permissions.
+        return ctx.has_permission(str(parts[-1]))
+    if len(parts) == 1:
+        return evaluator.has_permission(ctx, None, str(parts[0]))
+    if len(parts) == 2:
+        return evaluator.has_permission(ctx, parts[0], str(parts[1]))
+    target_id, target_type, permission = parts[-3], parts[-2], parts[-1]
+    return evaluator.has_permission(ctx, target_id, str(permission), target_type=str(target_type))
 
 
 def _effective_roles(ctx: SecurityContext) -> set[str]:
@@ -102,7 +140,9 @@ def _has_authority(ctx: SecurityContext, authority: Any) -> bool:
     return _has_role(ctx, name) or ctx.has_permission(name)
 
 
-def _build_namespace(ctx: SecurityContext, args: dict[str, Any] | None, return_object: Any) -> dict[str, Any]:
+def _build_namespace(
+    ctx: SecurityContext, args: dict[str, Any] | None, return_object: Any, filter_object: Any = None
+) -> dict[str, Any]:
     namespace: dict[str, Any] = {
         "principal": ctx,
         "authentication": ctx,
@@ -120,10 +160,11 @@ def _build_namespace(ctx: SecurityContext, args: dict[str, Any] | None, return_o
         "hasAnyRole": _BoolFn(lambda *roles: any(_has_role(ctx, r) for r in roles)),
         "hasAuthority": _BoolFn(lambda authority: _has_authority(ctx, authority)),
         "hasAnyAuthority": _BoolFn(lambda *auths: any(_has_authority(ctx, a) for a in auths)),
-        # 1-arg hasPermission(perm) or 2-arg hasPermission(target, perm) — the last
-        # argument is the permission (target-based ACLs are not modelled).
-        "hasPermission": _BoolFn(lambda *parts: ctx.has_permission(str(parts[-1]))),
+        # hasPermission(perm) / (target, perm) / (id, type, perm) — dispatched to the
+        # installed PermissionEvaluator, or a flat context check when none is set.
+        "hasPermission": _BoolFn(lambda *parts: _eval_permission(ctx, parts)),
         "returnObject": return_object,
+        "filterObject": filter_object,
     }
     for key, value in (args or {}).items():
         namespace[_PARAM_PREFIX + key] = value
@@ -188,11 +229,15 @@ def evaluate_security_expression(
     *,
     args: dict[str, Any] | None = None,
     return_object: Any = None,
+    filter_object: Any = None,
 ) -> bool:
-    """Evaluate a method-security expression; returns the boolean decision."""
+    """Evaluate a method-security expression; returns the boolean decision.
+
+    *filter_object* binds ``filterObject`` for ``@pre_filter`` / ``@post_filter``.
+    """
     translated = _PARAM_RE.sub(lambda m: _PARAM_PREFIX + m.group(1), expression.strip())
     try:
         tree = ast.parse(translated, mode="eval")
     except SyntaxError as exc:
         raise SecurityException(f"Invalid security expression syntax: {exc}", code="INVALID_EXPRESSION") from exc
-    return bool(_eval(tree, _build_namespace(ctx, args, return_object)))
+    return bool(_eval(tree, _build_namespace(ctx, args, return_object, filter_object)))
