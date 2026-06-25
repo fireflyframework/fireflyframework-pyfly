@@ -109,7 +109,7 @@ class AuthorizationServer:
         self._algorithm = algorithm.upper()
         self._is_asymmetric = self._algorithm[:2] in ("RS", "ES", "PS")
         self._key_id = key_id
-        self._private_key = self._coerce_private_key(private_key) if self._is_asymmetric else None
+        self._private_key: Any = self._coerce_private_key(private_key) if self._is_asymmetric else None
         if self._is_asymmetric and self._private_key is None:
             raise ValueError(f"algorithm {self._algorithm} requires a private_key")
         if audience is None:
@@ -144,6 +144,7 @@ class AuthorizationServer:
             return {"keys": []}
         import json as _json
 
+        assert self._private_key is not None  # narrowed for mypy
         public_key = self._private_key.public_key()
         if self._algorithm[:2] == "ES":
             jwk = _json.loads(pyjwt.algorithms.ECAlgorithm.to_jwk(public_key))
@@ -153,6 +154,55 @@ class AuthorizationServer:
         if self._key_id:
             jwk["kid"] = self._key_id
         return {"keys": [jwk]}
+
+    def authenticate_client(self, client_id: str, client_secret: str) -> ClientRegistration | None:
+        """Return the registration iff *client_id*/*client_secret* match (constant time)."""
+        registration = self._client_repository.find_by_registration_id(client_id)
+        if registration is None or not secrets.compare_digest(
+            registration.client_secret.encode("utf-8"), client_secret.encode("utf-8")
+        ):
+            return None
+        return registration
+
+    def _verification_key(self) -> Any:
+        return self._private_key.public_key() if self._is_asymmetric else self._secret
+
+    async def introspect(self, token: str) -> dict[str, Any]:
+        """RFC 7662 token introspection for an access (JWT) or refresh token."""
+        # Access token: a self-contained, signature-verified JWT.
+        try:
+            payload = pyjwt.decode(
+                token,
+                self._verification_key(),
+                algorithms=[self._algorithm],
+                options={"require": ["exp"], "verify_aud": False},
+            )
+            active: dict[str, Any] = {"active": True, "token_type": "Bearer"}
+            for claim in ("sub", "scope", "iat", "exp", "iss", "aud"):
+                if claim in payload:
+                    active[claim] = payload[claim]
+            active.setdefault("client_id", payload.get("sub"))
+            return active
+        except pyjwt.PyJWTError:
+            pass
+
+        # Refresh token: opaque, looked up in the store; active iff present,
+        # unused, unexpired, and its family is still active.
+        data = await self._token_store.find(token)
+        if data is None or data.get("used") or data.get("exp", 0) < int(time.time()):
+            return {"active": False}
+        family_id = data.get("family_id")
+        if family_id:
+            family = await self._token_store.find(self._family_key(family_id))
+            if family is not None and not family.get("active", True):
+                return {"active": False}
+        return {
+            "active": True,
+            "token_type": "refresh_token",
+            "client_id": data.get("client_id"),
+            "scope": data.get("scope", ""),
+            "exp": data.get("exp"),
+        }
 
     async def token(
         self,
@@ -180,10 +230,8 @@ class AuthorizationServer:
         """
         # Authenticate client (constant-time secret comparison to avoid a timing
         # side-channel that could leak the client secret).
-        registration = self._client_repository.find_by_registration_id(client_id)
-        if registration is None or not secrets.compare_digest(
-            registration.client_secret.encode("utf-8"), client_secret.encode("utf-8")
-        ):
+        registration = self.authenticate_client(client_id, client_secret)
+        if registration is None:
             raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
 
         if grant_type == "client_credentials":

@@ -256,47 +256,105 @@ class JWKSTokenValidator:
     def _build_context(self, payload: dict[str, Any]) -> SecurityContext:
         """Map a validated *payload* onto a :class:`SecurityContext` per the
         configured claim mappings. Subclasses may override for bespoke mapping."""
-        m = self._mappings
+        return build_security_context(payload, self._mappings)
 
-        # Principal: first non-empty principal claim wins.
-        user_id: str | None = None
-        for claim in m.principal_claims:
-            vals = _flatten_strs(_resolve_claim_path(payload, claim))
-            if vals:
-                user_id = vals[0]
-                break
 
-        # Authorities/roles: collect across every configured path, de-duplicated
-        # (order-preserving), with the optional prefix applied.
-        roles: list[str] = []
-        seen: set[str] = set()
-        for claim in m.authority_claims:
-            for raw in _flatten_strs(_resolve_claim_path(payload, claim)):
-                value = f"{m.authority_prefix}{raw}" if m.authority_prefix else raw
-                if value not in seen:
-                    seen.add(value)
-                    roles.append(value)
+def build_security_context(payload: dict[str, Any], mappings: ClaimMappings) -> SecurityContext:
+    """Map a token/introspection *payload* onto a :class:`SecurityContext`.
 
-        # Permissions/scopes: scope claims are space-delimited strings or lists.
-        permissions: list[str] = []
-        perm_seen: set[str] = set()
-        for claim in m.scope_claims:
-            for raw in _flatten_strs(_resolve_claim_path(payload, claim)):
-                for part in raw.split():
-                    if part and part not in perm_seen:
-                        perm_seen.add(part)
-                        permissions.append(part)
+    Shared by :class:`JWKSTokenValidator` and :class:`OpaqueTokenIntrospector` so
+    JWT and opaque-token resource servers map claims identically.
+    """
+    m = mappings
 
-        # Attributes: copy configured claims verbatim (string-coerced).
-        attributes: dict[str, str] = {}
-        for claim in m.attribute_claims:
-            vals = _flatten_strs(_resolve_claim_path(payload, claim))
-            if vals:
-                attributes[claim] = vals[0]
+    # Principal: first non-empty principal claim wins.
+    user_id: str | None = None
+    for claim in m.principal_claims:
+        vals = _flatten_strs(_resolve_claim_path(payload, claim))
+        if vals:
+            user_id = vals[0]
+            break
 
-        return SecurityContext(
-            user_id=user_id,
-            roles=roles,
-            permissions=permissions,
-            attributes=attributes,
-        )
+    # Authorities/roles: collect across every configured path, de-duplicated
+    # (order-preserving), with the optional prefix applied.
+    roles: list[str] = []
+    seen: set[str] = set()
+    for claim in m.authority_claims:
+        for raw in _flatten_strs(_resolve_claim_path(payload, claim)):
+            value = f"{m.authority_prefix}{raw}" if m.authority_prefix else raw
+            if value not in seen:
+                seen.add(value)
+                roles.append(value)
+
+    # Permissions/scopes: scope claims are space-delimited strings or lists.
+    permissions: list[str] = []
+    perm_seen: set[str] = set()
+    for claim in m.scope_claims:
+        for raw in _flatten_strs(_resolve_claim_path(payload, claim)):
+            for part in raw.split():
+                if part and part not in perm_seen:
+                    perm_seen.add(part)
+                    permissions.append(part)
+
+    # Attributes: copy configured claims verbatim (string-coerced).
+    attributes: dict[str, str] = {}
+    for claim in m.attribute_claims:
+        vals = _flatten_strs(_resolve_claim_path(payload, claim))
+        if vals:
+            attributes[claim] = vals[0]
+
+    return SecurityContext(
+        user_id=user_id,
+        roles=roles,
+        permissions=permissions,
+        attributes=attributes,
+    )
+
+
+class OpaqueTokenIntrospector:
+    """Validates opaque access tokens via an RFC 7662 introspection endpoint.
+
+    The resource server posts the token (with its own client credentials) to the
+    authorization server's ``/introspect`` endpoint and maps the returned claims
+    onto a :class:`SecurityContext` using the same :class:`ClaimMappings` as the
+    JWT validator. Use this for opaque (non-JWT) tokens.
+    """
+
+    def __init__(
+        self,
+        introspection_uri: str,
+        *,
+        client_id: str,
+        client_secret: str,
+        claim_mappings: ClaimMappings | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._uri = introspection_uri
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._mappings = claim_mappings or ClaimMappings()
+        self._timeout = timeout
+
+    def introspect(self, token: str) -> dict[str, Any]:
+        """Return the introspection claims for *token*, or raise if it is inactive."""
+        import httpx
+
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                resp = client.post(
+                    self._uri,
+                    data={"token": token, "token_type_hint": "access_token"},
+                    auth=(self._client_id, self._client_secret),
+                    headers={"Accept": "application/json"},
+                )
+        except httpx.HTTPError as exc:
+            raise SecurityException(f"Token introspection request failed: {exc}", code="INVALID_TOKEN") from exc
+        if resp.status_code != 200:
+            raise SecurityException(f"Token introspection failed (HTTP {resp.status_code})", code="INVALID_TOKEN")
+        payload: dict[str, Any] = resp.json()
+        if not payload.get("active"):
+            raise SecurityException("Token is not active", code="INVALID_TOKEN")
+        return payload
+
+    def to_security_context(self, token: str) -> SecurityContext:
+        return build_security_context(self.introspect(token), self._mappings)
