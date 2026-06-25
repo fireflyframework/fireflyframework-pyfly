@@ -165,9 +165,7 @@ def test_client_autoconfig_pkce_can_be_disabled() -> None:
                     "oauth2": {
                         "client": {
                             "enabled": "true",
-                            "registrations": {
-                                "acme": {"client-id": "c", "client-secret": "s", "use-pkce": "false"}
-                            },
+                            "registrations": {"acme": {"client-id": "c", "client-secret": "s", "use-pkce": "false"}},
                         }
                     }
                 }

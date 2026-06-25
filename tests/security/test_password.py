@@ -170,9 +170,7 @@ class TestDelegatingEncoderAutoConfig:
         from pyfly.core.config import Config
         from pyfly.security.auto_configuration import PasswordEncoderAutoConfiguration
 
-        cfg = Config(
-            {"pyfly": {"security": {"password": {"delegating": {"enabled": "true"}, "bcrypt-rounds": 4}}}}
-        )
+        cfg = Config({"pyfly": {"security": {"password": {"delegating": {"enabled": "true"}, "bcrypt-rounds": 4}}}})
         enc = PasswordEncoderAutoConfiguration().delegating_password_encoder(cfg)
         hashed = enc.hash("pw")
         assert hashed.startswith("{bcrypt}")

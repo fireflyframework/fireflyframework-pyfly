@@ -224,6 +224,28 @@ def _csv_or_list(value: Any) -> list[str]:
     return [s.strip() for s in str(value).split(",") if s.strip()]
 
 
+def _users_from_config(config: Config, key: str) -> list[Any]:
+    """Build :class:`UserDetails` from a config map of pre-hashed users at *key*."""
+    from pyfly.security.user_details import UserDetails
+
+    raw = config.get(key, {})
+    users: list[Any] = []
+    if isinstance(raw, dict):
+        for username, props in raw.items():
+            if not isinstance(props, dict):
+                continue
+            users.append(
+                UserDetails(
+                    username=str(username),
+                    password_hash=str(props.get("password-hash", "")),
+                    roles=_csv_or_list(props.get("roles")),
+                    permissions=_csv_or_list(props.get("permissions")),
+                    enabled=_as_bool(props.get("enabled", True)),
+                )
+            )
+    return users
+
+
 @auto_configuration
 @conditional_on_property("pyfly.security.http-basic.enabled", having_value="true")
 @conditional_on_class("starlette")
@@ -252,31 +274,69 @@ class HttpBasicAutoConfiguration:
     @bean
     def http_basic_filter(self, config: Config) -> WebFilter:
         from pyfly.security.password import BcryptPasswordEncoder
-        from pyfly.security.user_details import InMemoryUserDetailsService, UserDetails
+        from pyfly.security.user_details import InMemoryUserDetailsService
         from pyfly.web.adapters.starlette.filters.http_basic_filter import HttpBasicAuthenticationFilter
 
-        raw_users = config.get("pyfly.security.http-basic.users", {})
-        users: list[UserDetails] = []
-        if isinstance(raw_users, dict):
-            for username, props in raw_users.items():
-                if not isinstance(props, dict):
-                    continue
-                users.append(
-                    UserDetails(
-                        username=str(username),
-                        password_hash=str(props.get("password-hash", "")),
-                        roles=_csv_or_list(props.get("roles")),
-                        permissions=_csv_or_list(props.get("permissions")),
-                        enabled=_as_bool(props.get("enabled", True)),
-                    )
-                )
-
+        users = _users_from_config(config, "pyfly.security.http-basic.users")
         rounds = int(config.get("pyfly.security.password.bcrypt-rounds", 12))
         return HttpBasicAuthenticationFilter(
             InMemoryUserDetailsService(*users),
             BcryptPasswordEncoder(rounds=rounds),
             realm=str(config.get("pyfly.security.http-basic.realm", "Realm")),
             error_mode=str(config.get("pyfly.security.http-basic.error-mode", "anonymous")),
+        )
+
+
+@auto_configuration
+@conditional_on_property("pyfly.security.form-login.enabled", having_value="true")
+@conditional_on_class("starlette")
+@conditional_on_class("bcrypt")
+class FormLoginAutoConfiguration:
+    """Auto-configures form login from config (opt-in).
+
+    Declares users (pre-hashed) under ``pyfly.security.form-login.users`` and tunes
+    URLs/params under ``pyfly.security.form-login.*``. Apps with a dynamic user
+    store register their own ``FormLoginFilter`` ``WebFilter`` bean instead.
+    """
+
+    @bean
+    def form_login_filter(self, config: Config) -> WebFilter:
+        from pyfly.security.authentication import DaoAuthenticationProvider, ProviderManager
+        from pyfly.security.password import BcryptPasswordEncoder
+        from pyfly.security.user_details import InMemoryUserDetailsService
+        from pyfly.web.adapters.starlette.filters.form_login_filter import FormLoginFilter
+
+        users = _users_from_config(config, "pyfly.security.form-login.users")
+        rounds = int(config.get("pyfly.security.password.bcrypt-rounds", 12))
+        manager = ProviderManager(
+            DaoAuthenticationProvider(InMemoryUserDetailsService(*users), BcryptPasswordEncoder(rounds=rounds))
+        )
+        return FormLoginFilter(
+            manager,
+            login_url=str(config.get("pyfly.security.form-login.login-url", "/login")),
+            username_param=str(config.get("pyfly.security.form-login.username-param", "username")),
+            password_param=str(config.get("pyfly.security.form-login.password-param", "password")),
+            success_url=str(config.get("pyfly.security.form-login.success-url", "/")),
+            failure_url=str(config.get("pyfly.security.form-login.failure-url", "/login?error")),
+            use_redirect=_as_bool(config.get("pyfly.security.form-login.use-redirect", True)),
+        )
+
+
+@auto_configuration
+@conditional_on_property("pyfly.security.logout.enabled", having_value="true")
+@conditional_on_class("starlette")
+class LogoutAutoConfiguration:
+    """Auto-configures a generic logout filter (opt-in) from ``pyfly.security.logout.*``."""
+
+    @bean
+    def logout_filter(self, config: Config) -> WebFilter:
+        from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
+
+        return LogoutFilter(
+            logout_url=str(config.get("pyfly.security.logout.logout-url", "/logout")),
+            logout_success_url=str(config.get("pyfly.security.logout.success-url", "/login?logout")),
+            delete_cookies=_csv_or_list(config.get("pyfly.security.logout.delete-cookies")),
+            use_redirect=_as_bool(config.get("pyfly.security.logout.use-redirect", True)),
         )
 
 

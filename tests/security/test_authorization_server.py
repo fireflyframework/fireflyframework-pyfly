@@ -180,9 +180,7 @@ class TestAudienceClaim:
         )
 
     @pytest.mark.asyncio
-    async def test_client_credentials_token_includes_aud(
-        self, auth_server_with_aud: AuthorizationServer
-    ) -> None:
+    async def test_client_credentials_token_includes_aud(self, auth_server_with_aud: AuthorizationServer) -> None:
         result = await auth_server_with_aud.token(
             grant_type="client_credentials",
             client_id="test-client",
@@ -289,9 +287,7 @@ class TestRefreshTokenReuseDetection:
     """OAuth 2.1 / RFC 9700: replaying a rotated refresh token revokes the whole family."""
 
     @pytest.mark.asyncio
-    async def test_reuse_of_rotated_token_revokes_active_descendant(
-        self, auth_server: AuthorizationServer
-    ) -> None:
+    async def test_reuse_of_rotated_token_revokes_active_descendant(self, auth_server: AuthorizationServer) -> None:
         initial = await auth_server.token(
             grant_type="client_credentials", client_id="test-client", client_secret="test-secret"
         )

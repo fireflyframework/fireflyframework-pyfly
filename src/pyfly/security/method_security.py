@@ -83,11 +83,7 @@ def _filter_collection(expression: str, collection: Any, args: dict[str, Any]) -
     """Return *collection* with only the elements for which *expression* (bound to
     ``filterObject``) is True, preserving the collection's concrete type."""
     ctx = _get_security_context()
-    kept = [
-        item
-        for item in collection
-        if evaluate_security_expression(expression, ctx, args=args, filter_object=item)
-    ]
+    kept = [item for item in collection if evaluate_security_expression(expression, ctx, args=args, filter_object=item)]
     return type(collection)(kept)
 
 
