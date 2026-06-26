@@ -1484,11 +1484,66 @@ class ShoppingCart: ...
 | `#paramName` / `returnObject` | `#paramName` / `returnObject` | Method args are bound by name; `returnObject` is available in `@post_authorize`. (`@secure` does not bind args.) |
 | `RoleHierarchy` bean | `RoleHierarchy` + `set_role_hierarchy()` / `get_role_hierarchy()` | `RoleHierarchy.from_string("ADMIN > USER")`, `expand(roles)`; one process-wide hierarchy consulted by `hasRole`/`hasAnyRole`/`hasAuthority`. See [Security Guide](modules/security.md#method-level-security). |
 
+### Authentication (login mechanisms + credential SPI)
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| `http.formLogin()` / `UsernamePasswordAuthenticationFilter` | `FormLoginFilter` (`pyfly.web.adapters.starlette.filters.form_login_filter`) | POST of `username`/`password` to the login URL; authenticates via `ProviderManager`, rotates the session id (session-fixation defense), stores the `SecurityContext` in the session. Redirect or JSON via `use_redirect`. Enable with `pyfly.security.form-login.enabled`; tune `.login-url`, `.username-param`, `.password-param`, `.success-url`, `.failure-url`, `.use-redirect`, `.users.<username>.{password-hash, roles, permissions, enabled}`. |
+| `http.httpBasic()` / `BasicAuthenticationFilter` | `HttpBasicAuthenticationFilter` (`...filters.http_basic_filter`) | RFC 7617 Basic auth against a `UserDetailsService` + `PasswordEncoder`. `error-mode: anonymous` (default — fall through to the gate) or `401` (challenge with `WWW-Authenticate: Basic realm=…`). Enable with `pyfly.security.http-basic.enabled`; `.realm`, `.error-mode`, `.users.<username>.{password-hash, roles, permissions, enabled}`. |
+| `http.x509()` / `X509AuthenticationFilter` | `X509AuthenticationFilter` (`...filters.x509_filter`) | Authenticates the client cert forwarded by the TLS-terminating proxy in a header (default `x-client-cert`, PEM, URL-decoded); subject CN → principal, optional `UserDetailsService` supplies authorities. `error_mode` `anonymous`/`401`. Wired programmatically. |
+| `SwitchUserFilter` (`/login/impersonate`, `ROLE_PREVIOUS_ADMINISTRATOR`) | `SwitchUserFilter` (`...filters.switch_user_filter`) | A principal holding `switch_authority` (default `ADMIN`) impersonates another user; original principal stashed in session and restored at the exit URL. Defaults: switch `/login/impersonate`, exit `/logout/impersonate`; impersonated context carries the `PREVIOUS_ADMINISTRATOR` authority. |
+| `http.logout()` / `LogoutConfigurer` | `LogoutFilter` (`...filters.logout_filter`) | POST to the logout URL invalidates the session, clears the context, deletes cookies. Enable with `pyfly.security.logout.enabled`; `.logout-url`, `.success-url`, `.delete-cookies`, `.use-redirect`. |
+| `UserDetailsService` / `UserDetails` / `InMemoryUserDetailsManager` | `UserDetailsService` (protocol), `UserDetails`, `InMemoryUserDetailsService`; JDBC equivalent `SqlUserDetailsService` (`pyfly.security.adapters.sql_user_details`) | `async load_user_by_username(username) -> UserDetails | None`. `UserDetails` holds `username`, `password_hash`, `roles`, `permissions`, `enabled`. |
+| `AuthenticationManager` / `ProviderManager` / `DaoAuthenticationProvider` | `ProviderManager`, `AuthenticationProvider`, `DaoAuthenticationProvider`, `Authentication` (`pyfly.security.authentication`) | `ProviderManager` consults providers in order (first that `supports` wins). `DaoAuthenticationProvider` verifies username/password against a `UserDetailsService` + `PasswordEncoder`, with a constant-time dummy `verify()` on unknown users to block username enumeration. Exceptions mirror Spring: `AuthenticationException`, `BadCredentialsException`, `DisabledException`, `ProviderNotFoundException`. |
+
+### Password encoding (algorithm migration)
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| `PasswordEncoderFactories.createDelegatingPasswordEncoder()` / `DelegatingPasswordEncoder` | `DelegatingPasswordEncoder` / `create_delegating_password_encoder()` | Produces `{id}`-prefixed hashes (`{bcrypt}…`) and dispatches `verify()` by prefix; `upgrade_encoding(hash)` reports when a stored hash should be re-hashed with the current default (transparent on-login migration). Default id is `bcrypt`. Enable the auto-config encoder with `pyfly.security.password.delegating.enabled`; bcrypt cost via `pyfly.security.password.bcrypt-rounds`. |
+| `Argon2PasswordEncoder` / `Pbkdf2PasswordEncoder` / `SCryptPasswordEncoder` / `BCryptPasswordEncoder` | `Argon2PasswordEncoder`, `Pbkdf2PasswordEncoder`, `ScryptPasswordEncoder`, `BcryptPasswordEncoder` (all implement the `PasswordEncoder` protocol) | PBKDF2 (600k SHA-256 iters), scrypt and Argon2id all emit self-describing strings. `Argon2PasswordEncoder` needs `argon2-cffi` (`pip install pyfly[argon2]`); it is imported lazily so the module works without it. |
+
+### Authorization (filters + expression DSL)
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| `@PreFilter` / `@PostFilter` | `pre_filter` / `post_filter` (`pyfly.security.method_security`) | Filter a collection argument before the call (`@PreFilter`) or the returned collection after (`@PostFilter`); each element binds to `filterObject`, and the concrete collection type is preserved. |
+| `PermissionEvaluator` (ACL `hasPermission`) | `PermissionEvaluator` (protocol) + `set_permission_evaluator()` / `get_permission_evaluator()` | Backs `hasPermission(target, 'perm')` and `hasPermission(id, 'Type', 'perm')` in method-security expressions with domain-object checks. Install one process-wide. |
+| `requestMatchers(HttpMethod.POST, "/…")` | `HttpSecurity.authorize_requests().request_matchers("/…", methods="POST")` (also `any_request(methods=…)`) | `SecurityRule.methods` restricts a rule to specific HTTP methods; an empty list matches any method. Terminals unchanged: `permit_all()`, `deny_all()`, `authenticated()`, `has_role()`, `has_any_role()`, `has_permission()`. |
+| `CsrfFilter` (on by default, `CookieCsrfTokenRepository`) | `CsrfFilter` (`...filters.csrf_filter`) via `CsrfFilterAutoConfiguration` | **Secure by default** (`match_if_missing=true`): double-submit cookie active unless `pyfly.security.csrf.enabled=false`. Cookie-gated mode (`pyfly.security.csrf.cookie-gated`, default `true`) exempts requests with no cookies and `Authorization: Bearer …` requests; set `cookie-gated=false` for strict enforcement. Skip paths with `pyfly.security.csrf.exclude-patterns`. |
+| `HeaderWriterFilter` / `http.headers()` defaults | `SecurityHeadersFilter` + `SecurityHeadersConfig` (`pyfly.web.security_headers`) | Added by `create_app()` for every response by default: `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`, `X-XSS-Protection`, `Referrer-Policy`, plus optional `Content-Security-Policy` / `Permissions-Policy`. |
+
+### OAuth2 Authorization Server
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| Spring Authorization Server (`OAuth2AuthorizationServerConfigurer`) | `AuthorizationServer` + `AuthorizationServerEndpoints` (`pyfly.security.oauth2`) | Enable with `pyfly.security.oauth2.authorization-server.enabled`; `secret`, `issuer`, `audience`, `access-token-ttl`, `refresh-token-ttl`. Startup FAILS if `secret` is the placeholder `change-me-in-production` or (HS*) shorter than 32 bytes. |
+| `client_credentials` grant | `AuthorizationServer.token(grant_type="client_credentials")` | Rejects scopes not registered for the client (`INVALID_SCOPE`); a client registered only for another grant cannot mint client-credentials tokens. |
+| `refresh_token` grant (rotation) | `AuthorizationServer.token(grant_type="refresh_token")` | Rotation + **family reuse detection**: using a refresh token revokes it and issues a new one; replaying a consumed token deactivates the whole family. |
+| `authorization_code` + PKCE (OAuth 2.1) | `AuthorizationServer` authorization-code grant | Single-use code, exact `redirect_uri` match, **mandatory PKCE S256**; a replayed code revokes previously issued tokens. |
+| OIDC `id_token` | OIDC `id_token` for the `openid` scope | Issued alongside the access token when `openid` is requested. |
+| JWKS endpoint + asymmetric signing | `AuthorizationServer.jwks()`; `algorithm` HS256 (default) or RS256/RS384/RS512/PS*/ES256/ES384/ES512 | `GET /oauth2/jwks` publishes public keys for asymmetric signing. |
+| Token introspection (RFC 7662) / revocation (RFC 7009) | `POST /oauth2/introspect` / `POST /oauth2/revoke` | Client-authenticated; RFC 7009 §2.1 only the owning client may revoke. |
+| Dynamic client registration | `AuthorizationServer.register_client()` → `POST /oauth2/register` | Registers a client and returns its credentials. |
+| Pushed Authorization Requests (RFC 9126) | `POST /oauth2/par` | Returns a one-time `request_uri` consumed by `/oauth2/authorize`. |
+| JWT-secured Authorization Request (RFC 9101, JAR) | `request=` on `/oauth2/authorize`, verified via `verify_request_object()` | Signed request object (HS256, client secret) supplies the authorization parameters. |
+| Authorization Server Metadata / OIDC discovery | `GET /.well-known/oauth-authorization-server`, `GET /.well-known/openid-configuration` | Advertises endpoints, `code_challenge_methods_supported=["S256"]`, and (OIDC) `id_token_signing_alg_values_supported`. |
+| RFC 9207 `iss` mix-up defense | `iss` emitted in the authorize redirect; validated by `OAuth2LoginHandler`; `ClientRegistration.require_iss` | `iss` is validated when present; `require_iss=true` (`pyfly.security.oauth2.client.registrations.<id>.require-iss`) additionally requires it to be present. |
+| Persistent token store (multi-instance) | `TokenStore` / `InMemoryTokenStore`, `RedisTokenStore`, `PostgresTokenStore` | Select via `pyfly.security.oauth2.token-store.provider` (`memory`\|`redis`\|`postgres`); `…token-store.redis.url`. |
+
+### OAuth2 Resource Server hardening
+
+| Spring Security | PyFly | Notes |
+|-----------------|-------|-------|
+| `OpaqueTokenIntrospector` / `NimbusOpaqueTokenIntrospector` | `OpaqueTokenIntrospector` (`pyfly.security.oauth2`) | Validates opaque (non-JWT) access tokens via a remote RFC 7662 `/introspect` endpoint; maps claims onto `SecurityContext` identically to `JWKSTokenValidator` (shared `build_security_context`). |
+| DPoP (RFC 9449) sender-constrained tokens | `DPoPProofValidator`, `confirm_dpop_binding`, `jwk_thumbprint`, `access_token_hash` (`pyfly.security.oauth2.dpop`); enforced by `OAuth2ResourceServerFilter` | When a token carries `cnf.jkt` AND `pyfly.security.oauth2.resource-server.enforce-sender-constraints=true`, the filter requires a valid `DPoP` proof bound to that key. |
+| mTLS-bound tokens (RFC 8705) | `confirm_mtls_binding`, `certificate_thumbprint` (`...oauth2.dpop`); `OAuth2ResourceServerFilter` | When a token carries `cnf["x5t#S256"]` and enforcement is on, the presented client cert (from `…resource-server.mtls-cert-header`, default `x-client-cert`) must match the thumbprint. |
+
 ### OAuth2 PKCE
 
 | Spring | PyFly | Notes |
 |--------|-------|-------|
-| `ClientRegistration` PKCE (`code_challenge`/S256) | `ClientRegistration(use_pkce=True)` | Toggling `use_pkce` makes `OAuth2LoginHandler` generate a `code_verifier`/`code_challenge` (S256) on the `authorization_code` flow. No extra wiring. See [Security Guide](modules/security.md#pkce-proof-key-for-code-exchange). |
+| `ClientRegistration` PKCE (`code_challenge`/S256) | `ClientRegistration` (`use_pkce` defaults `True`) | PKCE is **on by default** on the `authorization_code` flow and always forced for public (empty-secret) clients; `OAuth2LoginHandler` generates the `code_verifier`/`code_challenge` (S256). See the [OAuth2 Guide](modules/oauth2.md#pkce-on-by-default). |
 
 ### Distributed trace propagation (OTel)
 
@@ -1603,7 +1658,32 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `@PreAuthorize` / `@PostAuthorize` | `@pre_authorize` / `@post_authorize` | Method-level SpEL security |
 | SpEL `#param` / `returnObject` | `#param` / `returnObject` | Bound method args / return value in expressions |
 | `RoleHierarchy` bean | `RoleHierarchy` + `set_role_hierarchy()` | Transitive role expansion |
-| `ClientRegistration` PKCE | `ClientRegistration(use_pkce=True)` | OAuth2 PKCE (RFC 7636, S256) |
+| `ClientRegistration` PKCE | `ClientRegistration` (`use_pkce` defaults `True`) | OAuth2 PKCE (RFC 7636, S256); on by default, always forced for public (empty-secret) clients |
+| `http.formLogin()` | `FormLoginFilter` / `pyfly.security.form-login.*` | Username/password form login + session |
+| `http.httpBasic()` | `HttpBasicAuthenticationFilter` / `pyfly.security.http-basic.*` | RFC 7617 Basic auth |
+| `http.x509()` | `X509AuthenticationFilter` | Forwarded client-cert auth |
+| `SwitchUserFilter` | `SwitchUserFilter` | Run-as user impersonation |
+| `http.logout()` | `LogoutFilter` / `pyfly.security.logout.*` | Session invalidation + cookie clearing |
+| `UserDetailsService` / `UserDetails` | `UserDetailsService` / `UserDetails` / `InMemoryUserDetailsService` / `SqlUserDetailsService` | Credential-lookup SPI |
+| `AuthenticationManager` / `DaoAuthenticationProvider` | `ProviderManager` / `DaoAuthenticationProvider` / `Authentication` | Pluggable authentication providers |
+| `DelegatingPasswordEncoder` / `PasswordEncoderFactories` | `DelegatingPasswordEncoder` / `create_delegating_password_encoder()` | `{id}`-prefixed hashes + on-login migration |
+| `Argon2/Pbkdf2/SCrypt/BCryptPasswordEncoder` | `Argon2PasswordEncoder` / `Pbkdf2PasswordEncoder` / `ScryptPasswordEncoder` / `BcryptPasswordEncoder` | `PasswordEncoder` adapters |
+| `@PreFilter` / `@PostFilter` | `pre_filter` / `post_filter` | Collection filtering (`filterObject`) |
+| `PermissionEvaluator` | `PermissionEvaluator` + `set_permission_evaluator()` | ACL-style `hasPermission` |
+| `requestMatchers(HttpMethod.X, …)` | `request_matchers(…, methods="X")` | HTTP-method-aware URL rules |
+| `CsrfFilter` (on by default) | `CsrfFilter` / `pyfly.security.csrf.*` | Double-submit cookie, secure by default |
+| `HeaderWriterFilter` / `http.headers()` | `SecurityHeadersFilter` / `SecurityHeadersConfig` | OWASP response headers by default |
+| Spring Authorization Server | `AuthorizationServer` + `AuthorizationServerEndpoints` / `pyfly.security.oauth2.authorization-server.*` | Token issuance + OAuth2/OIDC endpoints |
+| `authorization_code` + PKCE / OIDC `id_token` | `AuthorizationServer` (mandatory PKCE S256, single-use code, `openid` id_token) | OAuth 2.1 code flow |
+| `refresh_token` rotation | `AuthorizationServer` refresh grant (rotation + family reuse detection) | Revoke-on-reuse |
+| `/oauth2/jwks` + RS/ES/PS signing | `AuthorizationServer.jwks()` / `algorithm=RS256\|ES256\|PS256\|…` | Asymmetric signing + key publication |
+| Introspection (RFC 7662) / revocation (RFC 7009) | `POST /oauth2/introspect` / `POST /oauth2/revoke` | Client-authenticated |
+| Dynamic client registration | `POST /oauth2/register` / `register_client()` | Programmatic client onboarding |
+| PAR (RFC 9126) / JAR (RFC 9101) | `POST /oauth2/par` / `request=` + `verify_request_object()` | Pushed / signed authorization requests |
+| Authorization Server Metadata / OIDC discovery | `/.well-known/oauth-authorization-server` / `/.well-known/openid-configuration` | Endpoint + capability discovery |
+| RFC 9207 `iss` mix-up defense | `OAuth2LoginHandler` iss check / `ClientRegistration(require_iss=…)` | Validated when present; required when opted in |
+| `OpaqueTokenIntrospector` | `OpaqueTokenIntrospector` | RFC 7662 opaque-token validation |
+| DPoP (RFC 9449) / mTLS (RFC 8705) | `DPoPProofValidator` / `confirm_dpop_binding` / `confirm_mtls_binding` + `pyfly.security.oauth2.resource-server.enforce-sender-constraints` | Sender-constrained tokens via `cnf` |
 | Jackson `ObjectMapper` | `PyFlyJsonSerializer` + `pyfly.web.json.*` | Global JSON config |
 | Jackson serializer/module | `JsonSerializers.register(...)` | Non-Pydantic type encoders |
 | `@JsonNaming` (camelCase) | `CamelModel` | Opt-in camelCase model base |

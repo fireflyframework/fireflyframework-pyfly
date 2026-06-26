@@ -1064,7 +1064,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 
 | Module | Description | Firefly Java Equivalent |
 |--------|-------------|------------------------|
-| **Security** | JWT, password encoding, authorization | Part of `fireflyframework-starter-application` |
+| **Security** | Spring-style URL + method authorization (`HttpSecurity`, `@pre_authorize`/`@post_authorize`/`@pre_filter`/`@post_filter`), form / HTTP-Basic / X.509 login, password encoders (bcrypt / PBKDF2 / scrypt / Argon2 behind a delegating encoder), CSRF + security headers, and full OAuth 2.1 / OIDC — resource server, client & login, and authorization server (PKCE, DPoP, mTLS, introspection, DCR, PAR, JAR) | Part of `fireflyframework-starter-application` |
 | **Messaging** | Kafka, RabbitMQ, in-memory broker | `fireflyframework-eda` |
 | **EDA** | Event-driven architecture, event bus | `fireflyframework-eda` |
 | **Cache** | Caching decorators, Redis adapter | `fireflyframework-cache` |
