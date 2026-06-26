@@ -28,12 +28,14 @@ import base64
 import binascii
 from secrets import compare_digest as _consteq
 from typing import Any
+from urllib.parse import urlencode
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from pyfly.kernel.exceptions import SecurityException
+from pyfly.security.context import SecurityContext
 from pyfly.security.oauth2.authorization_server import AuthorizationServer
 from pyfly.security.oauth2.client import ClientRegistration
 
@@ -41,21 +43,125 @@ from pyfly.security.oauth2.client import ClientRegistration
 # are request/grant errors returned as 400 (RFC 6749 §5.2).
 _UNAUTHORIZED_ERRORS = {"INVALID_CLIENT"}
 
+# Authorization-endpoint error codes that may NOT be redirected back to the client
+# (the client/redirect is untrusted), per RFC 6749 §4.1.2.1.
+_NON_REDIRECTABLE = {"INVALID_CLIENT", "INVALID_REDIRECT_URI"}
+
+# Map internal SecurityException codes to RFC 6749 authorization-response errors.
+_AUTHZ_ERROR = {
+    "INVALID_SCOPE": "invalid_scope",
+    "UNSUPPORTED_RESPONSE_TYPE": "unsupported_response_type",
+    "INVALID_REQUEST": "invalid_request",
+}
+
 
 class AuthorizationServerEndpoints:
     """Builds Starlette routes that expose an :class:`AuthorizationServer`."""
 
-    def __init__(self, server: AuthorizationServer) -> None:
+    def __init__(self, server: AuthorizationServer, *, login_url: str = "/login") -> None:
         self._server = server
+        self._login_url = login_url
 
     def routes(self) -> list[Route]:
         return [
+            Route("/oauth2/authorize", self._authorize, methods=["GET"]),
+            Route("/oauth2/par", self._par, methods=["POST"]),
             Route("/oauth2/token", self._token, methods=["POST"]),
             Route("/oauth2/introspect", self._introspect, methods=["POST"]),
             Route("/oauth2/revoke", self._revoke, methods=["POST"]),
             Route("/oauth2/register", self._register, methods=["POST"]),
             Route("/oauth2/jwks", self._jwks, methods=["GET"]),
+            Route("/.well-known/oauth-authorization-server", self._oauth_metadata, methods=["GET"]),
+            Route("/.well-known/openid-configuration", self._openid_metadata, methods=["GET"]),
         ]
+
+    # -- metadata / discovery (RFC 8414 + OIDC discovery) -----------------
+
+    def _metadata(self, request: Request) -> dict[str, Any]:
+        base = str(request.base_url).rstrip("/")
+        return {
+            "issuer": self._server.issuer or base,
+            "authorization_endpoint": f"{base}/oauth2/authorize",
+            "token_endpoint": f"{base}/oauth2/token",
+            "introspection_endpoint": f"{base}/oauth2/introspect",
+            "revocation_endpoint": f"{base}/oauth2/revoke",
+            "registration_endpoint": f"{base}/oauth2/register",
+            "jwks_uri": f"{base}/oauth2/jwks",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token"],
+            "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+            "code_challenge_methods_supported": ["S256"],
+        }
+
+    async def _oauth_metadata(self, request: Request) -> Response:
+        return JSONResponse(self._metadata(request))
+
+    async def _openid_metadata(self, request: Request) -> Response:
+        doc = self._metadata(request)
+        doc.update(
+            {
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": [self._server.signing_algorithm],
+                "scopes_supported": ["openid"],
+                "claims_supported": ["sub", "aud", "iss", "exp", "iat", "nonce"],
+            }
+        )
+        return JSONResponse(doc)
+
+    # -- authorization endpoint (RFC 6749 §4.1.1) -------------------------
+
+    async def _authorize(self, request: Request) -> Response:
+        ctx = getattr(getattr(request, "state", None), "security_context", None)
+        user_id = ctx.user_id if isinstance(ctx, SecurityContext) and ctx.is_authenticated else None
+        if not user_id:
+            # The resource owner must authenticate first; bounce to login and come back.
+            return RedirectResponse(f"{self._login_url}?{urlencode({'next': str(request.url)})}", status_code=302)
+
+        params: dict[str, str] = dict(request.query_params)
+        client_id = params.get("client_id", "")
+        # PAR (RFC 9126): resolve a one-time request_uri to its pushed params.
+        if params.get("request_uri"):
+            stored = await self._server.consume_pushed_request(params["request_uri"], client_id)
+            if stored is None:
+                return JSONResponse({"error": "invalid_request_uri"}, status_code=400)
+            params = {**{k: str(v) for k, v in stored.items()}, "client_id": client_id}
+        # JAR (RFC 9101): a signed request object supplies the parameters.
+        elif params.get("request"):
+            try:
+                claims = self._server.verify_request_object(client_id, params["request"])
+            except SecurityException as exc:
+                return JSONResponse({"error": "invalid_request_object", "error_description": str(exc)}, status_code=400)
+            params = {**params, **{k: str(v) for k, v in claims.items()}}
+
+        redirect_uri = params.get("redirect_uri", "")
+        state = params.get("state")
+        try:
+            result = await self._server.authorize(
+                client_id=params.get("client_id", ""),
+                redirect_uri=redirect_uri,
+                user_id=user_id,
+                response_type=params.get("response_type", "code"),
+                scope=params.get("scope", ""),
+                state=state,
+                code_challenge=params.get("code_challenge"),
+                code_challenge_method=params.get("code_challenge_method", "S256"),
+                nonce=params.get("nonce"),
+            )
+        except SecurityException as exc:
+            code = exc.code or "INVALID_REQUEST"
+            if code in _NON_REDIRECTABLE:
+                return JSONResponse({"error": code.lower(), "error_description": str(exc)}, status_code=400)
+            query = {"error": _AUTHZ_ERROR.get(code, "invalid_request")}
+            if state is not None:
+                query["state"] = state
+            return RedirectResponse(f"{redirect_uri}?{urlencode(query)}", status_code=302)
+
+        query = {"code": result["code"]}
+        if "state" in result:
+            query["state"] = result["state"]
+        if "iss" in result:
+            query["iss"] = result["iss"]
+        return RedirectResponse(f"{result['redirect_uri']}?{urlencode(query)}", status_code=302)
 
     # -- dynamic client registration (RFC 7591) ---------------------------
 
@@ -81,6 +187,17 @@ class AuthorizationServerEndpoints:
             result = await self._server.register_client(metadata if isinstance(metadata, dict) else {})
         except SecurityException as exc:
             return JSONResponse({"error": (exc.code or "invalid_request").lower()}, status_code=403)
+        return JSONResponse(result, status_code=201)
+
+    # -- pushed authorization requests (RFC 9126) -------------------------
+
+    async def _par(self, request: Request) -> Response:
+        form = await request.form()
+        registration = self._authenticate(request, form)
+        if registration is None:
+            return self._error(SecurityException("Invalid client", code="INVALID_CLIENT"))
+        params = {k: str(v) for k, v in form.items() if k not in ("client_id", "client_secret")}
+        result = await self._server.pushed_authorization_request(registration.client_id, params)
         return JSONResponse(result, status_code=201)
 
     # -- token endpoint ----------------------------------------------------

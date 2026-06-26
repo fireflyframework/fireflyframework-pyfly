@@ -349,7 +349,7 @@ class TestAuthorizationServerErrors:
         """Unsupported grant type raises SecurityException with UNSUPPORTED_GRANT_TYPE."""
         with pytest.raises(SecurityException) as exc_info:
             await auth_server.token(
-                grant_type="authorization_code",
+                grant_type="password",  # ROPC — not supported (removed by OAuth 2.1)
                 client_id="test-client",
                 client_secret="test-secret",
             )

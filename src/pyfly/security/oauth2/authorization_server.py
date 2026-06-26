@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import secrets
 import time
 from typing import Any, Protocol
@@ -23,6 +25,12 @@ import jwt as pyjwt
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.oauth2.client import ClientRegistration, ClientRegistrationRepository
+
+
+def _s256(verifier: str) -> str:
+    """PKCE S256 transform: base64url(SHA-256(verifier)), no padding (RFC 7636)."""
+    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+
 
 # ---------------------------------------------------------------------------
 # Token Store port and in-memory adapter
@@ -101,10 +109,12 @@ class AuthorizationServer:
         key_id: str | None = None,
         allow_dynamic_registration: bool = False,
         registration_access_token: str | None = None,
+        auth_code_ttl: int = 60,
     ) -> None:
         self._secret = secret
         self.allow_dynamic_registration = allow_dynamic_registration
         self.registration_access_token = registration_access_token
+        self._auth_code_ttl = auth_code_ttl
         self._client_repository = client_repository
         self._token_store = token_store
         self._access_token_ttl = access_token_ttl
@@ -123,6 +133,16 @@ class AuthorizationServer:
         else:
             aud_list = [a for a in audience if a]
             self._audience = aud_list or None
+
+    @property
+    def issuer(self) -> str | None:
+        """The configured issuer identifier, if any."""
+        return self._issuer
+
+    @property
+    def signing_algorithm(self) -> str:
+        """The JWS algorithm used to sign tokens (e.g. ``HS256``/``RS256``)."""
+        return self._algorithm
 
     @staticmethod
     def _coerce_private_key(private_key: Any) -> Any:
@@ -286,31 +306,45 @@ class AuthorizationServer:
         scope: str = "",
         refresh_token: str | None = None,
         confirmation: dict[str, Any] | None = None,
+        code: str | None = None,
+        redirect_uri: str | None = None,
+        code_verifier: str | None = None,
     ) -> dict[str, Any]:
         """Issue tokens based on grant type.
 
         Args:
-            grant_type: "client_credentials" or "refresh_token"
+            grant_type: "client_credentials", "refresh_token" or "authorization_code"
             client_id: The client's ID
-            client_secret: The client's secret
+            client_secret: The client's secret (confidential clients)
             scope: Space-separated scopes (for client_credentials)
             refresh_token: The refresh token (for refresh_token grant)
             confirmation: Optional ``cnf`` confirmation claim to bind the access
                 token to a key (e.g. ``{"jkt": ...}`` for DPoP, ``{"x5t#S256": ...}``
                 for mTLS) — sender-constraining per RFC 9449 / RFC 8705.
+            code: Authorization code (for authorization_code grant).
+            redirect_uri: Redirect URI used in the authorization request (must match).
+            code_verifier: PKCE verifier (for authorization_code grant).
 
         Returns:
             Token response dict with access_token, token_type, expires_in,
-            and optionally refresh_token.
+            and optionally refresh_token / id_token.
 
         Raises:
             SecurityException: If authentication fails or grant type is unsupported.
         """
-        # Authenticate client (constant-time secret comparison to avoid a timing
-        # side-channel that could leak the client secret).
-        registration = self.authenticate_client(client_id, client_secret)
+        registration = self._client_repository.find_by_registration_id(client_id)
         if registration is None:
             raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
+
+        # Client authentication: a confidential client (one with a registered
+        # secret) MUST present it. A public client (no secret) is permitted only
+        # for the authorization_code grant, where PKCE provides proof of possession.
+        is_public = not registration.client_secret
+        if not is_public:
+            if self.authenticate_client(client_id, client_secret) is None:
+                raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
+        elif grant_type != "authorization_code":
+            raise SecurityException("Public clients may not use this grant", code="INVALID_CLIENT")
 
         if grant_type == "client_credentials":
             # The client must be registered for the client_credentials grant to
@@ -326,11 +360,211 @@ class AuthorizationServer:
             if refresh_token is None:
                 raise SecurityException("Refresh token required", code="INVALID_REQUEST")
             return await self._handle_refresh_token(registration, refresh_token, confirmation)
+        elif grant_type == "authorization_code":
+            if code is None:
+                raise SecurityException("Authorization code required", code="INVALID_REQUEST")
+            return await self._handle_authorization_code(registration, code, redirect_uri, code_verifier, confirmation)
         else:
             raise SecurityException(
                 f"Unsupported grant type: {grant_type}",
                 code="UNSUPPORTED_GRANT_TYPE",
             )
+
+    # ------------------------------------------------------------------
+    # Authorization Code grant (RFC 6749 §4.1 + PKCE RFC 7636 + OIDC)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _code_key(code: str) -> str:
+        return f"authcode:{code}"
+
+    async def authorize(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        user_id: str,
+        response_type: str = "code",
+        scope: str = "",
+        state: str | None = None,
+        code_challenge: str | None = None,
+        code_challenge_method: str = "S256",
+        nonce: str | None = None,
+    ) -> dict[str, Any]:
+        """Process an authorization request and issue a single-use authorization code.
+
+        *user_id* is the already-authenticated resource owner. Enforces exact
+        redirect-URI matching, scope subset, and **mandatory PKCE (S256)** (OAuth
+        2.1 / RFC 9700). Returns ``{code, redirect_uri[, state][, iss]}``.
+
+        Raises:
+            SecurityException: ``INVALID_CLIENT`` / ``INVALID_REDIRECT_URI`` must NOT
+            be redirected back to the client; other codes are safe to surface to the
+            client via a redirect ``error`` parameter.
+        """
+        registration = self._client_repository.find_by_registration_id(client_id)
+        if registration is None:
+            raise SecurityException("Unknown client", code="INVALID_CLIENT")
+        # Exact redirect-URI match (RFC 9700 / OAuth 2.1) — never redirect on mismatch.
+        if redirect_uri != registration.redirect_uri:
+            raise SecurityException("redirect_uri does not match the registration", code="INVALID_REDIRECT_URI")
+        if response_type != "code":
+            raise SecurityException(f"Unsupported response_type: {response_type}", code="UNSUPPORTED_RESPONSE_TYPE")
+
+        requested = scope.split() if scope else list(registration.scopes)
+        unregistered = [s for s in requested if s not in registration.scopes]
+        if unregistered:
+            raise SecurityException(f"Unpermitted scope(s): {' '.join(unregistered)}", code="INVALID_SCOPE")
+
+        # PKCE is mandatory and must be S256 (OAuth 2.1 §4.1.1 / RFC 7636).
+        if not code_challenge:
+            raise SecurityException("PKCE code_challenge is required", code="INVALID_REQUEST")
+        if code_challenge_method != "S256":
+            raise SecurityException("Only the S256 PKCE method is supported", code="INVALID_REQUEST")
+
+        code = secrets.token_urlsafe(32)
+        await self._token_store.store(
+            self._code_key(code),
+            {
+                "client_id": registration.client_id,
+                "redirect_uri": redirect_uri,
+                "scope": " ".join(requested),
+                "code_challenge": code_challenge,
+                "user_id": user_id,
+                "nonce": nonce,
+                "exp": int(time.time()) + self._auth_code_ttl,
+                "used": False,
+            },
+        )
+        result: dict[str, Any] = {"code": code, "redirect_uri": redirect_uri}
+        if state is not None:
+            result["state"] = state
+        if self._issuer:
+            result["iss"] = self._issuer  # RFC 9207 mix-up defense
+        return result
+
+    # ------------------------------------------------------------------
+    # Pushed Authorization Requests (RFC 9126) + request objects (RFC 9101)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _par_key(request_uri: str) -> str:
+        return f"par:{request_uri}"
+
+    async def pushed_authorization_request(self, client_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Store a pushed authorization request and return its ``request_uri`` (RFC 9126)."""
+        request_uri = "urn:ietf:params:oauth:request_uri:" + secrets.token_urlsafe(24)
+        await self._token_store.store(
+            self._par_key(request_uri),
+            {"client_id": client_id, "params": dict(params), "exp": int(time.time()) + 90},
+        )
+        return {"request_uri": request_uri, "expires_in": 90}
+
+    async def consume_pushed_request(self, request_uri: str, client_id: str) -> dict[str, Any] | None:
+        """Return (and one-time consume) the params for *request_uri* if valid for *client_id*."""
+        data = await self._token_store.find(self._par_key(request_uri))
+        if data is None or data.get("client_id") != client_id or data.get("exp", 0) < int(time.time()):
+            return None
+        await self._token_store.revoke(self._par_key(request_uri))
+        return dict(data.get("params") or {})
+
+    def verify_request_object(self, client_id: str, request_jwt: str) -> dict[str, Any]:
+        """Verify a JAR request object (RFC 9101) signed with the client secret (HS256)."""
+        registration = self._client_repository.find_by_registration_id(client_id)
+        if registration is None or not registration.client_secret:
+            raise SecurityException("Request objects require a confidential client", code="INVALID_REQUEST")
+        try:
+            claims: dict[str, Any] = pyjwt.decode(
+                request_jwt, registration.client_secret, algorithms=["HS256"], options={"verify_aud": False}
+            )
+        except pyjwt.PyJWTError as exc:
+            raise SecurityException(f"Invalid request object: {exc}", code="INVALID_REQUEST") from exc
+        return claims
+
+    async def _handle_authorization_code(
+        self,
+        registration: ClientRegistration,
+        code: str,
+        redirect_uri: str | None,
+        code_verifier: str | None,
+        confirmation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        key = self._code_key(code)
+        data = await self._token_store.find(key)
+        if data is None:
+            raise SecurityException("Invalid authorization code", code="INVALID_GRANT")
+
+        # Single-use: a replayed code is treated as injection — revoke any tokens
+        # already issued from it (RFC 9700) and reject.
+        if data.get("used"):
+            issued_refresh = data.get("issued_refresh")
+            if issued_refresh:
+                await self.revoke(issued_refresh)
+            raise SecurityException("Authorization code already used", code="INVALID_GRANT")
+        if data.get("client_id") != registration.client_id:
+            raise SecurityException("Authorization code was issued to another client", code="INVALID_GRANT")
+        if redirect_uri is not None and data.get("redirect_uri") != redirect_uri:
+            raise SecurityException("redirect_uri mismatch", code="INVALID_GRANT")
+        if data.get("exp", 0) < int(time.time()):
+            await self._token_store.revoke(key)
+            raise SecurityException("Authorization code expired", code="INVALID_GRANT")
+
+        # PKCE verification (mandatory).
+        challenge = data.get("code_challenge")
+        if not code_verifier or _s256(code_verifier) != challenge:
+            raise SecurityException("PKCE verification failed", code="INVALID_GRANT")
+
+        now = int(time.time())
+        scope = data.get("scope", "")
+        user_id = data.get("user_id")
+
+        access_payload: dict[str, Any] = {
+            "sub": user_id,
+            "scope": scope,
+            "iat": now,
+            "exp": now + self._access_token_ttl,
+        }
+        if self._issuer:
+            access_payload["iss"] = self._issuer
+        if self._audience is not None:
+            access_payload["aud"] = self._audience
+        if confirmation:
+            access_payload["cnf"] = confirmation
+        access_token = self._encode(access_payload)
+
+        refresh_id = await self._issue_refresh_token(registration.client_id, scope)
+
+        # Mark the code consumed and remember the refresh token so a replay can
+        # revoke it (authorization-code injection defense).
+        data["used"] = True
+        data["issued_refresh"] = refresh_id
+        await self._token_store.store(key, data)
+
+        response: dict[str, Any] = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": self._access_token_ttl,
+            "refresh_token": refresh_id,
+            "scope": scope,
+        }
+        if "openid" in scope.split():
+            response["id_token"] = self._issue_id_token(str(user_id), registration.client_id, data.get("nonce"))
+        return response
+
+    def _issue_id_token(self, subject: str, client_id: str, nonce: str | None) -> str:
+        """Issue an OIDC ID token (aud = client_id) for the openid scope."""
+        now = int(time.time())
+        payload: dict[str, Any] = {
+            "sub": subject,
+            "aud": client_id,
+            "iat": now,
+            "exp": now + self._access_token_ttl,
+        }
+        if self._issuer:
+            payload["iss"] = self._issuer
+        if nonce:
+            payload["nonce"] = nonce
+        return self._encode(payload)
 
     async def _handle_client_credentials(
         self, registration: ClientRegistration, scope: str, confirmation: dict[str, Any] | None = None
