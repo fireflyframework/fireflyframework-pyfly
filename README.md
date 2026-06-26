@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.06.113-brightgreen" alt="Version: 26.06.113"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.06.114-brightgreen" alt="Version: 26.06.114"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -1185,6 +1185,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
+- **`v26.06.114`** (2026-06-26) — **security overhaul**: full **RFC 9700 / OAuth 2.1** alignment and broad **Spring Security parity** — a complete OAuth 2.1 / OIDC **authorization server** (PKCE, OIDC id tokens, JWKS, introspection/revocation, DCR, PAR, JAR), **DPoP / mTLS** sender-constrained tokens, form / HTTP-Basic / X.509 login, an `AuthenticationManager` / `UserDetailsService` SPI, a delegating password encoder (bcrypt / PBKDF2 / scrypt / Argon2), and secure-by-default hardening (PKCE-default, CSRF-on, ROPC opt-in, signing-secret fail-fast). See the [Security](docs/modules/security.md) and [OAuth2](docs/modules/oauth2.md) guides.
 - **`v26.06.113`** (2026-06-17) — **server-layer observability**: per-server metrics (active connections, in-flight requests, workers, uptime) across Uvicorn / Granian / Hypercorn, correct multi-worker Prometheus aggregation, and a live admin **Observability** dashboard.
 - **`v26.06.112`** (2026-06-16) — *PyFly by Example* figures rebuilt in one polished, vector visual language (English + Spanish editions).
 - **`v26.05.01`** (2026-05-07) — **full Java-framework parity**: the Saga + Workflow + TCC transactional engine, nine new modules (event sourcing, callbacks, webhooks, notifications, IDP, ECM, plugins, rule engine, config server), 12 third-party adapters, and the move to CalVer.
