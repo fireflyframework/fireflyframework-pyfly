@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from secrets import compare_digest as _consteq
 from typing import Any
 
 from starlette.requests import Request
@@ -52,8 +53,35 @@ class AuthorizationServerEndpoints:
             Route("/oauth2/token", self._token, methods=["POST"]),
             Route("/oauth2/introspect", self._introspect, methods=["POST"]),
             Route("/oauth2/revoke", self._revoke, methods=["POST"]),
+            Route("/oauth2/register", self._register, methods=["POST"]),
             Route("/oauth2/jwks", self._jwks, methods=["GET"]),
         ]
+
+    # -- dynamic client registration (RFC 7591) ---------------------------
+
+    async def _register(self, request: Request) -> Response:
+        # When an initial access token is configured, it MUST be presented as a
+        # bearer token (RFC 7591 §3); otherwise registration is open.
+        required = self._server.registration_access_token
+        if required:
+            header = request.headers.get("authorization", "")
+            parts = header.split(" ", 1)
+            presented = parts[1].strip() if len(parts) == 2 and parts[0].lower() == "bearer" else ""
+            if not presented or not _consteq(presented, required):
+                return JSONResponse(
+                    {"error": "invalid_token"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+                )
+        try:
+            metadata = await request.json()
+        except Exception:  # malformed JSON body
+            metadata = {}
+        try:
+            result = await self._server.register_client(metadata if isinstance(metadata, dict) else {})
+        except SecurityException as exc:
+            return JSONResponse({"error": (exc.code or "invalid_request").lower()}, status_code=403)
+        return JSONResponse(result, status_code=201)
 
     # -- token endpoint ----------------------------------------------------
 

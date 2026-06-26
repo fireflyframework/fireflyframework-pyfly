@@ -99,8 +99,12 @@ class AuthorizationServer:
         algorithm: str = "HS256",
         private_key: Any = None,
         key_id: str | None = None,
+        allow_dynamic_registration: bool = False,
+        registration_access_token: str | None = None,
     ) -> None:
         self._secret = secret
+        self.allow_dynamic_registration = allow_dynamic_registration
+        self.registration_access_token = registration_access_token
         self._client_repository = client_repository
         self._token_store = token_store
         self._access_token_ttl = access_token_ttl
@@ -154,6 +158,49 @@ class AuthorizationServer:
         if self._key_id:
             jwk["kid"] = self._key_id
         return {"keys": [jwk]}
+
+    async def register_client(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Register a new client dynamically (RFC 7591) and return its metadata.
+
+        Requires ``allow_dynamic_registration`` and a client repository that
+        supports ``add``. Generates the ``client_id`` / ``client_secret``; the
+        endpoint layer enforces any initial access token.
+        """
+        if not self.allow_dynamic_registration:
+            raise SecurityException("Dynamic client registration is disabled", code="REGISTRATION_DISABLED")
+        repo = self._client_repository
+        add = getattr(repo, "add", None)
+        if not callable(add):
+            raise SecurityException(
+                "The configured client repository does not support registration", code="REGISTRATION_UNSUPPORTED"
+            )
+        grant_types = metadata.get("grant_types") or ["client_credentials"]
+        redirect_uris = metadata.get("redirect_uris") or []
+        scope = metadata.get("scope", "")
+        scopes = scope.split() if isinstance(scope, str) else list(scope or [])
+        client_id = secrets.token_urlsafe(16)
+        client_secret = secrets.token_urlsafe(32)
+        registration = ClientRegistration(
+            registration_id=client_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            authorization_grant_type=str(grant_types[0]),
+            redirect_uri=str(redirect_uris[0]) if redirect_uris else "",
+            scopes=scopes,
+            provider_name=str(metadata.get("client_name", "")),
+        )
+        add(registration)
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "client_id_issued_at": int(time.time()),
+            "client_secret_expires_at": 0,  # never expires
+            "grant_types": list(grant_types),
+            "redirect_uris": list(redirect_uris),
+            "scope": " ".join(scopes),
+            "token_endpoint_auth_method": "client_secret_basic",
+            "client_name": str(metadata.get("client_name", "")),
+        }
 
     def authenticate_client(self, client_id: str, client_secret: str) -> ClientRegistration | None:
         """Return the registration iff *client_id*/*client_secret* match (constant time).
