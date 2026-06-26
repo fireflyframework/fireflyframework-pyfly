@@ -50,15 +50,28 @@ def _exclude_patterns(config: Config, key: str) -> Sequence[str]:
 
 @auto_configuration
 @conditional_on_class("starlette")
-@conditional_on_property("pyfly.security.csrf.enabled", having_value="true")
+@conditional_on_property("pyfly.security.csrf.enabled", having_value="true", match_if_missing=True)
 class CsrfFilterAutoConfiguration:
-    """Registers the double-submit-cookie CSRF filter (opt-in)."""
+    """Registers the double-submit-cookie CSRF filter.
+
+    Secure by default: active unless ``pyfly.security.csrf.enabled=false``. The
+    filter runs in cookie-gated mode (``pyfly.security.csrf.cookie-gated``,
+    default true), so stateless/token (no-cookie) clients are unaffected while
+    browser/session requests are protected. Set ``cookie-gated: false`` for
+    strict enforcement of every unsafe request.
+    """
 
     @bean
     def csrf_filter(self, config: Config) -> WebFilter:
         from pyfly.web.adapters.starlette.filters.csrf_filter import CsrfFilter
 
-        filter_ = CsrfFilter()
+        cookie_gated = str(config.get("pyfly.security.csrf.cookie-gated", True)).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        filter_ = CsrfFilter(cookie_gated=cookie_gated)
         excludes = _exclude_patterns(config, "pyfly.security.csrf.exclude-patterns")
         if excludes:
             filter_.exclude_patterns = list(excludes)

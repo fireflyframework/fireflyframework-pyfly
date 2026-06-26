@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.6.113"
+version = "26.6.114"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -49,6 +49,9 @@ data-relational = [
 ]
 testing = [
     "jsonpath-ng>=1.8.0",
+]
+argon2 = [
+    "argon2-cffi>=23.1.0",  # Argon2PasswordEncoder (OWASP-preferred password hashing)
 ]
 testcontainers = [
     "testcontainers>=4.0.0",
@@ -199,6 +202,9 @@ server = "pyfly.server.auto_configuration:ServerAutoConfiguration"
 event-loop = "pyfly.server.auto_configuration:EventLoopAutoConfiguration"
 security-jwt = "pyfly.security.auto_configuration:JwtAutoConfiguration"
 security-password = "pyfly.security.auto_configuration:PasswordEncoderAutoConfiguration"
+security-http-basic = "pyfly.security.auto_configuration:HttpBasicAutoConfiguration"
+security-form-login = "pyfly.security.auto_configuration:FormLoginAutoConfiguration"
+security-logout = "pyfly.security.auto_configuration:LogoutAutoConfiguration"
 oauth2-resource-server = "pyfly.security.auto_configuration:OAuth2ResourceServerAutoConfiguration"
 oauth2-authorization-server = "pyfly.security.auto_configuration:OAuth2AuthorizationServerAutoConfiguration"
 oauth2-client = "pyfly.security.auto_configuration:OAuth2ClientAutoConfiguration"

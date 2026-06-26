@@ -97,7 +97,12 @@ async def test_cognito_login_includes_secret_hash() -> None:
 
     fake = _FakeBoto()
     adapter = AwsCognitoIdpAdapter(
-        user_pool_id="pool", client_id="cid", region="us-east-1", client_secret="shh", client=fake
+        user_pool_id="pool",
+        client_id="cid",
+        region="us-east-1",
+        client_secret="shh",
+        client=fake,
+        allow_password_grant=True,
     )
     await adapter.login(LoginRequest(username="bob", password="pw"))
     assert "SECRET_HASH" in fake.auth_params  # audit #23

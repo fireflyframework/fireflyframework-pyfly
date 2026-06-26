@@ -1300,6 +1300,562 @@ Cuando Starlette está presente, `IdpAutoConfiguration` también registra un bea
 
 ---
 
+## Iniciar sesión con un formulario
+
+Todo lo visto hasta ahora daba por supuesto un cliente de máquina: acuñar un JWT,
+reenviarlo en la cabecera `Authorization` y validarlo a la entrada. Eso es
+exactamente lo correcto para la API de Lumen. Pero Lumen también tiene un panel de
+administración —un navegador— y los navegadores no llevan cabeceras Bearer. Llevan
+cookies. Para el panel quieres lo de siempre, lo aburrido y correcto: un formulario
+de usuario/contraseña que hace POST a una URL de inicio de sesión, y una cookie de
+sesión que viaja con cada petición posterior.
+
+PyFly te da eso sin escribir un controlador. `FormLoginFilter` intercepta un POST a
+la URL de inicio de sesión, autentica las credenciales a través de un
+`ProviderManager` y —algo crucial— **rota el id de sesión** antes de vincular el
+`SecurityContext` autenticado a la sesión. La rotación es la defensa contra la
+fijación de sesión (session-fixation) de la sección de sesiones, aplicada
+automáticamente en el momento en que cambian los privilegios: cualquier id de
+sesión que un atacante pudiera haber plantado antes del inicio de sesión se descarta
+y se reemplaza. El contexto se almacena en la sesión, y `OAuth2SessionSecurityFilter`
+lo restaura en cada petición posterior, de modo que el panel permanece con la sesión
+iniciada.
+
+Declaras los usuarios y las URLs en `pyfly.yaml`. Las contraseñas se almacenan
+**pre-hasheadas** —nunca en texto plano— y la autoconfiguración las verifica con
+`BcryptPasswordEncoder` a través de un `DaoAuthenticationProvider`:
+
+```yaml
+pyfly:
+  security:
+    enabled: true
+    form-login:
+      enabled: true
+      login-url: /login
+      username-param: username
+      password-param: password
+      success-url: /dashboard
+      failure-url: /login?error
+      use-redirect: true
+      users:
+        alice:
+          # hash bcrypt de "hunter2" — genéralo con BcryptPasswordEncoder.hash
+          password-hash: "$2b$12$Q9.../iJ8wq6Yk5fJ0bO"
+          roles: ADMIN
+          permissions: wallet:read,wallet:create
+          enabled: true
+    logout:
+      enabled: true
+      logout-url: /logout
+      success-url: /login?logout
+      delete-cookies: PYFLY_SESSION
+      use-redirect: true
+```
+
+`FormLoginFilter` se ejecuta en `HIGHEST_PRECEDENCE + 230`, justo después del filtro
+que restaura la sesión, de modo que un inicio de sesión nuevo siempre prevalece
+sobre cualquier contexto anónimo previo. `LogoutFilter` corre justo detrás, en
+`+235`: un POST a la URL de cierre de sesión invalida la sesión, restablece el
+contexto de la petición a `SecurityContext.anonymous()` y elimina las cookies que
+nombres en `delete-cookies`. Ambos filtros hablan dos dialectos: pon
+`use-redirect: false` y responderán con JSON (`{"authenticated": true}` / `204`) en
+lugar de un `302`, que es lo que quieres si el panel es una aplicación de página
+única (SPA) que llama a `fetch`.
+
+La autenticación en sí es el `DaoAuthenticationProvider` de la SPI de autenticación
+de PyFly. Es deliberadamente cuidadoso en una cosa: un nombre de usuario desconocido
+aun así incurre en una verificación de contraseña contra un hash ficticio de usar y
+tirar, de modo que el endpoint de inicio de sesión no puede usarse como un oráculo
+de nombres de usuario: una contraseña incorrecta y un usuario inexistente tardan lo
+mismo y lanzan la misma `BadCredentialsException`. Una cuenta deshabilitada
+(`enabled: false`) lanza `DisabledException`.
+
+!!! tip "Pruébalo — inicia sesión con una cookie y luego cierra sesión"
+    Arranca la aplicación y haz POST del formulario (fíjate en `-d`, no JSON: esto es
+    un envío de formulario HTML real):
+
+    ```bash
+    curl -i -X POST http://localhost:8080/login \
+      -d "username=alice&password=hunter2"
+    ```
+
+    Esperado — `HTTP/1.1 302 Found`, una cabecera `location: /dashboard` y un
+    `set-cookie: PYFLY_SESSION=...` que lleva el id de sesión nuevo (rotado). Reenvía
+    una contraseña incorrecta y en su lugar obtendrás `302 → /login?error`. Ahora
+    termina la sesión:
+
+    ```bash
+    curl -i -X POST http://localhost:8080/logout -b "PYFLY_SESSION=<id>"
+    ```
+
+    Esperado — `302 → /login?logout` y un `set-cookie` que caduca `PYFLY_SESSION`.
+    La entrada de la sesión ya no está en el almacén; la cookie ya no resuelve a
+    nada.
+
+!!! spring "Equivalencia con Spring"
+    Estos son los configuradores `formLogin()` y `logout()` de Spring Security.
+    `FormLoginFilter` se corresponde con `UsernamePasswordAuthenticationFilter`,
+    `LogoutFilter` con el `LogoutFilter` de Spring, y el mapa `form-login.users`
+    guiado por configuración es el equivalente de un `UserDetailsManager` en memoria.
+    La rotación del id de sesión al iniciar sesión coincide con la estrategia de
+    fijación de sesión `changeSessionId` por defecto de Spring.
+
+---
+
+## Hashing de contraseñas más robusto
+
+bcrypt es un buen valor por defecto, y es el que Lumen ha usado hasta ahora. Pero
+dos cosas son ciertas a la vez: bcrypt es suficientemente bueno hoy, y tarde o
+temprano querrás abandonarlo —en favor de Argon2id, el algoritmo que OWASP
+recomienda ahora— sin una migración de golpe que obligue a cada usuario a
+restablecer su contraseña. El obstáculo es que un hash almacenado no es más que una
+cadena; nada en `$2b$12$...` le dice a tu código *qué* algoritmo lo produjo una vez
+que tienes más de uno en juego.
+
+`DelegatingPasswordEncoder` resuelve esto igual que Spring Security: antepone a cada
+hash que produce el id del encoder entre llaves —`{argon2}...`, `{bcrypt}...`,
+`{pbkdf2}...`, `{scrypt}...`—. Al verificar, lee el prefijo y delega en el encoder
+correspondiente, de modo que un único bean de encoder puede *leer* todos los hashes
+heredados mientras *escribe* solo el valor por defecto actual. Un valor almacenado
+con un prefijo desconocido o ausente nunca coincide: falla de forma cerrada
+(fail-closed) por construcción.
+
+PyFly incluye cuatro adaptadores de `PasswordEncoder` —`BcryptPasswordEncoder`,
+`Pbkdf2PasswordEncoder`, `ScryptPasswordEncoder` y `Argon2PasswordEncoder`
+(Argon2id; instálalo con `pip install pyfly[argon2]`)— más la factoría
+`create_delegating_password_encoder`, que construye un encoder delegador con
+**bcrypt** como id por defecto y los otros tres conectados para la verificación.
+Para hacer de Argon2id el valor *por defecto* para los hashes nuevos sin dejar de
+leer la columna bcrypt existente de Lumen, construye el encoder delegador
+directamente y pásale `encoding_id="argon2"`:
+
+```python
+from pyfly.container import bean, configuration
+from pyfly.security import (
+    Argon2PasswordEncoder,
+    BcryptPasswordEncoder,
+    DelegatingPasswordEncoder,
+    Pbkdf2PasswordEncoder,
+    ScryptPasswordEncoder,
+)
+
+
+@configuration
+class PasswordConfig:
+
+    @bean
+    def password_encoder(self) -> DelegatingPasswordEncoder:
+        return DelegatingPasswordEncoder(
+            {
+                "argon2": Argon2PasswordEncoder(),   # valor por defecto preferido por OWASP
+                "bcrypt": BcryptPasswordEncoder(rounds=12),
+                "pbkdf2": Pbkdf2PasswordEncoder(),
+                "scrypt": ScryptPasswordEncoder(),
+            },
+            encoding_id="argon2",
+        )
+```
+
+La ventaja es la **migración transparente en el inicio de sesión**.
+`DelegatingPasswordEncoder` expone `upgrade_encoding(stored)`, que devuelve `True`
+cuando un hash almacenado fue producido por algo distinto del valor por defecto
+actual. Llámalo dentro de `login`, justo después de que la contraseña se verifique,
+y vuelve a hashear in situ. Cada usuario se actualiza silenciosamente de bcrypt a
+Argon2id la próxima vez que inicie sesión: sin correo de restablecimiento, sin
+tiempo de inactividad, sin una segunda columna:
+
+```python
+async def login(self, username: str, password: str) -> str:
+    user = await self._users.find_by_username(username)
+    if user is None or not self._encoder.verify(password, user.password_hash):
+        raise UnauthorizedException(
+            "Invalid credentials", code="INVALID_CREDENTIALS"
+        )
+
+    # Re-hashea de forma transparente las credenciales heredadas ({bcrypt}…) al
+    # valor por defecto actual ({argon2}…) ahora que tenemos el texto plano y se verificó.
+    if self._encoder.upgrade_encoding(user.password_hash):
+        user.password_hash = self._encoder.hash(password)
+        await self._users.save(user)
+
+    return self._jwt.encode({"sub": str(user.id), "roles": [user.role]})
+```
+
+!!! tip "Pruébalo — observa el prefijo y la actualización en el REPL"
+    ```python
+    >>> from pyfly.security import create_delegating_password_encoder
+    >>> enc = create_delegating_password_encoder()   # bcrypt por defecto
+    >>> h = enc.hash("hunter2")
+    >>> h[:8]
+    '{bcrypt}'
+    >>> enc.verify("hunter2", h)
+    True
+    >>> enc.upgrade_encoding(h)     # ya es el valor por defecto → no necesita actualización
+    False
+    >>> enc.upgrade_encoding("{pbkdf2}sha256$600000$...")   # heredado → actualiza
+    True
+    ```
+
+    El prefijo `{id}` es lo que hace que esto funcione: la verificación se enruta por
+    él, y `upgrade_encoding` lo compara con el valor por defecto configurado.
+
+!!! note "Jerga: Argon2id"
+    Argon2id es un hash de contraseñas duro en memoria (memory-hard): obliga a un
+    atacante a gastar *memoria*, no solo CPU, por cada conjetura, lo que neutraliza
+    las granjas de GPU y ASIC que abaratan a gran escala el crackeo de bcrypt.
+    `Argon2PasswordEncoder` usa por defecto los parámetros interactivos de OWASP
+    (coste de tiempo 3, 64 MiB, 4 carriles).
+
+---
+
+## Lumen como su propio servidor de autorización
+
+Hasta ahora Lumen ha sido un *consumidor* de tokens: acuñando JWTs simples para su
+propio inicio de sesión, o validando tokens emitidos por un IdP externo. Hay un
+tercer papel que Lumen puede desempeñar: un verdadero **servidor de autorización**
+OAuth2 que emite tokens a *otras* partes. Querrás esto en cuanto Lumen tenga más de
+una pieza en movimiento. Un worker nocturno de conciliación del libro mayor necesita
+llamar a la API de Lumen como sí mismo, sin ningún humano en el bucle. Una
+aplicación móvil propia necesita iniciar la sesión de un usuario y actuar en su
+nombre. Esos son dos tipos de concesión (grant) de OAuth2 distintos, y
+`AuthorizationServer` habla ambos.
+
+### Servicio a servicio: client_credentials
+
+El worker de conciliación es un cliente confidencial: posee un secreto y pide un
+token en su propio nombre. Registra los clientes de Lumen en un
+`InMemoryClientRegistrationRepository` y activa el servidor de autorización en la
+configuración: el bean `AuthorizationServer` y un almacén de tokens en memoria se
+autoconfiguran por ti:
+
+```python
+from pyfly.container import bean, configuration
+from pyfly.security.oauth2 import (
+    ClientRegistration,
+    InMemoryClientRegistrationRepository,
+)
+
+
+@configuration
+class LumenClientsConfig:
+
+    @bean
+    def client_repository(self) -> InMemoryClientRegistrationRepository:
+        return InMemoryClientRegistrationRepository(
+            # Cliente de máquina — servicio a servicio, sin usuario.
+            ClientRegistration(
+                registration_id="lumen-reconciler",
+                client_id="lumen-reconciler",
+                client_secret="${RECONCILER_SECRET}",
+                authorization_grant_type="client_credentials",
+                scopes=["ledger:read"],
+            ),
+            # Aplicación móvil propia — cliente público (sin secreto), solo PKCE.
+            ClientRegistration(
+                registration_id="lumen-mobile",
+                client_id="lumen-mobile",
+                authorization_grant_type="authorization_code",
+                redirect_uri="com.lumen.app://callback",
+                scopes=["openid", "wallet:read", "wallet:deposit"],
+            ),
+        )
+```
+
+```yaml
+pyfly:
+  security:
+    oauth2:
+      authorization-server:
+        enabled: true
+        secret: "${AS_SIGNING_SECRET}"   # nunca el marcador de posición; HS256 ≥ 32 bytes
+        issuer: "https://lumen.example.com"
+        audience: "lumen-backend"
+        access-token-ttl: 3600
+        refresh-token-ttl: 86400
+      token-store:
+        provider: redis            # memory | redis | postgres
+        redis:
+          url: "redis://localhost:6379/0"
+```
+
+La superficie HTTP es `AuthorizationServerEndpoints`, que construye las rutas
+estándar de OAuth2/OIDC a partir del bean `AuthorizationServer`. Móntalas en la
+aplicación:
+
+```python
+from pyfly.security.oauth2 import AuthorizationServer, AuthorizationServerEndpoints
+
+def register_oauth2(app, context):
+    server = context.get_bean(AuthorizationServer)
+    app.router.routes.extend(AuthorizationServerEndpoints(server).routes())
+```
+
+Eso expone el conjunto completo: `GET /oauth2/authorize`, `POST /oauth2/par`,
+`POST /oauth2/token`, `POST /oauth2/introspect`, `POST /oauth2/revoke`,
+`POST /oauth2/register`, `GET /oauth2/jwks`, y los dos documentos de descubrimiento
+`GET /.well-known/oauth-authorization-server` y
+`GET /.well-known/openid-configuration`.
+
+!!! tip "Pruébalo — obtén un token de máquina"
+    El worker se autentica con HTTP Basic y pide el ámbito (scope) para el que fue
+    registrado:
+
+    ```bash
+    curl -s -X POST http://localhost:8080/oauth2/token \
+      -u lumen-reconciler:$RECONCILER_SECRET \
+      -d grant_type=client_credentials \
+      -d scope="ledger:read"
+    ```
+
+    Esperado — una respuesta de token JSON con `access_token`,
+    `token_type: "Bearer"`, `expires_in: 3600`, un `refresh_token` y
+    `scope: "ledger:read"`. Ahora pide un ámbito para el que el cliente **no** estaba
+    registrado:
+
+    ```bash
+    curl -s -X POST http://localhost:8080/oauth2/token \
+      -u lumen-reconciler:$RECONCILER_SECRET \
+      -d grant_type=client_credentials -d scope="ledger:write admin"
+    ```
+
+    Esperado — `{"error":"invalid_scope", ...}` con HTTP `400`. Un cliente solo puede
+    obtener los ámbitos para los que está registrado; los ámbitos no registrados se
+    rechazan por completo, nunca se devuelven en silencio. (Pedir
+    `client_credentials` desde un cliente registrado solo para `authorization_code`
+    se rechaza del mismo modo, con `unauthorized_client`.)
+
+### De cara al usuario: authorization_code + PKCE + un id_token OIDC
+
+La aplicación móvil es un cliente público: no incluye ningún secreto, porque
+cualquier cosa empotrada en el binario de una app no es un secreto. Su prueba de
+posesión es **PKCE**: la app genera un `code_verifier` aleatorio, envía solo su hash
+SHA-256 (`code_challenge`) cuando pide un código de autorización, y revela el
+verificador solo cuando canjea el código. Un atacante que intercepte el código no
+puede canjearlo sin el verificador.
+
+El flujo tiene dos tramos. Primero la app envía al usuario al endpoint de
+autorización:
+
+```
+GET /oauth2/authorize?response_type=code
+    &client_id=lumen-mobile
+    &redirect_uri=com.lumen.app://callback
+    &scope=openid%20wallet:read
+    &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+    &code_challenge_method=S256
+    &state=xyz
+```
+
+Si el propietario del recurso aún no está autenticado, el endpoint lo redirige a la
+URL de inicio de sesión y vuelve. Una vez lo está, Lumen emite un código de
+autorización **de un solo uso** y redirige a
+`redirect_uri?code=...&state=xyz&iss=...`. El parámetro `iss` (RFC 9207) permite a
+la app confirmar qué servidor respondió: una defensa contra la confusión (mix-up).
+Luego la app canjea el código, presentando el verificador:
+
+```bash
+curl -s -X POST http://localhost:8080/oauth2/token \
+  -d grant_type=authorization_code \
+  -d client_id=lumen-mobile \
+  -d code="$CODE" \
+  -d redirect_uri="com.lumen.app://callback" \
+  -d code_verifier="$VERIFIER"
+```
+
+La respuesta lleva el `access_token`, un `refresh_token` y —porque la petición
+incluía el ámbito `openid`— un **`id_token`** OIDC cuyo `aud` es el id del cliente.
+El servidor de autorización impone las barreras de seguridad por ti: el redirect URI
+debe coincidir con el registro **exactamente**, PKCE es **obligatorio y debe ser
+S256**, y el código es **de un solo uso**. Reenvía un código que ya se había canjeado
+y Lumen no se limita a rechazarlo: trata la repetición como un ataque de inyección y
+**revoca el token de actualización (refresh token) ya emitido a partir de ese
+código**.
+
+### Rotación de tokens de actualización y detección de reutilización
+
+Los tokens de actualización (refresh tokens) rotan. Cada vez que la app refresca,
+obtiene un *nuevo* token de actualización y el antiguo se marca como consumido:
+
+```bash
+curl -s -X POST http://localhost:8080/oauth2/token \
+  -d grant_type=refresh_token -d client_id=lumen-mobile \
+  -d refresh_token="$OLD_REFRESH"
+```
+
+El token consumido no se elimina: se conserva precisamente para poder detectar una
+*repetición*. Si se presenta un token de actualización robado después de que el
+cliente legítimo ya lo haya rotado, el servidor detecta la reutilización y revoca la
+**familia de tokens completa** (el token original y todos sus descendientes),
+obligando tanto al atacante como a la víctima a pasar de nuevo por el inicio de
+sesión. Un cliente legítimo nunca reenvía un token ya rotado, así que la
+reutilización es prueba inequívoca de robo. Tanto el caso de reutilización como una
+presentación desde el cliente equivocado lanzan `INVALID_GRANT`.
+
+### Firma asimétrica y JWKS
+
+Para los tokens de servicio a servicio, HS256 con un secreto compartido está bien:
+Lumen firma y Lumen verifica. Pero en cuanto *otros* servicios validan los tokens de
+Lumen, no querrás entregarles tu secreto de firma. Cambia a la firma asimétrica:
+Lumen guarda una clave privada, firma con `RS256` (o `ES256` / `PS256`) y publica
+solo la clave **pública** correspondiente en `/oauth2/jwks`. Proporciona tú mismo un
+bean `AuthorizationServer` para optar por el modo asimétrico (un bean declarado a
+mano suprime la autoconfiguración de HS256):
+
+```python
+from pyfly.container import bean, configuration
+from pyfly.security.oauth2 import (
+    AuthorizationServer,
+    InMemoryClientRegistrationRepository,
+    InMemoryTokenStore,
+)
+
+
+@configuration
+class AsymmetricAuthServerConfig:
+
+    @bean
+    def authorization_server(
+        self, clients: InMemoryClientRegistrationRepository
+    ) -> AuthorizationServer:
+        return AuthorizationServer(
+            secret="",                       # sin uso en la firma asimétrica
+            client_repository=clients,
+            token_store=InMemoryTokenStore(),
+            algorithm="RS256",
+            private_key=open("lumen-signing-key.pem").read(),
+            key_id="lumen-2026",             # se convierte en el `kid` de la cabecera del JWT
+            issuer="https://lumen.example.com",
+        )
+```
+
+Ahora `GET /oauth2/jwks` devuelve el conjunto de claves JWK públicas (con el `kid` y
+el `alg`), y cualquier servidor de recursos PyFly puede validar los tokens de Lumen
+apuntando su `pyfly.security.oauth2.resource-server.jwks-uri` a él: exactamente la
+configuración de Keycloak vista antes en este capítulo, pero con Lumen como emisor.
+Lumen ha cerrado el círculo: emite los tokens *y* los valida, y las dos mitades no
+comparten nada salvo una clave pública.
+
+!!! spring "Equivalencia con Spring"
+    `AuthorizationServer` + `AuthorizationServerEndpoints` es el
+    `spring-authorization-server` de PyFly. Las rutas de los endpoints, los
+    documentos de descubrimiento, el PKCE obligatorio con S256, la rotación de tokens
+    de actualización con detección de reutilización y el conjunto de claves de
+    `/oauth2/jwks` coinciden todos con los valores por defecto de Spring
+    Authorization Server.
+
+---
+
+## Tokens restringidos al poseedor (sender-constrained)
+
+Todos los tokens de este capítulo hasta ahora han sido tokens *portadores* (bearer):
+quien lo tiene, lo usa. Esa es toda la gracia, y todo el riesgo. Un token portador
+que se filtra por un log, un proxy o un dispositivo comprometido es una credencial
+totalmente utilizable en manos de un atacante. Para un monedero que mueve dinero,
+"quien lo tiene" no es un modelo de seguridad cómodo. La restricción al poseedor
+(sender-constraining) lo arregla vinculando el token a una clave que posee el cliente
+legítimo, de modo que un token robado es inerte sin esa clave.
+
+PyFly soporta ambos mecanismos estándar, y la vinculación se transporta en el claim
+`cnf` (confirmación) del token:
+
+- **DPoP** (RFC 9449) — el cliente firma un JWT de *prueba* (proof) nuevo por cada
+  petición con su clave privada; el token de acceso lleva `cnf.jkt`, la huella
+  SHA-256 de esa clave (RFC 7638). El servidor de recursos verifica la prueba y que
+  la huella de su clave coincida con `jkt`.
+- **mTLS** (RFC 8705) — el token de acceso lleva `cnf["x5t#S256"]`, la huella del
+  certificado TLS del cliente. El servidor de recursos la compara con el certificado
+  presentado en la conexión.
+
+El servidor de autorización vincula el token automáticamente: si un cliente presenta
+una cabecera `DPoP` en la petición de token, Lumen estampa `cnf.jkt` en el token de
+acceso emitido. En el lado del servidor de recursos activas la imposición:
+
+```yaml
+pyfly:
+  security:
+    oauth2:
+      resource-server:
+        enabled: true
+        jwks-uri: "https://lumen.example.com/oauth2/jwks"
+        enforce-sender-constraints: true
+        mtls-cert-header: "x-client-cert"   # lo establece tu proxy que termina el TLS
+```
+
+Con `enforce-sender-constraints: true`, cuando un token lleva un claim `cnf` el
+filtro *exige* la prueba correspondiente: un token `cnf.jkt` sin una cabecera de
+prueba `DPoP` válida se rechaza como `INVALID_TOKEN`; un token `cnf["x5t#S256"]` cuya
+huella no coincida con el certificado de cliente presentado se rechaza igualmente.
+Un token portador simple (sin `cnf`) no se ve afectado: la imposición solo entra en
+juego para los tokens que se emitieron restringidos al poseedor, de modo que puedes
+desplegarla de forma gradual.
+
+Las primitivas de verificación son públicas si las necesitas directamente:
+`DPoPProofValidator`, `confirm_dpop_binding`, `confirm_mtls_binding`,
+`jwk_thumbprint`, `certificate_thumbprint` y `access_token_hash`. Para Lumen, la
+lección es la proporcional: protege los ámbitos que mueven dinero
+(`wallet:deposit`, `wallet:withdraw`) con tokens restringidos al poseedor, y un token
+de acceso filtrado deja de ser una retirada de fondos filtrada.
+
+---
+
+## Seguro por defecto
+
+Un tema recorre todo este capítulo: la opción segura es la que viene por defecto, y
+tienes que *desactivarla* explícitamente, no activarla. Eso es deliberado. Los
+valores de seguridad por defecto que hay que recordar son valores de seguridad por
+defecto que se olvidan. Vale la pena destacar juntos cuatro de los valores de
+endurecimiento por defecto de Lumen, porque cada uno cierra un error que, de otro
+modo, es fácil llevar a producción.
+
+**El secreto de marcador de posición falla rápido.** Los valores por defecto de
+PyFly incluyen un secreto de firma literal, `change-me-in-production`. Si lo dejas en
+su sitio, la raíz de composición **se niega a arrancar**: tanto el `JWTService`
+simétrico (cuando su filtro está activado) como el servidor de autorización lanzan
+`INSECURE_SIGNING_SECRET` en lugar de firmar tokens que cualquiera podría falsificar.
+Y como una clave HS256 más corta que 32 bytes es más débil que el algoritmo al que
+alimenta, un secreto HMAC demasiado corto falla del mismo modo con
+`WEAK_SIGNING_SECRET`. No hay camino a producción con una clave adivinable.
+
+**La protección CSRF está activada.** No la activaste tú; viene activada por
+defecto. El filtro está *condicionado por cookies* (cookie-gated): solo desafía las
+peticiones no seguras que de verdad llevan cookies, de modo que el tráfico de la API
+de Lumen, sin estado y con token Bearer, pasa sin tocarse mientras el panel de cara
+al navegador queda protegido. Desactívala por servicio con
+`pyfly.security.csrf.enabled: false`, o endurécela hasta una imposición estricta y
+siempre activa con `pyfly.security.csrf.cookie-gated: false`.
+
+**PKCE está activado para el flujo de inicio de sesión.**
+`ClientRegistration.use_pkce` vale `True` por defecto, los clientes públicos (los que
+no tienen secreto) están *obligados* a usarlo de todos modos, y el paso de
+autorización del servidor de autorización exige el método S256: no hay forma de
+registrar un cliente de authorization-code que se salte la prueba de posesión.
+
+**La concesión de contraseña del propietario del recurso está desactivada.** El
+flujo heredado ROPC (`grant_type=password`), en el que una app recoge la contraseña
+del usuario y la cambia por un token, está deshabilitado en los adaptadores de IdP de
+Keycloak, Cognito y Azure AD a menos que establezcas explícitamente
+`pyfly.idp.allow-password-grant: true`. La respuesta moderna es el flujo
+`authorization_code` + PKCE de arriba; ROPC queda detrás de una activación explícita
+para la rara migración heredada que todavía la necesita.
+
+```yaml
+# Las desactivaciones, reunidas en un solo lugar — cada una te aparta de un valor por defecto seguro.
+pyfly:
+  security:
+    csrf:
+      enabled: false          # desactiva CSRF por completo (servicios solo sin estado)
+      cookie-gated: false     # O mantenlo activado, pero imponlo estrictamente para todos
+  idp:
+    allow-password-grant: true  # reactiva el ROPC heredado (evítalo salvo que te obliguen)
+```
+
+La cuestión no es que estos valores por defecto nunca puedan relajarse: cada uno de
+ellos tiene una desactivación legítima. La cuestión es que relajarlos sea una *línea
+visible y deliberada en tu configuración*, revisada como cualquier otro cambio, en
+lugar de una salvaguarda que olvidaste añadir en silencio.
+
+---
+
 ## Juntándolo todo — la capa de autenticación de Lumen
 
 El listado siguiente muestra la conexión completa: adaptador del IDP, filtro JWT, reglas a nivel de URL y un almacén de sesiones en Redis para el panel de administración.

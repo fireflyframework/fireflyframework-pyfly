@@ -114,7 +114,19 @@ def _adapter() -> AzureAdIdpAdapter:
         tenant_id=TENANT_ID,
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
+        allow_password_grant=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_login_refused_without_password_grant_optin() -> None:
+    """ROPC (grant_type=password) is refused unless explicitly enabled (RFC 9700 §2.4)."""
+    from pyfly.kernel.exceptions import SecurityException
+
+    adapter = AzureAdIdpAdapter(tenant_id=TENANT_ID, client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
+    with pytest.raises(SecurityException) as exc:
+        await adapter.login(LoginRequest(username="alice@example.com", password="s3cr3t!"))
+    assert exc.value.code == "ROPC_DISABLED"
 
 
 def _inject(adapter: AzureAdIdpAdapter, fake: FakeClient) -> None:

@@ -1,6 +1,8 @@
 # Security Guide
 
-The PyFly security module provides a complete authentication and authorization system built around JWT tokens, password hashing, a request-scoped security context, middleware for automatic token processing, and a decorator for role- and permission-based access control. Like all PyFly modules, it follows hexagonal principles: the password encoder is defined as a protocol (port) with a bcrypt adapter, and the security context is a plain dataclass with no framework coupling.
+The PyFly security module is a full Spring-Security-style stack for async Python: a request-scoped `SecurityContext`, URL-level (`HttpSecurity`) and method-level (`@pre_authorize`/`@post_authorize`/`@pre_filter`/`@post_filter`) authorization, pluggable authentication mechanisms (form login, HTTP Basic, X.509, a `UserDetailsService`/`AuthenticationManager` SPI, run-as), password encoders (bcrypt, PBKDF2, scrypt, Argon2 behind a delegating encoder), CSRF protection, security headers, and a complete OAuth 2.1 / OpenID Connect implementation (resource server, client & login, and a full authorization server). Like all PyFly modules it follows hexagonal principles, with ports (protocols) and swappable adapters, and a `SecurityContext` that is a plain dataclass with no framework coupling.
+
+> The OAuth 2.1 / OIDC surface (resource server, client/login, authorization server, DPoP/mTLS, dynamic client registration, PAR/JAR, introspection, discovery) is large enough to have its own page — see the **[OAuth 2.1 & OpenID Connect guide](oauth2.md)**.
 
 ---
 
@@ -25,6 +27,7 @@ The PyFly security module provides a complete authentication and authorization s
   - [PasswordEncoder Protocol](#passwordencoder-protocol)
   - [BcryptPasswordEncoder](#bcryptpasswordencoder)
   - [Custom Password Encoders](#custom-password-encoders)
+  - [Delegating & Modern Encoders](#delegating-modern-encoders)
 - [SecurityMiddleware](#securitymiddleware)
   - [How It Works](#how-the-middleware-works)
   - [Excluding Paths](#excluding-paths)
@@ -45,26 +48,24 @@ The PyFly security module provides a complete authentication and authorization s
   - [Building URL-Level Access Rules](#building-url-level-access-rules)
   - [Access Rule Types](#access-rule-types)
   - [HttpSecurityFilter](#httpsecurityfilter)
-  - [Integration with create_app()](#integration-with-create_app-1)
+  - [Integration with create_app()](#integration-with-create_app_1)
 - [Method-Level Security](#method-level-security)
-  - [@pre_authorize](#pre_authorize--check-before-execution)
-  - [@post_authorize](#post_authorize--check-after-execution)
+  - [@pre_authorize](#pre_authorize-check-before-execution)
+  - [@post_authorize](#post_authorize-check-after-execution)
   - [Expression Vocabulary](#expression-vocabulary)
   - [Method Arguments and returnObject](#method-arguments-and-returnobject)
   - [Role Hierarchy](#role-hierarchy)
-- [OAuth2](#oauth2)
-  - [OAuth2 Resource Server (JWKS)](#oauth2-resource-server-jwks)
-  - [OAuth2 Client Registration](#oauth2-client-registration)
-  - [Built-in Provider Factories](#built-in-provider-factories)
-  - [ClientRegistrationRepository](#clientregistrationrepository)
-  - [OAuth2 Authorization Server](#oauth2-authorization-server)
-  - [Issuing Tokens](#issuing-tokens)
-  - [TokenStore Protocol](#tokenstore-protocol)
-  - [Error Codes](#error-codes)
-  - [OAuth2 Login Flow](#oauth2-login-flow)
-  - [OAuth2LoginHandler](#oauth2loginhandler)
-  - [OAuth2SessionSecurityFilter](#oauth2sessionsecurityfilter)
-  - [Login Flow Configuration Example](#login-flow-configuration-example)
+- [Authentication Mechanisms](#authentication-mechanisms)
+  - [UserDetailsService SPI](#userdetails-and-the-userdetailsservice-spi)
+  - [AuthenticationManager](#authenticationmanager-providermanager-and-daoauthenticationprovider)
+  - [Form Login](#form-login)
+  - [HTTP Basic](#http-basic)
+  - [X.509 Client Certificates](#x509-client-certificate-authentication)
+  - [Logout](#logout)
+  - [switch-user / run-as](#switch-user-run-as-impersonation)
+- [Security Headers](#security-headers)
+- [OAuth 2.1 & OpenID Connect](#oauth-21-openid-connect) — see the [OAuth2 guide](oauth2.md)
+- [Secure-by-Default & Hardening](#secure-by-default-hardening)
 - [Exception Hierarchy](#exception-hierarchy)
 - [Auto-Configuration](#auto-configuration)
 - [Putting It All Together](#putting-it-all-together)
@@ -98,35 +99,47 @@ The security module consists of the following components:
 | `HttpSecurityFilter`   | `pyfly.web.adapters.starlette.filters.http_security_filter` | Evaluates HttpSecurity rules at filter layer |
 | `OAuth2LoginHandler`   | `pyfly.security.oauth2.login`     | Browser-facing authorization_code login flow |
 | `OAuth2SessionSecurityFilter` | `pyfly.security.oauth2.session_security_filter` | Restores SecurityContext from HTTP session |
+| `UserDetailsService`   | `pyfly.security.user_details` | Credential-lookup SPI (`InMemoryUserDetailsService`, `SqlUserDetailsService`) |
+| `ProviderManager` / `DaoAuthenticationProvider` | `pyfly.security.authentication` | `AuthenticationManager` SPI |
+| `FormLoginFilter` / `LogoutFilter` | `pyfly.web.adapters.starlette.filters.*` | Form login + generic logout |
+| `HttpBasicAuthenticationFilter` | `pyfly.web.adapters.starlette.filters.http_basic_filter` | HTTP Basic auth (RFC 7617) |
+| `X509AuthenticationFilter` / `SwitchUserFilter` | `pyfly.web.adapters.starlette.filters.*` | Client-cert auth + run-as impersonation |
+| `DelegatingPasswordEncoder` | `pyfly.security.password` | `{id}`-prefixed multi-algorithm encoder (bcrypt/PBKDF2/scrypt/Argon2) |
+| `PermissionEvaluator`  | `pyfly.security.permission` | ACL-style `hasPermission` SPI |
+| `SecurityHeadersFilter`| `pyfly.web.adapters.starlette.filters.security_headers_filter` | OWASP response headers |
+| `AuthorizationServerEndpoints` | `pyfly.security.oauth2.endpoints` | OAuth2/OIDC HTTP routes (token, authorize, jwks, introspect, …) |
+| `OpaqueTokenIntrospector` | `pyfly.security.oauth2.resource_server` | RFC 7662 opaque-token validation |
 
 All components are exported from the top-level `pyfly.security` package:
 
 ```python
 from pyfly.security import (
     SecurityContext,
-    JWTService,
-    PasswordEncoder,
-    BcryptPasswordEncoder,
-    SecurityMiddleware,
-    secure,
+    HttpSecurity,
+    pre_authorize, post_authorize, pre_filter, post_filter, secure,
+    RoleHierarchy, set_role_hierarchy, get_role_hierarchy,
+    PermissionEvaluator, set_permission_evaluator, get_permission_evaluator,
+    JWTService, SecurityMiddleware,
+    # Password encoders
+    PasswordEncoder, BcryptPasswordEncoder, Pbkdf2PasswordEncoder,
+    ScryptPasswordEncoder, Argon2PasswordEncoder,
+    DelegatingPasswordEncoder, create_delegating_password_encoder,
+    # Authentication SPI
+    UserDetails, UserDetailsService, InMemoryUserDetailsService,
+    Authentication, AuthenticationProvider, DaoAuthenticationProvider, ProviderManager,
+    AuthenticationException, BadCredentialsException, DisabledException, ProviderNotFoundException,
 )
 
 # CSRF utilities
 from pyfly.security.csrf import generate_csrf_token, validate_csrf_token
-from pyfly.web.adapters.starlette.filters.csrf_filter import CsrfFilter
 
-# OAuth2
+# OAuth2 / OIDC (see the OAuth2 guide)
 from pyfly.security.oauth2 import (
-    JWKSTokenValidator,
-    ClientRegistration,
-    ClientRegistrationRepository,
-    InMemoryClientRegistrationRepository,
-    AuthorizationServer,
-    TokenStore,
-    InMemoryTokenStore,
-    google,
-    github,
-    keycloak,
+    JWKSTokenValidator, OpaqueTokenIntrospector, ClaimMappings,
+    ClientRegistration, InMemoryClientRegistrationRepository,
+    AuthorizationServer, AuthorizationServerEndpoints,
+    TokenStore, InMemoryTokenStore, OAuth2LoginHandler,
+    google, github, keycloak,
 )
 ```
 
@@ -402,6 +415,90 @@ Because `PasswordEncoder` is a `runtime_checkable` protocol, you can use `isinst
 encoder = BcryptPasswordEncoder()
 isinstance(encoder, PasswordEncoder)  # True
 ```
+
+### Delegating & Modern Encoders
+
+Beyond `BcryptPasswordEncoder`, the password module ships PBKDF2, scrypt, and Argon2 adapters plus a `DelegatingPasswordEncoder` that prefixes each stored hash with a `{id}` tag so the active algorithm can be migrated over time without invalidating existing credentials (Spring Security's `DelegatingPasswordEncoder` / `PasswordEncoderFactories`).
+
+#### DelegatingPasswordEncoder
+
+`DelegatingPasswordEncoder` wraps a map of `{id -> PasswordEncoder}` and a default `encoding_id`. `hash()` produces `{<encoding_id>}<inner-hash>` using the default encoder; `verify()` reads the `{id}` prefix and dispatches to the matching encoder. A stored value whose prefix is unknown or missing never matches. `upgrade_encoding()` reports whether a stored hash should be re-hashed with the current default — the hook for transparent on-login migration.
+
+```python
+from pyfly.security import (
+    DelegatingPasswordEncoder,
+    BcryptPasswordEncoder,
+    Pbkdf2PasswordEncoder,
+)
+
+encoder = DelegatingPasswordEncoder(
+    {
+        "bcrypt": BcryptPasswordEncoder(rounds=12),
+        "pbkdf2": Pbkdf2PasswordEncoder(),
+    },
+    encoding_id="bcrypt",
+)
+
+stored = encoder.hash("s3cret")          # "{bcrypt}$2b$12$..."
+encoder.verify("s3cret", stored)          # True
+
+# A legacy PBKDF2 hash still verifies, and is flagged for upgrade:
+legacy = "{pbkdf2}sha256$600000$<salt>$<digest>"
+encoder.verify("s3cret", legacy)          # True (dispatched to the pbkdf2 encoder)
+encoder.upgrade_encoding(legacy)          # True  -> re-hash with the default (bcrypt)
+encoder.upgrade_encoding(stored)          # False -> already the default encoding
+```
+
+The constructor raises `ValueError` if `encoding_id` is not present in the encoders map.
+
+#### create_delegating_password_encoder
+
+`create_delegating_password_encoder()` builds a ready-made delegating encoder with bcrypt as the default id, while `{pbkdf2}`, `{scrypt}`, and `{argon2}` hashes remain recognised for verification and migration (Spring's `PasswordEncoderFactories.createDelegatingPasswordEncoder()`):
+
+```python
+from pyfly.security import create_delegating_password_encoder
+
+encoder = create_delegating_password_encoder(bcrypt_rounds=12)
+encoder.hash("s3cret")    # "{bcrypt}$2b$12$..."
+```
+
+#### Argon2 / PBKDF2 / scrypt adapters
+
+Each modern adapter implements the `PasswordEncoder` protocol and produces a self-describing hash string, so its parameters travel with the value.
+
+| Encoder | Backing | Stored format | Defaults |
+|---|---|---|---|
+| `Argon2PasswordEncoder` | Argon2id (`argon2-cffi`) | argon2-cffi PHC string | `time_cost=3`, `memory_cost=65536`, `parallelism=4` |
+| `Pbkdf2PasswordEncoder` | stdlib `hashlib.pbkdf2_hmac` | `<algorithm>$<iterations>$<salt_b64>$<hash_b64>` | `iterations=600_000`, `algorithm="sha256"`, `salt_bytes=16` |
+| `ScryptPasswordEncoder` | stdlib `hashlib.scrypt` | `<n>$<r>$<p>$<salt_b64>$<hash_b64>` | `n=2**14`, `r=8`, `p=1`, `salt_bytes=16`, `dklen=32` |
+
+```python
+from pyfly.security import Argon2PasswordEncoder, Pbkdf2PasswordEncoder, ScryptPasswordEncoder
+
+argon2 = Argon2PasswordEncoder()              # OWASP-preferred; Argon2id
+pbkdf2 = Pbkdf2PasswordEncoder()              # FIPS-friendly; 600k SHA-256 iterations
+scrypt = ScryptPasswordEncoder()              # memory-hard
+```
+
+`Argon2PasswordEncoder` imports `argon2-cffi` lazily, so the rest of the security module works without it; install with `pip install pyfly[argon2]`. Calling `hash()`/`verify()` without the dependency raises `ImportError`.
+
+#### Opt-in delegating bean
+
+The auto-configuration always exposes a `BcryptPasswordEncoder` bean when `pyfly.security.enabled=true` and bcrypt is installed. Setting `pyfly.security.password.delegating.enabled=true` additionally registers a `DelegatingPasswordEncoder` bean built via `create_delegating_password_encoder()`, reusing `pyfly.security.password.bcrypt-rounds` for the default encoder:
+
+```yaml
+pyfly:
+  security:
+    enabled: true
+    password:
+      bcrypt-rounds: 12
+      delegating:
+        enabled: true        # registers the {id}-prefixed DelegatingPasswordEncoder bean
+```
+
+#### SqlUserDetailsService note
+
+`SqlUserDetailsService` (`pyfly.security.adapters.sql_user_details`) stores `password_hash` verbatim in a `TEXT` column, so `{id}`-prefixed delegating hashes round-trip unchanged. This makes on-login migration straightforward: after a successful `verify()`, call `upgrade_encoding()` on the stored hash and, when it returns `True`, re-hash with the delegating encoder and persist via `SqlUserDetailsService.save(...)`.
 
 ---
 
@@ -706,6 +803,28 @@ fetch('/api/orders', {
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/csrf_filter.py`
 
+### Enabled by Default (cookie-gated)
+
+CSRF protection is **secure-by-default**: `CsrfFilterAutoConfiguration` registers the `CsrfFilter` unless `pyfly.security.csrf.enabled=false` (the property is treated as enabled when missing). The filter runs in **cookie-gated** mode by default, which lets it be on without breaking stateless/token clients:
+
+- **Safe methods** (GET, HEAD, OPTIONS, TRACE) pass through and the response sets/refreshes the `XSRF-TOKEN` cookie.
+- **Bearer requests** (`Authorization: Bearer ...`) are exempt — JWT API clients carry no ambient browser authority to forge.
+- **Cookie-gated exemption** — when `cookie-gated` is true and the request carries no cookies, there is no ambient authority a cross-site request could abuse, so it is exempt. This is what makes default-on safe for stateless API clients.
+- **Unsafe methods** with cookies are validated by comparing the `X-XSRF-TOKEN` header against the `XSRF-TOKEN` cookie (timing-safe); a missing or mismatched value returns HTTP 403.
+
+Set `cookie-gated: false` for **strict mode**, which validates every unsafe request regardless of cookies. Disable CSRF entirely with `enabled: false`. The filter's exclude patterns default to `/actuator/*`, `/health`, `/ready` and can be overridden:
+
+```yaml
+pyfly:
+  security:
+    csrf:
+      enabled: true                          # default; set false to disable entirely
+      cookie-gated: true                     # default; false = strict (validate every unsafe request)
+      exclude-patterns: "/actuator/*,/webhooks/**"
+```
+
+**Source:** `src/pyfly/web/security_filters_auto_configuration.py`, `src/pyfly/web/adapters/starlette/filters/csrf_filter.py`
+
 ---
 
 ## HttpSecurity DSL
@@ -808,6 +927,32 @@ class SecurityConfig:
 The filter is automatically included in the WebFilter chain and sorted by its `@order` value (`HIGHEST_PRECEDENCE + 350`).
 
 **Source:** `src/pyfly/security/http_security.py`, `src/pyfly/web/adapters/starlette/filters/http_security_filter.py`
+
+#### HTTP-Method-Scoped Rules
+
+`request_matchers(...)` accepts an optional `methods` argument to scope a rule to specific HTTP verbs, mirroring Spring's `requestMatchers(HttpMethod.X, ...)`. Pass a single method as a string or several as a list/tuple; values are upper-cased. When `methods` is omitted the rule matches any method.
+
+```python
+from pyfly.security.http_security import HttpSecurity
+
+http_security = HttpSecurity()
+http_security.authorize_requests() \
+    .request_matchers("/api/orders/**", methods="GET").authenticated() \
+    .request_matchers("/api/orders/**", methods="POST").has_role("ADMIN") \
+    .request_matchers("/api/orders/**", methods=["PUT", "DELETE"]).has_role("ADMIN") \
+    .any_request().permit_all()
+
+http_security_filter = http_security.build()
+```
+
+`any_request()` takes the same keyword to restrict the catch-all to specific methods:
+
+```python
+http_security.authorize_requests() \
+    .any_request(methods=["PUT", "PATCH", "DELETE"]).authenticated()
+```
+
+A rule with an empty method list (the default) applies to every method; otherwise it applies only when the request method is one of the listed (upper-cased) verbs.
 
 ---
 
@@ -930,508 +1075,532 @@ async def list_orders(self) -> list[Order]: ...
 
 ---
 
-## OAuth2
+#### @pre_filter / @post_filter and PermissionEvaluator
 
-PyFly provides a complete OAuth2 implementation following hexagonal architecture. The module includes a Resource Server for validating external tokens, Client Registration for connecting to OAuth2 providers, and an Authorization Server for issuing tokens.
+`@pre_filter` and `@post_filter` filter *collections* element-by-element against a security expression, binding each element to `filterObject` (Spring's `@PreFilter` / `@PostFilter`). They complement the all-or-nothing `@pre_authorize` / `@post_authorize` checks.
+
+`@post_filter(expression)` filters the method's returned collection after it runs; non-collection results are returned unchanged. `@pre_filter(expression, filter_target=None)` filters a collection *argument* before the method runs — `filter_target` names the parameter to filter; when omitted, the first collection-valued argument is used. Both preserve the collection's concrete type (`list` / `tuple` / `set`) and drop elements for which the expression is `False`.
 
 ```python
-from pyfly.security.oauth2 import (
-    # Resource Server
-    JWKSTokenValidator,
-    # Client Registration
-    ClientRegistration,
-    ClientRegistrationRepository,
-    InMemoryClientRegistrationRepository,
-    google,
-    github,
-    keycloak,
-    # Authorization Server
-    AuthorizationServer,
-    TokenStore,
-    InMemoryTokenStore,
-)
+from pyfly.security import pre_filter, post_filter
+
+
+@service
+class DocumentService:
+
+    # Return only the documents the caller owns.
+    @post_filter("filterObject.owner_id == principal.user_id")
+    async def list_documents(self) -> list[Document]:
+        return await self._repo.find_all()
+
+    # Keep only non-draft documents from the incoming batch before publishing.
+    @pre_filter("filterObject.draft == False", filter_target="documents")
+    async def publish(self, documents: list[Document]) -> None:
+        ...
 ```
 
-### OAuth2 Resource Server (JWKS)
+##### PermissionEvaluator (ACL-style hasPermission)
 
-The `JWKSTokenValidator` validates JWTs against a remote JWKS (JSON Web Key Set) endpoint. Use it when your application is an **OAuth2 Resource Server** — it receives bearer tokens issued by an external authorization server and validates the signature, `iss`, `aud` and `exp` (with clock-skew leeway). It is **multi-IdP out of the box**: Keycloak, Microsoft Entra ID (v1.0 + v2.0) and AWS Cognito all work via configuration, no subclassing.
+`PermissionEvaluator` is the SPI behind domain-object `hasPermission(...)` checks. It is a runtime-checkable `Protocol` with a single method:
 
-#### Enable via configuration (recommended)
+```python
+def has_permission(
+    self,
+    context: Any,          # the active SecurityContext
+    target: Any,           # the domain object, or its identifier (3-arg form)
+    permission: str,
+    *,
+    target_type: str | None = None,
+) -> bool: ...
+```
 
-The resource-server filter auto-wires when `pyfly.security.oauth2.resource-server.enabled=true`. It binds [`ResourceServerProperties`](#) and adds a bearer-token filter to the chain.
+Install one process-wide with `set_permission_evaluator()`; `get_permission_evaluator()` returns the current one and `set_permission_evaluator(None)` disables it. When an evaluator is installed, the `hasPermission` function in security expressions dispatches to it by argument shape:
+
+- `hasPermission('perm')` — flat check: `has_permission(ctx, None, 'perm')`
+- `hasPermission(target, 'perm')` — domain object: `has_permission(ctx, target, 'perm')`
+- `hasPermission(id, 'Type', 'perm')` — identifier + type: `has_permission(ctx, id, 'perm', target_type='Type')`
+
+When **no** evaluator is installed, `hasPermission` falls back to a flat permission check on the `SecurityContext` (the principal's granted permissions), using the last argument as the permission name.
+
+```python
+from pyfly.security import PermissionEvaluator, set_permission_evaluator
+
+
+class AclPermissionEvaluator:
+    def has_permission(self, context, target, permission, *, target_type=None) -> bool:
+        # Consult your ACL store using context.user_id, target/target_type, permission.
+        ...
+
+
+set_permission_evaluator(AclPermissionEvaluator())
+```
+
+```python
+@service
+class OrderService:
+
+    @pre_authorize("hasPermission(#order, 'order:write')")
+    async def update(self, order: Order) -> None: ...
+
+    @pre_authorize("hasPermission(#order_id, 'Order', 'write')")
+    async def update_by_id(self, order_id: str) -> None: ...
+```
+
+**Source:** `src/pyfly/security/method_security.py`, `src/pyfly/security/expression.py`, `src/pyfly/security/permission.py`
+
+---
+
+## Authentication Mechanisms
+
+Beyond stateless JWT processing, PyFly ships the Spring Security authentication SPI: a `UserDetailsService` that resolves a username to a stored credential, an `AuthenticationManager` (`ProviderManager`) that delegates to one or more `AuthenticationProvider`s, and a family of `WebFilter`s that establish a `SecurityContext` from HTTP Basic credentials, a login form, a client certificate, or an impersonation request. Each filter populates `request.state.security_context`; the `HttpSecurity` gate and `@secure` decorator then enforce access. Config-driven HTTP Basic and form login store their users with **pre-hashed bcrypt password hashes** — plaintext passwords never appear in configuration.
+
+### UserDetails and the UserDetailsService SPI
+
+A `UserDetailsService` is the credential-lookup port: it resolves a username to a `UserDetails` (a stored password hash plus authorities) or `None`. The HTTP Basic / form-login / X.509 filters verify the supplied password against that hash using a `PasswordEncoder`.
+
+`UserDetails` is a frozen dataclass:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `username` | `str` | required | The principal's identifier |
+| `password_hash` | `str` | required | Stored credential (e.g. a bcrypt hash) |
+| `roles` | `list[str]` | `[]` | Granted roles |
+| `permissions` | `list[str]` | `[]` | Granted permissions |
+| `enabled` | `bool` | `True` | Whether the account may authenticate |
+
+The port is a single async method:
+
+```python
+from typing import Protocol, runtime_checkable
+from pyfly.security import UserDetails
+
+@runtime_checkable
+class UserDetailsService(Protocol):
+    async def load_user_by_username(self, username: str) -> UserDetails | None: ...
+```
+
+#### InMemoryUserDetailsService
+
+`InMemoryUserDetailsService` is a dict-backed store for development and testing. It takes any number of `UserDetails` and exposes `load_user_by_username()` plus an `add()` mutator:
+
+```python
+from pyfly.security import (
+    InMemoryUserDetailsService,
+    UserDetails,
+    BcryptPasswordEncoder,
+)
+
+encoder = BcryptPasswordEncoder(rounds=12)
+users = InMemoryUserDetailsService(
+    UserDetails(
+        username="alice",
+        password_hash=encoder.hash("s3cret"),   # store the hash, not the password
+        roles=["ADMIN", "USER"],
+        permissions=["order:read", "order:write"],
+    ),
+)
+users.add(UserDetails(username="bob", password_hash=encoder.hash("hunter2"), roles=["USER"]))
+
+await users.load_user_by_username("alice")   # -> UserDetails(...)
+await users.load_user_by_username("nobody")  # -> None
+```
+
+#### SqlUserDetailsService
+
+`SqlUserDetailsService` is a durable, table-backed `UserDetailsService` for HTTP Basic / form login, backed by any SQLAlchemy `AsyncEngine`. It is hexagonal: the engine is supplied lazily via an `engine_factory` callable (the composition root injects it), and SQLAlchemy is never imported at module scope. The table is created lazily and idempotently on first use, with columns `username` (PK), `password_hash`, `roles` (JSON), `permissions` (JSON), and `enabled` (int). It works on PostgreSQL and SQLite via an `ON CONFLICT` upsert.
+
+```python
+from pyfly.container import configuration, bean
+from pyfly.security.adapters.sql_user_details import SqlUserDetailsService
+from pyfly.security import UserDetails, UserDetailsService, BcryptPasswordEncoder
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+
+@configuration
+class UserStoreConfig:
+
+    @bean
+    def user_details_service(self, engine: AsyncEngine) -> UserDetailsService:
+        # The engine is resolved from the container; the table defaults to "pyfly_users".
+        return SqlUserDetailsService(lambda: engine, table="pyfly_users")
+```
+
+```python
+# Provisioning and managing users (save() upserts by username; delete() removes one):
+store = SqlUserDetailsService(lambda: engine)
+await store.save(
+    UserDetails(
+        username="alice",
+        password_hash=BcryptPasswordEncoder().hash("s3cret"),
+        roles=["ADMIN"],
+        permissions=["order:write"],
+        enabled=True,
+    )
+)
+await store.load_user_by_username("alice")  # -> UserDetails(...)
+await store.delete("alice")
+```
+
+The constructor rejects an invalid SQL identifier as the table name (it must match `^[A-Za-z_][A-Za-z0-9_]*$`), raising `ValueError`.
+
+**Source:** `src/pyfly/security/user_details.py`, `src/pyfly/security/adapters/sql_user_details.py`
+
+### AuthenticationManager: ProviderManager and DaoAuthenticationProvider
+
+`ProviderManager` is PyFly's `AuthenticationManager`: it holds an ordered list of `AuthenticationProvider`s and authenticates an `Authentication` request by delegating to the first provider that `supports()` it. The built-in `DaoAuthenticationProvider` checks a username/password against a `UserDetailsService` and a `PasswordEncoder`.
+
+An `Authentication` is both the request and the result. Before authentication, `principal` and `credentials` carry the submitted username/password; after a successful authentication, `authenticated` is `True`, `roles` / `permissions` / `authorities` are populated, and `credentials` is erased. `to_security_context()` converts the (authenticated) result into a `SecurityContext`.
+
+```python
+from pyfly.security import (
+    Authentication,
+    DaoAuthenticationProvider,
+    ProviderManager,
+    InMemoryUserDetailsService,
+    UserDetails,
+    BcryptPasswordEncoder,
+)
+
+encoder = BcryptPasswordEncoder(rounds=12)
+users = InMemoryUserDetailsService(
+    UserDetails(username="alice", password_hash=encoder.hash("s3cret"), roles=["ADMIN"]),
+)
+
+manager = ProviderManager(DaoAuthenticationProvider(users, encoder))
+
+result = await manager.authenticate(Authentication(principal="alice", credentials="s3cret"))
+result.authenticated   # True
+result.credentials     # None  -> erased on success
+result.authorities     # ["ADMIN"]  (roles + permissions)
+ctx = result.to_security_context()   # SecurityContext(user_id="alice", roles=["ADMIN"], ...)
+```
+
+`DaoAuthenticationProvider` behaviour, verified in source:
+
+- **Credential erasure.** A successful `authenticate()` returns an `Authentication` with `credentials=None`; `ProviderManager` also clears `credentials` on the returned result. `authorities` is the concatenation of `roles` and `permissions`.
+- **Timing equalisation.** When the username is unknown, the provider still runs `PasswordEncoder.verify()` against a throw-away dummy hash before raising, so request timing cannot be used to enumerate valid usernames.
+- **Failure modes.** An unknown user or a wrong password raises `BadCredentialsException` (code `"BAD_CREDENTIALS"`). The password is verified *before* the `enabled` check, so only a *correct* password against a disabled account raises `DisabledException` (code `"ACCOUNT_DISABLED"`); a wrong password on a disabled account still yields `BadCredentialsException`.
+- **`supports()`** returns `True` only when `principal` is non-empty and `credentials` is not `None`.
+
+`ProviderManager.authenticate()` iterates providers in order: it skips providers that do not `supports()` the request; if a supporting provider raises an `AuthenticationException` it remembers it and tries the next; the first authenticated result wins. If every supporting provider failed it re-raises the last error, and if no provider supported the request it raises `ProviderNotFoundException` (code `"PROVIDER_NOT_FOUND"`). Construct one from an iterable with `ProviderManager.of([...])`.
+
+All of these derive from `AuthenticationException` (a `SecurityException` subclass):
+
+| Exception | Code | Raised when |
+|---|---|---|
+| `BadCredentialsException` | `BAD_CREDENTIALS` | Unknown principal or wrong password |
+| `DisabledException` | `ACCOUNT_DISABLED` | Correct password but `enabled=False` |
+| `ProviderNotFoundException` | `PROVIDER_NOT_FOUND` | No provider `supports()` the request |
+
+**Source:** `src/pyfly/security/authentication.py`
+
+### Form Login
+
+`FormLoginFilter` processes a POST of username/password to the login URL, authenticates via a `ProviderManager`, and on success **rotates the session id** (session-fixation defense) before storing the `SecurityContext` in the session — where `OAuth2SessionSecurityFilter` restores it on later requests. It runs at `HIGHEST_PRECEDENCE + 230` (after the session-restoring filter), so a successful login overrides any prior anonymous context. Both browser (302 redirect) and API (JSON) responses are supported via `use_redirect`.
+
+Enable config-driven form login by declaring **pre-hashed** users under `pyfly.security.form-login.users` (requires `starlette` and `bcrypt`). The auto-configuration builds a `ProviderManager(DaoAuthenticationProvider(InMemoryUserDetailsService(...), BcryptPasswordEncoder(...)))` from those users:
 
 ```yaml
 pyfly:
   security:
     enabled: true
-    oauth2:
-      resource-server:
-        enabled: true
-        # Provide a JWKS URI directly, OR an issuer-uri for OIDC discovery:
-        issuer-uri: "https://login.microsoftonline.com/<tenant>/v2.0"   # discovers jwks-uri + issuer
-        # jwks-uri: "https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys"
-        audiences: "api://my-backend"      # comma-separated; token aud must match ANY
-        validate-audience: true            # set false for Cognito ACCESS tokens (they carry no aud)
-        algorithms: "RS256"
-        clock-skew-seconds: 60             # leeway for iat/nbf/exp (default 60)
-        # Config-driven claim mapping (dotted paths, '*' wildcard, colon-safe):
-        principal-claim-names: "oid,sub"
-        authorities-claim-names: "roles,realm_access.roles,resource_access.*.roles,groups,cognito:groups"
-        scope-claim-names: "scp,scope"     # Entra uses scp; Keycloak/Cognito use scope
-        attribute-claims: "tid,preferred_username"
-        authority-prefix: ""               # e.g. "ROLE_" / "SCOPE_" for Spring-style authorities
-        exclude-patterns: "/actuator/**,/api/v1/version"
-        authenticate-error-mode: "anonymous"   # or "401" to reject invalid tokens at the filter
+    password:
+      bcrypt-rounds: 12              # cost factor for the encoder
+    form-login:
+      enabled: true
+      login-url: "/login"           # POST target this filter intercepts
+      username-param: "username"
+      password-param: "password"
+      success-url: "/"
+      failure-url: "/login?error"
+      use-redirect: true            # false -> JSON {"authenticated": true} / 401
+      users:
+        alice:
+          password-hash: "$2b$12$..."   # bcrypt hash, never plaintext
+          roles: "ADMIN,USER"           # comma-separated or a YAML list
+          permissions: "order:read,order:write"
+          enabled: true
 ```
 
-Per-IdP quick reference:
-
-| IdP | `issuer` | Roles claim(s) | Scopes | Audience |
-|---|---|---|---|---|
-| **Keycloak** | `https://<host>/realms/<r>` | `realm_access.roles`, `resource_access.*.roles` | `scope` | client / `account` |
-| **Entra ID v2.0** | `https://login.microsoftonline.com/<tid>/v2.0` | `roles`, `groups` | `scp` | `api://…` or client GUID |
-| **Cognito (access)** | `https://cognito-idp.<region>.amazonaws.com/<pool>` | `cognito:groups` | `scope` | **none** → set `validate-audience: false` |
-
-#### Programmatic use
+For a dynamic user store (e.g. `SqlUserDetailsService`), register your own `FormLoginFilter` bean instead of using the config users:
 
 ```python
-from pyfly.security.oauth2 import JWKSTokenValidator, ClaimMappings
+from pyfly.container import configuration, bean
+from pyfly.web.ports.filter import WebFilter
+from pyfly.web.adapters.starlette.filters.form_login_filter import FormLoginFilter
+from pyfly.security import ProviderManager, DaoAuthenticationProvider, BcryptPasswordEncoder, UserDetailsService
 
-validator = JWKSTokenValidator(
-    jwks_uri="https://auth.example.com/.well-known/jwks.json",
-    issuer="https://auth.example.com",
-    audiences=["my-api"],
-    leeway=60,
-    claim_mappings=ClaimMappings(attribute_claims=("tid",)),
-)
-ctx = validator.to_security_context(token)
-# SecurityContext(user_id=..., roles=[...], permissions=[...], attributes={...})
+
+@configuration
+class FormLoginConfig:
+
+    @bean
+    def form_login_filter(self, users: UserDetailsService) -> WebFilter:
+        manager = ProviderManager(DaoAuthenticationProvider(users, BcryptPasswordEncoder(rounds=12)))
+        return FormLoginFilter(
+            manager,
+            login_url="/login",
+            success_url="/dashboard",
+            failure_url="/login?error",
+            use_redirect=True,
+        )
 ```
 
-**Constructor parameters:**
+On a failed login the filter catches `AuthenticationException` and returns the failure response (a redirect to `failure_url`, or `401` `{"error": "invalid_credentials"}` in API mode).
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `jwks_uri` | `str` | required | URL of the JWKS endpoint |
-| `issuer` | `str \| None` | `None` | Expected `iss` claim (validated if set) |
-| `audiences` | `list[str] \| None` | `None` | Accepted audiences; `aud` must match any. Empty disables `aud` validation |
-| `algorithms` | `list[str] \| None` | `["RS256"]` | Allowed signing algorithms |
-| `leeway` | `int` | `60` | Clock-skew tolerance (seconds) for `iat`/`nbf`/`exp` |
-| `validate_audience` | `bool` | `True` | Skip `aud` validation when `False` (Cognito access tokens) |
-| `claim_mappings` | `ClaimMappings \| None` | multi-IdP defaults | Config-driven claim→context mapping |
+**Source:** `src/pyfly/web/adapters/starlette/filters/form_login_filter.py`
 
-**Claim mapping (`ClaimMappings`):** claim names are searched as **dotted paths** with a single `*` wildcard (`resource_access.*.roles`) and are colon-safe (`cognito:groups`). Defaults map authorities from `roles`, `realm_access.roles`, `resource_access.*.roles`, `groups`, `cognito:groups`; scopes from `scp`, `scope`; principal from `oid` then `sub`.
+### HTTP Basic
 
-To customise per IdP without subclassing, set the `*-claim-names` config keys. An application that needs bespoke mapping can still subclass `JWKSTokenValidator` and register it — `@conditional_on_missing_bean(JWKSTokenValidator)` backs the default off.
+`HttpBasicAuthenticationFilter` parses an `Authorization: Basic` header (RFC 7617), resolves the user via a `UserDetailsService`, and verifies the password with a `PasswordEncoder` (offloaded to a worker thread, since bcrypt/argon2 verification is CPU-bound). It runs at `HIGHEST_PRECEDENCE + 215`, just before the symmetric JWT filter, so credential-based clients get a context while token-based auth falls through when no Basic header is present.
 
-**OIDC discovery:** set `issuer-uri` (instead of `jwks-uri`) and the framework fetches `<issuer-uri>/.well-known/openid-configuration` to learn the `jwks_uri` + `issuer`.
+`error_mode` controls what happens on a *present-but-invalid* credential:
 
-**Source:** `src/pyfly/security/oauth2/resource_server.py`, `src/pyfly/security/oauth2/properties.py`
+- `"anonymous"` (default): a bad credential yields an anonymous context and the request proceeds — the `HttpSecurity` gate decides.
+- `"401"`: a present-but-invalid credential is rejected here with `401 Unauthorized`, a `WWW-Authenticate: Basic realm="…"` challenge, and body `{"error": "invalid_credentials", "error_description": "Authentication failed."}`.
 
-### OAuth2 Client Registration
+In either mode, a *missing* Basic header always falls through to the gate. The filter treats an unknown user, a disabled account (`enabled=False`), and a wrong password uniformly as an authentication failure.
 
-`ClientRegistration` is a frozen dataclass that holds the configuration needed to interact with an OAuth2 provider.
+Enable config-driven HTTP Basic by declaring **pre-hashed** users under `pyfly.security.http-basic.users` (requires `starlette` and `bcrypt`):
+
+```yaml
+pyfly:
+  security:
+    enabled: true
+    password:
+      bcrypt-rounds: 12
+    http-basic:
+      enabled: true
+      realm: "PyFly"
+      error-mode: "401"             # or "anonymous" (default)
+      users:
+        alice:
+          password-hash: "$2b$12$..."   # bcrypt hash, never plaintext
+          roles: "ADMIN,USER"
+          permissions: "order:read"
+          enabled: true
+```
+
+For a dynamic user store, register the filter directly as a `WebFilter` bean:
 
 ```python
-from pyfly.security.oauth2 import ClientRegistration
+from pyfly.container import configuration, bean
+from pyfly.web.ports.filter import WebFilter
+from pyfly.web.adapters.starlette.filters.http_basic_filter import HttpBasicAuthenticationFilter
+from pyfly.security import BcryptPasswordEncoder, UserDetailsService
 
-registration = ClientRegistration(
-    registration_id="my-app",
-    client_id="client-id-from-provider",
-    client_secret="client-secret-from-provider",
-    authorization_grant_type="authorization_code",
-    redirect_uri="https://myapp.com/callback",
-    scopes=["openid", "profile", "email"],
-    authorization_uri="https://provider.com/authorize",
-    token_uri="https://provider.com/token",
-    user_info_uri="https://provider.com/userinfo",
-    jwks_uri="https://provider.com/.well-known/jwks.json",
-    issuer_uri="https://provider.com",
-    provider_name="Custom Provider",
-)
+
+@configuration
+class HttpBasicConfig:
+
+    @bean
+    def http_basic_filter(self, users: UserDetailsService) -> WebFilter:
+        return HttpBasicAuthenticationFilter(
+            users,
+            BcryptPasswordEncoder(rounds=12),
+            realm="PyFly",
+            error_mode="401",       # or "anonymous"
+        )
 ```
 
-**Fields:**
+You can generate a bcrypt hash for the config `password-hash` values with the built-in encoder:
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `registration_id` | `str` | required | Unique identifier for this registration |
-| `client_id` | `str` | required | OAuth2 client ID |
-| `client_secret` | `str` | `""` | OAuth2 client secret |
-| `authorization_grant_type` | `str` | `"authorization_code"` | Grant type |
-| `redirect_uri` | `str` | `""` | Redirect URI for auth code flow |
-| `scopes` | `list[str]` | `[]` | Requested scopes |
-| `authorization_uri` | `str` | `""` | Provider's authorization endpoint |
-| `token_uri` | `str` | `""` | Provider's token endpoint |
-| `user_info_uri` | `str` | `""` | Provider's userinfo endpoint |
-| `jwks_uri` | `str` | `""` | Provider's JWKS endpoint |
-| `issuer_uri` | `str` | `""` | Provider's issuer URI |
-| `provider_name` | `str` | `""` | Human-readable provider name |
-| `use_pkce` | `bool` | `False` | Enable PKCE (RFC 7636, S256) on the `authorization_code` flow |
+```bash
+python -c "from pyfly.security import BcryptPasswordEncoder; print(BcryptPasswordEncoder().hash('s3cret'))"
+```
 
-##### PKCE (Proof Key for Code Exchange)
+**Source:** `src/pyfly/web/adapters/starlette/filters/http_basic_filter.py`
 
-Setting `use_pkce=True` enables PKCE (RFC 7636) on the `authorization_code` login flow. Recommended for public clients (no `client_secret`), and harmless — more secure — for confidential clients too.
+### X.509 Client-Certificate Authentication
+
+`X509AuthenticationFilter` authenticates a request by the client certificate forwarded by a TLS-terminating proxy in a header (PEM, possibly URL-encoded). It runs at `HIGHEST_PRECEDENCE + 218`. The certificate subject's Common Name becomes the principal; alternatively a `subject_regex` with a capturing group extracts the principal from the subject's RFC 4514 string (the first capture group is used). There is no auto-configuration for X.509 — register the filter as a `WebFilter` bean.
+
+Behaviour:
+
+- **No `UserDetailsService`** — certificate presence *is* the credential: the principal authenticates with no authority lookup (`SecurityContext(user_id=<CN>)`).
+- **With a `UserDetailsService`** — the extracted principal must resolve to an enabled user, whose roles/permissions are applied; an unknown or disabled user fails.
+- On failure, `error_mode="401"` returns `401` `{"error": "invalid_client_certificate"}` with a `WWW-Authenticate: X509` header; `"anonymous"` (default) sets an anonymous context and proceeds. A *missing* certificate header always falls through.
 
 ```python
-from pyfly.security.oauth2 import ClientRegistration
+from pyfly.container import configuration, bean
+from pyfly.web.ports.filter import WebFilter
+from pyfly.web.adapters.starlette.filters.x509_filter import X509AuthenticationFilter
+from pyfly.security import UserDetailsService
 
-registration = ClientRegistration(
-    registration_id="my-app",
-    client_id="public-client-id",
-    authorization_grant_type="authorization_code",
-    redirect_uri="https://myapp.com/login/oauth2/code/my-app",
-    authorization_uri="https://provider.com/authorize",
-    token_uri="https://provider.com/token",
-    use_pkce=True,
-)
+
+@configuration
+class X509Config:
+
+    @bean
+    def x509_filter(self, users: UserDetailsService) -> WebFilter:
+        return X509AuthenticationFilter(
+            cert_header="x-client-cert",       # header the proxy forwards (PEM)
+            user_details_service=users,        # omit to authenticate on cert presence alone
+            subject_regex=r"CN=([^,]+)",       # optional; default extracts the CN
+            error_mode="401",                  # or "anonymous"
+        )
 ```
 
-When enabled, `OAuth2LoginHandler` (see [OAuth2 Login Flow](#oauth2-login-flow)) automatically:
+**Source:** `src/pyfly/web/adapters/starlette/filters/x509_filter.py`
 
-1. Generates a high-entropy `code_verifier` and its SHA-256 `code_challenge`.
-2. Adds `code_challenge` and `code_challenge_method=S256` to the authorization redirect, stashing the one-time `code_verifier` in the session.
-3. Sends the stored `code_verifier` when exchanging the authorization code for tokens.
+### Logout
 
-No additional wiring is required — toggling `use_pkce` is sufficient. The built-in `google()`, `github()`, and `keycloak()` factories default to `use_pkce=False`.
+`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`.
 
-#### Built-in Provider Factories
+Enable config-driven logout (requires `starlette`):
 
-Pre-configured factories for common OAuth2 providers:
+```yaml
+pyfly:
+  security:
+    logout:
+      enabled: true
+      logout-url: "/logout"              # POST target this filter intercepts
+      success-url: "/login?logout"       # redirect target (use-redirect=true)
+      delete-cookies: "SESSION,XSRF-TOKEN"   # comma-separated or a YAML list
+      use-redirect: true                 # false -> 204 No Content
+```
+
+Or register the filter programmatically:
 
 ```python
-from pyfly.security.oauth2 import google, github, keycloak
+from pyfly.container import configuration, bean
+from pyfly.web.ports.filter import WebFilter
+from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
 
-# Google OAuth2
-google_reg = google(
-    client_id="your-google-client-id",
-    client_secret="your-google-client-secret",
-    redirect_uri="https://myapp.com/callback/google",
-)
 
-# GitHub OAuth2
-github_reg = github(
-    client_id="your-github-client-id",
-    client_secret="your-github-client-secret",
-)
+@configuration
+class LogoutConfig:
 
-# Keycloak (derives all endpoints from the issuer URI)
-keycloak_reg = keycloak(
-    client_id="your-keycloak-client-id",
-    client_secret="your-keycloak-client-secret",
-    issuer_uri="https://keycloak.example.com/realms/myrealm",
-)
+    @bean
+    def logout_filter(self) -> WebFilter:
+        return LogoutFilter(
+            logout_url="/logout",
+            logout_success_url="/login?logout",
+            delete_cookies=["SESSION", "XSRF-TOKEN"],
+            use_redirect=True,
+        )
 ```
 
-| Factory | Scopes | Grant Type |
+Each deleted cookie is cleared with `path="/"`.
+
+**Source:** `src/pyfly/web/adapters/starlette/filters/logout_filter.py`
+
+### switch-user / run-as Impersonation
+
+`SwitchUserFilter` lets an authorized principal impersonate another user and switch back, mirroring Spring's `SwitchUserFilter`. It runs at `HIGHEST_PRECEDENCE + 232` (after form login, before logout) and matches on path (the target username comes from a query parameter). There is no auto-configuration — register it as a `WebFilter` bean with a `UserDetailsService`.
+
+Flow:
+
+1. The acting principal visits the **switch URL** (default `/login/impersonate`) with `?username=<target>`. They must be authenticated, and must hold the **switch authority** (default `ADMIN`) as either a role or a permission; otherwise the filter returns `401` (`authentication_required`) or `403` (`forbidden`).
+2. The target must resolve to an enabled user, else `404` (`user_not_found`).
+3. On success the filter builds an impersonated `SecurityContext` carrying the target's roles **plus** the marker role `PREVIOUS_ADMINISTRATOR` (the value of `PREVIOUS_PRINCIPAL_ROLE`). It stashes the full original `SecurityContext` in the session (under the internal `SWITCH_USER_ORIGINAL` key) so it can be restored, and records the original principal id on the impersonated context's `switch_user_original` attribute. It then redirects to `success_url`. The marker lets the application detect run-as and offer an "exit" action.
+4. Visiting the **exit URL** (default `/logout/impersonate`) restores the original context and redirects to `success_url`; if there is no stashed original it returns `400` (`not_impersonating`).
+
+```python
+from pyfly.container import configuration, bean
+from pyfly.web.ports.filter import WebFilter
+from pyfly.web.adapters.starlette.filters.switch_user_filter import SwitchUserFilter
+from pyfly.security import UserDetailsService
+
+
+@configuration
+class SwitchUserConfig:
+
+    @bean
+    def switch_user_filter(self, users: UserDetailsService) -> WebFilter:
+        return SwitchUserFilter(
+            users,
+            switch_url="/login/impersonate",   # GET ?username=<target>
+            exit_url="/logout/impersonate",
+            username_param="username",
+            switch_authority="ADMIN",          # required role OR permission
+            success_url="/",
+        )
+```
+
+An impersonated request can be recognised with `security_context.has_role("PREVIOUS_ADMINISTRATOR")`, and the original principal read from `security_context.attributes["switch_user_original"]`.
+
+**Source:** `src/pyfly/web/adapters/starlette/filters/switch_user_filter.py`
+
+---
+
+## Security Headers
+
+`SecurityHeadersFilter` adds OWASP-recommended response headers to **every** response. It is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 300`, and appends a precomputed, static set of header pairs after the downstream handler returns. Header names and values come from `SecurityHeadersConfig` (a frozen dataclass); the table below lists the exact headers emitted with their defaults:
+
+| Header | Default value | Notes |
 |---|---|---|
-| `google()` | `openid`, `profile`, `email` | `authorization_code` |
-| `github()` | `read:user`, `user:email` | `authorization_code` |
-| `keycloak()` | `openid`, `profile`, `email` | `authorization_code` |
+| `x-content-type-options` | `nosniff` | always emitted |
+| `x-frame-options` | `DENY` | always emitted |
+| `strict-transport-security` | `max-age=31536000; includeSubDomains` | always emitted |
+| `x-xss-protection` | `0` | always emitted (modern browsers: disable the legacy XSS auditor) |
+| `referrer-policy` | `strict-origin-when-cross-origin` | always emitted |
+| `content-security-policy` | *(unset)* | only emitted when `content_security_policy` is configured (default `None` = not added — CSP is too app-specific) |
+| `permissions-policy` | *(unset)* | only emitted when `permissions_policy` is configured (default `None` = not added) |
 
-#### ClientRegistrationRepository
-
-The `ClientRegistrationRepository` protocol defines the port for looking up registrations:
-
-```python
-from pyfly.security.oauth2 import (
-    ClientRegistrationRepository,
-    InMemoryClientRegistrationRepository,
-)
-
-# Create a repository with registrations
-repo = InMemoryClientRegistrationRepository(google_reg, github_reg, keycloak_reg)
-
-# Look up by registration ID
-reg = repo.find_by_registration_id("google")  # Returns ClientRegistration or None
-
-# Add registrations after construction
-repo.add(custom_registration)
-
-# List all registrations
-all_regs = repo.registrations  # list[ClientRegistration]
-```
-
-**Source:** `src/pyfly/security/oauth2/client.py`
-
-### OAuth2 Authorization Server
-
-The `AuthorizationServer` issues JWT access tokens and manages refresh tokens. It supports `client_credentials` (machine-to-machine) and `refresh_token` grant types.
+To customise, construct the filter with a `SecurityHeadersConfig`:
 
 ```python
-from pyfly.security.oauth2 import (
-    AuthorizationServer,
-    InMemoryTokenStore,
-    InMemoryClientRegistrationRepository,
-    ClientRegistration,
-)
+from pyfly.web.adapters.starlette.filters.security_headers_filter import SecurityHeadersFilter
+from pyfly.web.security_headers import SecurityHeadersConfig
 
-# Set up client registration
-client = ClientRegistration(
-    registration_id="my-service",
-    client_id="my-service",
-    client_secret="service-secret",
-    scopes=["read", "write"],
-)
-client_repo = InMemoryClientRegistrationRepository(client)
-
-# Create authorization server
-auth_server = AuthorizationServer(
-    secret="jwt-signing-secret",
-    client_repository=client_repo,
-    token_store=InMemoryTokenStore(),
-    access_token_ttl=3600,       # 1 hour
-    refresh_token_ttl=86400,     # 24 hours
-    issuer="https://auth.myapp.com",
+filter_ = SecurityHeadersFilter(
+    SecurityHeadersConfig(
+        x_frame_options="SAMEORIGIN",
+        content_security_policy="default-src 'self'",
+        permissions_policy="geolocation=(), camera=()",
+    )
 )
 ```
 
-**Constructor parameters:**
+**Source:** `src/pyfly/web/adapters/starlette/filters/security_headers_filter.py`, `src/pyfly/web/security_headers.py`
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `secret` | `str` | required | Secret key for HS256 token signing |
-| `client_repository` | `ClientRegistrationRepository` | required | Repository for client lookup |
-| `token_store` | `TokenStore` | required | Storage for refresh tokens |
-| `access_token_ttl` | `int` | `3600` | Access token lifetime (seconds) |
-| `refresh_token_ttl` | `int` | `86400` | Refresh token lifetime (seconds) |
-| `issuer` | `str \| None` | `None` | Token issuer (`iss` claim) |
+---
 
-#### Issuing Tokens
+## OAuth 2.1 & OpenID Connect
 
-```python
-# Client credentials grant (machine-to-machine)
-response = await auth_server.token(
-    grant_type="client_credentials",
-    client_id="my-service",
-    client_secret="service-secret",
-    scope="read write",
-)
-# {
-#     "access_token": "eyJhbGciOiJIUzI1NiI...",
-#     "token_type": "Bearer",
-#     "expires_in": 3600,
-#     "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2g...",
-#     "scope": "read write"
-# }
+PyFly ships a complete OAuth 2.1 / OpenID Connect implementation across all three roles — **resource server** (validate inbound tokens), **client & login** (the browser `authorization_code` flow with PKCE), and a full **authorization server** (issue tokens; `client_credentials`, `refresh_token`, and `authorization_code` grants, OIDC id tokens, JWKS, introspection/revocation, Dynamic Client Registration, PAR, JAR, metadata/discovery) — plus sender-constrained (DPoP / mTLS) tokens.
 
-# Refresh token grant
-new_response = await auth_server.token(
-    grant_type="refresh_token",
-    client_id="my-service",
-    client_secret="service-secret",
-    refresh_token=response["refresh_token"],
-)
-```
+That surface is documented in its own guide:
 
-**Refresh token rotation:** When a refresh token is used, the old token is automatically revoked and a new one is issued. This limits the window of vulnerability if a token is compromised.
-
-#### TokenStore Protocol
-
-The `TokenStore` protocol defines the port for token persistence:
-
-```python
-class TokenStore(Protocol):
-    async def store(self, token_id: str, token_data: dict[str, Any]) -> None: ...
-    async def find(self, token_id: str) -> dict[str, Any] | None: ...
-    async def revoke(self, token_id: str) -> None: ...
-```
-
-`InMemoryTokenStore` is the built-in adapter for development and testing. PyFly also ships persistent Redis and Postgres adapters for production use (see below).
-
-#### Persistent Token Stores (multi-instance authorization server)
-
-`InMemoryTokenStore` keeps refresh tokens in a process-local dict — it is fine for a single-instance dev/test server, but it **loses all tokens on restart** and is not shared across instances (a refresh issued on one node is unknown to another, and revocation does not propagate). To run the authorization server across multiple instances, select a persistent token store via configuration. `OAuth2AuthorizationServerAutoConfiguration._build_token_store()` reads `pyfly.security.oauth2.token-store.provider` (case-insensitive) and wires the matching adapter:
-
-| Provider | Adapter | Persistence | When to use |
-|---|---|---|---|
-| `memory` (default) | `InMemoryTokenStore` (`pyfly.security.oauth2.authorization_server`) | Process-local; **lost on restart**, not shared across instances | Development and testing only — single instance |
-| `redis` | `RedisTokenStore` (`pyfly.security.adapters.redis_token_store`) | Cross-instance, fast distributed revocation; tokens self-evict at the refresh-token TTL | Multi-instance servers wanting fast revocation |
-| `postgres` | `PostgresTokenStore` (`pyfly.security.adapters.postgres_token_store`) | Durable + auditable in a SQL table, no Redis required | Multi-instance servers needing durable, auditable storage |
-
-Selecting `redis` or `postgres` fixes multi-instance authorization servers: refresh tokens and revocations are shared across all nodes, so a token issued or revoked on one instance is honoured everywhere, and tokens survive a restart (postgres) or persist until their TTL (redis).
+**→ [OAuth 2.1 & OpenID Connect](oauth2.md)**
 
 ```yaml
 pyfly:
   security:
     oauth2:
-      authorization-server:
+      resource-server:        # validate JWTs from any OIDC IdP
         enabled: true
-        secret: "${OAUTH2_SECRET}"
-        refresh-token-ttl: 86400          # also the Redis token TTL
-      token-store:
-        provider: redis                   # memory (default) | redis | postgres
-        redis:
-          url: "redis://localhost:6379/0" # falls back to pyfly.session.redis.url
+        issuer-uri: "https://login.example.com/realms/app"
+        audiences: "my-api"
 ```
 
-**Configuration keys:**
+The resource server validates bearer tokens against a remote JWKS with config-driven claim mapping; the client supports declarative `ClientRegistration`s with PKCE on by default; the authorization server issues and manages tokens. See the [OAuth2 guide](oauth2.md) for the resource server, client/login, authorization server, DPoP/mTLS, and the full configuration reference.
 
-| Key | Default | Description |
-|---|---|---|
-| `pyfly.security.oauth2.token-store.provider` | `memory` | `memory`, `redis`, or `postgres` (matched case-insensitively) |
-| `pyfly.security.oauth2.token-store.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis connection URL (redis provider only) |
+---
 
-**Redis adapter.** When `provider=redis` and the `redis.asyncio` driver is available, the composition root builds an async client with `redis.asyncio.from_url(url)` and injects it into `RedisTokenStore(client, ttl=refresh_ttl)`. Tokens are stored as JSON under the `pyfly:oauth2:token:` key prefix with an `ex` equal to the refresh-token TTL, so expired tokens self-evict. If the driver is unavailable the store falls back to `InMemoryTokenStore`.
+## Secure-by-Default & Hardening
 
-**Postgres adapter.** When `provider=postgres`, the composition root resolves a SQLAlchemy `AsyncEngine` from the container (so an `AsyncEngine` bean must be present) and injects an engine factory into `PostgresTokenStore`. The adapter lazily and idempotently creates a `pyfly_oauth2_tokens` table (`token_id TEXT PRIMARY KEY, data TEXT NOT NULL`) on first use and upserts refresh tokens with `ON CONFLICT (token_id) DO UPDATE`. Both adapters are hexagonal: they never import their driver at module scope — the client/engine is injected by the auto-configuration.
+PyFly's security defaults are chosen to fail closed. The behaviours below are active without extra configuration; operators should understand them before deploying.
 
-#### Error Codes
+**Signing-secret fail-fast.** The composition root refuses to start when a token-signing secret is left at the built-in placeholder `change-me-in-production`, raising `SecurityException` with code `INSECURE_SIGNING_SECRET`. For HMAC (`HS*`) algorithms it additionally requires at least 32 bytes (RFC 7518 §3.2), raising `WEAK_SIGNING_SECRET` otherwise. This is enforced for the authorization-server secret (`pyfly.security.oauth2.authorization-server.secret`) unconditionally. The symmetric `JWTService` secret (`pyfly.security.jwt.secret`) is only enforced when the symmetric JWT filter is enabled (`pyfly.security.jwt.filter.enabled=true`) — a resource-server-only app validates JWTs via JWKS and never needs a symmetric signing secret.
 
-| Error Code | Cause |
-|---|---|
-| `INVALID_CLIENT` | Unknown client ID or wrong secret |
-| `INVALID_REQUEST` | Missing required parameter (e.g., refresh_token) |
-| `UNSUPPORTED_GRANT_TYPE` | Grant type not supported |
-| `INVALID_GRANT` | Invalid, expired, or mismatched refresh token |
-
-**Source:** `src/pyfly/security/oauth2/authorization_server.py`
-
-### OAuth2 Login Flow
-
-The `OAuth2LoginHandler` implements the full browser-facing OAuth2 `authorization_code` flow. It creates Starlette routes that handle the redirect-to-provider, callback-with-code, and logout steps. The `OAuth2SessionSecurityFilter` complements it by restoring the `SecurityContext` from the HTTP session on subsequent requests.
-
-```python
-from pyfly.security.oauth2.login import OAuth2LoginHandler
-from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
+```bash
+# Generate a strong secret:
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-#### OAuth2LoginHandler
+**CSRF on by default (cookie-gated).** CSRF protection is enabled unless `pyfly.security.csrf.enabled=false`; cookie-gated mode keeps stateless/Bearer clients unaffected. Set `pyfly.security.csrf.cookie-gated=false` for strict enforcement of every unsafe request. (See [Enabled by Default](#enabled-by-default-cookie-gated).)
 
-`OAuth2LoginHandler` creates three routes:
+**PKCE on by default.** `ClientRegistration.use_pkce` defaults to `True` for the `authorization_code` flow (RFC 9700 / OAuth 2.1). A public client (empty `client_secret`) always uses PKCE with `S256` even if `use_pkce=False`, since it has no other defense against code injection; only set `use_pkce=False` for a confidential client talking to an authorization server that rejects PKCE. The RFC 9207 `iss` authorization-response parameter is validated whenever present; set `require_iss=true` (per registration) to also reject providers that omit it.
 
-| Route | Method | Description |
-|---|---|---|
-| `/oauth2/authorization/{registration_id}` | GET | Redirects the browser to the OAuth2 provider's authorization endpoint with a CSRF `state` parameter |
-| `/login/oauth2/code/{registration_id}` | GET | Handles the provider callback: validates state, exchanges the authorization code for tokens, fetches user info, builds a `SecurityContext`, and stores it in the session |
-| `/logout` | POST | Invalidates the HTTP session and redirects to `/` |
+**ROPC opt-in.** The Resource Owner Password Credentials grant (`grant_type=password`) against external IdPs (`keycloak` / `cognito` / `azure-ad`) is disabled unless `pyfly.idp.allow-password-grant=true`.
 
-**Constructor parameters:**
+**client_credentials scope validation.** The `AuthorizationServer` rejects a `client_credentials` request that asks for scopes not registered for the client, returning the `INVALID_SCOPE` error.
 
-| Parameter | Type | Description |
-|---|---|---|
-| `client_repository` | `ClientRegistrationRepository` | Repository to look up OAuth2 client registrations |
+**Refresh-token rotation + reuse detection.** Refresh tokens are single-use and rotated on every refresh; the old token is revoked when a new one is issued. Reusing an already-rotated (revoked) token triggers family reuse detection — the token family is revoked — and the request is rejected with `INVALID_GRANT`.
 
-**Authorization flow:**
-
-1. The user visits `/oauth2/authorization/google` (or any registration ID).
-2. The handler looks up the `ClientRegistration`, generates a random `state` token, stores it in the session, and redirects the browser to the provider's `authorization_uri` with `response_type=code`, `client_id`, `redirect_uri`, `scope`, and `state` parameters. If the registration has [`use_pkce=True`](#pkce-proof-key-for-code-exchange), a `code_challenge` (`code_challenge_method=S256`) is also added and the matching `code_verifier` is stored in the session for the token exchange.
-3. The provider authenticates the user and redirects back to `/login/oauth2/code/google?code=...&state=...`.
-4. The callback handler validates the `state` parameter (CSRF protection), exchanges the authorization code for tokens via the provider's `token_uri`, fetches user info from `user_info_uri`, builds a `SecurityContext`, and stores it in the session.
-5. The user is redirected to the original page (or `/`).
-
-```python
-from pyfly.security.oauth2 import (
-    ClientRegistrationRepository,
-    InMemoryClientRegistrationRepository,
-    google,
-)
-from pyfly.security.oauth2.login import OAuth2LoginHandler
-
-# Set up client registrations
-google_reg = google(
-    client_id="your-google-client-id",
-    client_secret="your-google-client-secret",
-    redirect_uri="http://localhost:8080/login/oauth2/code/google",
-)
-client_repo = InMemoryClientRegistrationRepository(google_reg)
-
-# Create the login handler
-login_handler = OAuth2LoginHandler(client_repository=client_repo)
-
-# Get the routes for mounting in create_app()
-oauth2_routes = login_handler.routes()
-```
-
-**Source:** `src/pyfly/security/oauth2/login.py`
-
-#### OAuth2SessionSecurityFilter
-
-The `OAuth2SessionSecurityFilter` is a `OncePerRequestFilter` that restores the `SecurityContext` from the HTTP session on every request. It runs at `HIGHEST_PRECEDENCE + 225`, which is **after** the JWT-based `SecurityFilter` (at +220), so a session-established context overwrites a token-established one — session-based authentication takes priority over symmetric-token auth.
-
-```python
-from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
-```
-
-**Behavior:**
-
-1. Reads the session from `request.state.session`.
-2. If a `SECURITY_CONTEXT` attribute is stored in the session (set by `OAuth2LoginHandler` during login), restores it to `request.state.security_context`.
-3. If no session-based context is found and no `security_context` has been set by an earlier filter, sets an anonymous context.
-
-This filter is complementary to the JWT `SecurityFilter`. In applications that use both OAuth2 login (session-based) and API tokens (JWT-based), the session filter runs first. If the user has an active session, the session context is used. If not, the JWT `SecurityFilter` gets its turn to check for a Bearer token.
-
-| Property | Value |
-|---|---|
-| `__pyfly_order__` | `HIGHEST_PRECEDENCE + 225` |
-| Runs after | `SecurityFilter` (HP+220) |
-| Runs before | `HttpSecurityFilter` (HP+350) |
-
-**Source:** `src/pyfly/security/oauth2/session_security_filter.py`
-
-#### Login Flow Configuration Example
-
-A complete example wiring OAuth2 login into a PyFly application:
-
-```python
-from pyfly.container import configuration, bean
-from pyfly.security.oauth2 import (
-    InMemoryClientRegistrationRepository,
-    google, github,
-)
-from pyfly.security.oauth2.login import OAuth2LoginHandler
-from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
-from pyfly.security.http_security import HttpSecurity
-
-
-@configuration
-class OAuth2Config:
-
-    @bean
-    def client_repository(self) -> InMemoryClientRegistrationRepository:
-        return InMemoryClientRegistrationRepository(
-            google(
-                client_id="google-client-id",
-                client_secret="google-client-secret",
-                redirect_uri="http://localhost:8080/login/oauth2/code/google",
-            ),
-            github(
-                client_id="github-client-id",
-                client_secret="github-client-secret",
-                redirect_uri="http://localhost:8080/login/oauth2/code/github",
-            ),
-        )
-
-    @bean
-    def oauth2_login_handler(self, client_repository: InMemoryClientRegistrationRepository) -> OAuth2LoginHandler:
-        return OAuth2LoginHandler(client_repository=client_repository)
-
-    @bean
-    def oauth2_session_filter(self) -> OAuth2SessionSecurityFilter:
-        return OAuth2SessionSecurityFilter()
-
-    @bean
-    def http_security_filter(self):
-        http_security = HttpSecurity()
-        http_security.authorize_requests() \
-            .request_matchers("/oauth2/**", "/login/**", "/logout").permit_all() \
-            .request_matchers("/api/**").authenticated() \
-            .any_request().permit_all()
-        return http_security.build()
-```
-
-Then mount the OAuth2 routes via `extra_routes` in `create_app()`:
-
-```python
-from pyfly.web.adapters.starlette import create_app
-
-login_handler = context.get_bean(OAuth2LoginHandler)
-app = create_app(
-    title="My App",
-    context=context,
-    extra_routes=login_handler.routes(),
-)
-```
+**Source:** `src/pyfly/security/auto_configuration.py`, `src/pyfly/web/security_filters_auto_configuration.py`, `src/pyfly/security/oauth2/client.py`, `src/pyfly/security/oauth2/authorization_server.py`
 
 ---
 

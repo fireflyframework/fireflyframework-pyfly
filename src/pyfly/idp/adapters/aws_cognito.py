@@ -8,6 +8,7 @@ import asyncio
 import logging
 from typing import Any
 
+from pyfly.idp.adapters import _require_password_grant_optin
 from pyfly.idp.models import (
     AuthResult,
     IdpRole,
@@ -40,12 +41,14 @@ class AwsCognitoIdpAdapter:
         region: str,
         client_secret: str | None = None,
         client: Any | None = None,
+        allow_password_grant: bool = False,
     ) -> None:
         self._user_pool_id = user_pool_id
         self._client_id = client_id
         self._region = region
         self._client_secret = client_secret
         self._client = client
+        self._allow_password_grant = allow_password_grant
 
     def _secret_hash(self, username: str) -> str | None:
         """Cognito SECRET_HASH = Base64(HMAC-SHA256(secret, username + client_id)).
@@ -148,6 +151,7 @@ class AwsCognitoIdpAdapter:
         return [_from_cognito(u) for u in data.get("Users", [])]
 
     async def login(self, request: LoginRequest) -> AuthResult:
+        _require_password_grant_optin(self._allow_password_grant, "aws-cognito")
         client = self._ensure_client()
         auth_params = {"USERNAME": request.username, "PASSWORD": request.password}
         secret_hash = self._secret_hash(request.username)

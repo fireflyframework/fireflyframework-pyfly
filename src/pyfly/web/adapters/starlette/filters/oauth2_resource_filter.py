@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import cast
+from typing import Any, cast
 
 from anyio import to_thread
 from starlette.requests import Request
@@ -70,23 +70,37 @@ class OAuth2ResourceServerFilter(OncePerRequestFilter):
         exclude_patterns: Sequence[str] = (),
         *,
         error_mode: str = ERROR_MODE_ANONYMOUS,
+        enforce_sender_constraints: bool = False,
+        dpop_validator: Any = None,
+        mtls_cert_header: str = "x-client-cert",
     ) -> None:
         self._token_validator = token_validator
         self.exclude_patterns = list(exclude_patterns)
         self._error_mode = error_mode if error_mode in (ERROR_MODE_ANONYMOUS, ERROR_MODE_401) else ERROR_MODE_ANONYMOUS
+        self._enforce_sc = enforce_sender_constraints
+        self._dpop_validator = dpop_validator
+        self._mtls_cert_header = mtls_cert_header
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
-        token = self._extract_bearer(request.headers.get("authorization", ""))
+        token = self._extract_token(request.headers.get("authorization", ""))
 
         if token is not None:
             try:
                 # Offload to a worker thread: JWKS key lookup may do blocking
                 # urllib I/O on a cache miss, which would otherwise stall the loop.
-                security_context = await to_thread.run_sync(self._token_validator.to_security_context, token)
+                if self._enforce_sc:
+                    payload, security_context = await to_thread.run_sync(
+                        self._token_validator.validate_and_context, token
+                    )
+                    # Sender-constrained tokens (RFC 9449 DPoP / RFC 8705 mTLS) must be
+                    # accompanied by proof of possession; a stolen token alone is useless.
+                    self._enforce_sender_constraint(request, payload, token)
+                else:
+                    security_context = await to_thread.run_sync(self._token_validator.to_security_context, token)
             except SecurityException:
                 # A token was presented but failed validation (bad signature,
-                # expired, wrong iss/aud, unknown kid, ...).
-                logger.warning("OAuth2 bearer token rejected (invalid_token)")
+                # expired, wrong iss/aud, unknown kid, failed proof-of-possession).
+                logger.warning("OAuth2 token rejected (invalid_token)")
                 if self._error_mode == ERROR_MODE_401:
                     return self._invalid_token_response()
                 security_context = SecurityContext.anonymous()
@@ -100,16 +114,42 @@ class OAuth2ResourceServerFilter(OncePerRequestFilter):
             req_ctx.security_context = security_context
         return cast(Response, await call_next(request))
 
-    @staticmethod
-    def _extract_bearer(auth_header: str) -> str | None:
-        """Return the token from an ``Authorization`` header, or ``None``.
+    def _enforce_sender_constraint(self, request: Request, payload: dict[str, Any], token: str) -> None:
+        """Enforce DPoP/mTLS proof-of-possession when the token carries a ``cnf`` claim."""
+        cnf = payload.get("cnf")
+        if not isinstance(cnf, dict):
+            return  # plain bearer token — nothing to enforce
+        if "jkt" in cnf:
+            from urllib.parse import urlsplit, urlunsplit
 
-        The auth scheme is matched case-insensitively (RFC 7235 §2.1: the scheme
-        is a case-insensitive token), so ``Bearer``, ``bearer`` and ``BEARER``
-        are all accepted.
+            from pyfly.security.oauth2.dpop import DPoPProofValidator, confirm_dpop_binding
+
+            proof = request.headers.get("dpop")
+            if not proof:
+                raise SecurityException("DPoP proof required for this token", code="INVALID_TOKEN")
+            validator = self._dpop_validator or DPoPProofValidator()
+            parts = urlsplit(str(request.url))
+            http_url = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+            jkt = validator.validate(proof, http_method=request.method, http_url=http_url, access_token=token)
+            confirm_dpop_binding(payload, jkt)
+        elif "x5t#S256" in cnf:
+            from urllib.parse import unquote
+
+            from pyfly.security.oauth2.dpop import confirm_mtls_binding
+
+            cert = request.headers.get(self._mtls_cert_header)
+            if not cert:
+                raise SecurityException("Client certificate required for this token", code="INVALID_TOKEN")
+            confirm_mtls_binding(payload, unquote(cert))
+
+    @staticmethod
+    def _extract_token(auth_header: str) -> str | None:
+        """Return the token from a ``Bearer`` or ``DPoP`` ``Authorization`` header.
+
+        The auth scheme is matched case-insensitively (RFC 7235 §2.1).
         """
         parts = auth_header.split(" ", 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+        if len(parts) == 2 and parts[0].lower() in ("bearer", "dpop") and parts[1].strip():
             return parts[1].strip()
         return None
 

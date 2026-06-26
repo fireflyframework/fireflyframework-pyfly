@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -90,13 +91,41 @@ class TestCsrfFilter:
         assert "XSRF-TOKEN" in cookie_header
 
     @pytest.mark.asyncio
-    async def test_csrf_filter_unsafe_method_missing_cookie(self) -> None:
-        """POST without CSRF cookie returns 403."""
-        csrf_filter = CsrfFilter()
+    async def test_csrf_filter_strict_mode_missing_cookie(self) -> None:
+        """In strict mode, a POST without the CSRF cookie returns 403."""
+        csrf_filter = CsrfFilter(cookie_gated=False)
         request = _make_request(
             method="POST",
             headers={"X-XSRF-TOKEN": "some-token"},
         )
+        call_next = AsyncMock()
+
+        result = await csrf_filter.do_filter(request, call_next)
+
+        assert result.status_code == 403
+        call_next.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_csrf_filter_cookie_gated_no_cookies_is_exempt(self) -> None:
+        """Default (cookie-gated) mode: a POST carrying NO cookies has no ambient
+        authority to abuse, so it is exempt from CSRF — keeping stateless API
+        clients working when CSRF is on by default."""
+        csrf_filter = CsrfFilter()  # cookie_gated=True by default
+        request = _make_request(method="POST", headers={"X-XSRF-TOKEN": "some-token"})
+        response = Response(content="ok", status_code=200)
+        call_next = AsyncMock(return_value=response)
+
+        result = await csrf_filter.do_filter(request, call_next)
+
+        call_next.assert_awaited_once_with(request)
+        assert result is response
+
+    @pytest.mark.asyncio
+    async def test_csrf_filter_cookie_present_requires_token(self) -> None:
+        """A POST that carries a (session) cookie but no valid CSRF pair is rejected,
+        even in cookie-gated mode — that is the actual CSRF scenario."""
+        csrf_filter = CsrfFilter()
+        request = _make_request(method="POST", cookies={"SESSION": "abc"})
         call_next = AsyncMock()
 
         result = await csrf_filter.do_filter(request, call_next)
@@ -171,3 +200,54 @@ class TestCsrfFilter:
 
         call_next.assert_awaited_once_with(request)
         assert result is response
+
+
+class TestCsrfDefaultOn:
+    """CSRF is wired by default (secure-by-default) unless explicitly disabled."""
+
+    def _app(self, csrf: dict[str, object] | None = None) -> Any:
+        import contextlib
+        from collections.abc import AsyncIterator
+
+        from pyfly.container.stereotypes import rest_controller
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.web.adapters.starlette.app import create_app
+        from pyfly.web.mappings import get_mapping, request_mapping
+
+        @rest_controller
+        @request_mapping("/api/ping")
+        class _PingController:
+            @get_mapping("/")
+            async def ping(self) -> dict:
+                return {"ok": True}
+
+        security: dict[str, object] = {}
+        if csrf is not None:
+            security["csrf"] = csrf
+        ctx = ApplicationContext(Config({"pyfly": {"security": security}}))
+        ctx.register_bean(_PingController)
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(_app: Any) -> AsyncIterator[None]:
+            await ctx.start()
+            yield
+            await ctx.stop()
+
+        return create_app(context=ctx, lifespan=_lifespan)
+
+    def test_get_sets_xsrf_cookie_by_default(self) -> None:
+        from starlette.testclient import TestClient
+
+        with TestClient(self._app()) as client:
+            resp = client.get("/api/ping/")
+            assert resp.status_code == 200
+            assert "XSRF-TOKEN" in resp.cookies
+
+    def test_can_be_disabled(self) -> None:
+        from starlette.testclient import TestClient
+
+        with TestClient(self._app(csrf={"enabled": "false"})) as client:
+            resp = client.get("/api/ping/")
+            assert resp.status_code == 200
+            assert "XSRF-TOKEN" not in resp.cookies

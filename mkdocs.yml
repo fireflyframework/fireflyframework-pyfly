@@ -159,6 +159,7 @@ nav:
           - Plugins: modules/plugins.md
       - Security & Identity:
           - Security: modules/security.md
+          - OAuth 2.1 & OIDC: modules/oauth2.md
           - Identity Provider (IDP): modules/idp.md
       - Integrations:
           - Content Management (ECM): modules/ecm.md

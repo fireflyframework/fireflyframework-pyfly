@@ -53,6 +53,7 @@ pyfly:
   idp:
     enabled: true
     provider: internal-db    # internal-db (default) | keycloak | cognito | azure-ad
+    allow-password-grant: false   # ROPC (grant_type=password) — OFF by default (OAuth 2.1 / RFC 9700)
     keycloak:
       base-url: https://keycloak.example.com
       realm: myrealm
@@ -75,6 +76,14 @@ pyfly:
 | `keycloak` | `KeycloakIdpAdapter` |
 | `cognito` / `aws-cognito` | `AwsCognitoIdpAdapter` |
 | `azure-ad` / `azuread` / `entra` | `AzureAdIdpAdapter` |
+
+> **ROPC is disabled by default.** The Resource Owner Password Credentials grant
+> (`grant_type=password`) on the `keycloak`, `cognito`, and `azure-ad` adapters —
+> where the app handles the user's raw password — is removed by OAuth 2.1 and
+> discouraged by RFC 9700 §2.4. It is refused unless you set
+> `pyfly.idp.allow-password-grant=true`. Prefer the `authorization_code` + PKCE
+> [OAuth2 login flow](oauth2.md#oauth2-client-login) instead. The first-party
+> `internal-db` adapter is unaffected (it verifies passwords locally with bcrypt).
 
 When `starlette` is installed, an `IdpController` bean is also registered,
 mounting authentication and admin endpoints under `/idp`:

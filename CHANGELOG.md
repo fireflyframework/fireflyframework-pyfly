@@ -6,6 +6,95 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.06.114 (2026-06-26)
+
+A comprehensive security release: PyFly now aligns with **RFC 9700 (OAuth 2.0
+Security Best Current Practice)** and **OAuth 2.1**, reaches broad **Spring
+Security parity**, and ships a complete OAuth 2.1 / OpenID Connect stack — followed
+by a full security documentation refresh.
+
+### Added
+
+- **OAuth 2.1 authorization server.** `AuthorizationServer` implements the
+  `authorization_code` grant (single-use codes, exact redirect-URI matching,
+  mandatory PKCE `S256`, code-reuse → token revocation) alongside
+  `client_credentials` and `refresh_token`. It issues OIDC `id_token`s for the
+  `openid` scope, supports symmetric (`HS*`) and asymmetric (`RS*`/`ES*`/`PS*`)
+  signing with a published JWK set (`jwks()`), and is fronted by
+  `AuthorizationServerEndpoints`: `GET /oauth2/authorize`, `POST /oauth2/par`,
+  `POST /oauth2/token`, `POST /oauth2/introspect`, `POST /oauth2/revoke`,
+  `POST /oauth2/register`, `GET /oauth2/jwks`, and the
+  `/.well-known/oauth-authorization-server` + `/.well-known/openid-configuration`
+  discovery documents. Includes Dynamic Client Registration (RFC 7591), Pushed
+  Authorization Requests (RFC 9126), JWT-Secured Authorization Requests (RFC 9101),
+  token introspection (RFC 7662), revocation (RFC 7009), and AS metadata (RFC 8414).
+- **Sender-constrained tokens.** DPoP (RFC 9449) and mTLS (RFC 8705): the
+  authorization server binds tokens via a `cnf` claim and the resource server
+  enforces proof-of-possession (`DPoPProofValidator`, `confirm_dpop_binding`,
+  `confirm_mtls_binding`) when
+  `pyfly.security.oauth2.resource-server.enforce-sender-constraints=true`.
+- **Opaque-token introspection.** `OpaqueTokenIntrospector` validates non-JWT
+  access tokens via a remote RFC 7662 endpoint, mapping claims identically to the
+  JWKS validator.
+- **Authentication mechanisms (Spring parity).** A `UserDetailsService` SPI
+  (`InMemoryUserDetailsService`, SQLAlchemy-backed `SqlUserDetailsService`), an
+  `AuthenticationManager` (`ProviderManager` + `DaoAuthenticationProvider`, with
+  username-enumeration-resistant timing and credential erasure), and config-driven
+  **form login** (`FormLoginFilter`), **HTTP Basic** (`HttpBasicAuthenticationFilter`),
+  **X.509** client-certificate auth (`X509AuthenticationFilter`), generic **logout**
+  (`LogoutFilter`), and **run-as** impersonation (`SwitchUserFilter`).
+- **Password encoders.** `Pbkdf2PasswordEncoder`, `ScryptPasswordEncoder`,
+  `Argon2PasswordEncoder` (Argon2id; `pip install pyfly[argon2]`), and a
+  `DelegatingPasswordEncoder` (`{id}`-prefixed, with `upgrade_encoding` for
+  transparent on-login migration) plus `create_delegating_password_encoder()`.
+- **Authorization breadth.** HTTP-method-scoped URL rules
+  (`request_matchers(..., methods=...)`), method-security collection filtering
+  (`@pre_filter` / `@post_filter` binding `filterObject`), and a `PermissionEvaluator`
+  SPI backing ACL-style `hasPermission(target, perm)`.
+- **RFC 9207** issuer (`iss`) validation in the OAuth2 client callback (mix-up
+  attack defense; `ClientRegistration.require_iss`).
+- **Configuration.** New keys under `pyfly.security.{http-basic,form-login,logout}.*`,
+  `pyfly.security.password.delegating.enabled`, `pyfly.security.csrf.cookie-gated`,
+  `pyfly.security.oauth2.authorization-server.audience`,
+  `pyfly.security.oauth2.resource-server.{enforce-sender-constraints,mtls-cert-header}`,
+  per-registration `use-pkce` / `require-iss`, and `pyfly.idp.allow-password-grant`.
+  New optional extra: `pyfly[argon2]`.
+
+### Changed
+
+- **PKCE is on by default** for the OAuth2 `authorization_code` login flow and is
+  always enforced for public clients (`ClientRegistration.use_pkce` now defaults
+  `True`).
+- **CSRF is enabled by default** in cookie-gated mode (stateless / `Bearer` clients
+  are unaffected); opt out with `pyfly.security.csrf.enabled=false`, or set
+  `pyfly.security.csrf.cookie-gated=false` for strict enforcement.
+- **`client_credentials` scope validation:** a request for a scope the client is
+  not registered for is now rejected with `invalid_scope` instead of being echoed.
+
+### Security
+
+- **Signing-secret fail-fast.** The composition root refuses to start when a
+  token-signing secret is left at the built-in placeholder `change-me-in-production`,
+  and requires ≥ 32-byte HMAC keys for `HS*` algorithms (RFC 7518 §3.2).
+- **ROPC disabled by default.** The IdP Resource Owner Password Credentials grant
+  (`grant_type=password`) on the Keycloak / Cognito / Entra adapters is refused
+  unless `pyfly.idp.allow-password-grant=true` (OAuth 2.1 / RFC 9700 §2.4).
+- **Refresh-token reuse detection.** Replaying an already-rotated refresh token
+  revokes the entire token family.
+- **Owner-scoped introspection & revocation.** A client may only introspect /
+  revoke its own tokens (RFC 7009 §2.1); empty client credentials are rejected.
+
+### Documentation
+
+- New **OAuth 2.1 & OpenID Connect** guide (`docs/modules/oauth2.md`). The Security
+  guide gained *Authentication Mechanisms*, *Security Headers*, and *Secure-by-Default
+  & Hardening* sections; the Spring comparison, IDP, and web-filters docs were
+  updated; and *PyFly by Example* chapter 14 (English **and** Spanish) gained
+  sections on form login, modern password hashing, the authorization server, and
+  sender-constrained tokens.
+
+---
+
 ## v26.06.113 (2026-06-17)
 
 ### Added

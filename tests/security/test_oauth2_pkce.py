@@ -42,6 +42,20 @@ def _handler(*, use_pkce: bool) -> OAuth2LoginHandler:
     return OAuth2LoginHandler(InMemoryClientRegistrationRepository(reg))
 
 
+def _reg(**overrides: Any) -> ClientRegistration:
+    base: dict[str, Any] = dict(
+        registration_id="acme",
+        client_id="cid",
+        client_secret="secret",
+        redirect_uri="https://app/cb",
+        scopes=["openid"],
+        authorization_uri="https://idp/auth",
+        token_uri="https://idp/token",
+    )
+    base.update(overrides)
+    return ClientRegistration(**base)
+
+
 def _request(rid: str = "acme") -> Request:
     scope: dict[str, Any] = {
         "type": "http",
@@ -86,6 +100,81 @@ async def test_authorization_omits_pkce_when_disabled() -> None:
 
     assert "code_challenge" not in query
     assert request.state.session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY) is None
+
+
+def test_pkce_enabled_by_default() -> None:
+    """RFC 9700 / OAuth 2.1: PKCE is on by default for the authorization_code flow."""
+    reg = ClientRegistration(registration_id="x", client_id="c")
+    assert reg.use_pkce is True
+
+
+@pytest.mark.asyncio
+async def test_authorization_adds_pkce_by_default() -> None:
+    """A registration that does not mention PKCE still gets a code_challenge."""
+    handler = OAuth2LoginHandler(InMemoryClientRegistrationRepository(_reg()))
+    request = _request()
+    response = await handler._handle_authorization(request)
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    assert request.state.session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+
+
+@pytest.mark.asyncio
+async def test_public_client_forces_pkce_even_if_disabled() -> None:
+    """A public client (no client_secret) gets PKCE even if it tries to opt out —
+    it has no other defense against authorization-code injection."""
+    handler = OAuth2LoginHandler(InMemoryClientRegistrationRepository(_reg(client_secret="", use_pkce=False)))
+    request = _request()
+    response = await handler._handle_authorization(request)
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    assert request.state.session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+
+
+def test_client_autoconfig_enables_pkce_by_default() -> None:
+    from pyfly.core.config import Config
+    from pyfly.security.auto_configuration import OAuth2ClientAutoConfiguration
+
+    cfg = Config(
+        {
+            "pyfly": {
+                "security": {
+                    "oauth2": {
+                        "client": {
+                            "enabled": "true",
+                            "registrations": {"acme": {"client-id": "c", "token-uri": "https://idp/token"}},
+                        }
+                    }
+                }
+            }
+        }
+    )
+    repo = OAuth2ClientAutoConfiguration().client_registration_repository(cfg)
+    reg = repo.find_by_registration_id("acme")
+    assert reg is not None and reg.use_pkce is True
+
+
+def test_client_autoconfig_pkce_can_be_disabled() -> None:
+    from pyfly.core.config import Config
+    from pyfly.security.auto_configuration import OAuth2ClientAutoConfiguration
+
+    cfg = Config(
+        {
+            "pyfly": {
+                "security": {
+                    "oauth2": {
+                        "client": {
+                            "enabled": "true",
+                            "registrations": {"acme": {"client-id": "c", "client-secret": "s", "use-pkce": "false"}},
+                        }
+                    }
+                }
+            }
+        }
+    )
+    repo = OAuth2ClientAutoConfiguration().client_registration_repository(cfg)
+    reg = repo.find_by_registration_id("acme")
+    assert reg is not None and reg.use_pkce is False
 
 
 @pytest.mark.asyncio
