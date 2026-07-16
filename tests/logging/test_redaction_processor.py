@@ -49,9 +49,9 @@ def test_trace_ids_are_never_redacted_even_with_phone_pattern():
         "info",
         {"event": "call 555 1234 now", "trace_id": tid, "span_id": "1234567abcdef000"},
     )
-    assert out["trace_id"] == tid                 # correlation key preserved verbatim
-    assert out["span_id"] == "1234567abcdef000"   # ditto, despite its own digit island
-    assert out["event"] == "call <PHONE> now"     # a genuine phone in the message is still redacted
+    assert out["trace_id"] == tid  # correlation key preserved verbatim
+    assert out["span_id"] == "1234567abcdef000"  # ditto, despite its own digit island
+    assert out["event"] == "call <PHONE> now"  # a genuine phone in the message is still redacted
 
 
 def test_stdlib_filter_redacts_message():
