@@ -54,13 +54,13 @@ class StructlogAdapter:
         fmt = props.format.lower()
 
         # Shared pre-chain applied to BOTH structlog and foreign (stdlib) records.
+        # Redaction runs BEFORE trace-id injection so the correlation keys are never seen
+        # by the redactor (defense in depth on top of the NEVER_REDACT allowlist).
         timestamper = structlog.processors.TimeStamper(fmt="iso")
         shared_pre: list[structlog.types.Processor] = [
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.add_log_level,
             structlog.stdlib.add_logger_name,
-            _add_trace_ids,
-            timestamper,
         ]
         if redactor is not None:
             shared_pre.append(
@@ -69,6 +69,8 @@ class StructlogAdapter:
                     make_structlog_redactor(redactor, props.redaction.allow_fields, props.redaction.deny_fields),
                 )
             )
+        shared_pre.append(_add_trace_ids)
+        shared_pre.append(timestamper)
 
         renderer: structlog.types.Processor = (
             structlog.processors.JSONRenderer()
