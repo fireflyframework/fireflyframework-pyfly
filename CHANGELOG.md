@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.07.01 (2026-07-16)
+
+### Fixed
+
+- **Trace/span correlation keys are never redacted.** PII redaction ran over each
+  log record *after* the active span's `trace_id`/`span_id` were injected, and a
+  32-char `trace_id` hex can contain a 7-digit island that matches the built-in
+  `PHONE` pattern — so the redactor could mutilate the correlation keys and silently
+  break log↔trace correlation. A hardcoded `NEVER_REDACT` allowlist
+  (`trace_id`, `span_id`, `trace_flags`, `correlationId`) in the structlog redactor
+  now protects these keys even against an explicit `deny_fields` entry, and the
+  structlog pre-chain redacts *before* trace-id injection as defense in depth.
+
+---
+
 ## v26.06.114 (2026-06-26)
 
 A comprehensive security release: PyFly now aligns with **RFC 9700 (OAuth 2.0

@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.6.114"
+version = "26.7.1"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
