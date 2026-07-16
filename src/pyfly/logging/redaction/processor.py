@@ -23,6 +23,11 @@ from pyfly.logging.redaction.engine import Redactor
 
 _REDACTED = "<REDACTED>"
 
+# Correlation keys are NEVER redacted, regardless of allow/deny config. A trace id is a
+# 32-char hex string whose digit substrings can match generic PII patterns (e.g. PHONE),
+# so an unguarded redactor can mutilate it and silently break log↔trace correlation.
+_NEVER_REDACT = frozenset({"trace_id", "span_id", "trace_flags", "correlationId"})
+
 
 def make_structlog_redactor(
     redactor: Redactor,
@@ -35,6 +40,8 @@ def make_structlog_redactor(
 
     def processor(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
         for key, value in list(event_dict.items()):
+            if key in _NEVER_REDACT:
+                continue
             if key in deny:
                 event_dict[key] = _REDACTED
                 continue
