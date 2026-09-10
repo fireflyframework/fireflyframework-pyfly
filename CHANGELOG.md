@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.03 (2026-09-10)
+
+### Fixed
+
+- **`ApplicationContext.stop()` releases the singletons it destroyed.** `stop()` called `@pre_destroy`
+  on every resolved bean and then left each instance on its registration, so the container went on
+  holding objects whose pools were closed, whose consumers were stopped and whose files were flushed.
+  Two consequences followed, both silent: `get_bean()` after a stop returned a **destroyed** singleton
+  rather than failing or rebuilding, and a later `start()` created a fresh set **beside** the stale one,
+  so anything walking the registrations — health reporting, metrics, a bean inventory — saw every
+  singleton twice, one live and one dead.
+
+  `stop()` now clears the instance from every registration it destroyed, which is what makes it the
+  inverse of `start()` rather than half of it. It releases only what the container **built**: anything
+  handed to it as a ready-made object — the container's own self-registration, the context's, anything
+  an embedder registered as an instance — has no factory to rebuild it, so it is left in place and the
+  next `start()` still works. `start()` records that distinction as it begins.
+
+  Found with the same service that surfaced the double-start in `26.09.02`: a start/stop/start cycle
+  across two test modules left two `EventPublisher` instances in one container, one of them dead.
+
+---
+
 ## v26.09.02 (2026-09-10)
 
 ### Fixed

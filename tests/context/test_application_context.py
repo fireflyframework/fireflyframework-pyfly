@@ -747,3 +747,44 @@ async def test_a_stopped_context_can_be_started_again() -> None:
     assert len(_CountingConfiguration.instances) == 2, "a restarted context must rebuild its singletons"
 
     await context.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_releases_the_singletons_it_destroyed() -> None:
+    """A stopped context must not keep handing out beans it has already destroyed.
+
+    stop() calls @pre_destroy on every resolved bean but used to leave the instance on its
+    registration, so the container went on holding objects whose pools were closed, whose consumers
+    were stopped and whose files were flushed. Two things follow, both bad: get_bean() after a stop
+    returns a destroyed object rather than failing or rebuilding, and a later start() adds a fresh set
+    BESIDE the stale one, so anything walking the registrations — health reporting, metrics, a bean
+    inventory — sees each singleton twice, one live and one dead.
+    """
+    _CountingConfiguration.instances.clear()
+
+    context = ApplicationContext(Config({}))
+    context.register_bean(_CountingConfiguration)
+
+    await context.start()
+    first = context.get_bean(_Counted)
+
+    await context.stop()
+
+    held = [
+        reg.instance
+        for reg in context._container._registrations.values()
+        if getattr(reg, "instance", None) is not None and isinstance(reg.instance, _Counted)
+    ]
+    assert held == [], f"a stopped context is still holding {len(held)} destroyed singleton(s)"
+
+    await context.start()
+
+    live = {
+        id(reg.instance)
+        for reg in context._container._registrations.values()
+        if getattr(reg, "instance", None) is not None and isinstance(reg.instance, _Counted)
+    }
+    assert len(live) == 1, "a restarted context holds both the new singleton and the destroyed one"
+    assert id(first) not in live, "the destroyed singleton is still registered after the restart"
+
+    await context.stop()
