@@ -161,7 +161,28 @@ class ApplicationContext:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the context: resolve @configuration beans, call lifecycle hooks, publish events."""
+        """Start the context: resolve @configuration beans, call lifecycle hooks, publish events.
+
+        Idempotent. A context that is already started returns immediately, because re-running the
+        pipeline does not refresh the context — it BUILDS A SECOND ONE beside it. Auto-configurations
+        register again, ``@configuration`` classes are processed again, and a second fully-initialised
+        set of singletons is created and started: a second Kafka consumer joins the same group and
+        steals partitions from the first, a second scheduler fires every ``@scheduled`` task twice, a
+        second connection pool opens. Nothing owns the duplicates, so :meth:`stop` disposes one set and
+        leaks the other.
+
+        A double start is easy to reach — an ASGI server that runs the lifespan twice, a reload, a test
+        harness sharing one module-level application across files — and it fails silently, which is the
+        worst property a lifecycle bug can have. Every adapter in this codebase already guards itself
+        the same way (``KafkaEventBus.start()`` opens with ``if self._started: return``); the context
+        now follows its own convention.
+
+        :meth:`stop` clears the flag, so a stopped context can be started again and rebuilds normally.
+        """
+        if self._started:
+            logger.debug("context_start_ignored", extra={"reason": "already started"})
+            return
+
         try:
             await self._do_start()
         except BeanCreationException:
