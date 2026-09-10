@@ -673,3 +673,77 @@ class TestSingularConditionIntegration:
         await ctx.start()
         with pytest.raises(NoSuchBeanError):
             ctx.get_bean(NeverService)
+
+
+# ---------------------------------------------------------------------------
+# start() is idempotent
+#
+# The context already tracked `_started` — it was set True at the end of start()
+# and False at the end of stop() — but nothing ever READ it, so a second start()
+# re-ran the entire pipeline: auto-configurations re-registered, @configuration
+# classes re-processed, and a second, fully-initialised set of singletons created
+# beside the first.
+#
+# That is not a test-only concern. The second set is STARTED: a second Kafka
+# consumer joins the same group and steals partitions from the first, a second
+# scheduler fires every @scheduled task twice, a second connection pool opens.
+# Nothing owns the duplicates, so stop() disposes one set and leaks the other.
+# A double start is easy to reach — an ASGI server that runs the lifespan twice,
+# a reload, a test harness that shares one module-level app across files.
+#
+# PyFly's own adapters already guard this way (`KafkaEventBus.start()` opens with
+# `if self._started: return`); the context now follows its own convention.
+# ---------------------------------------------------------------------------
+
+
+@configuration
+class _CountingConfiguration:
+    instances: list[object] = []
+
+    @bean
+    def counted(self) -> "_Counted":
+        made = _Counted()
+        _CountingConfiguration.instances.append(made)
+        return made
+
+
+class _Counted:
+    pass
+
+
+@pytest.mark.asyncio
+async def test_starting_twice_does_not_build_a_second_set_of_singletons() -> None:
+    _CountingConfiguration.instances.clear()
+
+    context = ApplicationContext(Config({}))
+    context.register_bean(_CountingConfiguration)
+
+    await context.start()
+    first = context.get_bean(_Counted)
+    assert len(_CountingConfiguration.instances) == 1
+
+    await context.start()  # the second start must do nothing
+
+    assert len(_CountingConfiguration.instances) == 1, (
+        "start() ran the bean pipeline again and built a second singleton"
+    )
+    assert context.get_bean(_Counted) is first, "the container handed back a different instance"
+
+    await context.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_context_can_be_started_again() -> None:
+    """Idempotence must not turn into a one-shot: stop() clears the flag."""
+    _CountingConfiguration.instances.clear()
+
+    context = ApplicationContext(Config({}))
+    context.register_bean(_CountingConfiguration)
+
+    await context.start()
+    await context.stop()
+    await context.start()
+
+    assert len(_CountingConfiguration.instances) == 2, "a restarted context must rebuild its singletons"
+
+    await context.stop()

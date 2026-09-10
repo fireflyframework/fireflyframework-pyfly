@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.02 (2026-09-10)
+
+### Fixed
+
+- **`ApplicationContext.start()` is idempotent.** The context already tracked `_started` — set at the
+  end of `start()`, cleared at the end of `stop()` — but nothing ever read it, so a second `start()`
+  re-ran the whole pipeline rather than returning. Auto-configurations registered again,
+  `@configuration` classes were processed again, and a second fully-initialised set of singletons was
+  created and **started** beside the first: a second Kafka consumer joining the same group and stealing
+  partitions from the first, a second scheduler firing every `@scheduled` task twice, a second
+  connection pool. Nothing owned the duplicates, so `stop()` disposed one set and leaked the other.
+
+  A double start is easy to reach — an ASGI server that runs the lifespan twice, a reload, a test
+  harness sharing one module-level application across files — and it failed silently, which is the
+  worst property a lifecycle bug can have. Every adapter in the codebase already guards itself this way
+  (`KafkaEventBus.start()` opens with `if self._started: return`); the context now follows its own
+  convention. `stop()` still clears the flag, so a stopped context restarts and rebuilds normally.
+
+---
+
 ## v26.09.01 (2026-09-09)
 
 Found by building a real service on `26.07.01`. Two defects, both of the same shape: a capability the
