@@ -71,6 +71,8 @@ class ApplicationContext:
         self._event_bus = ApplicationEventBus()
         self._post_processors: list[BeanPostProcessor] = []
         self._started = False
+        #: Instances the container was HANDED rather than built; stop() must not release them.
+        self._preexisting_instances: set[int] = set()
         self._infrastructure_adapters: list[Any] = []
         self._task_scheduler: Any | None = None
         self._background_tasks: list[asyncio.Task[Any]] = []
@@ -196,6 +198,16 @@ class ApplicationContext:
 
     async def _do_start(self) -> None:
         """Internal startup logic."""
+        # Whatever already carries an instance was HANDED to the container, not built by it — the
+        # container's self-registration, the context's own, anything an embedder registered as a
+        # ready-made object. stop() releases what this start creates and leaves these alone, because
+        # they cannot be rebuilt: they have no factory, and discarding them breaks the next start.
+        self._preexisting_instances = {
+            id(reg.instance)
+            for reg in self._container._registrations.values()
+            if getattr(reg, "instance", None) is not None
+        }
+
         # 0. Register built-in @auto_configuration classes
         self._register_auto_configurations()
 
@@ -349,9 +361,11 @@ class ApplicationContext:
         # by instance identity so an interface-typed @bean alias is not
         # destroyed twice (audit #113).
         seen_destroy: set[int] = set()
+        destroyed: list[Any] = []
         for reg in reversed(list(self._container._registrations.values())):
             if reg.instance is not None and id(reg.instance) not in seen_destroy:
                 seen_destroy.add(id(reg.instance))
+                destroyed.append(reg.instance)
                 try:
                     await asyncio.wait_for(
                         self._call_pre_destroy(reg.instance),
@@ -362,6 +376,29 @@ class ApplicationContext:
                         "pre_destroy_timeout",
                         extra={"bean": type(reg.instance).__qualname__, "timeout_s": shutdown_timeout},
                     )
+
+        # RELEASE what was just destroyed. @pre_destroy has closed these pools, stopped these
+        # consumers and flushed these files, so keeping them on their registrations leaves the
+        # container handing out objects that no longer work: get_bean() after a stop returned a
+        # destroyed singleton instead of failing or rebuilding. It also made a restart accumulate —
+        # start() creates a fresh set BESIDE the stale one, so anything walking the registrations
+        # (health reporting, metrics, a bean inventory) sees every singleton twice, one live and one
+        # dead. Clearing here is what makes stop() the inverse of start() rather than half of it.
+        released = 0
+        for reg in self._container._registrations.values():
+            if (
+                reg.instance is not None
+                and id(reg.instance) in seen_destroy
+                and id(reg.instance) not in self._preexisting_instances
+            ):
+                reg.instance = None
+                released += 1
+
+        if released:
+            logger.debug(
+                "context_singletons_released",
+                extra={"registrations": released, "instances": len(seen_destroy)},
+            )
 
         await self._event_bus.publish(ContextClosedEvent())
         self._started = False
