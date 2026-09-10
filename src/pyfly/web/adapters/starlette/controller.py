@@ -58,6 +58,13 @@ class RouteMetadata:
     summary: str = ""
     description: str = ""
     deprecated: bool = False
+    media_type: str = "application/json"
+    """Media type of the success response.
+
+    ``application/json`` for an ordinary mapping, ``text/event-stream`` for an ``@sse_mapping``. SSE is
+    plain HTTP — a GET whose body is a stream of events — so it is perfectly describable in OpenAPI, and
+    it only ever went missing because the collector looked at a single attribute.
+    """
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -139,12 +146,28 @@ class ControllerRegistrar:
                     continue
 
                 mapping = getattr(method_obj, "__pyfly_mapping__", None)
-                if mapping is None:
+                sse_mapping = getattr(method_obj, "__pyfly_sse_mapping__", None)
+
+                if mapping is None and sse_mapping is None:
+                    # A @websocket_mapping lands here. WebSocket is a different protocol with no
+                    # OpenAPI representation, so it is deliberately not an operation — but the
+                    # omission is no longer silent: collect_websocket_routes() reports those routes
+                    # and the generator publishes them as x-pyfly-websocket-routes.
                     continue
 
-                full_path = base_path + mapping["path"]
-                http_method = mapping["method"]
-                status_code = mapping.get("status_code", 200)
+                if mapping is not None:
+                    full_path = base_path + mapping["path"]
+                    http_method = mapping["method"]
+                    status_code = mapping.get("status_code", 200)
+                    media_type = "application/json"
+                elif sse_mapping is not None:
+                    # Server-sent events are a GET that does not close. Describing it as one is what
+                    # lets a CI job export /openapi.json and diff the WHOLE surface rather than only
+                    # its request/response half.
+                    full_path = base_path + sse_mapping["path"]
+                    http_method = "GET"
+                    status_code = 200
+                    media_type = "text/event-stream"
 
                 # Extract parameter metadata and request body model from type hints
                 params, body_model = self._extract_param_metadata(method_obj)
@@ -173,10 +196,47 @@ class ControllerRegistrar:
                         summary=summary,
                         description=description,
                         deprecated=deprecated,
+                        media_type=media_type,
                     )
                 )
 
         return metadata
+
+    def collect_websocket_routes(self, ctx: Any) -> list[dict[str, str]]:
+        """The ``@websocket_mapping`` routes of every controller, in declaration order.
+
+        WebSocket is not expressible in OpenAPI — that is what AsyncAPI is for — so these are
+        deliberately not operations. They were also simply absent from the generated document with
+        nothing said about them, which meant a service could delete a socket route and an OpenAPI diff
+        would report no change at all. Returning them here lets the generator publish them under the
+        document-level ``x-pyfly-websocket-routes`` extension: still not an operation, but visible,
+        diffable, and honest about what the document does not cover.
+        """
+        routes: list[dict[str, str]] = []
+
+        for cls, _reg in ctx.container._registrations.items():
+            if getattr(cls, "__pyfly_stereotype__", "") not in self._CONTROLLER_STEREOTYPES:
+                continue
+
+            base_path = getattr(cls, "__pyfly_request_mapping__", "")
+
+            for attr_name in dir(cls):
+                method_obj = getattr(cls, attr_name, None)
+                ws_mapping = getattr(method_obj, "__pyfly_ws_mapping__", None) if method_obj else None
+
+                if ws_mapping is None:
+                    continue
+
+                summary, _description = self._parse_docstring(method_obj)
+                routes.append(
+                    {
+                        "path": base_path + ws_mapping["path"],
+                        "handler": attr_name,
+                        "summary": summary,
+                    }
+                )
+
+        return routes
 
     @staticmethod
     def _derive_tag(cls: type) -> str:

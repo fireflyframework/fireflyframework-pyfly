@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.01 (2026-09-09)
+
+Found by building a real service on `26.07.01`. Two defects, both of the same shape: a capability the
+framework advertises, wired in a way that silently did nothing.
+
+### Fixed
+
+- **The OTLP endpoint is now built to the OpenTelemetry specification.** `OTEL_EXPORTER_OTLP_ENDPOINT`
+  is a BASE url — the SDK appends the per-signal path to it — while `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+  and the exporter's own `endpoint=` argument are the COMPLETE url, used verbatim. `TracingAutoConfiguration`
+  read the base variable and handed it straight to `OTLPSpanExporter(endpoint=...)`, collapsing the two: an
+  operator who set the spec-correct `http://collector:4318` got an exporter POSTing to
+  `http://collector:4318`, which is not a signal endpoint, so **every span was dropped and nothing was
+  logged**. The only way to make it work was to write a value into the base variable that the spec says is
+  not a base. Both spellings work now — a url with no path is treated as a base and gains `/v1/traces`,
+  a url that already has one is left alone — and the same normalisation applies to
+  `pyfly.observability.tracing.otlp.endpoint`.
+
+- **`@sse_mapping` routes appear in the OpenAPI document.** `collect_route_metadata()` looked only at
+  `__pyfly_mapping__`, so server-sent-event routes were absent from `/openapi.json` and from
+  `pyfly openapi` with nothing said about it — a CI job that exports the document and diffs it, which is
+  the standard way to keep an HTTP surface honest, could not see the streaming half of the API at all, and
+  a deleted stream read as no change. SSE is plain HTTP, so it is now emitted as the GET it is, with a
+  `text/event-stream` success response.
+
+### Added
+
+- **`x-pyfly-websocket-routes`.** WebSocket has no OpenAPI representation — that is what AsyncAPI is for —
+  but leaving `@websocket_mapping` routes out of the document entirely made it quietly incomplete in the
+  same way SSE was. `ControllerRegistrar.collect_websocket_routes()` now reports them and the generator
+  publishes them under this document-level extension: still not operations, but visible, diffable, and
+  honest about what the document does not cover. Wired through `pyfly openapi`, the Starlette adapter and
+  the FastAPI adapter alike.
+
+- **`opentelemetry-exporter-otlp-proto-http` is a dev dependency.** OTLP is the exporter
+  `TracingAutoConfiguration` selects by default as soon as an endpoint is configured, yet it appeared in no
+  extra, so no CI job ever imported it and the entire OTLP path — the endpoint bug above included — was
+  unexercised. It is a dev dependency rather than a new runtime one: applications still choose and pay for
+  their own exporter.
+
+### Changed
+
+- The README version badge, which the `v26.07.01` release left at `26.06.114`.
+
+---
+
 ## v26.07.01 (2026-07-16)
 
 ### Fixed

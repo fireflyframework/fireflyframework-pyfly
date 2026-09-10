@@ -401,7 +401,8 @@ def create_app(
     # the ``openapi_url``/``docs_url``/``redoc_url`` set on the constructor.
     if docs_enabled:
         generator = OpenAPIGenerator(title=title, version=version, description=description)
-        spec = generator.generate(route_metadata or None)
+        websocket_routes = registrar.collect_websocket_routes(context) if context is not None else []
+        spec = generator.generate(route_metadata or None, websocket_routes=websocket_routes or None)
 
         def _custom_openapi() -> dict[str, object]:
             app.openapi_schema = spec

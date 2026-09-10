@@ -803,3 +803,92 @@ class TestReDocHTML:
         client = TestClient(app)
         response = client.get("/redoc")
         assert "expandResponses" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Streaming routes: @sse_mapping and @websocket_mapping
+#
+# collect_route_metadata() only ever looked at ``__pyfly_mapping__``, so a
+# controller's SSE and WebSocket routes were absent from /openapi.json with
+# nothing said about it. A CI job that exports the document and diffs it — the
+# standard way to keep an HTTP surface honest — therefore could not see the
+# streaming half of the API at all, and a removed stream looked like no change.
+#
+# SSE *is* expressible: it is a GET whose response body is text/event-stream, so
+# it belongs in ``paths`` like any other operation. WebSocket is a different
+# protocol and has no OpenAPI representation (that is what AsyncAPI is for), so
+# it stays out of ``paths`` — but it is now listed under the document-level
+# ``x-pyfly-websocket-routes`` extension, which makes the omission explicit and
+# keeps the diff meaningful.
+# ---------------------------------------------------------------------------
+
+
+class _StreamingController:
+    __pyfly_stereotype__ = "rest_controller"
+    __pyfly_request_mapping__ = "/api/v1"
+
+    def room_events(self):  # pragma: no cover - metadata only
+        """Stream room events.
+
+        Server-sent events for one room.
+        """
+
+    room_events.__pyfly_sse_mapping__ = {"path": "/rooms/{room_id}/events"}
+
+    def room_socket(self):  # pragma: no cover - metadata only
+        """Bidirectional room channel."""
+
+    room_socket.__pyfly_ws_mapping__ = {"path": "/rooms/{room_id}/ws"}
+
+
+class _StreamingContainer:
+    def __init__(self, cls):
+        self._registrations = {cls: object()}
+
+
+class _StreamingCtx:
+    def __init__(self, cls):
+        self.container = _StreamingContainer(cls)
+
+
+def test_collect_route_metadata_includes_sse_routes_as_get():
+    metadata = ControllerRegistrar().collect_route_metadata(_StreamingCtx(_StreamingController))
+
+    sse = [m for m in metadata if m.path == "/api/v1/rooms/{room_id}/events"]
+    assert len(sse) == 1, "an @sse_mapping route must reach the OpenAPI document"
+    assert sse[0].http_method == "GET"
+    assert sse[0].media_type == "text/event-stream"
+
+
+def test_collect_route_metadata_leaves_websocket_routes_out_of_paths():
+    metadata = ControllerRegistrar().collect_route_metadata(_StreamingCtx(_StreamingController))
+
+    assert not [m for m in metadata if m.path.endswith("/ws")], (
+        "a WebSocket route has no OpenAPI representation and must not be emitted as an HTTP operation"
+    )
+
+
+def test_websocket_routes_are_declared_in_a_document_extension():
+    registrar = ControllerRegistrar()
+    ctx = _StreamingCtx(_StreamingController)
+
+    spec = OpenAPIGenerator("Streams", "1.0.0").generate(
+        registrar.collect_route_metadata(ctx),
+        websocket_routes=registrar.collect_websocket_routes(ctx),
+    )
+
+    assert spec["x-pyfly-websocket-routes"] == [
+        {"path": "/api/v1/rooms/{room_id}/ws", "handler": "room_socket", "summary": "Bidirectional room channel."}
+    ]
+
+
+def test_sse_operation_declares_an_event_stream_response():
+    registrar = ControllerRegistrar()
+    spec = OpenAPIGenerator("Streams", "1.0.0").generate(
+        registrar.collect_route_metadata(_StreamingCtx(_StreamingController))
+    )
+
+    operation = spec["paths"]["/api/v1/rooms/{room_id}/events"]["get"]
+
+    assert "text/event-stream" in operation["responses"]["200"]["content"]
+    assert operation["summary"] == "Stream room events."

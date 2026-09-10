@@ -79,6 +79,32 @@ class TracingAutoConfiguration:
         trace.set_tracer_provider(provider)
         return provider
 
+    _OTLP_TRACES_PATH = "/v1/traces"
+
+    @classmethod
+    def _otlp_traces_endpoint(cls, configured: str) -> str:
+        """Turn a configured OTLP endpoint into the full traces URL the exporter wants.
+
+        The OpenTelemetry specification draws a line this method restores. ``OTEL_EXPORTER_OTLP_ENDPOINT``
+        is a BASE url — the SDK appends the per-signal path to it — while ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT``
+        and the exporter's own ``endpoint=`` argument are the COMPLETE url, used verbatim. Reading the base
+        variable and passing it straight to ``OTLPSpanExporter(endpoint=...)`` collapsed the two: an operator
+        who set the spec-correct ``http://collector:4318`` got an exporter POSTing to ``http://collector:4318``,
+        which is not a signal endpoint, and every span was dropped with nothing logged. The only way to make
+        it work was to write a value into the base variable that the spec says is not a base.
+
+        Both spellings work now. A url whose path is empty (or bare ``/``) is treated as a base and gains
+        ``/v1/traces``; anything with a path is taken as already complete and returned untouched.
+        """
+        from urllib.parse import urlparse
+
+        parsed = urlparse(configured)
+
+        if parsed.path in ("", "/"):
+            return configured.rstrip("/") + cls._OTLP_TRACES_PATH
+
+        return configured
+
     @staticmethod
     def _install_span_processor(provider: Any, config: Config) -> None:
         """Wire a BatchSpanProcessor + exporter chosen from configuration.
@@ -116,7 +142,11 @@ class TracingAutoConfiguration:
                     "pyfly.observability.tracing.exporter=console."
                 )
                 return
-            exporter = OTLPSpanExporter(endpoint=otlp_endpoint) if otlp_endpoint else OTLPSpanExporter()
+            exporter = (
+                OTLPSpanExporter(endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint))
+                if otlp_endpoint
+                else OTLPSpanExporter()
+            )
             provider.add_span_processor(BatchSpanProcessor(exporter))
             return
 
