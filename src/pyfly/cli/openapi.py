@@ -39,9 +39,11 @@ def _build_spec(ctx: Any) -> dict[str, Any]:
     version: str = str(ctx.config.get("pyfly.app.version", "0.1.0"))
     description: str = str(ctx.config.get("pyfly.app.description", ""))
 
-    route_metadata = ControllerRegistrar().collect_route_metadata(ctx)
+    registrar = ControllerRegistrar()
+    route_metadata = registrar.collect_route_metadata(ctx)
+    websocket_routes = registrar.collect_websocket_routes(ctx)
     generator = OpenAPIGenerator(title=title, version=version, description=description)
-    return generator.generate(route_metadata or None)
+    return generator.generate(route_metadata or None, websocket_routes=websocket_routes or None)
 
 
 @click.command("openapi")

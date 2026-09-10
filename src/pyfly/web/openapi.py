@@ -92,8 +92,18 @@ class OpenAPIGenerator:
         self._description = description
         self._schemas: dict[str, Any] = {}
 
-    def generate(self, route_metadata: list[RouteMetadata] | None = None) -> dict[str, Any]:
-        """Generate a complete OpenAPI 3.1 spec as a dict."""
+    def generate(
+        self,
+        route_metadata: list[RouteMetadata] | None = None,
+        websocket_routes: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a complete OpenAPI 3.1 spec as a dict.
+
+        ``websocket_routes`` — from ``ControllerRegistrar.collect_websocket_routes()`` — is published
+        under the ``x-pyfly-websocket-routes`` extension rather than as operations. WebSocket has no
+        OpenAPI representation, but leaving it out entirely made the document quietly incomplete: a
+        service could delete a socket route and a CI diff of /openapi.json would report no change.
+        """
         self._schemas = {}
 
         paths: dict[str, Any] = {}
@@ -113,6 +123,9 @@ class OpenAPIGenerator:
 
         if self._schemas:
             spec["components"] = {"schemas": self._schemas}
+
+        if websocket_routes:
+            spec["x-pyfly-websocket-routes"] = websocket_routes
 
         return spec
 
@@ -232,6 +245,13 @@ class OpenAPIGenerator:
                         }
                     }
                 },
+            }
+        elif meta.media_type != "application/json":
+            # An @sse_mapping: the body is a stream of text/event-stream frames, not a JSON document,
+            # and saying so is the difference between a described stream and an undescribed one.
+            responses[status] = {
+                "description": "Event stream",
+                "content": {meta.media_type: {"schema": {"type": "string"}}},
             }
         else:
             responses[status] = {"description": "Successful response"}

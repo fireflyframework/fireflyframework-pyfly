@@ -392,7 +392,8 @@ def create_app(
     # Generate OpenAPI spec and doc routes
     if docs_enabled:
         generator = OpenAPIGenerator(title=title, version=version, description=description)
-        spec = generator.generate(route_metadata or None)
+        websocket_routes = registrar.collect_websocket_routes(context) if context is not None else []
+        spec = generator.generate(route_metadata or None, websocket_routes=websocket_routes or None)
 
         routes.extend(
             [

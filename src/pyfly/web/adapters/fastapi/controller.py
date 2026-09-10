@@ -116,6 +116,10 @@ class FastAPIControllerRegistrar:
         """
         return ControllerRegistrar().collect_route_metadata(ctx)
 
+    def collect_websocket_routes(self, ctx: Any) -> list[dict[str, str]]:
+        """Delegate to the Starlette registrar; the attributes it reads are adapter-independent."""
+        return ControllerRegistrar().collect_websocket_routes(ctx)
+
     def _collect_exception_handlers(self, instance: Any) -> dict[type[Exception], Any]:
         """Collect all @exception_handler methods from a controller instance.
 
