@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.04 (2026-09-10)
+
+### Fixed
+
+- **A restart reproduces a cold start.** `26.09.03` made `stop()` release the singletons it built, but
+  the REGISTRATIONS the previous `start()` created were left in place, so the next `start()` layered a
+  second pipeline on top of them instead of rebuilding. Two things went wrong, both silent:
+
+  - a `@bean` reachable under several keys — its concrete class and the protocol it satisfies — stopped
+    being one object. The first start aliased those keys to a single instance; the restart resolved each
+    key independently and called the factory once per key, so `get_bean(Protocol)` and
+    `get_bean(Concrete)` returned **different** singletons.
+  - the registration set drifted, because the `@conditional_on_*` passes re-evaluated against a registry
+    that already held the previous run's output rather than against the user's own definitions.
+
+  `start()` now records exactly which registrations its pipeline added and drops them at the next start,
+  so the registry a restart begins from is the one a cold start begins from. Two tests pin it: a bean
+  published under an interface stays one instance across a restart, and the registration set after a
+  restart is identical to the set after the cold start.
+
+  This completes the lifecycle trilogy of `26.09.02` (idempotent `start()`), `26.09.03` (`stop()`
+  releases what it destroyed) and this release, all found by one service that shares a module-level
+  application across test modules.
+
+---
+
 ## v26.09.03 (2026-09-10)
 
 ### Fixed

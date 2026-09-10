@@ -788,3 +788,83 @@ async def test_stop_releases_the_singletons_it_destroyed() -> None:
     assert id(first) not in live, "the destroyed singleton is still registered after the restart"
 
     await context.stop()
+
+
+# ---------------------------------------------------------------------------
+# A restart must reproduce a cold start
+#
+# stop() releases the singletons it built (26.09.03), but the REGISTRATIONS the
+# previous start created were left in place, so the next start layered a second
+# pipeline on top of them rather than rebuilding. Two things went wrong, and both
+# are silent:
+#
+#   * a @bean reachable under several keys — its concrete class and the protocol
+#     it satisfies — stopped being one object. The first start aliased the keys to
+#     a single instance; the restart resolved each key independently and called the
+#     factory once per key, so `get_bean(Protocol)` and `get_bean(Concrete)`
+#     returned DIFFERENT singletons.
+#   * the registration set drifted, because the conditional passes re-evaluated
+#     against a registry that already held the previous run's output.
+# ---------------------------------------------------------------------------
+
+
+class _Port:
+    """The interface a bean is published under, alongside its concrete class."""
+
+
+class _Adapter(_Port):
+    pass
+
+
+@configuration
+class _PortConfiguration:
+    @bean
+    def adapter(self) -> _Port:
+        return _Adapter()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_keeps_one_instance_per_bean_across_every_key() -> None:
+    context = ApplicationContext(Config({}))
+    context.register_bean(_PortConfiguration)
+
+    await context.start()
+    assert context.get_bean(_Port) is context.get_bean(_Port)
+    await context.stop()
+
+    await context.start()
+    by_port = context.get_bean(_Port)
+
+    reachable = {
+        id(reg.instance)
+        for reg in context._container._registrations.values()
+        if isinstance(getattr(reg, "instance", None), _Adapter)
+    }
+    assert len(reachable) == 1, (
+        f"after a restart the bean is registered as {len(reachable)} distinct instances; "
+        "a singleton reachable under several keys must stay one object"
+    )
+    assert id(by_port) in reachable
+
+    await context.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_does_not_drift_the_registration_set() -> None:
+    context = ApplicationContext(Config({}))
+    context.register_bean(_PortConfiguration)
+
+    await context.start()
+    first = set(context._container._registrations.keys())
+    await context.stop()
+
+    await context.start()
+    second = set(context._container._registrations.keys())
+
+    assert second == first, (
+        "a restart produced a different registry than the cold start: "
+        f"added {sorted(str(k) for k in second - first)}, "
+        f"lost {sorted(str(k) for k in first - second)}"
+    )
+
+    await context.stop()

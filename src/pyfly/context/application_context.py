@@ -73,6 +73,9 @@ class ApplicationContext:
         self._started = False
         #: Instances the container was HANDED rather than built; stop() must not release them.
         self._preexisting_instances: set[int] = set()
+        #: Registration keys the last start() pipeline added; dropped at the next start so a restart
+        #: rebuilds from the same registry a cold start sees.
+        self._pipeline_registrations: frozenset[Any] = frozenset()
         self._infrastructure_adapters: list[Any] = []
         self._task_scheduler: Any | None = None
         self._background_tasks: list[asyncio.Task[Any]] = []
@@ -198,6 +201,22 @@ class ApplicationContext:
 
     async def _do_start(self) -> None:
         """Internal startup logic."""
+        # A RESTART MUST REPRODUCE A COLD START.
+        #
+        # stop() releases the singletons it built, but the REGISTRATIONS this pipeline created are
+        # still here, and layering a second pipeline on top of them is not a rebuild. Two things go
+        # wrong, both silent. A @bean reachable under several keys — its concrete class and the
+        # protocol it satisfies — stops being one object, because the first start aliased those keys to
+        # a single instance and a second pass resolves each key independently, calling the factory once
+        # per key. And the registry drifts, because the conditional passes re-evaluate against a
+        # registry that already holds the previous run's output rather than against the user's own
+        # definitions. Dropping what the last pipeline added puts the registry back to the state a cold
+        # start begins from.
+        for key in getattr(self, "_pipeline_registrations", frozenset()):
+            self._container._registrations.pop(key, None)
+
+        registrations_before = set(self._container._registrations.keys())
+
         # Whatever already carries an instance was HANDED to the container, not built by it — the
         # container's self-registration, the context's own, anything an embedder registered as a
         # ready-made object. stop() releases what this start creates and leaves these alone, because
@@ -310,6 +329,10 @@ class ApplicationContext:
         await self._event_bus.publish(ContextRefreshedEvent())
         await self._event_bus.publish(ApplicationReadyEvent())
         await self._invoke_runners()
+        # Everything this pipeline added, so the next start can drop it and begin from the same
+        # registry a cold start begins from.
+        self._pipeline_registrations = frozenset(self._container._registrations.keys()) - registrations_before
+
         self._started = True
         # Lazily-created singletons (built post-startup on first resolve) must still
         # run the full init pipeline. Installed now so the batched startup passes
