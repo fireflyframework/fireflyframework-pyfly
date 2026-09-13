@@ -385,11 +385,42 @@ def _run_with_uvicorn_reload(app_path: str, host: str, port: int, reload_dirs: l
 
 
 def _read_port_from_config() -> int | None:
-    """Read the application port from pyfly.yaml if available.
+    """Resolve the application port the way the application itself does.
 
-    Spring ``server.port`` parity: reads ``pyfly.server.port`` (the former
-    ``pyfly.web.port`` key was removed in v26.06.102).
+    Spring ``server.port`` parity: ``pyfly.server.port`` (the former ``pyfly.web.port``
+    key was removed in v26.06.102), resolved with the same precedence as ``Config``:
+
+    1. ``PYFLY_SERVER_PORT`` in the environment — the relaxed-binding override, and
+       also what ``-D server.port=…`` becomes after ``_build_launch_env``.
+    2. The merged configuration for the active profiles (``pyfly.yaml`` plus
+       ``pyfly-{profile}.yaml`` overlays, in ``config/`` or the project root).
+    3. A raw read of ``pyfly.yaml`` if the loader cannot run.
+
+    Before, only step 3 existed: the CLI bound the base port while the application,
+    which reads the same key through ``Config``, believed the overridden one. The
+    ``-D server.port=9000`` example in the ``--define`` help text was therefore inert.
     """
+    env_port = os.environ.get("PYFLY_SERVER_PORT")
+    if env_port is not None and env_port.strip():
+        try:
+            return int(env_port)
+        except ValueError:
+            raise click.BadParameter(
+                f"PYFLY_SERVER_PORT must be an integer, got {env_port!r}",
+                param_hint="PYFLY_SERVER_PORT / -D server.port",
+            ) from None
+
+    profiles = [p.strip() for p in os.environ.get("PYFLY_PROFILES_ACTIVE", "").split(",") if p.strip()]
+    try:
+        from pyfly.core.config import Config
+
+        merged = Config.from_sources(Path.cwd(), active_profiles=profiles or None, load_defaults=False)
+        port = merged.get("pyfly.server.port")
+        if port is not None:
+            return int(port)
+    except Exception:  # noqa: BLE001 - the loader is best effort here; fall back to the raw file
+        pass
+
     import yaml
 
     config_path = Path("pyfly.yaml")
