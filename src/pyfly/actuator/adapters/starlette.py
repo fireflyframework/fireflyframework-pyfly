@@ -25,6 +25,7 @@ from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
 from pyfly.actuator.endpoints.loggers_endpoint import LoggersEndpoint
 from pyfly.actuator.endpoints.prometheus_endpoint import PrometheusEndpoint
 from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
+from pyfly.actuator.ports import find_write_operation
 from pyfly.actuator.registry import ActuatorRegistry
 
 
@@ -172,15 +173,17 @@ def _make_refresh_routes(ep: RefreshEndpoint, bp: str) -> list[Route]:
 def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
     """Generic endpoint — ``GET /actuator/{id}`` plus an optional
     ``GET /actuator/{id}/{selector}`` drill-down when the endpoint opts in via
-    ``supports_selector = True``."""
+    ``supports_selector = True``, and ``POST`` on the same paths when the endpoint
+    declares a ``@write_operation`` (see :func:`pyfly.actuator.ports.write_operation`)."""
 
     async def handler(request: Request) -> JSONResponse:
         data = await ep.handle({"query": dict(request.query_params)})  # type: ignore[attr-defined]
         return JSONResponse(data)
 
     routes = [Route(f"{bp}/{eid}", handler, methods=["GET"])]
+    selector_enabled = bool(getattr(ep, "supports_selector", False))
 
-    if getattr(ep, "supports_selector", False):
+    if selector_enabled:
 
         async def selector_handler(request: Request) -> JSONResponse:
             selector = request.path_params["selector"]
@@ -192,5 +195,31 @@ def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
             return JSONResponse(data)
 
         routes.append(Route(f"{bp}/{eid}/{{selector:path}}", selector_handler, methods=["GET"]))
+
+    write = find_write_operation(ep)
+    if write is not None:
+
+        async def write_handler(request: Request) -> Response:
+            # The body is refused before the operation runs: a write operation is a command,
+            # and a command with no document (or a document that is not an object) is not one
+            # the endpoint can be expected to guess at.
+            raw = await request.body()
+            try:
+                body = json.loads(raw) if raw else None
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                return JSONResponse({"error": "request body is not a JSON object"}, status_code=400)
+            context = {"query": dict(request.query_params), "selector": request.path_params.get("selector")}
+            result = await write(body, context)
+            if result is None:
+                return Response(status_code=204)
+            if isinstance(result, dict) and "error" in result:
+                return JSONResponse(result, status_code=400)
+            return JSONResponse(result)
+
+        routes.append(Route(f"{bp}/{eid}", write_handler, methods=["POST"]))
+        if selector_enabled:
+            routes.append(Route(f"{bp}/{eid}/{{selector:path}}", write_handler, methods=["POST"]))
 
     return routes

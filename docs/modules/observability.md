@@ -950,6 +950,28 @@ pyfly:
 
 The auto-configured `TracerProvider` creates an OpenTelemetry `TracerProvider` with a `Resource` containing the service name, attaches a `BatchSpanProcessor` with the configured exporter (so spans are actually exported), and sets it as the global tracer provider. See [OpenTelemetry Integration](#opentelemetry-integration) for exporter selection rules, including the `OTEL_EXPORTER_OTLP_ENDPOINT` auto-detection.
 
+The `TracingFilter` that opens a `SERVER` span per request skips the paths in
+`pyfly.observability.tracing.exclude-patterns` (a list or a comma-separated string of `fnmatch`
+globs). The default is `/actuator` and `/actuator/*`: liveness and readiness probes hit the
+actuator at 1 Hz per replica and, traced, outnumber every business span in the store. The
+setting applies to the main app and to the management app alike. The patterns live on the filter
+instance — `TracingFilter(exclude_patterns=[...])` — not on the class.
+
+### MeterProviderAutoConfiguration
+
+**Conditions:** `opentelemetry-sdk` installed (`opentelemetry.sdk.metrics` importable).
+
+| Bean | Type | Config Keys |
+|------|------|-------------|
+| `meter_provider` | `MeterProvider` | `pyfly.observability.metrics.otlp.endpoint`, else derived from `pyfly.observability.tracing.otlp.endpoint` / `OTEL_EXPORTER_OTLP_ENDPOINT` |
+
+Registers an OpenTelemetry `MeterProvider` (with the same `service.name` as the tracer provider)
+as the global one, so OTel metric instruments an application records are exported rather than
+dropped by the API's no-op provider. The reader is OTLP/HTTP to the metrics endpoint: the one
+configured under `metrics.otlp.endpoint` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the
+traces endpoint with `/v1/traces` rewritten to `/v1/metrics` (a base URL gains `/v1/metrics`).
+With no endpoint at all the provider has no reader: instruments still work, nothing is exported.
+
 ### Overriding Auto-Configured Beans
 
 Provide your own beans via `@configuration` + `@bean` to override the auto-configured versions:

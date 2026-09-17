@@ -98,6 +98,7 @@ class TestDiscoverAutoConfigurations:
             "IdpAutoConfiguration",
             "JwtAutoConfiguration",
             "MessagingAutoConfiguration",
+            "MeterProviderAutoConfiguration",
             "MetricsActuatorAutoConfiguration",
             "MetricsAutoConfiguration",
             "NotificationsAutoConfiguration",

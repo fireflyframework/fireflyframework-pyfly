@@ -30,6 +30,12 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
 * ``group`` — consumer group / cursor name. Defaults to
   ``pyfly-default``.
 * ``kafka.bootstrap-servers`` — Kafka bootstrap. Default ``localhost:9092``.
+* ``kafka.partition-key-header`` — envelope header consulted first for the
+  record key (then ``x-correlation-id``, then the event type). Default
+  ``partition_key``.
+* ``kafka.dlt.enabled`` / ``kafka.dlt.suffix`` — dead-letter an
+  undeserialisable record to ``<topic><suffix>``. Default ``true`` / ``.DLT``.
+* ``serialization-format`` — ``json | firefly-json | avro | protobuf``.
 * ``redis.url`` — Redis URL. Default ``redis://localhost:6379/0``.
 * ``postgres.dsn`` — Postgres DSN for the producer pool.
 * ``postgres.listen-dsn`` — Optional dedicated DSN for the LISTEN
@@ -91,11 +97,16 @@ class EdaAutoConfiguration:
             from pyfly.eda.adapters.kafka import KafkaEventBus
 
             servers = str(config.get("pyfly.eda.kafka.bootstrap-servers", "localhost:9092"))
+            key_header = str(config.get("pyfly.eda.kafka.partition-key-header", "partition_key"))
+            dlt_enabled = str(config.get("pyfly.eda.kafka.dlt.enabled", "true")).lower() in ("true", "1", "yes")
+            dlt_suffix = str(config.get("pyfly.eda.kafka.dlt.suffix", ".DLT")) if dlt_enabled else None
             return KafkaEventBus(
                 bootstrap_servers=servers,
                 topics=destinations,
                 group=group,
                 serializer=serializer,
+                partition_key_header=key_header,
+                dlt_suffix=dlt_suffix,
             )
 
         if provider == "redis":
@@ -150,10 +161,16 @@ class EdaAutoConfiguration:
     def _make_serializer(config: Config) -> Any:
         """Select the event serializer from pyfly.eda.serialization-format (#138).
 
-        json (default) | avro | protobuf — Avro/Protobuf remain opt-in stubs
-        ('bring your own' schema), but the selection is now reachable.
+        json (default) | firefly-json | avro | protobuf — ``firefly-json`` writes the
+        LaraFly envelope shape for topics shared with a PHP service (both JSON
+        serializers read both shapes); Avro/Protobuf remain opt-in stubs ('bring
+        your own' schema), but the selection is now reachable.
         """
         fmt = str(config.get("pyfly.eda.serialization-format", "json")).lower()
+        if fmt == "firefly-json":
+            from pyfly.eda.serializers import FireflyJsonEventSerializer
+
+            return FireflyJsonEventSerializer()
         if fmt == "avro":
             from pyfly.eda.serializers import AvroEventSerializer
 

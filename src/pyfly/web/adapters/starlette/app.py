@@ -195,7 +195,7 @@ def create_app(
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
-        TracingFilter(),
+        TracingFilter.from_config(context.config if context is not None else None),
         TransactionIdFilter(),
     ]
     if request_logging_enabled:
@@ -386,14 +386,31 @@ def create_app(
             )
         )
 
+    # The application's own management routes (ManagementRoutesContributor beans) belong to
+    # the management surface: on the management app when it is separate, here when it is
+    # shared, nowhere when management is disabled — exactly like the actuator.
+    if context is not None and management_mode != "disabled" and not _serve_separately:
+        from pyfly.web.ports.management import collect_management_routes
+
+        routes.extend(collect_management_routes(context))
+
     # Collect route metadata (used for OpenAPI and startup logging)
     route_metadata = registrar.collect_route_metadata(context) if context is not None else []
 
     # Generate OpenAPI spec and doc routes
     if docs_enabled:
+        from pyfly.web.adapters.starlette.mounted_routes import collect_mounted_routes
+
         generator = OpenAPIGenerator(title=title, version=version, description=description)
         websocket_routes = registrar.collect_websocket_routes(context) if context is not None else []
-        spec = generator.generate(route_metadata or None, websocket_routes=websocket_routes or None)
+        # The caller's own routes and sub-applications are served beside the controllers; the
+        # document describes them too, or a diff of it cannot see them go.
+        mounted_routes = collect_mounted_routes(extra_routes) if extra_routes else []
+        spec = generator.generate(
+            route_metadata or None,
+            websocket_routes=websocket_routes or None,
+            mounted_routes=mounted_routes or None,
+        )
 
         routes.extend(
             [

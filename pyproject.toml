@@ -220,6 +220,7 @@ oauth2-client = "pyfly.security.auto_configuration:OAuth2ClientAutoConfiguration
 scheduling = "pyfly.scheduling.auto_configuration:SchedulingAutoConfiguration"
 metrics = "pyfly.observability.auto_configuration:MetricsAutoConfiguration"
 tracing = "pyfly.observability.auto_configuration:TracingAutoConfiguration"
+otel-metrics = "pyfly.observability.auto_configuration:MeterProviderAutoConfiguration"
 actuator = "pyfly.actuator.auto_configuration:ActuatorAutoConfiguration"
 actuator-metrics = "pyfly.actuator.auto_configuration:MetricsActuatorAutoConfiguration"
 aop = "pyfly.aop.auto_configuration:AopAutoConfiguration"

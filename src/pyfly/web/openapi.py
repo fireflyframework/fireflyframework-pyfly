@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from pyfly.web.adapters.starlette.controller import RouteMetadata
+    from pyfly.web.adapters.starlette.mounted_routes import MountedRoute
 
 _PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 
@@ -96,6 +97,7 @@ class OpenAPIGenerator:
         self,
         route_metadata: list[RouteMetadata] | None = None,
         websocket_routes: list[dict[str, str]] | None = None,
+        mounted_routes: list[MountedRoute] | None = None,
     ) -> dict[str, Any]:
         """Generate a complete OpenAPI 3.1 spec as a dict.
 
@@ -103,6 +105,13 @@ class OpenAPIGenerator:
         under the ``x-pyfly-websocket-routes`` extension rather than as operations. WebSocket has no
         OpenAPI representation, but leaving it out entirely made the document quietly incomplete: a
         service could delete a socket route and a CI diff of /openapi.json would report no change.
+
+        ``mounted_routes`` — from ``collect_mounted_routes()`` over ``create_app(extra_routes=...)`` —
+        are the plain Starlette routes and mounted sub-applications served beside the controllers.
+        They become operations marked ``x-pyfly-mounted: true`` (no typed contract can be read from
+        an ASGI endpoint) and never overwrite a controller's operation on the same path and method;
+        a mount that could not be walked is listed under ``x-pyfly-mounts``. Same reason as above:
+        a service whose webhooks live in sub-apps had a document that described none of them.
         """
         self._schemas = {}
 
@@ -111,6 +120,22 @@ class OpenAPIGenerator:
         if route_metadata:
             paths = self._build_paths(route_metadata)
             tags = self._collect_tags(route_metadata)
+
+        opaque_mounts: list[dict[str, str]] = []
+        for mounted in mounted_routes or ():
+            if mounted.method is None:
+                opaque_mounts.append({"path": mounted.path, "name": mounted.name})
+                continue
+            operations = paths.setdefault(mounted.path, {})
+            method_key = mounted.method.lower()
+            if method_key in operations:
+                continue
+            operation: dict[str, Any] = {"operationId": mounted.name}
+            if mounted.summary:
+                operation["summary"] = mounted.summary
+            operation["responses"] = {"default": {"description": "Successful response"}}
+            operation["x-pyfly-mounted"] = True
+            operations[method_key] = operation
 
         spec: dict[str, Any] = {
             "openapi": "3.1.0",
@@ -126,6 +151,9 @@ class OpenAPIGenerator:
 
         if websocket_routes:
             spec["x-pyfly-websocket-routes"] = websocket_routes
+
+        if opaque_mounts:
+            spec["x-pyfly-mounts"] = opaque_mounts
 
         return spec
 

@@ -6,6 +6,116 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.05 (2026-09-17)
+
+Six things a Python service sharing a platform with a LaraFly control plane had to work around
+at boot, each now a framework feature with its own tests. Found by one worker runtime that
+carried a hand-built database wrapper, three Kafka shims, a monkeypatched management app, a
+class-attribute mutation and its own `MeterProvider` — and by the CI diff of its OpenAPI
+document, which could not see the routes that carried its traffic.
+
+### Added
+
+- **A user `@bean` may depend on a bean an `@auto_configuration` provides.** User
+  `@configuration` classes are processed before auto-configurations so that
+  `@conditional_on_missing_bean` can see what the user declared — and until now that was also
+  the order in which the `@bean` methods were CALLED, so a user factory taking
+  `async_sessionmaker`, `EventPublisher` or a client pool failed with "No matching bean is
+  registered": the framework offered the bean and refused to inject it. A user factory whose
+  parameters are not registered yet is now deferred. Its declared return type is registered at
+  once (so the missing-bean conditions still back off, and a resolve in the meantime builds it
+  lazily), and the call completes in a new step 2d, after the auto-configurations. Parameters are
+  resolved before the factory body runs, so a deferred factory never starts twice; deferred
+  factories may depend on each other; a dependency nobody registers raises the same
+  `NoSuchBeanError`, naming the configuration, the method and the parameter, that an eager
+  failure raised. Auto-configuration factories are never deferred — they run last, so a
+  dependency they cannot resolve is a real error. Eight tests in
+  `tests/context/test_bean_method_after_auto_configuration.py`.
+
+- **Kafka records carry a partition key.** `KafkaEventBus.publish()` sent no key, so Kafka
+  round-robined the records and two events of one aggregate could be consumed in either order —
+  the per-aggregate ordering every other Firefly publisher guarantees was lost on the Python side.
+  The key is now `headers["partition_key"]`, else `headers["x-correlation-id"]`, else the event
+  type: the rule `KafkaEventPublisher::partitionKey` applies in LaraFly, byte for byte (an empty
+  header stays an empty key, as PHP's `??` keeps it), so a topic written from both runtimes is
+  keyed the same way. `publish(..., key=)` overrides it for one call and
+  `pyfly.eda.kafka.partition-key-header` names a different header to consult first.
+
+- **A poison record is dead-lettered, not dropped.** The consume loop `continue`d past a record
+  it could not deserialise; with auto-commit on, the offset advanced and the message was gone
+  before any listener ran — a decorator on a listener cannot help, no listener ever sees it. The
+  record is now republished verbatim (bytes, key, headers) to `<topic>.DLT` with `x-dlt-reason`,
+  `x-dlt-source-topic` and `x-dlt-source-offset`, retried three times, and only then does the
+  loop move on; a publish that fails after every retry is logged `CRITICAL` and counted on
+  `dlt_publish_failures` beside `dlt_published`. `pyfly.eda.kafka.dlt.enabled` (`true`) and
+  `pyfly.eda.kafka.dlt.suffix` (`.DLT`) configure it. A handler that raises is deliberately not
+  dead-lettered: the envelope was readable, and what to do with a failing handler is the
+  listener's error strategy, not the transport's.
+
+- **The JSON serializer reads both envelope shapes of the family; `firefly-json` writes the
+  PHP one.** `JsonEventSerializer.deserialize` did `raw["event_id"]` and died with a `KeyError`
+  on a LaraFly envelope (`eventId`/`eventType`, camelCase, `[]` for an empty object), so on a
+  shared topic every cross-runtime event was poison. It now reads either shape, fills in an
+  absent event id or timestamp (metadata the reader can stand in for), and raises one typed
+  `EnvelopeDecodeError` — for bytes that are not UTF-8 JSON, a value that is not an object, a
+  missing event type, a non-object payload, a timestamp that is not ISO 8601 — so a consumer can
+  dead-letter on one exception and name the reason. `FireflyJsonEventSerializer`
+  (`pyfly.eda.serialization-format: firefly-json`) writes the LaraFly shape in LaraFly's key
+  order with `DATE_ATOM` timestamps, for the service whose wire contract is the PHP side.
+
+- **`ManagementRoutesContributor` and `@write_operation`.** The actuator's read model —
+  `GET /actuator/{id}` with query parameters — was the whole management surface an application
+  could extend, so a management command that took a document had one way onto the management
+  port: replace `create_management_app` on its module at boot, from a bean whose only job was to
+  exist early enough. Two doors now. `@write_operation` (`pyfly.actuator`) marks the one method
+  of a custom `ActuatorEndpoint` mounted as `POST /actuator/{id}` with a JSON body, the Spring
+  `@WriteOperation` equivalent: a body that is missing, not JSON or not an object is refused with
+  400 before the method runs; `None` answers 204, a dict 200, a dict with `"error"` 400.
+  `ManagementRoutesContributor` (`pyfly.web.ports`) is a bean returning Starlette routes that
+  `create_management_app` mounts under the management base path — and `create_app` mounts on the
+  main app when the management surface is shared, and nowhere when it is disabled, exactly like
+  the actuator, so an application that runs shared in tests and separate in production sees one
+  behaviour.
+
+- **`/openapi.json` describes the routes handed to `create_app(extra_routes=...)`.** A service
+  that mounts provider webhooks as Starlette sub-applications beside its controllers had a
+  document that described the controllers and nothing else: the paths carrying the traffic were
+  invisible, so a CI diff could not notice one disappearing. The generator now walks the extra
+  routes — plain `Route` objects and the routes inside a `Mount` whose app is a router,
+  recursively, with the mount prefix — and emits them as operations marked
+  `x-pyfly-mounted: true` (there is no handler signature to read a contract from; a controller's
+  operation on the same path and method is never overwritten). A mount whose app cannot be walked
+  (static files, a foreign ASGI app) is listed under `x-pyfly-mounts`, so the document at least
+  says the prefix exists.
+
+- **`MeterProviderAutoConfiguration`.** The framework set a global `TracerProvider` and no
+  `MeterProvider`, so every OpenTelemetry metric an application recorded went to the API's no-op
+  provider and was dropped, silently. A `MeterProvider` bean is now registered beside the tracer
+  provider, with the same `service.name`, reading to OTLP/HTTP: the endpoint under
+  `pyfly.observability.metrics.otlp.endpoint` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the
+  traces endpoint with `/v1/traces` rewritten to `/v1/metrics`. With no endpoint the provider has
+  no reader — instruments still work, nothing is exported, tests stay offline.
+
+### Changed
+
+- **`TracingFilter` skips the actuator, and its exclusions are configurable.** The filter opened
+  a `SERVER` span for every request on both listeners, so kubelet probes at 1 Hz per replica
+  outnumbered every business span in the trace store; and because `exclude_patterns` was a
+  class attribute that `create_app` instantiated past, the only way to exclude a path was to
+  mutate the class before the app was built. The patterns now live on the instance
+  (`TracingFilter(exclude_patterns=[...])`), default to `/actuator` and `/actuator/*`, and are
+  read from `pyfly.observability.tracing.exclude-patterns` (a list or a comma-separated string)
+  by `create_app` and `create_management_app` alike.
+
+- **`async_session` is transient.** The relational auto-configuration's `AsyncSession` bean was
+  a singleton: every repository, every user bean and the engine lifecycle shared one SQLAlchemy
+  session — one transaction, one identity map and one connection's local state (`SET LOCAL`, a
+  tenant GUC, a `search_path`) for the whole process — and anything multi-tenant or concurrent
+  had to refuse the bean and open its own. Every injection now receives its own session; the
+  factory (`async_session_factory`) is the unit of sharing, the session the unit of work. A bean
+  that needs a session per request or per tenant injects the factory and calls it, which the
+  deferral above makes possible from a user `@bean`.
+
 ## v26.09.05 (2026-09-23)
 
 ### Added

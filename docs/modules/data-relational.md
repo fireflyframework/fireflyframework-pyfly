@@ -189,7 +189,7 @@ class ProductRepository(Repository[Product, int]):
 **How it works:**
 
 1. `__init_subclass__` inspects `__orig_bases__` to extract the entity type (`Order`) and ID type (`UUID`) from the generic parameters at class definition time.
-2. The `AsyncSession` is provided as an auto-configured bean by `RelationalAutoConfiguration` and injected by the container into the repository's constructor.
+2. The `AsyncSession` is provided as an auto-configured bean by `RelationalAutoConfiguration` and injected by the container into the repository's constructor. The bean is **transient** (since v26.09.05): every injection receives its own session, so two repositories never share a transaction, an identity map or a connection's local state by accident. A bean that needs a session per request or per tenant injects `async_sessionmaker[AsyncSession]` and calls it — and a user `@bean` may take that factory as a parameter, because user factories whose dependencies are auto-configured are deferred until the auto-configuration has run (see [The start() Lifecycle](dependency-injection.md#the-start-lifecycle)).
 3. The entity type is used internally for all query operations — no need to pass it manually.
 
 ### CRUD Methods Reference
