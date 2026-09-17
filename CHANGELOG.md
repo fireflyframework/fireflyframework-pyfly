@@ -29,7 +29,12 @@ document, which could not see the routes that carried its traffic.
   factories may depend on each other; a dependency nobody registers raises the same
   `NoSuchBeanError`, naming the configuration, the method and the parameter, that an eager
   failure raised. Auto-configuration factories are never deferred — they run last, so a
-  dependency they cannot resolve is a real error. Eight tests in
+  dependency they cannot resolve is a real error. The declared type is the class a hint
+  names, so `-> Port | None` (the idiomatic hint for a factory that may decline) claims `Port`
+  exactly as `-> Port` does — deferred or eager: the union used to be bound as-is, a key
+  nobody asked for, so `get_bean(Port)` failed and a deferred claim was never completed. A
+  two-class union claims nothing; a factory answering `None` registers nothing (not
+  `NoneType`, as before) and drops its provisional claim. Thirteen tests in
   `tests/context/test_bean_method_after_auto_configuration.py`.
 
 - **Kafka records carry a partition key.** `KafkaEventBus.publish()` sent no key, so Kafka
@@ -75,7 +80,11 @@ document, which could not see the routes that carried its traffic.
   `create_management_app` mounts under the management base path — and `create_app` mounts on the
   main app when the management surface is shared, and nowhere when it is disabled, exactly like
   the actuator, so an application that runs shared in tests and separate in production sees one
-  behaviour.
+  behaviour. Contributors are scanned twice, like health indicators: at build time for a context
+  started beforehand, and from the post-start rescan for the canonical boot order (the generated
+  `main.py` starts the context inside the lifespan, after `create_app` returned), each asked
+  once. The management app built for a separate listener is exposed as
+  `app.state.pyfly_management_app`.
 
 - **`/openapi.json` describes the routes handed to `create_app(extra_routes=...)`.** A service
   that mounts provider webhooks as Starlette sub-applications beside its controllers had a
@@ -84,9 +93,15 @@ document, which could not see the routes that carried its traffic.
   routes — plain `Route` objects and the routes inside a `Mount` whose app is a router,
   recursively, with the mount prefix — and emits them as operations marked
   `x-pyfly-mounted: true` (there is no handler signature to read a contract from; a controller's
-  operation on the same path and method is never overwritten). A mount whose app cannot be walked
-  (static files, a foreign ASGI app) is listed under `x-pyfly-mounts`, so the document at least
-  says the prefix exists.
+  operation on the same path and method is never overwritten). The document validates: a
+  template such as `/{botId}/updates` declares its path parameters from Starlette's convertors
+  (`int` → integer, `float` → number, `uuid` → string/uuid, anything else a string; the
+  convertor suffix never reaches the template), a mount's own parameters are inherited by what
+  it contains, and `operationId`s are unique — the first holder of a name keeps it, a later
+  endpoint with the same `__name__` (six sub-apps each with `health`) is qualified as
+  `health_get_api_slack_health`, deterministically, so a diff stays stable. A mount whose app
+  cannot be walked (static files, a foreign ASGI app) is listed under `x-pyfly-mounts`, so the
+  document at least says the prefix exists.
 
 - **`MeterProviderAutoConfiguration`.** The framework set a global `TracerProvider` and no
   `MeterProvider`, so every OpenTelemetry metric an application recorded went to the API's no-op

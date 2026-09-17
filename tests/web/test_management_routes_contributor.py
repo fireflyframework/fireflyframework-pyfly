@@ -181,6 +181,105 @@ class TestManagementRoutesContributor:
         finally:
             await ctx.stop()
 
+    async def test_routes_ride_on_the_main_app_under_the_canonical_boot_order(self) -> None:
+        """The generated ``main.py`` calls ``create_app(context=ctx, lifespan=...)`` at import time
+        and starts the context INSIDE the lifespan. At build time no bean is instantiated, so a
+        contributor found only by scanning instances would be missed and its routes would 404 in
+        shared mode while the same service answers on the management port in production. The
+        post-start rescan (the one that finds late controllers and health indicators) must find
+        the contributors too."""
+        ctx = ApplicationContext(_exposure_config())
+        ctx.register_bean(GuardrailDryRunRoutes)
+
+        @contextlib.asynccontextmanager
+        async def boot(app: Any):  # type: ignore[no-untyped-def]
+            await ctx.start()
+            yield
+            await ctx.stop()
+
+        app = create_app(context=ctx, actuator_enabled=True, docs_enabled=False, lifespan=boot)
+        assert "/internal/guardrails/test" not in {getattr(r, "path", "") for r in app.router.routes}
+        with TestClient(app) as client:
+            answered = client.post(
+                "/internal/guardrails/test",
+                json={"sample": "hello"},
+                headers={"authorization": "Bearer service-token"},
+            )
+            assert answered.status_code == 200
+            assert client.get("/actuator/health").status_code == 200
+            # Asked once, mounted once: the route is not duplicated by the rescan.
+            assert [getattr(r, "path", "") for r in app.router.routes].count("/internal/guardrails/test") == 1
+
+    async def test_a_contributor_is_asked_once_when_the_context_started_before_the_app(self) -> None:
+        """A started context (tests, embedded use) is scanned at build time; the post-start rescan
+        must not ask the same contributor again or mount its routes twice."""
+        ctx = ApplicationContext(_exposure_config())
+        ctx.register_bean(GuardrailDryRunRoutes)
+        await ctx.start()
+        try:
+            app = create_app(context=ctx, actuator_enabled=True, docs_enabled=False, lifespan=_noop_lifespan)
+            with TestClient(app) as client:
+                assert (
+                    client.post(
+                        "/internal/guardrails/test",
+                        json={"sample": "hello"},
+                        headers={"authorization": "Bearer service-token"},
+                    ).status_code
+                    == 200
+                )
+            assert [getattr(r, "path", "") for r in app.router.routes].count("/internal/guardrails/test") == 1
+        finally:
+            await ctx.stop()
+
+    async def test_routes_ride_on_the_management_port_under_the_canonical_boot_order(self) -> None:
+        """Separate mode, canonical order: the management app is built inside the lifespan after
+        ``start()``, so the contributor is instantiated by then and its routes are on that listener."""
+        ctx = ApplicationContext(_exposure_config(management={"server": {"port": 0}}, server={"port": 8099}))
+        ctx.register_bean(GuardrailDryRunRoutes)
+
+        @contextlib.asynccontextmanager
+        async def boot(app: Any):  # type: ignore[no-untyped-def]
+            await ctx.start()
+            yield
+            await ctx.stop()
+
+        app = create_app(context=ctx, actuator_enabled=True, docs_enabled=False, lifespan=boot)
+        with TestClient(app) as client:
+            assert client.post("/internal/guardrails/test", json={}).status_code == 404
+            assert client.get("/actuator/health").status_code == 404
+            mgmt = app.state.pyfly_management_app
+            with TestClient(mgmt) as mgmt_client:
+                answered = mgmt_client.post(
+                    "/internal/guardrails/test",
+                    json={"sample": "hello"},
+                    headers={"authorization": "Bearer service-token"},
+                )
+                assert answered.status_code == 200
+                assert mgmt_client.get("/actuator/health").status_code == 200
+
+    async def test_the_fastapi_adapter_mounts_them_under_the_canonical_boot_order_too(self) -> None:
+        pytest.importorskip("fastapi")
+        from pyfly.web.adapters.fastapi.app import create_app as create_fastapi_app
+
+        ctx = ApplicationContext(_exposure_config())
+        ctx.register_bean(GuardrailDryRunRoutes)
+
+        @contextlib.asynccontextmanager
+        async def boot(app: Any):  # type: ignore[no-untyped-def]
+            await ctx.start()
+            yield
+            await ctx.stop()
+
+        app = create_fastapi_app(context=ctx, actuator_enabled=True, docs_enabled=False, lifespan=boot)
+        with TestClient(app) as client:
+            answered = client.post(
+                "/internal/guardrails/test",
+                json={"sample": "hello"},
+                headers={"authorization": "Bearer service-token"},
+            )
+            assert answered.status_code == 200
+            assert [getattr(r, "path", "") for r in app.routes].count("/internal/guardrails/test") == 1
+
     async def test_routes_leave_the_main_app_when_the_management_port_is_separate(self) -> None:
         ctx = ApplicationContext(_exposure_config(management={"server": {"port": 9099}}, server={"port": 8099}))
         ctx.register_bean(GuardrailDryRunRoutes)

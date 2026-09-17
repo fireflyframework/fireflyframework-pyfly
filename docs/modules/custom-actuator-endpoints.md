@@ -192,7 +192,12 @@ class GuardrailDryRunRoutes:
 The routes are mounted on the management surface: on the management app under its base path
 when `pyfly.management.server.port` selects a separate listener, on the main app when the
 management surface is shared (the default), and nowhere when management is disabled — exactly
-like the actuator. The management port carries none of the application's security filters
+like the actuator. A contributor is an ordinary bean, so it is instantiated by
+`ApplicationContext.start()`; under the generated `main.py` that happens inside the app's
+lifespan, after `create_app` returned, and the post-start rescan mounts the routes then (the
+same rescan that finds late health indicators and `@bean`-produced controllers). A context
+started before `create_app` is served at build time. Either way `management_routes()` is called
+once per bean. The management port carries none of the application's security filters
 unless `pyfly.management.security.enabled` is on, so a contributed route that must not be public
 authenticates itself.
 

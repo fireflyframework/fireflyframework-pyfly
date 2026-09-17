@@ -26,7 +26,9 @@ A bean implementing this protocol has its routes mounted:
 * on the management app when ``pyfly.management.server.port`` selects a separate listener,
   under the configured base path;
 * on the main app when the management surface is shared (the default), so an application
-  that runs shared in tests and separate in production sees one behaviour;
+  that runs shared in tests and separate in production sees one behaviour — whether the
+  context was started before ``create_app`` or, as the generated ``main.py`` does, inside the
+  app's lifespan (the post-start rescan mounts what the build-time scan could not see);
 * nowhere when management is disabled (``port: -1``), like the actuator itself.
 
 The routes are Starlette ``BaseRoute`` objects; the type is ``Any`` here because the ports
@@ -52,14 +54,25 @@ class ManagementRoutesContributor(Protocol):
         ...
 
 
-def collect_management_routes(context: Any) -> list[Any]:
-    """Every route every :class:`ManagementRoutesContributor` bean in *context* contributes.
+def collect_management_routes(context: Any, *, asked: set[int] | None = None) -> list[Any]:
+    """Every route every *instantiated* :class:`ManagementRoutesContributor` bean contributes.
 
     Beans are visited in registration order and each contributor is asked once, even when it
     is registered under several keys (its class and the protocols it satisfies).
+
+    Only instances are visited, never factories: a contributor is an ordinary bean and building
+    it here would run its constructor outside the container's start sequence. That has a
+    consequence the caller must handle. The canonical boot order (``main.py.j2``) is
+    ``create_app(context=ctx, lifespan=...)`` at import time with ``ctx.start()`` INSIDE the
+    lifespan, so at build time no user bean exists yet and this function finds nothing — the
+    same reason the actuator's health indicators and ``@bean``-produced controllers are
+    rescanned after start. ``create_app`` therefore calls this twice: once while building (a
+    context started beforehand — tests, embedded use — is served immediately) and once from the
+    post-start rescan. *asked* carries the ids of the contributors already visited across those
+    calls so ``management_routes()`` runs once per bean and no route is mounted twice.
     """
     routes: list[Any] = []
-    seen: set[int] = set()
+    seen: set[int] = asked if asked is not None else set()
     for reg in context.container._registrations.values():
         instance = reg.instance
         if instance is None or id(instance) in seen or not isinstance(instance, ManagementRoutesContributor):

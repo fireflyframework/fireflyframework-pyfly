@@ -1164,6 +1164,8 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
    a client pool) is **deferred** rather than failed: its declared return type is registered now,
    so `@conditional_on_missing_bean` in step 2b still sees it, and the factory runs in step 2d.
    Parameters are resolved before the factory runs, so a deferred factory never starts twice.
+   The declared type is the class the hint names: `-> Port | None` claims `Port`, a two-class
+   union claims nothing, and a factory that answers `None` registers nothing.
 2b. **Evaluate conditions (pass 2)** -- removes beans that fail bean-dependent conditions
     (`@conditional_on_bean`, `@conditional_on_missing_bean`).
 2c. **Process `@auto_configuration` classes** -- resolves auto-configuration `@bean` methods

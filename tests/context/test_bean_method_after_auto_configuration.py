@@ -178,6 +178,122 @@ class TestUserBeanDependsOnAutoConfiguredBean:
         with pytest.raises(NoSuchBeanError):
             ctx.get_bean(FallbackPortConfiguration)
 
+    async def test_a_deferred_user_bean_declared_optional_still_backs_off_an_auto_configuration(self) -> None:
+        """``-> Port | None`` is the idiomatic hint for a factory that may decline; it must
+        stand in for ``Port`` while deferred exactly as a bare ``-> Port`` does.
+
+        A union hint is not a class and must never become a registration key (the admin
+        beans graph crashed on one), so the provisional registration is made under the union's
+        one class member. Without it the fallback auto-configuration saw no ``Port``, registered
+        ``AutoPort``, and the application held two beans for one port — the case deferral exists
+        to prevent.
+        """
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def port(self, factory: SessionFactory) -> Port | None:
+                return UserPort(factory)
+
+        @conditional_on_missing_bean(Port)
+        @auto_configuration
+        class FallbackPortConfiguration:
+            @bean
+            def port(self) -> Port:
+                return AutoPort()
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        ctx.register_bean(FallbackPortConfiguration)
+        await ctx.start()
+
+        port = ctx.get_bean(Port)
+        assert isinstance(port, UserPort)
+        assert ctx.get_bean(UserPort) is port
+        assert len(ctx.get_beans_of_type(Port)) == 1
+        with pytest.raises(NoSuchBeanError):
+            ctx.get_bean(FallbackPortConfiguration)
+        # No union ever became a registration key.
+        assert all(isinstance(key, type) for key in ctx.container._registrations)
+
+    async def test_a_deferred_optional_user_bean_that_declines_leaves_no_provisional_behind(self) -> None:
+        """The factory answered ``None``: the provisional ``Port`` registration must not survive
+        to answer a resolve with a bean that does not exist."""
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def port(self, factory: SessionFactory) -> Port | None:
+                return None
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        await ctx.start()
+        assert not ctx.container.contains_type(Port)
+        assert all(isinstance(key, type) for key in ctx.container._registrations)
+
+    async def test_a_deferred_user_bean_with_a_two_class_union_makes_no_provisional_claim(self) -> None:
+        """``-> A | B`` names no single port; the container cannot know which one the user means,
+        so nothing is claimed provisionally and the fallback is free to register. Both beans
+        are still built and reachable by their concrete types."""
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def port(self, factory: SessionFactory) -> UserPort | Database:
+                return UserPort(factory)
+
+        @conditional_on_missing_bean(Database)
+        @auto_configuration
+        class FallbackDatabaseConfiguration:
+            @bean
+            def database(self, factory: SessionFactory) -> Database:
+                return Database(factory)
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        ctx.register_bean(FallbackDatabaseConfiguration)
+        await ctx.start()
+        assert isinstance(ctx.get_bean(UserPort), UserPort)
+        assert isinstance(ctx.get_bean(Database), Database)
+        assert all(isinstance(key, type) for key in ctx.container._registrations)
+
+    async def test_an_eager_user_bean_declared_optional_resolves_by_its_declared_type(self) -> None:
+        """Not only the deferred path: ``-> Port | None`` returning a ``UserPort`` must make
+        ``get_bean(Port)`` answer as ``-> Port`` does. The union used to be bound as-is, a key
+        nothing ever asked for, so ``Port`` resolved for nobody."""
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def port(self) -> Port | None:
+                return UserPort(SessionFactory("inline"))
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        await ctx.start()
+        assert ctx.get_bean(Port) is ctx.get_bean(UserPort)
+        assert all(isinstance(key, type) for key in ctx.container._registrations)
+        assert all(isinstance(key, type) for key in ctx.container._bindings)
+
+    async def test_an_eager_user_bean_that_declines_registers_nothing(self) -> None:
+        """A ``None`` result is a factory declining, not a bean of type ``NoneType``."""
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def port(self) -> Port | None:
+                return None
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        await ctx.start()
+        assert not ctx.container.contains_type(Port)
+        assert type(None) not in ctx.container._registrations
+
     async def test_a_dependency_nobody_registers_is_still_reported(self) -> None:
         @configuration
         class UserConfiguration:

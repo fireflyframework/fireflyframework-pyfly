@@ -20,6 +20,7 @@ import dataclasses
 import functools
 import inspect
 import logging
+import types
 import typing
 from collections import deque
 from collections.abc import Callable
@@ -265,10 +266,10 @@ class ApplicationContext:
         self._evaluate_bean_conditions()
         self._process_configurations(auto=True)
 
-        # 2c. Complete the user @bean methods that were waiting on an auto-configured bean.
+        # 2d. Complete the user @bean methods that were waiting on an auto-configured bean.
         self._process_deferred_bean_methods()
 
-        # 2c. Start infrastructure adapters (fail-fast: validates connectivity)
+        # 2e. Start infrastructure adapters (fail-fast: validates connectivity)
         await self._start_infrastructure()
 
         # 3. Auto-discover BeanPostProcessors from registered beans
@@ -536,6 +537,28 @@ class ApplicationContext:
         if reg.name and reg.name in self._container._named:
             del self._container._named[reg.name]
 
+    @staticmethod
+    def _declared_bean_type(return_type: Any) -> type | None:
+        """The one class a ``@bean`` return hint declares, or ``None`` when it declares none.
+
+        A bare class is itself. ``Port | None`` / ``Optional[Port]`` — the idiomatic hint for
+        a factory that may decline — declares ``Port``: that is what a dependant injects and
+        what ``@conditional_on_missing_bean(Port)`` asks about, so the deferred pass must claim
+        it provisionally under ``Port`` or the fallback auto-configuration registers a second
+        bean for the same port in the window before the user's factory runs. ``A | B`` with two
+        classes declares no single port and gets no claim: the container cannot know which one
+        the user means, and guessing would silence a fallback the user may rely on. A union is
+        never itself a registration key (it has no ``__name__`` and crashed the admin beans
+        graph); only the unwrapped class is.
+        """
+        if isinstance(return_type, type):
+            return return_type
+        if typing.get_origin(return_type) in (typing.Union, types.UnionType):
+            members = [arg for arg in typing.get_args(return_type) if arg is not type(None)]
+            if len(members) == 1 and isinstance(members[0], type):
+                return members[0]
+        return None
+
     def _process_configurations(self, *, auto: bool = False) -> None:
         """Find @configuration beans, call their @bean methods, register results.
 
@@ -588,7 +611,7 @@ class ApplicationContext:
                 # factory whose parameters are not there yet is DEFERRED: its declared return
                 # type is registered now (so the missing-bean conditions still back off, and so a
                 # resolve in the meantime builds it lazily through the factory) and the call is
-                # completed in step 2c, once the auto-configurations have registered theirs.
+                # completed in step 2d, once the auto-configurations have registered theirs.
                 # Parameters are resolved BEFORE the method runs, so deferring never re-runs a
                 # factory body that already started.
                 #
@@ -625,6 +648,18 @@ class ApplicationContext:
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
 
+        if result is None:
+            # The factory declined (``-> Port | None`` answering ``None``). Nothing is
+            # registered — least of all ``NoneType``, which is what ``type(result)`` would have
+            # keyed — and a provisional claim a deferred factory made must go with it, or a
+            # later resolve of ``Port`` would run the factory again and hand out ``None``.
+            declared = self._declared_bean_type(return_type)
+            if declared is not None:
+                reg = self._container._registrations.get(declared)
+                if reg is not None and reg.factory is factory and reg.instance is None:
+                    self._remove_registration(declared)
+            return
+
         # Register bean: use the concrete type so multiple beans
         # returning the same interface type don't overwrite each other.
         # A factory closure is stored so TRANSIENT beans rebuild through
@@ -640,32 +675,40 @@ class ApplicationContext:
         if bean_scope == Scope.SINGLETON:
             impl_reg.instance = result
 
-        # Bind return type → concrete type for list[T] resolution
-        if return_type is not impl_type:
-            self._container.bind(return_type, impl_type)
+        # The type the hint DECLARES. A PEP 604 union / TypeVar / generic-alias
+        # return hint is *not* a real class: ``get_type_hints`` preserves
+        # ``Foo | None`` as a ``types.UnionType``, which has no
+        # ``__name__``/``__qualname__``/``__module__``. It must never become a
+        # ``_registrations`` or ``_bindings`` key (a non-class key crashed the
+        # admin BeansProvider, 500 on ``/admin/api/beans/graph``) — but the
+        # class inside it is what the user meant: ``-> Port | None`` returning a
+        # ``UserPort`` must make ``get_bean(Port)`` answer, exactly as ``-> Port``
+        # does, and must complete the provisional ``Port`` registration a deferred
+        # factory claimed. Until 26.09.05 the union was bound as-is, so ``Port``
+        # resolved for nobody and the deferred claim was never completed (the
+        # factory ran a second time on the next resolve). A two-class union
+        # declares nothing; the concrete ``impl_type`` registered above still
+        # backs resolution by the concrete type.
+        declared = self._declared_bean_type(return_type)
 
-        # Also keep a direct registration for the return type
+        # Bind declared type → concrete type for list[T] resolution
+        if declared is not None and declared is not impl_type:
+            self._container.bind(declared, impl_type)
+
+        # Also keep a direct registration for the declared type
         # (for single-bean resolution) unless it already exists. It
         # shares the same instance/factory; the startup lifecycle and
         # wiring passes de-duplicate by instance identity so the bean is
         # never post-processed or subscribed twice (audit #113).
-        #
-        # A PEP 604 union / TypeVar / generic-alias return hint (e.g. the
-        # idiomatic ``Foo | None``) is *not* a real class: ``get_type_hints``
-        # preserves it as a ``types.UnionType``, which has no
-        # ``__name__``/``__qualname__``/``__module__``. It must never become a
-        # ``_registrations`` key — the concrete ``impl_type`` registered above
-        # already backs single-bean resolution, and a non-class key crashed the
-        # admin BeansProvider (500 on ``/admin/api/beans/graph``).
-        if isinstance(return_type, type) and return_type not in self._container._registrations:
-            self._container.register(return_type, scope=bean_scope)
-            return_reg = self._container._registrations[return_type]
+        if declared is not None and declared not in self._container._registrations:
+            self._container.register(declared, scope=bean_scope)
+            return_reg = self._container._registrations[declared]
             return_reg.factory = factory
             if bean_scope == Scope.SINGLETON:
                 return_reg.instance = result
-        elif isinstance(return_type, type) and (
+        elif declared is not None and (
             getattr(method, "__pyfly_bean_primary__", False)
-            or self._container._registrations[return_type].factory is factory
+            or self._container._registrations[declared].factory is factory
         ):
             # A later @bean(primary=True) for the same return type must win the
             # single-bean direct resolution (the @Bean @Primary semantics) —
@@ -673,7 +716,7 @@ class ApplicationContext:
             # The same completion applies to a deferred bean's own provisional
             # registration (recognised by its factory), which is now given the
             # instance it was standing in for.
-            return_reg = self._container._registrations[return_type]
+            return_reg = self._container._registrations[declared]
             return_reg.factory = factory
             if getattr(method, "__pyfly_bean_primary__", False):
                 return_reg.primary = True
@@ -702,9 +745,10 @@ class ApplicationContext:
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         factory = self._bean_factory(config_instance, method)
-        if isinstance(return_type, type) and return_type not in self._container._registrations:
-            self._container.register(return_type, scope=bean_scope, name=bean_name)
-            provisional = self._container._registrations[return_type]
+        declared = self._declared_bean_type(return_type)
+        if declared is not None and declared not in self._container._registrations:
+            self._container.register(declared, scope=bean_scope, name=bean_name)
+            provisional = self._container._registrations[declared]
             provisional.factory = factory
             if getattr(method, "__pyfly_bean_primary__", False):
                 provisional.primary = True
@@ -721,7 +765,7 @@ class ApplicationContext:
         )
 
     def _process_deferred_bean_methods(self) -> None:
-        """Step 2c: complete the user @bean methods deferred in step 2.
+        """Step 2d: complete the user @bean methods deferred in step 2.
 
         Runs after the auto-configurations, so every bean the framework provides is registered.
         Deferred methods may depend on one another; the pass repeats while it makes progress and
@@ -733,11 +777,8 @@ class ApplicationContext:
         while pending:
             still_pending: list[_DeferredBeanMethod] = []
             for entry in pending:
-                provisional = (
-                    self._container._registrations.get(entry.return_type)
-                    if isinstance(entry.return_type, type)
-                    else None
-                )
+                declared = self._declared_bean_type(entry.return_type)
+                provisional = self._container._registrations.get(declared) if declared is not None else None
                 if (
                     provisional is not None
                     and provisional.factory is entry.factory
@@ -764,12 +805,13 @@ class ApplicationContext:
                 )
             if len(still_pending) == len(pending):
                 first = still_pending[0]
-                if isinstance(first.return_type, type):
-                    reg = self._container._registrations.get(first.return_type)
+                first_declared = self._declared_bean_type(first.return_type)
+                if first_declared is not None:
+                    reg = self._container._registrations.get(first_declared)
                     if reg is not None and reg.factory is first.factory and reg.instance is None:
                         # Leave no provisional registration behind that would answer a resolve
                         # with the same failure later.
-                        self._remove_registration(first.return_type)
+                        self._remove_registration(first_declared)
                 raise first.cause
             pending = still_pending
 

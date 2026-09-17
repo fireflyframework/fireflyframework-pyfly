@@ -33,7 +33,7 @@ from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 from pyfly.web.adapters.starlette.app import create_app
-from pyfly.web.adapters.starlette.mounted_routes import MountedRoute, collect_mounted_routes
+from pyfly.web.adapters.starlette.mounted_routes import MountedParameter, MountedRoute, collect_mounted_routes
 from pyfly.web.openapi import OpenAPIGenerator
 
 
@@ -56,6 +56,15 @@ async def ping(request: Request) -> PlainTextResponse:
 
 async def opaque(scope, receive, send):  # type: ignore[no-untyped-def]
     pass
+
+
+async def updates(request: Request) -> JSONResponse:
+    """Receive a Telegram update."""
+    return JSONResponse({"ok": True})
+
+
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "UP"})
 
 
 def _slack() -> Starlette:
@@ -93,6 +102,36 @@ class TestCollectMountedRoutes:
         # Starlette adds HEAD to every GET route; that is transport, not contract.
         assert not any(r.method == "HEAD" for r in found)
 
+    def test_path_parameters_are_read_off_the_route_and_the_mount(self) -> None:
+        """A path template such as ``/{botId}/updates`` names a parameter the document MUST
+        declare (OpenAPI 3.1: every template expression has a ``parameters`` entry). Starlette
+        keeps the convertor on the route; the mount prefix may carry parameters too."""
+        found = collect_mounted_routes(
+            [
+                Mount(
+                    "/api/telegram",
+                    app=Starlette(routes=[Route("/{botId}/updates", updates, methods=["POST"])]),
+                ),
+                Mount(
+                    "/tenants/{tenant:uuid}",
+                    app=Starlette(routes=[Route("/files/{name:path}", ping, methods=["GET"])]),
+                ),
+                Route("/items/{item_id:int}/price/{amount:float}", ping, methods=["GET"]),
+            ]
+        )
+        by_path = {r.path: r for r in found}
+        assert by_path["/api/telegram/{botId}/updates"].parameters == (MountedParameter("botId", "string", None),)
+        # The convertor suffix is Starlette syntax, not OpenAPI: the template keeps only the name.
+        assert "/tenants/{tenant}/files/{name}" in by_path
+        assert by_path["/tenants/{tenant}/files/{name}"].parameters == (
+            MountedParameter("tenant", "string", "uuid"),
+            MountedParameter("name", "string", None),
+        )
+        assert by_path["/items/{item_id}/price/{amount}"].parameters == (
+            MountedParameter("item_id", "integer", None),
+            MountedParameter("amount", "number", None),
+        )
+
     def test_a_mount_whose_app_cannot_be_walked_is_an_opaque_prefix(self) -> None:
         (found,) = collect_mounted_routes([Mount("/static", app=opaque, name="static")])
         assert found == MountedRoute(path="/static", method=None, name="static", summary="")
@@ -118,6 +157,65 @@ class TestGeneratorEmitsMountedRoutes:
         assert spec["x-pyfly-mounts"] == [{"path": "/static", "name": "static"}]
         assert "/static" not in spec["paths"]
 
+    def test_path_parameters_are_declared_on_the_operation(self) -> None:
+        spec = OpenAPIGenerator(title="t", version="1").generate(
+            mounted_routes=[
+                MountedRoute(
+                    "/api/telegram/{botId}/updates",
+                    "POST",
+                    "updates",
+                    "",
+                    parameters=(MountedParameter("botId", "string", None), MountedParameter("n", "integer", None)),
+                ),
+                MountedRoute(
+                    "/tenants/{tenant}", "GET", "tenant", "", parameters=(MountedParameter("tenant", "string", "uuid"),)
+                ),
+            ]
+        )
+        assert spec["paths"]["/api/telegram/{botId}/updates"]["post"]["parameters"] == [
+            {"name": "botId", "in": "path", "required": True, "schema": {"type": "string"}},
+            {"name": "n", "in": "path", "required": True, "schema": {"type": "integer"}},
+        ]
+        assert spec["paths"]["/tenants/{tenant}"]["get"]["parameters"] == [
+            {"name": "tenant", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}},
+        ]
+
+    def test_operation_ids_are_unique_across_the_document(self) -> None:
+        """Six sub-apps each with a ``health`` endpoint produced six ``operationId: health`` —
+        an OpenAPI document that does not validate. The first keeps the bare name; the others
+        are qualified by method and path, deterministically, so a diff of the document is stable."""
+        from pyfly.web.adapters.starlette.controller import RouteMetadata
+
+        meta = RouteMetadata(path="/status", http_method="GET", status_code=200, handler=ping, handler_name="health")
+        spec = OpenAPIGenerator(title="t", version="1").generate(
+            route_metadata=[meta],
+            mounted_routes=[
+                MountedRoute("/api/slack/health", "GET", "health", ""),
+                MountedRoute("/api/teams/health", "GET", "health", ""),
+                MountedRoute(
+                    "/api/telegram/{botId}/health",
+                    "GET",
+                    "health",
+                    "",
+                    parameters=(MountedParameter("botId", "string", None),),
+                ),
+                MountedRoute("/api/events", "POST", "events", ""),
+                MountedRoute("/api/events", "GET", "events", ""),
+            ],
+        )
+        ids = [op["operationId"] for path in spec["paths"].values() for op in path.values()]
+        assert len(ids) == len(set(ids)), ids
+        # The controller's id is untouched; the mounted twins are qualified.
+        assert spec["paths"]["/status"]["get"]["operationId"] == "health"
+        assert spec["paths"]["/api/slack/health"]["get"]["operationId"] == "health_get_api_slack_health"
+        assert spec["paths"]["/api/teams/health"]["get"]["operationId"] == "health_get_api_teams_health"
+        assert (
+            spec["paths"]["/api/telegram/{botId}/health"]["get"]["operationId"]
+            == "health_get_api_telegram_botId_health"
+        )
+        assert spec["paths"]["/api/events"]["post"]["operationId"] == "events"
+        assert spec["paths"]["/api/events"]["get"]["operationId"] == "events_get_api_events"
+
     def test_a_controller_operation_is_never_overwritten_by_a_mounted_one(self) -> None:
         from pyfly.web.adapters.starlette.controller import RouteMetadata
 
@@ -140,8 +238,26 @@ class TestCreateAppDocument:
         spec = client.get("/openapi.json").json()
         assert set(spec["paths"]) >= {"/ping", "/api/slack/events", "/api/slack/commands", "/api/slack/v2/events"}
         assert spec["paths"]["/api/slack/events"]["post"]["x-pyfly-mounted"] is True
+        # ``/api/slack/v2/events`` reuses the ``events`` endpoint: the document still validates.
+        ids = [op["operationId"] for path in spec["paths"].values() for op in path.values()]
+        assert len(ids) == len(set(ids)), ids
         # The document does not describe itself or the doc pages.
         assert not {"/openapi.json", "/docs", "/redoc"} & set(spec["paths"])
         # And the routes really are served.
         assert client.post("/api/slack/events").status_code == 200
         assert client.get("/ping").text == "pong"
+
+    def test_openapi_json_declares_the_parameters_of_a_mounted_template(self) -> None:
+        app = create_app(
+            docs_enabled=True,
+            extra_routes=[
+                Mount("/api/telegram", app=Starlette(routes=[Route("/{botId}/updates", updates, methods=["POST"])])),
+            ],
+        )
+        client = TestClient(app)
+        spec = client.get("/openapi.json").json()
+        operation = spec["paths"]["/api/telegram/{botId}/updates"]["post"]
+        assert operation["parameters"] == [
+            {"name": "botId", "in": "path", "required": True, "schema": {"type": "string"}},
+        ]
+        assert client.post("/api/telegram/bot-1/updates").status_code == 200

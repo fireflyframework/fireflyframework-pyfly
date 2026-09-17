@@ -65,6 +65,12 @@ _HTTP_VALIDATION_ERROR_SCHEMA = {
 }
 
 
+def _path_slug(path: str) -> str:
+    """``/api/telegram/{botId}/updates`` → ``api_telegram_botId_updates``: the part of a
+    qualified operationId that names the path, with nothing an identifier cannot carry."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", path).strip("_")
+
+
 class OpenAPIGenerator:
     """Generate an OpenAPI 3.1 specification dict.
 
@@ -109,8 +115,9 @@ class OpenAPIGenerator:
         ``mounted_routes`` — from ``collect_mounted_routes()`` over ``create_app(extra_routes=...)`` —
         are the plain Starlette routes and mounted sub-applications served beside the controllers.
         They become operations marked ``x-pyfly-mounted: true`` (no typed contract can be read from
-        an ASGI endpoint) and never overwrite a controller's operation on the same path and method;
-        a mount that could not be walked is listed under ``x-pyfly-mounts``. Same reason as above:
+        an ASGI endpoint) with their path parameters declared and a unique ``operationId``, and
+        never overwrite a controller's operation on the same path and method; a mount that could
+        not be walked is listed under ``x-pyfly-mounts``. Same reason as above:
         a service whose webhooks live in sub-apps had a document that described none of them.
         """
         self._schemas = {}
@@ -121,6 +128,18 @@ class OpenAPIGenerator:
             paths = self._build_paths(route_metadata)
             tags = self._collect_tags(route_metadata)
 
+        # operationIds must be unique across the document (OpenAPI 3.1). A mounted route's name
+        # is its endpoint's ``__name__`` unless the route was named, and six sub-applications
+        # each carrying a ``health`` endpoint are the normal case, not the exception. The first
+        # holder of a name keeps it (the controllers' ids are taken first, so a controller never
+        # loses its id to a mounted twin); every later one is qualified by method and path,
+        # which is deterministic, so a diff of the document stays stable.
+        taken: set[str] = {
+            str(operation.get("operationId"))
+            for operations in paths.values()
+            for operation in operations.values()
+            if isinstance(operation, dict) and operation.get("operationId")
+        }
         opaque_mounts: list[dict[str, str]] = []
         for mounted in mounted_routes or ():
             if mounted.method is None:
@@ -130,9 +149,15 @@ class OpenAPIGenerator:
             method_key = mounted.method.lower()
             if method_key in operations:
                 continue
-            operation: dict[str, Any] = {"operationId": mounted.name}
+            operation_id = mounted.name
+            if operation_id in taken:
+                operation_id = f"{mounted.name}_{method_key}_{_path_slug(mounted.path)}"
+            taken.add(operation_id)
+            operation: dict[str, Any] = {"operationId": operation_id}
             if mounted.summary:
                 operation["summary"] = mounted.summary
+            if mounted.parameters:
+                operation["parameters"] = [parameter.to_openapi() for parameter in mounted.parameters]
             operation["responses"] = {"default": {"description": "Successful response"}}
             operation["x-pyfly-mounted"] = True
             operations[method_key] = operation

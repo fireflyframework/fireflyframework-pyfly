@@ -376,6 +376,27 @@ def create_app(
             )
         )
 
+    # The application's own management routes (ManagementRoutesContributor beans), on the
+    # main app in shared mode exactly as the Starlette adapter does: scanned at build time for
+    # a context started beforehand and again from the post-start rescan for the canonical boot
+    # order, each contributor asked once (see pyfly.web.ports.management).
+    _contributors_asked: set[int] = set()
+    _mount_contributed_routes = context is not None and management_mode != "disabled" and not _serve_separately
+
+    def _install_contributed_routes() -> None:
+        if not _mount_contributed_routes or context is None:
+            return
+        from pyfly.web.ports.management import collect_management_routes
+
+        existing = {(getattr(r, "path", ""), frozenset(getattr(r, "methods", None) or ())) for r in app.routes}
+        for r in collect_management_routes(context, asked=_contributors_asked):
+            key = (getattr(r, "path", ""), frozenset(getattr(r, "methods", None) or ()))
+            if key not in existing:
+                app.routes.append(r)
+                existing.add(key)
+
+    _install_contributed_routes()
+
     # Register global exception handler
     register_exception_handlers(app)
     from pyfly.web.converters import build_exception_converter_service
@@ -426,6 +447,7 @@ def create_app(
         _install_user_filters()
         remove_welcome_fallback(app)
         _install_context_routes()
+        _install_contributed_routes()
         for hook in _extra_post_start:
             hook()
         install_webapp(app, context)
@@ -469,6 +491,7 @@ def create_app(
                             admin_enabled=admin_enabled,
                             base_path=management_props.base_path,
                         )
+                        app_.state.pyfly_management_app = mgmt_app
                         mgmt_host = management_props.address or resolve_app_host(context.config)
                         mgmt_server = ManagementServer(
                             mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0)

@@ -389,10 +389,21 @@ def create_app(
     # The application's own management routes (ManagementRoutesContributor beans) belong to
     # the management surface: on the management app when it is separate, here when it is
     # shared, nowhere when management is disabled — exactly like the actuator.
-    if context is not None and management_mode != "disabled" and not _serve_separately:
+    #
+    # Two scans, like the health indicators. A contributor is a bean, and under the canonical
+    # boot order (create_app at import, ctx.start() inside the lifespan) no bean exists yet
+    # when this line runs — so this scan finds contributors only in a context started
+    # beforehand (tests, embedded use), and ``_install_dynamic_wiring`` scans again after
+    # start(). ``_contributors_asked`` is shared by both so a contributor is asked once and a
+    # route mounted once. Before 26.09.05 fixed this, the first scan was the only one and a
+    # service booted the canonical way answered 404 in shared mode for a route that was live on
+    # its management port in production.
+    _contributors_asked: set[int] = set()
+    _mount_contributed_routes = context is not None and management_mode != "disabled" and not _serve_separately
+    if _mount_contributed_routes and context is not None:
         from pyfly.web.ports.management import collect_management_routes
 
-        routes.extend(collect_management_routes(context))
+        routes.extend(collect_management_routes(context, asked=_contributors_asked))
 
     # Collect route metadata (used for OpenAPI and startup logging)
     route_metadata = registrar.collect_route_metadata(context) if context is not None else []
@@ -454,6 +465,14 @@ def create_app(
                 if key not in existing:
                     app_.router.routes.append(r)
                     existing.add(key)
+        if _mount_contributed_routes and context is not None:
+            from pyfly.web.ports.management import collect_management_routes
+
+            for r in collect_management_routes(context, asked=_contributors_asked):
+                key = _route_key(r)
+                if key not in existing:
+                    app_.router.routes.append(r)
+                    existing.add(key)
         for hook in _extra_post_start:
             hook()
         install_webapp(app_, context)
@@ -497,6 +516,10 @@ def create_app(
                             admin_enabled=admin_enabled,
                             base_path=management_props.base_path,
                         )
+                        # Exposed for the same reason as the health aggregator: a test or an
+                        # embedding host can drive the management surface without binding the
+                        # listener's port a second time.
+                        app_.state.pyfly_management_app = mgmt_app
                         mgmt_host = management_props.address or resolve_app_host(context.config)
                         mgmt_server = ManagementServer(
                             mgmt_app, host=str(mgmt_host), port=int(management_props.port or 0)
