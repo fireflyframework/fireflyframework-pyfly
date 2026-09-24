@@ -19,6 +19,7 @@ of the upstream distributed trace. No-op when opentelemetry is not installed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import cast
 
 from starlette.requests import Request
@@ -35,9 +36,46 @@ except ImportError:  # pragma: no cover - exercised without the observability ex
     trace = None  # type: ignore[assignment]
 
 
+#: Paths that get no SERVER span unless configured otherwise. Liveness and readiness probes hit
+#: the actuator at 1 Hz per replica; traced, they outnumber every business span in the store
+#: and say nothing anyone will ever look up by trace id.
+DEFAULT_EXCLUDE_PATTERNS: tuple[str, ...] = ("/actuator", "/actuator/*")
+
+#: The configuration key both ``create_app`` and ``create_management_app`` read: a list, or a
+#: comma-separated string, of ``fnmatch`` globs.
+EXCLUDE_PATTERNS_KEY = "pyfly.observability.tracing.exclude-patterns"
+
+
 @order(HIGHEST_PRECEDENCE + 60)  # just after CorrelationFilter (+50)
 class TracingFilter(OncePerRequestFilter):
-    """Opens a server span as a child of the extracted upstream trace context."""
+    """Opens a server span as a child of the extracted upstream trace context.
+
+    ``exclude_patterns`` are held on the INSTANCE. The base class declares them as a class
+    attribute, and since ``create_app`` builds its own ``TracingFilter()`` while assembling the
+    chain, the only way an application could exclude a path was to mutate the class before the
+    app was built — a boot-order trick every service reinvented. The constructor and
+    :meth:`from_config` are the supported doors now.
+    """
+
+    def __init__(self, exclude_patterns: Sequence[str] | None = None) -> None:
+        self.exclude_patterns = list(DEFAULT_EXCLUDE_PATTERNS if exclude_patterns is None else exclude_patterns)
+
+    @classmethod
+    def from_config(cls, config: object | None) -> TracingFilter:
+        """Build the filter from ``pyfly.observability.tracing.exclude-patterns``.
+
+        Accepts a YAML list or a comma-separated string; an absent key keeps the default.
+        """
+        if config is None:
+            return cls()
+        raw = getattr(config, "get")(EXCLUDE_PATTERNS_KEY)  # noqa: B009 - Config is duck-typed here
+        if raw is None or raw == "":
+            return cls()
+        if isinstance(raw, str):
+            patterns = [p.strip() for p in raw.split(",") if p.strip()]
+        else:
+            patterns = [str(p).strip() for p in raw if str(p).strip()]
+        return cls(exclude_patterns=patterns)
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
         if not has_otel():

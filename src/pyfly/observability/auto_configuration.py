@@ -30,6 +30,11 @@ try:
 except ImportError:
     TracerProvider = object  # type: ignore[misc,assignment]
 
+try:
+    from opentelemetry.sdk.metrics import MeterProvider
+except ImportError:
+    MeterProvider = object  # type: ignore[misc,assignment]
+
 from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_class
 from pyfly.core.config import Config
@@ -59,18 +64,27 @@ class MetricsAutoConfiguration:
 class TracingAutoConfiguration:
     """Auto-configures an OpenTelemetry TracerProvider when opentelemetry is installed."""
 
+    @staticmethod
+    def _service_name(config: Config) -> str:
+        """``pyfly.observability.tracing.service-name``, else ``pyfly.app.name``, else ``pyfly-app``.
+
+        Shared with :class:`MeterProviderAutoConfiguration` so traces and metrics carry one
+        ``service.name`` — a dashboard joins the two on it.
+        """
+        return str(
+            config.get(
+                "pyfly.observability.tracing.service-name",
+                config.get("pyfly.app.name", "pyfly-app"),
+            )
+        )
+
     @bean
     def tracer_provider(self, config: Config) -> TracerProvider:
         from opentelemetry import trace
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider as _TracerProvider
 
-        service_name = str(
-            config.get(
-                "pyfly.observability.tracing.service-name",
-                config.get("pyfly.app.name", "pyfly-app"),
-            )
-        )
+        service_name = self._service_name(config)
         resource = Resource.create({"service.name": service_name})
         provider = _TracerProvider(resource=resource)
         # Attach a span processor + exporter (audit #153). Without one, every
@@ -154,3 +168,82 @@ class TracingAutoConfiguration:
             "Tracing is active but no span exporter is configured — spans are dropped. "
             "Set pyfly.observability.tracing.exporter=otlp|console or OTEL_EXPORTER_OTLP_ENDPOINT."
         )
+
+
+@auto_configuration
+@conditional_on_class("opentelemetry.sdk.metrics")
+class MeterProviderAutoConfiguration:
+    """Auto-configures an OpenTelemetry ``MeterProvider`` beside the ``TracerProvider``.
+
+    Until 26.09.06 the framework set a tracer provider and no meter provider, so every OTel
+    metric an application (or the framework's own instrumentation) recorded went to the API's
+    no-op provider and was dropped, silently. The reader is OTLP/HTTP, to the metrics endpoint
+    derived from the traces one (``/v1/traces`` -> ``/v1/metrics``) unless
+    ``pyfly.observability.metrics.otlp.endpoint`` or ``OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`` names
+    it. With no endpoint at all the provider has no reader: instruments still work, nothing is
+    exported, and tests stay offline.
+    """
+
+    _OTLP_METRICS_PATH = "/v1/metrics"
+    _OTLP_TRACES_PATH = "/v1/traces"
+
+    @classmethod
+    def _otlp_metrics_endpoint(cls, configured: str) -> str:
+        """Turn a traces or base OTLP url into the metrics url.
+
+        Same line the traces resolver draws: a url with no path is a base and gains
+        ``/v1/metrics``; a url ending in ``/v1/traces`` is the sibling signal and is rewritten;
+        anything else is taken as the complete metrics url.
+        """
+        from urllib.parse import urlparse
+
+        parsed = urlparse(configured)
+        if parsed.path in ("", "/"):
+            return configured.rstrip("/") + cls._OTLP_METRICS_PATH
+        trimmed = configured.rstrip("/")
+        if trimmed.endswith(cls._OTLP_TRACES_PATH):
+            return trimmed[: -len(cls._OTLP_TRACES_PATH)] + cls._OTLP_METRICS_PATH
+        return configured
+
+    @bean
+    def meter_provider(self, config: Config) -> MeterProvider:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider as _MeterProvider
+        from opentelemetry.sdk.resources import Resource
+
+        explicit = config.get("pyfly.observability.metrics.otlp.endpoint") or os.environ.get(
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+        )
+        derived_from = config.get("pyfly.observability.tracing.otlp.endpoint") or os.environ.get(
+            "OTEL_EXPORTER_OTLP_ENDPOINT"
+        )
+        endpoint = (
+            str(explicit) if explicit else (self._otlp_metrics_endpoint(str(derived_from)) if derived_from else "")
+        )
+
+        readers: list[Any] = []
+        if endpoint:
+            try:
+                from opentelemetry.exporter.otlp.proto.http.metric_exporter import (  # type: ignore[import-not-found, unused-ignore]
+                    OTLPMetricExporter,
+                )
+                from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+            except ImportError:
+                _logger.warning(
+                    "An OTLP metrics endpoint is configured but opentelemetry-exporter-otlp is not "
+                    "installed — metrics will be dropped. Install it or unset the endpoint."
+                )
+            else:
+                readers.append(PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint)))
+        else:
+            _logger.info(
+                "Metrics are active but no OTLP endpoint is configured — instruments record, nothing is exported. "
+                "Set pyfly.observability.metrics.otlp.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT."
+            )
+
+        provider = _MeterProvider(
+            resource=Resource.create({"service.name": TracingAutoConfiguration._service_name(config)}),
+            metric_readers=readers,
+        )
+        metrics.set_meter_provider(provider)
+        return provider

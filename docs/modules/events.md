@@ -245,8 +245,11 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.provider` | `str` | `auto` | `auto \| memory \| kafka \| redis \| postgres \| rabbitmq`. When `auto`, the strongest available broker library wins (kafka > postgres > redis > rabbitmq > memory). |
 | `pyfly.eda.destinations` | `str` | `pyfly.events` | Comma-separated list of topics / streams / routing keys to consume from. |
 | `pyfly.eda.group` | `str` | `pyfly-default` | Consumer group name (used as Kafka group ID, Redis consumer group, Postgres cursor name, or RabbitMQ queue prefix). |
-| `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `avro`, or `protobuf`. |
+| `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `firefly-json`, `avro`, or `protobuf`. `firefly-json` writes the LaraFly (PHP) envelope shape for topics shared with a PHP service; both JSON serializers read both shapes. |
 | `pyfly.eda.kafka.bootstrap-servers` | `str` | `localhost:9092` | Kafka bootstrap server list. |
+| `pyfly.eda.kafka.partition-key-header` | `str` | `partition_key` | Envelope header consulted first for the record key; then `x-correlation-id`, then the event type (the rule every Firefly Kafka publisher applies). |
+| `pyfly.eda.kafka.dlt.enabled` | `bool` | `true` | Dead-letter a record the serializer cannot read to `<topic><suffix>`, verbatim, before the consume loop moves on. `false` restores log-and-skip. |
+| `pyfly.eda.kafka.dlt.suffix` | `str` | `.DLT` | Suffix of the dead-letter topic. |
 | `pyfly.eda.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL. |
 | `pyfly.eda.postgres.dsn` | `str` | *(required)* | PostgreSQL DSN for the producer connection pool. |
 | `pyfly.eda.postgres.listen-dsn` | `str` | same as `dsn` | Optional dedicated DSN for the LISTEN connection. |
@@ -267,6 +270,30 @@ pyfly:
       url: "amqp://user:pass@rabbitmq:5672/"
       exchange-name: "myapp"
 ```
+
+### Kafka: keys, the dead-letter topic and the family envelope
+
+Every record `KafkaEventBus.publish()` produces carries a **partition key**, so two events of one
+aggregate land on one partition and are consumed in order. The key is `headers["partition_key"]`,
+else `headers["x-correlation-id"]`, else the event type — the rule the LaraFly publisher applies,
+so a topic written from both runtimes is keyed the same way. Pass `key=` to override it for one
+call, or `partition_key_header` (`pyfly.eda.kafka.partition-key-header`) to consult a different
+header first.
+
+A record whose body the serializer cannot read is **dead-lettered**: republished verbatim (bytes,
+key and headers) to `<topic>.DLT` with `x-dlt-reason`, `x-dlt-source-topic` and
+`x-dlt-source-offset` headers, and only then does the loop move on. With auto-commit on, the
+offset advances whether or not anyone read the record, so this is the one place the message can
+still be saved. The publish is retried three times; after that the loss is logged `CRITICAL` and
+counted on `bus.dlt_publish_failures` — scrape `bus.dlt_published` too, because a silent
+dead-letter topic is the same failure as a lost message, only later. A handler that raises is
+*not* dead-lettered here: the envelope was readable, and what to do about a failing handler is
+the listener's error strategy.
+
+The JSON serializer **reads both envelope shapes** of the Firefly family — PyFly's snake_case
+(`event_id`, `event_type`) and LaraFly's camelCase (`eventId`, `eventType`, with PHP's `[]` for an
+empty object) — and raises one typed `EnvelopeDecodeError` for anything else. To *write* the
+LaraFly shape (its key order, `DATE_ATOM` timestamps), select `serialization-format: firefly-json`.
 
 ---
 

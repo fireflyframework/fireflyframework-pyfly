@@ -14,7 +14,7 @@
 """Actuator — production-ready monitoring and management endpoints."""
 
 from pyfly.actuator.health import HealthAggregator, HealthIndicator, HealthResult, HealthStatus, ProbeGroup
-from pyfly.actuator.ports import ActuatorEndpoint
+from pyfly.actuator.ports import ActuatorEndpoint, write_operation
 from pyfly.actuator.registry import ActuatorRegistry
 from pyfly.actuator.wiring import build_actuator_routes, install_health_indicators
 
@@ -28,4 +28,5 @@ __all__ = [
     "ProbeGroup",
     "build_actuator_routes",
     "install_health_indicators",
+    "write_operation",
 ]

@@ -12,7 +12,9 @@ endpoints.
 1. [ActuatorEndpoint Protocol](#actuatorendpoint-protocol)
 2. [Creating a Custom Endpoint](#creating-a-custom-endpoint)
 3. [Auto-Discovery](#auto-discovery)
-4. [Per-Endpoint Configuration](#per-endpoint-configuration)
+4. [Write Operations](#write-operations)
+5. [Routes Beyond the Actuator](#routes-beyond-the-actuator)
+6. [Per-Endpoint Configuration](#per-endpoint-configuration)
 5. [ActuatorRegistry](#actuatorregistry)
 6. [Built-in Endpoints Reference](#built-in-endpoints-reference)
    - [Health](#health)
@@ -123,6 +125,81 @@ Any `@component` (or `@service`, `@repository`, etc.) that satisfies the
 is needed.
 
 ---
+
+## Write Operations
+
+A custom endpoint is `GET` by default. To accept a command with a document, mark one method
+with `@write_operation` — the Spring `@WriteOperation` equivalent — and it is mounted as
+`POST /actuator/{endpoint_id}` (and `POST /actuator/{endpoint_id}/{selector}` when the endpoint
+sets `supports_selector = True`):
+
+```python
+from typing import Any
+
+from pyfly.actuator import write_operation
+from pyfly.container import component
+
+
+@component
+class LevelEndpoint:
+    @property
+    def endpoint_id(self) -> str:
+        return "level"
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def handle(self, context: Any = None) -> dict[str, Any]:
+        return {"level": self.level}
+
+    @write_operation
+    async def change(self, body: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
+        if body.get("level") not in ("debug", "info"):
+            return {"error": f"unknown level {body.get('level')!r}"}   # -> 400
+        self.level = body["level"]
+        return None                                                     # -> 204
+```
+
+`body` is the request's JSON object; a missing body, a body that is not JSON or JSON that is not
+an object is refused with `400` before the method runs. `context` is the same
+`{"query": ..., "selector": ...}` the read operation receives. Return `None` for `204`, a dict
+for `200` with that document, or a dict carrying `"error"` for `400`. An endpoint declares at
+most one write operation.
+
+## Routes Beyond the Actuator
+
+When a management operation does not fit the endpoint model — it needs its own request shape,
+its own authentication, a response that is not a JSON object — implement
+`ManagementRoutesContributor` from `pyfly.web.ports`:
+
+```python
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from pyfly.container import component
+
+
+@component
+class GuardrailDryRunRoutes:
+    def management_routes(self) -> list[Route]:
+        async def dry_run(request: Request) -> JSONResponse:
+            ...
+        return [Route("/internal/guardrails/test", dry_run, methods=["POST"])]
+```
+
+The routes are mounted on the management surface: on the management app under its base path
+when `pyfly.management.server.port` selects a separate listener, on the main app when the
+management surface is shared (the default), and nowhere when management is disabled — exactly
+like the actuator. A contributor is an ordinary bean, so it is instantiated by
+`ApplicationContext.start()`; under the generated `main.py` that happens inside the app's
+lifespan, after `create_app` returned, and the post-start rescan mounts the routes then (the
+same rescan that finds late health indicators and `@bean`-produced controllers). A context
+started before `create_app` is served at build time. Either way `management_routes()` is called
+once per bean. The management port carries none of the application's security filters
+unless `pyfly.management.security.enabled` is on, so a contributed route that must not be public
+authenticates itself.
 
 ## Per-Endpoint Configuration
 

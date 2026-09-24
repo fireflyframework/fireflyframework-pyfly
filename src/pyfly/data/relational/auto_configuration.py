@@ -31,6 +31,7 @@ except ImportError:
     AsyncSession = object  # type: ignore[misc,assignment]
 
 from pyfly.container.bean import bean
+from pyfly.container.types import Scope
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
@@ -187,14 +188,20 @@ class RelationalAutoConfiguration:
             replica_factory = async_sessionmaker(replica_engine, expire_on_commit=False)
         return RoutingSessionFactory(async_session_factory, replica_factory)
 
-    @bean
+    @bean(scope=Scope.TRANSIENT)
     def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:
-        """Create an ``AsyncSession`` from the factory.
+        """Create an ``AsyncSession`` from the factory — a NEW one for every injection.
 
-        .. warning::
-            This bean returns a **single session instance** shared across
-            injections.  In production you should manage session lifecycle
-            per-request (e.g. via middleware or a request-scoped provider).
+        This bean was a singleton until 26.09.06, so every repository, every user bean and the
+        engine lifecycle shared one SQLAlchemy session: one transaction, one identity map and one
+        connection's local state (``SET LOCAL``, a tenant GUC, a ``search_path``) for the whole
+        process. Anything multi-tenant or concurrent had to refuse the bean and open its own
+        sessions by hand. The factory (``async_session_factory``) is the unit of sharing; the
+        session is the unit of work, so it is transient: a bean that injects ``AsyncSession``
+        owns the one it receives, and a bean that needs a session per request or per tenant
+        injects the factory and calls it.
+
+        The one session ``engine_lifecycle`` receives is the one it closes at shutdown.
         """
         session: AsyncSession = async_session_factory()
         return session

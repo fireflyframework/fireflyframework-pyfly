@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.routing import Mount, Route
+from starlette.routing import BaseRoute, Mount
 
 from pyfly.container.ordering import get_order
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
@@ -40,6 +40,7 @@ from pyfly.web.adapters.starlette.filters import (
     TransactionIdFilter,
 )
 from pyfly.web.ports.filter import WebFilter
+from pyfly.web.ports.management import collect_management_routes
 
 if TYPE_CHECKING:
     from pyfly.actuator.health import HealthAggregator
@@ -77,7 +78,7 @@ def create_management_app(
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
-        TracingFilter(),
+        TracingFilter.from_config(context.config),
         TransactionIdFilter(),
         SecurityHeadersFilter(),
     ]
@@ -136,7 +137,7 @@ def create_management_app(
 
     middleware = [Middleware(WebFilterChainMiddleware, filters=filters)]
 
-    routes: list[Route] = []
+    routes: list[BaseRoute] = []
     agg = health_agg
     if actuator_active:
         if agg is None:
@@ -155,6 +156,12 @@ def create_management_app(
                 extra_post_start=[],
             )
         )
+
+    # The application's own management routes (ManagementRoutesContributor beans). They are
+    # asked here, after the context has started, so a contributor may close over beans; and
+    # they go under the same base path as the actuator, because to the operator they are one
+    # surface.
+    routes.extend(collect_management_routes(context))
 
     if base_path:
         # Mount everything under the configured base path (Spring base-path).

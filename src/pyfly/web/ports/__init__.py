@@ -14,6 +14,7 @@
 """Web framework ports — abstract interfaces for web server adapters."""
 
 from pyfly.web.ports.filter import WebFilter
+from pyfly.web.ports.management import ManagementRoutesContributor, collect_management_routes
 from pyfly.web.ports.outbound import WebServerPort
 
-__all__ = ["WebFilter", "WebServerPort"]
+__all__ = ["ManagementRoutesContributor", "WebFilter", "WebServerPort", "collect_management_routes"]
