@@ -4,6 +4,9 @@ Enterprise Python has long meant stitching together a dozen independent librarie
 
 This book teaches PyFly **by doing**. You build one real application from an empty folder to a secured, observable, event-driven service — making every concept concrete before moving to the next. Crucially, the code in these pages is not illustrative pseudocode: it is taken from a **real project that compiles, boots, and passes its tests** against PyFly v26.6.110. Every listing was verified against the running sample, so what you read is what actually works.
 
+
+**Appendix E** extends the book with the separate `samples/webapp` catalog, verified against the current PyFly checkout. It covers native HTML, forms, route/static helpers, custom errors, and administration of the same SQLAlchemy/Beanie models. Lumen chapters retain their historical version references.
+
 ### Who This Book Is For
 
 This book is for intermediate Python developers comfortable with `async`/`await`, type hints, and the basics of HTTP services. You need no prior framework expertise — if you have built anything with FastAPI, Flask, or SQLAlchemy, you are well prepared.

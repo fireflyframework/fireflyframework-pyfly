@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Catalog{% endblock %} · PyFly</title>
+<link rel="stylesheet" href="{{ static_url('catalog.css') }}"></head>
+<body><header><a href="{{ reverse('catalog') }}">PyFly / Catalog</a><a href="{{ reverse('catalog') }}admin">Model administration</a></header>
+<main>{% block content %}{% endblock %}</main></body></html>

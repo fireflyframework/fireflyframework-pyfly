@@ -1,12 +1,14 @@
 """Page content service."""
 
+from typing import Any
+
 from pyfly.container import service
 
 
 @service
 class PageService:
 
-    def get_home_context(self) -> dict:
+    def get_home_context(self) -> dict[str, Any]:
         return {
             "title": "Home",
             "heading": "Welcome to {{ name }}",
@@ -18,7 +20,7 @@ class PageService:
             ],
         }
 
-    def get_about_context(self) -> dict:
+    def get_about_context(self) -> dict[str, Any]:
         return {
             "title": "About",
             "heading": "About {{ name }}",

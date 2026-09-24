@@ -507,7 +507,7 @@ spec = FilterUtils.from_example(example)
 
 ## Pagination
 
-For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [Data Module Guide — Pagination & Sorting](data.md#pagination--sorting).
+For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [Data Module Guide — Pagination & Sorting](data.md#pagination-sorting).
 
 ### Paginated Queries
 

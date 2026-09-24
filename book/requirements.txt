@@ -1,0 +1,5 @@
+Markdown>=3.7,<4
+Pygments>=2.18,<3
+PyYAML>=6,<7
+WeasyPrint>=68,<70
+pymdown-extensions>=10,<13

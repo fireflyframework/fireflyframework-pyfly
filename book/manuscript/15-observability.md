@@ -35,6 +35,9 @@ By the end of the chapter Lumen will produce structured JSON logs with correlati
 
 ---
 
+!!! note "HTML applications and model administration"
+    Appendix E follows the runnable catalog: `ModelAndView`, `Form[T]`, `reverse`, `static_url`, HTML errors, and CRUD over existing entities/documents. Data administration always requires authentication; a separate listener also requires `pyfly.management.security.enabled: true`.
+
 ## Structured logging & PII redaction
 
 ### Why structured logging?

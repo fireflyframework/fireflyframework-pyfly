@@ -116,6 +116,9 @@ def create_management_app(
         "1",
         "yes",
     )
+    data_enabled = str(context.config.get("pyfly.admin.data.enabled", False)).lower() in ("true", "1", "yes")
+    if data_enabled and not management_security:
+        raise ValueError("Data admin on a management listener requires pyfly.management.security.enabled=true")
     if management_security:
         present = {id(f) for f in filters}
         for _cls, reg in context.container._registrations.items():

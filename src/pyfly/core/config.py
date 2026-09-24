@@ -577,6 +577,19 @@ class Config:
         except ImportError:
             pass
 
+        # Declared field names disambiguate env-only underscores (max_body_size
+        # is one field, not the unknown nested path max.body.size).
+        if dataclasses.is_dataclass(config_cls):
+            for declared in dataclasses.fields(config_cls):
+                raw = os.environ.get(self._env_key(f"{prefix}.{declared.name}"))
+                if raw is None:
+                    continue
+                reference = _dict_get_relaxed(section, declared.name)
+                if reference is None:
+                    reference = declared.default
+                    if declared.default_factory is not dataclasses.MISSING:
+                        reference = declared.default_factory()
+                section[declared.name] = _coerce_like(raw, reference)
         # Dataclass path (recurses into nested dataclass fields).
         return cast(T, self._bind_dataclass(config_cls, section))
 

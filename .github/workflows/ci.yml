@@ -13,6 +13,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_PYTHON: "3.13"
+
 jobs:
   lint:
     name: Lint
@@ -46,6 +49,8 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +110,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test]
+    needs: [lint, typecheck, test, documentation]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -119,3 +124,46 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  documentation:
+    name: Documentation and book sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-docs.txt -r book/requirements.txt pytest
+      - run: python -m mkdocs build --strict
+      - run: python -m pytest book/tests -q
+      - run: python book/build/verify_code.py book/manuscript
+      - run: python book/build/verify_code.py book/manuscript-es
+
+  webapp:
+    name: Webapp browser and installed distributions
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    needs: build
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras --no-extra pii --group dev --group browser
+      - run: uv run playwright install --with-deps chromium
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Installed optional extras
+        run: |
+          export PYFLY_TEST_WHEEL="$(find dist -maxdepth 1 -name 'pyfly-*.whl' -print -quit)"
+          uv run pytest tests/web/test_webapp_distribution.py -m integration -q
+      - name: Browser rendering and real dashboard CRUD
+        run: uv run pytest tests/browser -m browser -q
+      - name: Native catalog sample
+        run: PYTHONPATH=samples/webapp/src uv run pytest samples/webapp/tests -q

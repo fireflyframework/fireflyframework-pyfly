@@ -13,6 +13,45 @@ pyfly:
       root: "INFO"
     format: "console"
   web:
+    templates:
+      enabled: false
+      directories: [templates]
+      packages: []
+      strict-undefined: true
+      auto-reload: false
+      cache-size: 400
+    static:
+      enabled: false
+      path: /static
+      directories: [static]
+      packages: []
+      cache-control: no-cache
+    forms:
+      max-fields: 1000
+      max-files: 20
+      max-part-size: 1048576
+      max-body-size: 16777216
+    errors:
+      html-enabled: false
+      templates: {}
+      default-template: errors/error.html
+      include-stacktrace: on-debug
+      max-stack-frames: 30
+      max-trace-length: 20000
+    welcome:
+      enabled: true
+      template: pyfly/welcome.html
+    branding:
+      name: PyFly
+      tagline: Build something that matters.
+      logo-url: ""
+      favicon-url: ""
+      primary-color: "#4cbb2f"
+      accent-color: "#c2e85f"
+      documentation-url: https://fireflyframework.github.io/fireflyframework-pyfly/docs/
+      support-url: https://github.com/fireflyframework/fireflyframework-pyfly/issues
+      footer: Built with PyFly · Firefly Software Foundation
+      assets-path: /_pyfly/web
     # NOTE: the application listen host/port moved to pyfly.server.host / .port
     # (Spring server.address / server.port parity). pyfly.web.host / .port were
     # removed in v26.06.102.
@@ -107,6 +146,14 @@ pyfly:
       failure-threshold: 5
       recovery-timeout: 30
   admin:
+    data:
+      enabled: false
+      allowed-roles: [ADMIN]
+      page-size: 25
+      max-page-size: 100
+      max-body-size: 1048576
+      edit-token-key: ""
+      operations: [list, read, create, update, delete]
     enabled: true
     path: "/admin"
     title: "PyFly Admin"

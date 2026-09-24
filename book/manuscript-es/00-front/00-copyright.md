@@ -8,6 +8,6 @@ Salvo que lo exija la legislación aplicable o se acuerde por escrito, el softwa
 
 **Primera edición, 2026.**
 
-Todos los listados de código de este libro se escribieron y verificaron con la versión 26.6.x del framework PyFly.
+Los capítulos originales de Lumen corresponden a PyFly 26.6.x. El Apéndice E documenta la implementación de aplicaciones web y administración de modelos del checkout 26.9.5 que acompaña al libro; ejecuta su catálogo desde ese checkout.
 
 Publicado por la Firefly Software Foundation.

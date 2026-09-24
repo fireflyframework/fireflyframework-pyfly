@@ -1,0 +1,10 @@
+{% extends 'base.html' %}{% block title %}Product{% endblock %}{% block content %}
+<h1>Product</h1>
+{% if errors %}<ul role="alert">{% for error in errors %}<li>{{ error.loc|join('.') }}: {{ error.msg }}</li>{% endfor %}</ul>{% endif %}
+<form method="post">
+<input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+<input type="hidden" name="edit_version" value="{{ values.get('edit_version', '') }}">
+<label for="name">Name</label><input id="name" name="name" value="{{ values.get('name', '') }}" required maxlength="80">
+<label for="price">Price</label><input id="price" name="price" inputmode="decimal" value="{{ values.get('price', '') }}" required>
+<button>Save product</button></form>
+{% endblock %}

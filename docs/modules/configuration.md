@@ -43,7 +43,7 @@ and the full reference of framework defaults.
     - [Usage in Beans](#usage-in-beans)
     - [@Value vs @config_properties](#value-vs-config_properties)
 11. [SpEL-lite Expressions](#spel-lite-expressions)
-    - [The `#{ ... }` Form](#the-spel-form)
+    - [The `#{ ... }` Form](#the-form)
     - [`@conditional_on_expression`](#conditional_on_expression)
     - [Safety Model](#safety-model)
 12. [Framework Defaults Reference](#framework-defaults-reference)
@@ -52,12 +52,14 @@ and the full reference of framework defaults.
     - [Banner](#banner-defaults)
     - [Logging](#logging-defaults)
     - [Web](#web-defaults)
+    - [Native Webapps](#native-webapp-defaults)
     - [Data](#data-defaults)
     - [Cache](#cache-defaults)
     - [Messaging](#messaging-defaults)
     - [Client](#client-defaults)
     - [Server](#server-defaults)
     - [Admin](#admin-defaults)
+    - [Model Administration](#model-administration-defaults)
     - [Security](#security-defaults)
     - [Observability](#observability-defaults)
 13. [Complete Example: Multi-Environment Setup](#complete-example-multi-environment-setup)
@@ -233,7 +235,7 @@ def reload_from_sources(self) -> bool:
 Re-reads the original configuration sources and **atomically swaps in** the freshly
 merged result, so a running application picks up edits to the config files and profile
 overlays without a restart (Spring Cloud config refresh). It replays the exact merge
-recorded by [`from_sources()`](#from_sources) — framework defaults, starter defaults,
+recorded by [`from_sources()`](#configuration-layering) — framework defaults, starter defaults,
 `config/` files, project-root files, and profile overlays — under an internal lock, then
 rebinds `_data` in a single assignment. Because `get()` reads that single attribute,
 concurrent readers always see a consistent snapshot (the old tree or the new one, never a
@@ -1119,6 +1121,95 @@ Every key can be overridden in your config file or via environment variables.
 | `pyfly.web.docs.enabled` | `true` | Enable API documentation endpoints. |
 | `pyfly.web.actuator.enabled` | `false` | Enable actuator management endpoints. |
 
+### Native Webapp Defaults
+
+These settings use the same typed YAML/TOML, profile, and environment binding as
+other PyFly properties. Lists in environment variables are comma-separated:
+`PYFLY_ADMIN_DATA_OPERATIONS=list,read`. An environment-only integer such as
+`PYFLY_WEB_FORMS_MAX_BODY_SIZE=2097152` binds as an integer even without a YAML leaf.
+
+Under `pyfly.web.templates`:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `enabled` | `false` | Opt in to template auto-configuration. |
+| `directories` | `[templates]` | Ordered filesystem roots, relative to the working directory. |
+| `packages` | `[]` | Installed `package:folder` roots; searched after filesystem roots. |
+| `strict-undefined` | `true` | Fail on undefined template values. |
+| `auto-reload` | `false` | Check for modified templates; useful in development. |
+| `cache-size` | `400` | Nonnegative compiled-template cache size; zero disables caching. |
+
+Under `pyfly.web.static`:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `enabled` | `false` | Mount the configured public roots. |
+| `path` | `/static` | Non-root absolute URL path; reference it using `static_url`. |
+| `directories` | `[static]` | Filesystem roots in lookup order. |
+| `packages` | `[]` | Installed `package:folder` roots. |
+| `cache-control` | `no-cache` | Cache policy on static responses. |
+
+Set `directories: []` when using only package resources. Roots must exist; static
+mounts cannot overlap controller routes. Neither static nor template loaders allow
+filesystem symlinks to escape configured roots.
+
+Under `pyfly.web.forms` (all limits must be positive):
+
+| Key | Default | Behavior |
+|---|---|---|
+| `max-fields` | `1000` | Maximum parsed text fields. |
+| `max-files` | `20` | Maximum uploaded files. |
+| `max-part-size` | `1048576` | Maximum multipart part/file size in bytes. |
+| `max-body-size` | `16777216` | Maximum total form body size in bytes. |
+
+Under `pyfly.web.errors`:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `html-enabled` | `false` | Enable HTML error negotiation. |
+| `templates` | `{}` | Status-to-template map, for example `{"404": "errors/missing.html"}`. |
+| `default-template` | `errors/error.html` | Last template candidate before the built-in fallback. |
+| `include-stacktrace` | `on-debug` | `never`, `on-debug`, or `always`; applies only to negotiated HTML errors. |
+| `max-stack-frames` | `30` | Most recent frames of the original exception; range 1–200. |
+| `max-trace-length` | `20000` | Maximum formatted trace characters; range 256–100000. |
+
+Custom error rendering uses the configured template engine. The built-in branded
+fallback remains available without one. `pyfly.web.debug` defaults to `false` and
+controls `on-debug` diagnostics; REST errors remain JSON.
+
+Under `pyfly.web.welcome`:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `enabled` | `true` | Root fallback **only when templates are enabled** and no application home route exists. |
+| `template` | `pyfly/welcome.html` | Bundled welcome page or a custom template name. |
+
+Under `pyfly.web.branding`:
+
+| Key | Default | Behavior |
+|---|---|---|
+| `name` | `PyFly` | Name shown in page titles and branding context. |
+| `tagline` | `Build something that matters.` | Welcome text and footer tagline. |
+| `logo-url` | empty | Application-relative or HTTP(S) logo; empty uses packaged PyFly logo. |
+| `favicon-url` | empty | Application-relative or HTTP(S) icon; empty omits it. |
+| `primary-color` | `#4cbb2f` | Six-digit hex; applied through external theme CSS. |
+| `accent-color` | `#c2e85f` | Six-digit hex; buttons and highlights. |
+| `documentation-url` | PyFly documentation website | HTTP(S) or application-relative; empty hides link. |
+| `support-url` | PyFly GitHub issues | HTTP(S) or application-relative; empty hides link. |
+| `footer` | `Built with PyFly · Firefly Software Foundation` | Footer text. |
+| `assets-path` | `/_pyfly/web` | Reserved non-root path for packaged logo/CSS; no trailing slash. |
+
+The `web` scaffold enables browser features; API/service archetypes do not. Installing
+an extra alone does not activate pages. Brand assets require explicitly enabled templates
+or HTML errors. See [welcome and branding](webapps.md#branded-welcome-page) for template
+blocks, loader precedence, mounted URLs, and security rules.
+
+Under
+`pyfly.security.csrf`, `form-field` defaults to `_csrf` and `cookie-secure` to
+`true`; use a local profile override of `false` only for development over HTTP.
+See the [webapp guide](webapps.md) for route/static helpers, error precedence,
+browser form behavior, and a runnable application.
+
 ### Data Defaults
 
 | Key | Default | Description |
@@ -1178,6 +1269,27 @@ Every key can be overridden in your config file or via environment variables.
 | `pyfly.admin.require-auth` | `false` | Require authentication for admin access. |
 | `pyfly.admin.refresh-interval` | `5000` | SSE refresh interval in milliseconds. |
 
+### Model Administration Defaults
+
+Prefix: `pyfly.admin.data`. These settings are independent of the monitoring
+dashboard's `require-auth` option; data access always requires authentication.
+
+| Key | Default | Behavior |
+|---|---|---|
+| `enabled` | `false` | Opt in to resource routes and Datasources navigation. |
+| `allowed-roles` | `[ADMIN]` | At least one permitted role is required when enabled. |
+| `page-size` | `25` | Default page size, between 1 and `max-page-size`. |
+| `max-page-size` | `100` | Request limit; cannot exceed 1000. |
+| `max-body-size` | `1048576` | Maximum JSON mutation body in bytes; must be positive. |
+| `edit-token-key` | empty | Shared random secret, at least 32 characters when writes are enabled. |
+| `operations` | `[list, read, create, update, delete]` | Global ceiling; each registration defaults to list/read. |
+
+Supply `edit-token-key: "${ADMIN_EDIT_TOKEN_KEY}"` or
+`PYFLY_ADMIN_DATA_EDIT_TOKEN_KEY` through the environment. Rotating the key
+invalidates outstanding edits. Use `operations: [list, read]` for a globally
+read-only deployment. A separate management listener additionally requires
+`pyfly.management.security.enabled: true` and configured authentication.
+
 ### Security Defaults
 
 | Key | Default | Description |
@@ -1220,6 +1332,45 @@ pyfly:
       enabled: true
     actuator:
       enabled: false
+    templates:
+      enabled: false
+      directories: [templates]
+      packages: []
+      strict-undefined: true
+      auto-reload: false
+      cache-size: 400
+    static:
+      enabled: false
+      path: /static
+      directories: [static]
+      packages: []
+      cache-control: no-cache
+    forms:
+      max-fields: 1000
+      max-files: 20
+      max-part-size: 1048576
+      max-body-size: 16777216
+    errors:
+      html-enabled: false
+      templates: {}
+      default-template: errors/error.html
+      include-stacktrace: on-debug
+      max-stack-frames: 30
+      max-trace-length: 20000
+    welcome:
+      enabled: true
+      template: pyfly/welcome.html
+    branding:
+      name: PyFly
+      tagline: Build something that matters.
+      logo-url: ""
+      favicon-url: ""
+      primary-color: "#4cbb2f"
+      accent-color: "#c2e85f"
+      documentation-url: https://fireflyframework.github.io/fireflyframework-pyfly/docs/
+      support-url: https://github.com/fireflyframework/fireflyframework-pyfly/issues
+      footer: Built with PyFly · Firefly Software Foundation
+      assets-path: /_pyfly/web
   server:
     type: "auto"
     event-loop: "auto"
@@ -1260,6 +1411,14 @@ pyfly:
     theme: "auto"
     require-auth: false
     refresh-interval: 5000
+    data:
+      enabled: false
+      allowed-roles: [ADMIN]
+      page-size: 25
+      max-page-size: 100
+      max-body-size: 1048576
+      edit-token-key: ""
+      operations: [list, read, create, update, delete]
   security:
     enabled: false
     jwt:
@@ -1496,3 +1655,6 @@ Final effective values:
 | `pyfly.logging.format` | `"json"` | Prod overlay |
 | `pyfly.logging.level.root` | `"WARNING"` | Prod overlay |
 | `pyfly.banner.mode` | `"OFF"` | Prod overlay |
+
+
+The [webapp configuration reference](webapps.md) documents `pyfly.web.templates`, `pyfly.web.static`, `pyfly.web.forms`, `pyfly.web.errors`, and `pyfly.admin.data`. These use the same typed binding, profile overlays, and environment precedence described here; templates, static resources, HTML errors, and data administration are disabled by default.

@@ -26,3 +26,16 @@ def test_figure_inlines_svg(tmp_path):
 def test_spring_callout(tmp_path):
     html = render_markdown('!!! spring "Spring parity"\n    Same as Spring.\n', tmp_path)
     assert "admonition spring" in html and "Spring parity" in html
+
+
+def test_fenced_code_in_callout_stays_code_and_valid_xhtml(tmp_path):
+    from xml.etree import ElementTree
+
+    source = ('!!! note "Run it"\n\n    ```bash\n'
+              '    # -> {"wallet_id": "wlt-123"}\n'
+              '    echo "<hello>"\n    ```\n')
+    html = render_markdown(source, tmp_path)
+    root = ElementTree.fromstring(f'<section>{html}</section>')
+    assert root.find('.//pre') is not None
+    assert root.find('.//h1') is None
+    assert '# -> {"wallet_id": "wlt-123"}' in ''.join(root.itertext())

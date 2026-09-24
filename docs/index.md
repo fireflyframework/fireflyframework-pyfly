@@ -229,6 +229,10 @@ PyFly detects installed libraries at startup and wires the right adapters automa
 
 ---
 
+## Native web applications
+
+Use `pyfly[webapp]` for server-rendered pages, typed forms, named-route and static URL helpers, and custom HTML errors. The admin dashboard can browse and modify explicitly registered existing SQLAlchemy entities or Beanie documents. Start with the [webapp guide](modules/webapps.md) and its runnable catalog walkthrough.
+
 ## Quick Start
 
 ```bash

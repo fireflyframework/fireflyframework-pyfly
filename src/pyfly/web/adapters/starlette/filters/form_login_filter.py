@@ -71,7 +71,9 @@ class FormLoginFilter(OncePerRequestFilter):
         return await call_next(request)  # type: ignore[no-any-return]
 
     async def _attempt_login(self, request: Request) -> Response:
-        form = await request.form()
+        from pyfly.web.adapters.starlette.form_binding import parse_form
+
+        form = await parse_form(request)
         username = str(form.get(self._username_param, "") or "")
         password = str(form.get(self._password_param, "") or "")
 

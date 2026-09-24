@@ -52,7 +52,7 @@ class TestControllerGenerator:
         assert result.exit_code == 0, result.output
         text = (tmp_path / "src" / "shop" / "controllers" / "page_controller.py").read_text()
         assert "@controller" in text
-        assert "Jinja2Templates" in text
+        assert "ModelAndView" in text
 
 
 class TestEntityRepository:

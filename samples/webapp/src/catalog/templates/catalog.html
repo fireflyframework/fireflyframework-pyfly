@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block content %}
+<h1>Product catalog</h1><p>One PyFly model, available in your web application and administration dashboard.</p>
+<a class="button" href="{{ url_for('new_product') }}">Add product</a>
+<table><thead><tr><th>Name</th><th>Price</th><th></th></tr></thead><tbody>
+{% for product in products %}<tr><td>{{ product.values.name }}</td><td>{{ product.values.price }}</td><td><a href="{{ url_for('edit_product', id=product.id) }}">Edit</a></td></tr>
+{% else %}<tr><td colspan="3">No products yet.</td></tr>{% endfor %}</tbody></table>
+{% endblock %}

@@ -1,27 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% raw %}{% block title %}{{ name }}{% endblock %} — {{ name }}{% endraw %}</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <nav>
-        <a href="/" class="logo">{{ name }}</a>
-        <ul>
-            <li><a href="/">Home</a></li>
-            <li><a href="/about">About</a></li>
-            <li><a href="/health">Health</a></li>
-        </ul>
-    </nav>
+{% raw %}{% extends "pyfly/base.html" %}
 
-    <main>
-        {% raw %}{% block content %}{% endblock %}{% endraw %}
-    </main>
+{% block head %}
+{{ super() }}
+<link rel="stylesheet" href="{{ static_url('css/style.css') }}">
+{% endblock %}
 
-    <footer>
-        <p>Built with <a href="https://github.com/fireflyframework/pyfly">PyFly</a></p>
-    </footer>
-</body>
-</html>
+{% block navigation %}
+<a href="{{ reverse('home') }}">Home</a>
+<a href="{{ reverse('about') }}">About</a>
+{{ super() }}
+{% endblock %}{% endraw %}

@@ -294,7 +294,7 @@ my-site/
 │   └── my_site/
 │       ├── __init__.py
 │       ├── app.py
-│       ├── main.py                     # ASGI entry with StaticFiles mount
+│       ├── main.py                     # ASGI entry; templates/static configured in YAML
 │       ├── controllers/
 │       │   ├── __init__.py
 │       │   ├── health_controller.py    # @rest_controller — /health
@@ -315,7 +315,7 @@ my-site/
     └── test_home_controller.py
 ```
 
-The `web` archetype uses `@controller` (instead of `@rest_controller`) for endpoints that return `TemplateResponse` objects. The `main.py` mounts a `/static` route for serving CSS, JavaScript, and images via Starlette's `StaticFiles`.
+The `web` archetype uses `@controller` endpoints returning native `ModelAndView` values. It enables package-based templates and static resources through `pyfly.yaml`; the application factory handles `/static`. The generated dependencies include `pyfly[templates]`. See the [native webapp guide](modules/webapps.md) for forms, HTML errors, migration, and model administration.
 
 ### Hexagonal Archetype
 
@@ -775,7 +775,7 @@ Missing optional tools are shown with a `-` dash indicator (dimmed), while missi
 Verifies that PyFly itself is importable and displays the installed version:
 
 ```
-✓ pyfly v26.05.01
+✓ pyfly v26.09.05
 ```
 
 ### Summary

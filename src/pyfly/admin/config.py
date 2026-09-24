@@ -33,6 +33,7 @@ class AdminProperties:
     require_auth: bool = False
     allowed_roles: list[str] = field(default_factory=lambda: ["ADMIN"])
     refresh_interval: int = 5000
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @config_properties(prefix="pyfly.admin.server")

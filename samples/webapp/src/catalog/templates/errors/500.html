@@ -1,0 +1,3 @@
+{% extends "pyfly/error.html" %}
+{% block error_message %}The catalog could not complete your request. Please try again.{% endblock %}
+{% block navigation %}<a href="{{ reverse('catalog') }}">Catalog</a>{{ super() }}{% endblock %}

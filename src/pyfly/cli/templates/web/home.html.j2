@@ -1,16 +1,12 @@
-{% raw %}{% extends "base.html" %}
+{% raw %}{% extends "pyfly/welcome.html" %}
 
-{% block title %}{{ title }}{% endblock %}
+{% block head %}
+{{ super() }}
+<link rel="stylesheet" href="{{ static_url('css/style.css') }}">
+{% endblock %}
 
-{% block content %}
-<h1>{{ heading }}</h1>
-
-<section class="features">
-    <h2>Features</h2>
-    <ul>
-        {% for feature in features %}
-        <li>{{ feature }}</li>
-        {% endfor %}
-    </ul>
-</section>
+{% block navigation %}
+<a href="{{ reverse('home') }}">Home</a>
+<a href="{{ reverse('about') }}">About</a>
+{{ super() }}
 {% endblock %}{% endraw %}

@@ -37,10 +37,11 @@ The building blocks that every PyFly application relies on.
 
 ## Web Development
 
-Build REST APIs with automatic OpenAPI documentation, validation, security headers, and extensible middleware.
+Build REST APIs and native HTML applications with shared routing, validation, security, and persistence.
 
 | Guide | What You'll Learn |
 |-------|-------------------|
+| [Native Webapps & Model Admin](webapps.md) | `ModelAndView`, `Form[T]`, `reverse`, `static_url`, custom HTML errors, and model administration |
 | [Web Layer](web.md) | `@rest_controller`, `@get_mapping` / `@post_mapping` / `@put_mapping` / `@delete_mapping`, parameter binding (`Body`, `PathVar`, `QueryParam`, `Header`, `Cookie`), CORS configuration, OpenAPI 3.1 auto-generation, Swagger UI, ReDoc |
 | [Validation](validation.md) | `Valid[T]` annotation for explicit request validation, structured 422 error responses with field-level errors, `Valid[Body[T]]`, `Valid[QueryParam[T]]`, Pydantic `Field()` constraints, custom validators |
 | [WebFilters](web-filters.md) | `WebFilterChainMiddleware`, `OncePerRequestFilter` base class, URL pattern matching, built-in filters: `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter`, `SecurityFilter`, custom filter creation |

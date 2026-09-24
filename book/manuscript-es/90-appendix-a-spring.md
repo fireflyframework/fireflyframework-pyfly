@@ -373,3 +373,15 @@ Instálalo con: `pip install 'pyfly[testcontainers]'`
 
 !!! tip "Cascada de autoconfiguración"
     La autoconfiguración de PyFly usa el mismo patrón de beans condicionales que Spring Boot: si Granian está instalado, gana `GranianServerAdapter`; si no, se prueba Uvicorn a continuación; luego Hypercorn. Anúlalo en cualquier punto aportando tu propio bean `ApplicationServerPort`.
+
+
+## HTML nativo y recursos estáticos
+
+| Spring / Django | PyFly |
+|---|---|
+| Spring `ModelAndView` | `ModelAndView(template, model)` |
+| Django `reverse` / template URL tag | `reverse(request, name, **params)` / `reverse(name, **params)` |
+| Django static helper / template tag | `static_url(request, path)` / `static_url(path)` |
+| Django `ModelAdmin` | Explicit `ModelAdmin` over existing SQLAlchemy/Beanie models |
+
+El Apéndice E explica configuración, seguridad y diferencias de persistencia.

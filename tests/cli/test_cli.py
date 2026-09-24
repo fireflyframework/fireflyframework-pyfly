@@ -367,7 +367,7 @@ class TestNewWeb:
         assert "@controller" in controller
         assert "from pyfly.container import controller" in controller
 
-    def test_web_has_template_response(self, tmp_path: Path):
+    def test_web_has_model_and_view(self, tmp_path: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -383,7 +383,7 @@ class TestNewWeb:
         assert result.exit_code == 0, result.output
 
         controller = (tmp_path / "my-site" / "src" / "my_site" / "controllers" / "home_controller.py").read_text()
-        assert "TemplateResponse" in controller
+        assert "ModelAndView" in controller
 
     def test_web_has_html_templates(self, tmp_path: Path):
         runner = CliRunner()
@@ -402,7 +402,7 @@ class TestNewWeb:
 
         pkg = tmp_path / "my-site" / "src" / "my_site"
         base = (pkg / "templates" / "base.html").read_text()
-        assert "<!DOCTYPE html>" in base
+        assert 'extends "pyfly/base.html"' in base
 
         home = (pkg / "templates" / "home.html").read_text()
         assert "extends" in home
@@ -426,7 +426,7 @@ class TestNewWeb:
         assert result.exit_code == 0, result.output
 
         css = (tmp_path / "my-site" / "src" / "my_site" / "static" / "css" / "style.css").read_text()
-        assert "body" in css
+        assert "main >" in css
 
     def test_web_service_uses_stereotype(self, tmp_path: Path):
         runner = CliRunner()
@@ -484,7 +484,7 @@ class TestNewWeb:
         pyproject = (tmp_path / "my-site" / "pyproject.toml").read_text()
         assert "pyfly[web]" in pyproject
 
-    def test_web_has_jinja2_dependency(self, tmp_path: Path):
+    def test_web_has_templates_dependency(self, tmp_path: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -500,9 +500,9 @@ class TestNewWeb:
         assert result.exit_code == 0, result.output
 
         pyproject = (tmp_path / "my-site" / "pyproject.toml").read_text()
-        assert "jinja2" in pyproject
+        assert "pyfly[templates]" in pyproject
 
-    def test_web_main_mounts_static(self, tmp_path: Path):
+    def test_web_configures_static(self, tmp_path: Path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -518,8 +518,9 @@ class TestNewWeb:
         assert result.exit_code == 0, result.output
 
         main = (tmp_path / "my-site" / "src" / "my_site" / "main.py").read_text()
-        assert "StaticFiles" in main
-        assert "/static" in main
+        assert "StaticFiles" not in main
+        config = (tmp_path / "my-site" / "pyfly.yaml").read_text()
+        assert "my_site:static" in config
 
     def test_web_readme_mentions_html(self, tmp_path: Path):
         runner = CliRunner()

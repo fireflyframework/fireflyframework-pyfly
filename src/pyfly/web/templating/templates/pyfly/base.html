@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ branding.name }}{% endblock %}</title>
+  {% if branding.favicon_url %}<link rel="icon" href="{{ branding.favicon_url }}">{% endif %}
+  <link rel="stylesheet" href="{{ web_asset_url('web.css') }}">
+  <link rel="stylesheet" href="{{ web_asset_url('theme.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <a href="{{ home_url }}" aria-label="{{ branding.name }} home"><img class="brand-logo" src="{{ branding.logo_url }}" alt="{{ branding.name }}"></a>
+      <nav aria-label="Resources">
+        {% block navigation %}
+        {% if branding.documentation_url %}<a href="{{ branding.documentation_url }}">Documentation <span aria-hidden="true">↗</span></a>{% endif %}
+        {% if branding.support_url %}<a href="{{ branding.support_url }}">Support <span aria-hidden="true">↗</span></a>{% endif %}
+        {% endblock %}
+      </nav>
+    </header>
+    <main id="main-content">{% block content %}{% endblock %}</main>
+    <footer>{% block footer %}<span>{{ branding.footer }}</span><span class="footer-detail">{{ branding.tagline }}</span>{% endblock %}</footer>
+  </div>
+</body>
+</html>

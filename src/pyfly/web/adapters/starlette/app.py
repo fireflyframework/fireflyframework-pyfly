@@ -416,7 +416,11 @@ def create_app(
         return (getattr(r, "path", ""), frozenset(getattr(r, "methods", None) or ()))
 
     def _install_dynamic_wiring(app_: Starlette) -> None:
+        from pyfly.web.adapters.starlette.branded_pages import remove_welcome_fallback
+        from pyfly.web.adapters.starlette.webapp_wiring import install_webapp
+
         _install_user_filters()
+        remove_welcome_fallback(app_)
         existing = {_route_key(r) for r in app_.router.routes}
         for r in _collect_context_routes():
             key = _route_key(r)
@@ -435,6 +439,7 @@ def create_app(
                     existing.add(key)
         for hook in _extra_post_start:
             hook()
+        install_webapp(app_, context)
         # Rebuild the exception-converter chain now that user @bean ExceptionConverter
         # instances exist (they are only created during start()) — audit #202.
         if context is not None:
@@ -528,4 +533,7 @@ def create_app(
 
     install_serialization_state(app, context)
 
+    from pyfly.web.adapters.starlette.webapp_wiring import install_webapp
+
+    install_webapp(app, context)
     return app

@@ -71,7 +71,12 @@ class CsrfFilterAutoConfiguration:
             "no",
             "off",
         )
-        filter_ = CsrfFilter(cookie_gated=cookie_gated)
+        secure = str(config.get("pyfly.security.csrf.cookie-secure", True)).lower() not in ("false", "0", "no")
+        filter_ = CsrfFilter(
+            cookie_gated=cookie_gated,
+            cookie_secure=secure,
+            form_field=str(config.get("pyfly.security.csrf.form-field", "_csrf")),
+        )
         excludes = _exclude_patterns(config, "pyfly.security.csrf.exclude-patterns")
         if excludes:
             filter_.exclude_patterns = list(excludes)

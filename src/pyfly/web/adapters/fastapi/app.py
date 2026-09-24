@@ -420,10 +420,15 @@ def create_app(
     # discovery, controller-route registration, and the indicator scan once
     # startup completes (audit #40/#163).
     def _install_dynamic_wiring() -> None:
+        from pyfly.web.adapters.starlette.branded_pages import remove_welcome_fallback
+        from pyfly.web.adapters.starlette.webapp_wiring import install_webapp
+
         _install_user_filters()
+        remove_welcome_fallback(app)
         _install_context_routes()
         for hook in _extra_post_start:
             hook()
+        install_webapp(app, context)
         # Fold user @bean ExceptionConverter instances into the chain (audit #202).
         if context is not None:
             from pyfly.web.converters import build_exception_converter_service
@@ -478,4 +483,7 @@ def create_app(
 
         app.router.lifespan_context = _lifespan_with_dynamic_wiring
 
+    from pyfly.web.adapters.starlette.webapp_wiring import install_webapp
+
+    install_webapp(app, context)
     return app

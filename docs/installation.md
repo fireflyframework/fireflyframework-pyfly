@@ -299,6 +299,8 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | Extra | Dependencies | What It Enables |
 |-------|-------------|-----------------|
 | `web` | starlette, uvicorn, python-multipart | HTTP server (Starlette + Uvicorn), REST controllers, routing, middleware, OpenAPI docs |
+| `templates` | jinja2 | Optional async HTML template engine; requires explicit configuration |
+| `webapp` | web, templates, security extras | Native HTML pages, forms, browser security, and static resource integration |
 | `web-fast` | starlette, granian, uvloop, python-multipart | High-performance web stack: Starlette + Granian + uvloop |
 | `web-fastapi` | fastapi, granian, uvloop, python-multipart | High-performance FastAPI stack: FastAPI + Granian + uvloop |
 | `fastapi` | fastapi, uvicorn, python-multipart | HTTP server (FastAPI + Uvicorn), REST controllers, native OpenAPI |
@@ -510,7 +512,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.05.01
+    ✓ pyfly v26.09.05
 
   All checks passed!
 ```

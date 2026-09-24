@@ -14,10 +14,13 @@
 """PyFly Admin -- Embedded management dashboard."""
 
 from pyfly.admin.config import AdminClientProperties, AdminProperties, AdminServerProperties
+from pyfly.admin.data import AdminResourceRegistry, ModelAdmin
 from pyfly.admin.ports import AdminViewExtension
 from pyfly.admin.registry import AdminViewRegistry
 
 __all__ = [
+    "AdminResourceRegistry",
+    "ModelAdmin",
     "AdminClientProperties",
     "AdminProperties",
     "AdminServerProperties",

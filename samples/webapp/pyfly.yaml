@@ -1,0 +1,30 @@
+pyfly:
+  server:
+    port: 8080
+  management:
+    server:
+      port: 8080
+  web:
+    templates:
+      enabled: true
+      directories: []
+      packages: ["catalog:templates"]
+    static:
+      enabled: true
+      directories: []
+      packages: ["catalog:static"]
+    errors:
+      html-enabled: true
+      include-stacktrace: on-debug
+    branding:
+      name: PyFly Catalog
+      tagline: Your products, beautifully organized.
+  admin:
+    enabled: true
+    data:
+      enabled: true
+      edit-token-key: "${WEBAPP_EDIT_TOKEN_KEY}"
+      allowed-roles: [ADMIN]
+  logging:
+    redaction:
+      engine: regex

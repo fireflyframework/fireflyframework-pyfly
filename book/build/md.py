@@ -5,7 +5,7 @@ Custom block directives on top of python-markdown:
   ::: listing <file-label> | <caption>       (block; code lines until a lone ':::')
       <code...>
   :::
-Plain ``` fences still work via codehilite. Callouts use the admonition
+Plain ``` fences, including those nested in callouts, use SuperFences. Callouts use the admonition
 extension (note/tip/warning + custom 'spring').
 """
 from __future__ import annotations
@@ -127,9 +127,10 @@ def _to_xml_entities(s: str) -> str:
 
 def render_markdown(text: str, base: Path) -> str:
     md = markdown.Markdown(
-        extensions=["extra", "admonition", "sane_lists", "codehilite",
+        extensions=["extra", "admonition", "sane_lists", "codehilite", "pymdownx.highlight", "pymdownx.superfences",
                     PyflyExtension(base)],
-        extension_configs={"codehilite": {"css_class": "code", "guess_lang": False}},
+        extension_configs={"codehilite": {"css_class": "code", "guess_lang": False},
+                           "pymdownx.highlight": {"css_class": "code", "guess_lang": False}},
         output_format="xhtml",
     )
     return _to_xml_entities(md.convert(text))

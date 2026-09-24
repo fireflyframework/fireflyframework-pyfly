@@ -32,7 +32,7 @@ class MethodMapping(Protocol):
     attaches routing metadata to the handler method.
     """
 
-    def __call__(self, path: str = ..., *, status_code: int = ...) -> Callable[[F], F]: ...
+    def __call__(self, path: str = ..., *, status_code: int = ..., name: str | None = ...) -> Callable[[F], F]: ...
 
 
 def request_mapping(path: str) -> Callable[[T], T]:
@@ -48,13 +48,15 @@ def request_mapping(path: str) -> Callable[[T], T]:
 def _make_method_mapping(method: str) -> MethodMapping:
     """Factory that creates an HTTP method mapping decorator."""
 
-    def mapping(path: str = "", *, status_code: int = 200) -> Callable[[F], F]:
+    def mapping(path: str = "", *, status_code: int = 200, name: str | None = None) -> Callable[[F], F]:
         def decorator(func: F) -> F:
             func.__pyfly_mapping__ = {  # type: ignore[attr-defined]
                 "method": method,
                 "path": path,
                 "status_code": status_code,
             }
+            if name is not None:
+                func.__pyfly_mapping__["name"] = name  # type: ignore[attr-defined]
             return func
 
         return decorator

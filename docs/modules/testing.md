@@ -27,7 +27,7 @@ event-driven tests for PyFly applications.
    - [@DataTest](#datatest)
    - [@ServiceTest](#servicetest)
    - [get_test_slice()](#get_test_slice)
-   - [Functional Slices (web_slice / service_slice / data_slice)](#functional-slices-web_slice--service_slice--data_slice)
+   - [Functional Slices (web_slice / service_slice / data_slice)](#functional-slices-web_slice-service_slice-data_slice)
 7. [PyFlyTestClient](#pyflytestclient)
    - [TestResponse](#testresponse)
    - [Fluent Assertion Methods](#fluent-assertion-methods)

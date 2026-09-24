@@ -43,11 +43,11 @@ PyFly Data Document provides a document-oriented data access layer that implemen
   - [Beanie Initialization](#beanie-initialization)
   - [Document Class Discovery](#document-class-discovery)
 - [Transaction Management](#transaction-management)
-  - [mongo_transactional Decorator](#mongo_transactional-decorator)
+  - [mongo_transactional Decorator](#the-unified-transactional-decorator)
   - [Replica Set Requirement](#replica-set-requirement)
   - [Usage Example](#usage-example)
-- [MongoRepositoryBeanPostProcessor](#mongorepositorybeanbeanpostprocessor)
-  - [How It Works](#how-it-works-1)
+- [MongoRepositoryBeanPostProcessor](#mongorepositorybeanpostprocessor)
+  - [How It Works](#how-it-works_1)
   - [Stub Detection](#stub-detection)
 - [Pagination](#pagination)
   - [Paginated Queries](#paginated-queries)
@@ -957,7 +957,7 @@ Source file: `src/pyfly/data/document/mongodb/post_processor.py`
 
 ## Pagination
 
-For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [Data Module Guide — Pagination & Sorting](data.md#pagination--sorting).
+For the full `Pageable`, `Sort`, `Order`, and `Page[T]` API reference, see the [Data Module Guide — Pagination & Sorting](data.md#pagination-sorting).
 
 ### Paginated Queries
 

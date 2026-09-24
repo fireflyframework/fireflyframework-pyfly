@@ -135,6 +135,7 @@ nav:
           - Error Handling: modules/error-handling.md
       - Web & API:
           - Web Layer: modules/web.md
+          - Native Webapps & Model Admin: modules/webapps.md
           - Web Filters: modules/web-filters.md
           - Server Layer: modules/server.md
           - Validation: modules/validation.md
