@@ -194,6 +194,7 @@ message for sensitive entities before writing to any output.
 | `redaction.entities` | list[string] | see below | Entity names to detect and mask |
 | `redaction.mask` | string | `placeholder` | Mask style: `placeholder` (`<EMAIL>`), `partial` (`****1111`), or `hash` (`<EMAIL:a1b2c3d4>`) |
 | `redaction.extra-patterns` | map[string, string] | `{}` | Additional named regex patterns to redact (e.g. `{"EMP": "EMP-\\d{4}"}`) |
+| `redaction.preserve-patterns` | map[string, string] | `{}` | Additional named regex patterns whose matches are **never** redacted, on top of the built-in identifier shapes (e.g. `{"ORDER_REF": "ORD-[0-9]{8}"}`) |
 | `redaction.deny-fields` | list[string] | `["password", "token", "secret"]` | Structured log fields whose value is always replaced with `<REDACTED>` |
 | `redaction.allow-fields` | list[string] | `[]` | When set, only these structured fields (plus `event`) are scanned; others are skipped |
 | `redaction.streams.enabled` | bool | `false` | Opt-in: wrap `sys.stdout`/`sys.stderr` with the redactor |
@@ -207,6 +208,44 @@ Default entities detected by the regex engine:
 `BEARER_TOKEN`, `URL_CREDENTIALS`, `PHONE`. (`IPV4` and `IPV6` patterns also
 ship but are **off by default** — IP addresses are common in logs and redacting
 them is often undesirable; enable them via `redaction.entities` if you need them.)
+
+### Identifiers are never mangled
+
+A uuid, a W3C trace id or span id, and a ULID are made of digits and hex letters,
+so a generic PII rule can match a substring of one. Before 26.09.07 that is
+exactly what happened: roughly one uuid in four had a digit run in its middle
+replaced by `<PHONE>`, so a run id grepped out of an application never matched
+the log line it appeared on — silently, and only sometimes.
+
+Those shapes are now carved out of the message **before** any entity pattern
+runs, and the entity rules only ever see the gaps between them. A pattern
+therefore cannot match across a protected identifier, whichever engine is in
+use. The built-in protected shapes are:
+
+| Name | Shape |
+|------|-------|
+| `UUID` | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, any version, either case |
+| `TRACE_ID` | 32 hex characters (W3C trace-context), at least one of them a letter |
+| `SPAN_ID` | 16 hex characters (W3C trace-context), at least one of them a letter |
+| `ULID` | 26 Crockford base32 characters starting `0`-`7` |
+
+The hex shapes require at least one hex **letter** on purpose: an all-digit run
+of 16 characters is a card number far more often than it is a span id, and
+protecting it would turn this guard into a way to hide PII. Add your own
+identifier shapes with `redaction.preserve-patterns`.
+
+This is the message-text half of the rule
+`pyfly.logging.redaction.processor._NEVER_REDACT` applies to the structlog
+correlation *fields* (`trace_id`, `span_id`, `trace_flags`, `correlationId`).
+
+`PHONE` was tightened in the same release. It used to be guarded by digits only
+(`(?<!\d)` / `(?!\d)`), which a hex letter or a hyphen satisfies — the reason it
+read uuids as phone numbers — and it could not match compact E.164 at all, so
+`+34911234567` went to the log untouched. It is now anchored on word boundaries
+and matches compact E.164, separated international, `(212) 555-0143`,
+`202-555-0143` and `555-0143`. A national number written as seven bare digits
+with no separator is no longer matched; write it with a separator or with its
+country code.
 
 ### Upgrading to Presidio (NER-based redaction)
 

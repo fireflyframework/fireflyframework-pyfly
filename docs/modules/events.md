@@ -254,6 +254,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.postgres.dsn` | `str` | *(required)* | PostgreSQL DSN for the producer connection pool. |
 | `pyfly.eda.postgres.listen-dsn` | `str` | same as `dsn` | Optional dedicated DSN for the LISTEN connection. |
 | `pyfly.eda.postgres.channel` | `str` | `pyfly_eda` | `pg_notify` channel name. |
+| `pyfly.eda.postgres.auto-create-tables` | `bool` | `true` | Create `pyfly_eda_outbox` / `pyfly_eda_offsets` when they are missing. The DDL is skipped when they already exist, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all. |
 | `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
 | `pyfly.eda.rabbitmq.exchange-name` | `str` | `pyfly` | Name of the durable DIRECT exchange to declare. |
 
@@ -294,6 +295,34 @@ The JSON serializer **reads both envelope shapes** of the Firefly family — PyF
 (`event_id`, `event_type`) and LaraFly's camelCase (`eventId`, `eventType`, with PHP's `[]` for an
 empty object) — and raises one typed `EnvelopeDecodeError` for anything else. To *write* the
 LaraFly shape (its key order, `DATE_ATOM` timestamps), select `serialization-format: firefly-json`.
+
+### Postgres: what privileges a serving process actually needs
+
+`PostgresEventBus.start()` used to run `CREATE TABLE IF NOT EXISTS` and
+`CREATE INDEX IF NOT EXISTS` for the outbox in **every** process at **every** boot — including a
+process that only publishes, since `publish()` lazily starts the bus. Postgres checks `CREATE` on
+the schema *before* it checks `IF NOT EXISTS`, so an existing table did not save a role without
+that right; and `CREATE INDEX IF NOT EXISTS` on a table you do not own fails even when the index
+is already there, which a `GRANT CREATE ON SCHEMA` does not fix. The practical consequence was
+that a serving role had to own two framework-internal tables, or belong to a role that did.
+
+`start()` now **probes first**: one `to_regclass` round trip, which needs nothing beyond `USAGE`
+on the schema, and the DDL runs only when a table is genuinely missing. A first boot against an
+empty database still creates everything, so `pyfly new` needs no configuration. Set
+`pyfly.eda.postgres.auto-create-tables: false` when migrations own the schema and the framework
+must not issue DDL under any circumstance.
+
+A serving process therefore needs only:
+
+```sql
+GRANT USAGE ON SCHEMA public TO serving;
+GRANT SELECT, INSERT, UPDATE ON pyfly_eda_outbox, pyfly_eda_offsets TO serving;
+GRANT USAGE ON SEQUENCE pyfly_eda_outbox_id_seq TO serving;
+```
+
+The consumer group's cursor row (`INSERT ... ON CONFLICT DO NOTHING` into `pyfly_eda_offsets`) is
+issued on every boot regardless: it is data, not schema, it needs only `INSERT`, and a new
+consumer group joining an existing deployment still has to create its own.
 
 ---
 

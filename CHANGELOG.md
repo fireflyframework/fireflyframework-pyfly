@@ -6,6 +6,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.07 (2026-09-24)
+
+Three asks a platform raised against `26.09.06` on the day it shipped: logs that could not be
+searched by the identifiers the product is built around, a serving process that had to own the
+framework's own tables to start, and a cache bridge that made every process a consumer of a
+queue it had nothing to do with. Each was found by running a service on the framework, not by
+reading it.
+
+### Fixed
+
+- **An identifier in a log message survives redaction, and `PHONE` means a phone number.** The
+  built-in `PHONE` rule was guarded by digits only — `(?<!\d)` and `(?!\d)` — and a hex letter
+  or a hyphen satisfies a digit-only guard, so the rule matched happily inside a uuid: about one
+  uuid in four had a digit run in its middle replaced, and a line read `run
+  01a0b263-b0b7-71f5-bfb<PHONE>b2aa0`. A run id grepped out of an application therefore never
+  matched its own log line — silently, and only sometimes, which is worse than always, because
+  the operator concludes the event never happened. The same rule could not match compact E.164
+  at all (eleven contiguous digits cannot be split by `\d{3}\d{4}`), so `+34911234567` went to
+  the log untouched: it gave up searchability *and* privacy at once, and neither is traded away
+  to fix the other. Identifier shapes — uuid of any version, W3C trace id and span id, ULID —
+  are now carved out of the message **before** any entity pattern runs, and the entity rules
+  only ever see the gaps between them, so no rule can consume half of one, on the regex engine
+  and on the Presidio engine alike. This is the message-text half of the rule `#156` applied to
+  the structlog correlation *field keys*; the 16- and 32-character hex shapes require at least
+  one hex letter on purpose, so an all-digit run of that length is still read as a card number
+  rather than hidden behind the guard. `PHONE` itself is now anchored on word boundaries and
+  matches compact E.164, separated international, `(212) 555-0143`, `202-555-0143` and
+  `555-0143`; a national number written as seven bare digits with no separator is deliberately
+  no longer matched. `pyfly.logging.redaction.preserve-patterns` (a named-regex map, symmetric
+  with `extra-patterns`) protects a consumer's own id shape, and an invalid entry there is
+  warned about and ignored exactly as an invalid `extra-patterns` entry is. Forty tests in
+  `tests/logging/test_identifiers_survive_redaction.py`, including a sweep over three thousand
+  generated uuids per version — with a quarter of them mangled before, a handful of examples
+  would have passed by luck.
+
+- **A serving process boots the Postgres event bus with no right to create schema.**
+  `PostgresEventBus.start()` ran the outbox `CREATE TABLE/INDEX IF NOT EXISTS` in every process
+  at every boot, including a pure publisher, since `publish()` lazily starts the bus. PostgreSQL
+  checks `CREATE` on the schema *before* it checks `IF NOT EXISTS`, so an existing table did not
+  save a role without that right; and `CREATE INDEX IF NOT EXISTS` on a table you do not own
+  fails even when the index is already there, which a `GRANT CREATE ON SCHEMA` does not fix. The
+  framework was not asking for one privilege, it was asking every deployment to keep a boot role
+  that *owned* two framework-internal tables and to make the serving role a member of it —
+  under a least-privilege posture, not an inconvenience but a violation. `start()` now probes
+  first with a single `to_regclass` round trip, which needs nothing beyond `USAGE` on the schema,
+  and issues the DDL only when a table is genuinely missing; a first boot against an empty
+  database still creates everything, so `pyfly new` needs no configuration. The gate is an
+  opt-*out*: `pyfly.eda.postgres.auto-create-tables: false` stops the framework issuing DDL under
+  any circumstance, for a deployment whose schema belongs to its migrations. The consumer group's
+  cursor row is deliberately outside the skip — it is data, not schema, it needs only `INSERT`,
+  and a new group joining an existing deployment still has to create its own. Six unit tests in
+  `tests/eda/test_postgres_outbox_ddl_gate.py` drive `start()` against a fake asyncpg and assert
+  on the statements it sends; three in `tests/integration/test_eda_postgres_least_privilege.py`
+  boot the bus against a real server as a role that holds `USAGE`, `SELECT/INSERT/UPDATE` and
+  nothing else, and fail on the old adapter with `permission denied for schema public`.
+
+- **The CQRS cache-invalidation bridge subscribes one handler per rule, not the wildcard.**
+  `EdaCacheInvalidationBridge.subscribe()` registered `"*"` the moment a CQRS context had an EDA
+  bus, whether or not any rule was registered — so a process subscribed to everything in order
+  to discard it, since an unregistered event type reaches `on_envelope` and does nothing at all.
+  On the Postgres bus that is not passive: `_drain` refuses to advance the consumer group's
+  cursor while no handler is registered, precisely so events published before a worker subscribed
+  are not lost, and a wildcard handler that dispatches nothing defeated that guard — an API
+  sharing a worker's consumer group drained the worker's queue into a no-op and its jobs stayed
+  queued. On Kafka and Redis the same subscription cost a partition assignment and a pattern
+  subscription for no work. The bridge now subscribes an event type when a rule for it is
+  registered, and nothing while it has no rule, so a process that invalidates nothing is not a
+  consumer of the bus and the `_drain` guard works as written; registering before or after the
+  framework attaches the bridge both work. There was also no way to refuse it short of disabling
+  CQRS entirely — `pyfly.cqrs.cache.invalidation.enabled: false` now does exactly that. Eleven
+  tests in `tests/cqrs/test_cache_bridge_subscribes_narrowly.py` and the regression that names
+  the damage in `tests/eda/test_cursor_guard_with_cache_bridge.py`.
+
+---
+
 ## v26.09.06 (2026-09-24)
 
 > Prepared during the wave of 2026-09-17 as `26.09.05`; that number was taken meanwhile by the

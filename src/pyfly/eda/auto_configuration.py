@@ -41,6 +41,10 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
 * ``postgres.listen-dsn`` — Optional dedicated DSN for the LISTEN
   connection. Defaults to ``postgres.dsn``.
 * ``postgres.channel`` — pg_notify channel. Default ``pyfly_eda``.
+* ``postgres.auto-create-tables`` — Create the outbox tables when they are
+  missing. Default ``true``. The DDL is skipped when they already exist, so a
+  serving process needs no schema-creation right; set this to ``false`` when the
+  schema is managed by migrations and the framework must never issue DDL at all.
 * ``rabbitmq.url`` — AMQP URL. Default ``amqp://guest:guest@localhost/``.
 * ``rabbitmq.exchange-name`` — Exchange name. Default ``pyfly``.
 """
@@ -132,12 +136,18 @@ class EdaAutoConfiguration:
             listen_dsn_raw = config.get("pyfly.eda.postgres.listen-dsn", "")
             listen_dsn = str(listen_dsn_raw) if listen_dsn_raw else None
             channel = str(config.get("pyfly.eda.postgres.channel", "pyfly_eda"))
+            auto_create = str(config.get("pyfly.eda.postgres.auto-create-tables", "true")).lower() in (
+                "true",
+                "1",
+                "yes",
+            )
             return PostgresEventBus(
                 dsn=dsn,
                 listen_dsn=listen_dsn,
                 channel=channel,
                 destinations=destinations,
                 group=group,
+                auto_create_tables=auto_create,
             )
 
         if provider == "rabbitmq":
