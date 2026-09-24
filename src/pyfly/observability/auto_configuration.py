@@ -175,7 +175,7 @@ class TracingAutoConfiguration:
 class MeterProviderAutoConfiguration:
     """Auto-configures an OpenTelemetry ``MeterProvider`` beside the ``TracerProvider``.
 
-    Until 26.09.05 the framework set a tracer provider and no meter provider, so every OTel
+    Until 26.09.06 the framework set a tracer provider and no meter provider, so every OTel
     metric an application (or the framework's own instrumentation) recorded went to the API's
     no-op provider and was dropped, silently. The reader is OTLP/HTTP, to the metrics endpoint
     derived from the traces one (``/v1/traces`` -> ``/v1/metrics``) unless

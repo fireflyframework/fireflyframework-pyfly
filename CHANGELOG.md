@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## v26.09.05 (2026-09-17)
+## v26.09.06 (2026-09-24)
+
+> Prepared during the wave of 2026-09-17 as `26.09.05`; that number was taken meanwhile by the
+> native-webapps release of 2026-09-23, so this work ships as **`26.09.06`**. The two commits on
+> the branch still carry the old number in their subjects — this section is the released truth.
 
 Six things a Python service sharing a platform with a LaraFly control plane had to work around
 at boot, each now a framework feature with its own tests. Found by one worker runtime that

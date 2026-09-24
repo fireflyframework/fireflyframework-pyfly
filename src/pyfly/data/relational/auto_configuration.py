@@ -192,7 +192,7 @@ class RelationalAutoConfiguration:
     def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:
         """Create an ``AsyncSession`` from the factory — a NEW one for every injection.
 
-        This bean was a singleton until 26.09.05, so every repository, every user bean and the
+        This bean was a singleton until 26.09.06, so every repository, every user bean and the
         engine lifecycle shared one SQLAlchemy session: one transaction, one identity map and one
         connection's local state (``SET LOCAL``, a tenant GUC, a ``search_path``) for the whole
         process. Anything multi-tenant or concurrent had to refuse the bean and open its own

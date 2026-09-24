@@ -89,7 +89,7 @@ def decode_envelope(data: bytes) -> EventEnvelope:
 
     PyFly writes ``{"event_id", "event_type", "payload", "destination", "timestamp", "headers"}``;
     LaraFly writes ``{"eventType", "destination", "payload", "headers", "eventId", "timestamp"}``.
-    Until 26.09.05 this reader did ``raw["event_id"]`` and a record from the PHP side died with a
+    Until 26.09.06 this reader did ``raw["event_id"]`` and a record from the PHP side died with a
     ``KeyError`` — on a topic the two runtimes share, every cross-runtime event was poison. The
     event type and the destination are required; an absent event id or timestamp is filled in,
     because both are metadata the reader can stand in for and a handler needs neither to run.

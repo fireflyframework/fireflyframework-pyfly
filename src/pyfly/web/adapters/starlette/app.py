@@ -395,7 +395,7 @@ def create_app(
     # when this line runs — so this scan finds contributors only in a context started
     # beforehand (tests, embedded use), and ``_install_dynamic_wiring`` scans again after
     # start(). ``_contributors_asked`` is shared by both so a contributor is asked once and a
-    # route mounted once. Before 26.09.05 fixed this, the first scan was the only one and a
+    # route mounted once. Before 26.09.06 fixed this, the first scan was the only one and a
     # service booted the canonical way answered 404 in shared mode for a route that was live on
     # its management port in production.
     _contributors_asked: set[int] = set()

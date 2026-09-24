@@ -13,7 +13,7 @@
 # limitations under the License.
 """An application adds routes to the management listener without touching the framework.
 
-Two doors, both new in 26.09.05:
+Two doors, both new in 26.09.06:
 
 * :class:`ManagementRoutesContributor` — a bean returning Starlette routes that
   ``create_management_app`` mounts on the management port (and ``create_app`` on the main app

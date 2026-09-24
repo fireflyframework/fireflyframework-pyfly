@@ -684,7 +684,7 @@ class ApplicationContext:
         # class inside it is what the user meant: ``-> Port | None`` returning a
         # ``UserPort`` must make ``get_bean(Port)`` answer, exactly as ``-> Port``
         # does, and must complete the provisional ``Port`` registration a deferred
-        # factory claimed. Until 26.09.05 the union was bound as-is, so ``Port``
+        # factory claimed. Until 26.09.06 the union was bound as-is, so ``Port``
         # resolved for nobody and the deferred claim was never completed (the
         # factory ran a second time on the next resolve). A two-class union
         # declares nothing; the concrete ``impl_type`` registered above still

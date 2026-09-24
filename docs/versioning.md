@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.09.06` | 2026-09-24 | Deferred user `@bean` factories, Kafka partition keys and dead-letter topics, cross-runtime event envelopes, `ManagementRoutesContributor` and `@write_operation`, mounted routes in `/openapi.json`, a real `MeterProvider`, and a transient `AsyncSession`. |
 | `26.09.05` | 2026-09-23 | Native webapps, branded welcome/errors, existing-model administration, and bilingual book appendices. |
 | `26.05.01` | 2026-05-07 | **CalVer migration.** Full Java framework parity: rewritten transactional engine (Saga + Workflow + TCC), nine new modules (eventsourcing, callbacks, webhooks, notifications, IDP, ECM, plugins, rule engine, config server), 12 new third-party adapters, four new client protocols (SOAP/gRPC/GraphQL/WebSocket), 16 domain validators. |
 | `0.3.0-M1` | 2026-05-07 | (Superseded by 26.05.01.) Initial v0.3.0 milestone — same payload as 26.05.01 under the previous SemVer scheme. |
@@ -88,17 +89,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.09.05"
+print(pyfly.__version__)  # → "26.09.06"
 ```
 
 ```bash
-pyfly --version            # → 26.09.05
+pyfly --version            # → 26.09.06
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.09.05) (Python 3.13.9)
+:: PyFly Framework :: (v26.09.06) (Python 3.13.9)
 ```
 
 ---

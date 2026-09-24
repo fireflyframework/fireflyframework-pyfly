@@ -15,7 +15,7 @@
 
 ``create_app(extra_routes=...)`` accepts plain Starlette ``Route`` objects and ``Mount``\\ s of
 whole sub-applications — the shape a service uses for provider webhooks, an SDK's ASGI app or a
-legacy surface it carries beside its ``@rest_controller`` classes. Until 26.09.05 those routes
+legacy surface it carries beside its ``@rest_controller`` classes. Until 26.09.06 those routes
 were served and never described: the generator worked from controller metadata only, so a
 document could lose the paths that carried the traffic without any diff noticing. This module
 walks them. It cannot recover a typed contract (there is no handler signature to read), so what
@@ -59,7 +59,7 @@ class MountedParameter:
 
     OpenAPI 3.1 requires every ``{expression}`` in a path template to have a ``parameters``
     entry; a document that omits one does not validate, and the gateway's
-    ``/api/telegram/{botId}/updates`` was emitted without it until 26.09.05. Controllers get
+    ``/api/telegram/{botId}/updates`` was emitted without it until 26.09.06. Controllers get
     theirs from the handler signature; a plain route has only Starlette's convertor to read.
     """
 

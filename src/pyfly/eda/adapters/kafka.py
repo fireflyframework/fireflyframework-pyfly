@@ -141,7 +141,7 @@ class KafkaEventBus:
         """Produce one keyed record.
 
         ``key`` overrides the derived key for the one call; otherwise it is
-        :func:`partition_key` over the envelope headers. Until 26.09.05 no key
+        :func:`partition_key` over the envelope headers. Until 26.09.06 no key
         was sent at all and Kafka round-robined the records, so two events of
         one aggregate could be consumed in either order.
         """
