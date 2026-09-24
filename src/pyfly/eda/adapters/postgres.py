@@ -124,6 +124,20 @@ CREATE TABLE IF NOT EXISTS pyfly_eda_offsets (
 );
 """
 
+# Postgres checks CREATE on the schema BEFORE it checks IF NOT EXISTS, so
+# replaying the DDL above is not free for a role that merely reads and writes
+# the two tables: it fails with "permission denied for schema public" even
+# though both tables are already there. CREATE INDEX IF NOT EXISTS is stricter
+# still — it wants ownership of the table, so a GRANT CREATE ON SCHEMA does not
+# rescue it either. That is why a serving process used to need to be (or to
+# belong to) the owner of two framework-internal tables. This probe costs one
+# round trip, needs nothing beyond USAGE on the schema, and answers the only
+# question the DDL was asking.
+_SQL_TABLES_PRESENT = """
+SELECT to_regclass('pyfly_eda_outbox') IS NOT NULL
+   AND to_regclass('pyfly_eda_offsets') IS NOT NULL
+"""
+
 
 class PostgresEventBus:
     """``EventPublisher`` backed by Postgres LISTEN/NOTIFY + outbox table."""
@@ -137,6 +151,7 @@ class PostgresEventBus:
         destinations: list[str] | None = None,
         group: str = "default",
         poll_interval_s: float = 5.0,
+        auto_create_tables: bool = True,
     ) -> None:
         # asyncpg only understands the bare ``postgresql://`` scheme; strip
         # SQLAlchemy-style dialect markers (``+asyncpg``, ``+psycopg``)
@@ -147,6 +162,7 @@ class PostgresEventBus:
         self._destinations = list(destinations) if destinations else None
         self._group = group
         self._poll_interval_s = poll_interval_s
+        self._auto_create_tables = auto_create_tables
         self._handlers: list[tuple[str, EventHandler]] = []
         self._pool: Any = None
         self._listen_conn: Any = None
@@ -196,8 +212,10 @@ class PostgresEventBus:
 
         self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=10)
         async with self._pool.acquire() as conn:
-            await conn.execute(_DDL_OUTBOX)
-            await conn.execute(_DDL_OFFSETS)
+            await self._ensure_tables(conn)
+            # Deliberately outside the skip: this is the consumer group's cursor
+            # row, not schema. It needs INSERT and nothing more, and a new group
+            # joining an existing deployment still has to create its own.
             await conn.execute(
                 """
                 INSERT INTO pyfly_eda_offsets (consumer_group, last_event_id)
@@ -224,6 +242,28 @@ class PostgresEventBus:
             self._destinations,
             self._group,
         )
+
+    async def _ensure_tables(self, conn: Any) -> None:
+        """Create the outbox tables, but only when they are actually missing.
+
+        Every process used to replay the CREATE TABLE/INDEX statements at every
+        boot, so a serving role needed schema-creation rights (in practice,
+        ownership of framework-internal tables) for work it never did. The probe
+        is one round trip on a connection the adapter has already opened, and it
+        runs as any role that can read the schema.
+        """
+        if not self._auto_create_tables:
+            logger.debug(
+                "pyfly.eda.postgres.auto-create-tables is off; assuming the outbox tables are managed elsewhere"
+            )
+            return
+        if await conn.fetchval(_SQL_TABLES_PRESENT):
+            # Say so out loud: an operator chasing a missing table wants to see
+            # that the framework looked before it decided to do nothing.
+            logger.info("EDA outbox tables already present; skipping DDL")
+            return
+        await conn.execute(_DDL_OUTBOX)
+        await conn.execute(_DDL_OFFSETS)
 
     async def stop(self) -> None:
         self._closed = True

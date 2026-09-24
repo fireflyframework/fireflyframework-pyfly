@@ -37,11 +37,14 @@ def test_structlog_allow_fields_limits_scanning():
 
 
 def test_trace_ids_are_never_redacted_even_with_phone_pattern():
-    # A trace id with a 7-digit island bounded by hex letters matches the PHONE pattern;
-    # left unguarded the redactor would mutilate it and silently break log<->trace correlation.
+    # A trace id with a 7-digit island bounded by hex letters used to match the PHONE
+    # pattern, which silently broke log<->trace correlation. Since 26.09.07 the engine
+    # protects the identifier shape itself, so the id survives even in a message body;
+    # the field guard below stays as the second line of defence, for a key whose VALUE
+    # is not one of the recognised identifier shapes.
     tid = "a1234567ffffffffffffffffffffffff"
     r = RegexRedactor(["PHONE"])
-    assert r.redact(tid) != tid  # sanity: PHONE *would* corrupt it if unguarded
+    assert r.redact(tid) == tid  # the engine no longer mutilates it
     # deny_fields lists trace_id on purpose: NEVER_REDACT must win even over an explicit deny.
     proc = make_structlog_redactor(r, allow_fields=[], deny_fields=["trace_id"])
     out = proc(

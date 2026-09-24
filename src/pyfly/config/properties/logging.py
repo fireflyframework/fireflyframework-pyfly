@@ -82,6 +82,11 @@ class RedactionProperties:
     )
     mask: str = "placeholder"  # placeholder | partial | hash
     extra_patterns: dict[str, str] = field(default_factory=dict)
+    # Named regexes whose matches are never redacted, on top of the built-in
+    # identifier shapes (uuid, W3C trace/span id, ULID). For a consumer whose
+    # ids have a shape of their own — an ordering key, a tenant slug — that a
+    # generic PII rule would otherwise mangle.
+    preserve_patterns: dict[str, str] = field(default_factory=dict)
     allow_fields: list[str] = field(default_factory=list)
     deny_fields: list[str] = field(default_factory=lambda: ["password", "token", "secret"])
     streams: StreamsRedactionProperties = field(default_factory=StreamsRedactionProperties)

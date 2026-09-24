@@ -143,6 +143,7 @@ class CqrsAutoConfiguration:
         return QueryCacheAdapter(cache=cache)
 
     @bean
+    @conditional_on_property("pyfly.cqrs.cache.invalidation.enabled", having_value="true", match_if_missing=True)
     def eda_cache_invalidation_bridge(
         self,
         cache: QueryCacheAdapter,
@@ -151,19 +152,22 @@ class CqrsAutoConfiguration:
         """Wire the EDA→CQRS cache-invalidation bridge.
 
         When an :class:`~pyfly.eda.ports.outbound.EventPublisher` bean is
-        present the bridge is created, subscribed to the bus and returned so
-        that applications can register additional rules via
-        ``bridge.register(event_type, pattern)``.
+        present the bridge is created, attached to the bus and returned so
+        that applications can register rules via
+        ``bridge.register(event_type, pattern)``. Attaching subscribes one
+        handler per registered rule and nothing while there is no rule, so a
+        process that invalidates nothing is not a consumer of the bus.
 
         When no EDA bus is configured the bean evaluates to ``None`` and the
-        bridge is silently disabled.
+        bridge is silently disabled. ``pyfly.cqrs.cache.invalidation.enabled:
+        false`` refuses it outright, without disabling CQRS.
         """
         if producer is None:
             _logger.debug("No EventPublisher bean found — EDA cache-invalidation bridge disabled")
             return None
         bridge = EdaCacheInvalidationBridge(cache)
         bridge.subscribe(producer)
-        _logger.debug("EDA cache-invalidation bridge wired to %s", type(producer).__name__)
+        _logger.debug("EDA cache-invalidation bridge attached to %s", type(producer).__name__)
         return bridge
 
     @bean

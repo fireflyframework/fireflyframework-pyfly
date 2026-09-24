@@ -64,6 +64,20 @@ class QueryProperties:
 
 
 @dataclass
+class CacheInvalidationProperties:
+    """``pyfly.cqrs.cache.invalidation.*``."""
+
+    enabled: bool = True
+
+
+@dataclass
+class CqrsCacheProperties:
+    """``pyfly.cqrs.cache.*``."""
+
+    invalidation: CacheInvalidationProperties = field(default_factory=CacheInvalidationProperties)
+
+
+@dataclass
 class CustomAuthorizationProperties:
     """``pyfly.cqrs.authorization.custom.*``."""
 
@@ -87,4 +101,5 @@ class CqrsProperties:
     enabled: bool = True
     command: CommandProperties = field(default_factory=CommandProperties)
     query: QueryProperties = field(default_factory=QueryProperties)
+    cache: CqrsCacheProperties = field(default_factory=CqrsCacheProperties)
     authorization: AuthorizationProperties = field(default_factory=AuthorizationProperties)

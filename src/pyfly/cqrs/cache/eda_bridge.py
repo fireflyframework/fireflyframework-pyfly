@@ -48,7 +48,10 @@ class EdaCacheInvalidationBridge:
 
         bridge = EdaCacheInvalidationBridge(cache_adapter)
         bridge.register("order.updated", "order:{order_id}")
-        bridge.subscribe(event_bus)   # wires on_envelope as a subscriber
+        bridge.subscribe(event_bus)   # subscribes "order.updated", and nothing else
+
+    A bridge with no registered rule subscribes to nothing at all, so a process
+    that invalidates no cache entry is not a consumer of the bus.
 
     Then, when the EDA bus delivers an event of type ``"order.updated"``
     with payload ``{"order_id": "42", ...}``, the bridge evicts the cache
@@ -58,11 +61,17 @@ class EdaCacheInvalidationBridge:
     def __init__(self, cache: QueryCacheAdapter) -> None:
         self._cache = cache
         self._rules: dict[str, list[str]] = {}
+        self._publisher: EventPublisher | None = None
+        self._subscribed: set[str] = set()
 
     # ── rule registration ──────────────────────────────────────
 
     def register(self, event_type: str, cache_key_pattern: str) -> None:
         """Register a cache-key pattern to evict when *event_type* arrives.
+
+        When the bridge is already attached to a bus, registering a rule also
+        subscribes that one event type — the bridge only ever consumes what it
+        has something to do about.
 
         Args:
             event_type: The EDA event-type string (e.g. ``"order.updated"``).
@@ -70,21 +79,41 @@ class EdaCacheInvalidationBridge:
                 ``{field}`` placeholders are resolved from the envelope payload.
         """
         self._rules.setdefault(event_type, []).append(cache_key_pattern)
+        self._subscribe_event_type(event_type)
 
     # ── EDA subscription ───────────────────────────────────────
 
     def subscribe(self, event_publisher: EventPublisher) -> None:
-        """Wire this bridge into the EDA bus.
+        """Attach this bridge to the EDA bus.
 
-        Subscribes :meth:`on_envelope` as a wildcard handler so it receives
-        **every** event.  The bridge then routes internally based on the
-        registered rules.
+        Subscribes :meth:`on_envelope` **once per registered event type**, and
+        nothing at all while no rule is registered.
+
+        It used to subscribe the wildcard ``"*"``, which made every process a
+        consuming member of the group in order to discard what it received. On
+        the Postgres bus that is not passive: the adapter refuses to advance its
+        cursor while no handler is registered, precisely so events published
+        before a worker subscribed are not lost — and a wildcard handler that
+        dispatches nothing defeated that guard, draining another process's queue
+        into a no-op. On Kafka and Redis it cost a partition assignment and a
+        pattern subscription for no work.
+
+        Attaching before or after :meth:`register` both work: rules registered
+        later subscribe themselves.
 
         Args:
             event_publisher: The live EDA bus (e.g. an
                 :class:`~pyfly.eda.adapters.memory.InMemoryEventBus`).
         """
-        event_publisher.subscribe("*", self.on_envelope)
+        self._publisher = event_publisher
+        for event_type in self._rules:
+            self._subscribe_event_type(event_type)
+
+    def _subscribe_event_type(self, event_type: str) -> None:
+        if self._publisher is None or event_type in self._subscribed:
+            return
+        self._publisher.subscribe(event_type, self.on_envelope)
+        self._subscribed.add(event_type)
 
     # ── event handler ──────────────────────────────────────────
 

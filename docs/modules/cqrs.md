@@ -509,9 +509,28 @@ and injected into the `DefaultQueryBus`. No extra configuration is required.
 ### EDA-driven cache invalidation
 
 When an EDA `EventPublisher` bean is present, `CqrsAutoConfiguration`
-also creates an **`EdaCacheInvalidationBridge`** bean and subscribes it to the
-bus as a wildcard listener. The bridge evicts `QueryCacheAdapter` entries in
-response to domain events arriving on the `pyfly.eda` bus.
+also creates an **`EdaCacheInvalidationBridge`** bean and attaches it to the
+bus. The bridge evicts `QueryCacheAdapter` entries in response to domain events
+arriving on the `pyfly.eda` bus.
+
+It subscribes **one handler per registered rule**, and nothing at all while no
+rule is registered — a process that invalidates nothing is not a consumer of the
+bus. Registering a rule after startup subscribes it there and then, so the order
+of `register()` and the framework's `subscribe()` does not matter.
+
+> **Prior behaviour (corrected in 26.09.07):** the bridge subscribed the
+> wildcard `"*"` from every process the moment a CQRS context had an EDA bus,
+> whether or not any rule was registered — so a process subscribed to everything
+> in order to discard it. On the Postgres bus that is not passive: the adapter
+> refuses to advance the consumer group's cursor while no handler is registered,
+> precisely so events published before a worker subscribes are not lost, and a
+> wildcard handler that dispatches nothing defeated that guard. An API sharing a
+> worker's consumer group drained the worker's queue into a no-op and its jobs
+> stayed queued. On Kafka and Redis the same subscription cost a partition
+> assignment and a pattern subscription for no work.
+
+Set `pyfly.cqrs.cache.invalidation.enabled: false` to refuse the bridge outright
+without disabling CQRS.
 
 Register invalidation rules on the bridge after startup (or inject the bean):
 
@@ -684,6 +703,7 @@ pyfly:
 | `pyfly.cqrs.query.cache_ttl` | `int` | `900` | Default cache TTL (seconds). |
 | `pyfly.cqrs.query.metrics_enabled` | `bool` | `true` | Query metrics. |
 | `pyfly.cqrs.query.tracing_enabled` | `bool` | `true` | Query tracing. |
+| `pyfly.cqrs.cache.invalidation.enabled` | `bool` | `true` | Wire the EDA-driven cache-invalidation bridge. `false` refuses the bean without disabling CQRS. |
 | `pyfly.cqrs.authorization.enabled` | `bool` | `true` | Authorization checks. |
 | `pyfly.cqrs.authorization.custom.enabled` | `bool` | `true` | Custom authorization. |
 | `pyfly.cqrs.authorization.custom.timeout_ms` | `int` | `5000` | Custom auth timeout. |
@@ -709,7 +729,7 @@ these beans into the DI container:
 | `command_event_publisher` | `CommandEventPublisher` | `EdaCommandEventPublisher` when an EDA `EventPublisher` bean is present; `NoOpEventPublisher` otherwise |
 | `command_bus` | `DefaultCommandBus` | |
 | `query_cache_adapter` | `QueryCacheAdapter` | Injects `CacheAdapter` when available; no-op otherwise |
-| `eda_cache_invalidation_bridge` | `EdaCacheInvalidationBridge \| None` | Created and subscribed to the EDA bus when an `EventPublisher` bean is present; `None` otherwise |
+| `eda_cache_invalidation_bridge` | `EdaCacheInvalidationBridge \| None` | Created and attached to the EDA bus when an `EventPublisher` bean is present, subscribing one event type per registered rule; `None` otherwise. Gated by `pyfly.cqrs.cache.invalidation.enabled` (default `true`) |
 | `query_bus` | `DefaultQueryBus` | |
 
 `cqrs_metrics_service` optionally injects a `MetricsRegistry` bean from the
