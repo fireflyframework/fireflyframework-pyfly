@@ -30,7 +30,7 @@ If you're coming from the Java/Spring Boot ecosystem, this guide shows you how e
 - [Distributed Transactions](#distributed-transactions)
 - [Server Abstraction](#server-abstraction)
 - [Integration Testing with Containers](#integration-testing-with-containers)
-- [More Spring-parity features (v26.06.37–55)](#more-spring-parity-features-v260637-55)
+- [More Spring-parity features (v26.06.37–55)](#more-spring-parity-features-v26063755)
 - [Quick Reference Table](#quick-reference-table)
 
 ---
@@ -310,10 +310,11 @@ Spring and PyFly share the same stereotype hierarchy, but the semantics are slig
 | `@Component` | `@component` | Singleton | Generic managed bean |
 | `@Service` | `@service` | Singleton | Business logic |
 | `@Repository` | `@repository` | Singleton | Data access |
-| `@Controller` | `@rest_controller` | Singleton | HTTP endpoints |
+| `@Controller` | `@controller` | Singleton | HTML views with `ModelAndView` |
+| `@RestController` | `@rest_controller` | Singleton | JSON HTTP endpoints |
 | `@Configuration` | `@configuration` | Singleton | Bean factory class |
 
-**Why PyFly uses `@rest_controller` instead of `@controller`:** In Spring, `@Controller` renders views and `@RestController` returns JSON. Since PyFly is API-first and doesn't have a templating engine, `@rest_controller` is the standard stereotype. It automatically serializes return values to JSON.
+**HTML and REST:** `@controller` returns native `ModelAndView` pages using the configured template engine; `@rest_controller` keeps JSON semantics. Install `pyfly[webapp]` and enable `pyfly.web.templates.enabled` for HTML. Named mappings support `reverse(request, "home")` in Python and `reverse('home')` in templates; `static_url` resolves configured assets. See [native web applications](modules/webapps.md) for forms, HTML errors, and administration of existing models.
 
 ### Stereotype Behavior
 
@@ -1589,7 +1590,7 @@ class ShoppingCart: ...
 | Spring | PyFly | Notes |
 |--------|-------|-------|
 | `@WebMvcTest` | `web_slice(*controllers, overrides=…)` → `(context, client)` | Starts a minimal context + `PyFlyTestClient`. |
-| `@DataJpaTest` / `@SpringBootTest` slices | `data_slice(...)` / `service_slice(...)` → `context` | Intent-named aliases of `slice_context`; `overrides` accept a class or a pre-built instance; fail-fast on missing collaborators. See [Testing Guide](modules/testing.md#functional-slices-web_slice--service_slice--data_slice). |
+| `@DataJpaTest` / `@SpringBootTest` slices | `data_slice(...)` / `service_slice(...)` → `context` | Intent-named aliases of `slice_context`; `overrides` accept a class or a pre-built instance; fail-fast on missing collaborators. See [Testing Guide](modules/testing.md#functional-slices-web_slice-service_slice-data_slice). |
 
 ### Session concurrency control
 

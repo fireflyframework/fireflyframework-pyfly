@@ -377,6 +377,7 @@ class AdminRouteBuilder:
                 "theme": self._props.theme,
                 "refreshInterval": self._props.refresh_interval,
                 "serverMode": self._instance_registry is not None,
+                "dataEnabled": str(self._props.data.get("enabled", False)).lower() in ("true", "1", "yes"),
             }
         )
 
@@ -472,7 +473,7 @@ class AdminRouteBuilder:
         content = index_path.read_text(encoding="utf-8")
         # Inject <base> so relative URLs (static/css/*, static/js/*) resolve
         # correctly regardless of whether the browser path has a trailing slash.
-        base_href = self._props.path.rstrip("/") + "/"
+        base_href = request.scope.get("root_path", "").rstrip("/") + self._props.path.rstrip("/") + "/"
         content = content.replace("<head>", f'<head>\n    <base href="{base_href}">', 1)
         # Version-stamp local static assets so a framework upgrade busts stale
         # browser caches (otherwise a cached themes.css/admin.css/app.js keeps the

@@ -14,6 +14,9 @@ gestionadas por el framework que ya esperas del resto de PyFly.
 
 ---
 
+!!! note "Aplicaciones HTML y administración de modelos"
+    El Apéndice E desarrolla el catálogo ejecutable: `ModelAndView`, `Form[T]`, `reverse`, `static_url`, errores HTML y CRUD de entidades/documentos existentes. La administración de datos siempre exige autenticación; en un puerto separado también exige `pyfly.management.security.enabled: true`.
+
 ## Controladores y mapeos de rutas
 
 Todo framework web debe responder a dos preguntas: ¿cómo encuentra una petición

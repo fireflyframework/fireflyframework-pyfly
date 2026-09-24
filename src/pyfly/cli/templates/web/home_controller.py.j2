@@ -1,17 +1,9 @@
 """Web controllers — serves HTML pages."""
 
-from pathlib import Path
-
-from starlette.requests import Request
-from starlette.templating import Jinja2Templates
-
 from pyfly.container import controller
-from pyfly.web import get_mapping, request_mapping
+from pyfly.web import ModelAndView, get_mapping, request_mapping
 
 from {{ package_name }}.services.page_service import PageService
-
-_templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
-
 
 @controller
 @request_mapping("")
@@ -20,12 +12,12 @@ class HomeController:
     def __init__(self, page_service: PageService) -> None:
         self._page_service = page_service
 
-    @get_mapping("/")
-    async def home(self, request: Request):
+    @get_mapping("/", name="home")
+    async def home(self) -> ModelAndView:
         context = self._page_service.get_home_context()
-        return _templates.TemplateResponse(request, "home.html", {**context, "request": request})
+        return ModelAndView("home.html", context)
 
-    @get_mapping("/about")
-    async def about(self, request: Request):
+    @get_mapping("/about", name="about")
+    async def about(self) -> ModelAndView:
         context = self._page_service.get_about_context()
-        return _templates.TemplateResponse(request, "about.html", {**context, "request": request})
+        return ModelAndView("about.html", context)

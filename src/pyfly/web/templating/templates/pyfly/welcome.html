@@ -1,0 +1,19 @@
+{% extends "pyfly/base.html" %}
+{% block title %}Welcome to {{ branding.name }}{% endblock %}
+{% block content %}
+<section class="panel welcome-panel" aria-labelledby="welcome-heading">
+  <div class="hero-copy">
+    <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> YOUR APPLICATION IS READY</p>
+    <h1 id="welcome-heading">{{ heading | default('Welcome to ' ~ branding.name) }}</h1>
+    <p class="lead">{{ branding.tagline }}</p>
+    <p class="description">From the first page to your next great idea. Everything starts here.</p>
+    {% if branding.documentation_url %}<a class="button" href="{{ branding.documentation_url }}">Start building <span aria-hidden="true">↗</span></a>{% endif %}
+  </div>
+  <div class="flight" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><span class="spark spark-one"></span><span class="spark spark-two"></span><span class="spark spark-three"></span><div class="flight-core"><img src="{{ branding.logo_url }}" alt=""></div><span class="flight-caption">IDEAS TAKE FLIGHT</span></div>
+</section>
+<section class="features" aria-label="Build with PyFly">
+  <article><span class="feature-number">01 / CREATE</span><h2>Pages with purpose.</h2><p>Compose layouts, render templates, and bring your application to life.</p></article>
+  <article><span class="feature-number">02 / CONNECT</span><h2>Your models. Everywhere.</h2><p>Bring the same data models to your pages, APIs, and administration.</p></article>
+  <article><span class="feature-number">03 / GROW</span><h2>Room for the next idea.</h2><p>Start small. Build on a foundation ready to grow with you.</p></article>
+</section>
+{% endblock %}

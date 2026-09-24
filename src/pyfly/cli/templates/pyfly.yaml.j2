@@ -8,6 +8,21 @@ pyfly:
 
 {% if has_web or has_fastapi or archetype in ("web-api", "fastapi-api", "web", "hexagonal", "core") %}
   web:
+{% if archetype == "web" %}
+    templates:
+      enabled: true
+      directories: []
+      packages: ["{{ package_name }}:templates"]
+    static:
+      enabled: true
+      directories: []
+      packages: ["{{ package_name }}:static"]
+    errors:
+      html-enabled: true
+      include-stacktrace: on-debug
+    branding:
+      name: {{ name }}
+{% endif %}
 {% if has_fastapi or archetype == "fastapi-api" %}
     adapter: fastapi
 {% else %}

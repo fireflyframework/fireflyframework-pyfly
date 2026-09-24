@@ -52,6 +52,7 @@ _BODY = _Binding("body")
 _HEADER = _Binding("header")
 _COOKIE = _Binding("cookie")
 _FILE = _Binding("file")
+_FORM = _Binding("form")
 _VALID = _Binding("validate")
 
 
@@ -77,6 +78,9 @@ Cookie = Annotated[T, _COOKIE]
 File = Annotated[T, _FILE]
 """Multipart file upload: ``File[UploadedFile]`` or ``File[list[UploadedFile]]``."""
 
+Form = Annotated[T, _FORM]
+"""URL-encoded or multipart form fields, validated with Pydantic."""
+
 Valid = Annotated[T, _VALID]
 """Validate the parameter with Pydantic, raising a structured 422 on failure.
 
@@ -92,6 +96,7 @@ _BINDING_BY_SENTINEL: dict[_Binding, Any] = {
     _HEADER: Header,
     _COOKIE: Cookie,
     _FILE: File,
+    _FORM: Form,
 }
 
 

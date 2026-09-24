@@ -236,6 +236,6 @@ from pyfly.starters.domain import (
 ```
 
 See the
-[`samples/lumen/`](../../samples/lumen/README.md)
+[`samples/lumen/`](https://github.com/fireflyframework/fireflyframework-pyfly/tree/main/samples/lumen)
 directory for an end-to-end DDD service that uses every primitive on
 this page.

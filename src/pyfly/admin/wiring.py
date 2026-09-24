@@ -136,4 +136,6 @@ def build_admin_routes(
         observability=ObservabilityProvider(context=context),
         instance_registry=admin_instance_registry,
     )
-    return list(admin_builder.build_routes())
+    from pyfly.admin.data.wiring import build_data_routes
+
+    return build_data_routes(context, admin_props.path, extra_post_start) + list(admin_builder.build_routes())

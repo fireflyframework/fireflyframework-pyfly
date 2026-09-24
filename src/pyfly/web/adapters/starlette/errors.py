@@ -21,7 +21,7 @@ from http import HTTPStatus
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from pyfly.kernel.exceptions import (
     BadGatewayException,
@@ -149,7 +149,7 @@ def _problem_details_enabled(request: Request) -> bool:
         return False
 
 
-async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+async def global_exception_handler(request: Request, exc: Exception) -> Response:
     """Handle all exceptions with structured JSON responses.
 
     Emits the ``{"error": {...}}`` envelope by default; when
@@ -158,6 +158,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     """
     transaction_id = getattr(request.state, "transaction_id", str(uuid.uuid4()))
     timestamp = datetime.now(UTC).isoformat()
+    original_exception = exc
 
     # Translate known library exceptions (Pydantic, JSON, timeout, user-registered)
     # into the appropriate PyFly exception before deciding the status (audit #202).
@@ -176,6 +177,12 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         message = "Internal server error"
         code = "INTERNAL_ERROR"
         context = None
+
+    from pyfly.web.adapters.starlette.html_errors import render_html_error
+
+    html_response = await render_html_error(request, status, message, exception=original_exception)
+    if html_response is not None:
+        return html_response
 
     if _problem_details_enabled(request):
         # RFC 7807 problem+json (extension members: code/transactionId/timestamp/context).

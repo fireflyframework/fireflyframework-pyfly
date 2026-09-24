@@ -73,6 +73,7 @@ class WebFilterChainMiddleware:
             return
 
         request = Request(scope, receive, send)
+        terminal_invoked = False
 
         async def _call_app(req: Any) -> Response:
             """Terminal: run the downstream ASGI app and adapt its response.
@@ -83,6 +84,8 @@ class WebFilterChainMiddleware:
             on their first chunk and forwarded to the client **live**, so they are
             never buffered in memory and reach the client incrementally.
             """
+            nonlocal terminal_invoked
+            terminal_invoked = True
             status_code = 200
             raw_headers: list[tuple[bytes, bytes]] = []
             body_parts: list[bytes] = []
@@ -135,7 +138,19 @@ class WebFilterChainMiddleware:
                                     break
                                 body_parts.append(chunk)
 
-            await self.app(scope, receive, _intercept)
+            downstream_receive = receive
+            if "pyfly.request_body" in scope:
+                body_sent = False
+
+                async def replay_receive() -> Any:
+                    nonlocal body_sent
+                    if not body_sent:
+                        body_sent = True
+                        return {"type": "http.request", "body": scope["pyfly.request_body"], "more_body": False}
+                    return await receive()
+
+                downstream_receive = replay_receive
+            await self.app(scope, downstream_receive, _intercept)
 
             if state["streaming"]:
                 # Body already forwarded live; nothing left to send.
@@ -149,8 +164,17 @@ class WebFilterChainMiddleware:
         for f in reversed(self._filters):
             chain = _wrap(f, chain)
 
-        response = cast(Response, await chain(request))
-        await response(scope, receive, send)
+        try:
+            response = cast(Response, await chain(request))
+            if not terminal_invoked and response.status_code in (401, 403):
+                from pyfly.web.adapters.starlette.html_errors import render_filter_error
+
+                response = await render_filter_error(request, response)
+            await response(scope, receive, send)
+        finally:
+            form = scope.get("pyfly.form")
+            if form is not None:
+                await form.close()
 
 
 def _wrap(web_filter: WebFilter, next_call: CallNext) -> CallNext:

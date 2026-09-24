@@ -11,6 +11,7 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
   - [WebProperties](#webproperties)
   - [Auto-Detection](#auto-detection)
   - [StarletteWebAdapter](#starlettewebadapter)
+- [Native HTML Applications](#native-html-applications)
 - [REST Controllers](#rest-controllers)
   - [Defining a Controller](#defining-a-controller)
   - [@rest_controller Stereotype](#rest_controller-stereotype)
@@ -23,13 +24,13 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
   - [@patch_mapping](#patch_mapping)
   - [Parameters Reference](#parameters-reference)
 - [Request Parameter Binding](#request-parameter-binding)
-  - [PathVar\[T\] -- Path Variables](#pathvart----path-variables)
-  - [QueryParam\[T\] -- Query Parameters](#queryparamt----query-parameters)
-  - [Body\[T\] -- Request Body](#bodyt----request-body)
-  - [Header\[T\] -- HTTP Headers](#headert----http-headers)
-  - [Cookie\[T\] -- Cookies](#cookiet----cookies)
+  - [PathVar\[T\] -- Path Variables](#pathvart-path-variables)
+  - [QueryParam\[T\] -- Query Parameters](#queryparamt-query-parameters)
+  - [Body\[T\] -- Request Body](#bodyt-request-body)
+  - [Header\[T\] -- HTTP Headers](#headert-http-headers)
+  - [Cookie\[T\] -- Cookies](#cookiet-cookies)
   - [Type Coercion](#type-coercion)
-- [Valid\[T\] -- Parameter Validation](#validt----parameter-validation)
+- [Valid\[T\] -- Parameter Validation](#validt-parameter-validation)
   - [Standalone Usage: Valid\[T\]](#standalone-usage-validt)
   - [Wrapping Body\[T\]: Valid\[Body\[T\]\]](#wrapping-bodyt-validbodyt)
   - [Wrapping Other Binding Types](#wrapping-other-binding-types)
@@ -40,7 +41,7 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
 - [Response Handling](#response-handling)
   - [Return Value Conversion](#return-value-conversion)
   - [handle_return_value()](#handle_return_value)
-- [JSON & Content Negotiation](#json--content-negotiation)
+- [JSON & Content Negotiation](#json-content-negotiation)
   - [Global JSON Config: pyfly.web.json.\*](#global-json-config-pyflywebjson)
   - [CamelModel: Opt-in camelCase Models](#camelmodel-opt-in-camelcase-models)
   - [JsonSerializers: Custom Non-Pydantic Types](#jsonserializers-custom-non-pydantic-types)
@@ -54,7 +55,7 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
   - [Exception Converters](#exception-converters)
 - [WebFilter Chain](#webfilter-chain)
   - [WebFilter Protocol](#webfilter-protocol)
-  - [OncePerRequestFilter Base Class](#oncerequestfilter-base-class)
+  - [OncePerRequestFilter Base Class](#onceperrequestfilter-base-class)
   - [Built-in Filters](#built-in-filters)
     - [TransactionIdFilter](#transactionidfilter)
     - [RequestLoggingFilter](#requestloggingfilter)
@@ -255,6 +256,12 @@ Source files:
 - `src/pyfly/web/adapters/starlette/adapter.py` -- `StarletteWebAdapter`
 
 ---
+
+## Native HTML Applications
+
+Use `@controller` with `ModelAndView` for HTML pages and `Redirect` for POST/redirect/GET. `Form[T]` binds bounded URL-encoded or multipart input to typed values. Name routes with `@get_mapping("/", name="home")`; use `reverse(request, "home")` in Python or `reverse('home')` in templates. `static_url(request, "css/app.css")` and template `static_url('css/app.css')` resolve configured assets, including mount prefixes.
+
+Install `pyfly[webapp]`, then explicitly enable templates and static resources. The [native webapp guide](webapps.md) explains template inheritance, context processors, custom HTML errors, CSRF, configuration, and model administration with the same existing entities/documents.
 
 ## REST Controllers
 
@@ -475,7 +482,7 @@ async def create_order(self, body: Body[CreateOrderRequest]) -> dict:
 
 When `T` is not a Pydantic model, the raw body bytes are decoded as UTF-8 and passed to `T(decoded_string)`.
 
-**Note:** With bare `Body[T]`, Pydantic validation still runs (via `model_validate_json()`), but validation errors propagate as raw Pydantic `ValidationError` exceptions. To get structured 422 error responses with detailed error information, use `Valid[T]` or `Valid[Body[T]]` instead. See the [Valid[T] -- Parameter Validation](#validt----parameter-validation) section.
+**Note:** With bare `Body[T]`, Pydantic validation still runs (via `model_validate_json()`), but validation errors propagate as raw Pydantic `ValidationError` exceptions. To get structured 422 error responses with detailed error information, use `Valid[T]` or `Valid[Body[T]]` instead. See the [Valid[T] -- Parameter Validation](#validt-parameter-validation) section.
 
 ### Header[T] -- HTTP Headers
 
@@ -2376,3 +2383,6 @@ The WebFilter chain executes in this order for every request:
 ## Adapters
 
 - [Starlette Adapter](../adapters/starlette.md) — Setup, configuration reference, and adapter-specific features for the Starlette / Uvicorn backend
+
+
+Native HTML views, templates, forms, configured static resources, and custom HTML errors are covered in the [native web application guide](webapps.md). Both HTTP adapters use the same implementation.

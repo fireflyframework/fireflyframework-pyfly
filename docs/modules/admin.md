@@ -23,6 +23,7 @@ The admin dashboard requires no additional dependencies beyond the `web` extra
    - [AdminServerProperties](#adminserverproperties)
    - [AdminClientProperties](#adminclientproperties)
 4. [Built-in Views](#built-in-views)
+   - [Datasource Browsing and Model CRUD](#datasource-browsing-and-model-crud)
 5. [Real-Time Updates (SSE)](#real-time-updates-sse)
 6. [REST API Reference](#rest-api-reference)
 7. [Extensibility: Custom Views](#extensibility-custom-views)
@@ -61,10 +62,12 @@ pyfly run
 **4. Navigate to the dashboard:**
 
 ```
-http://localhost:8080/admin
+http://localhost:9090/admin
 ```
 
-That is all. The dashboard auto-discovers beans, health indicators, loggers,
+This is the default separate management port. If management and application ports are equal, use the application port. Data administration additionally requires explicit registrations and authenticated access as described below.
+
+The dashboard auto-discovers beans, health indicators, loggers,
 scheduled tasks, HTTP mappings, caches, CQRS handlers, transactions, and
 metrics from the running `ApplicationContext` and presents them in 16 built-in
 views with real-time updates.
@@ -258,6 +261,48 @@ stream for live updates.
 | **Instances** | `instances` | Fleet view showing all registered application instances with status, URL, and last health check timestamp. Only visible when `pyfly.admin.server.enabled=true`. |
 
 ---
+
+## Datasource Browsing and Model CRUD
+
+The **Datasources** view appears when `pyfly.admin.data.enabled` is true. It groups
+explicitly registered resources by datasource and supports list/detail/create/edit/delete,
+paging, search, filters, sorting, nullable fields, and authorized relationship choices.
+It works with existing SQLAlchemy entities and initialized Beanie documents. `ModelAdmin`
+is exposure/policy metadata; it does not define tables or run migrations.
+
+Register a `ModelAdmin` bean or an `AdminResourceRegistry` with an explicit visible-field
+allowlist. Registrations allow only `list` and `read` until write operations and editable
+fields are selected. Configure shared Pydantic write schemas for validation. The provider
+borrows the primary/named factory or initialized document collection; custom providers
+can call application services for domain invariants.
+
+```yaml
+pyfly:
+  management:
+    security:
+      enabled: true
+  admin:
+    enabled: true
+    data:
+      enabled: true
+      allowed-roles: [ADMIN]
+      edit-token-key: "${ADMIN_EDIT_TOKEN_KEY}"
+```
+
+Configure an existing authentication mechanism and supply a random key of at least 32
+characters for writes. This YAML enables guards; it does not create users or authenticate
+them. A separate management listener rejects data administration unless management
+security is enabled. The data API enforces its own roles even when monitoring is public.
+
+The dashboard sends CSRF headers, validates before writing, and protects stale edits with
+opaque tokens. A 409 preserves unsaved input and offers explicit reload. Deletion requires
+record-specific confirmation. The API exposes schemas and records below
+`<admin-path>/api/data`; hidden fields and datasource credentials stay private.
+
+See the [complete webapp/model-admin guide](webapps.md#register-existing-models) for
+registration examples, configuration defaults, policy hooks, scope, providers, concurrency,
+API payloads, and the runnable sample. SQL locking is verified on PostgreSQL and SQLite;
+Beanie action hooks and service-level invariants require a custom provider.
 
 ## Real-Time Updates (SSE)
 
@@ -537,8 +582,10 @@ security `WebFilter` chain via `RequestContext`):
 
 The SPA shell (`index.html`) and static assets stay public so the dashboard can
 still boot and then surface the API's `401`/`403` responses in the UI. When
-`require_auth` is `false` (the default) the guard is a no-op and all API routes
-are open.
+`require_auth` is `false` (the default), the monitoring guard is a no-op.
+**Model administration always requires authentication and `pyfly.admin.data.allowed-roles`.**
+Its mutations also require the CSRF cookie/header pair, even with bearer authentication.
+The monitoring and model-admin guards both apply when monitoring authentication is enabled.
 
 ### Example: Restrict to OPS and ADMIN Roles
 
@@ -614,3 +661,6 @@ automatically by the wheel build target (`packages = ["src/pyfly"]`).
 | Logfile viewer (via `/actuator/logfile`) | In-memory log viewer with SSE live tail (`/admin/api/logfile` + `/admin/api/sse/logfile`) |
 | Cache management (JMX/Actuator) | Cache stats, key listing, per-key eviction (`/admin/api/caches`) |
 | Log level management | Runtime log level changes via `/admin/api/loggers/{name}` |
+
+
+For opt-in datasource browsing and CRUD over existing SQLAlchemy entities and Beanie documents, see [model administration](webapps.md#register-existing-models). This data API always requires authenticated roles and CSRF for writes, independently of monitoring access.

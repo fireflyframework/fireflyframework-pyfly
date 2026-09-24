@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.09.04-brightgreen" alt="Version: 26.09.04"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.09.05-brightgreen" alt="Version: 26.09.05"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -57,11 +57,11 @@
 
 ## 📘 The Book — *PyFly by Example*
 
-**[PyFly by Example](book/)** is the official, project-driven book for the framework. Across **18 chapters in five parts** it builds **Lumen** — the wallet & ledger service in [`samples/lumen/`](samples/lumen/README.md) — from an empty folder into a secured, observable, event-driven microservice. Every code listing is drawn from that real, running project (it boots and passes its tests against this framework version), so what you read is what actually runs.
+**[PyFly by Example](book/)** is the official, project-driven book for the framework. Across **18 chapters in five parts** it builds **Lumen** — the wallet & ledger service in [`samples/lumen/`](samples/lumen/README.md) — from an empty folder into a secured, observable, event-driven microservice. Lumen is the main companion project. **Appendix E** adds a separate [catalog webapp](samples/webapp/README.md), covering native HTML, forms, URL/static helpers, custom errors, and administration of existing models.
 
 It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
 
-**📥 Download the book:** **[PDF](book/dist/pyfly-by-example.pdf)** · **[EPUB](book/dist/pyfly-by-example.epub)** — or build it from source with `bash book/build/run.sh`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
+**📥 Download the book:** **[English PDF](book/dist/pyfly-by-example.pdf)** · **[English EPUB](book/dist/pyfly-by-example.epub)** · **[Spanish PDF](book/dist/pyfly-by-example-es.pdf)** · **[Spanish EPUB](book/dist/pyfly-by-example-es.epub)** — or build it from source with `bash book/build/run.sh`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 
@@ -852,13 +852,13 @@ See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD micros
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.5-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.5-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.5.4-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.5-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1097,7 +1097,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 | **AOP** | Aspect-oriented programming | Spring AOP |
 | **Observability** | Prometheus metrics, OpenTelemetry tracing, server-layer metrics (workers, connections, in-flight requests, uptime) across Uvicorn/Granian/Hypercorn with multi-worker Prometheus aggregation, surfaced in a live admin Observability dashboard | `fireflyframework-observability` |
 | **Actuator** | Health checks, monitoring endpoints | `fireflyframework-starter-core` (actuator) |
-| **Admin** | Embedded management dashboard with 15 views, SSE streams, server mode fleet monitoring | Spring Boot Admin |
+| **Admin** | Management dashboard, opt-in model CRUD, SSE streams, fleet monitoring | Spring Boot Admin |
 | **Testing** | Test fixtures and assertions | Spring Test |
 | **CLI** | Command-line tools | `fireflyframework-cli` |
 
@@ -1117,6 +1117,7 @@ Full documentation lives in the [`docs/`](docs/README.md) directory:
 
 Browse all guides in the [Module Guides Index](docs/modules/README.md):
 
+- [Native Webapps & Model Admin](docs/modules/webapps.md) — HTML, forms, static/route helpers, custom errors, and existing-model CRUD
 - [Web Layer](docs/modules/web.md) — REST controllers, routing, parameter binding, OpenAPI
 - [Server Layer](docs/modules/server.md) — Pluggable ASGI servers, event loops, auto-configuration
 - [Data Commons](docs/modules/data.md) — Repository ports, derived queries, pagination, sorting, entity mapping

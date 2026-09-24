@@ -1,0 +1,4 @@
+{% extends "pyfly/error.html" %}
+{% block error_heading %}Page not found{% endblock %}
+{% block error_message %}The requested catalog page does not exist.{% endblock %}
+{% block navigation %}<a href="{{ reverse('catalog') }}">Catalog</a>{{ super() }}{% endblock %}

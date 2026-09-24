@@ -480,7 +480,7 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-  PyFly v26.05.01 | Python 3.12.0
+  PyFly v26.09.05 | Python 3.12.0
 
 2026-01-15T10:30:00Z [info] starting_application  app=my-service version=0.1.0
 2026-01-15T10:30:00Z [info] no_active_profiles     message=No active profiles set, falling back to default
@@ -716,3 +716,6 @@ Here is where to go next:
 ### Tools
 
 - [CLI Reference](cli.md) -- All `pyfly` CLI commands (`new`, `run`, `doctor`, etc.)
+
+
+To build native HTML applications, install `pyfly[webapp]` and follow the [webapp guide](modules/webapps.md). The [catalog sample](https://github.com/fireflyframework/fireflyframework-pyfly/tree/main/samples/webapp) demonstrates HTML forms and admin CRUD sharing one existing PyFly model.

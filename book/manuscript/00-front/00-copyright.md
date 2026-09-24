@@ -8,6 +8,6 @@ Unless required by applicable law or agreed to in writing, software and document
 
 **First edition, 2026.**
 
-All code listings in this book were written and verified against PyFly framework version 26.6.x.
+The original Lumen chapters target PyFly 26.6.x. Appendix E documents the native webapp and model-administration implementation in the accompanying 26.9.5 source checkout; run its catalog sample from that checkout.
 
 Published by the Firefly Software Foundation.

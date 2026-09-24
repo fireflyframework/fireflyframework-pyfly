@@ -26,7 +26,7 @@ from starlette.requests import Request
 
 from pyfly.kernel.exceptions import InvalidRequestException
 from pyfly.web.message_converters import JsonMessageConverter, MessageConverter, MessageConverterRegistry
-from pyfly.web.params import Body, Cookie, File, Header, PathVar, QueryParam, UploadedFile, inspect_binding
+from pyfly.web.params import Body, Cookie, File, Form, Header, PathVar, QueryParam, UploadedFile, inspect_binding
 
 _MISSING = object()
 # Fallback reader when no app-level registry is present (e.g. a unit-constructed resolver).
@@ -124,6 +124,10 @@ class ParameterResolver:
             return self._resolve_path_var(request, param)
         if param.binding_type is QueryParam:
             return self._resolve_query_param(request, param)
+        if param.binding_type is Form:
+            from pyfly.web.adapters.starlette.form_binding import bind_form
+
+            return await bind_form(request, param.name, param.inner_type, param.default, param.default is not _MISSING)
         if param.binding_type is Body:
             return await self._resolve_body(request, param)
         if param.binding_type is Header:
@@ -270,7 +274,9 @@ class ParameterResolver:
 
     async def _resolve_file(self, request: Request, param: ResolvedParam) -> Any:
         """Resolve a File[UploadedFile] or File[list[UploadedFile]] parameter."""
-        form = await request.form()
+        from pyfly.web.adapters.starlette.form_binding import parse_form
+
+        form = await parse_form(request)
 
         # Check if inner type is list[UploadedFile] (multi-file)
         if get_origin(param.inner_type) is list:

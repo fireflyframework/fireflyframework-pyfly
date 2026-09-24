@@ -23,7 +23,7 @@ from starlette.responses import JSONResponse, Response
 
 from pyfly.web.adapters.starlette.controller import ControllerRegistrar, RouteMetadata
 from pyfly.web.adapters.starlette.resolver import ParameterResolver
-from pyfly.web.adapters.starlette.response import handle_return_value
+from pyfly.web.adapters.starlette.view_response import dispatch_response
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -104,6 +104,7 @@ class FastAPIControllerRegistrar:
                     methods=[http_method],
                     status_code=status_code,
                     include_in_schema=False,
+                    name=mapping.get("name") or f"{cls.__module__}.{cls.__qualname__}.{attr_name}",
                 )
 
     def collect_route_metadata(self, ctx: Any) -> list[RouteMetadata]:
@@ -169,13 +170,18 @@ class FastAPIControllerRegistrar:
         _cache: dict[str, Any] = {}
 
         async def lazy_endpoint(request: Request) -> Response:
-            if "instance" not in _cache:
-                _cache["instance"] = ctx.get_bean(controller_cls)
+            instance = ctx.get_bean(controller_cls)
+            if _cache.get("instance") is not instance:
+                _cache["instance"] = instance
+                self._global_exception_handlers = None
                 _cache["exc_handlers"] = self._collect_exception_handlers(_cache["instance"])
                 bound_method = getattr(_cache["instance"], method_name)
                 _cache["resolver"] = ParameterResolver(bound_method)
                 _cache["method"] = bound_method
-            accept = request.headers.get("accept")
+            request.state.pyfly_rest_controller = (
+                getattr(controller_cls, "__pyfly_stereotype__", "") == "rest_controller"
+            )
+            request.state.pyfly_view_controller = not request.state.pyfly_rest_controller
             try:
                 converters = getattr(request.app.state, "pyfly_message_converters", None)
             except (KeyError, AttributeError):
@@ -183,7 +189,7 @@ class FastAPIControllerRegistrar:
             try:
                 kwargs = await _cache["resolver"].resolve(request)
                 result = await _maybe_await(_cache["method"](**kwargs))
-                return handle_return_value(result, status_code, accept=accept, converters=converters)
+                return await dispatch_response(request, result, status_code, converters=converters)
             except Exception as exc:
                 # 1. Check controller-local exception handlers
                 for exc_type, handler in _cache["exc_handlers"].items():
@@ -191,14 +197,18 @@ class FastAPIControllerRegistrar:
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result, accept=accept, converters=converters)
+                        return await dispatch_response(request, result, converters=converters)
                 # 2. Check global @controller_advice exception handlers
                 for exc_type, handler in self._get_global_advice_handlers(ctx).items():
                     if isinstance(exc, exc_type):
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result, accept=accept, converters=converters)
+                        return await dispatch_response(request, result, converters=converters)
                 raise
 
+        lazy_endpoint.__pyfly_controller_route__ = True  # type: ignore[attr-defined]
+        lazy_endpoint.__pyfly_rest_controller__ = (  # type: ignore[attr-defined]
+            getattr(controller_cls, "__pyfly_stereotype__", "") == "rest_controller"
+        )
         return lazy_endpoint

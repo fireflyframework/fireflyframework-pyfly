@@ -2,10 +2,8 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from starlette.applications import Starlette
-from starlette.staticfiles import StaticFiles
 
 from pyfly.core import PyFlyApplication
 from pyfly.web.adapters.starlette import create_app
@@ -14,7 +12,6 @@ from {{ package_name }}.app import Application
 
 # Bootstrap: load config, scan packages, build DI context
 _pyfly = PyFlyApplication(Application)
-_static_dir = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -25,8 +22,10 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     _pyfly._host = str(_pyfly.config.get("pyfly.server.host", "0.0.0.0"))
     _pyfly._port = int(_pyfly.config.get("pyfly.server.port", 8080))
     await _pyfly.startup()
-    yield
-    await _pyfly.shutdown()
+    try:
+        yield
+    finally:
+        await _pyfly.shutdown()
 
 
 app = create_app(
@@ -35,4 +34,3 @@ app = create_app(
     context=_pyfly.context,
     lifespan=_lifespan,
 )
-app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

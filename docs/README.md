@@ -42,6 +42,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 
 | Guide | Description |
 |-------|-------------|
+| [Native Webapps & Model Admin](modules/webapps.md) | HTML templates, route/static helpers, forms, custom errors, and CRUD over existing models |
 | [Web Layer](modules/web.md) | REST controllers, routing, parameter binding, middleware, CORS, OpenAPI |
 | [Validation](modules/validation.md) | `Valid[T]` annotation, Pydantic model validation, structured 422 errors |
 | [WebFilters](modules/web-filters.md) | Request/response filter chain — `TransactionIdFilter`, `RequestLoggingFilter`, `SecurityHeadersFilter` |
@@ -100,7 +101,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 
 | Guide | Description |
 |-------|-------------|
-| [Admin Dashboard](modules/admin.md) | Embedded management dashboard with 15 views, SSE streams, server mode, custom view extensibility |
+| [Admin Dashboard](modules/admin.md) | Management dashboard, opt-in datasource CRUD, SSE streams, fleet monitoring, and custom views |
 
 ### Operations
 

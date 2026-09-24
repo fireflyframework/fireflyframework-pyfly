@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 49
+        assert len(classes) == 50
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -72,6 +72,7 @@ class TestDiscoverAutoConfigurations:
     def test_contains_expected_class_names(self):
         names = {cls.__name__ for cls in discover_auto_configurations()}
         assert names == {
+            "TemplateAutoConfiguration",
             "ActuatorAutoConfiguration",
             "AdminAutoConfiguration",
             "AopAutoConfiguration",

@@ -13,6 +13,9 @@ framework-managed conventions you have come to expect from the rest of PyFly.
 
 ---
 
+!!! note "HTML applications and model administration"
+    Appendix E follows the runnable catalog: `ModelAndView`, `Form[T]`, `reverse`, `static_url`, HTML errors, and CRUD over existing entities/documents. Data administration always requires authentication; a separate listener also requires `pyfly.management.security.enabled: true`.
+
 ## Controllers and route mappings
 
 Every web framework must answer two questions: how does a request find the right

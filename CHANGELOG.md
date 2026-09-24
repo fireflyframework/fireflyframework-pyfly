@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.05 (2026-09-23)
+
+### Added
+
+- Native web applications on Starlette and FastAPI: asynchronous templates, `ModelAndView`,
+  redirects, validated browser forms, CSRF integration, named routes, and Python/template
+  `reverse` and `static_url` helpers that preserve mounted prefixes.
+- A PyFly-branded welcome page and custom HTML errors with configurable names, logos,
+  colors, links, and bounded development stack traces. Browser features are opt-in;
+  API and microservice scaffolds retain their existing behavior.
+- Datasource browsing and model CRUD in the admin dashboard, using existing SQLAlchemy
+  entities and Beanie documents with explicit registration, field/operation permissions,
+  row scoping, authenticated CSRF-protected writes, stale-edit detection, and auditing.
+- A runnable SQLite catalog sample sharing the same models and validation between HTML
+  forms and administration, complete configuration reference, and English/Spanish book
+  appendices with regenerated PDF and EPUB editions.
+- CI coverage for strict documentation builds, book sources, installed optional extras,
+  browser rendering, dashboard CRUD, and the catalog sample.
+
+### Fixed
+
+- Typed environment-only configuration binding, multipart parsing and upload cleanup,
+  safe validation redisplay, and controller/template lifecycle rebuilding.
+- Late-discovered home controllers take precedence over the welcome fallback. REST errors
+  remain JSON when HTML diagnostics are enabled, and failed error templates use an
+  independent branded fallback.
+- Book rendering preserves nested code fences and valid EPUB markup; active version
+  badges and installation examples now match the release.
+
+### Compatibility
+
+- No second persistence model or automatic schema migration is introduced. Model
+  administration is disabled until explicitly configured and registered.
+- Built-in Mongo conditional writes do not run arbitrary Beanie action hooks; provide
+  a custom `AdminDataProvider` for those hooks or service-level invariants. Concurrent
+  relational writes are verified on PostgreSQL and SQLite.
+
 ## v26.09.04 (2026-09-10)
 
 ### Fixed

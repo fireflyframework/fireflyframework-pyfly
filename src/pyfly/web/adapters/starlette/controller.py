@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from pyfly.web.adapters.starlette.resolver import ParameterResolver
-from pyfly.web.adapters.starlette.response import handle_return_value
+from pyfly.web.adapters.starlette.view_response import dispatch_response
 from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam, inspect_binding
 
 _MISSING = object()
@@ -121,7 +121,14 @@ class ControllerRegistrar:
                 status_code = mapping.get("status_code", 200)
 
                 handler = self._make_lazy_handler(ctx, cls, attr_name, status_code)
-                routes.append(Route(full_path, handler, methods=[http_method]))
+                routes.append(
+                    Route(
+                        full_path,
+                        handler,
+                        methods=[http_method],
+                        name=mapping.get("name") or f"{cls.__module__}.{cls.__qualname__}.{attr_name}",
+                    )
+                )
 
         return routes
 
@@ -175,6 +182,10 @@ class ControllerRegistrar:
                 # Extract return type
                 hints = typing.get_type_hints(method_obj, include_extras=True)
                 return_type = hints.get("return")
+                from pyfly.web.views import ModelAndView
+
+                if return_type is ModelAndView:
+                    media_type = "text/html"
 
                 # Extract summary and description from docstring
                 summary, description = self._parse_docstring(method_obj)
@@ -383,17 +394,21 @@ class ControllerRegistrar:
         _init_lock = asyncio.Lock()
 
         async def lazy_endpoint(request: Request) -> Response:
-            if "instance" not in _cache:
+            instance = ctx.get_bean(controller_cls)
+            if _cache.get("instance") is not instance:
                 async with _init_lock:
-                    if "instance" not in _cache:
-                        instance = ctx.get_bean(controller_cls)
+                    if _cache.get("instance") is not instance:
+                        self._global_exception_handlers = None
                         _cache["exc_handlers"] = self._collect_exception_handlers(instance)
                         bound_method = getattr(instance, method_name)
                         _cache["resolver"] = ParameterResolver(bound_method)
                         _cache["method"] = bound_method
                         _cache["instance"] = instance  # set last — acts as init flag
 
-            accept = request.headers.get("accept")
+            request.state.pyfly_rest_controller = (
+                getattr(controller_cls, "__pyfly_stereotype__", "") == "rest_controller"
+            )
+            request.state.pyfly_view_controller = not request.state.pyfly_rest_controller
             try:
                 converters = getattr(request.app.state, "pyfly_message_converters", None)
             except (KeyError, AttributeError):
@@ -402,7 +417,7 @@ class ControllerRegistrar:
             try:
                 kwargs = await _cache["resolver"].resolve(request)
                 result = await _maybe_await(_cache["method"](**kwargs))
-                return handle_return_value(result, status_code, accept=accept, converters=converters)
+                return await dispatch_response(request, result, status_code, converters=converters)
             except Exception as exc:
                 # 1. Check controller-local exception handlers
                 for exc_type, handler in _cache["exc_handlers"].items():
@@ -410,14 +425,18 @@ class ControllerRegistrar:
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result, accept=accept, converters=converters)
+                        return await dispatch_response(request, result, converters=converters)
                 # 2. Check global @controller_advice exception handlers
                 for exc_type, handler in self._get_global_advice_handlers(ctx).items():
                     if isinstance(exc, exc_type):
                         result = await _maybe_await(handler(exc))
                         if isinstance(result, tuple) and len(result) == 2:
                             return JSONResponse(result[1], status_code=result[0])
-                        return handle_return_value(result, accept=accept, converters=converters)
+                        return await dispatch_response(request, result, converters=converters)
                 raise
 
+        lazy_endpoint.__pyfly_controller_route__ = True  # type: ignore[attr-defined]
+        lazy_endpoint.__pyfly_rest_controller__ = (  # type: ignore[attr-defined]
+            getattr(controller_cls, "__pyfly_stereotype__", "") == "rest_controller"
+        )
         return lazy_endpoint

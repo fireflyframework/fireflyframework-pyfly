@@ -50,6 +50,8 @@ export const NAV_ITEMS = [
 ];
 
 /** Navigation item only shown in server mode. */
+export const DATA_ITEMS = [{ id: 'datasources', label: 'Datasources', icon: 'database', section: 'Data' }];
+
 export const SERVER_ITEMS = [
     { id: 'instances', label: 'Instances',  icon: 'server', section: 'Fleet' },
 ];
@@ -93,7 +95,7 @@ export function createSvgIcon(pathData) {
  * @param {function}    [options.onNavigate]  Called when a nav item is clicked.
  */
 export function renderSidebar(container, currentRoute, options = {}) {
-    const { serverMode = false, onNavigate = null } = options;
+    const { serverMode = false, dataEnabled = false, onNavigate = null } = options;
 
     // Clear previous content
     container.textContent = '';
@@ -113,7 +115,7 @@ export function renderSidebar(container, currentRoute, options = {}) {
     const nav = document.createElement('nav');
     nav.className = 'admin-sidebar-nav';
 
-    const items = serverMode ? [...NAV_ITEMS, ...SERVER_ITEMS] : NAV_ITEMS;
+    const items = [...NAV_ITEMS, ...(dataEnabled ? DATA_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
 
     for (const item of items) {
         // Section header
@@ -182,7 +184,7 @@ export function updateSidebarActive(container, currentRoute) {
     for (const item of items) {
         const href = item.getAttribute('href') || '';
         const route = href.replace('#', '');
-        if (route === currentRoute) {
+        if (route === currentRoute.split('?')[0]) {
             item.classList.add('active');
         } else {
             item.classList.remove('active');

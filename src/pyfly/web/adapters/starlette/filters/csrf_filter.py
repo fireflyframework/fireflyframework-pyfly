@@ -49,14 +49,14 @@ from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
 
 
-def _set_csrf_cookie(response: Any, token: str) -> None:
+def _set_csrf_cookie(response: Any, token: str, *, secure: bool = True) -> None:
     """Set the CSRF cookie on *response*."""
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=token,
         httponly=False,  # JS must be able to read the token
         samesite="lax",
-        secure=True,
+        secure=secure,
         path="/",
     )
 
@@ -73,7 +73,7 @@ class CsrfFilter(OncePerRequestFilter):
 
     exclude_patterns = ["/actuator/*", "/health", "/ready"]
 
-    def __init__(self, *, cookie_gated: bool = True) -> None:
+    def __init__(self, *, cookie_gated: bool = True, cookie_secure: bool = True, form_field: str = "_csrf") -> None:
         # ``cookie_gated`` (default): only enforce CSRF on unsafe requests that
         # carry cookies — i.e. requests with ambient authority a cross-site forgery
         # could abuse. A request with no cookies (a stateless API client) has no
@@ -81,16 +81,29 @@ class CsrfFilter(OncePerRequestFilter):
         # token/stateless clients. Set ``cookie_gated=False`` for strict enforcement
         # of every unsafe request regardless of cookies.
         self._cookie_gated = cookie_gated
+        self._cookie_secure = cookie_secure
+        self._form_field = form_field
 
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         method: str = request.method
+        token = request.cookies.get(CSRF_COOKIE_NAME) or generate_csrf_token()
+        state = getattr(request, "state", None)
+        if state is not None:
+            state.csrf_token = token
+            state.csrf_field = self._form_field
+
+        def response_token() -> str:
+            session = getattr(state, "session", None) if state is not None else None
+            if session is not None and (session.previous_id is not None or session.invalidated):
+                return generate_csrf_token()
+            return token
 
         # -----------------------------------------------------------------
         # Safe methods — pass through and set/refresh the CSRF cookie.
         # -----------------------------------------------------------------
         if method in SAFE_METHODS:
             response = await call_next(request)
-            _set_csrf_cookie(response, generate_csrf_token())
+            _set_csrf_cookie(response, response_token(), secure=self._cookie_secure)
             return response
 
         # -----------------------------------------------------------------
@@ -113,13 +126,24 @@ class CsrfFilter(OncePerRequestFilter):
         cookie_token: str | None = request.cookies.get(CSRF_COOKIE_NAME)
         header_token: str | None = request.headers.get(CSRF_HEADER_NAME)
 
+        if not header_token and request.headers.get("content-type", "").split(";", 1)[0] in (
+            "application/x-www-form-urlencoded",
+            "multipart/form-data",
+        ):
+            from pyfly.web.adapters.starlette.form_binding import parse_form
+
+            form = await parse_form(request)
+            candidates = form.getlist(self._form_field)
+            if len(candidates) == 1 and isinstance(candidates[0], str):
+                header_token = candidates[0]
+
         if not cookie_token or not header_token:
             return JSONResponse({"error": "CSRF token missing"}, status_code=403)
 
         if not validate_csrf_token(cookie_token, header_token):
             return JSONResponse({"error": "CSRF token invalid"}, status_code=403)
 
-        # Valid — proceed and rotate the token.
+        # Preserve open forms; rotate only when authentication changes the session.
         response = await call_next(request)
-        _set_csrf_cookie(response, generate_csrf_token())
+        _set_csrf_cookie(response, response_token(), secure=self._cookie_secure)
         return response

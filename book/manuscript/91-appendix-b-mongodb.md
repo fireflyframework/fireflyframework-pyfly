@@ -213,7 +213,7 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 | `find_all(**filters)` | `list[T]` | Find all; keyword args become equality filters |
 | `find_all(sort)` | `list[T]` | Fetch all documents, ordered by a `Sort` |
 | `find_all(pageable)` | `Page[T]` | Paged query: counts the total, applies the Pageable's sort, slices with skip/limit, returns `Page[T]` |
-| `stream_all(sort)` | `AsyncIterator[T]` | Stream all documents (the Flux<T> analogue); optional `Sort` and equality filters |
+| `stream_all(sort)` | `AsyncIterator[T]` | Stream all documents (the `Flux<T>` analogue); optional `Sort` and equality filters |
 | `delete(entity)` | `None` | Delete a loaded document instance |
 | `delete_by_id(id)` | `None` | Delete by primary key; no-op if not found |
 | `count()` | `int` | Count all documents in the collection |

@@ -15,6 +15,7 @@ import { showToast } from './components/toast.js';
 /* ── Route Registry ───────────────────────────────────────────── */
 
 const routes = {
+    'datasources': () => import('./views/datasources.js'),
     '':           () => import('./views/overview.js'),
     'beans':      () => import('./views/beans.js'),
     'health':     () => import('./views/health.js'),
@@ -46,6 +47,8 @@ let settings = {
 };
 
 let currentRoute = '';
+let routeAbort = null;
+let navigationVersion = 0;
 let currentCleanup = null;  // Cleanup function from current view
 let commandPalette = null;  // ⌘K launcher (installed in init)
 
@@ -239,6 +242,14 @@ function getRouteFromHash() {
 }
 
 async function navigateTo(route) {
+    if (currentCleanup?.canLeave && !currentCleanup.canLeave()) {
+        history.replaceState(null, '', '#' + currentRoute);
+        return;
+    }
+    routeAbort?.abort();
+    routeAbort = new AbortController();
+    const signal = routeAbort.signal;
+    const version = ++navigationVersion;
     // Cleanup previous view
     if (currentCleanup) {
         try { currentCleanup(); } catch (_) { /* ignore */ }
@@ -265,7 +276,7 @@ async function navigateTo(route) {
     content.appendChild(loader);
 
     // Resolve view
-    const loader_ = routes[route];
+    const loader_ = routes[route.split('?')[0]];
     if (!loader_) {
         content.textContent = '';
         const msg = document.createElement('div');
@@ -284,6 +295,7 @@ async function navigateTo(route) {
 
     try {
         const mod = await loader_();
+        if (version !== navigationVersion) return;
         content.textContent = '';
         content.classList.remove('view-enter');
         // Force reflow to restart animation
@@ -291,13 +303,15 @@ async function navigateTo(route) {
         content.classList.add('view-enter');
 
         if (mod.render) {
-            const result = await mod.render(content, api);
+            const result = await mod.render(content, api, { signal });
             // Views may return a cleanup function
             if (typeof result === 'function') {
+                if (version !== navigationVersion) { result(); return; }
                 currentCleanup = result;
             }
         }
     } catch (err) {
+        if (signal.aborted || version !== navigationVersion) return;
         console.error(`Failed to load view "${route}":`, err);
         content.textContent = '';
         const errDiv = document.createElement('div');
@@ -334,6 +348,7 @@ async function init() {
     // Render sidebar
     renderSidebar(sidebar, getRouteFromHash(), {
         serverMode: settings.serverMode,
+        dataEnabled: settings.dataEnabled,
         onNavigate: (route) => navigateTo(route),
     });
 
@@ -344,6 +359,7 @@ async function init() {
     commandPalette = installCommandPalette({
         onNavigate: (route) => navigateTo(route),
         serverMode: settings.serverMode,
+        dataEnabled: settings.dataEnabled,
         onToggleTheme: toggleTheme,
     });
 

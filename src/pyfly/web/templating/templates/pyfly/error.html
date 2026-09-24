@@ -1,0 +1,18 @@
+{% extends "pyfly/base.html" %}
+{% block title %}{{ status }} {{ title }} · {{ branding.name }}{% endblock %}
+{% block content %}
+<section class="panel error-panel" aria-labelledby="error-heading">
+  <div class="error-status" aria-hidden="true">{{ status }}</div>
+  <div class="error-copy"><p class="eyebrow">{{ branding.name }} / {{ status }}</p><h1 id="error-heading">{% block error_heading %}{{ title }}{% endblock %}</h1><p class="lead">{% block error_message %}{% if status >= 500 %}We could not complete your request. Please try again.{% else %}{{ message }}{% endif %}{% endblock %}</p>
+    <p class="request-path">{{ path }}</p>
+    <a class="button" href="{{ home_url }}">Return home <span aria-hidden="true">↗</span></a>
+    {% if transaction_id %}<p class="request-id">Request ID <code>{{ transaction_id }}</code></p>{% endif %}
+  </div>
+</section>
+{% if show_stacktrace %}
+<section class="diagnostics" aria-labelledby="trace-heading">
+  <div class="diagnostics-heading"><span class="eyebrow">DEVELOPER DETAILS</span><h2 id="trace-heading">{{ exception_type }}</h2><p>{{ exception_message }}</p></div>
+  <details open><summary>Stack trace · {{ stack_frames | length }} frames</summary><pre tabindex="0"><code>{{ stack_trace }}</code></pre></details>
+</section>
+{% endif %}
+{% endblock %}

@@ -57,5 +57,6 @@ parts:
       - {id: appb, file: 91-appendix-b-mongodb.md, num: "B", title: "MongoDB y Datos Documentales"}
       - {id: appc, file: 92-appendix-c-ecm.md,     num: "C", title: "ECM: Contenido y Firma Electrónica"}
       - {id: appd, file: 93-appendix-d-cli.md,     num: "D", title: "CLI y Resolución de Problemas"}
+      - {id: appe, file: 95-appendix-e-webapps.md, num: "E", title: "Aplicaciones Web Nativas y Administración de Modelos"}
       - {id: glossary, file: 94-glossary.md,       num: "",  title: "Glosario"}
 back: []
