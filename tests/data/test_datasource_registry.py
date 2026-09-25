@@ -26,6 +26,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -393,6 +395,18 @@ class TestClose:
             registry.register("late", _sqlite(tmp_path / "late.db"))
         assert DataSourceRegistry.for_config(config) is not registry  # a restart builds a fresh one
         await DataSourceRegistry.for_config(config).close()
+
+    async def test_a_closed_and_dropped_registry_releases_its_engines(self, tmp_path: Path) -> None:
+        config = _config({"url": _sqlite(tmp_path / "p.db"), "datasources": {"r": {"url": _sqlite(tmp_path / "r.db")}}})
+        registry = DataSourceRegistry.for_config(config)
+        engines = [weakref.ref(ds.engine) for ds in registry.all_datasources()]
+        configs = weakref.ref(config)
+        await _scalar(registry.primary.engine, "SELECT 1")
+        await registry.close()
+        del registry, config
+        gc.collect()
+        assert [ref() for ref in engines] == [None, None]
+        assert configs() is None
 
 
 # ---------------------------------------------------------------------------

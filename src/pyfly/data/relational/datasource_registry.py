@@ -39,8 +39,8 @@ disposes every engine exactly once.
 
 There is one registry per :class:`~pyfly.core.config.Config` (one per application context):
 :meth:`DataSourceRegistry.for_config` returns it, whichever auto-configuration asks first, and the
-``datasource_registry`` bean is that same object. A closed registry is forgotten, so a restarted
-context builds a fresh one.
+``datasource_registry`` bean is that same object. It is kept until :meth:`DataSourceRegistry.close`
+(the context's stop) forgets it, so a restarted context builds a fresh one.
 
 Usage::
 
@@ -54,6 +54,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -119,10 +120,12 @@ _STATIC_ISOLATION_LEVELS = {
     "mariadb": frozenset({"READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"}),
 }
 
-# Datasources by engine and by session factory, so a legacy holder of either (a service's
-# ``_session_factory``) maps back to its datasource. Weak: a disposed and dropped engine leaves.
-_BY_ENGINE: weakref.WeakKeyDictionary[AsyncEngine, DataSource] = weakref.WeakKeyDictionary()
-_BY_SESSIONMAKER: weakref.WeakKeyDictionary[async_sessionmaker[AsyncSession], DataSource] = weakref.WeakKeyDictionary()
+# Datasources by the identity of their engine and of their session factory, so a legacy holder of
+# either (a service's ``_session_factory``) maps back to its datasource. The values are weak (a
+# datasource holds its engine, so weak keys would never let an entry go): an entry leaves with its
+# datasource, and while the datasource lives its engine does too, so the id cannot be reused.
+_BY_ENGINE: weakref.WeakValueDictionary[int, DataSource] = weakref.WeakValueDictionary()
+_BY_SESSIONMAKER: weakref.WeakValueDictionary[int, DataSource] = weakref.WeakValueDictionary()
 
 
 class DataSourceConfigurationError(ValueError):
@@ -139,8 +142,10 @@ class NoSuchDataSourceError(KeyError):
 def datasource_of(target: AsyncEngine | async_sessionmaker[AsyncSession]) -> DataSource | None:
     """The registry datasource that owns *target* (an engine or a session factory), or ``None``."""
     if isinstance(target, AsyncEngine):
-        return _BY_ENGINE.get(target)
-    return _BY_SESSIONMAKER.get(target)
+        datasource = _BY_ENGINE.get(id(target))
+        return datasource if datasource is not None and datasource.engine is target else None
+    datasource = _BY_SESSIONMAKER.get(id(target))
+    return datasource if datasource is not None and datasource.sessionmaker is target else None
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +291,8 @@ class DataSource:
         # Bumped each time a credential rotation evicts the pool; a connection opened under an older
         # epoch is closed when it is returned.
         self._credentials_epoch = 0
-        _BY_ENGINE[engine] = self
-        _BY_SESSIONMAKER[sessionmaker] = self
+        _BY_ENGINE[id(engine)] = self
+        _BY_SESSIONMAKER[id(sessionmaker)] = self
 
     # -- identity -----------------------------------------------------------------------------------
 
@@ -392,7 +397,9 @@ class DataSourceRegistry:
     to change what every session factory is created with (the default is ``expire_on_commit=False``).
     """
 
-    _instances: weakref.WeakKeyDictionary[Config, DataSourceRegistry] = weakref.WeakKeyDictionary()
+    # One registry per configuration object. A registry holds its Config, so the entry is removed by
+    # close(), never by garbage collection: a context that is never stopped keeps its registry.
+    _instances: dict[Config, DataSourceRegistry] = {}
     _instances_lock = threading.Lock()
 
     def __init__(
@@ -520,7 +527,7 @@ class DataSourceRegistry:
 
     def find_by_engine(self, engine: AsyncEngine) -> DataSource | None:
         """The datasource (or replica) of this registry built on *engine*."""
-        datasource = _BY_ENGINE.get(engine)
+        datasource = datasource_of(engine)
         return datasource if datasource is not None and datasource.registry is self else None
 
     # -- registering --------------------------------------------------------------------------------
@@ -646,27 +653,33 @@ class DataSourceRegistry:
     # -- closing --------------------------------------------------------------------------------------
 
     async def close(self) -> None:
-        """Dispose every engine (primary, replicas, named, module datasources) exactly once."""
+        """Dispose every engine (primary, replicas, named, module datasources) exactly once.
+
+        The engines are disposed concurrently, so a pool whose database went silent (its dispose waits
+        for the server) keeps no other pool open, and one that fails is logged without stopping the rest.
+        """
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             datasources = self._built()
-        seen: set[int] = set()
-        for datasource in datasources:
-            if id(datasource.engine) in seen:
-                continue
-            seen.add(id(datasource.engine))
-            try:
-                await datasource.engine.dispose()
-            except Exception:  # noqa: BLE001 — one failing pool must not keep the others open
-                _logger.warning(
-                    "datasource_dispose_failed", extra={"datasource": datasource.qualified_name}, exc_info=True
-                )
         with DataSourceRegistry._instances_lock:
-            for config, registry in list(DataSourceRegistry._instances.items()):
-                if registry is self:
-                    del DataSourceRegistry._instances[config]
+            if DataSourceRegistry._instances.get(self._config) is self:
+                del DataSourceRegistry._instances[self._config]
+        unique: dict[int, DataSource] = {}
+        for datasource in datasources:
+            unique.setdefault(id(datasource.engine), datasource)
+        targets = list(unique.values())
+        results = await asyncio.gather(*(ds.engine.dispose() for ds in targets), return_exceptions=True)
+        for datasource, result in zip(targets, results, strict=True):
+            if isinstance(result, Exception):  # one failing pool must not keep the others open
+                _logger.warning(
+                    "datasource_dispose_failed",
+                    extra={"datasource": datasource.qualified_name},
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+            elif isinstance(result, BaseException):
+                raise result
 
     async def dispose_all(self) -> None:
         """Alias of :meth:`close`."""

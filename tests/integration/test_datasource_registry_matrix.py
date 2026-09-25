@@ -46,6 +46,7 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.context.refresh import ContextRefresher
 from pyfly.data.relational.datasource_registry import DataSource, DataSourceRegistry
 from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
+from tests.support.partition_proxy import PartitionProxy
 
 
 async def _server_connections(backend: RelationalBackend, app_name: str) -> int:
@@ -128,6 +129,47 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
     assert sorted(disposed) == sorted(id(engine.sync_engine) for engine in engines)
     if not relational_backend.is_embedded:
         assert await _server_connections(relational_backend, app_name) == 0
+
+
+@pytest.mark.backends(PG)
+async def test_close_disposes_every_engine_although_one_hangs(relational_backend: RelationalBackend) -> None:
+    # The database behind the primary went silent at shutdown: disposing its pool waits for the server to
+    # acknowledge the close. The other datasources must be disposed meanwhile, not after.
+    app_name = f"pyfly-close-{uuid.uuid4().hex[:8]}"
+    upstream = make_url(relational_backend.url)
+    proxy = PartitionProxy(upstream.host or "127.0.0.1", int(upstream.port or 5432))
+    port = await proxy.start()
+    registry = DataSourceRegistry(
+        relational_backend.config(
+            {
+                "pyfly.app.name": app_name,
+                "pyfly.data.relational.url": upstream.set(host="127.0.0.1", port=port).render_as_string(
+                    hide_password=False
+                ),
+                "pyfly.data.relational.datasources.reporting.url": relational_backend.url,
+            }
+        )
+    )
+    closing: asyncio.Future[None] | None = None
+    try:
+        for datasource in registry.all_datasources():
+            await _touch(datasource.engine)
+        assert await _server_connections(relational_backend, app_name) == 2
+
+        proxy.partition()
+        closing = asyncio.ensure_future(registry.close())
+        deadline = time.monotonic() + 5
+        while await _server_connections(relational_backend, app_name) > 1:
+            assert time.monotonic() < deadline, "the reporting pool waited for the primary's dispose"
+            await asyncio.sleep(0.05)
+        assert not closing.done()  # the primary's dispose is still waiting on the partition
+    finally:
+        proxy.heal()
+        if closing is not None:
+            await asyncio.wait_for(closing, 10)
+        await registry.close()
+        await proxy.close()
+    assert await _server_connections(relational_backend, app_name) == 0
 
 
 @pytest.mark.backends(PG)
