@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Smoke tests proving the SP-1 backend fixtures stand up a REAL container and round-trip.
+"""Smoke tests proving the backend fixtures stand up a REAL backend and round-trip.
+
+The broker and standalone-Mongo fixtures start one container each. The backend-matrix lanes are
+opened one by one: every relational lane enforces foreign keys (sqlite-file included, which runs in
+the fast suite), the MySQL/MariaDB lanes run with a working pool pre-ping, and the Mongo lane is a
+replica set with a writable primary that commits and aborts transactions.
 
 Run: PYFLY_INTEGRATION_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/test_container_fixtures_smoke.py
 """
@@ -22,8 +27,84 @@ import asyncio
 import uuid
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 from pyfly.testing import requires_docker
+from tests.support.backend_matrix import MARIADB, MYSQL, MongoBackend, RelationalBackend
+from tests.support.contract_models import ContractChild, ContractParent
+
+_EXPECTED_DIALECT = {"sqlite-file": "sqlite", "pg": "postgresql", "mysql": "mysql", "mariadb": "mariadb"}
+
+
+async def test_relational_lane_opens_and_enforces_foreign_keys(relational_backend: RelationalBackend) -> None:
+    """Every relational lane opens its own database and rejects a child whose parent does not exist."""
+    await relational_backend.create_tables(ContractParent, ContractChild)
+    engine = relational_backend.create_engine()
+    assert engine.dialect.name == _EXPECTED_DIALECT[relational_backend.lane]
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session, session.begin():
+        parent = ContractParent(name="parent")
+        parent.children.append(ContractChild(label="kept", position=1))
+        session.add(parent)
+
+    with pytest.raises(IntegrityError):
+        async with factory() as session, session.begin():
+            session.add(ContractChild(parent_id=uuid.uuid4(), label="orphan", position=1))
+
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT COUNT(*) FROM contract_child"))).scalar_one() == 1
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_mysql_lanes_replace_a_dead_pooled_connection_through_pre_ping(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The MySQL/MariaDB lanes run with pool pre-ping on, and it works: a pooled connection the
+    server has killed is detected at checkout and replaced, instead of failing the next statement."""
+    assert relational_backend.pre_ping
+    engine = relational_backend.create_engine(pool_size=1, max_overflow=0)
+    async with engine.connect() as conn:
+        first_id = (await conn.execute(text("SELECT CONNECTION_ID()"))).scalar_one()
+
+    killer = relational_backend.create_engine(poolclass=NullPool)
+    async with killer.connect() as conn:
+        await conn.execute(text(f"KILL {int(first_id)}"))
+
+    for _ in range(5):  # every checkout, not just the first after the kill
+        async with engine.connect() as conn:
+            current_id = (await conn.execute(text("SELECT CONNECTION_ID()"))).scalar_one()
+        assert current_id != first_id
+
+
+async def test_mongo_replica_set_lane_commits_and_aborts_transactions(mongo_backend: MongoBackend) -> None:
+    """The Mongo lane is a replica set with a writable primary: a transaction commits, and an aborted
+    one leaves nothing behind (a standalone server would reject startTransaction)."""
+    from pymongo import AsyncMongoClient
+
+    client: AsyncMongoClient[dict[str, object]] = AsyncMongoClient(mongo_backend.url)
+    try:
+        hello = await client.admin.command("hello")
+        assert hello["isWritablePrimary"] is True
+        assert hello["setName"] == "rs0"
+
+        collection = client[mongo_backend.database]["smoke"]
+        await collection.insert_one({"k": "setup"})  # create the collection outside any transaction
+        async with client.start_session() as session:
+            async with await session.start_transaction():
+                await collection.insert_one({"k": "committed"}, session=session)
+            with pytest.raises(RuntimeError, match="abort"):
+                async with await session.start_transaction():
+                    await collection.insert_one({"k": "aborted"}, session=session)
+                    raise RuntimeError("abort this transaction")
+
+        stored = [doc["k"] async for doc in collection.find({}, {"_id": 0})]
+        assert sorted(stored) == ["committed", "setup"]
+    finally:
+        await client.close()
 
 
 @requires_docker

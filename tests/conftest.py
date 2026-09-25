@@ -15,6 +15,10 @@
 
 import pytest
 
+# The backend matrix (relational_backend, mongo_backend, the server fixtures, the lane markers) is
+# available to every test, wherever it lives. See tests/support/backend_matrix.py.
+pytest_plugins = ("tests.support.backend_matrix",)
+
 
 @pytest.fixture
 def anyio_backend():
