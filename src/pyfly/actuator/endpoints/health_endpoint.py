@@ -57,6 +57,25 @@ class HealthEndpoint:
     async def handle(self, context: Any = None) -> dict[str, Any]:
         return self._serialize(await self._aggregator.check())
 
+    async def respond(self) -> tuple[dict[str, Any], int]:
+        """Payload and HTTP status of ``/actuator/health`` from ONE run of the indicators.
+
+        Calling :meth:`handle` and then :meth:`get_status_code` runs every indicator twice (twice the
+        database checks, twice the worst-case latency) and the two answers can disagree.
+        """
+        result = await self._aggregator.check()
+        return self._serialize(result), self._status_code(result.status)
+
+    async def respond_liveness(self) -> tuple[dict[str, Any], int]:
+        """Payload and HTTP status of the liveness probe from one run of its indicators."""
+        result = await self._aggregator.check_liveness()
+        return self._serialize(result), self._status_code(result.status)
+
+    async def respond_readiness(self) -> tuple[dict[str, Any], int]:
+        """Payload and HTTP status of the readiness probe from one run of its indicators."""
+        result = await self._aggregator.check_readiness()
+        return self._serialize(result), self._status_code(result.status)
+
     async def get_status_code(self) -> int:
         """Return the HTTP status code based on health state."""
         return self._status_code((await self._aggregator.check()).status)

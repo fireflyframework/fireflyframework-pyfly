@@ -96,19 +96,17 @@ def _make_health_routes(ep: HealthEndpoint, bp: str) -> list[Route]:
     ``/health/{path}`` selector for any other group or single component.
     """
 
+    # Each handler runs the indicators once and derives the status code from that same result.
     async def handler(request: Request) -> JSONResponse:
-        data = await ep.handle()
-        status_code = await ep.get_status_code()
+        data, status_code = await ep.respond()
         return JSONResponse(data, status_code=status_code)
 
     async def liveness_handler(request: Request) -> JSONResponse:
-        data = await ep.handle_liveness()
-        status_code = await ep.get_liveness_status_code()
+        data, status_code = await ep.respond_liveness()
         return JSONResponse(data, status_code=status_code)
 
     async def readiness_handler(request: Request) -> JSONResponse:
-        data = await ep.handle_readiness()
-        status_code = await ep.get_readiness_status_code()
+        data, status_code = await ep.respond_readiness()
         return JSONResponse(data, status_code=status_code)
 
     async def selector_handler(request: Request) -> JSONResponse:

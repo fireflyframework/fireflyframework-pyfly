@@ -438,3 +438,33 @@ class TestEveryDatasource:
         finally:
             await engine.dispose()
         assert "secret" not in repr(result.details)
+
+
+class TestOneCheckPerProbe:
+    """A probe GET used to aggregate twice (body, then status code): two database checks, twice the
+    worst-case latency, and a body and a status code that could disagree."""
+
+    @pytest.mark.parametrize("path", ["/actuator/health", "/actuator/health/readiness", "/actuator/health/liveness"])
+    def test_each_probe_runs_the_indicators_once(self, path: str) -> None:
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from pyfly.actuator.adapters.starlette import make_starlette_actuator_routes
+        from pyfly.actuator.endpoints.health_endpoint import HealthEndpoint
+        from pyfly.actuator.registry import ActuatorRegistry
+
+        calls: list[str] = []
+
+        class Counting:
+            async def health(self) -> HealthStatus:
+                calls.append("check")
+                return HealthStatus(status="UP")
+
+        aggregator = HealthAggregator()
+        aggregator.add_indicator("db", Counting())
+        registry = ActuatorRegistry()
+        registry.register(HealthEndpoint(aggregator))
+        app = Starlette(routes=make_starlette_actuator_routes(registry))
+        response = TestClient(app).get(path)
+        assert response.status_code == 200
+        assert calls == ["check"]
