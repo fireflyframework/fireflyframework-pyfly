@@ -7,6 +7,10 @@ manually to spot regressions and quantify the overhead PyFly *itself* adds.
 uv run python benchmarks/run.py
 ```
 
+The data layer has its own harness, `benchmarks/data/`: unit-of-work cost, statements per repository
+method and pool reuse on SQLite, PostgreSQL, MySQL and MariaDB (`uv run python benchmarks/data/run.py
+--backend pg`). Its recorded baseline and method are in `benchmarks/data/BASELINE.md`.
+
 ## Methodology (so the ratios are trustworthy)
 
 - **Measures the framework, not the test harness.** Request benchmarks drive the ASGI app
