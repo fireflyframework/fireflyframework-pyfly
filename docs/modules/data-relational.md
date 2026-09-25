@@ -735,14 +735,28 @@ registry builds therefore gets the following setup:
 - **Foreign keys are enforced.** `PRAGMA foreign_keys=ON` runs on every connection. Orphan rows are
   rejected and `ON DELETE CASCADE` runs, as on PostgreSQL and MySQL.
 - **File databases run in WAL mode with `synchronous=NORMAL`.** Readers run beside a writer. In-memory
-  databases keep `StaticPool` (one shared connection) and are never recycled.
+  databases keep `StaticPool` and are never recycled. Every session shares that one connection, so
+  sessions are not isolated from each other: a session that begins while another one's transaction is
+  open joins it, and once that transaction ends, the joined session's later statements run in
+  autocommit until it begins again. Test transactional behavior on a file database.
 - **The engine emits `BEGIN` itself.** This is SQLAlchemy's documented pysqlite/aiosqlite recipe.
   The driver otherwise defers `BEGIN` until the first write, so the reads of a read-modify-write run
   outside the transaction and a concurrent update is lost. Now two such transactions serialize: one of
   them fails with `database is locked` instead of both committing.
-- **A unit that will write starts with `BEGIN IMMEDIATE`.** It takes the write lock up front and waits
-  `busy-timeout` for it. The unit of work asks for this through `DataSource.begin_options(read_only=False)`,
-  which returns `{"pyfly_sqlite_begin": "IMMEDIATE"}`. Read units use a plain `BEGIN`.
+- **A unit that will write can start with `BEGIN IMMEDIATE`.** It takes the write lock up front and
+  waits `busy-timeout` for it, instead of failing on the lock upgrade later. Ask for it before the first
+  statement with `session.connection(execution_options=datasource.begin_options(read_only=False))`;
+  `begin_options` returns `{"pyfly_sqlite_begin": "IMMEDIATE"}` on SQLite and `{}` elsewhere. A
+  transaction that does not ask starts with a plain `BEGIN`. The transaction manager of the
+  unit-of-work redesign asks for it on every write unit; until it lands, `@transactional` methods and
+  repositories start with a plain `BEGIN`.
+- **An explicit `BEGIN IMMEDIATE` statement no longer works.** `session.execute(text("BEGIN IMMEDIATE"))`
+  inside `session.begin()` was the way to take the write lock under pysqlite's deferred `BEGIN`. On a
+  registry engine the transaction's `BEGIN` has already run, so SQLite answers "cannot start a
+  transaction within a transaction". Call `await begin_immediate(session)` from
+  `pyfly.data.relational.dialect_customizers` instead: it sets the execution option on a registry
+  engine and executes `BEGIN IMMEDIATE` on an engine you built yourself. The model administration's
+  SQLAlchemy provider uses it.
 
 ### Module Datasources
 
@@ -772,8 +786,8 @@ datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-featur
 
 ### After-Begin Customizers
 
-An `AfterBeginCustomizer` runs inside every framework-managed transaction on a datasource, right after
-`BEGIN`. Use it for a tenant GUC, a `SET LOCAL statement_timeout` or a `search_path`. Declare it as a
+An `AfterBeginCustomizer` runs inside a transaction on a datasource, right after `BEGIN`. Use it for a
+tenant GUC, a `SET LOCAL statement_timeout` or a `search_path`. Declare it as a
 bean and it applies to every datasource and its replica. To limit it, give the class a `datasources`
 attribute, or register it with `registry.add_customizer(customizer, datasource="name")`. Customizers
 run in `@order` order. An exception aborts the unit.
@@ -796,8 +810,11 @@ class TenantGuc:
             )
 ```
 
-The transaction manager calls `await datasource.run_after_begin(session)` (or
-`run_after_begin(datasource, session)`) for every unit it opens, auto units included.
+The customizers run when `await datasource.run_after_begin(session)` (or
+`run_after_begin(datasource, session)`) is called right after `BEGIN`. The transaction manager of the
+unit-of-work redesign calls it for every unit it opens, auto units included. Until it lands, nothing
+calls it on its own: `@transactional` methods and repositories do not run customizers yet, and a
+transaction you open yourself runs them with that call.
 
 ### Credential Rotation
 
