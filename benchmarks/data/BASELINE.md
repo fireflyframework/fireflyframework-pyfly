@@ -7,7 +7,8 @@ instead of 2.0.49; the control run below shows that the version does not move th
 
 - **Date:** 2026-09-25, 07:19 PDT
 - **Code:** branch `fix/orm-unit-of-work` at `28a4afe` (product code as `02b792f`), SQLAlchemy 2.0.54,
-  Python 3.12.13
+  Python 3.12.13. The `derived` table was re-measured at `84ba2bf`, product code unchanged (see its
+  section).
 - **Machine:** Apple M5 Pro, 64 GiB, macOS 26.6.2. The database servers ran in Docker through colima
   0.10.3 (a 4 vCPU / 8 GiB Linux VM, aarch64), next to other running containers on the same VM. The
   client connected over the VM's forwarded localhost port, with no TLS.
@@ -110,21 +111,34 @@ The SQL is the same on every backend, apart from the placeholder. `exists_by_id`
 audit_item.id = ?`). The derived `exists_by_name` counts every match (`SELECT count(*) AS count_1 FROM
 audit_item WHERE audit_item.name = ?`). Neither statement has `LIMIT 1` or `EXISTS`.
 
-### Derived query CPU (`derived`, 2,000 interleaved calls in one transaction)
+### Derived query CPU (`derived`, 2,000 interleaved calls)
 
 CPU is the event-loop thread's CPU time per call. It covers building, compiling and executing the
-statement in Python, and excludes the wait for the database.
+statement in Python, and excludes the wait for the database. The derived finder runs through the
+repository inside a `@transactional` method. The two hand-written twins run on a session the harness
+opens once from the `async_sessionmaker` bean, so the scenario uses no repository internals and
+measures the same thing after the redesign.
+
+This table was re-measured at `84ba2bf` (product code still as `02b792f`), 2026-09-25 07:45 PDT, on
+the same machine and servers, with `--scenario derived` on each backend. That commit moved the twins
+off the repository's private `_session` and onto the harness's own session, which WP01 requires.
 
 | Measure (per call) | SQLite file | PostgreSQL | MySQL | MariaDB |
 | --- | ---: | ---: | ---: | ---: |
-| derived `find_by_name`, CPU | 107.4 µs | 98.0 µs | 121.6 µs | 110.0 µs |
-| same statement built by hand each call, CPU | 105.2 µs | 96.3 µs | 117.2 µs | 107.2 µs |
-| same statement built once, CPU | 84.8 µs | 75.1 µs | 92.8 µs | 84.9 µs |
-| derived CPU over the prebuilt statement | +22.6 µs | +22.9 µs | +28.8 µs | +25.1 µs |
-| derived `find_by_name`, wall | 190.2 µs | 400.3 µs | 498.5 µs | 456.6 µs |
+| derived `find_by_name`, CPU | 106.8 µs | 94.6 µs | 106.0 µs | 109.0 µs |
+| same statement built by hand each call, CPU | 105.6 µs | 93.1 µs | 104.0 µs | 106.7 µs |
+| same statement built once, CPU | 85.7 µs | 72.0 µs | 82.2 µs | 84.2 µs |
+| derived CPU over the prebuilt statement | +21.1 µs | +22.6 µs | +23.8 µs | +24.8 µs |
+| derived `find_by_name`, wall | 189.5 µs | 404.2 µs | 470.0 µs | 458.7 µs |
+
+The first run, at `28a4afe`, had the twins on the repository's session. Its overheads were +22.6,
++22.9, +28.8 and +25.1 µs, and its derived CPU was 107.4, 98.0, 121.6 and 110.0 µs. The derived
+finder's own code path did not change between the two runs, so the spread on it is run-to-run noise.
+A third run, a minute before this table on the same code, gave 104.3, 99.4, 107.4 and 107.5 µs.
+Compare CPU figures over several runs, not one: a single MySQL run was 15 µs off the others.
 
 A derived query costs what the hand-written equivalent costs, because it rebuilds its statement on
-every call. Building the statement once saves about 23 to 29 µs of CPU per call.
+every call. Building the statement once saves about 21 to 25 µs of CPU per call.
 
 ### `stream_all` and IN lists (`stream`, `in_padding`)
 
@@ -147,3 +161,7 @@ These are the acceptance points in the spec ("Acceptance and verification"):
   connection.
 - `save(1)` sends one statement, and `save_all(n)` sends no per-entity SELECT (`p7`).
 - `exists` uses `LIMIT 1`: the `sql` field in the JSON output, and its `limit_1` flag.
+
+A package that re-runs the harness gets every scenario it can run, even if one breaks. A scenario that
+raises appears in the report as `{"error": "..."}`, its traceback goes to stderr, the `--json` file is
+still written, and the exit status is 1.
