@@ -62,8 +62,10 @@ def install_health_indicators(
     registration — re-running the scan is idempotent.
 
     *groups* assigns probe-group membership to every indicator the scan adds;
-    ``None`` keeps the default (the indicator participates in both liveness and
-    readiness).
+    ``None`` keeps each indicator's own ``probe_groups`` (the database indicator is
+    readiness-only), and an indicator that declares none participates in both
+    liveness and readiness. An indicator instance already registered under another
+    name (``add_indicator("db", indicator, groups={READINESS})``) is not added again.
 
     The container keeps one registration per bean type, so two indicator beans
     of the same concrete class are discovered only once (the last registered).
@@ -78,7 +80,7 @@ def install_health_indicators(
         if reg is None or reg.instance is None or not isinstance(reg.instance, HealthIndicator):
             continue
         name = reg.name or cls.__name__
-        if aggregator.has_indicator(name):
+        if aggregator.has_indicator(name) or aggregator.has_indicator_instance(reg.instance):
             continue
         aggregator.add_indicator(name, reg.instance, groups=groups)
 

@@ -11,14 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for SqlAlchemyHealthIndicator and EngineLifecycle.
+"""Tests for SqlAlchemyHealthIndicator and EngineLifecycle.
 
-No Docker required — all tests use in-memory SQLite via aiosqlite or
-an unreachable/invalid URL to exercise the DOWN path.
+No Docker required: SQLite engines, an unreachable port and a local TCP server that accepts and never
+answers (a database that went silent) exercise every path.
+
+C021: the ``db`` indicator belongs to the readiness probe only, answers within its timeout even when
+the database is silent or the pool is exhausted, and checks every registry datasource.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -28,10 +34,34 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.actuator.health import HealthStatus
+from pyfly.actuator.health import HealthAggregator, HealthStatus, ProbeGroup
+from pyfly.actuator.wiring import install_health_indicators
+from pyfly.context.application_context import ApplicationContext
+from pyfly.core.config import Config
 from pyfly.data.relational.auto_configuration import EngineLifecycle
+from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity
+
+
+@pytest.fixture
+async def silent_database() -> AsyncIterator[str]:
+    """A TCP server that accepts connections and never says a word: a database gone silent."""
+    held: list[asyncio.StreamWriter] = []
+
+    async def _hold(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(_hold, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"postgresql+asyncpg://app:secret@127.0.0.1:{port}/orders"
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+        await server.wait_closed()
+
 
 # ---------------------------------------------------------------------------
 # SqlAlchemyHealthIndicator
@@ -247,3 +277,164 @@ class TestEngineLifecycleDdlNone:
             async with engine.begin() as conn:
                 await conn.run_sync(lambda c: _Canary.__table__.drop(c, checkfirst=True))
             await lifecycle.stop()
+
+
+# ---------------------------------------------------------------------------
+# C021 — readiness only, bounded, every datasource
+# ---------------------------------------------------------------------------
+
+
+class TestProbeGroup:
+    async def test_db_indicator_is_readiness_only(self, tmp_path: Path) -> None:
+        context = ApplicationContext(
+            Config(
+                {
+                    "pyfly": {
+                        "data": {
+                            "relational": {
+                                "enabled": "true",
+                                "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                                "ddl-auto": "none",
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        await context.start()
+        try:
+            aggregator = HealthAggregator()
+            install_health_indicators(context, aggregator)
+            liveness = await aggregator.check_liveness()
+            readiness = await aggregator.check_readiness()
+            assert "db_health_indicator" not in liveness.components
+            assert readiness.components["db_health_indicator"].status == "UP"
+            assert "db_health_indicator" in (await aggregator.check()).components
+        finally:
+            await context.stop()
+
+    def test_indicator_declares_readiness(self) -> None:
+        assert SqlAlchemyHealthIndicator.probe_groups == frozenset({ProbeGroup.READINESS})
+
+    async def test_explicit_groups_still_win(self, tmp_path: Path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
+        try:
+            aggregator = HealthAggregator()
+            aggregator.add_indicator("db", SqlAlchemyHealthIndicator(engine), groups={ProbeGroup.LIVENESS})
+            assert "db" in (await aggregator.check_liveness()).components
+        finally:
+            await engine.dispose()
+
+    async def test_scan_does_not_register_an_indicator_twice(self, tmp_path: Path) -> None:
+        # The documented workaround registers the bean's instance as "db" (readiness) before the scan;
+        # the scan used to add it again under its bean name, back in liveness.
+        context = ApplicationContext(
+            Config(
+                {
+                    "pyfly": {
+                        "data": {
+                            "relational": {
+                                "enabled": "true",
+                                "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                                "ddl-auto": "none",
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        await context.start()
+        try:
+            aggregator = HealthAggregator()
+            indicator = context.get_bean(SqlAlchemyHealthIndicator)
+            aggregator.add_indicator("db", indicator, groups={ProbeGroup.READINESS})
+            install_health_indicators(context, aggregator)
+            assert set((await aggregator.check()).components) == {"db"}
+        finally:
+            await context.stop()
+
+
+class TestBounded:
+    async def test_silent_database_answers_within_the_timeout(self, silent_database: str) -> None:
+        engine = create_async_engine(silent_database)
+        try:
+            started = time.monotonic()
+            result = await SqlAlchemyHealthIndicator(engine, timeout=0.3).health()
+            elapsed = time.monotonic() - started
+        finally:
+            await engine.dispose()
+        assert result.status == "DOWN"
+        assert result.details["error"] == "TimeoutError"
+        assert elapsed < 2.0
+
+    async def test_exhausted_pool_is_not_waited_on(self, tmp_path: Path) -> None:
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'busy.db'}", pool_size=1, max_overflow=0, pool_timeout=30
+        )
+        held = await engine.connect()
+        try:
+            started = time.monotonic()
+            result = await SqlAlchemyHealthIndicator(engine, timeout=5.0).health()
+            elapsed = time.monotonic() - started
+        finally:
+            await held.close()
+            await engine.dispose()
+        assert elapsed < 1.0
+        assert result.status == "UNKNOWN"
+        assert result.details["validation"] == "skipped: pool exhausted"
+        assert engine.pool.checkedout() == 0
+
+    async def test_check_returns_its_connection(self, tmp_path: Path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
+        try:
+            await SqlAlchemyHealthIndicator(engine).health()
+            assert engine.pool.checkedout() == 0
+        finally:
+            await engine.dispose()
+
+
+class TestEveryDatasource:
+    async def test_registry_datasources_are_all_checked(self, tmp_path: Path) -> None:
+        registry = DataSourceRegistry.for_config(
+            Config(
+                {
+                    "pyfly": {
+                        "data": {
+                            "relational": {
+                                "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                                "read-replica": {"url": f"sqlite+aiosqlite:///{tmp_path / 'replica.db'}"},
+                                "datasources": {
+                                    "reporting": {"url": f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"},
+                                    "legacy": {
+                                        "url": "postgresql+asyncpg://bad:bad@127.0.0.1:1/nope",
+                                        "connect-args": {"timeout": 1},
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        try:
+            indicator = SqlAlchemyHealthIndicator(registry.primary.engine, registry=registry, timeout=2.0)
+            result = await indicator.health()
+        finally:
+            await registry.close()
+        assert result.status == "DOWN"
+        assert result.details["database"] == "sqlite"
+        datasources = result.details["datasources"]
+        assert set(datasources) == {"primary", "primary.replica", "reporting", "legacy"}
+        assert datasources["primary"]["status"] == "UP"
+        assert datasources["primary.replica"]["status"] == "UP"
+        assert datasources["reporting"]["status"] == "UP"
+        assert datasources["legacy"]["status"] == "DOWN"
+        assert datasources["legacy"]["database"] == "postgresql"
+
+    async def test_details_never_carry_the_password(self, silent_database: str) -> None:
+        engine = create_async_engine(silent_database)
+        try:
+            result = await SqlAlchemyHealthIndicator(engine, timeout=0.2).health()
+        finally:
+            await engine.dispose()
+        assert "secret" not in repr(result.details)
