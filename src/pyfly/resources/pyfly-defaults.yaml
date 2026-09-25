@@ -126,9 +126,9 @@ pyfly:
       access-log: false
   data:
     enabled: false
-    url: "sqlite+aiosqlite:///pyfly.db"
-    echo: false
-    pool-size: 5
+    # No database URL here: pyfly.data.relational.url must be configured (the legacy pyfly.data.url,
+    # echo and pool-size keys are deprecated aliases of the relational ones, so a default here would
+    # silently point every application at a file in its working directory).
     relational:
       ddl-auto: "create"
   cache:
