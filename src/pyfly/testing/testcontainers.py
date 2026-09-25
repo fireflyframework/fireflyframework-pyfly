@@ -36,6 +36,7 @@ Guard integration tests so they skip cleanly where Docker is unavailable::
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import time
@@ -150,12 +151,17 @@ class MongoDbReplicaSetContainer:
         )
 
     def start(self) -> Self:
-        """Start ``mongod``, initiate the replica set and wait for a writable primary."""
-        self._container.start()
+        """Start ``mongod``, initiate the replica set and wait for a writable primary.
+
+        If any step fails, the container is removed before the error propagates, including one that
+        Docker created before its start failed.
+        """
         try:
+            self._container.start()
             self._initiate()
         except BaseException:
-            self._container.stop()
+            with contextlib.suppress(Exception):  # the start error is the one to report
+                self._container.stop()
             raise
         return self
 

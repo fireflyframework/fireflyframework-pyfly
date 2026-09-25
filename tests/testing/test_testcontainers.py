@@ -122,6 +122,34 @@ def test_replica_set_container_maps_to_the_document_uri() -> None:
     }
 
 
+class _HalfStartedDockerContainer:
+    """Creates its container, then fails, the way a readiness wait or a port lookup can."""
+
+    def __init__(self, stop_error: Exception | None = None) -> None:
+        self.created = False
+        self.stop_error = stop_error
+
+    def start(self) -> None:
+        self.created = True
+        raise RuntimeError("wait strategy timed out")
+
+    def stop(self) -> None:
+        self.created = False
+        if self.stop_error is not None:
+            raise self.stop_error
+
+
+@pytest.mark.parametrize("stop_error", [None, RuntimeError("docker went away")])
+def test_replica_set_container_removes_a_container_that_failed_to_start(stop_error: Exception | None) -> None:
+    container = MongoDbReplicaSetContainer.__new__(MongoDbReplicaSetContainer)
+    docker = _HalfStartedDockerContainer(stop_error)
+    container._container = docker
+
+    with pytest.raises(RuntimeError, match="wait strategy timed out"):  # the start error, never the stop error
+        container.start()
+    assert docker.created is False
+
+
 def test_unmapped_container_raises() -> None:
     class Other:
         pass
