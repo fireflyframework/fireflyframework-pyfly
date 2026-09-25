@@ -25,7 +25,13 @@ Backends are the lanes of the test backend matrix (``tests/support/backend_matri
 ``pg``, ``mysql`` and ``mariadb``. A server lane starts its container through testcontainers (Docker
 required; set ``TESTCONTAINERS_RYUK_DISABLED=true`` where Ryuk cannot run) and removes it afterwards,
 unless ``--server-url`` (or the lane's ``PYFLY_IT_*`` variable) names a server to use instead. The
-URL must be allowed to create databases. Every scenario gets a database of its own, dropped at the end.
+URL must be allowed to create databases. ``--server-url`` is an async SQLAlchemy URL and is used as
+given, driver included; a ``PYFLY_IT_*`` URL gets the lane's async driver, as in the test matrix.
+Every scenario gets a database of its own, dropped at the end.
+
+A scenario that raises is recorded in the report as ``{"error": "<repr of the exception>"}``, with its
+traceback on stderr. The remaining scenarios still run, the ``--json`` file is still written, and the
+exit status is 1.
 
 What is measured, and why, is described in ``benchmarks/data/scenarios.py``; the recorded numbers
 are in ``benchmarks/data/BASELINE.md``. Latencies are wall-clock times on one event loop, medians
@@ -45,7 +51,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+import traceback
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -104,43 +111,64 @@ def _commit() -> str:
         return "unknown"
 
 
-async def _run(lane: str, server: RunningServer | None, scenarios: list[str], workdir: Path) -> dict[str, Any]:
-    results: dict[str, Any] = {}
-    meta: dict[str, Any] = {}
-    for name in scenarios:
-        if server is None:
-            url = f"sqlite+aiosqlite:///{workdir / f'{name}.db'}"
-            database = None
-        else:
-            database = new_database_name()
-            url = await create_database(server.url, database)
-        if not meta:
-            meta = {
-                "backend": lane,
-                "server": await _server_version(url),
-                "driver": sqlalchemy.engine.make_url(url).get_driver_name(),
-            }
+async def _run_scenario(
+    name: str, lane: str, server: RunningServer | None, workdir: Path, meta: dict[str, Any]
+) -> dict[str, Any]:
+    """Run scenario *name* on a database of its own, created here and dropped afterwards."""
+    if server is None:
+        url = f"sqlite+aiosqlite:///{workdir / f'{name}.db'}"
+        database = None
+    else:
+        database = new_database_name()
+        url = await create_database(server.url, database)
+    try:
+        if "server" not in meta:
+            meta["server"] = await _server_version(url)
+            meta["driver"] = sqlalchemy.engine.make_url(url).get_driver_name()
             print(f"[{lane}] {meta['server']} via {meta['driver']}", flush=True)
         print(f"[{name}]", flush=True)
         env = await boot(lane, url)
         try:
-            results[name] = await SCENARIOS[name](env)
+            return await SCENARIOS[name](env)
         finally:
             await env.context.stop()
             del env
             gc.collect()  # finalize pinned sessions while the loop still runs
-            if server is not None and database is not None:
-                await drop_database(server.url, database)
+    finally:
+        if server is not None and database is not None:
+            await drop_database(server.url, database)
+
+
+async def _run(lane: str, server: RunningServer | None, scenarios: list[str], workdir: Path) -> dict[str, Any]:
+    """Run *scenarios* in order. A scenario that raises is recorded as ``{"error": repr(exc)}`` and
+    the run goes on, so one broken scenario cannot hide the others or the ``--json`` report."""
+    results: dict[str, Any] = {}
+    meta: dict[str, Any] = {"backend": lane}
+    for name in scenarios:
+        try:
+            results[name] = await _run_scenario(name, lane, server, workdir, meta)
+        except Exception as exc:
+            results[name] = {"error": repr(exc)}
+            print(f"    FAILED: {exc!r}", flush=True)
+            traceback.print_exc()
     return {"meta": meta, "scenarios": results}
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the harness; the exit status is 1 when any scenario failed (its error is in the report)."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--backend", choices=RELATIONAL_LANES, default=SQLITE_FILE)
-    parser.add_argument("--server-url", help="use this server instead of starting a container (server lanes)")
+    parser.add_argument(
+        "--server-url",
+        help=(
+            "a server to use instead of starting a container (server lanes): an async SQLAlchemy URL, "
+            "used as given (e.g. postgresql+asyncpg://user:pass@host:5432/postgres), whose account may "
+            "create and drop databases"
+        ),
+    )
     parser.add_argument("--scenario", nargs="+", choices=list(SCENARIOS), default=list(SCENARIOS))
     parser.add_argument("--json", type=Path, help="also write the results to this JSON file")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.disable(logging.WARNING)  # the context logs its lifecycle at INFO; keep the output to results
     started = datetime.now(UTC)
@@ -162,7 +190,12 @@ def main() -> None:
     if args.json:
         args.json.write_text(json.dumps(report, indent=2, default=str) + "\n")
         print(f"results written to {args.json}")
+    failed = [name for name, result in report["scenarios"].items() if "error" in result]
+    if failed:
+        print(f"failed scenarios: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

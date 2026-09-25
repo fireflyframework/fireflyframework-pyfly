@@ -15,10 +15,12 @@
 
 Every scenario boots a real ``ApplicationContext`` with ``RelationalAutoConfiguration``, a
 ``@repository`` on ``Repository[AuditItem, int]`` and a ``@service`` using ``@transactional``, on a
-database of its own. Only public entry points are used (the context's beans, repository methods,
-``@transactional``), so the same scenarios measure the code before and after the unit-of-work
-redesign. ``AuditItem`` is the model of the audit proofs (``proofs.py``), which keeps ``p6`` and
-``p7`` comparable with FINDINGS.md.
+database of its own. The harness reaches the framework only through public entry points: the
+context's beans (the engine and the ``async_sessionmaker``), repository methods and ``@transactional``.
+The statements it writes by hand run on sessions it opens itself from that session factory, never on
+a repository's internals. So the same scenarios measure the code before and after the unit-of-work
+redesign (``tests/testing/test_data_benchmark_harness.py`` checks it). ``AuditItem`` is the model of
+the audit proofs (``proofs.py``), which keeps ``p6`` and ``p7`` comparable with FINDINGS.md.
 
 Scenarios:
 
@@ -31,7 +33,8 @@ Scenarios:
 ``exists``      ``exists_by_id`` and a derived ``exists_by_name`` over 5,000 matching rows: SQL shape
                 and latency.
 ``derived``     CPU of a derived ``find_by_name`` against the same statement built by hand on each call
-                and built once (interleaved; this thread's CPU time, so the database wait is out).
+                and built once, both on a session the harness opens (interleaved; this thread's CPU
+                time, so the database wait is out).
 ``stream``      ``stream_all()`` against ``find_all()`` over 5,000 rows.
 ``in_padding``  ``find_all_by_id`` for 1..64 ids: distinct SQL texts (asyncpg prepares one statement
                 per text) and latency.
@@ -72,24 +75,28 @@ class AuditItemRepository(Repository[AuditItem, int]):
 
     async def exists_by_name(self, name: str) -> bool: ...
 
-    async def hand_written_find(self, name: str) -> list[AuditItem]:
-        """The statement ``find_by_name`` derives, built by hand on every call."""
-        result = await self._session.execute(select(AuditItem).where(AuditItem.name == name))
-        return list(result.scalars().all())
-
-    async def prebuilt_find(self, name: str) -> list[AuditItem]:
-        """The same statement, built once: the floor a derived query can get down to."""
-        result = await self._session.execute(_PREBUILT_FIND_BY_NAME, {"name": name})
-        return list(result.scalars().all())
-
 
 _PREBUILT_FIND_BY_NAME = select(AuditItem).where(AuditItem.name == bindparam("name"))
+
+
+async def hand_written_find(session: AsyncSession, name: str) -> list[AuditItem]:
+    """The statement ``find_by_name`` derives, built by hand on every call."""
+    result = await session.execute(select(AuditItem).where(AuditItem.name == name))
+    return list(result.scalars().all())
+
+
+async def prebuilt_find(session: AsyncSession, name: str) -> list[AuditItem]:
+    """The same statement, built once: the floor a derived query can get down to."""
+    result = await session.execute(_PREBUILT_FIND_BY_NAME, {"name": name})
+    return list(result.scalars().all())
 
 
 @service
 class ItemService:
     def __init__(self, repo: AuditItemRepository, factory: async_sessionmaker[AsyncSession]) -> None:
         self.repo = repo
+        # The service's own attribute. Before the redesign, @transactional dispatches on it; after, it
+        # stays a legacy dispatch key, and the harness opens its own sessions from it (time_finders).
         self._session_factory = factory
 
     @transactional
@@ -119,30 +126,35 @@ class ItemService:
     async def time_finders(self, name: str, iterations: int) -> dict[str, dict[str, list[float]]]:
         """Wall and CPU seconds per call of the derived finder and of its two hand-written twins.
 
-        The three run interleaved in one transaction, so drift on the machine or the server affects
-        them alike. CPU is this thread's time: the Python work of building, compiling and executing
-        the statement, without the wait for the database (and without aiosqlite's worker thread).
+        The derived finder runs through the repository in this ``@transactional`` unit of work. The
+        twins run on a session the harness opens itself from the injected ``async_sessionmaker``, once,
+        before any call, and keeps in a transaction of its own; they touch no repository internals, so
+        the scenario means the same before and after the redesign. The three run interleaved, so drift
+        on the machine or the server affects them alike. CPU is this thread's time: the Python work of
+        building, compiling and executing the statement, without the wait for the database (and
+        without aiosqlite's worker thread).
         """
-        finders: dict[str, Callable[[], Awaitable[Any]]] = {
-            "derived": lambda: self.repo.find_by_name(name),
-            "hand_written": lambda: self.repo.hand_written_find(name),
-            "prebuilt": lambda: self.repo.prebuilt_find(name),
-        }
-        for _ in range(max(1, iterations // 10)):  # warm-up: caches, prepared statements
-            for call in finders.values():
-                await call()
-        samples: dict[str, dict[str, list[float]]] = {label: {"wall": [], "cpu": []} for label in finders}
-        gc.collect()
-        gc.disable()
-        try:
-            for _ in range(iterations):
-                for label, call in finders.items():
-                    wall, cpu = time.perf_counter(), time.thread_time()
+        async with self._session_factory() as session, session.begin():
+            finders: dict[str, Callable[[], Awaitable[Any]]] = {
+                "derived": lambda: self.repo.find_by_name(name),
+                "hand_written": lambda: hand_written_find(session, name),
+                "prebuilt": lambda: prebuilt_find(session, name),
+            }
+            for _ in range(max(1, iterations // 10)):  # warm-up: caches, prepared statements
+                for call in finders.values():
                     await call()
-                    samples[label]["cpu"].append(time.thread_time() - cpu)
-                    samples[label]["wall"].append(time.perf_counter() - wall)
-        finally:
-            gc.enable()
+            samples: dict[str, dict[str, list[float]]] = {label: {"wall": [], "cpu": []} for label in finders}
+            gc.collect()
+            gc.disable()
+            try:
+                for _ in range(iterations):
+                    for label, call in finders.items():
+                        wall, cpu = time.perf_counter(), time.thread_time()
+                        await call()
+                        samples[label]["cpu"].append(time.thread_time() - cpu)
+                        samples[label]["wall"].append(time.perf_counter() - wall)
+            finally:
+                gc.enable()
         return samples
 
     @transactional
