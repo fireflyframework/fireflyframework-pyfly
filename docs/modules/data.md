@@ -1242,6 +1242,11 @@ It also exports every datasource's connection pool (`SqlAlchemyPoolMetrics`, lab
 | `pyfly_db_pool_idle` | Gauge | Connections idle in the pool |
 | `pyfly_db_pool_overflow` | Gauge | Overflow connections in use |
 | `pyfly_db_pool_invalidated_total` | Counter | Connections invalidated (disconnects, errors) |
+| `pyfly_db_pool_acquire_seconds` | Histogram | Time a checkout took to obtain its connection: the wait for an idle one while the pool is busy, a connect when the pool grows, the pre-ping when it is on |
+
+The acquire histogram is the pool's wait time. Values near `pool.timeout` mean the pool is exhausted,
+and a failed checkout (a pool timeout) is recorded too. The registry builds queue-pool engines with
+`MeteredAsyncQueuePool`, which measures it; the in-memory SQLite `StaticPool` does not report it.
 
 No configuration is required — the bean is created automatically when
 `prometheus_client` is installed and the `MetricsRegistry` is available; when neither is

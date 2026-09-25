@@ -19,6 +19,7 @@ match the pool exactly while connections are checked out and after they are retu
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -61,6 +62,41 @@ async def test_pool_gauges_follow_the_pool(tmp_path: Path) -> None:
         assert _sample("pyfly_db_pool_idle", name) == 2
     finally:
         await registry.close()
+
+
+async def test_the_time_to_obtain_a_connection_is_measured(tmp_path: Path) -> None:
+    name = f"pool-{uuid.uuid4().hex[:8]}"
+    registry = DataSourceRegistry(
+        Config({"pyfly": {"data": {"relational": {"pool": {"size": 1, "max-overflow": 0, "timeout": 5}}}}})
+    )
+    try:
+        datasource = registry.register(name, f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
+        SqlAlchemyPoolMetrics(MetricsRegistry()).bind(name, datasource.engine)
+        held = await datasource.engine.connect()
+        assert _sample("pyfly_db_pool_acquire_seconds_count", name) == 1
+
+        async def _return_it_later() -> None:
+            await asyncio.sleep(0.2)
+            await held.close()
+
+        returning = asyncio.ensure_future(_return_it_later())
+        async with datasource.engine.connect() as conn:  # waits for the only connection
+            await conn.execute(text("SELECT 1"))
+        await returning
+        assert _sample("pyfly_db_pool_acquire_seconds_count", name) == 2
+        assert (_sample("pyfly_db_pool_acquire_seconds_sum", name) or 0.0) >= 0.18
+        assert _acquire_bucket(name, 0.1) == 1  # the first checkout did not wait
+
+        await datasource.engine.dispose()  # a replaced pool keeps reporting
+        async with datasource.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        assert _sample("pyfly_db_pool_acquire_seconds_count", name) == 3
+    finally:
+        await registry.close()
+
+
+def _acquire_bucket(datasource: str, le: float) -> float | None:
+    return REGISTRY.get_sample_value("pyfly_db_pool_acquire_seconds_bucket", {"datasource": datasource, "le": str(le)})
 
 
 async def test_invalidated_connections_are_counted(tmp_path: Path) -> None:

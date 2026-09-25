@@ -20,8 +20,9 @@ label is restricted to ``{SELECT, INSERT, UPDATE, DELETE, OTHER}`` so Prometheus
 bounded regardless of query shape.
 
 :class:`SqlAlchemyPoolMetrics` exports each datasource's connection pool (labeled ``datasource``):
-configured size, connections checked out, idle connections, overflow in use, and invalidated
-connections. The relational auto-configuration binds both to every engine of the datasource registry.
+configured size, connections checked out, idle connections, overflow in use, invalidated connections,
+and the time checkouts take to obtain a connection. The relational auto-configuration binds both to
+every engine of the datasource registry.
 """
 
 from __future__ import annotations
@@ -32,6 +33,9 @@ from typing import Any
 from pyfly.observability.ports import MetricsRecorder
 
 _KNOWN_OPS = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+
+# From an idle pooled connection (tens of microseconds) to a checkout that waited out pool.timeout.
+_ACQUIRE_BUCKETS = (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0)
 
 
 def _operation(statement: str) -> str:
@@ -154,13 +158,19 @@ class SqlAlchemyPoolMetrics:
     ``pyfly_db_pool_idle``                        Connections idle in the pool
     ``pyfly_db_pool_overflow``                    Overflow connections in use (0 when none)
     ``pyfly_db_pool_invalidated_total``           Connections invalidated (disconnects, errors)
+    ``pyfly_db_pool_acquire_seconds``             Histogram: time a checkout took to obtain its
+                                                  connection (the wait for an idle one, a
+                                                  connect, the pre-ping)
     ============================================  ===========================================
 
     With the Prometheus recorder the gauges are read from the pool at scrape time, so they are exact
     at rest and under load; with a recorder whose gauges have no ``set_function`` they are refreshed on
     every checkout and checkin. The gauges cover queue pools (every server database and SQLite files);
-    the in-memory SQLite ``StaticPool`` has one connection and reports invalidations only. The
-    datasource label is the registry's ``qualified_name`` (``primary``, ``primary.replica``, ...).
+    the in-memory SQLite ``StaticPool`` has one connection and reports invalidations only. The acquire
+    histogram needs the registry's
+    :class:`~pyfly.data.relational.datasource_registry.MeteredAsyncQueuePool`, which every registry
+    engine with a queue pool has; an acquire time near ``pool.timeout`` means the pool is exhausted.
+    The datasource label is the registry's ``qualified_name`` (``primary``, ``primary.replica``, ...).
     """
 
     def __init__(self, recorder: MetricsRecorder) -> None:
@@ -174,6 +184,12 @@ class SqlAlchemyPoolMetrics:
         )
         self._invalidated: Any = recorder.counter(
             "pyfly_db_pool_invalidated_total", "Pooled connections invalidated", labels=["datasource"]
+        )
+        self._acquire: Any = recorder.histogram(
+            "pyfly_db_pool_acquire_seconds",
+            "Time a checkout took to obtain its pooled connection",
+            labels=["datasource"],
+            buckets=_ACQUIRE_BUCKETS,
         )
         self._bound: set[tuple[str, int]] = set()
 
@@ -220,6 +236,10 @@ class SqlAlchemyPoolMetrics:
 
         event.listen(sync_engine, "invalidate", _on_invalidate)
         event.listen(sync_engine, "soft_invalidate", _on_invalidate)
+
+        add_acquire_observer = getattr(sync_engine.pool, "add_acquire_observer", None)
+        if callable(add_acquire_observer):
+            add_acquire_observer(self._acquire.labels(datasource=datasource).observe)
 
 
 def _pool_stat(sync_engine: Any, name: str) -> int:

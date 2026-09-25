@@ -58,6 +58,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import ConnectionPoolEntry, QueuePool
+from sqlalchemy.pool import AsyncAdaptedQueuePool, ConnectionPoolEntry, PoolProxiedConnection, QueuePool
 
 from pyfly.config.properties.data import PREFIX, PRIMARY, DataSourceProperties, RelationalProperties
 from pyfly.container.ordering import get_order
@@ -93,6 +94,7 @@ __all__ = [
     "DataSourceCapabilities",
     "DataSourceConfigurationError",
     "DataSourceRegistry",
+    "MeteredAsyncQueuePool",
     "NoSuchDataSourceError",
     "datasource_of",
 ]
@@ -139,6 +141,46 @@ def datasource_of(target: AsyncEngine | async_sessionmaker[AsyncSession]) -> Dat
     if isinstance(target, AsyncEngine):
         return _BY_ENGINE.get(target)
     return _BY_SESSIONMAKER.get(target)
+
+
+# ---------------------------------------------------------------------------
+# Pool
+# ---------------------------------------------------------------------------
+
+
+class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
+    """The queue pool of every registry engine that would get ``AsyncAdaptedQueuePool``: it times checkouts.
+
+    An observer added with :meth:`add_acquire_observer` receives, for every checkout, the seconds it
+    took to obtain its connection: the wait for an idle connection when the pool is busy, the connect
+    when the pool grows or recycles one, and the pre-ping when it is on. A checkout that fails (a pool
+    timeout) is reported too. The observers carry over to the pool ``engine.dispose()`` creates.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._acquire_observers: list[Callable[[float], None]] = []
+
+    def add_acquire_observer(self, observer: Callable[[float], None]) -> None:
+        """Call *observer* with the seconds each checkout took."""
+        self._acquire_observers.append(observer)
+
+    def connect(self) -> PoolProxiedConnection:
+        observers = self._acquire_observers
+        if not observers:
+            return super().connect()
+        started = time.perf_counter()
+        try:
+            return super().connect()
+        finally:
+            elapsed = time.perf_counter() - started
+            for observer in observers:
+                observer(elapsed)
+
+    def recreate(self) -> MeteredAsyncQueuePool:
+        pool = cast(MeteredAsyncQueuePool, super().recreate())
+        pool._acquire_observers = self._acquire_observers  # shared: the observers follow the engine
+        return pool
 
 
 # ---------------------------------------------------------------------------
@@ -764,11 +806,13 @@ class DataSourceRegistry:
             kwargs["pool_recycle"] = pool.recycle
         if connect_args:
             kwargs["connect_args"] = connect_args
+        dialect_class: Any = url.get_dialect(_is_async=True)
+        pool_class = cast(type, dialect_class.get_pool_class(url))
+        if pool_class is AsyncAdaptedQueuePool:
+            kwargs["poolclass"] = MeteredAsyncQueuePool
         sizing = {"pool_size": pool.size, "max_overflow": pool.max_overflow, "pool_timeout": pool.timeout}
         configured = {key: value for key, value in sizing.items() if value is not None}
         if configured:
-            dialect_class: Any = url.get_dialect(_is_async=True)
-            pool_class = cast(type, dialect_class.get_pool_class(url))
             if issubclass(pool_class, QueuePool):
                 kwargs.update(configured)
             else:
