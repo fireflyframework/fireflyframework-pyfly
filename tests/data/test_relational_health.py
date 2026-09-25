@@ -26,6 +26,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import String as SAString
@@ -33,6 +34,7 @@ from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.pool import StaticPool
 
 from pyfly.actuator.health import HealthAggregator, HealthStatus, ProbeGroup
 from pyfly.actuator.wiring import install_health_indicators
@@ -406,6 +408,48 @@ class TestBounded:
             assert engine.pool.checkedout() == 0
         finally:
             await engine.dispose()
+
+
+class TestSharedConnection:
+    async def test_a_late_check_leaves_a_shared_in_memory_connection_alone(self) -> None:
+        # SQLite :memory: keeps one connection (StaticPool) that the check shares with the application.
+        # Stopping the late check must not close it: that would lose the database under the application.
+        registry = DataSourceRegistry(
+            Config({"pyfly": {"data": {"relational": {"url": "sqlite+aiosqlite:///:memory:"}}}})
+        )
+        engine = registry.primary.engine
+        assert isinstance(engine.pool, StaticPool)
+
+        def _add_pause(dbapi_connection: Any, _record: Any) -> None:
+            dbapi_connection.create_function("pause", 1, time.sleep)  # holds the connection's worker thread
+
+        event.listen(engine.sync_engine, "connect", _add_pause)
+        indicator = SqlAlchemyHealthIndicator(engine, registry=registry, timeout=0.2)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE TABLE ledger (id INTEGER PRIMARY KEY)"))
+                await conn.execute(text("INSERT INTO ledger (id) VALUES (1)"))
+
+            async def _long_statement() -> int:
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT pause(0.6)"))
+                    return int((await conn.execute(text("SELECT count(*) FROM ledger"))).scalar_one())
+
+            work = asyncio.ensure_future(_long_statement())
+            await asyncio.sleep(0.05)
+            late = await indicator.health()
+            assert late.status == "DOWN"
+            assert late.details["error"] == "TimeoutError"
+
+            assert await work == 1  # the application's work finished on its connection
+            deadline = time.monotonic() + 2
+            while (after := await indicator.health()).status != "UP" and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)  # the late check ends by itself, after the application's statement
+            assert after.status == "UP", after.details
+            async with engine.connect() as conn:
+                assert (await conn.execute(text("SELECT count(*) FROM ledger"))).scalar_one() == 1
+        finally:
+            await registry.close()
 
 
 class TestEveryDatasource:

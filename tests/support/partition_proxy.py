@@ -26,6 +26,10 @@ Usage::
     proxy.partition()   # stop forwarding in both directions
     proxy.heal()        # forward again, held-back bytes first
     await proxy.close()
+
+:meth:`PartitionProxy.black_hole_established` reproduces the other silent failure: a firewall, NAT or
+load balancer drops the state of an idle flow, so the connections already open lose every byte while
+new connections reach the server.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ class PartitionProxy:
         self._tasks: set[asyncio.Task[None]] = set()
         self._writers: list[asyncio.StreamWriter] = []
         self._server: asyncio.Server | None = None
+        # Connections numbered below this one lose every byte, whatever partition() and heal() do.
+        self._black_holed_below = 0
         self.connections = 0
 
     async def start(self) -> int:
@@ -64,6 +70,14 @@ class PartitionProxy:
         """Forward again, held-back bytes first."""
         self._flowing.set()
 
+    def black_hole_established(self) -> None:
+        """Drop every byte of the connections accepted so far, for good; later connections flow.
+
+        The client's socket stays open and its writes succeed, but nothing reaches either side: what a
+        middlebox that forgot an idle flow does. :meth:`heal` does not bring these connections back.
+        """
+        self._black_holed_below = self.connections
+
     async def close(self) -> None:
         """Close every proxied connection and stop listening."""
         self.heal()
@@ -76,18 +90,21 @@ class PartitionProxy:
             await self._server.wait_closed()
 
     async def _accept(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
+        number = self.connections
         self.connections += 1
         server_reader, server_writer = await asyncio.open_connection(*self._upstream)
         self._writers += [client_writer, server_writer]
         for source, target in ((client_reader, server_writer), (server_reader, client_writer)):
-            task = asyncio.ensure_future(self._pipe(source, target))
+            task = asyncio.ensure_future(self._pipe(source, target, number))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-    async def _pipe(self, source: asyncio.StreamReader, target: asyncio.StreamWriter) -> None:
+    async def _pipe(self, source: asyncio.StreamReader, target: asyncio.StreamWriter, number: int) -> None:
         with contextlib.suppress(OSError, asyncio.IncompleteReadError):
             while data := await source.read(65536):
                 await self._flowing.wait()
+                if number < self._black_holed_below:
+                    continue  # the flow is forgotten: the bytes go nowhere, and the socket stays open
                 target.write(data)
                 await target.drain()
         target.close()
