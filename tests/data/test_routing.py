@@ -84,6 +84,11 @@ async def test_bean_builds_replica_when_configured(tmp_path: Path) -> None:
         assert replica is not None
         assert factory._primary is registry.primary.sessionmaker
         assert factory._replica is replica.sessionmaker
+
+        # A session factory the application declared itself keeps the configured replica.
+        own = async_sessionmaker(registry.primary.engine, expire_on_commit=False)
+        routed = auto.routing_session_factory(own, cfg)
+        assert routed._primary is own and routed._replica is replica.sessionmaker
     finally:
         await registry.close()
 

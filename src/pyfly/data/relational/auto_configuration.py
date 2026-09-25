@@ -309,13 +309,13 @@ class RelationalAutoConfiguration:
         the primary (no behavior change).
         """
         datasource = datasource_of(async_session_factory)
-        if datasource is None:
+        if datasource is not None:
+            replica = datasource.replica
+        else:
+            # A session factory the application declared itself still routes to the configured replica.
             registry = DataSourceRegistry.for_config(config)
-            datasource = registry.primary if registry.has_primary else None
-            if datasource is None or datasource.sessionmaker is not async_session_factory:
-                return RoutingSessionFactory(async_session_factory, None)
-        replica = datasource.replica
-        return RoutingSessionFactory(datasource.sessionmaker, replica.sessionmaker if replica is not None else None)
+            replica = registry.primary.replica if registry.has_primary else None
+        return RoutingSessionFactory(async_session_factory, replica.sessionmaker if replica is not None else None)
 
     @bean(scope=Scope.TRANSIENT)
     def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:
