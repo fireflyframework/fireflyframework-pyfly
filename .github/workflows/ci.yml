@@ -107,6 +107,39 @@ jobs:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
         run: uv run pytest -m integration tests/integration -q --tb=short
 
+  integration-lanes:
+    name: Integration lane (${{ matrix.lane }})
+    # One job per database of the backend matrix (tests/support/backend_matrix.py), over the whole tests/
+    # tree, so backend-matrix tests outside tests/integration run on every server too. The sqlite-file lane
+    # is the `test` job. Same trigger policy as `integration`: manual dispatch + nightly, not a PR gate.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: integration-pg
+            marker: pg
+          - lane: integration-mysql
+            marker: mysql
+          - lane: integration-mariadb
+            marker: mariadb
+          - lane: integration-mongo-rs
+            marker: mongo
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --no-extra pii --group dev
+      - name: Run the ${{ matrix.lane }} lane (Docker required — fail, don't skip)
+        env:
+          PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
+        run: uv run pytest -m "integration and ${{ matrix.marker }}" tests/ -q --tb=short
+
   build:
     name: Build
     runs-on: ubuntu-latest

@@ -1,12 +1,16 @@
 # Local backends for PyFly integration tests (alternative to testcontainers auto-start).
 #   docker compose up -d
 #   export PYFLY_IT_POSTGRES_URL=postgresql+asyncpg://pyfly:pyfly@localhost:5432/pyfly
-#   export PYFLY_IT_MYSQL_URL=mysql+aiomysql://root:pyfly@localhost:3306/pyfly
+#   export PYFLY_IT_MYSQL_URL=mysql+asyncmy://root:pyfly@localhost:3306/pyfly
+#   export PYFLY_IT_MARIADB_URL=mariadb+asyncmy://root:pyfly@localhost:3307/pyfly
 #   export PYFLY_IT_REDIS_URL=redis://localhost:6379/0
 #   export PYFLY_IT_MONGO_URI=mongodb://localhost:27017
+#   export PYFLY_IT_MONGO_RS_URI="mongodb://localhost:27018/?directConnection=true"
 #   export PYFLY_IT_KAFKA_BOOTSTRAP=localhost:9092
 #   export PYFLY_IT_AMQP_URL=amqp://guest:guest@localhost:5672/
 #   uv run pytest -m integration tests/integration
+# The backend-matrix lanes (tests/support/backend_matrix.py) create and drop a database per test on the
+# postgres, mysql and mariadb servers, so those URLs need an account that may create databases.
 services:
   postgres:
     image: postgres:16-alpine
@@ -26,12 +30,35 @@ services:
       MYSQL_ROOT_PASSWORD: pyfly
       MYSQL_DATABASE: pyfly
     ports: ["3306:3306"]
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: pyfly
+      MARIADB_DATABASE: pyfly
+    ports: ["3307:3306"]
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
   mongodb:
     image: mongo:7
     ports: ["27017:27017"]
+  # Single-node replica set rs0: the only topology that runs multi-document transactions. The health
+  # check initiates the set on first start and turns healthy once this member is the writable primary.
+  # Connect with directConnection=true (the member advertises localhost:27017 inside the container).
+  mongodb-rs:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports: ["27018:27017"]
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}) }; quit(db.hello().isWritablePrimary ? 0 : 1)"
+      interval: 2s
+      timeout: 5s
+      retries: 30
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     ports: ["5672:5672", "15672:15672"]
