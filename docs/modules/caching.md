@@ -618,7 +618,14 @@ pyfly:
 | `pyfly.cache.provider`     | `"auto"`                     | Cache provider: `"auto"`, `"memory"`, `"redis"`, or `"postgres"`. |
 | `pyfly.cache.ttl`          | `300`                        | Default TTL in seconds, applied when decorators do not specify their own TTL. |
 | `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (used when provider is `"redis"` or auto-detected). |
-| `pyfly.cache.postgres.url` | `"postgresql+asyncpg://localhost:5432/cache"` | PostgreSQL connection URL (used when provider is `"postgres"`). |
+| `pyfly.cache.postgres.url` | *(none)*: the primary datasource | PostgreSQL connection URL (used when provider is `"postgres"`). See below. |
+
+`pyfly.cache.postgres.url` resolves through the
+[datasource registry](data-relational.md#module-datasources). With no URL, the cache uses the primary
+datasource (`pyfly.data.relational.url`), and with no primary either, startup fails with an error that
+names both keys. Before 26.09.08 it connected to `postgresql+asyncpg://localhost:5432/cache`. A URL
+identical to a registered datasource's reuses that datasource's engine. Another URL registers the
+`cache` datasource, which gets the primary's pool settings and is disposed on shutdown.
 
 ---
 

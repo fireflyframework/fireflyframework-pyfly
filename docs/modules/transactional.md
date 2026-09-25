@@ -1054,9 +1054,13 @@ pyfly:
         url: postgresql+asyncpg://user:pass@host/db
 ```
 
-Config key `pyfly.transactional.persistence.sqlalchemy.url` is used when
-set; otherwise the adapter falls back to `pyfly.data.relational.url`. A
-`ValueError` is raised if neither key is configured. The adapter creates
+Config key `pyfly.transactional.persistence.sqlalchemy.url` resolves
+through the [datasource registry](data-relational.md#module-datasources).
+With no URL the adapter uses the primary datasource
+(`pyfly.data.relational.url`); a `DataSourceConfigurationError` (a
+`ValueError`) naming both keys is raised if neither is configured. A URL
+identical to a registered datasource's reuses that datasource's engine, and
+another URL registers the `transactional-persistence` datasource. The adapter creates
 the table `pyfly_orchestration_state` on first use and requires
 `sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres,
 `aiosqlite` for SQLite).
@@ -1239,7 +1243,7 @@ pyfly:
 |-----|------|---------|-------------|
 | `pyfly.transactional.persistence.provider` | `str` | `memory` | Persistence backend: `memory`, `redis`, `sqlalchemy`, or `cache`. |
 | `pyfly.transactional.persistence.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL (only used when provider is `redis`). |
-| `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). Falls back to `pyfly.data.relational.url`. |
+| `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). None: the primary datasource. Resolved through the datasource registry. |
 
 ### Saga Properties
 

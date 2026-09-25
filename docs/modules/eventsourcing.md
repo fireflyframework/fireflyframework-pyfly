@@ -129,9 +129,17 @@ pyfly:
       url: postgresql+asyncpg://user:pass@host/db   # optional
 ```
 
-When `pyfly.eventsourcing.store.url` is not set, the adapter falls back to
-`pyfly.data.relational.url`. If neither is configured, it defaults to
-`sqlite+aiosqlite:///./app.db`.
+The URL resolves through the
+[datasource registry](data-relational.md#module-datasources), which builds every engine:
+
+- With no `pyfly.eventsourcing.store.url`, the event store uses the primary datasource
+  (`pyfly.data.relational.url`). With no primary either, startup fails with a
+  `DataSourceConfigurationError` that names both keys. Before 26.09.08 it silently opened
+  `sqlite+aiosqlite:///./app.db`.
+- A URL identical to a registered datasource's (the password aside) reuses that datasource's engine,
+  so the event store and the repositories share one pool.
+- Another URL registers the `event-store` datasource, with the same pool settings, connect arguments,
+  SQLite setup and credential hook as the primary. The registry disposes it on shutdown.
 
 `SqlAlchemyEventStore` manages the table `pyfly_event_store`:
 
@@ -175,8 +183,12 @@ pyfly:
   eventsourcing:
     snapshot:
       provider: sqlalchemy
-      url: postgresql+asyncpg://user:pass@host/db   # optional; falls back to pyfly.data.relational.url
+      url: postgresql+asyncpg://user:pass@host/db   # optional; the primary datasource when absent
 ```
+
+The snapshot URL resolves like the event store's: no URL means the primary datasource (and no primary
+is a startup error naming both keys), an identical URL reuses that datasource's engine, and another URL
+registers the `snapshot-store` datasource.
 
 `SqlAlchemySnapshotStore` manages the table `pyfly_snapshots`:
 
@@ -244,9 +256,9 @@ await publisher.publish_all(envelopes)
 |-----|---------|-------------|
 | `pyfly.eventsourcing.enabled` | `false` | Enable the event-sourcing module. |
 | `pyfly.eventsourcing.store.provider` | `memory` | Event store backend: `memory` or `sqlalchemy`. |
-| `pyfly.eventsourcing.store.url` | *(none)* | Async SQLAlchemy URL for the event store. Falls back to `pyfly.data.relational.url`, then `sqlite+aiosqlite:///./app.db`. |
+| `pyfly.eventsourcing.store.url` | *(none)* | Async SQLAlchemy URL for the event store. None: the primary datasource (no primary is a startup error). The same URL as a registered datasource reuses its engine; another URL registers the `event-store` datasource. |
 | `pyfly.eventsourcing.snapshot.provider` | `memory` | Snapshot store backend: `memory` or `sqlalchemy`. |
-| `pyfly.eventsourcing.snapshot.url` | *(none)* | Async SQLAlchemy URL for the snapshot store. Falls back to `pyfly.data.relational.url`, then `sqlite+aiosqlite:///./app.db`. |
+| `pyfly.eventsourcing.snapshot.url` | *(none)* | Async SQLAlchemy URL for the snapshot store. None: the primary datasource (no primary is a startup error). The same URL as a registered datasource reuses its engine; another URL registers the `snapshot-store` datasource. |
 | `pyfly.eventsourcing.eda.destination` | `pyfly.events` | EDA routing destination for `EventSourcingPublisher`. |
 
 ## Testing
