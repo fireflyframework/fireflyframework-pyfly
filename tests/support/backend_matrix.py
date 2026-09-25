@@ -45,7 +45,8 @@ The sqlite-file run has no ``integration`` marker, so the default ``pytest`` run
 server run carries ``integration`` plus its lane marker (``pg``, ``mysql``, ``mariadb``), so
 ``pytest -m integration`` runs every server lane and ``pytest -m "integration and mysql"`` runs one.
 Tests that use a server fixture directly (``pg_url``, ``mongo_rs_url``, ``redis_url``, ...) get the
-same two markers from :func:`pytest_collection_modifyitems`, wherever they live. Under
+same two markers from :func:`pytest_collection_modifyitems`, wherever they live; only the fixtures of
+this plugin and of ``tests/integration/conftest.py`` count, not a same-named local fixture. Under
 ``tests/integration/`` the directory marker is not added to the sqlite-file runs, so a matrix test
 placed there runs SQLite in the fast suite and the servers in the integration suite.
 
@@ -124,6 +125,9 @@ FIXTURE_LANES: dict[str, str] = {
     "amqp_url": "brokers",
 }
 """Server fixtures -> the lane marker every test that uses them gets, together with ``integration``."""
+
+INTEGRATION_FIXTURES_BASEID = "tests/integration"
+"""The node id of the directory whose ``conftest.py`` defines the other server fixtures (``pg_url``, ...)."""
 
 MYSQL_DRIVERS: tuple[str, ...] = ("asyncmy", "aiomysql")
 """The MySQL/MariaDB async drivers the lanes prove: asyncmy (the ``mysql`` extra) and aiomysql."""
@@ -417,16 +421,43 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     )
 
 
+def _is_server_fixture(fixturedef: pytest.FixtureDef[Any]) -> bool:
+    """Whether *fixturedef* is one of the real server fixtures, not a same-named stand-in.
+
+    The server fixtures are defined in this module or in ``tests/integration/conftest.py``. A fixture
+    with the same name anywhere else (a unit test's local fake), or a direct ``parametrize`` of that
+    name (pytest's pseudo fixture, whose ``baseid`` is empty too), is not one.
+    """
+    if fixturedef.baseid == "":
+        return getattr(fixturedef.func, "__module__", None) == __name__
+    return fixturedef.baseid == INTEGRATION_FIXTURES_BASEID
+
+
+def _server_lanes(item: pytest.Item) -> list[str]:
+    """The lanes of the server fixtures *item* uses, directly or through other fixtures."""
+    fixtureinfo = getattr(item, "_fixtureinfo", None)
+    if fixtureinfo is None:  # not a test function (a doctest item, say)
+        return []
+    lanes = []
+    for fixture_name, lane in FIXTURE_LANES.items():
+        fixturedefs = fixtureinfo.name2fixturedefs.get(fixture_name)
+        if fixturedefs and _is_server_fixture(fixturedefs[-1]):  # the last one is what the test gets
+            lanes.append(lane)
+    return lanes
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Give every test that uses a server fixture the ``integration`` marker and its lane marker."""
+    """Give every test that uses a server fixture the ``integration`` marker and its lane marker.
+
+    Only the fixtures of this plugin and of ``tests/integration/conftest.py`` count, so a unit test with
+    a local fixture that happens to be called ``redis_url`` stays in the fast suite.
+    """
     for item in items:
-        fixturenames = getattr(item, "fixturenames", ())
-        for fixture_name, lane in FIXTURE_LANES.items():
-            if fixture_name in fixturenames:
-                item.add_marker(pytest.mark.integration)
-                item.add_marker(pytest.mark.docker)
-                item.add_marker(getattr(pytest.mark, LANE_MARKERS.get(lane, lane)))
+        for lane in _server_lanes(item):
+            item.add_marker(pytest.mark.integration)
+            item.add_marker(pytest.mark.docker)
+            item.add_marker(getattr(pytest.mark, LANE_MARKERS.get(lane, lane)))
 
 
 def _serve(lane: str) -> Iterator[str]:

@@ -91,7 +91,9 @@ Markers decide what runs where:
 
 - A server lane carries `integration` plus its lane marker (`pg`, `mysql`, `mariadb`). So does any
   test that uses a server fixture directly, wherever it lives (`mongo` for the Mongo fixtures, `brokers`
-  for Redis, Kafka and RabbitMQ). `-m "integration and mariadb"` runs one lane.
+  for Redis, Kafka and RabbitMQ). `-m "integration and mariadb"` runs one lane. Only the fixtures of
+  the backend-matrix plugin and of `tests/integration/conftest.py` count: a unit test with a local
+  fixture that happens to be called `redis_url` stays in the default suite.
 - Under `tests/integration/`, the directory marker is not added to the `sqlite-file` runs. A matrix
   test placed there runs SQLite in the default suite and the servers in the integration suite.
 

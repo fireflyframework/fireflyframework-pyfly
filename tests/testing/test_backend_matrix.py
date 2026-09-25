@@ -125,6 +125,51 @@ def test_one_lane_is_selected_by_its_marker(tmp_path: Path, marker: str, expecte
     assert _ids(_collect(tmp_path, "-m", f"integration and {marker}")) == expected
 
 
+_TREE = {
+    "tests/integration/conftest.py": (
+        "import pytest\n\n\n@pytest.fixture\ndef pg_url():\n    return 'postgresql+asyncpg://u:p@h:5432/db'\n"
+    ),
+    "tests/integration/test_server.py": "def test_on_pg(pg_url):\n    pass\n",
+    "tests/unit/test_fakes.py": (
+        "import pytest\n\n\n"
+        "@pytest.fixture\ndef redis_url():\n    return 'redis://fake'\n\n\n"
+        "def test_local_fake(redis_url):\n    pass\n\n\n"
+        "@pytest.mark.parametrize('mongo_url', ['mongodb://fake'])\ndef test_direct_param(mongo_url):\n    pass\n\n\n"
+        "def test_plugin_server(mongo_rs_url):\n    pass\n"
+    ),
+}
+
+
+def _collect_tree(tmp_path: Path, *args: str) -> list[str]:
+    for relative, source in _TREE.items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(source)
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(_REPO_ROOT), os.environ.get("PYTHONPATH")]))}
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "tests.support.backend_matrix", "-p", "no:cacheprovider"]
+        + ["--collect-only", "-q", *args, "tests"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode in (0, 5), result.stdout + result.stderr
+    return [line for line in result.stdout.splitlines() if line.startswith("tests/")]
+
+
+def test_a_same_named_fixture_outside_the_server_fixtures_stays_in_the_fast_suite(tmp_path: Path) -> None:
+    assert _collect_tree(tmp_path, "-m", "not integration") == [
+        "tests/unit/test_fakes.py::test_local_fake",
+        "tests/unit/test_fakes.py::test_direct_param[mongodb://fake]",
+    ]
+
+
+def test_the_server_fixtures_of_the_plugin_and_of_tests_integration_mark_their_lane(tmp_path: Path) -> None:
+    assert _collect_tree(tmp_path, "-m", "integration and pg") == ["tests/integration/test_server.py::test_on_pg"]
+    assert _collect_tree(tmp_path, "-m", "integration and mongo") == ["tests/unit/test_fakes.py::test_plugin_server"]
+
+
 def test_an_unknown_lane_is_a_usage_error(tmp_path: Path) -> None:
     source = "import pytest\n\n@pytest.mark.backends('oracle')\ndef test_x(relational_backend):\n    pass\n"
     result = _collect(tmp_path, source=source)
