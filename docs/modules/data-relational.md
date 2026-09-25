@@ -796,7 +796,7 @@ class TenantGuc:
             )
 ```
 
-The transaction manager calls `await datasource.after_begin(session)` (or
+The transaction manager calls `await datasource.run_after_begin(session)` (or
 `run_after_begin(datasource, session)`) for every unit it opens, auto units included.
 
 ### Credential Rotation

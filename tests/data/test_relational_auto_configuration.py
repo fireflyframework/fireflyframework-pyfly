@@ -325,6 +325,16 @@ class TestSpiBeans:
             def after_begin(self, connection: Any, datasource: DataSource) -> None:
                 return None
 
+        @component
+        class UnrelatedHook:
+            # A coroutine of the same name that cannot take (connection, datasource) is not the SPI either:
+            # called with them, it would abort every unit of work.
+            async def after_begin(self, event: Any) -> None:
+                return None
+
+            def datasource_credentials(self) -> None:
+                return None
+
         context = ApplicationContext(
             _config(
                 {
@@ -333,7 +343,7 @@ class TestSpiBeans:
                 }
             )
         )
-        for bean in (TenantGuc, ReportingOnly, Vault, NotACustomizer):
+        for bean in (TenantGuc, ReportingOnly, Vault, NotACustomizer, UnrelatedHook):
             context.register_bean(bean)
         await context.start()
         try:

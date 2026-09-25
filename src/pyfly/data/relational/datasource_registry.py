@@ -343,8 +343,13 @@ class DataSource:
         """Execution options a unit applies before ``BEGIN`` (SQLite write units: ``BEGIN IMMEDIATE``)."""
         return begin_execution_options(self.url.get_backend_name(), read_only=read_only)
 
-    async def after_begin(self, connection: AsyncSession | AsyncConnection) -> None:
-        """Run the after-begin customizers on *connection*, which just began a transaction here."""
+    async def run_after_begin(self, connection: AsyncSession | AsyncConnection) -> None:
+        """Run the after-begin customizers on *connection*, which just began a transaction here.
+
+        The unit of work calls it right after ``BEGIN``; it is
+        :func:`~pyfly.data.relational.dialect_customizers.run_after_begin` bound to this datasource. (It
+        is not named ``after_begin``: a datasource is not itself an ``AfterBeginCustomizer``.)
+        """
         await run_after_begin(self, connection)
 
     async def dispose(self) -> None:

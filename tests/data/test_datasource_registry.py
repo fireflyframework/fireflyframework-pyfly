@@ -50,7 +50,7 @@ from pyfly.data.relational.datasource_registry import (
     NoSuchDataSourceError,
     datasource_of,
 )
-from pyfly.data.relational.dialect_customizers import SQLITE_BEGIN_OPTION, run_after_begin
+from pyfly.data.relational.dialect_customizers import SQLITE_BEGIN_OPTION, AfterBeginCustomizer, run_after_begin
 
 
 class _Base(DeclarativeBase):
@@ -685,7 +685,7 @@ class TestAfterBeginCustomizers:
         assert await _scalar(sqlite_file.engine, "SELECT count(*) FROM registry_parent") == 0  # rolled back with it
 
         async with sqlite_file.engine.begin() as conn:
-            await sqlite_file.after_begin(conn)
+            await sqlite_file.run_after_begin(conn)
         assert await _scalar(sqlite_file.engine, "SELECT count(*) FROM registry_parent") == 1  # committed with it
 
     async def test_order_and_scope(self, tmp_path: Path, registries: list[DataSourceRegistry]) -> None:
@@ -718,6 +718,9 @@ class TestAfterBeginCustomizers:
         assert replica is not None and replica.customizers == (everywhere,)
         later = registry.resolve(_sqlite(tmp_path / "events.db"), name="event-store")
         assert later.customizers == (everywhere,)
+
+    def test_a_datasource_is_not_itself_a_customizer(self, sqlite_file: DataSource) -> None:
+        assert not isinstance(sqlite_file, AfterBeginCustomizer)
 
     async def test_no_customizer_is_a_no_op(self, sqlite_file: DataSource) -> None:
         async with sqlite_file.engine.begin() as conn:

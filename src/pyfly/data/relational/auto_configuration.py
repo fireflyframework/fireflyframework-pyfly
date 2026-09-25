@@ -199,14 +199,25 @@ class DataSourceRegistryLifecycle:
                 _logger.info("datasource_pools_evicted_on_refresh", extra={"datasources": evicted})
 
 
-def _defines_coroutine(bean_instance: object, name: str) -> bool:
-    """Whether the bean's class (not a ``__getattr__`` proxy or a mock) defines coroutine *name*."""
-    return inspect.iscoroutinefunction(getattr(type(bean_instance), name, None))
-
-
-def _defines_method(bean_instance: object, name: str) -> bool:
+def _defines_coroutine(bean_instance: object, name: str, arity: int) -> bool:
+    """Whether the bean's class (not a ``__getattr__`` proxy or a mock) defines coroutine *name*,
+    callable with *arity* positional arguments."""
     member = getattr(type(bean_instance), name, None)
-    return callable(member) and not inspect.iscoroutinefunction(member)
+    return inspect.iscoroutinefunction(member) and _accepts(bean_instance, name, arity)
+
+
+def _defines_method(bean_instance: object, name: str, arity: int) -> bool:
+    """Whether the bean's class defines plain method *name*, callable with *arity* positional arguments."""
+    member = getattr(type(bean_instance), name, None)
+    return callable(member) and not inspect.iscoroutinefunction(member) and _accepts(bean_instance, name, arity)
+
+
+def _accepts(bean_instance: object, name: str, arity: int) -> bool:
+    try:
+        inspect.signature(getattr(bean_instance, name)).bind(*([None] * arity))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 class DataSourceSpiRegistrar:
@@ -216,7 +227,9 @@ class DataSourceSpiRegistrar:
     :class:`~pyfly.data.relational.dialect_customizers.AfterBeginCustomizer` (limited to the names in
     its ``datasources`` attribute, if it has one); a bean whose class defines
     ``datasource_credentials(datasource)`` is a
-    :class:`~pyfly.data.relational.dialect_customizers.DataSourceCredentialsProvider`.
+    :class:`~pyfly.data.relational.dialect_customizers.DataSourceCredentialsProvider`. A method of the
+    same name that is not a coroutine (respectively, is one) or that cannot be called with those
+    arguments is not the SPI, and the bean is left alone.
     """
 
     def __init__(self, registry: DataSourceRegistry) -> None:
@@ -228,14 +241,11 @@ class DataSourceSpiRegistrar:
 
     def after_init(self, bean: Any, bean_name: str) -> Any:
         """Register *bean* with the registry when it implements one of the SPIs."""
-        from pyfly.data.relational.datasource_registry import DataSource
         from pyfly.data.relational.dialect_customizers import customizer_datasources
 
-        if isinstance(bean, DataSource):  # its after_begin() runs the customizers; it is not one
-            return bean
-        if _defines_coroutine(bean, "after_begin"):
+        if _defines_coroutine(bean, "after_begin", 2):
             self._registry.add_scoped_customizer(bean, customizer_datasources(bean))
-        if _defines_method(bean, "datasource_credentials"):
+        if _defines_method(bean, "datasource_credentials", 1):
             self._registry.add_credentials_provider(bean)
         return bean
 

@@ -450,7 +450,7 @@ async def test_after_begin_customizer_sets_a_transaction_local_guc(relational_ba
     async def tenant_in_unit() -> str | None:
         async with datasource.sessionmaker() as session, session.begin():
             await session.connection(execution_options=datasource.begin_options(read_only=False))
-            await datasource.after_begin(session)
+            await datasource.run_after_begin(session)
             value = (await session.execute(text("SELECT current_setting('app.tenant_id', true)"))).scalar()
             return value or None
 
