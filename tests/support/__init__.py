@@ -11,4 +11,5 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared test support: the backend matrix (``backend_matrix``) and the contract models (``contract_models``)."""
+"""Shared test support: the backend matrix (``backend_matrix``), the contract models (``contract_models``) and a
+TCP proxy that simulates a network partition (``partition_proxy``)."""

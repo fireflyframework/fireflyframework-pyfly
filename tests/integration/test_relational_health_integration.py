@@ -24,7 +24,6 @@ is back.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import Awaitable
 from typing import TypeVar
@@ -36,69 +35,12 @@ from pyfly.actuator.health import HealthStatus
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.partition_proxy import PartitionProxy
 
 T = TypeVar("T")
 
 _TIMEOUT = 0.5
 _SLACK = 0.5
-
-
-class PartitionProxy:
-    """A TCP proxy to the database that can stop forwarding, like a network partition.
-
-    While partitioned it still accepts connections (the SYN reaches the host) but forwards no byte in
-    either direction; :meth:`heal` delivers what was held back.
-    """
-
-    def __init__(self, host: str, port: int) -> None:
-        self._upstream = (host, port)
-        self._flowing = asyncio.Event()
-        self._flowing.set()
-        self._tasks: set[asyncio.Task[None]] = set()
-        self._writers: list[asyncio.StreamWriter] = []
-        self._server: asyncio.Server | None = None
-        self.connections = 0
-
-    async def start(self) -> int:
-        """Start listening on an ephemeral local port and return it."""
-        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
-        return int(self._server.sockets[0].getsockname()[1])
-
-    def partition(self) -> None:
-        """Stop forwarding."""
-        self._flowing.clear()
-
-    def heal(self) -> None:
-        """Forward again, held-back bytes first."""
-        self._flowing.set()
-
-    async def close(self) -> None:
-        """Close every proxied connection and stop listening."""
-        self.heal()
-        for task in list(self._tasks):
-            task.cancel()
-        for writer in self._writers:
-            writer.close()
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-
-    async def _accept(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
-        self.connections += 1
-        server_reader, server_writer = await asyncio.open_connection(*self._upstream)
-        self._writers += [client_writer, server_writer]
-        for source, target in ((client_reader, server_writer), (server_reader, client_writer)):
-            task = asyncio.ensure_future(self._pipe(source, target))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-
-    async def _pipe(self, source: asyncio.StreamReader, target: asyncio.StreamWriter) -> None:
-        with contextlib.suppress(OSError, asyncio.IncompleteReadError):
-            while data := await source.read(65536):
-                await self._flowing.wait()
-                target.write(data)
-                await target.drain()
-        target.close()
 
 
 async def _answer_within(awaitable: Awaitable[T], seconds: float) -> tuple[T, float]:
