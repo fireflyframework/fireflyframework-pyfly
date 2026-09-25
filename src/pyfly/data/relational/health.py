@@ -21,8 +21,13 @@ The indicator is built for the Kubernetes readiness probe, and only for it:
 
 - it declares ``probe_groups = {READINESS}``, so a database blip takes the pod out of the load
   balancer instead of failing liveness and restarting every replica at once;
-- each check is bounded by ``timeout`` (2 s by default, ``pyfly.data.relational.health.timeout``), so
-  a silent database answers DOWN in time instead of hanging the probe;
+- each check answers within ``timeout`` (2 s by default, ``pyfly.data.relational.health.timeout``),
+  whatever the driver does. The ``SELECT 1`` runs in a task of its own, and the probe stops waiting
+  for it at the deadline: a database that went silent on an already pooled connection would otherwise
+  keep the probe waiting in the driver's cleanup (asyncpg opens a new connection to cancel the query,
+  and waits for it without a timeout). The late check is cancelled and left to wind down;
+- while a check that missed its deadline is still winding down, the next probe of that datasource
+  answers DOWN at once instead of borrowing another connection, so stuck checks cannot pile up;
 - when the pool has no idle connection and no overflow left, the check does not queue behind the
   application for ``pool_timeout``: it reports ``UNKNOWN`` (validation skipped), which keeps the
   aggregate UP;
@@ -38,6 +43,17 @@ from typing import Any, ClassVar
 from pyfly.actuator.health import HealthStatus, ProbeGroup, aggregate_status
 
 
+class _Check:
+    """One ``SELECT 1`` in flight on an engine, shared by the probes that arrive while it runs."""
+
+    __slots__ = ("abandoned", "started", "task")
+
+    def __init__(self, task: asyncio.Task[HealthStatus], started: float) -> None:
+        self.task = task
+        self.started = started
+        self.abandoned = False
+
+
 class SqlAlchemyHealthIndicator:
     """Database health probe — ``UP`` iff ``SELECT 1`` succeeds within the timeout on every datasource."""
 
@@ -47,6 +63,8 @@ class SqlAlchemyHealthIndicator:
         self._engine = engine
         self._registry = registry
         self._timeout = timeout
+        # The check in flight per engine (keyed by identity); an entry leaves when its task finishes.
+        self._checks: dict[int, _Check] = {}
 
     async def health(self) -> HealthStatus:
         dialect = _dialect(self._engine)
@@ -68,32 +86,81 @@ class SqlAlchemyHealthIndicator:
         return targets or [("primary", self._engine)]
 
     async def _check(self, engine: Any) -> HealthStatus:
-        from sqlalchemy import literal, select
-
+        """The outcome of ``SELECT 1`` on *engine*, within the timeout whatever the driver does."""
         dialect = _dialect(engine)
-        if _pool_exhausted(engine):
-            return HealthStatus(
-                status="UNKNOWN",
-                details={"database": dialect, "validation": "skipped: pool exhausted"},
-            )
-        try:
-            async with asyncio.timeout(self._timeout), engine.connect() as conn:
-                await conn.execute(select(literal(1)))
-        except TimeoutError:
+        loop = asyncio.get_running_loop()
+        check = self._checks.get(id(engine))
+        if check is not None and check.task.get_loop() is not loop:
+            check = None  # left behind by an event loop that is gone
+        if check is not None and check.abandoned:
             return HealthStatus(
                 status="DOWN",
                 details={
                     "database": dialect,
                     "error": "TimeoutError",
-                    "message": f"no answer within {self._timeout:g} s",
+                    "message": (
+                        f"previous check still running after {loop.time() - check.started:.1f} s "
+                        "(no connection borrowed)"
+                    ),
                 },
             )
-        except Exception as exc:
-            return HealthStatus(
-                status="DOWN",
-                details={"database": dialect, "error": type(exc).__name__, "message": _masked(engine, exc)[:200]},
-            )
-        return HealthStatus(status="UP", details={"database": dialect})
+        if check is None:
+            if _pool_exhausted(engine):
+                return HealthStatus(
+                    status="UNKNOWN",
+                    details={"database": dialect, "validation": "skipped: pool exhausted"},
+                )
+            check = self._start(engine, loop)
+        remaining = max(self._timeout - (loop.time() - check.started), 0.0)
+        try:
+            done, _ = await asyncio.wait({check.task}, timeout=remaining)
+        except asyncio.CancelledError:
+            # The probe itself was cancelled: stop the check too, without waiting for it.
+            self._abandon(check)
+            raise
+        if check.task in done and not check.task.cancelled():
+            return check.task.result()
+        self._abandon(check)
+        return HealthStatus(
+            status="DOWN",
+            details={"database": dialect, "error": "TimeoutError", "message": f"no answer within {self._timeout:g} s"},
+        )
+
+    def _start(self, engine: Any, loop: asyncio.AbstractEventLoop) -> _Check:
+        check = _Check(loop.create_task(_select_one(engine)), loop.time())
+        key = id(engine)
+        self._checks[key] = check
+
+        def _finished(task: asyncio.Task[HealthStatus]) -> None:
+            if self._checks.get(key) is check:
+                del self._checks[key]
+            if not task.cancelled():
+                task.exception()  # retrieved, so a late failure is not reported as never retrieved
+
+        check.task.add_done_callback(_finished)
+        return check
+
+    @staticmethod
+    def _abandon(check: _Check) -> None:
+        """Cancel a check that missed its deadline; it stays registered until its task has finished."""
+        if not check.abandoned:
+            check.abandoned = True
+            check.task.cancel()
+
+
+async def _select_one(engine: Any) -> HealthStatus:
+    from sqlalchemy import literal, select
+
+    dialect = _dialect(engine)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(select(literal(1)))
+    except Exception as exc:
+        return HealthStatus(
+            status="DOWN",
+            details={"database": dialect, "error": type(exc).__name__, "message": _masked(engine, exc)[:200]},
+        )
+    return HealthStatus(status="UP", details={"database": dialect})
 
 
 def _dialect(engine: Any) -> str:

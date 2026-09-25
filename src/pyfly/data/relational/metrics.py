@@ -19,7 +19,7 @@ query errors (counter) via a :class:`~pyfly.observability.ports.MetricsRecorder`
 label is restricted to ``{SELECT, INSERT, UPDATE, DELETE, OTHER}`` so Prometheus cardinality stays
 bounded regardless of query shape.
 
-:class:`SqlAlchemyPoolMetrics` exports each datasource's connection pool (labelled ``datasource``):
+:class:`SqlAlchemyPoolMetrics` exports each datasource's connection pool (labeled ``datasource``):
 configured size, connections checked out, idle connections, overflow in use, and invalidated
 connections. The relational auto-configuration binds both to every engine of the datasource registry.
 """

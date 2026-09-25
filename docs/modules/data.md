@@ -1175,8 +1175,14 @@ balancer instead of failing liveness and being restarted, along with every other
 
 The check is bounded:
 
-- Each check has `pyfly.data.relational.health.timeout` seconds (2 by default). A database that went
-  silent answers `DOWN` in time instead of hanging the probe.
+- Each check has `pyfly.data.relational.health.timeout` seconds (2 by default), and the probe answers
+  by then whatever the driver does. The `SELECT 1` runs in a task of its own, and the probe stops
+  waiting for it at the deadline. This matters when the database goes silent on a connection that is
+  already pooled: cancelling the query makes asyncpg open another connection to send a cancel request,
+  and it waits for that one without a timeout. The late check is cancelled and left to wind down.
+- While a check that missed its deadline is still winding down, the next probe of that datasource
+  answers `DOWN` at once (`previous check still running`) and borrows no connection, so stuck checks
+  cannot pile up. Probes that arrive while a check is running within its deadline share its answer.
 - When the pool has no idle connection and no overflow left, the check does not queue behind the
   application for `pool.timeout`. It answers `UNKNOWN` (validation skipped), which keeps the aggregate
   status `UP`.
@@ -1195,13 +1201,14 @@ status = await indicator.health()
 # HealthStatus(status="DOWN", details={"database": "postgresql", "error": "TimeoutError", "message": "no answer within 2 s"})
 ```
 
-**Behaviour:**
+**Behavior:**
 
 | State | `status` | `details` keys |
 |-------|----------|----------------|
 | Connection succeeds | `"UP"` | `database` — SQLAlchemy dialect name (e.g. `"postgresql"`, `"sqlite"`) |
 | Connection fails | `"DOWN"` | `database`; `error` — exception class name; `message` — first 200 chars of the error message, password masked |
 | No answer within the timeout | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` |
+| Previous check still running | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` = `"previous check still running after ... s"` |
 | Pool exhausted | `"UNKNOWN"` | `database`; `validation` = `"skipped: pool exhausted"` |
 | With a registry | aggregate | `database` (the primary's dialect); `datasources` — one entry per datasource (`primary`, `primary.replica`, named...) |
 
@@ -1225,7 +1232,7 @@ It records the following Prometheus metrics:
 The `operation` label contains the SQL command verb (e.g. `SELECT`, `INSERT`, `UPDATE`,
 `DELETE`).
 
-It also exports every datasource's connection pool (`SqlAlchemyPoolMetrics`, labelled `datasource`:
+It also exports every datasource's connection pool (`SqlAlchemyPoolMetrics`, labeled `datasource`:
 `primary`, `primary.replica`, the named datasources). The gauges are read from the pool at scrape time.
 
 | Metric | Type | Description |

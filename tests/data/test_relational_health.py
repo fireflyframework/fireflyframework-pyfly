@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import String as SAString
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -383,6 +383,21 @@ class TestBounded:
         assert result.status == "UNKNOWN"
         assert result.details["validation"] == "skipped: pool exhausted"
         assert engine.pool.checkedout() == 0
+
+    async def test_concurrent_probes_share_one_check(self, tmp_path: Path) -> None:
+        # The readiness probe and a monitoring scrape arriving together borrow one connection, not two.
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
+        checkouts: list[object] = []
+        event.listen(engine.sync_engine, "checkout", lambda *args: checkouts.append(args))
+        indicator = SqlAlchemyHealthIndicator(engine)
+        try:
+            results = await asyncio.gather(indicator.health(), indicator.health(), indicator.health())
+            assert [result.status for result in results] == ["UP", "UP", "UP"]
+            assert len(checkouts) == 1
+            assert (await indicator.health()).status == "UP"  # a finished check is not reused
+            assert len(checkouts) == 2
+        finally:
+            await engine.dispose()
 
     async def test_check_returns_its_connection(self, tmp_path: Path) -> None:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
