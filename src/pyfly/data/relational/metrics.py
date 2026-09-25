@@ -28,6 +28,7 @@ every engine of the datasource registry.
 from __future__ import annotations
 
 import time
+import weakref
 from typing import Any
 
 from pyfly.observability.ports import MetricsRecorder
@@ -191,23 +192,28 @@ class SqlAlchemyPoolMetrics:
             labels=["datasource"],
             buckets=_ACQUIRE_BUCKETS,
         )
-        self._bound: set[tuple[str, int]] = set()
+        # The labels each engine is exported under; weak, so a dropped engine leaves (and a new engine
+        # that happens to reuse its id is still bound).
+        self._bound: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
 
     def bind(self, datasource: str, engine: Any) -> None:
         """Export *engine*'s pool under the label *datasource* (idempotent per engine and label)."""
-        key = (datasource, id(engine))
-        if key in self._bound:
+        labels = self._bound.setdefault(engine, set())
+        if datasource in labels:
             return
-        self._bound.add(key)
+        labels.add(datasource)
 
         from sqlalchemy import event
 
         sync_engine = engine.sync_engine
+        # The recorder may be process-wide (Prometheus' default registry) and read the gauges at scrape
+        # time: the readings hold the engine weakly, so a closed and dropped registry's engines can go.
+        engine_ref = weakref.ref(sync_engine)
         readings: dict[Any, Any] = {
-            self._size: lambda: _pool_stat(sync_engine, "size"),
-            self._checked_out: lambda: _pool_stat(sync_engine, "checkedout"),
-            self._idle: lambda: _pool_stat(sync_engine, "checkedin"),
-            self._overflow: lambda: max(_pool_stat(sync_engine, "overflow"), 0),
+            self._size: lambda: _pool_stat(engine_ref(), "size"),
+            self._checked_out: lambda: _pool_stat(engine_ref(), "checkedout"),
+            self._idle: lambda: _pool_stat(engine_ref(), "checkedin"),
+            self._overflow: lambda: max(_pool_stat(engine_ref(), "overflow"), 0),
         }
         live = True
         for gauge, reading in readings.items():
@@ -243,7 +249,12 @@ class SqlAlchemyPoolMetrics:
 
 
 def _pool_stat(sync_engine: Any, name: str) -> int:
-    """One statistic of the engine's current pool (it changes on ``dispose()``); 0 when not tracked."""
+    """One statistic of the engine's current pool (it changes on ``dispose()``).
+
+    0 when the pool does not track it, or when the engine is gone.
+    """
+    if sync_engine is None:
+        return 0
     reader = getattr(sync_engine.pool, name, None)
     if not callable(reader):
         return 0

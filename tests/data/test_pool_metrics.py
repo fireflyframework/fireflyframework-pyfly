@@ -20,7 +20,9 @@ match the pool exactly while connections are checked out and after they are retu
 from __future__ import annotations
 
 import asyncio
+import gc
 import uuid
+import weakref
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,7 @@ pytest.importorskip("prometheus_client")
 
 from prometheus_client import REGISTRY  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine  # noqa: E402
 
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
@@ -156,3 +159,38 @@ async def test_context_exports_every_datasource(tmp_path: Path) -> None:
             assert _sample("pyfly_db_pool_checked_out", reporting) == 1
     finally:
         await context.stop()
+
+
+async def test_exported_pools_do_not_keep_a_dropped_registry_alive(tmp_path: Path) -> None:
+    # The Prometheus registry is process-wide; its gauges read the pool at scrape time and must not pin
+    # the engine they read once its registry is closed and dropped (a restarted context builds anew).
+    name = f"dropped-{uuid.uuid4().hex[:8]}"
+    metrics = SqlAlchemyPoolMetrics(MetricsRegistry())
+    registry = DataSourceRegistry(Config({}))
+    datasource = registry.register(name, f"sqlite+aiosqlite:///{tmp_path / 'd.db'}")
+    metrics.bind(name, datasource.engine)
+    await _select_one(datasource.engine)
+    assert _sample("pyfly_db_pool_idle", name) == 1
+    engine = weakref.ref(datasource.engine.sync_engine)  # what a scrape-time reading would hold
+    await registry.close()
+    del registry, datasource
+    gc.collect()
+
+    assert engine() is None
+    assert _sample("pyfly_db_pool_idle", name) == 0  # the scrape still works, and reads an empty pool
+
+    # A new engine under the same label is exported, even should it reuse the dropped engine's id.
+    registry = DataSourceRegistry(Config({}))
+    try:
+        replacement = registry.register(name, f"sqlite+aiosqlite:///{tmp_path / 'd.db'}")
+        metrics.bind(name, replacement.engine)
+        async with replacement.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            assert _sample("pyfly_db_pool_checked_out", name) == 1
+    finally:
+        await registry.close()
+
+
+async def _select_one(engine: AsyncEngine) -> None:
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
