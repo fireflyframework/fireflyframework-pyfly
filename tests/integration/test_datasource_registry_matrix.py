@@ -360,6 +360,52 @@ async def test_refresh_closes_a_connection_in_use_when_it_is_returned(
         )
 
 
+@pytest.mark.backends(PG)
+async def test_refresh_evicts_old_password_connections_after_the_pool_opened_a_new_one(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under load the pool opens overflow connections between the rotation and the refresh event; the
+    # connections opened with the old password must still be evicted, not kept until pool.recycle.
+    admin_url = relational_backend.url
+    role = f"grow_{uuid.uuid4().hex[:10]}"
+    templated = make_url(admin_url).set(username=role, password="PLACEHOLDER").render_as_string(hide_password=False)
+    templated = templated.replace("PLACEHOLDER", "${GROWN_POOL_ROTATION_PASSWORD}")
+    await _admin(admin_url, f"CREATE ROLE {role} LOGIN PASSWORD 'old-secret'")
+    monkeypatch.setenv("GROWN_POOL_ROTATION_PASSWORD", "old-secret")
+    registry = DataSourceRegistry(relational_backend.config({"pyfly.data.relational.url": templated}))
+    engine = registry.primary.engine
+    try:
+        await _touch(engine)  # one pooled connection, opened with the old password
+        await _admin(admin_url, f"ALTER ROLE {role} PASSWORD 'new-secret'")
+        monkeypatch.setenv("GROWN_POOL_ROTATION_PASSWORD", "new-secret")
+
+        # The pool grows before the refresh event arrives: the second connection uses the new password.
+        first, second = await engine.connect(), await engine.connect()
+        for conn in (first, second):
+            await conn.execute(text("SELECT 1"))
+        await first.close()
+        await second.close()
+        assert engine.pool.checkedin() == 2
+        assert await _count_backends(admin_url, role) == 2
+
+        assert await registry.refresh_credentials() == ["primary"]
+        assert await _backends_settle_at(admin_url, role, 0) == 0
+        assert engine.pool.checkedin() == 0
+
+        # The replaced pool works with the new password, and a second refresh has nothing to evict.
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT current_user"))).scalar_one() == role
+        assert await registry.refresh_credentials() == []
+        assert engine.pool.checkedin() == 1
+    finally:
+        await registry.close()
+        await _admin(
+            admin_url,
+            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'",
+            f"DROP ROLE IF EXISTS {role}",
+        )
+
+
 class RoleProvider:
     """A ``DataSourceCredentialsProvider`` that answers for some datasources and records who asked."""
 

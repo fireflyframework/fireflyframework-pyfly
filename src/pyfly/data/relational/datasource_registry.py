@@ -287,7 +287,9 @@ class DataSource:
         self._registry_ref = weakref.ref(registry) if registry is not None else None
         self._customizers: list[AfterBeginCustomizer] = []
         self._capabilities: DataSourceCapabilities | None = None
-        self._connected_with: tuple[str | None, str | None] = (self.url.username, self.url.password)
+        # Every credential pair a connection was opened with since the pool was last evicted: the pool
+        # holds connections of each, so a refresh evicts it when any of them is no longer the live one.
+        self._pool_credentials: set[tuple[str | None, str | None]] = set()
         # Bumped each time a credential rotation evicts the pool; a connection opened under an older
         # epoch is closed when it is returned.
         self._credentials_epoch = 0
@@ -624,18 +626,22 @@ class DataSourceRegistry:
     # -- credentials ------------------------------------------------------------------------------------
 
     async def refresh_credentials(self) -> list[str]:
-        """Soft-evict the pools whose credentials changed since their connections were opened.
+        """Soft-evict the pools holding a connection opened with credentials that are no longer live.
 
         Called on a configuration refresh. New connections already take the live credentials (the
-        ``do_connect`` hook). Evicting a pool closes its idle connections at once and replaces the
-        pool; a connection in use finishes its work and is closed when it is returned, instead of going
-        back to a pool. Returns the evicted datasources (qualified names).
+        ``do_connect`` hook), so a pool that grew after the rotation holds connections of both; it is
+        evicted as long as one connection opened with the old credentials may remain. Evicting a pool
+        closes its idle connections at once and replaces the pool; a connection in use finishes its
+        work and is closed when it is returned, instead of going back to a pool. Returns the evicted
+        datasources (qualified names).
         """
         evicted: list[str] = []
         for datasource in self._built():
             live = self._live_credentials(datasource)
-            if live is not None and live != datasource._connected_with:
+            if live is not None and any(used != live for used in datasource._pool_credentials):
                 datasource._credentials_epoch += 1
+                # Connections opened from here on use the live credentials and belong to the new epoch.
+                datasource._pool_credentials = set()
                 await datasource.engine.dispose()
                 evicted.append(datasource.qualified_name)
                 _logger.info("datasource_credentials_rotated", extra={"datasource": datasource.qualified_name})
@@ -867,7 +873,7 @@ class DataSourceRegistry:
             return self._live_credentials(datasource)
 
         def _connected(credentials: tuple[str | None, str | None], record: ConnectionPoolEntry) -> None:
-            datasource._connected_with = credentials
+            datasource._pool_credentials.add(credentials)
             record.info[_CREDENTIALS_EPOCH] = datasource._credentials_epoch
 
         def _returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:

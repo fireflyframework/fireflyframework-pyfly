@@ -831,9 +831,11 @@ takes them from the first of:
   or a refreshed configuration takes effect.
 
 A rotated password therefore reaches new connections without a restart. On a configuration refresh
-(`POST /actuator/refresh`), the pools whose credentials changed are soft-evicted:
+(`POST /actuator/refresh`), every pool that still holds a connection opened with the old password is
+soft-evicted, including a pool that already opened connections with the new one between the rotation
+and the refresh (a pool growing under load):
 
-- idle connections opened with the old password are closed at once;
+- idle connections are closed at once;
 - a connection in use finishes its work and is closed when it is returned, instead of going back to a
   pool;
 - new connections authenticate with the new password.
