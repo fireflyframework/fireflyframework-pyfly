@@ -63,7 +63,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from sqlalchemy import MetaData
+from sqlalchemy import MetaData, event
 from sqlalchemy.engine import URL, Dialect, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -72,7 +72,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import ConnectionPoolEntry, QueuePool
 
 from pyfly.config.properties.data import PREFIX, PRIMARY, DataSourceProperties, RelationalProperties
 from pyfly.container.ordering import get_order
@@ -106,6 +106,9 @@ _SAVEPOINT_DIALECTS = frozenset({"sqlite", "postgresql", "mysql", "mariadb", "ms
 
 # Largest IN list / bound-parameter count per statement the driver accepts (SQLite before 3.32: 999).
 _MAX_IN_PARAMS = {"postgresql": 32767, "mysql": 65535, "mariadb": 65535, "mssql": 2000, "oracle": 1000}
+
+_CREDENTIALS_EPOCH = "pyfly_credentials_epoch"
+"""Pool-entry ``info`` key: the credential epoch of the datasource when the connection was opened."""
 
 _STATIC_ISOLATION_LEVELS = {
     "sqlite": frozenset({"READ UNCOMMITTED", "SERIALIZABLE"}),
@@ -238,6 +241,9 @@ class DataSource:
         self._customizers: list[AfterBeginCustomizer] = []
         self._capabilities: DataSourceCapabilities | None = None
         self._connected_with: tuple[str | None, str | None] = (self.url.username, self.url.password)
+        # Bumped each time a credential rotation evicts the pool; a connection opened under an older
+        # epoch is closed when it is returned.
+        self._credentials_epoch = 0
         _BY_ENGINE[engine] = self
         _BY_SESSIONMAKER[sessionmaker] = self
 
@@ -567,13 +573,15 @@ class DataSourceRegistry:
         """Soft-evict the pools whose credentials changed since their connections were opened.
 
         Called on a configuration refresh. New connections already take the live credentials (the
-        ``do_connect`` hook); disposing the pool also replaces the idle connections opened with the old
-        ones, and connections in use are closed when they are returned. Returns the evicted datasources.
+        ``do_connect`` hook). Evicting a pool closes its idle connections at once and replaces the
+        pool; a connection in use finishes its work and is closed when it is returned, instead of going
+        back to a pool. Returns the evicted datasources (qualified names).
         """
         evicted: list[str] = []
         for datasource in self._built():
             live = self._live_credentials(datasource)
             if live is not None and live != datasource._connected_with:
+                datasource._credentials_epoch += 1
                 await datasource.engine.dispose()
                 evicted.append(datasource.qualified_name)
                 _logger.info("datasource_credentials_rotated", extra={"datasource": datasource.qualified_name})
@@ -796,12 +804,21 @@ class DataSourceRegistry:
         def _supplier() -> tuple[str | None, str | None] | None:
             return self._live_credentials(datasource)
 
-        def _connected(credentials: tuple[str | None, str | None]) -> None:
+        def _connected(credentials: tuple[str | None, str | None], record: ConnectionPoolEntry) -> None:
             datasource._connected_with = credentials
+            record.info[_CREDENTIALS_EPOCH] = datasource._credentials_epoch
+
+        def _returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
+            # A connection opened before a rotation evicted its pool was in use then; it is closed now
+            # rather than left in the replaced pool until the garbage collector finds it.
+            epoch = datasource._credentials_epoch
+            if dbapi_connection is not None and record.info.get(_CREDENTIALS_EPOCH, epoch) != epoch:
+                record.invalidate()
 
         install_credentials_hook(
             datasource.engine, _supplier, explicit_keys=tuple(settings.connect_args), on_connect=_connected
         )
+        event.listen(datasource.engine.sync_engine, "checkin", _returned)
 
     def _announce(self, datasource: DataSource) -> None:
         self._announce_to_listeners(datasource)

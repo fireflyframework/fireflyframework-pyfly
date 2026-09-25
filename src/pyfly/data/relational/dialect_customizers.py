@@ -189,25 +189,29 @@ def install_credentials_hook(
     supplier: CredentialsSupplier,
     *,
     explicit_keys: Collection[str] = (),
-    on_connect: Callable[[tuple[str | None, str | None]], None] | None = None,
+    on_connect: Callable[[tuple[str | None, str | None], ConnectionPoolEntry], None] | None = None,
 ) -> None:
     """Make every new connection of *engine* use the credentials *supplier* returns at that moment.
 
     The engine keeps the URL it was built with; only the user name and password of the connect
     parameters change, recomputed through the dialect so every driver gets its own spelling.
     *explicit_keys* are connect arguments the operator set by hand, which are never overwritten.
-    *on_connect* is told the credentials each new connection used.
+    *on_connect* is told the credentials each new connection used, and its pool entry (whose ``info``
+    lives as long as that DBAPI connection).
+
+    Only the connect parameters change, so a dialect that takes its credentials from a positional
+    connection string (the ODBC dialects, ``mssql+aioodbc``) is not rotated by this hook.
     """
     sync_engine = engine.sync_engine
     base_url = sync_engine.url
     base_credentials = (base_url.username, base_url.password)
     pinned = set(explicit_keys)
 
-    def _do_connect(dialect: Dialect, _record: ConnectionPoolEntry, _cargs: list[Any], cparams: dict[str, Any]) -> None:
+    def _do_connect(dialect: Dialect, record: ConnectionPoolEntry, _cargs: list[Any], cparams: dict[str, Any]) -> None:
         credentials = supplier() or base_credentials
         _apply_credentials(dialect, base_url, credentials, cparams, pinned)
         if on_connect is not None:
-            on_connect(credentials)
+            on_connect(credentials, record)
 
     event.listen(sync_engine, "do_connect", _do_connect)
 

@@ -28,6 +28,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
+import time
 import uuid
 from contextvars import ContextVar
 from typing import Any
@@ -257,6 +260,64 @@ async def test_rotated_password_reaches_new_connections_and_refresh_evicts_the_o
         )
 
 
+async def _backends_settle_at(admin_url: str, role: str, expected: int, *, within: float = 3.0) -> int:
+    """The role's backend count once it reaches *expected* (a closed backend leaves pg_stat_activity a
+    moment after its client hung up), or the last count seen after *within* seconds."""
+    deadline = time.monotonic() + within
+    while True:
+        count = await _count_backends(admin_url, role)
+        if count == expected or time.monotonic() > deadline:
+            return count
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.backends(PG)
+async def test_refresh_closes_a_connection_in_use_when_it_is_returned(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin_url = relational_backend.url
+    role = f"inuse_{uuid.uuid4().hex[:10]}"
+    templated = make_url(admin_url).set(username=role, password="PLACEHOLDER").render_as_string(hide_password=False)
+    templated = templated.replace("PLACEHOLDER", "${IN_USE_ROTATION_PASSWORD}")
+    await _admin(admin_url, f"CREATE ROLE {role} LOGIN PASSWORD 'old-secret'")
+    monkeypatch.setenv("IN_USE_ROTATION_PASSWORD", "old-secret")
+    registry = DataSourceRegistry(relational_backend.config({"pyfly.data.relational.url": templated}))
+    engine = registry.primary.engine
+    gc.disable()  # the old pool must not need the garbage collector to close its connections
+    try:
+        idle = await engine.connect()
+        await idle.execute(text("SELECT 1"))
+        held = await engine.connect()
+        await held.execute(text("SELECT 1"))
+        await idle.close()
+        assert await _count_backends(admin_url, role) == 2
+
+        await _admin(admin_url, f"ALTER ROLE {role} PASSWORD 'new-secret'")
+        monkeypatch.setenv("IN_USE_ROTATION_PASSWORD", "new-secret")
+        assert await registry.refresh_credentials() == ["primary"]
+
+        # The idle connection is closed at once; the one in use finishes its work...
+        assert await _backends_settle_at(admin_url, role, 1) == 1
+        assert (await held.execute(text("SELECT current_user"))).scalar_one() == role
+        # ...and is closed when it is returned.
+        await held.close()
+        assert await _backends_settle_at(admin_url, role, 0) == 0
+
+        # New connections use the new password and stay pooled when returned.
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT current_user"))).scalar_one() == role
+        assert engine.pool.checkedin() == 1
+        assert await _count_backends(admin_url, role) == 1
+    finally:
+        gc.enable()
+        await registry.close()
+        await _admin(
+            admin_url,
+            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'",
+            f"DROP ROLE IF EXISTS {role}",
+        )
+
+
 class RoleProvider:
     """A ``DataSourceCredentialsProvider`` that answers for some datasources and records who asked."""
 
@@ -318,7 +379,8 @@ async def test_credentials_provider_tells_a_replica_from_its_primary(relational_
     finally:
         await _admin(
             admin_url,
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{writer}', '{reader}', '{token}')",
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            f"WHERE usename IN ('{writer}', '{reader}', '{token}')",
             f"DROP ROLE IF EXISTS {writer}",
             f"DROP ROLE IF EXISTS {reader}",
             f"DROP ROLE IF EXISTS {token}",

@@ -808,9 +808,18 @@ takes them from the first of:
   or a refreshed configuration takes effect.
 
 A rotated password therefore reaches new connections without a restart. On a configuration refresh
-(`POST /actuator/refresh`), the pools whose credentials changed are soft-evicted: idle connections
-opened with the old password are closed, and connections in use are closed when they are returned.
+(`POST /actuator/refresh`), the pools whose credentials changed are soft-evicted:
+
+- idle connections opened with the old password are closed at once;
+- a connection in use finishes its work and is closed when it is returned, instead of going back to a
+  pool;
+- new connections authenticate with the new password.
+
 `pool.recycle` bounds the age of every other connection.
+
+The hook changes the driver's connect parameters. A dialect that takes its credentials from a
+positional connection string (the ODBC dialects, such as `mssql+aioodbc`) is not rotated this way;
+rebuild its connection string or restart the application.
 
 ### Capabilities
 
