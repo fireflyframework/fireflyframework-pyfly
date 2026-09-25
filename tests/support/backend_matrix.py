@@ -334,6 +334,10 @@ class RelationalBackend:
         ``ddl-auto`` defaults to ``none`` here: create the tables a test needs with
         :meth:`create_tables`, because ``Base.metadata`` holds every model imported in the run.
         MySQL/MariaDB lanes set ``pool.pre-ping``. *overrides* are flat dotted keys, applied last.
+
+        The engine the application builds from this configuration has the framework's own settings,
+        not the lane's: on sqlite-file, foreign keys are enforced there only if the framework turns
+        them on. That keeps a test of the framework honest; :meth:`create_engine` is the lane's engine.
         """
         flat: dict[str, Any] = {
             "pyfly.data.relational.enabled": "true",

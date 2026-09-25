@@ -76,7 +76,10 @@ async def test_pg_only(relational_backend: RelationalBackend) -> None: ...
 `create_tables(*models)`, `with_driver("aiomysql")` (the same database through another driver) and
 `config(overrides)`, a PyFly `Config` with that database as the primary datasource. `config()` sets
 `ddl-auto: none`: create the tables a test needs with `create_tables`, because `Base.metadata` holds
-every model imported in the run. `mongo_backend` is the document counterpart: a fresh database on the
+every model imported in the run. The lane's settings (SQLite foreign keys, pre-ping) apply to engines
+from `create_engine()`; an engine the application builds from `config()` gets the framework's own
+settings (MySQL/MariaDB `config()` does set `pool.pre-ping`), so a test of the framework is not
+flattered by the harness. `mongo_backend` is the document counterpart: a fresh database on the
 replica set, with `url`, `database` and `config()`.
 
 The lanes deliberately run the settings that broke before: foreign keys are enforced on SQLite, and
