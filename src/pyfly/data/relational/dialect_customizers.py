@@ -81,6 +81,27 @@ def is_file_database(url: URL) -> bool:
     return str(url.query.get("mode", "")) != "memory"
 
 
+def is_autocommit(conn: Connection) -> bool:
+    """Whether *conn* runs in ``AUTOCOMMIT``, where SQLAlchemy still fires ``begin`` but no ``BEGIN`` belongs.
+
+    SQLAlchemy answers this with a private helper; when a release no longer has it, the answer comes from
+    the public execution options and the engine's ``isolation_level``.
+    """
+    probe = getattr(conn, "_is_autocommit_isolation", None)
+    if callable(probe):
+        return bool(probe())
+    return autocommit_from_options(conn)
+
+
+def autocommit_from_options(conn: Connection) -> bool:
+    """The fallback of :func:`is_autocommit`: the connection's ``isolation_level`` execution option, or
+    else the ``isolation_level`` the engine was created with."""
+    level = conn.get_execution_options().get("isolation_level")
+    if level is None:
+        level = getattr(conn.dialect, "_on_connect_isolation_level", None)
+    return str(level or "").upper() == "AUTOCOMMIT"
+
+
 def begin_execution_options(dialect_name: str, *, read_only: bool) -> dict[str, Any]:
     """Execution options a unit of work applies to its connection before ``BEGIN``.
 
@@ -136,7 +157,7 @@ def install_sqlite_customizer(
             cursor.close()
 
     def _on_begin(conn: Connection) -> None:
-        if conn._is_autocommit_isolation():
+        if is_autocommit(conn):
             return
         # StaticPool (in-memory databases) hands every session the same connection: when another
         # session already opened a transaction on it, this one joins it, as the driver's own handling

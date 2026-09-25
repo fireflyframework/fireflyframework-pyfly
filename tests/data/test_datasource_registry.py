@@ -50,7 +50,12 @@ from pyfly.data.relational.datasource_registry import (
     NoSuchDataSourceError,
     datasource_of,
 )
-from pyfly.data.relational.dialect_customizers import SQLITE_BEGIN_OPTION, AfterBeginCustomizer, run_after_begin
+from pyfly.data.relational.dialect_customizers import (
+    SQLITE_BEGIN_OPTION,
+    AfterBeginCustomizer,
+    autocommit_from_options,
+    run_after_begin,
+)
 
 
 class _Base(DeclarativeBase):
@@ -603,6 +608,29 @@ class TestSqliteBegin:
             await conn.rollback()
         assert seen == ["BEGIN", "UPDATE"]
         assert await _scalar(sqlite_file.engine, "SELECT balance FROM registry_account") == 5
+
+    async def test_the_autocommit_fallback_agrees_with_sqlalchemy(self, tmp_path: Path) -> None:
+        # The recipe asks SQLAlchemy's private helper; the fallback for a release without it must agree.
+        default = create_async_engine(_sqlite(tmp_path / "a.db"))
+        autocommit = create_async_engine(_sqlite(tmp_path / "a.db"), isolation_level="AUTOCOMMIT")
+        answers: list[tuple[bool, bool]] = []
+
+        def _both(conn: AsyncConnection) -> None:
+            sync = conn.sync_connection
+            assert sync is not None
+            answers.append((sync._is_autocommit_isolation(), autocommit_from_options(sync)))
+
+        try:
+            async with default.connect() as conn:
+                _both(conn)
+                _both(await conn.execution_options(isolation_level="AUTOCOMMIT"))  # options change conn itself
+                _both(await conn.execution_options(isolation_level="SERIALIZABLE"))
+            async with autocommit.connect() as conn:
+                _both(conn)
+        finally:
+            await default.dispose()
+            await autocommit.dispose()
+        assert answers == [(False, False), (True, True), (False, False), (True, True)]
 
     async def test_memory_database_sessions_sharing_the_one_connection_do_not_collide(
         self, registries: list[DataSourceRegistry]
