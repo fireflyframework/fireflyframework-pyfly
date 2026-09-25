@@ -983,7 +983,7 @@ class ReportingService:
 |--------|---------|-------------|
 | `get(name)` | `async_sessionmaker[AsyncSession]` | Session factory for `name`; raises `KeyError` if unknown. |
 | `names()` | `list[str]` | Sorted names of all configured secondary datasources. |
-| `dispose()` | `None` (await) | Disposes every secondary engine. The registry already does this when the context stops. |
+| `dispose()` | `None` (await) | Disposes the engines a hand-built instance was given. On the auto-configured bean it does nothing: the registry disposes each of its datasources exactly once when the context stops. |
 | `name in datasources` | `bool` | Whether a datasource is configured (`__contains__`). |
 | `len(datasources)` | `int` | Number of configured secondary datasources. |
 

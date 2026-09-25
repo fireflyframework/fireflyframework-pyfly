@@ -150,3 +150,45 @@ async def test_registry_view_lists_named_and_module_datasources(tmp_path: Path) 
             nds.get("primary")  # the primary keeps its own beans
     finally:
         await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_registry_view_leaves_disposal_to_the_registry(tmp_path: Path) -> None:
+    # Code written for the old bean still calls dispose() on shutdown; the registry disposes its engines
+    # when the context stops, so each one is disposed exactly once.
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import event
+
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry.for_config(
+        Config(
+            {
+                "pyfly": {
+                    "data": {
+                        "relational": {
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'p.db'}",
+                            "datasources": {
+                                "reporting": {
+                                    "url": f"sqlite+aiosqlite:///{tmp_path / 'r.db'}",
+                                    "read-replica": {"url": f"sqlite+aiosqlite:///{tmp_path / 'rr.db'}"},
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        )
+    )
+    disposed: list[str] = []
+    for datasource in registry.all_datasources():
+        label = datasource.qualified_name
+        event.listen(
+            datasource.engine.sync_engine, "engine_disposed", lambda _engine, label=label: disposed.append(label)
+        )
+    try:
+        await NamedDataSources.of_registry(registry).dispose()
+        assert disposed == []
+    finally:
+        await registry.close()
+    assert sorted(disposed) == ["primary", "reporting", "reporting.replica"]

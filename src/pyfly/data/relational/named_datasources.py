@@ -92,13 +92,13 @@ class NamedDataSources:
         return len(self.names())
 
     async def dispose(self) -> None:
-        """Dispose every secondary engine (the registry does this on shutdown for its own)."""
+        """Dispose the engines given as ``engines``.
+
+        A registry's datasources are left alone: the registry disposes each of them, exactly once,
+        when the context stops (:meth:`~pyfly.data.relational.datasource_registry.DataSourceRegistry.close`).
+        """
         for engine in self._engines.values():
             await engine.dispose()
-        if self._registry is not None:
-            for name in self.names():
-                if name in self._registry.names():
-                    await self._registry.get(name).dispose()
 
 
 def build_named_data_sources(config: Any, engine_factory: Any, session_factory: Any) -> NamedDataSources:
