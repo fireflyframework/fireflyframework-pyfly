@@ -152,6 +152,39 @@ every call. Building the statement once saves about 21 to 25 µs of CPU per call
 Every IN-list length produces its own SQL text. On asyncpg each text is one more prepared statement in
 the connection's cache.
 
+## Re-run after the datasource registry (WP02)
+
+The datasource registry changes what every engine gets: `pool.recycle`, `application_name`, the
+metered queue pool, a credential hook and, on SQLite, the connection setup (foreign keys, WAL,
+`synchronous=NORMAL`) and SQLAlchemy's `BEGIN` recipe. It does not change the unit of work itself.
+
+- **Date:** 2026-09-25, 10:05 PDT, same machine, servers and SQLAlchemy as the baseline.
+- **Code:** branch `fix/orm-unit-of-work` at `63bec18`.
+- **Commands:** `--scenario p6 tx read` three times on `sqlite-file` and on `pg`, and `--scenario save`
+  three times on `sqlite-file`. The table gives the three runs.
+
+| Measure | Baseline | After WP02 (three runs) |
+| --- | ---: | ---: |
+| SQLite file, p6 pooled median | 0.301 ms | 0.403 / 0.414 / 0.375 ms |
+| SQLite file, tx median | 0.351 ms | 0.456 / 0.436 / 0.420 ms |
+| SQLite file, tx statements per call | `{'SELECT': 1}`, 1 commit | `{'BEGIN': 1, 'SELECT': 1}`, 1 commit |
+| SQLite file, read median | 0.172 ms | 0.173 / 0.166 / 0.162 ms |
+| SQLite file, `save(1)` in `@transactional`, median | 0.791 ms | 0.687 / 0.725 / 0.679 ms |
+| SQLite file, `save_all(100)` in `@transactional`, median | 32.54 ms | 32.57 / 33.01 / 31.41 ms |
+| PostgreSQL, p6 pooled median | 1.019 ms | 1.103 / 1.053 / 0.934 ms |
+| PostgreSQL, tx median | 1.054 ms | 1.221 / 1.096 / 1.078 ms |
+| PostgreSQL, read median | 0.378 ms | 0.403 / 0.381 / 0.378 ms |
+
+On SQLite, a unit of work that only reads costs about 0.1 ms more (+25 to 30 %). The engine now emits
+a real `BEGIN` when the transaction starts. pysqlite used to defer it until the first write, so a
+read-only unit ran no transaction at all, which is how a read-modify-write lost updates (C044, C116).
+Each statement on aiosqlite is a hop to the driver's thread, and the statement counter now sees the
+`BEGIN`. That is the price of real isolation. Writes got faster: WAL with `synchronous=NORMAL` costs one
+fsync of the WAL per commit, so `save(1)` dropped by about 0.1 ms.
+
+On PostgreSQL the numbers stay within the run-to-run noise of the shared VM; the first run is the
+outlier. The registry adds no statement and no round trip to a pooled unit of work there.
+
 ## What the redesign is checked against
 
 These are the acceptance points in the spec ("Acceptance and verification"):
