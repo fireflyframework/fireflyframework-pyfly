@@ -2,7 +2,7 @@
 
 > **Module:** Data Relational — [Module Guide](../modules/data-relational.md)
 > **Package:** `pyfly.data.relational.sqlalchemy`
-> **Backend:** SQLAlchemy 2.0+ (async), Alembic, aiosqlite
+> **Backend:** SQLAlchemy 2.0.50+ (async), Alembic, aiosqlite
 
 ## Quick Start
 
@@ -13,6 +13,9 @@ uv add "pyfly[data-relational]"
 
 # For PostgreSQL (production)
 uv add "pyfly[data-relational,postgresql]"
+
+# For MySQL or MariaDB (asyncmy driver)
+uv add "pyfly[data-relational,mysql]"
 ```
 
 ### Minimal Configuration
@@ -56,7 +59,7 @@ class OrderRepository(Repository[OrderEntity, int]):
 | `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
 | `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
 | `pyfly.data.relational.pool.recycle` | `int` | *(driver default)* | Seconds before a connection is recycled |
-| `pyfly.data.relational.pool.pre-ping` | `bool` | *(driver default)* | Issue a `SELECT 1` ping before each checkout |
+| `pyfly.data.relational.pool.pre-ping` | `bool` | *(driver default)* | Test each pooled connection at checkout (the driver's ping on MySQL/MariaDB) and replace it if the server dropped it |
 
 ### Database URLs by Driver
 
@@ -64,7 +67,12 @@ class OrderRepository(Repository[OrderEntity, int]):
 |----------|-----------|
 | SQLite | `sqlite+aiosqlite:///app.db` |
 | PostgreSQL | `postgresql+asyncpg://user:pass@host:5432/db` |
-| MySQL | `mysql+aiomysql://user:pass@host:3306/db` |
+| MySQL | `mysql+asyncmy://user:pass@host:3306/db` (`pyfly[mysql]`; `mysql+aiomysql://` also works) |
+| MariaDB | `mariadb+asyncmy://user:pass@host:3306/db` (`pyfly[mysql]`; `mariadb+aiomysql://` also works) |
+
+SQLite, PostgreSQL, MySQL 8 and MariaDB 11 are the databases the test suite runs on. On MySQL and
+MariaDB, `pool.pre-ping` needs SQLAlchemy 2.0.50 or later, which the `data-relational` extra requires:
+with 2.0.49 and PyMySQL 1.2 installed, every other pre-pinged checkout raised `TypeError`.
 
 ---
 

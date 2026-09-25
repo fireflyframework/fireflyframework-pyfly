@@ -34,15 +34,17 @@ event-driven tests for PyFly applications.
 8. [Testcontainers (Docker-backed integration tests)](#testcontainers-docker-backed-integration-tests)
    - [Installation](#installation)
    - [Container Factories](#container-factories)
+   - [MongoDB Replica Set](#mongodb-replica-set)
    - [Wiring Connections into Config](#wiring-connections-into-config)
    - [Graceful Skip Without Docker](#graceful-skip-without-docker)
    - [Runnable Example](#runnable-example)
-9. [Testing Patterns](#testing-patterns)
+9. [StatementCounter (SQL statements per operation)](#statementcounter-sql-statements-per-operation)
+10. [Testing Patterns](#testing-patterns)
    - [Unit Testing Services](#unit-testing-services)
    - [Integration Testing with In-Memory Adapters](#integration-testing-with-in-memory-adapters)
    - [Testing Controllers](#testing-controllers)
    - [Testing Event Handlers](#testing-event-handlers)
-10. [Complete Example](#complete-example)
+11. [Complete Example](#complete-example)
 
 ---
 
@@ -868,14 +870,15 @@ class TestItemsAPI:
 ## Testcontainers (Docker-backed integration tests)
 
 When in-memory adapters are not enough, PyFly's Testcontainers helpers spin up a **real**
-Postgres, MySQL, Redis, MongoDB, or Kafka in Docker for the duration of a test, then wire
-the container's connection details straight into pyfly config keys. This is the equivalent
-of Spring Boot's `@Testcontainers` plus `@ServiceConnection`.
+Postgres, MySQL, MariaDB, Redis, MongoDB (standalone or as a replica set), Kafka or RabbitMQ in
+Docker for the duration of a test, then wire the container's connection details straight into
+pyfly config keys. This is the equivalent of Spring Boot's `@Testcontainers` plus
+`@ServiceConnection`.
 
 ```python
 from pyfly.testing import (
-    postgres_container, mysql_container, redis_container,
-    mongodb_container, kafka_container,
+    postgres_container, mysql_container, mariadb_container, redis_container,
+    mongodb_container, mongodb_replica_set_container, kafka_container, rabbitmq_container,
     pyfly_config, pyfly_config_for,
     is_docker_available, requires_docker,
 )
@@ -894,6 +897,10 @@ The extra pulls in `testcontainers>=4.0.0`. The container factories also need th
 factory is called without it installed, it raises a `RuntimeError` whose message points you
 back at `pip install 'pyfly[testcontainers]'`.
 
+The application still needs the database driver: `pyfly[postgresql]` (asyncpg) for Postgres,
+`pyfly[mysql]` (asyncmy) for MySQL and MariaDB, and `pyfly[data-document]` for MongoDB, whose
+`pymongo` the replica-set container also uses to initiate the set.
+
 ### Container Factories
 
 Each factory returns an unstarted `testcontainers` container — start it with a `with`
@@ -904,14 +911,45 @@ any extra keyword arguments through to the underlying container.
 |---|---|---|
 | `postgres_container(image="postgres:16-alpine", **kwargs)` | `postgres:16-alpine` | `PostgresContainer` |
 | `mysql_container(image="mysql:8", **kwargs)` | `mysql:8` | `MySqlContainer` |
+| `mariadb_container(image="mariadb:11", **kwargs)` | `mariadb:11` | `MySqlContainer` running MariaDB |
 | `redis_container(image="redis:7-alpine", **kwargs)` | `redis:7-alpine` | `RedisContainer` |
-| `mongodb_container(image="mongo:7", **kwargs)` | `mongo:7` | `MongoDbContainer` |
+| `mongodb_container(image="mongo:7", **kwargs)` | `mongo:7` | `MongoDbContainer` (standalone) |
+| `mongodb_replica_set_container(image="mongo:7", **kwargs)` | `mongo:7` | `MongoDbReplicaSetContainer` (single-node replica set `rs0`) |
 | `kafka_container(image="confluentinc/cp-kafka:7.6.0", **kwargs)` | `confluentinc/cp-kafka:7.6.0` | `KafkaContainer` |
+| `rabbitmq_container(image="rabbitmq:3.13-alpine", **kwargs)` | `rabbitmq:3.13-alpine` | `RabbitMqContainer` |
 
 ```python
 with postgres_container() as pg:
     ...  # pg is started here; stopped when the block exits
 ```
+
+### MongoDB Replica Set
+
+A standalone `mongod` rejects `startTransaction`, so any test of a MongoDB transaction needs a
+replica set. `mongodb_replica_set_container()` returns a `MongoDbReplicaSetContainer`. Its
+`start()` runs `mongod --replSet rs0 --bind_ip_all`, initiates the set with itself as the only
+member (`rs.initiate()`), and returns once that member reports `isWritablePrimary`. The server
+runs without authentication.
+
+`get_connection_url()` returns `mongodb://<host>:<port>/?directConnection=true`. With
+`directConnection=true` the client talks to that one member and skips replica-set discovery, so
+the member's advertised `localhost:27017` never has to resolve from the test process.
+
+```python
+from pymongo import AsyncMongoClient
+from pyfly.testing import mongodb_replica_set_container, pyfly_config
+
+with mongodb_replica_set_container() as mongo:
+    config = pyfly_config(mongo)  # pyfly.data.document.uri = mongodb://...?directConnection=true
+    client = AsyncMongoClient(mongo.get_connection_url())
+    async with client.start_session() as session:
+        async with await session.start_transaction():
+            await client.shop.orders.insert_one({"total": 10}, session=session)
+```
+
+Keyword arguments: `replica_set` (default `"rs0"`), `port` (default `27017`) and
+`startup_timeout` in seconds (default `60`). Others are passed to the underlying
+`DockerContainer`, which `get_wrapped_container()` returns.
 
 ### Wiring Connections into Config
 
@@ -924,13 +962,16 @@ single started container, and raises `ValueError` for an unmapped container type
 | Container | Config keys produced |
 |---|---|
 | Postgres | `pyfly.data.relational.url` (rewritten to the `postgresql+asyncpg://` async driver) |
-| MySQL | `pyfly.data.relational.url` (rewritten to the `mysql+aiomysql://` async driver) |
+| MySQL | `pyfly.data.relational.url` (rewritten to `mysql+asyncmy://`; `mysql+aiomysql://` when only aiomysql is installed) |
+| MariaDB (`mariadb_container()`) | `pyfly.data.relational.url` (rewritten to `mariadb+asyncmy://`, or `mariadb+aiomysql://` as above) |
 | Redis | `pyfly.cache.redis.url` **and** `pyfly.session.redis.url` (both `redis://host:port/0`) |
-| MongoDB | `pyfly.data.document.uri` |
+| MongoDB, standalone or replica set | `pyfly.data.document.uri` |
 | Kafka | `pyfly.eda.kafka.bootstrap-servers` |
+| RabbitMQ | `pyfly.eda.rabbitmq.url` **and** `pyfly.messaging.rabbitmq.url` |
 
-The Postgres/MySQL mappings deliberately swap the container's sync driver URL for pyfly's
-async driver, so the resulting URL is ready to hand to the reactive data layer.
+The Postgres/MySQL/MariaDB mappings deliberately swap the container's sync driver URL for pyfly's
+async driver, so the resulting URL is ready to hand to the reactive data layer. The MySQL driver
+is asyncmy, which `pip install 'pyfly[mysql]'` installs.
 
 **`pyfly_config(*containers, base=None)`** is the one-call setup for an integration
 `ApplicationContext`: it merges `pyfly_config_for(...)` for every started container (plus an
@@ -1028,6 +1069,55 @@ pytest tests/integration -v
 ```
 
 **Source:** `src/pyfly/testing/testcontainers.py`
+
+---
+
+## StatementCounter (SQL statements per operation)
+
+What a repository method costs is the number of statements it sends, and a test that only checks
+results never sees it: `save()` sending an INSERT plus a SELECT, or `save_all(100)` sending 100
+SELECTs, passes every functional assertion. `StatementCounter` records every statement an engine
+hands to the database driver (SQLAlchemy's `before_cursor_execute` event), plus the commits and
+rollbacks SQLAlchemy performs, so a test can assert the cost directly:
+
+```python
+from sqlalchemy.ext.asyncio import AsyncEngine
+from pyfly.testing import StatementCounter
+
+engine = context.get_bean(AsyncEngine)
+
+with StatementCounter(engine) as counter:
+    await orders.save_all(new_orders)
+
+assert counter.counts() == {"INSERT": 1}  # statements per verb, in order of first appearance
+assert counter.commits == 1
+```
+
+It accepts an `AsyncEngine` or a sync `Engine`, and counts everything the engine sends while it is
+active, from any session or connection. Importing it does not import SQLAlchemy; `start()` does.
+
+| Member | Returns |
+|---|---|
+| `StatementCounter(engine)` | A stopped counter for `engine`. `with counter:` starts and stops it |
+| `start()` / `stop()` | Attach / detach the listeners (both idempotent); `start()` returns the counter |
+| `counts()` | `dict[str, int]`: statements per verb, e.g. `{"INSERT": 1, "SELECT": 100}` |
+| `verbs()` | `list[str]`: the verb of every statement in order, e.g. `["INSERT", "SELECT"]` |
+| `count(verb=None)` | The total, or the count for one verb (case-insensitive) |
+| `statements` | `tuple[RecordedStatement, ...]`: `verb`, `sql`, `parameters`, `executemany` |
+| `commits` / `rollbacks` | Commits and rollbacks SQLAlchemy performed on the engine's connections |
+| `reset()` | Forget what was recorded |
+| `active` | Whether the listeners are attached |
+
+What counts as a statement:
+
+- One entry per cursor execution. An `executemany` batch, or one of SQLAlchemy's
+  "insertmanyvalues" batches, is one entry with `executemany` set, because it is one round trip.
+- The verb is the first SQL keyword after leading comments and parentheses: `SELECT`, `INSERT`,
+  `UPDATE`, `DELETE`, `WITH`, `PRAGMA`, `SAVEPOINT`...
+- `BEGIN` usually does not appear: drivers start transactions implicitly or through their own API.
+- `commits` and `rollbacks` still count on an `AUTOCOMMIT` connection, where the driver sends nothing.
+
+**Source:** `src/pyfly/testing/statement_counter.py`
 
 ---
 
