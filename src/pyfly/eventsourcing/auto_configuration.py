@@ -46,18 +46,20 @@ class EventSourcingAutoConfiguration:
             return InMemoryEventStore()
         if provider == "sqlalchemy":
             try:
-                from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found, unused-ignore]
+                from pyfly.data.relational.datasource_registry import DataSourceRegistry
             except ImportError as exc:
                 raise ValueError(
                     "pyfly.eventsourcing.store.provider=sqlalchemy requires the 'sqlalchemy' "
                     "and 'aiosqlite' / 'asyncpg' extras to be installed."
                 ) from exc
-            url = str(
-                config.get("pyfly.eventsourcing.store.url")
-                or config.get("pyfly.data.relational.url", "sqlite+aiosqlite:///./app.db")
+            # pyfly.eventsourcing.store.url is an alias resolved through the datasource registry: no URL
+            # is the primary datasource, an identical URL reuses that datasource's engine.
+            datasource = DataSourceRegistry.for_config(config).resolve(
+                config.get("pyfly.eventsourcing.store.url"),
+                name="event-store",
+                url_key="pyfly.eventsourcing.store.url",
             )
-            engine = create_async_engine(url, echo=False)
-            return SqlAlchemyEventStore(engine)
+            return SqlAlchemyEventStore(datasource.engine)
         raise ValueError(f"Unknown pyfly.eventsourcing.store.provider={provider!r}. Valid values: memory, sqlalchemy.")
 
     @bean
@@ -67,18 +69,18 @@ class EventSourcingAutoConfiguration:
             return InMemorySnapshotStore()
         if provider == "sqlalchemy":
             try:
-                from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found, unused-ignore]
+                from pyfly.data.relational.datasource_registry import DataSourceRegistry
             except ImportError as exc:
                 raise ValueError(
                     "pyfly.eventsourcing.snapshot.provider=sqlalchemy requires the 'sqlalchemy' "
                     "and 'aiosqlite' / 'asyncpg' extras to be installed."
                 ) from exc
-            url = str(
-                config.get("pyfly.eventsourcing.snapshot.url")
-                or config.get("pyfly.data.relational.url", "sqlite+aiosqlite:///./app.db")
+            datasource = DataSourceRegistry.for_config(config).resolve(
+                config.get("pyfly.eventsourcing.snapshot.url"),
+                name="snapshot-store",
+                url_key="pyfly.eventsourcing.snapshot.url",
             )
-            engine = create_async_engine(url, echo=False)
-            return SqlAlchemySnapshotStore(engine)
+            return SqlAlchemySnapshotStore(datasource.engine)
         raise ValueError(
             f"Unknown pyfly.eventsourcing.snapshot.provider={provider!r}. Valid values: memory, sqlalchemy."
         )

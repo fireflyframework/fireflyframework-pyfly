@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from pyfly.core.config import Config
@@ -52,16 +54,44 @@ def test_explicit_accessors_and_nesting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bean_builds_replica_when_configured() -> None:
+async def test_bean_builds_replica_when_configured(tmp_path: Path) -> None:
     pytest.importorskip("sqlalchemy")
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
 
-    primary = async_sessionmaker(create_async_engine("sqlite+aiosqlite:///:memory:"), expire_on_commit=False)
-    cfg = Config({"pyfly": {"data": {"relational": {"read-replica": {"url": "sqlite+aiosqlite:///:memory:"}}}}})
-    factory = RelationalAutoConfiguration().routing_session_factory(primary, cfg)
-    assert factory.has_replica is True
+    # The routing factory is a view over the registry: the primary's session factory and its replica's.
+    cfg = Config(
+        {
+            "pyfly": {
+                "data": {
+                    "relational": {
+                        "url": f"sqlite+aiosqlite:///{tmp_path / 'primary.db'}",
+                        "read-replica": {"url": f"sqlite+aiosqlite:///{tmp_path / 'replica.db'}"},
+                    }
+                }
+            }
+        }
+    )
+    registry = DataSourceRegistry.for_config(cfg)
+    try:
+        auto = RelationalAutoConfiguration()
+        primary = auto.async_session_factory(auto.async_engine(cfg))
+        factory = auto.routing_session_factory(primary, cfg)
+        assert factory.has_replica is True
+        replica = registry.replica()
+        assert replica is not None
+        assert factory._primary is registry.primary.sessionmaker
+        assert factory._replica is replica.sessionmaker
+    finally:
+        await registry.close()
 
-    no_replica = RelationalAutoConfiguration().routing_session_factory(primary, Config({}))
-    assert no_replica.has_replica is False
+    # A session factory that is not the registry's routes to itself only.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        foreign = async_sessionmaker(engine, expire_on_commit=False)
+        no_replica = RelationalAutoConfiguration().routing_session_factory(foreign, Config({}))
+        assert no_replica.has_replica is False
+    finally:
+        await engine.dispose()

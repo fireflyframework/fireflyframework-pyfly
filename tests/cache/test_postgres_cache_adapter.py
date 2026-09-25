@@ -27,7 +27,7 @@ comparison is consistent.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -210,30 +210,26 @@ class TestPostgresCacheAdapterSQLite:
 class TestPostgresCacheAutoConfiguration:
     """Assert that provider=postgres wires up a PostgresCacheAdapter."""
 
-    def test_cache_adapter_returns_postgres_adapter(self) -> None:
+    async def test_cache_adapter_returns_postgres_adapter(self) -> None:
+        # pyfly.cache.postgres.url resolves through the datasource registry: one engine per database.
         from pyfly.cache.adapters.postgres import PostgresCacheAdapter
         from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
 
-        config = MagicMock()
-        config.get = MagicMock(
-            side_effect=lambda key, default=None: {
-                "pyfly.cache.provider": "postgres",
-                "pyfly.cache.postgres.url": "postgresql+asyncpg://localhost:5432/cache",
-            }.get(key, default)
+        config = Config(
+            {
+                "pyfly": {
+                    "cache": {"provider": "postgres", "postgres": {"url": "postgresql+asyncpg://localhost:5432/cache"}},
+                    "data": {"relational": {"url": "postgresql+asyncpg://localhost:5432/cache"}},
+                }
+            }
         )
-
-        fake_engine = MagicMock()
-        with (
-            patch(
-                "pyfly.cache.auto_configuration.AutoConfiguration.is_available",
-                return_value=True,
-            ),
-            patch(
-                "sqlalchemy.ext.asyncio.create_async_engine",
-                return_value=fake_engine,
-            ),
-        ):
-            ac = CacheAutoConfiguration()
-            adapter = ac.cache_adapter(config)
-
-        assert isinstance(adapter, PostgresCacheAdapter)
+        registry = DataSourceRegistry.for_config(config)
+        try:
+            with patch("pyfly.cache.auto_configuration.AutoConfiguration.is_available", return_value=True):
+                adapter = CacheAutoConfiguration().cache_adapter(config)
+            assert isinstance(adapter, PostgresCacheAdapter)
+            assert adapter._engine is registry.primary.engine  # the same database: the primary's engine
+        finally:
+            await registry.close()

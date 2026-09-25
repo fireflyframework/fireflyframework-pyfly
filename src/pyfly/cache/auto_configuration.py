@@ -61,13 +61,15 @@ class CacheAutoConfiguration:
                     "pyfly.cache.provider=postgres requires SQLAlchemy async — "
                     "install pyfly[data-relational,postgresql]."
                 )
-            from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found,unused-ignore]
-
             from pyfly.cache.adapters.postgres import PostgresCacheAdapter
+            from pyfly.data.relational.datasource_registry import DataSourceRegistry
 
-            url = str(config.get("pyfly.cache.postgres.url", "postgresql+asyncpg://localhost:5432/cache"))
-            engine = create_async_engine(url)
-            return PostgresCacheAdapter(engine=engine)
+            # pyfly.cache.postgres.url is an alias resolved through the datasource registry: no URL is
+            # the application's primary datasource, an identical URL reuses that datasource's engine.
+            datasource = DataSourceRegistry.for_config(config).resolve(
+                config.get("pyfly.cache.postgres.url"), name="cache", url_key="pyfly.cache.postgres.url"
+            )
+            return PostgresCacheAdapter(engine=datasource.engine)
 
         from pyfly.cache.adapters.memory import InMemoryCache
 

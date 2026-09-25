@@ -426,39 +426,55 @@ class TestOrchestrationPersistenceProviderSelection:
         ):
             self._call_bean({"pyfly": {"transactional": {"persistence": {"provider": "redis"}}}})
 
-    def test_sqlalchemy_returns_sqlalchemy_provider(self) -> None:
+    async def test_sqlalchemy_returns_sqlalchemy_provider(self) -> None:
+        # The persistence URL resolves through the datasource registry (no engine of its own).
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
         from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
-        mock_engine: MagicMock = MagicMock()
-        with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=mock_engine):
-            result = self._call_bean(
-                {
-                    "pyfly": {
-                        "transactional": {
-                            "persistence": {
-                                "provider": "sqlalchemy",
-                                "sqlalchemy": {"url": "sqlite+aiosqlite:///:memory:"},
-                            }
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {
+                        "persistence": {
+                            "provider": "sqlalchemy",
+                            "sqlalchemy": {"url": "sqlite+aiosqlite:///:memory:"},
                         }
                     }
                 }
-            )
-        assert isinstance(result, SqlAlchemyPersistenceProvider)
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            assert isinstance(result, SqlAlchemyPersistenceProvider)
+            assert result._engine is registry.get("transactional-persistence").engine
+        finally:
+            await registry.close()
 
-    def test_sqlalchemy_falls_back_to_data_relational_url(self) -> None:
+    async def test_sqlalchemy_falls_back_to_data_relational_url(self) -> None:
+        # No persistence URL: the provider runs on the primary datasource and shares its engine.
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
         from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
-        mock_engine: MagicMock = MagicMock()
-        with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=mock_engine):
-            result = self._call_bean(
-                {
-                    "pyfly": {
-                        "transactional": {"persistence": {"provider": "sqlalchemy"}},
-                        "data": {"relational": {"url": "postgresql+asyncpg://localhost/test"}},
-                    }
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {"persistence": {"provider": "sqlalchemy"}},
+                    "data": {"relational": {"url": "postgresql+asyncpg://localhost/test"}},
                 }
-            )
-        assert isinstance(result, SqlAlchemyPersistenceProvider)
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            assert isinstance(result, SqlAlchemyPersistenceProvider)
+            assert result._engine is registry.primary.engine
+        finally:
+            await registry.close()
 
     def test_sqlalchemy_no_url_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="url"):

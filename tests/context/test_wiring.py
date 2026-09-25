@@ -93,12 +93,20 @@ class TestAppEventListenerWiring:
             async def on_ready(self, event: ApplicationReadyEvent):
                 pass
 
+        # Framework beans (the datasource registry's refresh listener, when SQLAlchemy is installed)
+        # wire listeners of their own; the count must grow by exactly the two declared here.
+        baseline = ApplicationContext(Config({}))
+        await baseline.start()
+        framework_listeners = baseline.wiring_counts["event_listeners"]
+        await baseline.stop()
+
         ctx = ApplicationContext(Config({}))
         ctx.register_bean(ListenerA)
         ctx.register_bean(ListenerB)
         await ctx.start()
 
-        assert ctx.wiring_counts["event_listeners"] == 2
+        assert ctx.wiring_counts["event_listeners"] == framework_listeners + 2
+        await ctx.stop()
 
 
 # --- Test: @message_listener wiring ---

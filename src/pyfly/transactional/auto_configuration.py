@@ -186,22 +186,18 @@ class TransactionalEngineAutoConfiguration:
                     "Install with: pip install sqlalchemy[asyncio] aiosqlite"
                 )
                 raise ValueError(msg)
-            from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found, unused-ignore]
-
+            from pyfly.data.relational.datasource_registry import DataSourceRegistry
             from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
-            sqlalchemy_url = config.get("pyfly.transactional.persistence.sqlalchemy.url")
-            if sqlalchemy_url is None:
-                sqlalchemy_url = config.get("pyfly.data.relational.url")
-            if sqlalchemy_url is None:
-                msg = (
-                    "pyfly.transactional.persistence.provider=sqlalchemy requires either "
-                    "'pyfly.transactional.persistence.sqlalchemy.url' or "
-                    "'pyfly.data.relational.url' to be configured."
-                )
-                raise ValueError(msg)
-            engine: Any = create_async_engine(str(sqlalchemy_url))
-            return SqlAlchemyPersistenceProvider(engine)
+            # The persistence URL is an alias resolved through the datasource registry: no URL is the
+            # primary datasource (a DataSourceConfigurationError, a ValueError, naming both keys when
+            # there is none), an identical URL reuses that datasource's engine.
+            datasource = DataSourceRegistry.for_config(config).resolve(
+                config.get("pyfly.transactional.persistence.sqlalchemy.url"),
+                name="transactional-persistence",
+                url_key="pyfly.transactional.persistence.sqlalchemy.url",
+            )
+            return SqlAlchemyPersistenceProvider(datasource.engine)
 
         if provider == "cache":
             if cache_adapter is None:

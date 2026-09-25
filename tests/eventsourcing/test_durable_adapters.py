@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -227,7 +227,7 @@ class TestEventSourcingPublisher:
 
 
 class TestProviderSelection:
-    """Assert correct store/snapshot types per config (mock engine creation)."""
+    """Assert correct store/snapshot types per config (SQL stores resolve their datasource through the registry)."""
 
     def _make_config(self, values: dict[str, str]) -> Any:
         cfg = MagicMock()
@@ -254,19 +254,22 @@ class TestProviderSelection:
 
     @pytest.mark.asyncio
     async def test_event_store_sqlalchemy_provider(self) -> None:
+        # The store's URL resolves through the datasource registry (no engine of its own).
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
         from pyfly.eventsourcing.auto_configuration import EventSourcingAutoConfiguration
 
         auto = EventSourcingAutoConfiguration()
-        cfg = self._make_config(
-            {
-                "pyfly.eventsourcing.store.provider": "sqlalchemy",
-                "pyfly.eventsourcing.store.url": "sqlite+aiosqlite:///:memory:",
-            }
+        cfg = Config(
+            {"pyfly": {"eventsourcing": {"store": {"provider": "sqlalchemy", "url": "sqlite+aiosqlite:///:memory:"}}}}
         )
-        fake_engine = MagicMock()
-        with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=fake_engine):
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
             store = auto.event_store(cfg)
-        assert isinstance(store, SqlAlchemyEventStore)
+            assert isinstance(store, SqlAlchemyEventStore)
+            assert store._engine is registry.get("event-store").engine
+        finally:
+            await registry.close()
 
     @pytest.mark.asyncio
     async def test_event_store_invalid_provider_raises(self) -> None:
@@ -288,35 +291,64 @@ class TestProviderSelection:
 
     @pytest.mark.asyncio
     async def test_snapshot_store_sqlalchemy_provider(self) -> None:
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
         from pyfly.eventsourcing.auto_configuration import EventSourcingAutoConfiguration
 
         auto = EventSourcingAutoConfiguration()
-        cfg = self._make_config(
+        cfg = Config(
             {
-                "pyfly.eventsourcing.snapshot.provider": "sqlalchemy",
-                "pyfly.eventsourcing.snapshot.url": "sqlite+aiosqlite:///:memory:",
+                "pyfly": {
+                    "eventsourcing": {"snapshot": {"provider": "sqlalchemy", "url": "sqlite+aiosqlite:///:memory:"}}
+                }
             }
         )
-        fake_engine = MagicMock()
-        with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=fake_engine):
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
             store = auto.snapshot_store(cfg)
-        assert isinstance(store, SqlAlchemySnapshotStore)
+            assert isinstance(store, SqlAlchemySnapshotStore)
+            assert store._engine is registry.get("snapshot-store").engine
+        finally:
+            await registry.close()
 
     @pytest.mark.asyncio
-    async def test_snapshot_store_falls_back_to_relational_url(self) -> None:
+    async def test_snapshot_store_falls_back_to_the_primary_datasource(self) -> None:
+        # No snapshot URL: the store runs on the application's primary datasource, sharing its engine.
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
         from pyfly.eventsourcing.auto_configuration import EventSourcingAutoConfiguration
 
         auto = EventSourcingAutoConfiguration()
-        cfg = self._make_config(
+        cfg = Config(
             {
-                "pyfly.eventsourcing.snapshot.provider": "sqlalchemy",
-                "pyfly.data.relational.url": "postgresql+asyncpg://localhost/test",
+                "pyfly": {
+                    "eventsourcing": {"snapshot": {"provider": "sqlalchemy"}},
+                    "data": {"relational": {"url": "postgresql+asyncpg://localhost/test"}},
+                }
             }
         )
-        fake_engine = MagicMock()
-        with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=fake_engine) as mock_cae:
-            auto.snapshot_store(cfg)
-        mock_cae.assert_called_once_with("postgresql+asyncpg://localhost/test", echo=False)
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            store = auto.snapshot_store(cfg)
+            assert store._engine is registry.primary.engine
+            assert registry.primary.url.render_as_string() == "postgresql+asyncpg://localhost/test"
+        finally:
+            await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_sqlalchemy_store_without_any_url_fails_fast(self, tmp_path: Any, monkeypatch: Any) -> None:
+        # It used to fall back to sqlite+aiosqlite:///./app.db in the working directory (C043).
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.eventsourcing.auto_configuration import EventSourcingAutoConfiguration
+
+        monkeypatch.chdir(tmp_path)
+        cfg = Config({"pyfly": {"eventsourcing": {"store": {"provider": "sqlalchemy"}}}})
+        try:
+            with pytest.raises(ValueError, match=r"pyfly\.eventsourcing\.store\.url"):
+                EventSourcingAutoConfiguration().event_store(cfg)
+        finally:
+            await DataSourceRegistry.for_config(cfg).close()
 
     @pytest.mark.asyncio
     async def test_event_sourcing_publisher_absent_when_no_event_publisher(self) -> None:

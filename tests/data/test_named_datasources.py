@@ -11,9 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multiple named datasources (v26.06.48)."""
+"""Multiple named datasources (v26.06.48).
+
+C046: named datasource URLs go through the same typed reader as the primary, so ``${...}``
+placeholders resolve and ``PYFLY_*`` overrides win; the auto-configured bean is a view over the
+datasource registry.
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -82,3 +89,64 @@ async def test_dispose_disposes_every_engine() -> None:
     nds = NamedDataSources({"r": "sm", "a": "sm"}, {"r": _FakeEngine("r"), "a": _FakeEngine("a")})
     await nds.dispose()
     assert sorted(disposed) == ["a", "r"]
+
+
+def test_build_resolves_placeholders_and_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("REPORTING_DIR", str(tmp_path))
+    monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_URL", f"sqlite+aiosqlite:///{tmp_path}/a.db")
+    cfg = Config(
+        {
+            "pyfly": {
+                "data": {
+                    "relational": {
+                        "datasources": {
+                            "reporting": {"url": "sqlite+aiosqlite:///${REPORTING_DIR}/r.db", "echo": "false"},
+                            "analytics": {"url": "sqlite+aiosqlite:///./i-should-be-overridden.db"},
+                        }
+                    }
+                }
+            }
+        }
+    )
+    created: dict[str, tuple[str, object]] = {}
+
+    def engine_factory(url: str, echo: object = False) -> str:
+        created[url] = (url, echo)
+        return url
+
+    nds = build_named_data_sources(cfg, engine_factory, lambda engine: f"sm:{engine}")
+    assert nds.get("reporting") == f"sm:sqlite+aiosqlite:///{tmp_path}/r.db"
+    assert nds.get("analytics") == f"sm:sqlite+aiosqlite:///{tmp_path}/a.db"
+    assert created[f"sqlite+aiosqlite:///{tmp_path}/r.db"][1] is False  # "false" is False, not bool("false")
+
+
+@pytest.mark.asyncio
+async def test_registry_view_lists_named_and_module_datasources(tmp_path: Path) -> None:
+    pytest.importorskip("sqlalchemy")
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry.for_config(
+        Config(
+            {
+                "pyfly": {
+                    "data": {
+                        "relational": {
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'p.db'}",
+                            "datasources": {"reporting": {"url": f"sqlite+aiosqlite:///{tmp_path / 'r.db'}"}},
+                        }
+                    }
+                }
+            }
+        )
+    )
+    try:
+        nds = NamedDataSources.of_registry(registry)
+        assert nds.names() == ["reporting"]
+        assert nds.get("reporting") is registry.get("reporting").sessionmaker
+        registry.resolve(f"sqlite+aiosqlite:///{tmp_path / 'e.db'}", name="event-store")
+        assert nds.names() == ["event-store", "reporting"]  # live: a module's datasource appears
+        assert "event-store" in nds and len(nds) == 2
+        with pytest.raises(KeyError, match="primary"):
+            nds.get("primary")  # the primary keeps its own beans
+    finally:
+        await registry.close()
