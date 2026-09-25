@@ -33,17 +33,20 @@ manager refresh, an IAM token) reaches new connections without a restart.
 **After-begin customizers** (:class:`AfterBeginCustomizer`, :func:`run_after_begin`). Code that must
 run inside every framework-managed transaction on a datasource, right after ``BEGIN``: a tenant GUC
 (``SELECT set_config('app.tenant_id', :tenant, true)``), a ``SET LOCAL statement_timeout``, a
-``search_path``. The transaction manager calls :func:`run_after_begin` for every unit it opens, auto
-units included.
+``search_path``. :func:`run_after_begin` runs them; the transaction manager of the unit-of-work
+redesign calls it for every unit it opens, auto units included. Until then nothing calls it on its
+own, and a transaction opened by hand calls it right after ``BEGIN``.
 """
 
 from __future__ import annotations
 
 import logging
+import weakref
 from collections.abc import Callable, Collection, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 from pyfly.config.properties.data import SqliteProperties
 
@@ -64,6 +67,9 @@ SQLITE_BEGIN_OPTION = "pyfly_sqlite_begin"
 """
 
 _BEGIN_MODES = frozenset({"DEFERRED", "IMMEDIATE", "EXCLUSIVE"})
+
+# The (sync) engines install_sqlite_customizer set up: they emit BEGIN themselves.
+_RECIPE_ENGINES: weakref.WeakSet[Engine] = weakref.WeakSet()
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +106,32 @@ def autocommit_from_options(conn: Connection) -> bool:
     if level is None:
         level = getattr(conn.dialect, "_on_connect_isolation_level", None)
     return str(level or "").upper() == "AUTOCOMMIT"
+
+
+def uses_sqlite_begin_recipe(bind: Engine | Connection | AsyncEngine) -> bool:
+    """Whether *bind* is (or runs on) an engine set up by :func:`install_sqlite_customizer`.
+
+    On such an engine the transaction's ``BEGIN`` has already run when the first statement executes, so
+    an explicit ``BEGIN IMMEDIATE`` statement fails with "cannot start a transaction within a
+    transaction"; ask for it with :data:`SQLITE_BEGIN_OPTION` (or :func:`begin_immediate`) instead.
+    """
+    sync: Any = getattr(bind, "sync_engine", bind)
+    return getattr(sync, "engine", sync) in _RECIPE_ENGINES
+
+
+async def begin_immediate(session: AsyncSession) -> None:
+    """Start *session*'s SQLite transaction with ``BEGIN IMMEDIATE`` (take the write lock now).
+
+    Call it inside ``session.begin()`` before the first statement. On an engine with the ``BEGIN``
+    recipe it sets :data:`SQLITE_BEGIN_OPTION`; on a plain pysqlite/aiosqlite engine, whose driver
+    defers its own ``BEGIN`` until the first write, it executes ``BEGIN IMMEDIATE``.
+    """
+    from sqlalchemy import text
+
+    if uses_sqlite_begin_recipe(session.get_bind()):
+        await session.connection(execution_options=cast(Any, begin_execution_options("sqlite", read_only=False)))
+    else:
+        await session.execute(text("BEGIN IMMEDIATE"))
 
 
 def begin_execution_options(dialect_name: str, *, read_only: bool) -> dict[str, Any]:
@@ -176,6 +208,7 @@ def install_sqlite_customizer(
 
     event.listen(sync_engine, "connect", _on_connect)
     event.listen(sync_engine, "begin", _on_begin)
+    _RECIPE_ENGINES.add(sync_engine)
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +341,10 @@ def customizer_datasources(customizer: object) -> frozenset[str] | None:
 async def run_after_begin(datasource: DataSource, connection: AsyncSession | AsyncConnection) -> None:
     """Run *datasource*'s after-begin customizers on *connection*, in order.
 
-    The transaction manager calls this right after it begins a unit of work (its own transactions and
-    the short auto units repositories open), after the isolation level is applied and before the first
-    statement of the unit. It is a no-op when the datasource has no customizer.
+    Call it right after a unit of work begins, after the isolation level is applied and before the first
+    statement of the unit: the transaction manager of the unit-of-work redesign does so for its own
+    transactions and the short auto units repositories open, and code that opens a transaction by hand
+    does so itself. It is a no-op when the datasource has no customizer.
     """
     for customizer in datasource.customizers:
         await customizer.after_begin(connection, datasource)

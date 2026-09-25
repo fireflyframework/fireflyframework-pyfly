@@ -18,18 +18,27 @@ class Product(Base):
     secret: Mapped[str] = mapped_column(default="private", deferred=True)
 
 
-@pytest.fixture
-async def admin(tmp_path):
+@pytest.fixture(params=["plain-engine", "datasource-registry"])
+async def admin(request, tmp_path):
     from pyfly.admin.data.adapters.sqlalchemy import SqlAlchemyAdminProvider
     from pyfly.admin.data.models import AdminOperationContext, ModelAdmin
     from pyfly.admin.data.registry import AdminResourceRegistry
     from pyfly.admin.data.service import AdminDataService
+    from pyfly.core.config import Config
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
     from pyfly.security.context import SecurityContext
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/data.db")
+    url = f"sqlite+aiosqlite:///{tmp_path}/data.db"
+    if request.param == "plain-engine":
+        engine = create_async_engine(url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        dispose = engine.dispose
+    else:
+        # The application's own session factory: the registry's SQLite engine emits BEGIN itself.
+        datasources = DataSourceRegistry(Config({"pyfly": {"data": {"relational": {"url": url}}}}))
+        engine, factory, dispose = datasources.primary.engine, datasources.primary.sessionmaker, datasources.close
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
     resource = ModelAdmin(
         "products",
         Product,
@@ -46,7 +55,7 @@ async def admin(tmp_path):
     try:
         yield service, actor, factory
     finally:
-        await engine.dispose()
+        await dispose()
 
 
 async def test_actual_crud_and_stale_edits(admin):

@@ -22,7 +22,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import String, func, inspect, or_, select, text
+from sqlalchemy import String, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
@@ -30,6 +30,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.admin.data.identifiers import EditTokens, decode_id, encode_id, json_value
 from pyfly.admin.data.models import AdminField, AdminOperationContext, AdminPage, AdminQuery, AdminRecord, ModelAdmin
+from pyfly.data.relational.dialect_customizers import begin_immediate
 from pyfly.kernel.exceptions import (
     ConflictException,
     ForbiddenException,
@@ -276,7 +277,7 @@ class SqlAlchemyAdminProvider:
             async with self._factory() as session:
                 async with session.begin():
                     if session.get_bind().dialect.name == "sqlite":
-                        await session.execute(text("BEGIN IMMEDIATE"))
+                        await begin_immediate(session)
                     statement: Any = (
                         select(resource.model)
                         .options(undefer("*"))

@@ -35,7 +35,7 @@ from typing import Any
 import pytest
 from sqlalchemy import ForeignKey, Integer, String, event, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 
@@ -54,7 +54,9 @@ from pyfly.data.relational.dialect_customizers import (
     SQLITE_BEGIN_OPTION,
     AfterBeginCustomizer,
     autocommit_from_options,
+    begin_immediate,
     run_after_begin,
+    uses_sqlite_begin_recipe,
 )
 
 
@@ -545,6 +547,27 @@ class TestSqliteBegin:
         assert seen[0] == "BEGIN IMMEDIATE"
         assert sqlite_file.begin_options(read_only=True) == {}
         assert sqlite_file.begin_options(read_only=False) == {SQLITE_BEGIN_OPTION: "IMMEDIATE"}
+
+    async def test_begin_immediate_works_with_and_without_the_recipe(
+        self, sqlite_file: DataSource, tmp_path: Path
+    ) -> None:
+        # An explicit BEGIN IMMEDIATE statement fails on a recipe engine (BEGIN already ran);
+        # begin_immediate() takes the write lock the way each engine allows.
+        plain = create_async_engine(_sqlite(tmp_path / "plain.db"))
+        try:
+            for engine in (sqlite_file.engine, plain):
+                seen = _statements(engine)
+                async with async_sessionmaker(engine)() as session, session.begin():
+                    await begin_immediate(session)
+                    await session.execute(text("SELECT 1"))
+                assert seen == ["BEGIN IMMEDIATE", "SELECT"]
+            assert uses_sqlite_begin_recipe(sqlite_file.engine)
+            assert not uses_sqlite_begin_recipe(plain)
+            async with sqlite_file.sessionmaker() as session, session.begin():
+                with pytest.raises(OperationalError, match="within a transaction"):
+                    await session.execute(text("BEGIN IMMEDIATE"))
+        finally:
+            await plain.dispose()
 
     async def test_concurrent_write_units_serialize_instead_of_losing_an_update(self, sqlite_file: DataSource) -> None:
         async with sqlite_file.sessionmaker.begin() as session:
