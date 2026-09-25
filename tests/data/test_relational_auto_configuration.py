@@ -28,13 +28,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import Integer, event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.data.relational.named_datasources import NamedDataSources
 from pyfly.data.relational.routing import RoutingSessionFactory
+from pyfly.data.relational.sqlalchemy.entity import Base
 
 
 def _config(relational: dict[str, Any], **root: Any) -> Config:
@@ -233,6 +235,30 @@ class TestDisposal:
             await context.stop()
 
 
+class StopOrderItem(Base):
+    """A table ``ddl-auto=create-drop`` creates on start and drops on stop."""
+
+    __tablename__ = "registry_stop_order_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class TestStopOrder:
+    async def test_create_drop_runs_before_the_registry_disposes_the_engine(self, tmp_path: Path) -> None:
+        context = await _started(_config({"url": _sqlite(tmp_path / "app.db"), "ddl-auto": "create-drop"}))
+        engine = context.get_bean(AsyncEngine)
+        assert await _scalar(engine, f"SELECT count(*) FROM {StopOrderItem.__tablename__}") == 0
+        disposed: list[int] = []
+        event.listen(engine.sync_engine, "engine_disposed", lambda e: disposed.append(id(e)))
+        await context.stop()
+        # The schema was dropped on the live pool, then the registry disposed it: no pool left open.
+        assert disposed == [id(engine.sync_engine)]
+        assert engine.pool.checkedin() == 0
+        with pytest.raises(Exception, match="no such table"):
+            await _scalar(engine, f"SELECT count(*) FROM {StopOrderItem.__tablename__}")
+        await engine.dispose()
+
+
 class TestBeansAreViewsOverTheRegistry:
     async def test_existing_beans_keep_their_names_and_types(self, tmp_path: Path) -> None:
         from pyfly.data.relational.auto_configuration import EngineLifecycle
@@ -293,6 +319,12 @@ class TestSpiBeans:
             def datasource_credentials(self, datasource: str) -> tuple[str | None, str | None] | None:
                 return None
 
+        @component
+        class NotACustomizer:
+            # A synchronous method of the same name is not the SPI.
+            def after_begin(self, connection: Any, datasource: DataSource) -> None:
+                return None
+
         context = ApplicationContext(
             _config(
                 {
@@ -301,7 +333,7 @@ class TestSpiBeans:
                 }
             )
         )
-        for bean in (TenantGuc, ReportingOnly, Vault):
+        for bean in (TenantGuc, ReportingOnly, Vault, NotACustomizer):
             context.register_bean(bean)
         await context.start()
         try:

@@ -228,8 +228,11 @@ class DataSourceSpiRegistrar:
 
     def after_init(self, bean: Any, bean_name: str) -> Any:
         """Register *bean* with the registry when it implements one of the SPIs."""
+        from pyfly.data.relational.datasource_registry import DataSource
         from pyfly.data.relational.dialect_customizers import customizer_datasources
 
+        if isinstance(bean, DataSource):  # its after_begin() runs the customizers; it is not one
+            return bean
         if _defines_coroutine(bean, "after_begin"):
             self._registry.add_scoped_customizer(bean, customizer_datasources(bean))
         if _defines_method(bean, "datasource_credentials"):
