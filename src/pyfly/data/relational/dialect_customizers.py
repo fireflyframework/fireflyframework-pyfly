@@ -138,6 +138,11 @@ def install_sqlite_customizer(
     def _on_begin(conn: Connection) -> None:
         if conn._is_autocommit_isolation():
             return
+        # StaticPool (in-memory databases) hands every session the same connection: when another
+        # session already opened a transaction on it, this one joins it, as the driver's own handling
+        # did, instead of failing with "cannot start a transaction within a transaction".
+        if getattr(conn.connection.driver_connection, "in_transaction", False):
+            return
         dbapi_connection = conn.connection.dbapi_connection
         # Setting an isolation level (and resetting it when the connection returns to the pool) turns
         # the driver's own BEGIN handling back on; switch it off again before this transaction starts.

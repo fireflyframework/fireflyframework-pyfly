@@ -577,6 +577,25 @@ class TestSqliteBegin:
         assert seen == ["BEGIN", "UPDATE"]
         assert await _scalar(sqlite_file.engine, "SELECT balance FROM registry_account") == 5
 
+    async def test_memory_database_sessions_sharing_the_one_connection_do_not_collide(
+        self, registries: list[DataSourceRegistry]
+    ) -> None:
+        # StaticPool hands every session the same connection. A session left open after a read (a
+        # repository's long-lived session) keeps that connection in a transaction; a second session's
+        # BEGIN must join it, as the driver did, instead of failing "within a transaction".
+        datasource = _registry(registries, _config({"url": "sqlite+aiosqlite:///:memory:"})).primary
+        async with datasource.engine.begin() as conn:
+            await conn.run_sync(_Base.metadata.create_all)
+        lingering = datasource.sessionmaker()
+        try:
+            await lingering.execute(select(Account))
+            async with datasource.sessionmaker.begin() as session:
+                session.add(Account(id=1, balance=10))
+            async with datasource.sessionmaker() as session:
+                assert (await session.execute(select(Account.balance))).scalar_one() == 10
+        finally:
+            await lingering.close()
+
     async def test_an_isolation_level_does_not_bring_the_driver_begin_back(self, sqlite_file: DataSource) -> None:
         seen = _statements(sqlite_file.engine)
         async with sqlite_file.sessionmaker() as session:
