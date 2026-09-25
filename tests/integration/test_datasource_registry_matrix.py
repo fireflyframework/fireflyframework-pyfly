@@ -257,6 +257,74 @@ async def test_rotated_password_reaches_new_connections_and_refresh_evicts_the_o
         )
 
 
+class RoleProvider:
+    """A ``DataSourceCredentialsProvider`` that answers for some datasources and records who asked."""
+
+    def __init__(self, answers: dict[str, tuple[str, str]]) -> None:
+        self.answers = answers
+        self.asked: list[str] = []
+
+    def datasource_credentials(self, datasource: str) -> tuple[str | None, str | None] | None:
+        self.asked.append(datasource)
+        return self.answers.get(datasource)
+
+
+@pytest.mark.backends(PG)
+async def test_credentials_provider_tells_a_replica_from_its_primary(relational_backend: RelationalBackend) -> None:
+    # IAM tokens are scoped to a host, and a replica often logs in as a read-only role: a provider must be
+    # able to answer for the replica apart from its primary.
+    admin_url = relational_backend.url
+    suffix = uuid.uuid4().hex[:8]
+    writer, reader, token = f"rw_{suffix}", f"ro_{suffix}", f"tk_{suffix}"
+    await _admin(
+        admin_url,
+        f"CREATE ROLE {writer} LOGIN PASSWORD 'rw-secret'",
+        f"CREATE ROLE {reader} LOGIN PASSWORD 'ro-secret'",
+        f"CREATE ROLE {token} LOGIN PASSWORD 'token-secret'",
+    )
+    base = make_url(admin_url)
+    config = {
+        "pyfly.data.relational.url": base.set(username=writer, password="rw-secret").render_as_string(
+            hide_password=False
+        ),
+        "pyfly.data.relational.read-replica.url": base.set(username=reader, password="ro-secret").render_as_string(
+            hide_password=False
+        ),
+    }
+    try:
+        # A provider that answers for the primary only leaves the replica on its own credentials.
+        registry = DataSourceRegistry(relational_backend.config(config))
+        primary_only = RoleProvider({"primary": (writer, "rw-secret")})
+        registry.add_credentials_provider(primary_only)
+        try:
+            replica = registry.replica()
+            assert replica is not None
+            assert await _current_user(registry.primary.sessionmaker) == writer
+            assert await _current_user(replica.sessionmaker) == reader
+            assert primary_only.asked == ["primary", "primary.replica"]
+        finally:
+            await registry.close()
+
+        # A provider that answers for the replica reaches the replica, and only the replica.
+        registry = DataSourceRegistry(relational_backend.config(config))
+        registry.add_credentials_provider(RoleProvider({"primary.replica": (token, "token-secret")}))
+        try:
+            replica = registry.replica()
+            assert replica is not None
+            assert await _current_user(replica.sessionmaker) == token
+            assert await _current_user(registry.primary.sessionmaker) == writer
+        finally:
+            await registry.close()
+    finally:
+        await _admin(
+            admin_url,
+            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{writer}', '{reader}', '{token}')",
+            f"DROP ROLE IF EXISTS {writer}",
+            f"DROP ROLE IF EXISTS {reader}",
+            f"DROP ROLE IF EXISTS {token}",
+        )
+
+
 _tenant: ContextVar[str | None] = ContextVar("test_tenant", default=None)
 
 

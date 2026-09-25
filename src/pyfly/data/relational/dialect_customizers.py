@@ -171,10 +171,16 @@ class DataSourceCredentialsProvider(Protocol):
 
     A bean implementing it is consulted every time a pool opens a connection, before the live
     configuration; returning ``None`` falls through to the configured URL.
+
+    *datasource* is the datasource's qualified name: ``"primary"``, a named datasource such as
+    ``"reporting"``, or ``"<name>.replica"`` for a read replica (``"primary.replica"``). A replica is
+    asked for apart from its primary because it usually runs on another host (an IAM token is scoped
+    to one) and often logs in as another role; answer ``None`` for it to keep its configured user.
     """
 
     def datasource_credentials(self, datasource: str) -> tuple[str | None, str | None] | None:
-        """The ``(username, password)`` for a new connection to *datasource*, or ``None``."""
+        """The ``(username, password)`` for a new connection to *datasource* (a qualified name), or
+        ``None``."""
         ...
 
 

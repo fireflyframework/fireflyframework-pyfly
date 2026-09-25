@@ -545,7 +545,11 @@ class DataSourceRegistry:
                     target._add_customizer(customizer)
 
     def add_credentials_provider(self, provider: DataSourceCredentialsProvider) -> None:
-        """Consult *provider* for the credentials of every new connection (before the configuration)."""
+        """Consult *provider* for the credentials of every new connection (before the configuration).
+
+        The provider is asked with the datasource's :attr:`~DataSource.qualified_name`: ``"primary"``,
+        ``"reporting"``, and ``"primary.replica"`` for a read replica.
+        """
         with self._lock:
             if not any(existing is provider for existing in self._credentials_providers):
                 self._credentials_providers.append(provider)
@@ -576,8 +580,9 @@ class DataSourceRegistry:
         return evicted
 
     def _live_credentials(self, datasource: DataSource) -> tuple[str | None, str | None] | None:
+        # Providers are asked by qualified name: a replica ("primary.replica") is not its primary.
         for provider in list(self._credentials_providers):
-            credentials = provider.datasource_credentials(datasource.name)
+            credentials = provider.datasource_credentials(datasource.qualified_name)
             if credentials is not None:
                 return credentials
         if datasource.url_key is None:

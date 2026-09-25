@@ -799,7 +799,11 @@ A `do_connect` hook asks for the user name and password every time the pool open
 takes them from the first of:
 
 - a `DataSourceCredentialsProvider` bean (`datasource_credentials(datasource) -> (user, password) | None`),
-  which fits IAM tokens or a secrets client;
+  which fits IAM tokens or a secrets client. It is asked with the datasource's qualified name:
+  `primary`, a named datasource such as `reporting`, or `<name>.replica` for a read replica
+  (`primary.replica`). A replica is asked apart from its primary because it usually runs on another
+  host (an IAM token is scoped to one) and often logs in as a read-only role. Return `None` for it to
+  keep the replica's configured user;
 - the **live** configuration: the datasource's URL key is read again, so a `${DB_PASSWORD}` placeholder
   or a refreshed configuration takes effect.
 
