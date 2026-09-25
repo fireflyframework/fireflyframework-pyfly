@@ -1215,9 +1215,10 @@ browser form behavior, and a runnable application.
 | Key | Default | Description |
 |---|---|---|
 | `pyfly.data.enabled` | `false` | Enable the data layer. |
-| `pyfly.data.url` | `"sqlite+aiosqlite:///pyfly.db"` | Database connection URL. |
-| `pyfly.data.echo` | `false` | Echo SQL statements (for debugging). |
-| `pyfly.data.pool-size` | `5` | Connection pool size. |
+| `pyfly.data.relational.url` | — (required) | Database connection URL. There is no default: a relational application without it fails at startup (the `dev` profile falls back to `sqlite+aiosqlite:///./app.db`). |
+| `pyfly.data.relational.echo` | `false` | Echo SQL statements (for debugging); `debug` also logs rows. |
+| `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Connection pool size; see [Datasource Registry](data-relational.md#configuration-reference) for every key. |
+| `pyfly.data.url`, `pyfly.data.echo`, `pyfly.data.pool-size` | — | Deprecated aliases of the three keys above, honored with a warning when those are absent. |
 
 ### Cache Defaults
 

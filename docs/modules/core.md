@@ -760,8 +760,8 @@ pyfly:
 | `pyfly.logging.level.root` | `"INFO"` | Root log level |
 | `pyfly.logging.format` | `"console"` | Log output format |
 | `pyfly.data.enabled` | `false` | Enable data layer |
-| `pyfly.data.url` | `"sqlite+aiosqlite:///pyfly.db"` | Database URL |
-| `pyfly.data.pool-size` | `5` | Connection pool size |
+| `pyfly.data.relational.url` | — (required) | Database URL; `pyfly.data.url` is a deprecated alias |
+| `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Connection pool size; `pyfly.data.pool-size` is a deprecated alias |
 | `pyfly.cache.enabled` | `false` | Enable caching |
 | `pyfly.cache.provider` | `"memory"` | Cache backend (`redis`, `memory`) |
 | `pyfly.cache.ttl` | `300` | Default TTL in seconds |

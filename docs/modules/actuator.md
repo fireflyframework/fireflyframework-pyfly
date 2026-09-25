@@ -480,6 +480,21 @@ aggregator.add_indicator("payment-gateway", PaymentGatewayHealthIndicator())
 |-------------|-------------------|------------------------------------|
 | `name`      | `str`             | Unique name for this indicator     |
 | `indicator` | `HealthIndicator` | Object implementing the protocol   |
+| `groups`    | `set[ProbeGroup] \| None` | Probe groups; `None` uses the indicator's own `probe_groups` attribute, and an indicator without one joins both probes |
+
+An indicator can declare its probe groups on its class, as the database indicator does, which is
+readiness-only:
+
+```python
+class DatabaseHealthIndicator:
+    probe_groups = frozenset({ProbeGroup.READINESS})
+
+    async def health(self) -> HealthStatus: ...
+```
+
+The bean scan (`install_health_indicators`) honors that attribute. It skips an indicator instance that
+is already registered under another name, so an explicit `add_indicator("db", indicator, groups=...)`
+made before the scan is kept.
 
 ### check()
 

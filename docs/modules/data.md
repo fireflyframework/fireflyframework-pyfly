@@ -1164,17 +1164,35 @@ modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fal
 
 ### SqlAlchemyHealthIndicator
 
-`SqlAlchemyHealthIndicator` is an actuator `HealthIndicator` that probes the configured relational
-database by executing `SELECT 1`.  It is auto-wired by `RelationalAutoConfiguration` and
-contributed to `/actuator/health` as the `db` component — no manual registration required.
+`SqlAlchemyHealthIndicator` is an actuator `HealthIndicator` that probes the relational databases with
+a portable `SELECT 1` (`select(literal(1))`, which Oracle renders with `FROM DUAL`).
+`RelationalAutoConfiguration` wires it as the `db_health_indicator` bean. It is contributed to
+`/actuator/health` under that name, with no manual registration.
+
+It belongs to the **readiness** probe only. Its class declares `probe_groups = {READINESS}`, which the
+aggregator honors when no groups are given. When the database is unreachable, the pod leaves the load
+balancer instead of failing liveness and being restarted, along with every other replica, at once.
+
+The check is bounded:
+
+- Each check has `pyfly.data.relational.health.timeout` seconds (2 by default). A database that went
+  silent answers `DOWN` in time instead of hanging the probe.
+- When the pool has no idle connection and no overflow left, the check does not queue behind the
+  application for `pool.timeout`. It answers `UNKNOWN` (validation skipped), which keeps the aggregate
+  status `UP`.
+
+The bean checks every datasource of the [datasource registry](data-relational.md#datasource-registry)
+concurrently: the primary, the replicas, the named datasources and the module datasources. It reports
+each one under `details["datasources"]`, and any `DOWN` makes the component `DOWN`.
 
 ```python
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 
-indicator = SqlAlchemyHealthIndicator(engine)
+indicator = SqlAlchemyHealthIndicator(engine, timeout=2.0)          # one engine
+indicator = SqlAlchemyHealthIndicator(engine, registry=registry)    # every registry datasource
 status = await indicator.health()
 # HealthStatus(status="UP", details={"database": "postgresql"})
-# HealthStatus(status="DOWN", details={"error": "OperationalError", "message": "..."})
+# HealthStatus(status="DOWN", details={"database": "postgresql", "error": "TimeoutError", "message": "no answer within 2 s"})
 ```
 
 **Behaviour:**
@@ -1182,7 +1200,10 @@ status = await indicator.health()
 | State | `status` | `details` keys |
 |-------|----------|----------------|
 | Connection succeeds | `"UP"` | `database` — SQLAlchemy dialect name (e.g. `"postgresql"`, `"sqlite"`) |
-| Connection fails | `"DOWN"` | `error` — exception class name; `message` — first 200 chars of the error message |
+| Connection fails | `"DOWN"` | `database`; `error` — exception class name; `message` — first 200 chars of the error message, password masked |
+| No answer within the timeout | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` |
+| Pool exhausted | `"UNKNOWN"` | `database`; `validation` = `"skipped: pool exhausted"` |
+| With a registry | aggregate | `database` (the primary's dialect); `datasources` — one entry per datasource (`primary`, `primary.replica`, named...) |
 
 Source file: `src/pyfly/data/relational/health.py`
 
@@ -1192,7 +1213,8 @@ Source file: `src/pyfly/data/relational/health.py`
 
 When the observability module is active (i.e. a `MetricsRegistry` bean is present from
 `pyfly.observability`), the `QueryMetricsLifecycle` bean automatically attaches SQLAlchemy
-event listeners to the engine and records the following Prometheus metrics:
+event listeners to every engine of the datasource registry, including those registered later.
+It records the following Prometheus metrics:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -1201,7 +1223,20 @@ event listeners to the engine and records the following Prometheus metrics:
 | `pyfly_db_query_errors_total` | Counter | `operation` | Total number of failed queries |
 
 The `operation` label contains the SQL command verb (e.g. `SELECT`, `INSERT`, `UPDATE`,
-`DELETE`).  No configuration is required — the bean is created automatically when
+`DELETE`).
+
+It also exports every datasource's connection pool (`SqlAlchemyPoolMetrics`, labelled `datasource`:
+`primary`, `primary.replica`, the named datasources). The gauges are read from the pool at scrape time.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pyfly_db_pool_size` | Gauge | Configured pool size |
+| `pyfly_db_pool_checked_out` | Gauge | Connections in use |
+| `pyfly_db_pool_idle` | Gauge | Connections idle in the pool |
+| `pyfly_db_pool_overflow` | Gauge | Overflow connections in use |
+| `pyfly_db_pool_invalidated_total` | Counter | Connections invalidated (disconnects, errors) |
+
+No configuration is required — the bean is created automatically when
 `prometheus_client` is installed and the `MetricsRegistry` is available; when neither is
 present the relational module continues to work unchanged.
 

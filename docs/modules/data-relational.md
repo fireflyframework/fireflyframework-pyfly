@@ -42,6 +42,13 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
 - [Run Migrations on Startup (Flyway-Style)](#run-migrations-on-startup-flyway-style)
+- [Datasource Registry](#datasource-registry)
+  - [Configuration Reference](#configuration-reference)
+  - [SQLite Setup](#sqlite-setup)
+  - [Module Datasources](#module-datasources)
+  - [After-Begin Customizers](#after-begin-customizers)
+  - [Credential Rotation](#credential-rotation)
+  - [Capabilities](#capabilities)
 - [Read/Write Routing (Read Replicas)](#readwrite-routing-read-replicas)
 - [Multiple Named Datasources](#multiple-named-datasources)
   - [NamedDataSources](#nameddatasources)
@@ -623,6 +630,201 @@ run 'pyfly db init' to create the Alembic environment; skipping migrations.
 
 ---
 
+## Datasource Registry
+
+Every SQLAlchemy engine the application uses is built by one
+`DataSourceRegistry`: the primary, its read replica, the named datasources, and the datasources the
+framework modules need (event store, snapshots, saga persistence, the PostgreSQL cache). Before
+26.09.08 each module built its own engine from a URL, so one database could carry seven pools, only
+the primary got the pool settings, and only the primary was disposed on shutdown.
+
+The registry gives every engine the same treatment: the pool settings, `pool.recycle`, the connect
+arguments, the SQLite setup and a credential hook. It keeps one engine per database, and it disposes
+every engine exactly once when the context stops. `DataSourceAutoConfiguration` exposes it as the
+`datasource_registry` bean whenever SQLAlchemy is installed, even with the relational repositories
+disabled, because the SQL-backed modules take their datasource from it.
+
+```python
+from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+registry = ctx.get_bean(DataSourceRegistry)
+primary = registry.primary                       # DataSource
+reporting = registry.get("reporting")
+async with reporting.sessionmaker() as session:
+    ...
+registry.names()                                 # ["primary", "reporting", ...]
+registry.replica()                               # the primary's replica DataSource, or None
+```
+
+A `DataSource` has these members:
+
+- `name`;
+- `url`, whose `str` and `repr` mask the password (`masked_url` renders it masked);
+- `engine` and `sessionmaker` (`expire_on_commit=False`);
+- `replica`;
+- `capabilities`;
+- `metadata`, a slot for the framework tables that live on it;
+- `customizers`.
+
+The beans you already inject keep their names and types, and each is now a view over the registry:
+
+- `async_engine` and `async_session_factory` are the primary's engine and session factory;
+- `routing_session_factory` routes to the primary's replica;
+- `named_data_sources` is a live view;
+- `db_health_indicator` checks every datasource;
+- `query_metrics` covers every engine;
+- `engine_lifecycle` leaves disposal to the registry.
+
+A relational application with no `pyfly.data.relational.url` **fails at startup**. Before 26.09.08
+it silently opened `./app.db` in the working directory. With the `dev` profile active, it falls back
+to `sqlite+aiosqlite:///./app.db` and logs a warning.
+
+### Configuration Reference
+
+Every key is read for its exact name, so `${...}` placeholders resolve and a `PYFLY_*` environment
+variable wins for every key, named datasources included. Values are cast with Config's truthy set
+(`true/false`, `yes/no`, `on/off`, `1/0`). A value that is not a boolean or a number where one is
+expected raises at startup and names the key. Before 26.09.08, `bool("false")` turned SQL echo on.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pyfly.data.relational.url` | — (required) | Primary datasource URL. |
+| `pyfly.data.relational.echo` | `false` | Log SQL: `true`, `false`, or `debug` (also logs result rows). |
+| `pyfly.data.relational.ddl-auto` | `create` | Schema strategy of `engine_lifecycle` (`create`, `create-drop`, `none`). |
+| `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Pool size (queue pools only). |
+| `pyfly.data.relational.pool.max-overflow` | SQLAlchemy's (10) | Connections beyond `size`. |
+| `pyfly.data.relational.pool.timeout` | SQLAlchemy's (30) | Seconds to wait for a connection. |
+| `pyfly.data.relational.pool.recycle` | `1800` | Replace a pooled connection after this many seconds (`-1` never). |
+| `pyfly.data.relational.pool.pre-ping` | `false` | Test every checkout with a round trip. |
+| `pyfly.data.relational.connect-args.*` | — | Passed to the driver verbatim, for example asyncpg `statement_cache_size: 0` behind pgbouncer, `server_settings`, SSL or timeouts. |
+| `pyfly.data.relational.sqlite.foreign-keys` | `true` | `PRAGMA foreign_keys=ON` on every connection. |
+| `pyfly.data.relational.sqlite.journal-mode` | `WAL` | Journal mode of file databases. |
+| `pyfly.data.relational.sqlite.synchronous` | `NORMAL` | `PRAGMA synchronous` of file databases. |
+| `pyfly.data.relational.sqlite.busy-timeout` | `5000` | Milliseconds to wait for a lock. It is left alone when the URL or `connect-args` set sqlite3's `timeout`. |
+| `pyfly.data.relational.read-replica.url` | — | The primary's read replica. |
+| `pyfly.data.relational.datasources.<name>.*` | inherited | A named datasource. It takes `url`, `echo`, `pool.*`, `connect-args.*`, `sqlite.*` and `read-replica.url`. |
+| `pyfly.data.relational.health.timeout` | `2` | Seconds each `db` health check may take. |
+
+Why pre-ping is off by default: it adds a round trip to every checkout (+0.675 ms on asyncpg, which
+nearly doubles a short unit of work). These cover the same failures without that cost:
+
+- `pool.recycle` bounds a connection's age;
+- SQLAlchemy invalidates the pool when it detects a disconnect.
+
+Turn pre-ping on where a proxy or firewall drops idle connections silently.
+
+On PostgreSQL, every connection carries `pyfly.app.name` as its `application_name`, which makes it
+visible in `pg_stat_activity`. Set `connect-args.server_settings.application_name` to override it.
+
+The keys `pyfly.data.url`, `pyfly.data.echo` and `pyfly.data.pool-size` used to be documented, but
+nothing read them. They are now **deprecated aliases** of `url`, `echo` and `pool.size`: they are
+honored when the `relational` key is absent, with a warning.
+`pyfly.data.relational.pool-size` is likewise an alias of `pool.size`.
+
+### SQLite Setup
+
+SQLite's defaults, and pysqlite's, are wrong for an application database. Every SQLite engine the
+registry builds therefore gets the following setup:
+
+- **Foreign keys are enforced.** `PRAGMA foreign_keys=ON` runs on every connection. Orphan rows are
+  rejected and `ON DELETE CASCADE` runs, as on PostgreSQL and MySQL.
+- **File databases run in WAL mode with `synchronous=NORMAL`.** Readers run beside a writer. In-memory
+  databases keep `StaticPool` (one shared connection) and are never recycled.
+- **The engine emits `BEGIN` itself.** This is SQLAlchemy's documented pysqlite/aiosqlite recipe.
+  The driver otherwise defers `BEGIN` until the first write, so the reads of a read-modify-write run
+  outside the transaction and a concurrent update is lost. Now two such transactions serialize: one of
+  them fails with `database is locked` instead of both committing.
+- **A unit that will write starts with `BEGIN IMMEDIATE`.** It takes the write lock up front and waits
+  `busy-timeout` for it. The unit of work asks for this through `DataSource.begin_options(read_only=False)`,
+  which returns `{"pyfly_sqlite_begin": "IMMEDIATE"}`. Read units use a plain `BEGIN`.
+
+### Module Datasources
+
+The per-module URL keys are aliases that resolve through the registry:
+
+- `pyfly.eventsourcing.store.url`;
+- `pyfly.eventsourcing.snapshot.url`;
+- `pyfly.transactional.persistence.sqlalchemy.url`;
+- `pyfly.cache.postgres.url`.
+
+Each resolves the same way:
+
+- **No URL** means the primary datasource.
+- **A URL identical to a registered datasource's** (the password aside, SQLite paths made absolute)
+  reuses that datasource's engine.
+- **Another URL** registers a named datasource that gets the same treatment (pool, connect arguments,
+  SQLite setup, credential hook). The name is `event-store`, `snapshot-store`,
+  `transactional-persistence` or `cache`.
+
+A module with no URL and no primary fails with an error naming both keys. It used to fall back to
+`./app.db`, or for the cache to `localhost:5432/cache`.
+
+```python
+datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-feature",
+                              url_key="pyfly.myfeature.url")
+```
+
+### After-Begin Customizers
+
+An `AfterBeginCustomizer` runs inside every framework-managed transaction on a datasource, right after
+`BEGIN`. Use it for a tenant GUC, a `SET LOCAL statement_timeout` or a `search_path`. Declare it as a
+bean and it applies to every datasource and its replica. To limit it, give the class a `datasources`
+attribute, or register it with `registry.add_customizer(customizer, datasource="name")`. Customizers
+run in `@order` order. An exception aborts the unit.
+
+```python
+from contextvars import ContextVar
+from sqlalchemy import text
+from pyfly.container import component
+
+current_tenant: ContextVar[str | None] = ContextVar("current_tenant", default=None)
+
+
+@component
+class TenantGuc:
+    async def after_begin(self, connection, datasource) -> None:
+        tenant = current_tenant.get()
+        if tenant is not None and datasource.capabilities.dialect == "postgresql":
+            await connection.execute(
+                text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": tenant}
+            )
+```
+
+The transaction manager calls `await datasource.after_begin(session)` (or
+`run_after_begin(datasource, session)`) for every unit it opens, auto units included.
+
+### Credential Rotation
+
+A `do_connect` hook asks for the user name and password every time the pool opens a connection. It
+takes them from the first of:
+
+- a `DataSourceCredentialsProvider` bean (`datasource_credentials(datasource) -> (user, password) | None`),
+  which fits IAM tokens or a secrets client;
+- the **live** configuration: the datasource's URL key is read again, so a `${DB_PASSWORD}` placeholder
+  or a refreshed configuration takes effect.
+
+A rotated password therefore reaches new connections without a restart. On a configuration refresh
+(`POST /actuator/refresh`), the pools whose credentials changed are soft-evicted: idle connections
+opened with the old password are closed, and connections in use are closed when they are returned.
+`pool.recycle` bounds the age of every other connection.
+
+### Capabilities
+
+`DataSource.capabilities` tells the dialect-gated accelerators what they may use:
+
+| Field | Meaning |
+|-------|---------|
+| `dialect`, `driver` | For example `postgresql` / `asyncpg`, or `mariadb` / `asyncmy` (MariaDB is detected from the server). |
+| `supports_savepoints` | SQLite (with the recipe), PostgreSQL, MySQL, MariaDB, SQL Server and Oracle. |
+| `supports_returning`, `insert_returning`, `update_returning`, `delete_returning` | Final after the first connection. For example, MariaDB 11 has `INSERT ... RETURNING` and MySQL 8 has none. |
+| `fast_autocommit_reads` | `True` only on PostgreSQL. |
+| `isolation_levels` | The driver's levels. asyncpg has no `READ UNCOMMITTED`; SQLite has only `SERIALIZABLE` and `READ UNCOMMITTED`. |
+| `max_in_params` | The largest IN list a statement may bind. |
+
+**Source:** `src/pyfly/data/relational/datasource_registry.py` · `src/pyfly/data/relational/dialect_customizers.py` · `src/pyfly/config/properties/data.py` · beans: `DataSourceAutoConfiguration`
+
+---
+
 ## Read/Write Routing (Read Replicas)
 
 PyFly can route read-only work to a database **read replica** while keeping writes on the primary — the equivalent of Spring's `AbstractRoutingDataSource` driven by `@Transactional(readOnly = true)`. Routing is **opt-in**: with no replica configured, every session goes to the primary, so behavior is unchanged for existing apps.
@@ -633,7 +835,7 @@ from pyfly.data.relational.routing import RoutingSessionFactory, read_only, is_r
 
 ### Enabling a Replica
 
-Set the replica URL under `pyfly.data.relational.read-replica.url`. `RelationalAutoConfiguration` then builds a separate engine + `async_sessionmaker` for the replica and wires it into the `routing_session_factory` bean:
+Set the replica URL under `pyfly.data.relational.read-replica.url`. The [datasource registry](#datasource-registry) builds the replica's engine with the primary's settings (pool, connect arguments, credential hook) and `routing_session_factory` routes to its `async_sessionmaker`:
 
 ```yaml
 pyfly:
@@ -696,22 +898,28 @@ Outside any `read_only()` block, `factory()` always returns a primary session. I
 
 In addition to the primary datasource, PyFly can configure any number of **secondary datasources** — the equivalent of Spring declaring multiple `DataSource` beans. Each named datasource gets its own engine and `async_sessionmaker`, kept separate from the primary's dedicated beans.
 
-Declare each one under `pyfly.data.relational.datasources.<name>`; only `url` is required (`echo` is optional and defaults to `false`):
+Declare each one under `pyfly.data.relational.datasources.<name>`. Only `url` is required. Every other
+key (`echo`, `pool.*`, `connect-args.*`, `sqlite.*`, `read-replica.url`) is inherited from the primary
+and can be overridden; the connect arguments are inherited only when the driver is the same. Every key
+is read like the primary's, so `${...}` placeholders resolve and a `PYFLY_*` override such as
+`PYFLY_DATA_RELATIONAL_DATASOURCES_REPORTING_URL` wins. Keep secrets out of the file. The name
+`primary` is reserved.
 
 ```yaml
 pyfly:
   data:
     relational:
-      url: postgresql+asyncpg://user:pass@primary:5432/app   # primary (unchanged)
+      url: postgresql+asyncpg://app:${DB_PASSWORD}@primary:5432/app   # primary (unchanged)
       datasources:
         reporting:
-          url: postgresql+asyncpg://user:pass@reporting:5432/reports
-          echo: false
+          url: postgresql+asyncpg://reports:${REPORTING_PASSWORD}@reporting:5432/reports
+          pool:
+            size: 3
         analytics:
-          url: postgresql+asyncpg://user:pass@analytics:5432/warehouse
+          url: postgresql+asyncpg://etl:${ANALYTICS_PASSWORD}@analytics:5432/warehouse
 ```
 
-`RelationalAutoConfiguration` builds a `NamedDataSources` registry bean from this config. Inject it and call `.get("<name>")` to retrieve that datasource's `async_sessionmaker`:
+The `named_data_sources` bean is a live `NamedDataSources` view over the [datasource registry](#datasource-registry). It also lists the datasources a module registers. Inject it and call `.get("<name>")` to retrieve that datasource's `async_sessionmaker`:
 
 ```python
 from pyfly.container import service
@@ -737,7 +945,7 @@ class ReportingService:
 |--------|---------|-------------|
 | `get(name)` | `async_sessionmaker[AsyncSession]` | Session factory for `name`; raises `KeyError` if unknown. |
 | `names()` | `list[str]` | Sorted names of all configured secondary datasources. |
-| `dispose()` | `None` (await) | Disposes every secondary engine — call on shutdown. |
+| `dispose()` | `None` (await) | Disposes every secondary engine. The registry already does this when the context stops. |
 | `name in datasources` | `bool` | Whether a datasource is configured (`__contains__`). |
 | `len(datasources)` | `int` | Number of configured secondary datasources. |
 

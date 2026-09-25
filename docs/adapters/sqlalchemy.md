@@ -52,14 +52,22 @@ class OrderRepository(Repository[OrderEntity, int]):
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter |
-| `pyfly.data.relational.url` | `str` | `"sqlite+aiosqlite:///pyfly.db"` | Database connection URL |
-| `pyfly.data.relational.echo` | `bool` | `false` | Log all SQL statements |
+| `pyfly.data.relational.url` | `str` | *(required)* | Database connection URL. Startup fails without it, except in the `dev` profile (`sqlite+aiosqlite:///./app.db`, with a warning) |
+| `pyfly.data.relational.echo` | `bool` or `debug` | `false` | Log all SQL statements (`debug` also logs rows); `"false"` from an env var is `false` |
 | `pyfly.data.relational.ddl-auto` | `str` | `"create"` | DDL strategy: `create`, `create-drop`, or `none` |
 | `pyfly.data.relational.pool.size` | `int` | *(driver default)* | Connection pool size (`pool_size`) |
 | `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
 | `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
-| `pyfly.data.relational.pool.recycle` | `int` | *(driver default)* | Seconds before a connection is recycled |
-| `pyfly.data.relational.pool.pre-ping` | `bool` | *(driver default)* | Test each pooled connection at checkout (the driver's ping on MySQL/MariaDB) and replace it if the server dropped it |
+| `pyfly.data.relational.pool.recycle` | `int` | `1800` | Seconds before a connection is recycled (`-1` never) |
+| `pyfly.data.relational.pool.pre-ping` | `bool` | `false` | Test each pooled connection at checkout (the driver's ping on MySQL/MariaDB) and replace it if the server dropped it |
+| `pyfly.data.relational.connect-args.*` | mapping | — | Passed to the driver verbatim (asyncpg `statement_cache_size: 0` behind pgbouncer, `server_settings`, SSL, timeouts) |
+| `pyfly.data.relational.sqlite.*` | mapping | see below | `foreign-keys` (`true`), `journal-mode` (`WAL`), `synchronous` (`NORMAL`), `busy-timeout` (`5000` ms) |
+| `pyfly.data.relational.health.timeout` | `float` | `2` | Seconds each `db` readiness check may take |
+
+Every key accepts `${...}` placeholders and `PYFLY_*` overrides, and the same settings apply to the
+read replica, the named datasources and the datasources the framework modules use. All of them are
+built by one datasource registry; see
+[Datasource Registry](../modules/data-relational.md#datasource-registry).
 
 ### Database URLs by Driver
 

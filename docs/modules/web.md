@@ -1938,6 +1938,10 @@ aggregator.add_indicator("disk", disk_indicator, groups={ProbeGroup.LIVENESS})
 aggregator.add_indicator("app", app_indicator)  # included in all probes
 ```
 
+An indicator can also declare its groups with a `probe_groups` class attribute, which applies when
+`add_indicator` gets no `groups`. The framework's database indicator (`db_health_indicator`) declares
+`{READINESS}`: a database outage takes the pod out of the load balancer instead of restarting it.
+
 | Group Assignment | Liveness | Readiness | General Health |
 |-----------------|----------|-----------|----------------|
 | No groups (default) | Included | Included | Included |
