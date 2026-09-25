@@ -459,14 +459,22 @@ class _Reader:
         return resolved
 
     def datasources(self, parent: RelationalProperties) -> dict[str, DataSourceProperties]:
-        """``datasources.<name>.*``: each named datasource inherits the top-level settings."""
+        """``datasources.<name>.*``: each named datasource inherits the top-level settings.
+
+        The names come from the YAML subtree and from ``PYFLY_DATA_RELATIONAL_DATASOURCES_<NAME>_*``
+        environment variables (a datasource may be declared in the environment alone); every value is
+        then read by its exact key.
+        """
         raw = self._config.get(f"{PREFIX}.datasources")
-        if not isinstance(raw, Mapping):
-            return {}
+        declared = [str(name) for name in raw] if isinstance(raw, Mapping) else []
+        # Env-only names are split on every underscore, so a variable that overrides "event-store"
+        # also yields a stray "event" entry; an env-only name counts only when it carries a URL.
+        env_only = [
+            str(name) for name in self._config.effective_section(f"{PREFIX}.datasources") if str(name) not in declared
+        ]
         parent_driver = _drivername(parent.url)
         result: dict[str, DataSourceProperties] = {}
-        for name in raw:
-            name = str(name)
+        for name in [*declared, *env_only]:
             if name == PRIMARY:
                 raise ValueError(
                     f"{PREFIX}.datasources.{PRIMARY} is reserved for the primary datasource; "
@@ -475,7 +483,8 @@ class _Reader:
             base = f"{PREFIX}.datasources.{name}"
             url = self.string(f"{base}.url")
             if url is None:
-                _logger.warning("Named datasource %r has no %s.url; it is skipped", name, base)
+                if name in declared:
+                    _logger.warning("Named datasource %r has no %s.url; it is skipped", name, base)
                 continue
             raw_echo = self._config.get(f"{base}.echo")
             own_args = self.tree(f"{base}.connect-args")

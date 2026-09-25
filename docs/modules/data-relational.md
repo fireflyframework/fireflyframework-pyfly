@@ -686,6 +686,12 @@ variable wins for every key, named datasources included. Values are cast with Co
 (`true/false`, `yes/no`, `on/off`, `1/0`). A value that is not a boolean or a number where one is
 expected raises at startup and names the key. Before 26.09.08, `bool("false")` turned SQL echo on.
 
+A named datasource can also be declared in the environment alone, with no YAML entry:
+`PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_URL` registers `analytics`, and
+`PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_POOL_SIZE` sizes its pool. A name declared this way is
+lower-case and has no dash, since every underscore reads as a key separator; declare a dashed name
+such as `event-store` in YAML, where the environment can still override its keys.
+
 | Key | Default | Description |
 |-----|---------|-------------|
 | `pyfly.data.relational.url` | — (required) | Primary datasource URL. |

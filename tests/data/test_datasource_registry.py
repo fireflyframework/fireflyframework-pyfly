@@ -149,6 +149,19 @@ class TestBuilding:
         with pytest.raises(NoSuchDataSourceError, match="reporting"):
             registry.get("missing")
 
+    async def test_named_datasource_defined_only_in_the_environment(
+        self, tmp_path: Path, registries: list[DataSourceRegistry], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # C046: a PYFLY_* variable declares a named datasource with no YAML entry at all.
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_URL", _sqlite(tmp_path / "analytics.db"))
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_POOL_SIZE", "4")
+        registry = _registry(registries, _config({"url": _sqlite(tmp_path / "p.db")}))
+        assert registry.names() == [PRIMARY, "analytics"]
+        analytics = registry.get("analytics")
+        assert analytics.url.database == str(tmp_path / "analytics.db")
+        assert analytics.engine.pool.size() == 4
+        assert await _scalar(analytics.engine, "SELECT 1") == 1
+
     async def test_url_secrets_are_masked(self, registries: list[DataSourceRegistry]) -> None:
         registry = _registry(registries, _config({"url": "postgresql+asyncpg://app:hunter2@db.internal/orders"}))
         primary = registry.primary

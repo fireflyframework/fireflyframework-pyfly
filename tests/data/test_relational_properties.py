@@ -209,6 +209,26 @@ class TestNamedDatasources:
         )
         assert props.datasources["analytics"].url == f"sqlite+aiosqlite:///{tmp_path}/a.db"
 
+    def test_datasource_declared_only_in_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_URL", "postgresql+asyncpg://app@db/analytics")
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_ANALYTICS_ECHO", "false")
+        props = RelationalProperties.from_config(_config({"url": "postgresql+asyncpg://app@db/orders"}))
+        assert list(props.datasources) == ["analytics"]
+        assert props.datasources["analytics"].url == "postgresql+asyncpg://app@db/analytics"
+        assert props.datasources["analytics"].echo is False
+
+    def test_env_override_of_a_dashed_name_adds_no_stray_datasource(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The variable's underscores also read as event.store.url; that reading must not become a datasource.
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_DATASOURCES_EVENT_STORE_URL", "postgresql+asyncpg://app@db/events")
+        props = RelationalProperties.from_config(
+            _config({"datasources": {"event-store": {"url": "postgresql+asyncpg://app@db/overridden"}}})
+        )
+        assert list(props.datasources) == ["event-store"]
+        assert props.datasources["event-store"].url == "postgresql+asyncpg://app@db/events"
+        assert "has no" not in caplog.text
+
     def test_named_datasources_inherit_the_primary_settings(self) -> None:
         props = RelationalProperties.from_config(
             _config(
