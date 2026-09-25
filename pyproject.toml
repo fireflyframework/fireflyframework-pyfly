@@ -69,7 +69,9 @@ mysql = [
     # MySQL and MariaDB (mysql+asyncmy:// and mariadb+asyncmy://). asyncmy rather than aiomysql: aiomysql
     # always installs PyMySQL, and with PyMySQL >= 1.2 next to SQLAlchemy 2.0.49 every other pre-pinged
     # checkout raised TypeError (C089); asyncmy's pre-ping worked there and works on every later 2.0.x.
-    "asyncmy>=0.2.15",
+    # 0.2.11 is the oldest release the MySQL/MariaDB lanes were run on (with SQLAlchemy 2.0.50) and the
+    # oldest with wheels for Python 3.12 and 3.13.
+    "asyncmy>=0.2.11",
 ]
 eda = [
     "aiokafka>=0.14.0",

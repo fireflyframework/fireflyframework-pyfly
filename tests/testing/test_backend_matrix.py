@@ -43,6 +43,7 @@ from tests.support.backend_matrix import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PRE_PING_FIXED = Version("2.0.50")  # SQLAlchemy release that fixed the MySQL async ping adapters (C089)
+_ASYNCMY_PROVEN = Version("0.2.11")  # oldest asyncmy the MySQL/MariaDB lanes were run on, with SQLAlchemy 2.0.50
 
 _GENERATED = """
 import pytest
@@ -246,3 +247,12 @@ def test_the_mysql_extra_installs_asyncmy() -> None:
     extras = _pyproject()["project"]["optional-dependencies"]
     assert _requirement(extras["mysql"], "asyncmy")
     assert any("mysql" in Requirement(req).extras for req in extras["full"])
+
+
+def test_the_asyncmy_floor_is_the_oldest_release_the_lanes_were_run_on() -> None:
+    # The MySQL and MariaDB lanes pass on asyncmy 0.2.11 with SQLAlchemy 2.0.50, the two floors
+    # together. 0.2.11 is also the oldest asyncmy with wheels for every Python this project supports
+    # (3.12 and 3.13); 0.2.10 has none for 3.13. A higher floor only makes resolution harder downstream.
+    floor = _requirement(_pyproject()["project"]["optional-dependencies"]["mysql"], "asyncmy")
+    assert floor.specifier.contains(str(_ASYNCMY_PROVEN)), f"{floor} excludes {_ASYNCMY_PROVEN}, which works"
+    assert not floor.specifier.contains("0.2.10"), f"{floor} admits 0.2.10, which has no Python 3.13 wheels"

@@ -2588,7 +2588,7 @@ requires-dist = [
     { name = "aiosqlite", marker = "extra == 'data-relational'", specifier = ">=0.22.1" },
     { name = "alembic", marker = "extra == 'data-relational'", specifier = ">=1.18.4" },
     { name = "argon2-cffi", marker = "extra == 'argon2'", specifier = ">=23.1.0" },
-    { name = "asyncmy", marker = "extra == 'mysql'", specifier = ">=0.2.15" },
+    { name = "asyncmy", marker = "extra == 'mysql'", specifier = ">=0.2.11" },
     { name = "asyncpg", marker = "extra == 'postgresql'", specifier = ">=0.31.0" },
     { name = "azure-storage-blob", marker = "extra == 'ecm-azure'", specifier = ">=12.19.0" },
     { name = "bcrypt", marker = "extra == 'security'", specifier = ">=5.0.0" },
