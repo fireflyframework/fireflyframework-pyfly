@@ -74,7 +74,9 @@ class TestVendorIsolation:
                 "and 'transactional/auto_configuration' not in l "
                 "and '/cache/adapters/postgres' not in l "
                 "and 'cache/auto_configuration' not in l "
-                "and 'web/converters' not in l]; "
+                "and 'web/converters' not in l "
+                # The statement counter is the SQL-engine test utility; it imports SQLAlchemy lazily.
+                "and '/testing/statement_counter' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

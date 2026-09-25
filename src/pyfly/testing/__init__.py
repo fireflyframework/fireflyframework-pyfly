@@ -20,10 +20,14 @@ from pyfly.testing.fixtures import PyFlyTestCase
 from pyfly.testing.mock import mock_bean
 from pyfly.testing.slice_context import data_slice, service_slice, slice_context, web_slice
 from pyfly.testing.slices import DataTest, ServiceTest, WebTest, get_test_slice
+from pyfly.testing.statement_counter import RecordedStatement, StatementCounter
 from pyfly.testing.testcontainers import (
+    MongoDbReplicaSetContainer,
     is_docker_available,
     kafka_container,
+    mariadb_container,
     mongodb_container,
+    mongodb_replica_set_container,
     mysql_container,
     postgres_container,
     pyfly_config,
@@ -35,9 +39,12 @@ from pyfly.testing.testcontainers import (
 
 __all__ = [
     "DataTest",
+    "MongoDbReplicaSetContainer",
     "PyFlyTestCase",
     "PyFlyTestClient",
+    "RecordedStatement",
     "ServiceTest",
+    "StatementCounter",
     "TestResponse",
     "WebTest",
     "assert_event_published",
@@ -47,8 +54,10 @@ __all__ = [
     "get_test_slice",
     "is_docker_available",
     "kafka_container",
+    "mariadb_container",
     "mock_bean",
     "mongodb_container",
+    "mongodb_replica_set_container",
     "mysql_container",
     "postgres_container",
     "pyfly_config",
