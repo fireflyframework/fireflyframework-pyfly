@@ -237,7 +237,12 @@ class OAuth2LoginHandler:
 
         # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
         # is now bound to the (rotated) session id, so this is the one correct enforcement point.
+        # The session is saved first: the controller counts a session while the store has it,
+        # so a concurrent login of the same principal must find this one there.
         if self._concurrency is not None:
+            persist = getattr(request.state, "persist_session", None)
+            if persist is not None:
+                await persist()
             allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
             if not allowed:
                 session.invalidate()

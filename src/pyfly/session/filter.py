@@ -34,6 +34,10 @@ class SessionFilter(OncePerRequestFilter):
     Reads the session cookie from the incoming request, loads session data
     from the ``SessionStore``, attaches the ``HttpSession`` to
     ``request.state.session``, and persists changes after the response.
+
+    ``request.state.persist_session`` saves the session at once (a coroutine function taking no
+    arguments): the OAuth2 login handler saves the session it has just logged in before it registers
+    the session with the concurrency controller, which counts a session while the store has it.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE + 150
@@ -53,6 +57,11 @@ class SessionFilter(OncePerRequestFilter):
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         session = await self._load_or_create_session(request)
         request.state.session = session
+
+        async def persist_session() -> None:
+            await self._persist_session(session)
+
+        request.state.persist_session = persist_session
         # Expose the session to the container for SESSION-scoped bean resolution.
         from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext
 
