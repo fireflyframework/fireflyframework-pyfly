@@ -302,10 +302,17 @@ commits behind the engine's back:
 - **A step that fails.** In a saga, the steps of its layer that are still
   running are awaited, never cancelled (a step cancelled while its `COMMIT` is in
   flight would commit behind the engine's back); the steps waiting for the layer's
-  concurrency limit never start, and a running step starts no new attempt. In a
+  concurrency limit never start, and a running step starts no new attempt (one
+  sleeping in its retry backoff wakes up and fails with its last error). In a
   workflow, the running siblings are cancelled and awaited (`asyncio.TaskGroup`
   semantics). Either way compensation starts only once every step of the layer
   has settled.
+- **A saga step that ends cancelled on its own** (its body awaited a future
+  something else cancelled, such as a reply future a client library gave up on,
+  while nothing cancelled the saga) failed: the attempt raises an
+  `OrchestrationError` chained from the `CancelledError`, and is retried,
+  compensated and reported like any other failure. The saga never takes it for
+  a success, nor for its own cancellation.
 - **The caller cancels** (a request timeout, `@time_limiter`, a client
   disconnect, shutdown). The saga cancels and awaits every step task, compensates
   the steps that committed, records its final state, and then re-raises
