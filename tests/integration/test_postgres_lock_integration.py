@@ -27,7 +27,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -43,7 +43,7 @@ from pyfly.scheduling.adapters.lease_lock import LeaseLock
 from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
 from pyfly.scheduling.decorators import scheduled
 from pyfly.scheduling.task_scheduler import TaskScheduler
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import PG, SERVER_LANES, RelationalBackend
 
 # ---------------------------------------------------------------------------------------------------------
 # LeaseLock — every relational lane
@@ -114,6 +114,29 @@ async def test_acquire_waits_for_a_lease_to_come_free(relational_backend: Relati
     assert lease is not None and lease.owner == node_b.owner
 
 
+async def test_an_acquisition_acquire_cannot_confirm_is_not_kept(relational_backend: RelationalBackend) -> None:
+    """``acquire`` recorded the acquisition before confirming it: when the lease had already ended (a ttl
+    shorter than the round trip) or the confirmation failed, the instance kept an acquisition it did not
+    report, and released or extended it later as its own."""
+    ended = await _lease(relational_backend)
+    assert await ended.acquire("nightly", 0.0) is None
+    assert ended._held == {}
+
+    calls = 0
+
+    def clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls > 1:  # the acquisition's own reading passes; the confirmation's fails
+            raise RuntimeError("the confirmation failed")
+        return datetime.now(UTC)
+
+    failing = await _lease(relational_backend, clock=clock)
+    with pytest.raises(RuntimeError, match="the confirmation failed"):
+        await failing.acquire("weekly", 30.0)
+    assert failing._held == {}
+
+
 async def test_exactly_one_of_many_racing_nodes_gets_the_lease(relational_backend: RelationalBackend) -> None:
     nodes = [await _lease(relational_backend) for _ in range(8)]
 
@@ -138,18 +161,41 @@ async def test_the_lease_holds_no_connection_while_the_job_runs(relational_backe
 async def test_the_lease_commits_on_its_own_whatever_the_caller_s_transaction_does(
     relational_backend: RelationalBackend,
 ) -> None:
-    """A lock taken inside a transaction that rolls back is still taken: the lease never joins a unit."""
+    """A lock taken inside a transaction that rolls back is still taken: the lease never joins a unit. (A
+    read-only one here: on SQLite, one writer, a write unit beside the caller's write unit is refused; the
+    server lanes take the lease inside a read-write transaction below.)"""
     engine = relational_backend.create_engine()
     node_a = await _lease(relational_backend, engine)
     node_b = await _lease(relational_backend)
     template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine), read_only=True)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="the caller's transaction rolls back"):
         async with template.transaction():
             assert await node_a.try_acquire("nightly", 30.0) is True
             raise RuntimeError("the caller's transaction rolls back")
 
     assert await node_b.try_acquire("nightly", 30.0) is False
+
+
+@pytest.mark.backends(*SERVER_LANES)
+async def test_the_lease_commits_on_its_own_inside_a_read_write_transaction_that_rolls_back(
+    relational_backend: RelationalBackend,
+) -> None:
+    engine = relational_backend.create_engine()
+    node_a = await _lease(relational_backend, engine)
+    node_b = await _lease(relational_backend)
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+
+    with pytest.raises(RuntimeError, match="the caller's transaction rolls back"):
+        async with template.transaction() as unit:
+            assert unit is not None and not unit.read_only
+            await unit.resource.execute(select(locks.c.name))  # the caller's transaction has begun
+            assert await node_a.try_acquire("nightly", 30.0) is True
+            raise RuntimeError("the caller's transaction rolls back")
+
+    assert await node_b.try_acquire("nightly", 30.0) is False
+    holder = await node_b.holder("nightly")
+    assert holder is not None and holder.owner == node_a.owner
 
 
 async def test_stop_releases_the_leases_still_held(relational_backend: RelationalBackend) -> None:
@@ -160,6 +206,43 @@ async def test_stop_releases_the_leases_still_held(relational_backend: Relationa
     await node_a.stop()
 
     assert await node_b.try_acquire("nightly", 30.0) is True
+
+
+async def test_a_name_longer_than_the_column_is_refused_instead_of_truncated(
+    relational_backend: RelationalBackend,
+) -> None:
+    """MySQL and MariaDB's ``INSERT IGNORE`` truncated a name longer than ``pyfly_locks.name``: the first node
+    "took" a lease on the truncated key that no release or take-over could ever match again, and the job never
+    ran again on any node. PostgreSQL failed every tick; SQLite has no limit."""
+    engine = relational_backend.create_engine()
+    node_a, node_b = await _lease(relational_backend, engine), await _lease(relational_backend)
+    too_long = "n" * (LeaseLock.MAX_NAME_LENGTH + 1)
+
+    for attempt in (node_a.try_acquire(too_long, 30.0), node_a.acquire(too_long, 30.0)):
+        with pytest.raises(ValueError, match="at most 255 characters"):
+            await attempt
+    async with engine.connect() as connection:
+        assert (await connection.execute(select(locks.c.name))).all() == []
+
+    longest = "n" * LeaseLock.MAX_NAME_LENGTH
+    assert await node_a.try_acquire(longest, 30.0) is True
+    assert await node_b.try_acquire(longest, 30.0) is False
+    await node_a.release(longest)
+    assert await node_b.try_acquire(longest, 30.0) is True
+    await node_b.release(longest)
+
+
+async def test_an_owner_whose_acquisitions_would_not_fit_the_column_is_refused(
+    relational_backend: RelationalBackend,
+) -> None:
+    engine = relational_backend.create_engine()
+    with pytest.raises(ValueError, match="at most 246 characters"):
+        LeaseLock(engine, owner="o" * (LeaseLock.MAX_OWNER_LENGTH + 1))
+
+    node = await _lease(relational_backend, engine, owner="o" * LeaseLock.MAX_OWNER_LENGTH)
+    lease = await node.acquire("nightly", 30.0)
+    assert lease is not None and lease.owner == node.owner and len(lease.locked_by) == LeaseLock.MAX_NAME_LENGTH
+    await node.release("nightly")
 
 
 async def test_without_ddl_a_missing_lease_table_fails_fast(relational_backend: RelationalBackend) -> None:
@@ -217,11 +300,15 @@ async def test_taking_a_known_lease_is_one_statement_and_one_round_trip(relation
     node = await _lease(relational_backend, engine)
     assert await node.try_acquire("nightly", 30.0) is True
     await node.release("nightly")
+    statements: list[str] = []
+    event.listen(engine.sync_engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
     wire.clear()
 
     assert await node.try_acquire("nightly", 30.0) is True
     await node.release("nightly")
 
+    # asyncpg's query logger sees BEGIN/COMMIT/ROLLBACK, not prepared statements: the cursor event counts those.
+    assert [statement.split()[0].upper() for statement in statements] == ["UPDATE", "UPDATE"]
     assert not [query for query in wire if query.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))]
 
 

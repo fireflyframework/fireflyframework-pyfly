@@ -73,17 +73,28 @@ class Lease:
 
 
 def default_owner() -> str:
-    """``host:pid:random``: tells the nodes, and two lock instances of one process, apart."""
-    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    """``host:pid:random``: tells the nodes, and two lock instances of one process, apart (the host name is
+    cut to 200 characters, so the owner fits :attr:`LeaseLock.MAX_OWNER_LENGTH`)."""
+    return f"{socket.gethostname()[:200]}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
 class LeaseLock:
     """A :class:`~pyfly.scheduling.lock.DistributedLock` on a lease table (see the module documentation).
 
     *datasource* is where the table lives: an ``AsyncEngine``, a registry ``DataSource`` or a datasource
-    name. *owner* identifies this instance in ``locked_by`` (by default ``host:pid:random``). With
-    *create_table* false the table is only checked at :meth:`start`. *clock* gives the current UTC instant.
+    name. *owner* identifies this instance in ``locked_by`` (by default ``host:pid:random``, at most
+    :attr:`MAX_OWNER_LENGTH` characters). With *create_table* false the table is only checked at
+    :meth:`start`. *clock* gives the current UTC instant.
+
+    A lease name is at most :attr:`MAX_NAME_LENGTH` characters: a longer one raises ``ValueError`` before
+    any statement runs (MySQL and MariaDB's ``INSERT IGNORE`` would truncate it, and the truncated lease
+    could never be released or taken over again).
     """
+
+    #: The longest lease name: the length of ``pyfly_locks.name``.
+    MAX_NAME_LENGTH = 255
+    #: The longest *owner*: a ``locked_by`` is the owner, ``/`` and a token of 8 characters, in 255.
+    MAX_OWNER_LENGTH = MAX_NAME_LENGTH - 9
 
     def __init__(
         self,
@@ -97,6 +108,11 @@ class LeaseLock:
         self._target = datasource
         self._table_name = table_name
         self._owner = owner or default_owner()
+        if len(self._owner) > self.MAX_OWNER_LENGTH:
+            raise ValueError(
+                f"A lease owner is at most {self.MAX_OWNER_LENGTH} characters (each acquisition's locked_by adds "
+                f"a token of 9 to it, in {self.MAX_NAME_LENGTH}): {self._owner[:40]!r}..."
+            )
         self._create_table = create_table
         self._clock = clock or (lambda: datetime.now(UTC))
         self._table_object: Table | None = None
@@ -188,14 +204,22 @@ class LeaseLock:
 
     async def acquire(self, name: str, ttl: float, *, wait: float = 0.0, poll_interval: float = 0.25) -> Lease | None:
         """Take lease *name* for *ttl* seconds, trying again every *poll_interval* seconds for up to *wait*
-        seconds; return the lease (with its fencing token), or ``None`` when another holder kept it."""
+        seconds; return the lease (with its fencing token), or ``None`` when another holder kept it.
+
+        An acquisition whose lease cannot be read back (it ended already, the ttl being shorter than the round
+        trip, or the read failed) is not kept: the lease ends at its ttl."""
         deadline = time.monotonic() + wait
         while True:
             locked_by = await self._take(name, ttl)
             if locked_by is not None:
-                lease = await self.holder(name)
+                try:
+                    lease = await self.holder(name)
+                except BaseException:
+                    self._forget(name, locked_by)
+                    raise
                 if lease is not None and lease.locked_by == locked_by:
                     return lease
+                self._forget(name, locked_by)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
@@ -250,6 +274,7 @@ class LeaseLock:
         """One acquisition attempt; returns its ``locked_by`` when it took the lease."""
         from pyfly.data.relational.upsert import insert_if_absent, take_over
 
+        self._check_name(name)
         if not self._started:
             await self.start()
 
@@ -278,6 +303,10 @@ class LeaseLock:
         self._held.setdefault(name, []).append((asyncio.current_task(), locked_by))
         return locked_by
 
+    def _check_name(self, name: str) -> None:
+        if len(name) > self.MAX_NAME_LENGTH:
+            raise ValueError(f"A lease name is at most {self.MAX_NAME_LENGTH} characters: {name[:40]!r}...")
+
     @staticmethod
     def _entry(entries: list[tuple[asyncio.Task[Any] | None, str]]) -> tuple[asyncio.Task[Any] | None, str]:
         """The acquisition of the running task, else the latest (a lease taken and released by one task)."""
@@ -286,6 +315,15 @@ class LeaseLock:
             if entry[0] is task:
                 return entry
         return entries[-1]
+
+    def _forget(self, name: str, locked_by: str) -> None:
+        entries = self._held.get(name, [])
+        for entry in entries:
+            if entry[1] == locked_by:
+                entries.remove(entry)
+                break
+        if not entries:
+            self._held.pop(name, None)
 
     def _pop(self, name: str) -> str | None:
         entries = self._held.get(name)
