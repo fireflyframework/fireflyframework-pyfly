@@ -20,8 +20,9 @@ methods the post-processor compiles) is wrapped so that each call opens an **ope
 - inside a unit of work for the repository's datasource (``@transactional``, a ``TransactionTemplate``
   block), the call joins that unit and uses its session, under the unit's operation guard;
 - otherwise the outermost repository call opens a short **auto unit** of its own: a *read* method
-  (``find*``, ``count*``, ``exists*``, ``stream*``, ``get*``, ``scroll*``, unless its name before ``_by_``
-  holds a write verb such as ``create``, ``save``, ``update`` or ``delete``: ``get_or_create`` writes) gets a
+  (``find*``, ``count*``, ``exists*``, ``stream*``, ``get*``, ``scroll*``, unless a write verb such as
+  ``create``, ``update`` or ``lock`` follows an ``and``/``or`` in its name before ``_by_``: ``get_or_create``
+  and ``find_and_lock_by_id`` write, ``get_store_by_code`` reads) gets a
   read unit (on PostgreSQL an ``AUTOCOMMIT`` connection, one round trip; elsewhere a short transaction that
   ends without writing) that is retried once when its connection turns out to be dead, and any other
   method a write unit that commits. Both run the datasource's after-begin customizers, and both always
@@ -149,22 +150,46 @@ READ_PREFIXES: tuple[str, ...] = ("find", "count", "exists", "stream", "get", "s
 unless :data:`WRITE_WORDS` says it writes."""
 
 WRITE_WORDS: frozenset[str] = frozenset(
-    {"create", "save", "insert", "update", "upsert", "delete", "remove", "merge", "persist", "store", "lock"}
+    {
+        "create",
+        "save",
+        "insert",
+        "update",
+        "upsert",
+        "delete",
+        "remove",
+        "merge",
+        "persist",
+        "store",
+        "lock",
+        "modify",
+        "replace",
+        "increment",
+        "decrement",
+        "set",
+        "claim",
+    }
 )
-"""Words that make a read-prefixed method name a write method when they appear, as a whole word, in the
+"""Verbs that make a read-prefixed method name a write method when one follows an ``and`` or an ``or`` in the
 name before its criteria (``get_or_create``, ``find_or_create_by_email``, ``find_and_update``,
-``find_and_lock_by_id``); ``find_by_update_time`` stays a read."""
+``find_and_lock_by_id``, ``find_one_and_replace``). Elsewhere they are nouns: ``get_store_by_code``,
+``get_lock_by_name`` and ``find_by_update_time`` stay reads."""
+
+_CONJUNCTIONS = frozenset({"and", "or"})
 
 _EAGER_LOADS = frozenset({"joined", "selectin", "subquery", "immediate"})
 """Relationship loading strategies that run statements (or joins) while an entity result is fetched."""
 
 
 def is_read_method(name: str) -> bool:
-    """Whether a repository method called *name* reads (and so gets a read auto unit)."""
+    """Whether a repository method called *name* reads (and so gets a read auto unit): a read prefix, and no
+    write verb right after an ``and``/``or`` before its criteria (:data:`WRITE_WORDS`)."""
     if not name.startswith(READ_PREFIXES):
         return False
-    subject = name.split("_by_", 1)[0]
-    return not any(word in WRITE_WORDS for word in subject.lower().split("_"))
+    words = name.split("_by_", 1)[0].lower().split("_")
+    return not any(
+        word in _CONJUNCTIONS and following in WRITE_WORDS for word, following in zip(words, words[1:], strict=False)
+    )
 
 
 def repository_operation(
@@ -294,9 +319,11 @@ class Repository(Generic[T, ID]):
     __load__: ClassVar[FetchPlan | None] = None
     """The fetch plan of the read methods when a call passes no ``load=`` (``None``: the mapping's own)."""
     __sortable__: ClassVar[Sequence[str] | None] = None
-    """The only properties a ``Sort`` may name (``None``: every mapped column)."""
+    """The only properties a ``Sort`` may name (``None``: every mapped column); a name that is not a property
+    fails with ``ValueError`` when the repository is built."""
     __filterable__: ClassVar[Sequence[str] | None] = None
-    """The only properties ``find_all(**filters)`` may filter on (``None``: every mapped column)."""
+    """The only properties ``find_all(**filters)`` may filter on (``None``: every mapped column); checked like
+    ``__sortable__``."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -336,6 +363,11 @@ class Repository(Generic[T, ID]):
         self._transaction_managers: TransactionManagerRegistry | None = None
         self._sort_names: PropertyResolver | None = None
         self._filter_names: PropertyResolver | None = None
+        # An allow-list with a typo fails here, when the context builds the repository, not on the first read.
+        if type(self).__sortable__ is not None:
+            self._sort_resolver()
+        if type(self).__filterable__ is not None:
+            self._filter_resolver()
 
     # ------------------------------------------------------------------
     # Session resolution

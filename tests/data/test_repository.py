@@ -13,6 +13,7 @@
 # limitations under the License.
 """Tests for Generic Repository[T, ID] and @reactive_transactional."""
 
+import types
 from uuid import UUID
 
 import pytest
@@ -367,15 +368,47 @@ class TestRepositoryIntId:
         assert b.id == a.id + 1
 
 
-class TestReadMethodNames:
-    """A read-prefixed name runs in a read auto unit, unless it holds a write word before its criteria."""
+class TestAllowLists:
+    """A typo in ``__sortable__`` or ``__filterable__`` fails when the repository is built (at context start),
+    not as a 500 on the first read."""
 
-    def test_a_write_word_before_the_criteria_makes_a_write_method(self) -> None:
+    @pytest.mark.parametrize("attribute", ["__sortable__", "__filterable__"])
+    def test_a_typo_fails_when_the_repository_is_built(self, attribute: str) -> None:
+        typo = types.new_class(
+            "TypoRepo", (Repository[Item, UUID],), exec_body=lambda namespace: namespace.update({attribute: ("nmae",)})
+        )
+        with pytest.raises(ValueError, match="nmae"):
+            typo()
+
+    def test_valid_allow_lists_build(self) -> None:
+        class Guarded(Repository[Item, UUID]):
+            __sortable__ = ("name",)
+            __filterable__ = ("name",)
+
+        assert Guarded().datasource == "primary"
+
+
+class TestReadMethodNames:
+    """A read-prefixed name runs in a read auto unit, unless a write verb follows an ``and``/``or`` before its
+    criteria."""
+
+    def test_a_write_verb_after_and_or_makes_a_write_method(self) -> None:
         assert not is_read_method("get_or_create")
         assert not is_read_method("find_or_create_by_email")
         assert not is_read_method("find_and_update")
         assert not is_read_method("find_and_lock_by_id")
+        assert not is_read_method("get_or_store")
+        assert not is_read_method("find_one_and_replace")
+        assert not is_read_method("get_and_increment_counter")
         assert is_read_method("find_by_update_time")
         assert is_read_method("find_all_by_created_at")
         assert is_read_method("scroll")
         assert is_read_method("get_settings")
+
+    def test_nouns_that_are_also_verbs_stay_reads(self) -> None:
+        """``store`` and ``lock`` are common nouns: only a verb position (after ``and``/``or``) writes."""
+        assert is_read_method("get_store_by_code")
+        assert is_read_method("find_store_by_id")
+        assert is_read_method("get_lock_by_name")
+        assert is_read_method("find_update_candidates")
+        assert is_read_method("count_deleted_rows")
