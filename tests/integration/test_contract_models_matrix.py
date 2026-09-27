@@ -177,10 +177,10 @@ async def test_soft_delete_column_stores_the_deletion_instant(relational_backend
         stored.deleted_at = deleted_at
 
     async with factory() as session:
-        reloaded = await session.get(ContractSoftItem, item.id)
+        # A soft-deleted row is invisible to ORM loads unless the statement opts in (C057).
+        assert await session.get(ContractSoftItem, item.id) is None
+        reloaded = await session.get(ContractSoftItem, item.id, execution_options={"include_deleted": True})
     assert reloaded is not None
     assert reloaded.is_deleted
-    assert reloaded.deleted_at is not None
-    # A UTC instant in whole seconds reads back as the same wall-clock time on every lane, whether the
-    # backend returns it aware (PostgreSQL) or naive (SQLite, MySQL, MariaDB).
-    assert reloaded.deleted_at.replace(tzinfo=None) == deleted_at.replace(tzinfo=None)
+    # deleted_at is a UtcDateTime: the same aware UTC instant on every lane (C047).
+    assert reloaded.deleted_at == deleted_at

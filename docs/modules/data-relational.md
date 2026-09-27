@@ -1753,8 +1753,33 @@ class OrderRepository(SoftDeleteRepository[Order, UUID]):
 | `find_all_by_spec_paged(spec, pageable)` | Applies spec predicate AND excludes soft-deleted entities |
 | `find_all_including_deleted()` | Includes soft-deleted entities |
 | `restore(id)` | Clears `deleted_at` |
-| `hard_delete(id)` | Permanently removes from DB |
+| `hard_delete(id)` | Permanently removes from DB, a soft-deleted row included |
 | `count()` | Counts only non-deleted entities |
+
+**Deleted rows are invisible to every ORM load, not only to the repository's own reads.** Like Hibernate's
+`@SoftDelete`, the mixin installs loader criteria (`deleted_at IS NULL`) on every ORM `SELECT` of every
+session (the registry's, your own `async_sessionmaker`, a session you open by hand):
+
+- relationship collections (selectin, joined and lazy loads, a refresh, an explicit `selectinload`), so a
+  deleted comment is not in `post.comments`;
+- a many-to-one to a deleted parent (`comment.post` is `None`);
+- joins in any ORM statement or `Specification`, aliases included;
+- `session.get()`, derived queries, and a plain `Repository` over a soft-delete entity.
+
+What stays visible: an object already in the session's identity map, the refresh of an object you hold,
+and raw `text()` SQL (as native queries in Spring). `UPDATE` and `DELETE` statements are not filtered.
+
+Opt out for one statement, or for a block of code (a retention job, an admin screen):
+
+```python
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
+
+stmt = select(Order).where(Order.deleted_at < cutoff).execution_options(include_deleted=True)
+order = await session.get(Order, order_id, execution_options={"include_deleted": True})
+
+with including_deleted():
+    everything = await orders.find_all()
+```
 
 #### VersionedMixin (Optimistic Locking)
 

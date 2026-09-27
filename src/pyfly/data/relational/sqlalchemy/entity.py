@@ -146,11 +146,23 @@ class SoftDeleteMixin:
     :class:`SoftDeleteRepository`; instead their ``deleted_at`` column
     is set to the current UTC time (a :class:`~pyfly.data.relational.sqlalchemy.types.UtcDateTime`:
     aware UTC with microseconds on every backend).
+
+    A soft-deleted row is invisible to every ORM load of every session: repository reads,
+    ``session.get()``, relationship loads and joins. Opt out with the ``include_deleted`` execution option
+    or :func:`~pyfly.data.relational.sqlalchemy.soft_delete_criteria.including_deleted`.
     """
 
     __abstract__ = True
 
     deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), default=None, nullable=True)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Soft-deleted rows are invisible to every ORM load of every session from the first soft-delete
+        # entity on (pyfly.data.relational.sqlalchemy.soft_delete_criteria).
+        from pyfly.data.relational.sqlalchemy.soft_delete_criteria import install_soft_delete_criteria
+
+        install_soft_delete_criteria()
 
     @property
     def is_deleted(self) -> bool:
