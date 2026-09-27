@@ -283,9 +283,12 @@ class KeyValueTokenStore:
                 return GrantOutcome.REPLAYED
             if int(stored.get("exp", 0)) < now:
                 return GrantOutcome.EXPIRED
-            # The presented token is marked last: a failure before leaves it redeemable.
+            # The presented token is marked last: a failure before leaves it redeemable. The family lists
+            # its unused tokens only (a used one is refused through the family once it is revoked), so it
+            # does not grow with every rotation.
             family = family or {"client_id": token.client_id, "active": True, "members": []}
-            family["members"] = [*family.get("members", []), token.token_id]
+            family["members"] = [member for member in family.get("members", []) if member != token_id]
+            family["members"].append(token.token_id)
             family["exp"] = max(int(family.get("exp", 0)), token.expires_at)
             await self._delegate.store(token.token_id, self._stored(token))
             await self._delegate.store(family_key, family)

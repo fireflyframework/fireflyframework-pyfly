@@ -560,3 +560,15 @@ class TestGrantAtomicity:
 
         assert purged == 3  # the expired token, its family and the expired code
         assert await grants.is_active(live, kept)
+
+    @pytest.mark.asyncio
+    async def test_a_family_does_not_grow_with_rotations(self) -> None:
+        """C072 on a key-value store: the family record listed every token ever rotated."""
+        store = InMemoryTokenStore()
+        server = grants.server(store)
+        token = await grants.issue(server)
+        family_id = store._tokens[token]["family_id"]
+        for _ in range(10):
+            token = (await grants.refresh(server, token))["refresh_token"]
+
+        assert store._tokens[f"family:{family_id}"]["members"] == [token]
