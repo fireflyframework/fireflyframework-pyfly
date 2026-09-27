@@ -19,7 +19,10 @@ returns outside a transaction is), or one of another session. It also:
 
 - bumps the version of a versioned entity, so a stale copy can no longer be saved over the deleted row, and
   checks the version an entity carries (``StaleDataError`` when it is stale);
-- stamps ``updated_at`` and ``updated_by`` where the entity has them (the auditing listener's user);
+- stamps ``updated_at`` and ``updated_by`` where the entity has them, as the auditing listener stamps an ORM
+  update: the active auditing handler's time and auditor (:mod:`pyfly.data.auditing`: the application's
+  ``DateTimeProvider`` and ``AuditorAware``, the defaults when none is registered), ``updated_by`` ``None``
+  when there is no auditor;
 - leaves a row that is already deleted alone: its ``deleted_at`` keeps the time it was first deleted.
 
 The entities the unit holds, and the entity passed in, are kept in step with the row: where the dialect has
@@ -35,7 +38,6 @@ Every read excludes deleted rows; ``find_all_including_deleted``, ``restore`` an
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
 from sqlalchemy import Update, and_, select
@@ -46,19 +48,13 @@ from sqlalchemy.orm import Mapper
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
+from pyfly.data.auditing import AuditingHandler, active_auditing_handler
 from pyfly.data.relational.sqlalchemy.repository import ID, Repository, _state
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete as delete_for_good
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
 from pyfly.data.relational.sqlalchemy.statements import RESERVED_BINDS, dialect_of, unique_entities
 
 T = TypeVar("T")
-
-
-def _current_auditor() -> str | None:
-    """The user the auditing listener stamps ``updated_by`` with (``None`` when nobody is authenticated)."""
-    from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
-
-    return AuditingEntityListener()._get_current_user()
 
 
 def _increments(mapper: Mapper[Any]) -> bool:
@@ -132,7 +128,7 @@ class SoftDeleteRepository(Repository[T, ID]):
         ``None``."""
         session = self._session
         if entities is None:
-            await self._soft_delete(session, [None], self._stamps(), None, None, ())
+            await self._soft_delete(session, [None], await self._stamps(), None, None, ())
         else:
             await self._soft_delete_entities(session, list(entities))
 
@@ -141,7 +137,7 @@ class SoftDeleteRepository(Repository[T, ID]):
         checked; an entity only pending in the unit is simply not inserted)."""
         session = self._session
         if entities is None:
-            await self._soft_delete(session, [None], self._stamps(), None, None, ())
+            await self._soft_delete(session, [None], await self._stamps(), None, None, ())
             return
         stored = self._expunge_pending(session, list(entities))
         identities = [identity for entity in stored if (identity := self._identity_of(entity)) is not None]
@@ -201,17 +197,18 @@ class SoftDeleteRepository(Repository[T, ID]):
         """Whether the ``UPDATE`` bumps the version itself (``version + 1``)."""
         return self._version_key is not None and callable(self._mapper.version_id_generator)
 
-    def _stamps(self) -> dict[str, Any]:
+    async def _stamps(self) -> dict[str, Any]:
         """The columns a soft delete sets: ``deleted_at``, and ``updated_at``/``updated_by`` where the entity has
-        them (the auditing listener's user)."""
-        now = datetime.now(UTC)
+        them, from the active auditing handler (the defaults when none is registered), as the auditing listener
+        stamps an ORM update: ``updated_by`` is the current auditor, ``None`` when there is none."""
+        handler = active_auditing_handler() or AuditingHandler()
+        now = handler.now()
         stamps: dict[str, Any] = {"deleted_at": now}
         columns = {attribute.key for attribute in self._mapper.column_attrs}
         if "updated_at" in columns:
             stamps["updated_at"] = now
-        auditor = _current_auditor() if "updated_by" in columns else None
-        if auditor is not None:
-            stamps["updated_by"] = auditor
+        if "updated_by" in columns:
+            stamps["updated_by"] = await handler.current_auditor()
         return stamps
 
     def _soft_delete_update(self, criteria: Sequence[Any], stamps: dict[str, Any], version: Any = None) -> Update:
@@ -240,7 +237,7 @@ class SoftDeleteRepository(Repository[T, ID]):
         stored = self._expunge_pending(session, entities)
         await session.flush()  # the unit's pending changes first: they may bump the versions compared below
         version_key = self._version_key
-        stamps = self._stamps()
+        stamps = await self._stamps()
         plain: dict[tuple[Any, ...], list[Any]] = {}
         for entity in stored:
             state = _state(entity)
@@ -268,7 +265,7 @@ class SoftDeleteRepository(Repository[T, ID]):
         entities: Sequence[Any] = (),
         stamps: dict[str, Any] | None = None,
     ) -> None:
-        stamps = self._stamps() if stamps is None else stamps
+        stamps = await self._stamps() if stamps is None else stamps
         criteria = self._soft_delete_criteria(dialect_of(session), identities, stamps)
         await self._soft_delete(session, criteria, stamps, None, identities, entities)
 

@@ -36,6 +36,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.context.request_context import RequestContext
 from pyfly.data import transactional
+from pyfly.data.auditing import AuditingHandler
 from pyfly.data.pageable import KeysetPosition, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity, SoftDeleteMixin, VersionedMixin
@@ -242,6 +243,60 @@ async def test_a_bulk_soft_delete_stamps_the_audit_columns(relational_backend: R
             rows = (await conn.execute(select(ContractSoftItem.updated_by, ContractSoftItem.updated_at))).all()
         assert [updated_by for updated_by, _at in rows] == ["bob", "bob"]
         assert all(updated_at.year >= 2026 for _by, updated_at in rows)
+
+
+class _FixedClock:
+    def get_now(self) -> datetime:
+        return datetime(2031, 5, 4, 3, 2, 1, 123456, tzinfo=UTC)
+
+
+class _AsyncSystemAuditor:
+    async def get_current_auditor(self) -> str | None:
+        return "system-job"
+
+
+@pytest.mark.parametrize("how", ["by_id", "every_row", "entity"])
+async def test_a_soft_delete_stamps_with_the_applications_auditing_handler(
+    relational_backend: RelationalBackend, bob: None, how: str
+) -> None:
+    """The soft-delete ``UPDATE`` stamps as the auditing listener stamps an ORM update: with the registered
+    handler's ``DateTimeProvider`` and ``AuditorAware`` (an ``async`` one too), not with the security context
+    and the wall clock directly."""
+    handler = AuditingHandler(_AsyncSystemAuditor(), _FixedClock())
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        items = SoftItems()
+        saved = await items.save(ContractSoftItem(label="audited"))
+        handler.register()
+        try:
+            if how == "by_id":
+                await items.delete_all_by_id([saved.id])
+            elif how == "every_row":
+                await items.delete_all()
+            else:
+                await items.delete(saved)
+        finally:
+            handler.unregister()
+        async with datasources.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(ContractSoftItem.updated_by, ContractSoftItem.updated_at, ContractSoftItem.deleted_at)
+                )
+            ).one()
+        expected = _FixedClock().get_now()
+        assert row.updated_by == "system-job"
+        assert row.updated_at == expected and row.deleted_at == expected
+
+
+async def test_a_soft_delete_without_an_auditor_clears_updated_by(relational_backend: RelationalBackend) -> None:
+    """As the auditing listener does for an ORM update: a job with no principal does not leave the last
+    user's name on its change."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        items = SoftItems()
+        saved = await items.save(ContractSoftItem(label="orphaned", updated_by="alice"))
+        await items.delete_by_id(saved.id)
+        async with datasources.engine.connect() as conn:
+            updated_by = (await conn.execute(select(ContractSoftItem.updated_by))).scalar_one()
+        assert updated_by is None
 
 
 async def test_an_already_deleted_row_keeps_its_deleted_at(relational_backend: RelationalBackend) -> None:
