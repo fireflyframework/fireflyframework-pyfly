@@ -355,6 +355,37 @@ async def test_an_identity_the_cache_cannot_key_is_not_cached_and_never_fails_th
     assert len(messages) == 1 and "MyOrdersHandler" in messages[0] and "RuntimeError" in messages[0]
 
 
+@dataclass(frozen=True)
+class Unkeyable(Query[list[str]]):
+    def get_cache_key(self) -> str | None:
+        raise RecursionError("a field that contains itself")
+
+
+@query_handler(cacheable=True)
+class UnkeyableHandler(QueryHandler[Unkeyable, list[str]]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def do_handle(self, query: Unkeyable) -> list[str]:
+        self.calls += 1
+        return [f"answer {self.calls}"]
+
+
+async def test_a_query_whose_key_cannot_be_computed_is_not_cached_and_never_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    handler = UnkeyableHandler()
+    registry = HandlerRegistry()
+    registry.register_query_handler(handler)
+    bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(InMemoryCache()))
+    caplog.set_level(logging.WARNING, logger="pyfly.cqrs.query.bus")
+    assert await bus.query_with_context(Unkeyable(), _ctx(user="alice")) == ["answer 1"]
+    assert await bus.query_with_context(Unkeyable(), _ctx(user="alice")) == ["answer 2"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1 and "UnkeyableHandler" in messages[0] and "RecursionError" in messages[0]
+
+
 async def test_callers_that_differ_only_in_the_tenant_header_or_the_principal_get_entries_of_their_own(
     handlers: tuple[MyOrdersHandler, TenantPlansHandler, CountriesHandler],
 ) -> None:

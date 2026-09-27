@@ -24,6 +24,7 @@ and :mod:`pyfly.cqrs.query.handler` (``QueryHandler[Q, R]``).
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import hashlib
 from datetime import UTC, datetime
@@ -60,6 +61,32 @@ def cache_key_digest(*components: object) -> str:
         data = text.encode("utf-8", "surrogatepass")
         encoded += b"%d:%b," % (len(data), data)
     return hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_text(value: Any) -> str:
+    """*value* as text that does not depend on the process: its ``repr()``, except for containers.
+
+    Sets and frozensets list their elements sorted (``repr()`` lists them in hash order, which changes with
+    ``PYTHONHASHSEED`` from one process to the next), dicts list their items sorted by key (two equal dicts
+    built in another order have another ``repr()``), and lists, tuples and dataclass instances are rebuilt from
+    the canonical text of their parts. Each container is tagged with its type's name.
+
+    Any other value contributes its ``repr()``. That is the same in every process for plain values (``str``,
+    numbers, ``None``, ``bool``, enums, dates and times, ``Decimal``, ``UUID``, ``bytes``), but not for an object
+    with the default ``repr()`` (``<Filter object at 0x...>``) or one that holds a set (a Pydantic model): such
+    a value gets another text in another process.
+    """
+    if isinstance(value, (set, frozenset)):
+        return f"{type(value).__qualname__}({{{', '.join(sorted(canonical_text(item) for item in value))}}})"
+    if isinstance(value, dict):
+        items = sorted(f"{canonical_text(key)}: {canonical_text(item)}" for key, item in value.items())
+        return f"{type(value).__qualname__}({{{', '.join(items)}}})"
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__qualname__}([{', '.join(canonical_text(item) for item in value)}])"
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = (f"{field.name}={canonical_text(getattr(value, field.name))}" for field in dataclasses.fields(value))
+        return f"{type(value).__qualname__}({', '.join(fields)})"
+    return repr(value)
 
 
 class QueryCacheScope(enum.Enum):
@@ -219,21 +246,34 @@ class Query(Generic[R]):
     def get_cache_key(self) -> str | None:
         """Smart cache key — override for custom keys, else auto-generated from class + fields.
 
-        A dataclass query's key is ``<ClassName>:<digest>``, where the digest is the full SHA-256 of its field
-        names and the ``repr()`` of their values (:func:`cache_key_digest`): stable across processes and
-        restarts (not the process-randomized built-in ``hash()``, audit #100), and never truncated, since the
-        fields may come from the caller and a ``GLOBAL`` entry is shared by every caller.
+        The key is ``<ClassName>:<digest>``. The digest is the full SHA-256 (:func:`cache_key_digest`) of the
+        query class's module and qualified name and, for a dataclass, each field's name and the
+        :func:`canonical_text` of its value. So:
+
+        - two query classes with the same name in different modules (or nested in different scopes) get
+          different keys;
+        - the key does not change between processes and restarts when the fields' canonical text does not:
+          plain values, and sets, dicts, lists, tuples and dataclasses of them (sets are sorted, dicts ordered;
+          not the process-randomized built-in ``hash()``, audit #100). A field whose ``repr()`` depends on the
+          process only costs misses;
+        - two queries share a key only when their classes and the canonical text of every field are equal (a
+          value whose ``repr()`` leaves out part of its state shares a key with values that differ only there).
+          The digest is never truncated, so any other collision would be a SHA-256 collision: a caller cannot
+          search for field values whose key is another query's, which matters because a ``GLOBAL`` entry is
+          shared by every caller.
+
+        A query that is not a dataclass is keyed by its class alone: every instance shares one key, whatever
+        its attributes (override this method when they matter).
 
         The key names the query, not the caller: the bus adds the handler's ``cache_key_prefix`` and the
         caller's tenant and user (:class:`QueryCacheScope`), so do not put them in it yourself.
         """
-        import dataclasses
-
-        if not dataclasses.is_dataclass(self):
-            return type(self).__name__
-        fields = sorted((f.name, repr(getattr(self, f.name))) for f in dataclasses.fields(self))
-        digest = cache_key_digest(*(part for field in fields for part in field))
-        return f"{type(self).__name__}:{digest}"
+        query_type = type(self)
+        parts: list[str] = [query_type.__module__, query_type.__qualname__]
+        if dataclasses.is_dataclass(self):
+            fields = sorted((f.name, canonical_text(getattr(self, f.name))) for f in dataclasses.fields(self))
+            parts += [part for field in fields for part in field]
+        return f"{query_type.__name__}:{cache_key_digest(*parts)}"
 
     # ── hooks for bus pipeline ─────────────────────────────────
 

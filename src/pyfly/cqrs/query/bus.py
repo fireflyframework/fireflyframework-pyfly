@@ -228,7 +228,11 @@ class DefaultQueryBus:
             return None  # the handler refuses a call without a context; a hit must not bypass that
         if not self._result_type_cacheable(handler):
             return None
-        raw = query.get_cache_key()
+        try:
+            raw = query.get_cache_key()
+        except Exception as error:  # noqa: BLE001 — a cache problem never fails the query: fail closed
+            self._report_unkeyable(handler, error)
+            return None
         if not raw:
             return None
         scope = handler.get_cache_scope()
@@ -249,8 +253,8 @@ class DefaultQueryBus:
             return
         self._unkeyable.add(handler_type)
         _logger.warning(
-            "query_cache_skipped handler=%s: the caller's identity cannot be keyed (%s: %s), so the result is not "
-            "cached; pass the tenant and user as strings in the ExecutionContext",
+            "query_cache_skipped handler=%s: the call cannot be keyed (%s: %s), so the result is not cached; fix "
+            "the query's get_cache_key(), or pass the tenant and user as strings in the ExecutionContext",
             handler_type.__qualname__,
             type(error).__name__,
             error,

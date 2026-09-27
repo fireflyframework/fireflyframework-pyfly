@@ -131,7 +131,7 @@ class GetOrderQuery(Query[dict | None]):
 | `get_timestamp()` | `datetime` | UTC creation time. |
 | `get_metadata()` | `dict[str, Any]` | Arbitrary metadata. |
 | `is_cacheable()` / `set_cacheable(bool)` | `bool` | Whether results can be cached (default `True`). |
-| `get_cache_key()` | `str \| None` | Cache key. For dataclass subclasses: `ClassName:<sha256>`, the full SHA-256 (64 hex characters) of the field names and the `repr()` of their values, each length-prefixed (`cache_key_digest` in `pyfly.cqrs.types`): the same query maps to the same key in every process, and no caller can craft field values whose key collides with another query's. For non-dataclass subclasses: the class name. Override to provide a fully custom key. |
+| `get_cache_key()` | `str \| None` | Cache key: `ClassName:<sha256>`, the full SHA-256 (64 hex characters) of the query class's module and qualified name and, for a dataclass, each field's name and canonical text, each length-prefixed (`cache_key_digest` and `canonical_text` in `pyfly.cqrs.types`). The canonical text is the value's `repr()`, with sets sorted, dict items ordered by key, and lists, tuples and dataclasses rebuilt from their parts. Two classes with the same name in different modules get different keys. A query gets the same key in every process when its fields' text is the same: plain values and those containers of them do; an object with the default `repr()` does not, which costs misses. Two queries share a key only when their classes and field texts are equal; the digest is never truncated, so a caller cannot search for field values that reach another query's entry. A non-dataclass query is keyed by its class alone, whatever its attributes. Override to provide a fully custom key. |
 
 Queries share the same `validate()`, `authorize()`, and `authorize_with_context(ctx)` hooks as commands.
 
@@ -546,9 +546,10 @@ The key carries the full SHA-256 of that identity (64 hex characters, each
 name and value length-prefixed before hashing), never a truncated digest: a
 client that chooses its `X-Tenant-Id` cannot search offline for a value whose
 digest collides with another caller's and be served that caller's entry. An
-identifier that is not a string (a `UUID`) is keyed by its `str()`; one that
-cannot be turned into text is not cached (a `query_cache_skipped` warning names
-the handler once), and the query still runs.
+identifier that is not a string (a `UUID`) is keyed by its `str()`. A call
+the cache cannot key (an identifier with no text, a `get_cache_key()` that
+raises) is not cached, a `query_cache_skipped` warning names the handler once,
+and the query still runs.
 
 A handler's cache scope decides who shares an entry, and which identity it
 needs:

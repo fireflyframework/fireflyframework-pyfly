@@ -476,9 +476,10 @@ Data written by earlier versions is not where this version reads it:
   retried with an idempotency key first used before the upgrade runs again
   instead of being replayed; deploy when no such retry is expected.
 * **CQRS query-cache entries** are keyed by the caller's scope, and the default
-  query keys (`<QueryClass>:<digest>`) and scope digests are full SHA-256
-  digests (64 hex characters, 16 before). Entries written before are never read
-  again: each costs one miss and expires with its TTL.
+  query keys (`<QueryClass>:<digest>`, now also for a query that is not a
+  dataclass) and scope digests are full SHA-256 digests (64 hex characters, 16
+  before) that cover the query class's module. Entries written before are never
+  read again: each costs one miss and expires with its TTL.
 
 ---
 
