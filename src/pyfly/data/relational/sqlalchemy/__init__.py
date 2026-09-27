@@ -13,6 +13,7 @@
 # limitations under the License.
 """SQLAlchemy data access adapter — default RepositoryPort implementation."""
 
+from pyfly.data.query import modifying
 from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin, VersionedMixin
 from pyfly.data.relational.sqlalchemy.filter import FilterOperator, FilterUtils
@@ -58,6 +59,7 @@ __all__ = [
     "VersionedMixin",
     "_active_session_var",
     "including_deleted",
+    "modifying",
     "query",
     "reactive_transactional",
     "transactional",

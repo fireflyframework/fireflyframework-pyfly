@@ -42,8 +42,8 @@ from pyfly.data.ports.outbound import (
 from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
 from pyfly.data.projection import is_projection, projection, projection_fields
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
-from pyfly.data.query import query
-from pyfly.data.query_parser import QueryMethodParser
+from pyfly.data.query import modifying, query
+from pyfly.data.query_parser import IncorrectResultSizeException, InvalidQueryMethodError, QueryMethodParser
 from pyfly.data.specification import Specification
 from pyfly.data.transactional import Isolation, Propagation, transactional
 
@@ -53,7 +53,9 @@ __all__ = [
     "BatchRepository",
     "CrudRepository",
     "DERIVED_PREFIXES",
+    "IncorrectResultSizeException",
     "InvalidPropertyError",
+    "InvalidQueryMethodError",
     "Isolation",
     "KeysetPosition",
     "Mapper",
@@ -77,6 +79,7 @@ __all__ = [
     "default_mapper",
     "is_projection",
     "mapping",
+    "modifying",
     "projection",
     "projection_fields",
     "query",
