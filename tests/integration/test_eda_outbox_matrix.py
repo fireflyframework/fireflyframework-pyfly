@@ -451,3 +451,25 @@ async def test_the_sql_dead_letter_store_keeps_entries_durably(relational_backen
     assert await store.delete(first.id) is True
     assert await store.delete(first.id) is False
     assert [entry.id for entry in await store.list()] == [second.id]
+
+
+async def test_retry_keeps_attempting_and_an_unregistered_group_is_owed_nothing(
+    relational_backend: RelationalBackend,
+) -> None:
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="stubborn", error_strategy=ErrorStrategy.RETRY, retry=_retry(2))
+    failing = Recorder(fail_on={"flaky"})
+    bus.subscribe("*", failing)
+    await bus.relay.run_once()
+    await bus.publish("d", "flaky", {"n": 1})
+    for _ in range(5):
+        await bus.relay.run_once()
+
+    assert failing.attempts == 5  # past max_attempts: RETRY never dead-letters
+    assert await bus.outbox.dead_letters("stubborn") == []
+    pending = await bus.outbox.pending("stubborn")
+    assert [(p.attempts, (p.last_error or "").startswith("RuntimeError")) for p in pending] == [(5, True)]
+
+    assert await bus.outbox.unregister("stubborn") == 1  # its undelivered delivery goes with it
+    await bus.publish("d", "later", {"n": 2})
+    assert await bus.outbox.pending("stubborn") == []
