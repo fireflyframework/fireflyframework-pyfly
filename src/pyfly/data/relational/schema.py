@@ -61,18 +61,20 @@ from collections.abc import AsyncIterator, Iterable
 from typing import Any, Literal
 
 from sqlalchemy import MetaData, Table, inspect, text
-from sqlalchemy.engine import Connection, Dialect
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from pyfly.config.properties.data import ddl_auto_strategy
 from pyfly.data.relational.dialect_customizers import SQLITE_BEGIN_OPTION, uses_sqlite_begin_recipe
 from pyfly.data.relational.migrations import MIGRATION_PHASE
+from pyfly.data.relational.upsert import backend_name
 
 __all__ = [
     "SCHEMA_LOCK",
     "SCHEMA_PHASE",
     "LeaseSchemaLock",
+    "LockStrategy",
     "SchemaInitializer",
     "SchemaLockTimeoutError",
     "SchemaValidationError",
@@ -102,11 +104,6 @@ class SchemaValidationError(RuntimeError):
 
 class SchemaLockTimeoutError(TimeoutError):
     """Another instance held the schema lock for longer than ``pyfly.data.relational.schema.lock-timeout``."""
-
-
-def backend_name(dialect: Dialect) -> str:
-    """``mariadb`` for a MariaDB server (a ``mysql://`` URL included), else the dialect's name."""
-    return "mariadb" if getattr(dialect, "is_mariadb", False) else str(dialect.name)
 
 
 # ---------------------------------------------------------------------------------------------------------

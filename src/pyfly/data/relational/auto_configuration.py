@@ -857,8 +857,7 @@ class MigrationAutoConfiguration:
         properties = RelationalProperties.from_config(config)
         engine = async_engine
         if engine is None and properties.url:
-            registry = datasource_registry if datasource_registry is not None else DataSourceRegistry.for_config(config)
-            engine = registry.primary.engine
+            engine = _datasources(datasource_registry, config).primary.engine
         return MigrationRunner(
             # The same URL the primary engine uses (the legacy pyfly.data.url alias included).
             url=properties.url or "",
