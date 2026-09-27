@@ -51,7 +51,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import weakref
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import event, text
@@ -110,14 +112,19 @@ savepoints roll back (see ``marks_rollback_only``)."""
 _READ_ONLY_DIALECT_STATEMENT = {"mysql": "SET TRANSACTION READ ONLY", "mariadb": "SET TRANSACTION READ ONLY"}
 
 
+_MANAGER = "_pyfly_transaction_manager"
+"""The attribute a ``DataSource``, an ad-hoc session factory or an ad-hoc engine's ``sync_engine`` keeps its
+manager in. The manager lives exactly as long as what it serves: a cache keyed by those objects would keep
+them alive through the manager that references them."""
+
+_LOOKUP_LOCK = threading.RLock()
+
+_UNNAMED = object()
+"""The registry an ad-hoc manager's name was worked out for, before it first was."""
+
+
 class SqlAlchemyTransactionManager:
     """Runs units of work on one relational datasource (see the module documentation)."""
-
-    _by_datasource: weakref.WeakKeyDictionary[DataSource, SqlAlchemyTransactionManager] = weakref.WeakKeyDictionary()
-    _by_sessionmaker: weakref.WeakKeyDictionary[async_sessionmaker[AsyncSession], SqlAlchemyTransactionManager] = (
-        weakref.WeakKeyDictionary()
-    )
-    _by_engine: weakref.WeakKeyDictionary[AsyncEngine, SqlAlchemyTransactionManager] = weakref.WeakKeyDictionary()
 
     def __init__(
         self,
@@ -133,6 +140,9 @@ class SqlAlchemyTransactionManager:
             datasource.sessionmaker if datasource is not None else sessionmaker  # type: ignore[assignment]
         )
         self._name = name or (datasource.name if datasource is not None else PRIMARY)
+        # An ad-hoc manager named by for_sessionmaker() follows the installed registry (see datasource).
+        self._follows_registry = datasource is None and name is None
+        self._named_for: object = _UNNAMED
         self._capabilities: TransactionCapabilities | None = None
 
     # -- factories ------------------------------------------------------------------------------------------
@@ -142,11 +152,7 @@ class SqlAlchemyTransactionManager:
         """The manager of *datasource* (a replica maps to its primary's manager); one per datasource."""
         if datasource.is_replica and datasource.registry is not None:
             datasource = datasource.registry.get(datasource.name)
-        manager = cls._by_datasource.get(datasource)
-        if manager is None:
-            manager = cls(datasource)
-            cls._by_datasource[datasource] = manager
-        return manager
+        return _attached(datasource, lambda: cls(datasource))
 
     @classmethod
     def for_sessionmaker(cls, factory: async_sessionmaker[AsyncSession]) -> SqlAlchemyTransactionManager:
@@ -160,11 +166,7 @@ class SqlAlchemyTransactionManager:
         datasource = datasource_of(factory)
         if datasource is not None:
             return cls.for_datasource(datasource)
-        manager = cls._by_sessionmaker.get(factory)
-        if manager is None:
-            manager = cls(sessionmaker=factory, name=_adhoc_name(factory))
-            cls._by_sessionmaker[factory] = manager
-        return manager
+        return _attached(factory, lambda: cls(sessionmaker=factory))
 
     @classmethod
     def for_engine(cls, engine: AsyncEngine) -> SqlAlchemyTransactionManager:
@@ -172,17 +174,26 @@ class SqlAlchemyTransactionManager:
         datasource = datasource_of(engine)
         if datasource is not None:
             return cls.for_datasource(datasource)
-        manager = cls._by_engine.get(engine)
-        if manager is None:
-            manager = cls.for_sessionmaker(async_sessionmaker(engine, expire_on_commit=False))
-            cls._by_engine[engine] = manager
-        return manager
+        # AsyncEngine has __slots__: the manager is kept on its sync engine.
+        return _attached(
+            engine.sync_engine, lambda: cls.for_sessionmaker(async_sessionmaker(engine, expire_on_commit=False))
+        )
 
     # -- identity ---------------------------------------------------------------------------------------------
 
     @property
     def datasource(self) -> str:
-        """The datasource name units are bound under."""
+        """The datasource name units are bound under.
+
+        An ad-hoc manager's name follows the installed registry: it is worked out again when a context
+        installs or removes its registry, so a factory used before the context started never keeps binding
+        under the name of a datasource on another database.
+        """
+        if self._follows_registry:
+            registry = installed_registry()
+            if registry is not self._named_for:
+                self._name = _adhoc_name(self._sessionmaker)
+                self._named_for = registry
         return self._name
 
     @property
@@ -203,7 +214,7 @@ class SqlAlchemyTransactionManager:
         bind = self._sessionmaker.kw.get("bind")
         if not isinstance(bind, AsyncEngine):
             raise IllegalTransactionStateError(
-                f"The session factory of datasource '{self._name}' is not bound to an AsyncEngine"
+                f"The session factory of datasource '{self.datasource}' is not bound to an AsyncEngine"
             )
         return bind
 
@@ -250,9 +261,9 @@ class SqlAlchemyTransactionManager:
         isolation = definition.isolation
         if not self.capabilities.supports_isolation(isolation):
             raise IllegalTransactionStateError(
-                f"Isolation {isolation.value} is not supported on datasource '{self._name}' ({dialect}); "
+                f"Isolation {isolation.value} is not supported on datasource '{self.datasource}' ({dialect}); "
                 f"supported: {sorted(self.capabilities.isolation_levels)}",
-                datasource=self._name,
+                datasource=self.datasource,
             )
         if not read_only:
             self._refuse_waiting_for_own_lock(engine, definition.propagation.value)
@@ -262,7 +273,7 @@ class SqlAlchemyTransactionManager:
         if read_only and dialect == "postgresql":
             options["postgresql_readonly"] = True
         session = self._new_session(factory)
-        unit = UnitOfWork(self, self._name, session, definition=definition)
+        unit = UnitOfWork(self, self.datasource, session, definition=definition)
         await self._start(unit, session, options, target, read_only=read_only, dialect=dialect)
         if definition.timeout is not None and dialect == "postgresql":
             milliseconds = max(1, int(definition.timeout * 1000))
@@ -292,7 +303,7 @@ class SqlAlchemyTransactionManager:
             else self._begin_options(target, dialect, read_only=read_only)
         )
         session = self._new_session(self._sessionmaker)
-        unit = UnitOfWork(self, self._name, session, auto=True, read_only=read_only)
+        unit = UnitOfWork(self, self.datasource, session, auto=True, read_only=read_only)
         unit.attributes[_AUTOCOMMIT] = autocommit
         await self._start(unit, session, options, None if autocommit else target, read_only=read_only, dialect=dialect)
         return unit
@@ -363,14 +374,14 @@ class SqlAlchemyTransactionManager:
         if engine.dialect.name != "sqlite" or not is_file_database(engine.url):
             return
         task = asyncio.current_task()
-        for held in current_state().held_units(self._name):
+        for held in current_state().held_units(self.datasource):
             if held.owner_task is task and not held.read_only and not held.completed:
                 raise IllegalTransactionStateError(
-                    f"A new write unit on SQLite datasource '{self._name}' ({what}) would wait for the write "
+                    f"A new write unit on SQLite datasource '{self.datasource}' ({what}) would wait for the write "
                     f"lock that {held.describe()} holds, and that unit cannot finish before this one does. "
                     "SQLite has one writer: join the outer unit (Propagation.REQUIRED), run the work after it, "
                     "or put it on another datasource.",
-                    datasource=self._name,
+                    datasource=self.datasource,
                 )
 
     # -- completing units -----------------------------------------------------------------------------------
@@ -386,14 +397,14 @@ class SqlAlchemyTransactionManager:
                 raise CommitOutcomeUnknownError(
                     f"The connection of {unit.describe()} failed while COMMIT was in flight; the unit may or may "
                     "not have committed. Do not retry it blindly.",
-                    datasource=self._name,
+                    datasource=self.datasource,
                 ) from error
             raise
         except (OSError, asyncio.CancelledError) as error:
             raise CommitOutcomeUnknownError(
                 f"COMMIT of {unit.describe()} was interrupted in flight ({type(error).__name__}); the unit may or "
                 "may not have committed. Do not retry it blindly.",
-                datasource=self._name,
+                datasource=self.datasource,
             ) from error
 
     async def rollback(self, unit: UnitOfWork) -> None:
@@ -510,7 +521,7 @@ class SqlAlchemyTransactionManager:
 
     def __repr__(self) -> str:
         source = self._datasource.masked_url if self._datasource is not None else "ad-hoc session factory"
-        return f"SqlAlchemyTransactionManager(datasource={self._name!r}, {source})"
+        return f"SqlAlchemyTransactionManager(datasource={self.datasource!r}, {source})"
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -626,6 +637,19 @@ def _record_savepoint_failure(unit: UnitOfWork, savepoint: SessionTransaction, e
         failures.append((savepoint, error))
 
 
+def _attached(owner: object, build: Callable[[], SqlAlchemyTransactionManager]) -> SqlAlchemyTransactionManager:
+    """The manager kept on *owner* (see ``_MANAGER``), built and attached on first use."""
+    manager = getattr(owner, _MANAGER, None)
+    if isinstance(manager, SqlAlchemyTransactionManager):
+        return manager
+    with _LOOKUP_LOCK:
+        manager = getattr(owner, _MANAGER, None)
+        if not isinstance(manager, SqlAlchemyTransactionManager):
+            manager = build()
+            setattr(owner, _MANAGER, manager)
+        return manager
+
+
 def _backend(engine: AsyncEngine) -> str:
     dialect = engine.dialect
     return "mariadb" if getattr(dialect, "is_mariadb", False) else str(dialect.name)
@@ -694,7 +718,8 @@ def _resolve_resource(resource: object) -> SqlAlchemyTransactionManager | None:
 register_resource_resolver(_resolve_resource)
 
 
-_REGISTRIES: weakref.WeakKeyDictionary[DataSourceRegistry, TransactionManagerRegistry] = weakref.WeakKeyDictionary()
+_MANAGERS = "_pyfly_transaction_managers"
+"""The attribute a ``DataSourceRegistry`` keeps its ``TransactionManagerRegistry`` in (see ``_MANAGER``)."""
 
 
 def transaction_managers_for(datasources: DataSourceRegistry) -> TransactionManagerRegistry:
@@ -702,20 +727,27 @@ def transaction_managers_for(datasources: DataSourceRegistry) -> TransactionMana
     managers are the SQLAlchemy managers of the registry's datasources, built on first use (datasources a
     module registers later included), and its default datasource is the primary. One per
     ``DataSourceRegistry``, whichever auto-configuration asks first (the ``transaction_manager_registry``
-    bean is that object)."""
-    existing = _REGISTRIES.get(datasources)
-    if existing is not None:
+    bean is that object); it lives as long as the ``DataSourceRegistry`` does."""
+    existing = getattr(datasources, _MANAGERS, None)
+    if isinstance(existing, TransactionManagerRegistry):
         return existing
     registry = TransactionManagerRegistry(default=PRIMARY)
+    source = weakref.ref(datasources)
 
     def _resolve(name: str) -> SqlAlchemyTransactionManager | None:
-        if datasources.closed:
+        owner = source()
+        if owner is None or owner.closed:
             return None
         try:
-            datasource = datasources.get(name)
+            datasource = owner.get(name)
         except (NoSuchDataSourceError, DataSourceConfigurationError):
             return None
         return SqlAlchemyTransactionManager.for_datasource(datasource)
 
     registry.add_resolver(_resolve)
-    return _REGISTRIES.setdefault(datasources, registry)
+    with _LOOKUP_LOCK:
+        existing = getattr(datasources, _MANAGERS, None)
+        if isinstance(existing, TransactionManagerRegistry):
+            return existing
+        setattr(datasources, _MANAGERS, registry)
+        return registry

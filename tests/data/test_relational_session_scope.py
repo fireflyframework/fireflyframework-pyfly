@@ -367,3 +367,82 @@ class TestTheInstalledTransactionManagers:
         assert installed_registry() is second_managers  # only the installed registry is removed
         await second.stop()
         assert installed_registry() is None
+
+    async def test_a_stopped_context_leaves_its_datasources_and_managers_collectable(self, tmp_path: Path) -> None:
+        """A restart must reproduce a cold start: no cache of the transaction managers keeps a stopped
+        context's registry, its engines or its managers alive."""
+        import gc
+        import weakref
+
+        from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+        from pyfly.data.transaction import TransactionManagerRegistry, TransactionTemplate
+
+        alive: list[weakref.ref[object]] = []
+        for cycle in range(3):
+            url = f"sqlite+aiosqlite:///{tmp_path / f'cycle-{cycle}.db'}"
+            config = Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": url, "ddl-auto": "none"}}}})
+            ctx = ApplicationContext(config)
+            ctx.register_bean(RelationalAutoConfiguration)
+            await ctx.start()
+            registry = ctx.get_bean(DataSourceRegistry)
+            managers = ctx.get_bean(TransactionManagerRegistry)
+            manager = managers.get("primary")
+            # Every lookup path of the managers: by datasource, by session factory, by engine.
+            assert SqlAlchemyTransactionManager.for_sessionmaker(registry.primary.sessionmaker) is manager
+            assert SqlAlchemyTransactionManager.for_engine(registry.primary.engine) is manager
+            async with TransactionTemplate().transaction() as unit:
+                assert unit is not None
+                await unit.resource.execute(text("SELECT 1"))
+            alive += [
+                weakref.ref(registry),
+                weakref.ref(registry.primary),
+                weakref.ref(registry.primary.engine.sync_engine),
+                weakref.ref(managers),
+                weakref.ref(manager),
+            ]
+            await ctx.stop()
+            del ctx, config, registry, managers, manager, unit
+        gc.collect()
+        assert [ref() for ref in alive] == [None] * len(alive)
+
+    async def test_an_ad_hoc_manager_does_not_keep_its_engine_alive(self, tmp_path: Path) -> None:
+        import gc
+        import weakref
+
+        from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ad-hoc.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        by_engine = SqlAlchemyTransactionManager.for_engine(engine)
+        by_factory = SqlAlchemyTransactionManager.for_sessionmaker(factory)
+        assert SqlAlchemyTransactionManager.for_engine(engine) is by_engine  # cached
+        assert SqlAlchemyTransactionManager.for_sessionmaker(factory) is by_factory
+        alive = [weakref.ref(engine.sync_engine), weakref.ref(factory), weakref.ref(by_engine), weakref.ref(by_factory)]
+        await engine.dispose()
+        del engine, factory, by_engine, by_factory
+        gc.collect()
+        assert [ref() for ref in alive] == [None] * len(alive)
+
+    async def test_an_ad_hoc_factory_used_before_the_context_follows_the_installed_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """A factory on another database is named after the primary while no context runs, and gets a name
+        of its own once a context installs a primary elsewhere: it never joins the primary's units."""
+        from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'elsewhere.db'}")
+        try:
+            manager = SqlAlchemyTransactionManager.for_sessionmaker(async_sessionmaker(engine))
+            assert manager.datasource == "primary"  # no context: the factory is the application's primary
+            url = f"sqlite+aiosqlite:///{tmp_path / 'primary.db'}"
+            config = Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": url, "ddl-auto": "none"}}}})
+            ctx = ApplicationContext(config)
+            ctx.register_bean(RelationalAutoConfiguration)
+            await ctx.start()
+            try:
+                assert manager.datasource.startswith("session-factory-")
+            finally:
+                await ctx.stop()
+            assert manager.datasource == "primary"
+        finally:
+            await engine.dispose()
