@@ -92,7 +92,7 @@ from pyfly.data.relational.sqlalchemy import (
     transactional, reactive_transactional,  # Declarative transaction management
 )
 from pyfly.data.transaction import (     # The backend-neutral unit of work
-    TransactionTemplate, after_commit, detached, infrastructure_unit,
+    TransactionTemplate, after_commit, detached, infrastructure_unit, outside_transaction,
 )
 ```
 
@@ -1104,6 +1104,40 @@ unit whose task is cancelled (a client disconnect, a timeout) discards its conne
 returning it to the pool, and commit, rollback and release run shielded (their own task, under `asyncio`
 and `anyio` shields) before the cancellation is re-raised.
 
+#### Work outside the caller's unit
+
+`outside_transaction()` runs a block of the calling task with its units suspended, as `NOT_SUPPORTED`
+suspends one, and starts no task: it is for work the caller waits for that must not be part of its
+transaction. Inside the block `infrastructure_unit()`, repository calls and `REQUIRED` boundaries open short
+units of their own, `after_commit` callbacks run at once, and `is_transaction_active()` and
+`is_current_transaction_read_only()` are false; the binding comes back when the block exits, after an
+exception or a cancellation too. `TransactionAwareCache` runs its immediate operations this way (see
+[Caching and Transactions](caching.md#caching-and-transactions)).
+
+```python
+from pyfly.data.transaction import outside_transaction
+
+@transactional
+async def log_in(self, user: str, password: str) -> Session:
+    # throttle: log-in attempt counters in a database-backed cache, whose statements join the bound unit
+    with outside_transaction():
+        attempts = await self.throttle.increment(f"login:{user}")   # committed now: a rollback keeps the count
+    if attempts > 5:
+        raise TooManyAttempts(user)
+    return await self.sessions.open(user, password)   # raises on a bad password: the unit rolls back
+```
+
+Surviving the caller's rollback is the point there: a failed log-in must still count. (On SQLite the counters
+belong on another database: a write beside the caller's write unit is refused, see below.) In your own code a
+boundary is usually what you want (`Propagation.REQUIRES_NEW` on one datasource); `outside_transaction()` is
+for code that joins whatever unit is bound, on any datasource, such as a framework adapter that runs through
+`infrastructure_unit()`.
+
+The caller's units stay open meanwhile, and the task still holds their connections and locks. Each statement
+in the block checks out another pooled connection of its datasource, and the block must not wait for a lock
+the caller holds: on SQLite a write unit the block would open beside a write unit this task holds is refused
+at once with `IllegalTransactionStateError`, instead of waiting `busy_timeout` for its own lock.
+
 ### Programmatic Transactions
 
 `TransactionTemplate` has the same semantics as `@transactional`:
@@ -2109,9 +2143,16 @@ run from a plain call. Check `is_transaction_active()` first, or use `after_comm
 
 Commit, rollback and session close run shielded, and a cancellation that arrived meanwhile is re-raised
 afterwards, so a client that disconnects mid-transaction (Starlette cancels the request through an anyio
-scope) never returns a poisoned or leaked connection to the pool. A commit whose connection fails while
-`COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
-blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transactions)).
+scope) never returns a poisoned or leaked connection to the pool. The `after_commit` and
+`after_completion` callbacks run shielded too, each in a task of its own: a cancellation that lands as the
+unit commits interrupts none of them (a cache eviction or an event publication of a committed unit is
+never lost to a client disconnect), and it is re-raised once they all ran. The flip side: a shielded
+callback cannot be cancelled either. One that hangs (a cache eviction on a Redis client without
+`socket_timeout` during a network partition) holds the request, its `asyncio.timeout`, client-disconnect
+cancellation and shutdown until it returns, so give the clients your callbacks use timeouts of their own. A
+commit whose connection fails while `COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may
+have committed. Never retry it blindly; `@retry` does not (see
+[Resilience](resilience.md#retries-and-transactions)).
 
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises

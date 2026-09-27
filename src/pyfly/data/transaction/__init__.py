@@ -29,6 +29,7 @@ Main entry points:
 - :func:`register_synchronization`, :func:`after_commit`, :func:`on_phase`;
 - :func:`infrastructure_unit` for framework adapters (join the bound unit or open a short one);
 - :func:`detached` (a function and a decorator) for work that must not join its caller's unit;
+- :func:`outside_transaction` for a block of the calling task that must not join its units either;
 - :func:`current_unit_of_work`, :func:`is_transaction_active`.
 """
 
@@ -38,6 +39,7 @@ from pyfly.data.transaction.context import (
     detached,
     is_current_transaction_read_only,
     is_transaction_active,
+    outside_transaction,
 )
 from pyfly.data.transaction.decorator import is_transactional, transactional
 from pyfly.data.transaction.definition import Isolation, Propagation, TransactionDefinition
@@ -111,6 +113,7 @@ __all__ = [
     "is_transaction_active",
     "is_transactional",
     "on_phase",
+    "outside_transaction",
     "register_synchronization",
     "resolve_manager",
     "rollback_on",

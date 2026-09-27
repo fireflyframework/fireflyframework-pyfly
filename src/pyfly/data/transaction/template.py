@@ -58,7 +58,9 @@ Completion rules:
 - Commit, rollback, savepoint release and session close are shielded: they run in their own task,
   awaited under ``asyncio`` and ``anyio`` shields until done, and a cancellation that arrived meanwhile is
   re-raised afterwards. A client disconnect in mid-transaction never returns a poisoned or leaked
-  connection to the pool.
+  connection to the pool. So are the ``after_commit`` and ``after_completion`` callbacks, one task each:
+  a cancellation that lands as the unit commits interrupts none of them, and is re-raised once they all
+  ran.
 - A boundary whose body ends with a driver error after a cancel request arrived while it ran ends as
   cancelled: the unit is poisoned (its connection discarded) and ``CancelledError`` is raised, chained
   from the driver's error (:func:`~pyfly.data.transaction.unit_of_work.cancellation_replaced_by`). A
@@ -224,25 +226,41 @@ async def _before_completion(unit: UnitOfWork, outcome: _Outcome) -> None:
             _record_synchronization_failure(unit, "before_completion", error)
 
 
-async def _after_completion(unit: UnitOfWork, status: CompletionStatus) -> None:
-    """Run the after-commit and after-completion callbacks with the transaction state cleared."""
+async def _after_completion(unit: UnitOfWork, status: CompletionStatus) -> bool:
+    """Run the after-commit and after-completion callbacks with the transaction state cleared.
+
+    Each callback runs to completion in its own task (:func:`run_shielded`), as the commit did: a
+    cancellation of the calling task (an anyio cancel scope re-delivers one at every await once the
+    shielded commit is done) interrupts neither that callback nor the ones after it, so no cache eviction or
+    event publication of a committed unit is lost to a client disconnect. Returns whether the calling task
+    was cancelled meanwhile; the boundary re-raises that cancellation once every callback has run.
+    """
     if not unit.synchronizations:
-        return
+        return False
+    cancelled = False
     token = bind_state(EMPTY)
     try:
         if status is CompletionStatus.COMMITTED:
             for synchronization in list(unit.synchronizations):
-                try:
-                    await synchronization.after_commit()
-                except Exception as error:  # noqa: BLE001 — never turn a committed unit into a failure
-                    _record_synchronization_failure(unit, "after_commit", error)
+                cancelled |= await _run_callback(unit, "after_commit", synchronization.after_commit)
         for synchronization in list(unit.synchronizations):
-            try:
-                await synchronization.after_completion(status)
-            except Exception as error:  # noqa: BLE001
-                _record_synchronization_failure(unit, "after_completion", error)
+            cancelled |= await _run_callback(unit, "after_completion", synchronization.after_completion, status)
     finally:
         reset_state(token)
+    return cancelled
+
+
+async def _run_callback(unit: UnitOfWork, phase: str, callback: Callable[..., Awaitable[None]], *args: Any) -> bool:
+    """Run ``callback(*args)`` shielded; log and count its failure (never raised: the unit is complete).
+    Returns whether the calling task was cancelled while it ran."""
+
+    async def call() -> None:
+        await callback(*args)
+
+    _result, error, cancelled = await run_shielded(call())
+    if error is not None:
+        _record_synchronization_failure(unit, phase, error)
+    return cancelled
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -757,7 +775,8 @@ class TransactionBoundary:
         finally:
             if self._token is not None:
                 reset_state(self._token)
-        await _after_completion(unit, outcome.status)
+        if await _after_completion(unit, outcome.status):
+            outcome.cancelled = True
         if outcome.cancelled:
             raise asyncio.CancelledError
         if replaced:
@@ -865,7 +884,8 @@ async def complete_auto_unit(
     finally:
         if reset is not None:
             reset_state(reset)
-    await _after_completion(unit, outcome.status)
+    if await _after_completion(unit, outcome.status):
+        outcome.cancelled = True
     if outcome.cancelled:
         raise asyncio.CancelledError
     if replaced:

@@ -35,3 +35,20 @@ def test_query_cache_adapter_no_cache_is_noop():
     cfg = CqrsAutoConfiguration()
     adapter = cfg.query_cache_adapter()
     assert adapter._cache is None
+
+
+async def test_query_cache_generations_expire_with_the_configured_cache_ttl():
+    import asyncio
+
+    from pyfly.cache.adapters.memory import InMemoryCache
+    from pyfly.cqrs.config.properties import CqrsProperties, QueryProperties
+
+    root = InMemoryCache()
+    cfg = CqrsAutoConfiguration()
+    adapter = cfg.query_cache_adapter(cache=root, props=CqrsProperties(query=QueryProperties(cache_ttl=1)))
+    await adapter.evict("GetOrder:1")  # an eviction writes nothing, not even a generation
+    assert root.get_keys() == []
+    assert await adapter.entry_key("GetOrder:1", "digest") is not None  # a lookup whose entry TTL is unknown
+    assert root.get_keys() == [":cqrs:GetOrder:1|generation"]
+    await asyncio.sleep(1.1)
+    assert root.get_keys() == []

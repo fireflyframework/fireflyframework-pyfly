@@ -19,6 +19,7 @@ Mirrors Java's ``CqrsAutoConfiguration``.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.container.bean import bean
@@ -64,11 +65,11 @@ class CqrsAutoConfiguration:
     * :class:`CommandEventPublisher` (``EdaCommandEventPublisher`` when an EDA
       :class:`~pyfly.eda.ports.outbound.EventPublisher` bean is present, else
       :class:`NoOpEventPublisher`)
-    * :class:`DefaultCommandBus`
+    * :class:`DefaultCommandBus` (it invalidates the query cache after a command commits)
     * :class:`QueryCacheAdapter` (conditional on cache availability)
     * :class:`EdaCacheInvalidationBridge` (when an EDA ``EventPublisher`` bean is
       present; ``None`` otherwise)
-    * :class:`DefaultQueryBus`
+    * :class:`DefaultQueryBus` (``pyfly.cqrs.query.caching_enabled: false`` turns its cache off)
     """
 
     @bean
@@ -126,21 +127,30 @@ class CqrsAutoConfiguration:
         authorization: AuthorizationService,
         metrics: CqrsMetricsService,
         event_publisher: CommandEventPublisher,
+        query_cache: QueryCacheAdapter | None = None,
     ) -> DefaultCommandBus:
+        # The query cache lets the bus evict what a committed command made stale (Command.get_cache_key()
+        # and @cache_evict event tags).
         return DefaultCommandBus(
             registry=registry,
             validation=validation,
             authorization=authorization,
             metrics=metrics,
             event_publisher=event_publisher,
+            query_cache=query_cache,
         )
 
     @bean
-    def query_cache_adapter(self, cache: CacheAdapter | None = None) -> QueryCacheAdapter:
+    def query_cache_adapter(
+        self, cache: CacheAdapter | None = None, props: CqrsProperties | None = None
+    ) -> QueryCacheAdapter:
         # Inject the pyfly.cache CacheAdapter bean when the cache subsystem is
         # active; otherwise the adapter degrades to a silent no-op. Previously no
         # CacheAdapter was ever passed, so @cacheable queries were never cached.
-        return QueryCacheAdapter(cache=cache)
+        # Scoped keys' generations expire with the bus's default TTL until the
+        # adapter has seen a handler's own.
+        generation_ttl = timedelta(seconds=props.query.cache_ttl) if props is not None else None
+        return QueryCacheAdapter(cache=cache, generation_ttl=generation_ttl)
 
     @bean
     @conditional_on_property("pyfly.cqrs.cache.invalidation.enabled", having_value="true", match_if_missing=True)
@@ -187,4 +197,5 @@ class CqrsAutoConfiguration:
             metrics=metrics,
             cache_adapter=cache,
             default_cache_ttl=props.query.cache_ttl,
+            caching_enabled=props.query.caching_enabled,
         )

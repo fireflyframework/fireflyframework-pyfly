@@ -27,6 +27,7 @@ from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.cache.adapter import CQRS_CACHE_PREFIX, QueryCacheAdapter
 from pyfly.cqrs.cache.eda_bridge import EdaCacheInvalidationBridge
 from pyfly.cqrs.command.registry import HandlerRegistry
+from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
@@ -227,13 +228,14 @@ class TestEdaBridgeEvictsBusCachedEntries:
         bridge.register("widget.updated", "widget:{widget_id}")
         bridge.subscribe(eda_bus)
 
-        # Step 1 — run the query so the result is cached through the bus.
-        result1 = await bus.query(GetWidgetQuery(widget_id="w-99"))
+        # Step 1 — run the query so the result is cached through the bus (for this caller).
+        caller = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+        result1 = await bus.query_with_context(GetWidgetQuery(widget_id="w-99"), caller)
         assert result1 == {"id": "w-99", "name": "Sprocket"}
         assert handler.call_count == 1
 
         # Step 2 — confirm the cache hit (handler NOT called again).
-        result2 = await bus.query(GetWidgetQuery(widget_id="w-99"))
+        result2 = await bus.query_with_context(GetWidgetQuery(widget_id="w-99"), caller)
         assert result2 == {"id": "w-99", "name": "Sprocket"}
         assert handler.call_count == 1  # served from cache
 
@@ -241,7 +243,7 @@ class TestEdaBridgeEvictsBusCachedEntries:
         await eda_bus.publish("cqrs.events", "widget.updated", {"widget_id": "w-99"})
 
         # Step 4 — the cache entry must be gone; next query re-executes the handler.
-        result3 = await bus.query(GetWidgetQuery(widget_id="w-99"))
+        result3 = await bus.query_with_context(GetWidgetQuery(widget_id="w-99"), caller)
         assert result3 == {"id": "w-99", "name": "Sprocket"}
         assert handler.call_count == 2, (
             "Handler must be called again after EDA invalidation — bridge failed to evict the bus-cached entry"

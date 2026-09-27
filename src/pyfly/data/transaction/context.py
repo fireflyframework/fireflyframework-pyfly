@@ -22,16 +22,19 @@ Helpers:
 
 - :func:`current_unit_of_work` and :func:`is_transaction_active` inspect the binding;
 - :func:`detached` (a function and a decorator) runs work in a task of its own with the state cleared,
-  so it gets its own transactions instead of borrowing (and outliving) its caller's.
+  so it gets its own transactions instead of borrowing (and outliving) its caller's;
+- :func:`outside_transaction` runs a block of the calling task with its units suspended, so the work in it
+  gets short units of its own while the caller waits for it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, ParamSpec, TypeVar, overload
@@ -225,3 +228,75 @@ def detached(target: Any, /, *, name: str | None = None) -> Any:
 
         return spawner
     raise TypeError(f"detached() takes a coroutine or a coroutine function, got {type(target).__name__}")
+
+
+# -- work outside the caller's units -------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def outside_transaction() -> Iterator[None]:
+    """Run the block outside the units of work bound to the running task, in the task itself.
+
+    Every unit bound to the task, and every repository operation scope open in it, is suspended for the
+    block, as ``Propagation.NOT_SUPPORTED`` suspends one: :func:`~pyfly.data.transaction.infrastructure_unit`
+    and repository calls in the block open short units of their own instead of joining the caller's,
+    ``after_commit`` callbacks run at once, and :func:`is_transaction_active` and
+    :func:`is_current_transaction_read_only` are false (the block is outside every boundary, a read-only one
+    included). The binding comes back when the block exits, after an exception or a cancellation too. Outside
+    every unit and boundary it changes nothing.
+
+    Unlike :func:`detached`, it starts no task: it is for work the caller waits for but that must not be
+    part of the caller's transaction, such as an immediate write to a database-backed cache, which the
+    caller's rollback must not undo and whose row locks another request must not wait for::
+
+        with outside_transaction():
+            await cache.evict(key)   # a short unit of its own, committed before the caller's unit ends
+
+    The caller's units stay open meanwhile, and the task still holds their connections and locks:
+
+    - each statement in the block checks out another pooled connection of its datasource, so size the pool
+      for one more connection per task that does such work inside a unit;
+    - the block must not wait for a lock the caller's unit holds. On SQLite, whose database has one writer,
+      a write unit the block would open on the database of a write unit this task holds is refused at once
+      with :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` (it would otherwise wait
+      ``busy_timeout`` for the task's own lock): the suspended units stay visible to that check.
+    """
+    state = _STATE.get()
+    if not state.scopes and not state.read_only and all(isinstance(bound, Suspended) for _name, bound in state.units):
+        yield
+        return
+    token = _STATE.set(_suspended(state))
+    try:
+        yield
+    finally:
+        _STATE.reset(token)
+
+
+def _suspended(state: TransactionState) -> TransactionState:
+    """*state* with every unit and repository operation scope suspended, and not read-only (see
+    :func:`outside_transaction`).
+
+    Each datasource keeps what this task holds open on it in its suspension marker, as a ``NOT_SUPPORTED``
+    boundary does: the bound unit (its own suspended units chain from it), or else the unit of the operation
+    scope open for it. A scope whose unit the marker does not already hold (a repository call's write auto
+    unit inside ``SUPPORTS`` or ``NOT_SUPPORTED``, where the marker holds no unit or a suspended one) replaces
+    it: that unit may hold SQLite's write lock, which the one-writer check must see.
+    """
+    held: dict[str, Suspended] = {}
+    for name, bound in state.units:
+        held[name] = bound if isinstance(bound, Suspended) else Suspended(bound)
+    for name, unit in state.scopes:
+        marker = held.get(name)
+        if marker is None or not _holds(marker, unit):
+            held[name] = Suspended(unit)
+    return TransactionState(tuple(held.items()))
+
+
+def _holds(marker: Suspended, unit: UnitOfWork) -> bool:
+    """Whether *unit* is the unit *marker* keeps, or one that unit suspended."""
+    current = marker.unit
+    while current is not None:
+        if current is unit:
+            return True
+        current = current.suspended
+    return False

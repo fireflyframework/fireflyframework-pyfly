@@ -24,12 +24,19 @@ injected.  When the feature is enabled but no cache adapter is present an
 explicit :class:`RuntimeError` is raised with a descriptive message so the
 operator gets actionable feedback.
 
+The records live in the cache dedicated to ``idempotency``
+(:func:`~pyfly.cache.namespaces.dedicated_cache`), not among the application's
+cache entries: clearing the cache (the admin's "evict all",
+``@cache_evict(all_entries=True)``, a query-cache reset) never drops them, so a
+retried request is still replayed instead of running again.
+
 TTL defaults to 86 400 s (24 h) and is overridable via
 ``pyfly.web.idempotency.ttl-seconds``.
 """
 
 from __future__ import annotations
 
+from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.container.bean import bean
 from pyfly.context.conditions import (
@@ -39,6 +46,9 @@ from pyfly.context.conditions import (
 )
 from pyfly.core.config import Config
 from pyfly.web.ports.filter import WebFilter
+
+IDEMPOTENCY_CACHE = "idempotency"
+"""The name of the cache dedicated to idempotency records."""
 
 
 @auto_configuration
@@ -70,4 +80,4 @@ class IdempotencyFilterAutoConfiguration:
             )
 
         ttl_seconds = int(config.get("pyfly.web.idempotency.ttl-seconds", 86400))
-        return IdempotencyWebFilter(cache=cache, ttl_seconds=ttl_seconds)
+        return IdempotencyWebFilter(cache=dedicated_cache(cache, IDEMPOTENCY_CACHE), ttl_seconds=ttl_seconds)

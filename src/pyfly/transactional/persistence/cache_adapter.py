@@ -28,6 +28,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import (
@@ -35,12 +36,19 @@ from pyfly.transactional.core.persistence import (
     StateSerializer,
 )
 
+ORCHESTRATION_CACHE = "orchestration"
+"""The name of the cache dedicated to orchestration state."""
+
 
 class CachePersistenceProvider:
     """Wraps any PyFly :class:`~pyfly.cache.ports.outbound.CacheAdapter`.
 
     Durability notes
     ----------------
+    * The state lives in the cache dedicated to ``orchestration``
+      (:func:`~pyfly.cache.namespaces.dedicated_cache`), not among the
+      adapter's own entries, so clearing the application cache never drops
+      in-flight executions.
     * Keys are stored under ``<prefix><correlation_id>`` using
       :meth:`~pyfly.cache.ports.outbound.CacheAdapter.put` /
       :meth:`~pyfly.cache.ports.outbound.CacheAdapter.get` /
@@ -63,7 +71,9 @@ class CachePersistenceProvider:
     """
 
     def __init__(self, cache_adapter: CacheAdapter, *, key_prefix: str = "orchestration:") -> None:
-        self._cache = cache_adapter
+        # Orchestration state is durable: it lives in the cache dedicated to it, which clearing the
+        # application cache (an admin "evict all", a query-cache reset) never touches.
+        self._cache = dedicated_cache(cache_adapter, ORCHESTRATION_CACHE)
         self._prefix = key_prefix
 
     def _key(self, correlation_id: str) -> str:

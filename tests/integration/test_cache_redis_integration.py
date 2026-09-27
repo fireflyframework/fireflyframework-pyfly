@@ -14,7 +14,8 @@
 """Integration tests for the RedisCacheAdapter against a real Redis instance (v26.06.x).
 
 Exercises the distinctive real-Redis paths: PING on start, JSON round-trip,
-SET NX (put_if_absent), SCAN-based prefix eviction, EX TTL expiry, and FLUSHDB.
+SET NX (put_if_absent), SCAN-based prefix eviction, EX TTL expiry, and the
+namespace-scoped clear (never FLUSHDB, see test_cache_redis_namespaces_integration.py).
 Gated by ``@requires_docker``; run in CI (``--all-extras`` + Docker).
 """
 
@@ -56,7 +57,7 @@ async def test_redis_cache_adapter_against_real_redis(redis_url: str) -> None:
         await asyncio.sleep(1.3)
         assert await cache.get("ttl") is None  # expired
 
-        await cache.clear()  # FLUSHDB
+        await cache.clear()  # the cache's namespace only
         assert await cache.get("fresh") is None
     finally:
         await client.aclose()

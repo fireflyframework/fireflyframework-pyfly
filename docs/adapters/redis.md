@@ -30,19 +30,25 @@ pyfly:
 ### Minimal Example
 
 ```python
+import redis.asyncio as redis
+
 from pyfly.cache import cacheable, cache_evict
 from pyfly.cache.adapters.redis import RedisCacheAdapter
 
-cache = RedisCacheAdapter(url="redis://localhost:6379/0")
+cache = RedisCacheAdapter(redis.from_url("redis://localhost:6379/0"))
 
 @cacheable(backend=cache, key="order:{id}")
-async def find_by_id(self, id: int) -> Order:
-    return await self._repo.find_by_id(id)
+async def find_by_id(self, id: int) -> OrderDto | None:
+    # Cache a DTO: an ORM entity return type is refused when the method is decorated.
+    order = await self._repo.find_by_id(id)
+    return OrderDto.model_validate(order, from_attributes=True) if order else None
 
 @cache_evict(backend=cache, key="order:{id}")
 async def delete_order(self, id: int) -> None:
-    await self._repo.delete(id)
+    await self._repo.delete(id)   # evicted after the commit
 ```
+
+A hit comes back as the declared `OrderDto`, not as the JSON `dict` Redis stores.
 
 ---
 
@@ -65,7 +71,10 @@ When `provider` is `"auto"`, PyFly uses Redis if the `redis` library is installe
 
 Implements `CacheAdapter` using `redis.asyncio.Redis`.
 
-- **Serialization:** Values are JSON-serialized before storage and deserialized on retrieval
+- **Serialization:** Values are JSON-serialized before storage and deserialized on retrieval; a live ORM
+  object is refused with `CacheValueError`
+- **Namespace:** Entries live under `pyfly:cache:` (the `namespace` argument, which always ends with
+  `:`), so the cache can share a database with sessions, locks and other data
 - **TTL:** Supports per-key TTL via `timedelta` or the global default
 - **Connection validation:** Calls `ping()` on `start()` to verify connectivity
 
@@ -77,7 +86,8 @@ Implements `CacheAdapter` using `redis.asyncio.Redis`.
 | `put(key, value, ttl)` | Serialize and store a value with optional TTL |
 | `evict(key)` | Remove a key from the cache |
 | `exists(key)` | Check if a key exists |
-| `clear()` | Flush all keys (uses `flushdb`) |
+| `clear()` | Delete the cache's own keys (its namespace, through `SCAN`); never `FLUSHDB` |
+| `with_namespace(name)` | A cache dedicated to `name` (`pyfly:cache.<name>:`) that `clear()` never touches |
 
 ### In-Memory Fallback
 

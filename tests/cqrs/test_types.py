@@ -15,8 +15,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -47,6 +52,40 @@ class GetOrderQuery(Query[dict]):
 @dataclass(frozen=True)
 class ListOrdersQuery(Query[list[dict]]):
     customer_id: str = "cust-1"
+
+
+@dataclass(frozen=True)
+class FindByNameQuery(Query[list[dict]]):
+    first: str = ""
+    last: str = ""
+
+
+@dataclass(frozen=True)
+class FilterQuery(Query[list[dict]]):
+    options: dict[str, Any] = field(default_factory=dict)
+
+
+class PlainQuery(Query[int]):
+    """A query that is not a dataclass."""
+
+
+_SEEDED_KEYS = """
+from dataclasses import dataclass, field
+from pyfly.cqrs.types import Query
+
+@dataclass(frozen=True)
+class Nested:
+    tags: frozenset[str]
+
+@dataclass(frozen=True)
+class ByTags(Query[list[int]]):
+    tags: frozenset[str] = frozenset({"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"})
+    groups: tuple[frozenset[str], ...] = (frozenset({"red", "green", "blue", "cyan", "magenta"}),)
+    nested: Nested = Nested(frozenset({"one", "two", "three", "four", "five"}))
+    names: set[str] = field(default_factory=lambda: {"ann", "bob", "cid", "dee", "eve", "fay"})
+
+print(ByTags().get_cache_key())
+"""
 
 
 # ── subclass with custom validate / authorize ─────────────────
@@ -233,6 +272,83 @@ class TestQuery:
         q1 = GetOrderQuery(order_id="order-1")
         q2 = GetOrderQuery(order_id="order-1")
         assert q1.get_cache_key() == q2.get_cache_key()
+
+    def test_get_cache_key_digest_is_a_full_sha256(self) -> None:
+        # Its fields may come from the caller, and a GLOBAL entry is shared by every caller: a truncated digest
+        # could be collided with another query's key offline.
+        name, digest = GetOrderQuery(order_id="order-1").get_cache_key().split(":")
+        assert name == "GetOrderQuery"
+        assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+    def test_get_cache_key_fields_cannot_run_into_each_other(self) -> None:
+        keys = {
+            FindByNameQuery(first="a', 'b", last="c").get_cache_key(),
+            FindByNameQuery(first="a", last="b', 'c").get_cache_key(),
+            FindByNameQuery(first="ab", last="c").get_cache_key(),
+            FindByNameQuery(first="a", last="bc").get_cache_key(),
+        }
+        assert len(keys) == 4
+
+    def test_get_cache_key_does_not_depend_on_the_hash_seed(self) -> None:
+        # repr() of a set lists its elements in hash order, which changes with PYTHONHASHSEED between processes.
+        keys = {
+            subprocess.run(
+                [sys.executable, "-c", _SEEDED_KEYS],
+                env={**os.environ, "PYTHONHASHSEED": str(seed)},
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            for seed in range(1, 7)
+        }
+        assert len(keys) == 1, keys
+
+    def test_get_cache_key_does_not_depend_on_dict_order(self) -> None:
+        first = FilterQuery(options={"status": "open", "limit": 10})
+        second = FilterQuery(options={"limit": 10, "status": "open"})
+        assert first.get_cache_key() == second.get_cache_key()
+        assert first.get_cache_key() != FilterQuery(options={"limit": 10, "status": "closed"}).get_cache_key()
+
+    def test_query_classes_with_the_same_name_in_other_modules_get_keys_of_their_own(self) -> None:
+        elsewhere = dataclass(frozen=True)(
+            type(
+                "GetOrderQuery",
+                (Query,),
+                {
+                    "__module__": "elsewhere.orders",
+                    "__qualname__": "GetOrderQuery",
+                    "__annotations__": {"order_id": str},
+                    "order_id": "order-1",
+                },
+            )
+        )
+
+        def local() -> type[Query[Any]]:
+            @dataclass(frozen=True)
+            class GetOrderQuery(Query[dict]):
+                order_id: str = "order-1"
+
+            return GetOrderQuery
+
+        ours = GetOrderQuery(order_id="order-1").get_cache_key()
+        assert elsewhere().get_cache_key() != ours
+        assert local()().get_cache_key() != ours  # another __qualname__ in the same module
+        assert elsewhere().get_cache_key().startswith("GetOrderQuery:")
+
+    def test_a_query_that_is_not_a_dataclass_is_keyed_by_its_class(self) -> None:
+        # Under the handler's group prefix (the class name and ":"), which an event-tag eviction deletes.
+        key = PlainQuery().get_cache_key()
+        assert key is not None and re.fullmatch(r"PlainQuery:[0-9a-f]{64}", key)
+        assert key == PlainQuery().get_cache_key()
+        other = type("PlainQuery", (Query,), {"__module__": "elsewhere.plain", "__qualname__": "PlainQuery"})
+        assert other().get_cache_key() != key
+
+    def test_get_cache_key_is_stable(self) -> None:
+        # The same query maps to the same key in every process and on every Python version: pinned. The digest
+        # covers the class's module and qualified name, then each field's name and canonical text.
+        assert GetOrderQuery(order_id="order-1").get_cache_key() == (
+            "GetOrderQuery:51a4b7510127c700c6f00221d82afdfa53bfd5d51c2b2b9fb9d20c72acd6c8c7"
+        )
 
     @pytest.mark.asyncio
     async def test_validate_returns_success_by_default(self) -> None:
