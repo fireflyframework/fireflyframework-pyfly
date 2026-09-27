@@ -37,9 +37,11 @@ The translated exception is raised *from* the backend's (``__cause__``). Its mes
 kind of violation and the violated constraint (``uq_users_email``: the same name on every backend, thanks
 to :data:`~pyfly.data.relational.sqlalchemy.entity.NAMING_CONVENTION`), and never carry the SQL statement or
 its bound values, which may be personal data; the full driver message is logged at ``DEBUG`` by this
-module's logger. MariaDB's "record has changed since last read" (its snapshot isolation catching a stale
-write) is an optimistic-locking failure too. Other exceptions (a connection failure, a deadlock, a
-serialization failure) are left as they are, so retry rules that name them keep working.
+module's logger. MariaDB's "record has changed since last read" (error 1020: its snapshot isolation catching
+a stale write, a serialization conflict) is an optimistic-locking failure too, so a retry rule that named the
+driver's ``OperationalError`` for it names ``OptimisticLockingFailureException`` now. Other exceptions (a
+connection failure, a deadlock, another serialization failure) are left as they are, so retry rules that name
+them keep working.
 
 A backend adds its translations with :func:`register_exception_translator` (the document backend
 registers MongoDB's). This module imports no backend library at import time.

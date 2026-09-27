@@ -1606,7 +1606,10 @@ class AuditingConfig:
 `pyfly.data.relational.sqlalchemy.auditing.AuditingEntityListener` is the relational side: the
 `RelationalAutoConfiguration` registers one, built on the two port beans. Its ORM hooks are installed once
 per process however many application contexts start, and removed when the last context stops; registering
-again changes nothing. An `AuditingEntityListener` bean of your own replaces the auto-configured one:
+again changes nothing. Customize it through the `AuditorAware` and `DateTimeProvider` beans: the hooks are
+module functions, so a subclass that overrides a private method of earlier releases (`_get_current_user`,
+`_on_insert`, `_on_update`) changes nothing. An `AuditingEntityListener` bean of your own replaces the
+auto-configured one:
 
 ```python
 @configuration
@@ -2051,7 +2054,9 @@ async def add_stock(self, sku: str, quantity: int) -> None: ...
 ```
 
 Other errors (a lost connection, a deadlock, a serialization failure) keep their SQLAlchemy type, so retry
-rules that name them keep working. Code that uses an `AsyncSession` directly gets SQLAlchemy's exceptions
+rules that name them keep working. The exception is MariaDB's "record has changed since last read" (error
+1020, the serialization conflict of its snapshot isolation): it is an optimistic-locking failure, so a retry
+rule that named `OperationalError` for it names `OptimisticLockingFailureException` now. Code that uses an `AsyncSession` directly gets SQLAlchemy's exceptions
 from its own statements; the web layer still answers 409 without SQL for them (`PersistenceExceptionConverter`,
 `SQLAlchemyIntegrityExceptionConverter`). Another backend plugs its translations in with
 `pyfly.data.exception_translation.register_exception_translator(translator)`.

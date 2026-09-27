@@ -62,6 +62,10 @@ class AuditingEntityListener(AuditingHandler):
     """Registers SQLAlchemy ORM events that populate the audit columns of every ``BaseEntity`` (module
     documentation).
 
+    Customize who and when with ``AuditorAware`` and ``DateTimeProvider`` beans (or these arguments). The ORM
+    hooks are module functions installed once per process, so a subclass that overrides a private method
+    (``_get_current_user``, ``_on_insert`` or ``_on_update`` of earlier releases) changes nothing.
+
     Args:
         auditor_aware: who is writing (default: the authenticated user of the security context).
         date_time_provider: the clock (default: UTC now).
