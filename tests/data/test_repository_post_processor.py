@@ -629,6 +629,30 @@ class TestStubDetection:
         assert await repo.count_by_name("other") == 200
 
 
+class SignatureShapesRepo(Repository[StubDoc, str]):
+    async def find_by_owner_id_and_name(self, owner_id: str, *, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name_or_owner_id(self, *values: str) -> int: ...
+
+    async def exists_by_name(self, name: str = "other") -> bool: ...
+
+
+@pytest.mark.backends("sqlite-file")
+class TestArgumentBinding:
+    """A compiled method takes its arguments as the stub declares them."""
+
+    async def test_keyword_only_variadic_and_default_parameters(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = processor.after_init(SignatureShapesRepo(StubDoc, file_session), "signatures")
+        assert [doc.id for doc in await repo.find_by_owner_id_and_name("o1", name="other")] == ["d2"]
+        with pytest.raises(TypeError, match="find_by_owner_id_and_name"):
+            await repo.find_by_owner_id_and_name("o1", "other")
+        assert await repo.count_by_name_or_owner_id("MixedCase", "o2") == 2
+        assert await repo.exists_by_name() is True
+        assert await repo.exists_by_name("nothing") is False
+
+
 class TestIsStub:
     """``is_stub`` reads the body's shape, whatever the Python version compiles it to."""
 
