@@ -62,6 +62,8 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -98,6 +100,7 @@ __all__ = [
     "MeteredAsyncQueuePool",
     "NoSuchDataSourceError",
     "datasource_of",
+    "observing_checkouts",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -153,6 +156,29 @@ def datasource_of(target: AsyncEngine | async_sessionmaker[AsyncSession]) -> Dat
 # ---------------------------------------------------------------------------
 
 
+_CHECKOUT_OBSERVER: ContextVar[Callable[[ConnectionPoolEntry], None] | None] = ContextVar(
+    "pyfly_checkout_observer", default=None
+)
+"""The observer :func:`observing_checkouts` set in the current task, if any."""
+
+
+@contextmanager
+def observing_checkouts(observer: Callable[[ConnectionPoolEntry], None]) -> Iterator[None]:
+    """Hand *observer* the pool entry of each connection the current task checks out inside the block.
+
+    A :class:`MeteredAsyncQueuePool` reports the entry as soon as it has it (an idle entry, or a new
+    one once connected), before the checkout reconnects, recycles or pre-pings its connection. The
+    ``db`` health check needs it: a check that hangs in the pre-ping holds no connection yet, and the
+    entry is how it reaches the socket the pre-ping waits on. The observer is task-local (a context
+    variable), so checkouts other tasks make meanwhile are not reported; other pools report nothing.
+    """
+    token = _CHECKOUT_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _CHECKOUT_OBSERVER.reset(token)
+
+
 class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
     """The queue pool of every registry engine that would get ``AsyncAdaptedQueuePool``: it times checkouts.
 
@@ -160,6 +186,9 @@ class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
     took to obtain its connection: the wait for an idle connection when the pool is busy, the connect
     when the pool grows or recycles one, and the pre-ping when it is on. A checkout that fails (a pool
     timeout) is reported too. The observers carry over to the pool ``engine.dispose()`` creates.
+
+    Inside :func:`observing_checkouts`, it also reports the pool entry of each checkout, before the
+    checkout reconnects, recycles or pre-pings the entry's connection.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -181,6 +210,13 @@ class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
             elapsed = time.perf_counter() - started
             for observer in observers:
                 observer(elapsed)
+
+    def _do_get(self) -> ConnectionPoolEntry:
+        entry = super()._do_get()
+        observer = _CHECKOUT_OBSERVER.get()
+        if observer is not None:
+            observer(entry)
+        return entry
 
     def recreate(self) -> MeteredAsyncQueuePool:
         pool = cast(MeteredAsyncQueuePool, super().recreate())

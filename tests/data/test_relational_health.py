@@ -23,9 +23,11 @@ the database is silent or the pool is exhausted, and checks every registry datas
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -41,7 +43,7 @@ from pyfly.actuator.wiring import install_health_indicators
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.data.relational.auto_configuration import EngineLifecycle
-from pyfly.data.relational.datasource_registry import DataSourceRegistry
+from pyfly.data.relational.datasource_registry import DataSourceRegistry, observing_checkouts
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity
 
@@ -448,6 +450,151 @@ class TestSharedConnection:
             assert after.status == "UP", after.details
             async with engine.connect() as conn:
                 assert (await conn.execute(text("SELECT count(*) FROM ledger"))).scalar_one() == 1
+        finally:
+            await registry.close()
+
+
+async def _up_within(indicator: SqlAlchemyHealthIndicator, seconds: float) -> HealthStatus:
+    """Probe until *indicator* answers UP or *seconds* have passed; the last answer."""
+    deadline = time.monotonic() + seconds
+    while (answer := await indicator.health()).status != "UP" and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    return answer
+
+
+class _StuckCheck:
+    """An engine whose check does not end, not even when cancelled, until ``release`` is set.
+
+    ``stuck_in="checkout"`` stands for a pre-ping on a pooled connection whose flow a middlebox forgot,
+    on a pool that does not report the connection it is checking out: cancelling asyncpg's pre-ping makes
+    it wait for the dead socket without a timeout, and the check holds no connection it could close.
+    ``stuck_in="statement"`` is a check that holds its connection and waits in its ``SELECT 1``.
+    """
+
+    dialect = SimpleNamespace(name="postgresql")
+
+    def __init__(self, stuck_in: str) -> None:
+        self.stuck_in = stuck_in
+        self.release = asyncio.Event()
+        self.checkouts = 0
+
+    def connect(self) -> _StuckCheck:
+        return self
+
+    async def __aenter__(self) -> _StuckCheck:
+        self.checkouts += 1
+        if self.stuck_in == "checkout":
+            await self._wait_for_release()
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    @property
+    def sync_connection(self) -> SimpleNamespace:
+        # The pooled connection the check holds; ``dbapi_connection`` None: there is no socket to close.
+        return SimpleNamespace(connection=SimpleNamespace(dbapi_connection=None))
+
+    async def execute(self, _statement: object) -> None:
+        if self.stuck_in == "statement":
+            await self._wait_for_release()
+
+    async def _wait_for_release(self) -> None:
+        while not self.release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.release.wait()
+
+
+class TestLateChecks:
+    async def test_a_check_stuck_before_it_holds_a_connection_does_not_block_the_next_probes(self) -> None:
+        engine = _StuckCheck("checkout")
+        indicator = SqlAlchemyHealthIndicator(engine, timeout=0.1)
+        try:
+            first = await indicator.health()
+            assert first.status == "DOWN"
+            assert first.details["message"] == "no answer within 0.1 s"
+
+            # The late check never got a connection, so the next probe starts a check of its own (on a
+            # pool, another connection) instead of answering DOWN until the stuck one ends.
+            second = await indicator.health()
+            assert second.status == "DOWN"
+            assert second.details["message"] == "no answer within 0.1 s"
+            assert engine.checkouts == 2
+
+            # Two late checks are still running: the next probe answers at once and starts none.
+            started = time.monotonic()
+            third = await indicator.health()
+            assert time.monotonic() - started < 0.05
+            assert third.status == "DOWN"
+            assert third.details["message"].startswith("previous check still running")
+            assert engine.checkouts == 2
+
+            engine.release.set()
+            assert (await _up_within(indicator, 2)).status == "UP"
+        finally:
+            engine.release.set()  # checks that ignore cancellation must not outlive a failed assertion
+
+    async def test_a_late_check_that_holds_its_connection_is_waited_for(self) -> None:
+        engine = _StuckCheck("statement")
+        indicator = SqlAlchemyHealthIndicator(engine, timeout=0.1)
+        try:
+            first = await indicator.health()
+            assert first.status == "DOWN"
+            assert first.details["message"] == "no answer within 0.1 s"
+
+            # It borrowed a connection: the next probe borrows no other one while the late check winds down.
+            second = await indicator.health()
+            assert second.status == "DOWN"
+            assert second.details["message"].startswith("previous check still running")
+            assert engine.checkouts == 1
+
+            engine.release.set()
+            assert (await _up_within(indicator, 2)).status == "UP"
+        finally:
+            engine.release.set()
+
+    async def test_the_registry_pool_reports_the_connection_before_its_pre_ping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A check that hangs in the pre-ping holds no connection yet; the pool entry it is checking out
+        # is what lets the late check close the socket the pre-ping waits on.
+        registry = DataSourceRegistry(
+            Config(
+                {
+                    "pyfly": {
+                        "data": {
+                            "relational": {
+                                "url": f"sqlite+aiosqlite:///{tmp_path / 'ping.db'}",
+                                "pool": {"pre-ping": True},
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        engine = registry.primary.engine
+        reported: list[Any] = []
+        known_at_ping: list[list[Any]] = []
+        ping = engine.dialect.do_ping
+
+        def _recording_ping(dbapi_connection: Any) -> bool:
+            known_at_ping.append([entry.dbapi_connection for entry in reported])
+            return bool(ping(dbapi_connection))
+
+        monkeypatch.setattr(engine.dialect, "do_ping", _recording_ping)
+        try:
+            async with engine.connect():
+                pass  # the pool now holds an established connection, which the next checkout pre-pings
+            with observing_checkouts(reported.append):
+                async with engine.connect() as conn:
+                    raw = conn.sync_connection.connection.dbapi_connection
+            assert raw is not None
+            assert [entry.dbapi_connection for entry in reported] == [raw]
+            assert known_at_ping == [[raw]]
+
+            async with engine.connect():
+                pass  # outside the block nothing is reported
+            assert len(reported) == 1
         finally:
             await registry.close()
 

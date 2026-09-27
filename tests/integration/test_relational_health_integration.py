@@ -24,7 +24,9 @@ The same proxy also reproduces a middlebox that forgot an idle flow (a cloud NAT
 its idle timeout): the pooled connection loses every byte while new connections reach the server. The
 check that landed on it answers DOWN, closes that connection's socket instead of waiting for the kernel
 to give up on it, and the next probe answers UP on a fresh connection. That case runs on PostgreSQL,
-MySQL and MariaDB (whose lanes also turn pool pre-ping on).
+MySQL and MariaDB, each with pool pre-ping off and on: with pre-ping on, the check hangs in the
+checkout's pre-ping, before it holds the connection, and asyncpg's cancel protocol would otherwise wait
+on the dead socket for good.
 """
 
 from __future__ import annotations
@@ -73,6 +75,23 @@ async def _slots_released(engine: AsyncEngine, *, within: float = 2.0) -> int:
     while pool.checkedout() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     return pool.checkedout()
+
+
+def _checks_in_flight() -> list[asyncio.Task[object]]:
+    """The ``db`` health checks (``SELECT 1`` tasks) still running on this loop, abandoned ones included."""
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done() and getattr(task.get_coro(), "__name__", "") == "_select_one"
+    ]
+
+
+async def _checks_finished(*, within: float = 2.0) -> list[asyncio.Task[object]]:
+    """The health checks still running after *within* seconds; empty once every check has finished."""
+    deadline = time.monotonic() + within
+    while _checks_in_flight() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    return _checks_in_flight()
 
 
 @pytest.mark.backends(PG)
@@ -125,33 +144,46 @@ async def test_database_silent_on_a_pooled_connection_answers_down_in_time(
 
 
 @pytest.mark.backends(PG, MYSQL, MARIADB)
+@pytest.mark.parametrize("pre_ping", [False, True], ids=["pre-ping-off", "pre-ping-on"])
 async def test_black_holed_pooled_connection_is_down_for_one_probe_only(
-    relational_backend: RelationalBackend,
+    relational_backend: RelationalBackend, pre_ping: bool
 ) -> None:
     upstream = make_url(relational_backend.url)
     proxy = PartitionProxy(upstream.host or "127.0.0.1", int(upstream.port or 5432))
     port = await proxy.start()
     proxied = upstream.set(host="127.0.0.1", port=port).render_as_string(hide_password=False)
-    registry = DataSourceRegistry(relational_backend.config({"pyfly.data.relational.url": proxied}))
+    registry = DataSourceRegistry(
+        relational_backend.config(
+            {
+                "pyfly.data.relational.url": proxied,
+                "pyfly.data.relational.pool.pre-ping": "true" if pre_ping else "false",
+            }
+        )
+    )
     engine = registry.primary.engine
+    assert engine.pool._pre_ping is pre_ping  # the lane's default must not decide which case runs
     indicator = SqlAlchemyHealthIndicator(engine, registry=registry, timeout=_TIMEOUT)
     try:
         warm, _ = await _answer_within(indicator.health(), 10)
         assert warm.status == "UP"
         assert engine.pool.checkedin() == 1  # the next check runs on this established connection
 
-        # The middlebox forgets the pooled connection's flow; the database itself stays reachable.
+        # The middlebox forgets the pooled connection's flow; the database itself stays reachable. With
+        # pre-ping on, the check hangs in the checkout's pre-ping, before it holds the connection.
         proxy.black_hole_established()
         first, elapsed = await _answer_within(indicator.health(), _TIMEOUT + _SLACK)
         assert first.status == "DOWN", first.details
         assert first.details["error"] == "TimeoutError"
         assert elapsed >= _TIMEOUT * 0.9
 
-        # The late check's socket is closed rather than left to the kernel's retransmission timeout, so it
-        # gives its pool slot back at once and the next probe finds the database healthy.
-        assert await _slots_released(engine) == 0
+        # The late check's socket is closed rather than left to the kernel's retransmission timeout (or,
+        # after a pre-ping, to asyncpg's cancel protocol, which waits on that socket without a timeout):
+        # the check ends and gives its pool slot back at once, and the next probe finds the database healthy.
+        assert await _checks_finished() == [], "the late check is still running"
+        assert await _slots_released(engine) == 0, "the late check still holds its pool slot"
         second, _ = await _answer_within(indicator.health(), _TIMEOUT + _SLACK)
         assert second.status == "UP", second.details
+        assert _checks_in_flight() == []
         assert engine.pool.checkedout() == 0
     finally:
         await registry.close()

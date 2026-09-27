@@ -26,17 +26,26 @@ The indicator is built for the Kubernetes readiness probe, and only for it:
   for it at the deadline: a database that went silent on an already pooled connection would otherwise
   keep the probe waiting in the driver's cleanup (asyncpg opens a new connection to cancel the query,
   and waits for it without a timeout);
-- the late check does not keep its connection. Its socket is closed on the spot (the dialect's
+- the late check does not keep its connection. The socket of the connection it holds, or is still
+  checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
   ``terminate``, which sends nothing and waits for nothing) and the check is cancelled, so it gives its
   pool slot back at once. A middlebox that forgot an idle flow (a cloud NAT or load balancer after its
-  idle timeout) black-holes one pooled connection while the database accepts new ones; without this
-  the check would sit in the driver's cleanup until the kernel gave up on the socket (about 15 minutes
-  on Linux), and the datasource would stay DOWN all that time. With it, one probe answers DOWN and the
-  next one runs on a fresh connection. A check on a connection the pool shares with the application
+  idle timeout) black-holes a pooled connection while the database accepts new ones. Without this the
+  check would sit in the driver's cleanup until the kernel gave up on the socket (about 15 minutes on
+  Linux), or for good with pool pre-ping on: cancelled, asyncpg's pre-ping waits for the server's
+  answer on that socket with no timeout. With it, each black-holed connection costs one probe, pre-ping
+  on or off: that probe answers DOWN and the next one runs on another connection. A check still in its
+  checkout is reached through the pool entry that the registry's pool
+  (:class:`~pyfly.data.relational.datasource_registry.MeteredAsyncQueuePool`) reports; on an engine the
+  registry did not build, a check stuck in the pre-ping cannot be closed and keeps its pool slot (the
+  next point bounds that). A check on a connection the pool shares with the application
   (``StaticPool`` for SQLite ``:memory:``) is neither closed nor cancelled, only no longer waited for:
   it runs after the application's statement ahead of it;
-- while a check that missed its deadline is still winding down, the next probe of that datasource
-  answers DOWN at once instead of borrowing another connection, so stuck checks cannot pile up;
+- while a check that missed its deadline is still winding down with its connection, the next probe of
+  that datasource answers DOWN at once instead of borrowing another connection. A late check that never
+  got its connection (stuck connecting or pre-pinging) does not hold the next probes back: they start a
+  new check, on another connection, as long as fewer than two late checks of that datasource are still
+  running. Stuck checks therefore cannot pile up;
 - a probe that is itself cancelled (the client hung up) stops the check only when no other probe is
   waiting for it;
 - when the pool has no idle connection and no overflow left, the check does not queue behind the
@@ -57,15 +66,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pyfly.actuator.health import HealthStatus, ProbeGroup, aggregate_status
 
 if TYPE_CHECKING:
-    from sqlalchemy.pool import PoolProxiedConnection
+    from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
 _logger = logging.getLogger(__name__)
+
+_MAX_LATE_CHECKS = 2
+"""Late checks of one engine, still running, beyond which a probe starts no new check."""
 
 
 class _Check:
     """One ``SELECT 1`` in flight on an engine, shared by the probes that arrive while it runs."""
 
-    __slots__ = ("abandoned", "connection", "engine", "started", "task", "waiters")
+    __slots__ = ("abandoned", "connection", "engine", "entry", "started", "task", "waiters")
 
     task: asyncio.Task[HealthStatus]
 
@@ -77,8 +89,17 @@ class _Check:
         # when the connection goes back to the pool, so a late terminate never hits a connection that
         # someone else may have borrowed since.
         self.connection: PoolProxiedConnection | None = None
+        # The pool entry the check is checking out, until it holds the connection: the registry's pool
+        # reports it before the pre-ping. An entry keeps its ``dbapi_connection`` in the pool, so it is
+        # dropped the moment the checkout ends, before the check can yield to another task.
+        self.entry: ConnectionPoolEntry | None = None
         # Probes waiting for this check; a cancelled probe stops the check only when it was the last.
         self.waiters = 0
+
+    def checking_out(self, entry: ConnectionPoolEntry) -> None:
+        """Remember the pool entry the check is checking out (the registry's pool reports it)."""
+        if self.connection is None:
+            self.entry = entry
 
 
 class SqlAlchemyHealthIndicator:
@@ -92,6 +113,8 @@ class SqlAlchemyHealthIndicator:
         self._timeout = timeout
         # The check in flight per engine (keyed by identity); an entry leaves when its task finishes.
         self._checks: dict[int, _Check] = {}
+        # The checks that missed their deadline and are still running, per engine.
+        self._late: dict[int, set[_Check]] = {}
 
     async def health(self) -> HealthStatus:
         dialect = _dialect(self._engine)
@@ -120,17 +143,21 @@ class SqlAlchemyHealthIndicator:
         if check is not None and check.task.get_loop() is not loop:
             check = None  # left behind by an event loop that is gone
         if check is not None and check.abandoned:
-            return HealthStatus(
-                status="DOWN",
-                details={
-                    "database": dialect,
-                    "error": "TimeoutError",
-                    "message": (
-                        f"previous check still running after {loop.time() - check.started:.1f} s "
-                        "(no connection borrowed)"
-                    ),
-                },
-            )
+            if check.connection is not None or self._late_checks(engine, loop) >= _MAX_LATE_CHECKS:
+                return HealthStatus(
+                    status="DOWN",
+                    details={
+                        "database": dialect,
+                        "error": "TimeoutError",
+                        "message": (
+                            f"previous check still running after {loop.time() - check.started:.1f} s "
+                            "(no connection borrowed)"
+                        ),
+                    },
+                )
+            # It is stuck before it got its connection (a pre-ping on a pool that reports no entry): a
+            # new check borrows another connection rather than answer DOWN until the stuck one ends.
+            check = None
         if check is None:
             if _pool_exhausted(engine):
                 return HealthStatus(
@@ -166,26 +193,43 @@ class SqlAlchemyHealthIndicator:
         def _finished(task: asyncio.Task[HealthStatus]) -> None:
             if self._checks.get(key) is check:
                 del self._checks[key]
+            late = self._late.get(key)
+            if late is not None:
+                late.discard(check)
+                if not late:
+                    del self._late[key]
             if not task.cancelled():
                 task.exception()  # retrieved, so a late failure is not reported as never retrieved
 
         check.task.add_done_callback(_finished)
         return check
 
-    @staticmethod
-    def _abandon(check: _Check) -> None:
+    def _late_checks(self, engine: Any, loop: asyncio.AbstractEventLoop) -> int:
+        """How many checks of *engine* that missed their deadline are still running on *loop*."""
+        key = id(engine)
+        late = self._late.get(key)
+        if late is None:
+            return 0
+        late -= {check for check in late if check.task.get_loop() is not loop}  # left by a loop that is gone
+        if not late:
+            del self._late[key]
+        return len(late)
+
+    def _abandon(self, check: _Check) -> None:
         """Stop a check that missed its deadline; it stays registered until its task has finished.
 
-        The socket of the connection it holds is closed first, so the task does not wait in the
-        driver's cleanup for a database that no longer answers on that connection. A check on a
-        connection the pool shares with the application is only no longer waited for: cancelling it
-        would make SQLAlchemy invalidate, and close, the connection the application is using (and
-        lose a ``:memory:`` database with it). It ends by itself once the application's statement
-        ahead of it has run.
+        The socket of the connection it holds, or is still checking out, is closed first, so the task
+        does not wait in the driver's cleanup for a database that no longer answers on that connection.
+        A check on a connection the pool shares with the application is only no longer waited for:
+        cancelling it would make SQLAlchemy invalidate, and close, the connection the application is
+        using (and lose a ``:memory:`` database with it). It ends by itself once the application's
+        statement ahead of it has run.
         """
         if check.abandoned:
             return
         check.abandoned = True
+        if not check.task.done():
+            self._late.setdefault(id(check.engine), set()).add(check)
         if _shares_connections(check.engine):
             return
         _terminate(check)
@@ -195,31 +239,44 @@ class SqlAlchemyHealthIndicator:
 async def _select_one(check: _Check) -> HealthStatus:
     from sqlalchemy import literal, select
 
+    from pyfly.data.relational.datasource_registry import observing_checkouts
+
     engine = check.engine
     dialect = _dialect(engine)
     try:
-        async with engine.connect() as conn:
-            check.connection = conn.sync_connection.connection
-            await conn.execute(select(literal(1)))
+        with observing_checkouts(check.checking_out):
+            async with engine.connect() as conn:
+                check.connection = conn.sync_connection.connection
+                check.entry = None
+                await conn.execute(select(literal(1)))
     except Exception as exc:
         return HealthStatus(
             status="DOWN",
             details={"database": dialect, "error": type(exc).__name__, "message": _masked(engine, exc)[:200]},
         )
+    finally:
+        check.entry = None  # the checkout is over (or failed): the entry may serve another checkout now
     return HealthStatus(status="UP", details={"database": dialect})
 
 
 def _terminate(check: _Check) -> None:
-    """Close the socket of the connection *check* holds, without sending or awaiting anything.
+    """Close the socket of the connection *check* holds or is checking out, sending and awaiting nothing.
 
     Called outside SQLAlchemy's greenlet, the async dialects' ``terminate`` takes the forced path
     (asyncpg ``Connection.terminate()``, aiosqlite ``stop()``, asyncmy/aiomysql ``close()``). The task
-    then fails at once in the driver, and SQLAlchemy invalidates the pool entry. Nothing happens when
-    the check holds no connection yet (it is still connecting; cancelling it is enough), when the
-    connection is already back in the pool, or when the dialect cannot terminate.
+    then fails at once in the driver, and SQLAlchemy invalidates the pool entry. A check still in its
+    checkout (pre-pinging, recycling or reconnecting) is reached through the pool entry it reported:
+    cancelled, asyncpg's pre-ping would wait on a black-holed socket for good. Nothing happens when the
+    check has no connection yet (it is still connecting, and cancelling it is enough), when its pool
+    reports no entry, when the connection is already back in the pool, or when the dialect cannot
+    terminate.
     """
-    connection = check.connection
-    raw = connection.dbapi_connection if connection is not None else None
+    if check.connection is not None:
+        raw = check.connection.dbapi_connection  # None once the connection is back in the pool
+    elif check.entry is not None:
+        raw = check.entry.dbapi_connection  # None while the checkout (re)connects
+    else:
+        raw = None
     if raw is None:
         return
     dialect = getattr(getattr(check.engine, "sync_engine", None), "dialect", None)
