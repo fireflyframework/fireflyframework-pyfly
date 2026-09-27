@@ -294,7 +294,10 @@ class SessionConcurrencyController:
             await stop()
 
     async def on_login(self, principal: str, session_id: str, created_at: float) -> bool:
-        """Register the new session, enforcing the cap. Returns ``False`` if rejected."""
+        """Register the new session, enforcing the cap. Returns ``False`` if rejected.
+
+        Under a cap (``max_sessions`` >= 0) the principal's dead sessions are dropped first; with no cap the
+        session is only registered (the purge of an :class:`ExpiringSessionRegistry` drops the dead ones)."""
         if self._policy.max_sessions < 0:
             await self._registry.register(principal, session_id, created_at)
             await self._purge_if_due()

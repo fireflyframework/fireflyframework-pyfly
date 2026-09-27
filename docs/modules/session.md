@@ -496,7 +496,7 @@ auto-configured one entirely.
 | Method | Description |
 |---|---|
 | `__init__(registry, policy, *, session_deleter=None, session_store=None, purge_interval=timedelta(seconds=60))` | `session_store` tells live sessions from dead ones; `session_deleter` (by default the store's `delete`) is an `async (session_id) -> None` callable used to evict store entries |
-| `on_login(principal, session_id, created_at)` | Drops the principal's dead sessions, then registers the session atomically, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it, and do not save it again (an eviction may have deleted it) |
+| `on_login(principal, session_id, created_at)` | Under a cap (`max-sessions` >= 0), drops the principal's dead sessions, then registers the session atomically, enforcing the cap; with no cap, registers it. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it, and do not save it again (an eviction may have deleted it) |
 | `on_logout(principal, session_id)` | Deregisters the session |
 | `purge_expired()` | Drops the due registrations whose session is gone and renews the others (an `ExpiringSessionRegistry`: the SQL and in-memory registries); returns how many were dropped |
 
