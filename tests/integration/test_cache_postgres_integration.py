@@ -22,9 +22,11 @@ take again and rows never purged (C092), and three round trips for every single 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -32,12 +34,34 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from pyfly.cache.adapters.postgres import PostgresCacheAdapter
+from pyfly.cache.adapters.postgres import MAX_KEY_LENGTH, PostgresCacheAdapter
+from pyfly.cqrs.decorators import query_handler
+from pyfly.cqrs.query.handler import QueryHandler
+from pyfly.cqrs.types import Query
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, cache_entries
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.transaction import TransactionTemplate
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
+
+
+@dataclass(frozen=True)
+class _LongNamedQuery(Query[int]):
+    sku: str = "a"
+
+
+_LongNamedQuery.__name__ = _LongNamedQuery.__qualname__ = "LongNamed" * 11 + "Query"  # a 104-character class name
+
+
+@query_handler(cacheable=True)
+class _LongNamedHandler(QueryHandler[_LongNamedQuery, int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def do_handle(self, query: _LongNamedQuery) -> int:
+        self.calls += 1
+        return 42
 
 
 async def _cache(backend: RelationalBackend, **options: Any) -> PostgresCacheAdapter:
@@ -232,6 +256,124 @@ async def test_a_write_inside_a_read_only_transaction_gets_a_unit_of_its_own(reg
         assert await cache.put_if_absent("report-lock", "me") is True
 
     assert await cache.get("report") == {"total": 3} and await cache.get("report-lock") == "me"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The CacheAdapter contract (WP14): an own namespace, named caches, keys that fit
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def _stored_keys(engine: AsyncEngine) -> list[str]:
+    async with engine.connect() as connection:
+        rows = (await connection.execute(select(cache_entries.c.cache_key).order_by(cache_entries.c.cache_key))).all()
+    return [str(key) for (key,) in rows]
+
+
+async def test_clear_deletes_only_this_caches_namespace(relational_backend: RelationalBackend) -> None:
+    """The table is shared: by the dedicated caches of ``with_namespace``, by caches with another namespace,
+    by other applications. ``clear()`` used to empty it; it deletes this cache's entries only now."""
+    cache = await _cache(relational_backend)
+    idempotency = cache.with_namespace("idempotency")
+    other = PostgresCacheAdapter(cache.engine, namespace="other-app")
+    await cache.put("k", 1)
+    await cache.put("p:1", 2)
+    await idempotency.put("k", "record")
+    await other.put("k", "theirs")
+    async with cache.engine.begin() as connection:
+        await connection.execute(cache_entries.insert().values(cache_key="foreign", value=b"1", expires_at=None))
+
+    assert await _stored_keys(cache.engine) == [
+        "foreign",
+        "other-app:k",
+        "pyfly:cache.idempotency:k",
+        "pyfly:cache:k",
+        "pyfly:cache:p:1",
+    ]
+    assert sorted(await cache.get_keys()) == ["k", "p:1"]
+    assert (await cache.get_stats())["size"] == 2
+    assert await idempotency.get("k") == "record" and await cache.get("k") == 1
+
+    assert await cache.evict_by_prefix("") == 2  # every key of its own, and no one else's
+    await cache.put("k", 1)
+    await cache.clear()
+    assert await _stored_keys(cache.engine) == ["foreign", "other-app:k", "pyfly:cache.idempotency:k"]
+    assert await idempotency.get("k") == "record" and await other.get("k") == "theirs"
+
+    await idempotency.clear()
+    assert await _stored_keys(cache.engine) == ["foreign", "other-app:k"]
+
+
+async def test_an_empty_namespace_owns_the_table_and_says_so_for_a_dedicated_cache(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache = await _cache(relational_backend, namespace="")
+    caplog.set_level(logging.WARNING, logger="pyfly.cache.adapters.postgres")
+    records = cache.with_namespace("idempotency")
+    cache.with_namespace("orchestration")
+    assert records.namespace == "idempotency:"
+    assert len([r for r in caplog.records if "cache_not_dedicated" in r.getMessage()]) == 1  # once per cache
+    await cache.put("k", 1)
+    await records.put("k", "record")
+    assert sorted(await cache.get_keys()) == ["idempotency:k", "k"]
+    await cache.clear()  # it owns the table: the dedicated cache goes too
+    assert await _rows(cache.engine) == 0
+
+
+async def test_a_glob_escape_matches_a_wildcard_literally(relational_backend: RelationalBackend) -> None:
+    """A region (``PrefixedCache``) lists its keys with its prefix escaped as a Redis ``MATCH`` pattern
+    escapes it: a backslash makes the next wildcard literal."""
+    cache = await _cache(relational_backend)
+    await cache.put("a*b:1", 1)
+    await cache.put("aXb:2", 2)
+    assert sorted(await cache.get_keys("a*b:*")) == ["a*b:1", "aXb:2"]
+    assert await cache.get_keys("a\\*b:*") == ["a*b:1"]
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_a_key_longer_than_the_column_is_refused_before_any_write(relational_backend: RelationalBackend) -> None:
+    """The key column is VARCHAR(512) on MySQL and MariaDB, the namespace included. A longer key is refused
+    with ValueError before anything is written; the query cache logs that and does not cache."""
+    from pyfly.cqrs.cache.adapter import QueryCacheAdapter
+
+    cache = await _cache(relational_backend)
+    fits = "k" * (MAX_KEY_LENGTH - len(cache.namespace))
+    await cache.put(fits, 1)
+    assert await cache.get(fits) == 1
+    too_long = fits + "k"
+    with pytest.raises(ValueError, match="at most 512 characters"):
+        await cache.put(too_long, 1)
+    with pytest.raises(ValueError, match="at most 512 characters"):
+        await cache.put_if_absent(too_long, 1)
+
+    queries = QueryCacheAdapter(cache)
+    await queries.put(too_long, "answer")  # logged and skipped: a cache problem never fails the query
+    assert await queries.entry_key(too_long, "0" * 64) is None  # no generation could start: uncached
+    assert await _stored_keys(cache.engine) == [cache.namespace + fits]
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_the_query_cache_keys_of_a_long_handler_name_fit_the_key_column(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A scoped query-cache entry is ``:cqrs:<Class>:<64 hex>|<generation>|scope=<64 hex>`` in the cache's
+    namespace: about 170 characters plus the class name, well within the 512 the key column takes."""
+    from pyfly.cqrs.cache.adapter import QueryCacheAdapter
+    from pyfly.cqrs.command.registry import HandlerRegistry
+    from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
+    from pyfly.cqrs.query.bus import DefaultQueryBus
+
+    cache = await _cache(relational_backend)
+    handler = _LongNamedHandler()
+    registry = HandlerRegistry()
+    registry.register_query_handler(handler)
+    bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(cache))
+    alice = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+
+    assert await bus.query_with_context(_LongNamedQuery(sku="a"), alice) == 42
+    assert await bus.query_with_context(_LongNamedQuery(sku="a"), alice) == 42
+    assert handler.calls == 1  # cached
+    keys = await _stored_keys(cache.engine)
+    assert len(keys) == 2 and all(len(key) < MAX_KEY_LENGTH for key in keys)  # its generation and its entry
 
 
 async def test_without_ddl_a_missing_table_fails_fast_at_start(relational_backend: RelationalBackend) -> None:

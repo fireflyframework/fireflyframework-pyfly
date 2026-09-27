@@ -101,15 +101,9 @@ Every built-in adapter keeps these rules, and a custom adapter should too:
   from this one, which this cache's `clear()` never touches. See
   [Named Caches](#named-caches-regions-and-dedicated-caches).
 
-> **The PostgreSQL adapter does not keep the last three rules yet.** Its
-> `clear()` deletes every row of the cache table, and it has no
-> `with_namespace()`: a dedicated cache on it falls back to a region of the same
-> table (a `cache_not_dedicated` warning says so), so a root `clear()` also
-> deletes idempotency records and orchestration state kept there. Clear its
-> regions instead (`clear_all_cache()` on the query bus clears the `:cqrs:`
-> region only), or use the in-memory or Redis adapter for durable consumers. It
-> also never deletes an expired row: expired rows are ignored when read, but
-> they stay in the table until the key is written again.
+Every built-in adapter keeps these rules: the in-memory, Redis and PostgreSQL
+ones (the PostgreSQL adapter keeps its entries under a namespace of the cache
+table, and purges expired rows).
 
 ### Method Reference
 
@@ -301,9 +295,26 @@ await cache.evict("user:123")
 # Evict all keys sharing a prefix
 count = await cache.evict_by_prefix("user:")
 
-# Clear everything
+# Clear this cache's entries (its namespace), nothing else in the table
 await cache.clear()
 ```
+
+The entries live under a **namespace** of the table, `pyfly:cache:` by default,
+as on Redis: keys passed to and returned by the adapter are the cache's own
+(`user:123` is stored as `pyfly:cache:user:123`), and `clear()` deletes that
+namespace and nothing else in the table, which the
+[dedicated caches](#named-caches-regions-and-dedicated-caches) of
+`with_namespace()`, other applications and older entries may share.
+`with_namespace(name)` returns a cache of its own on the same table and
+datasource (`pyfly:cache.<name>:`), which the root cache's `clear()` never
+touches. An empty namespace declares that the cache owns the whole table:
+`clear()` then empties it, the dedicated caches included (a
+`cache_not_dedicated` warning says so when the first one is made).
+
+Entries written before 26.09.08 have no namespace: they are no longer read
+(each key misses once), and those without a TTL stay in the table until you
+delete them (`DELETE FROM pyfly_cache_entries WHERE cache_key NOT LIKE
+'pyfly:cache%'`, adjusted to the namespaces you use).
 
 ### Constructor
 
@@ -313,6 +324,7 @@ await cache.clear()
 | `create_table` | `bool` (default `True`) | Create the table on `start()` when it is missing; with `False` the table is only checked, and a missing one fails the start. |
 | `purge_interval` | `timedelta \| None` (default 60 s) | How often a write purges a batch of expired rows; `None` leaves purging to `purge_expired()`. |
 | `table_name` | `str` (default `pyfly_cache_entries`) | The table. |
+| `namespace` | `str` (default `pyfly:cache:`) | Keyword-only. The key prefix of the cache's entries; a `:` is appended when it does not end with one, so `clear()` never reaches a namespace that merely starts with it. An empty namespace declares that the cache owns the whole table. |
 
 ### Table schema
 
@@ -331,7 +343,10 @@ CREATE INDEX ix_pyfly_cache_entries_expires_at ON pyfly_cache_entries (expires_a
 ```
 
 On MySQL and MariaDB the key is `VARCHAR(512)` (keys are limited to 512
-characters there) with a binary collation, the value `LONGBLOB` and the expiry
+characters there, the namespace included: a longer one is refused with
+`ValueError` before anything is written, which the cache decorators and the
+CQRS query cache log and skip, so the call is answered uncached; a CQRS query
+key is about 170 characters plus the query class name) with a binary collation, the value `LONGBLOB` and the expiry
 `DATETIME(6)` in UTC. Keys match exactly on every backend: `User:1` and
 `user:1` are two entries (the default MySQL and MariaDB collations ignore case
 and accents), and so are `get_keys()` patterns and `evict_by_prefix()`
@@ -366,20 +381,32 @@ with Redis `SET NX`.
 
 Outside a transaction every operation is a single statement on an autocommit
 connection on PostgreSQL: one round trip instead of `BEGIN`, the statement and
-`COMMIT`. Inside a unit of work on the cache's datasource the adapter joins it,
-so an entry written by a transaction that rolls back is rolled back too; a
-write made inside a read-only unit gets a unit of its own.
+`COMMIT`. Called directly inside a unit of work on the cache's datasource, the
+adapter joins it, so an entry written by a transaction that rolls back is
+rolled back too; a write made inside a read-only unit gets a unit of its own.
 
-Prefix eviction (`evict_by_prefix`) translates the prefix to a SQL `LIKE`
-pattern (a `GLOB` on SQLite) and deletes all matching rows in a single
-statement.
+Through the cache decorators and the CQRS query cache (both wrap it in
+`TransactionAwareCache`, see [Caching and Transactions](#caching-and-transactions))
+it does not join the caller's unit: writes wait for the commit, and what runs at
+once (reads, `put_if_absent`, `evict_if_present`, `invalidate`) runs outside the
+caller's unit, each statement in a short unit of its own. **Pool sizing:** while
+a business unit holds a connection of the cache's datasource, each such cache
+statement checks out one more pooled connection of it. Size
+`pyfly.data.relational.pool.*` (or the cache datasource's pool) for one extra
+connection per request that uses the cache inside a transaction, or put the
+cache on a datasource of its own (`pyfly.cache.postgres.datasource`).
+
+Prefix eviction (`evict_by_prefix`) takes the prefix literally, translates it
+to a SQL `LIKE` pattern (a `GLOB` on SQLite) inside the cache's namespace, and
+deletes all matching rows in a single statement.
 
 ### Additional methods
 
 | Method | Description |
 |--------|-------------|
-| `get_keys(pattern, limit)` | Return up to `limit` non-expired keys matching a glob pattern (`*` / `?`). |
-| `get_stats()` | Return a `dict` with `size`, `type`, `requests`, `hits`, `misses`, `evictions`, `hit_rate`. |
+| `get_keys(pattern, limit)` | Return up to `limit` of this cache's non-expired keys matching a glob pattern (`*` / `?`; a backslash makes the next character literal), without the namespace. |
+| `get_stats()` | Return a `dict` with `size` (this cache's live entries), `type`, `namespace`, `requests`, `hits`, `misses`, `evictions`, `hit_rate`. |
+| `with_namespace(name)` | A cache dedicated to `name` on the same table (`pyfly:cache.<name>:`), which `clear()` never touches. |
 | `purge_expired()` | Delete every expired entry now; returns how many were deleted. |
 
 ### Auto-configuration
@@ -483,7 +510,8 @@ each other's entries, so PyFly gives them named caches:
 * A **dedicated cache** is disjoint from the cache it comes from.
   `dedicated_cache(cache, "idempotency")` calls the adapter's
   `with_namespace("idempotency")`: a separate store in memory, the
-  `pyfly:cache.idempotency:` namespace on Redis. Clearing the application cache
+  `pyfly:cache.idempotency:` namespace on Redis and in the PostgreSQL adapter's
+  table. Clearing the application cache
   never touches it. The HTTP idempotency filter and the cache-backed
   orchestration persistence keep their records in dedicated caches.
 
@@ -506,6 +534,9 @@ Data written by earlier versions is not where this version reads it:
 * **Redis cache entries** now live under `pyfly:cache:`. Entries written
   before, under their bare keys, are never read again: each costs one miss.
   Entries written without a TTL stay in Redis until you delete them.
+* **PostgreSQL cache entries** (`pyfly_cache_entries`) now live under the
+  `pyfly:cache:` namespace too, with the same consequences; see
+  [PostgresCacheAdapter](#postgrescacheadapter).
 * **Orchestration state** kept by `CachePersistenceProvider` and **idempotency
   records** kept by the HTTP idempotency filter moved to their dedicated caches
   (`orchestration`, `idempotency`), and records written before the upgrade are

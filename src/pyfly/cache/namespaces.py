@@ -23,7 +23,7 @@ HTTP idempotency records, orchestration state). They must not clear each other's
 - A **dedicated cache** (:func:`dedicated_cache`) is disjoint from the cache it comes from: clearing that
   cache never touches it. Durable consumers (idempotency records, orchestration state) keep their entries
   there. The built-in adapters implement it with ``with_namespace(name)``: a separate store in memory, a
-  separate key namespace on Redis.
+  separate key namespace on Redis and in the PostgreSQL adapter's table.
 
 No clear ever flushes a store other data may share (``FLUSHDB`` on Redis).
 """

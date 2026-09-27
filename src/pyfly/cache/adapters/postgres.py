@@ -28,10 +28,25 @@ SQLAlchemy supports: the table is a Core table with portable types and the upser
   (:attr:`PostgresCacheAdapter.PURGE_BATCH`) after its transaction commits, and while a batch comes back
   full the next write purges the next one, so a backlog is worked off without ever landing on one request;
   :meth:`PostgresCacheAdapter.purge_expired` deletes them all on demand.
+- **Its own namespace.** The entries live under a key prefix, *namespace* (``pyfly:cache:`` by default), as
+  on Redis: keys passed to and returned by the adapter are the cache's own (``product:1`` is stored as
+  ``pyfly:cache:product:1``), :meth:`PostgresCacheAdapter.clear` deletes the namespace only, never the whole
+  table, and :meth:`PostgresCacheAdapter.with_namespace` gives a cache of its own on the same table that the
+  root cache's ``clear()`` never touches. An empty namespace declares that the cache owns the whole table.
+  Where the key column has a length (MySQL, MariaDB, SQL Server, Oracle), a key is at most
+  :data:`MAX_KEY_LENGTH` characters *with* the namespace, and a longer one is refused with ``ValueError``
+  before anything is written (the CQRS query cache and the cache decorators log it and do not cache).
 - **One round trip.** Every operation runs through :func:`~pyfly.data.transaction.infrastructure_unit`:
-  outside a unit of work a single statement runs on an autocommit connection on PostgreSQL. Inside a unit
-  on the cache's datasource it joins that unit, so an entry written by a transaction that rolls back is
-  rolled back too. A read-only unit cannot write: a write made inside one gets a unit of its own.
+  outside a unit of work a single statement runs on an autocommit connection on PostgreSQL.
+
+Called directly inside a unit of work on the cache's datasource, an operation joins that unit, so an entry
+written by a transaction that rolls back is rolled back too (a read-only unit cannot write: a write made
+inside one gets a unit of its own). Through the cache decorators and the CQRS query cache
+(:class:`~pyfly.cache.transaction.TransactionAwareCache`) it does not: their writes wait for the unit's
+commit, and what runs at once (reads, ``put_if_absent``, ``evict_if_present``, ``invalidate``) runs outside
+the caller's unit (:func:`~pyfly.data.transaction.outside_transaction`), each statement in a short unit of
+its own. That costs one more pooled connection of the cache's datasource per cache statement while a
+business unit holds its own: size the pool for it.
 """
 
 from __future__ import annotations
@@ -68,46 +83,75 @@ _UNBOUNDED_KEY_DIALECTS = frozenset({"postgresql", "sqlite"})
 """Where the key column is ``TEXT``; elsewhere it is ``VARCHAR(512)``."""
 
 MAX_KEY_LENGTH = 512
-"""The longest key the table takes where the key column needs a length (MySQL, MariaDB, SQL Server, Oracle)."""
+"""The longest stored key (the namespace included) the table takes where the key column needs a length
+(MySQL, MariaDB, SQL Server, Oracle)."""
+
+DEFAULT_NAMESPACE = "pyfly:cache:"
+"""The key prefix of the cache's entries in the table (as the Redis adapter's)."""
+
+
+def _glob_tokens(pattern: str) -> list[tuple[str, bool]]:
+    """The characters of a glob *pattern*, each with whether it is a wildcard (``*`` or ``?``); a backslash
+    makes the next character literal, as in a Redis ``MATCH`` pattern."""
+    tokens: list[tuple[str, bool]] = []
+    escaped = False
+    for ch in pattern:
+        if escaped:
+            tokens.append((ch, False))
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        else:
+            tokens.append((ch, ch in ("*", "?")))
+    if escaped:
+        tokens.append(("\\", False))
+    return tokens
+
+
+def _like_literal(text: str) -> str:
+    """*text* matched literally in a LIKE pattern escaped with ``!``."""
+    return "".join(_LIKE_ESCAPE + ch if ch in ("%", "_", _LIKE_ESCAPE) else ch for ch in text)
 
 
 def _glob_to_like(pattern: str) -> str:
-    """Translate a glob pattern (``*`` / ``?``) to a SQL LIKE pattern (``%`` / ``_``), escaping with ``!``."""
+    """Translate a glob pattern (``*`` / ``?``; ``\\`` escapes the next character) to a SQL LIKE pattern
+    (``%`` / ``_``), escaping with ``!``."""
     result: list[str] = []
-    for ch in pattern:
-        if ch == "*":
-            result.append("%")
-        elif ch == "?":
-            result.append("_")
-        elif ch in ("%", "_", _LIKE_ESCAPE):
-            result.append(_LIKE_ESCAPE + ch)
+    for ch, wildcard in _glob_tokens(pattern):
+        if wildcard:
+            result.append("%" if ch == "*" else "_")
         else:
-            result.append(ch)
+            result.append(_like_literal(ch))
     return "".join(result)
 
 
 def _like_prefix(prefix: str) -> str:
     """A LIKE pattern matching every key that starts with *prefix* (taken literally)."""
-    escaped = "".join(_LIKE_ESCAPE + ch if ch in ("%", "_", _LIKE_ESCAPE) else ch for ch in prefix)
-    return escaped + "%"
+    return _like_literal(prefix) + "%"
+
+
+def _sqlite_glob_literal(text: str) -> str:
+    """*text* matched literally in a SQLite ``GLOB`` pattern."""
+    return "".join(f"[{ch}]" if ch in ("*", "?", "[") else ch for ch in text)
 
 
 def _glob_to_sqlite_glob(pattern: str) -> str:
-    """Translate a glob pattern (``*`` / ``?``, every other character literal) to SQLite's ``GLOB``, where
-    ``[`` opens a character class and is matched literally as ``[[]``."""
-    return "".join("[[]" if ch == "[" else ch for ch in pattern)
+    """Translate a glob pattern (``*`` / ``?``; ``\\`` escapes the next character, every other character is
+    literal) to SQLite's ``GLOB``, where ``[`` opens a character class and is matched literally as ``[[]``."""
+    return "".join(ch if wildcard else _sqlite_glob_literal(ch) for ch, wildcard in _glob_tokens(pattern))
 
 
 def _sqlite_glob_prefix(prefix: str) -> str:
     """A SQLite ``GLOB`` pattern matching every key that starts with *prefix* (taken literally)."""
-    return "".join(f"[{ch}]" if ch in ("*", "?", "[") else ch for ch in prefix) + "*"
+    return _sqlite_glob_literal(prefix) + "*"
 
 
 class PostgresCacheAdapter:
     """Cache adapter backed by a SQL table (see the module documentation).
 
     Values are serialized to JSON bytes before storage (identical to the Redis adapter) so any
-    JSON-compatible Python object can be cached transparently.
+    JSON-compatible Python object can be cached transparently; a live ORM object, or a value JSON cannot
+    represent, raises :class:`~pyfly.cache.serialization.CacheValueError` before anything is written.
 
     Args:
         engine: where the entries live: an ``AsyncEngine``, a registry ``DataSource`` or a datasource name
@@ -116,6 +160,10 @@ class PostgresCacheAdapter:
         purge_interval: how often a write purges expired rows (``None``: only :meth:`purge_expired` does).
         table_name: the table (declared on the framework metadata under that name).
         clock: the current UTC instant (tests pass their own).
+        namespace: the key prefix of this cache's entries in the table (``pyfly:cache:``); a ``:`` is
+            appended when it does not end with one, so :meth:`clear` never reaches a namespace that merely
+            starts with it. An empty namespace declares that the cache owns the whole table: :meth:`clear`
+            then empties it, the caches of :meth:`with_namespace` included.
     """
 
     #: How many expired rows one purge statement deletes.
@@ -129,8 +177,11 @@ class PostgresCacheAdapter:
         purge_interval: timedelta | None = timedelta(seconds=60),
         table_name: str = "pyfly_cache_entries",
         clock: Callable[[], datetime] | None = None,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> None:
         self._target = engine
+        self._namespace = namespace if not namespace or namespace.endswith(":") else f"{namespace}:"
+        self._shared_namespace_reported = False
         self._create_table = create_table
         self._purge_interval = purge_interval.total_seconds() if purge_interval is not None else None
         self._table_name = table_name
@@ -162,6 +213,43 @@ class PostgresCacheAdapter:
             await self.start()
 
     @property
+    def namespace(self) -> str:
+        """The key prefix of this cache's entries in the table."""
+        return self._namespace
+
+    def with_namespace(self, name: str) -> PostgresCacheAdapter:
+        """A cache dedicated to *name* on the same table and datasource, disjoint from this one: :meth:`clear`
+        never touches it (``pyfly:cache.<name>:`` for the default namespace).
+
+        With an empty namespace this cache owns the whole table, and its :meth:`clear` deletes the dedicated
+        cache (``<name>:``) too; the first one made logs a ``cache_not_dedicated`` WARNING. Give the cache a
+        namespace to keep idempotency records and orchestration state through a clear."""
+        if not name:
+            raise ValueError("A dedicated cache needs a name")
+        if not self._namespace and not self._shared_namespace_reported:
+            self._shared_namespace_reported = True
+            _logger.warning(
+                "cache_not_dedicated: this PostgresCacheAdapter has an empty namespace (it owns the whole table), "
+                "so its clear() also deletes the dedicated cache %r and every other one; give it a namespace",
+                name,
+            )
+        base = self._namespace[:-1] if self._namespace.endswith(":") else self._namespace
+        dedicated = PostgresCacheAdapter(
+            self._target,
+            create_table=self._create_table,
+            purge_interval=timedelta(seconds=self._purge_interval) if self._purge_interval is not None else None,
+            table_name=self._table_name,
+            clock=self._clock,
+            namespace=f"{base}.{name}:" if base else f"{name}:",
+        )
+        dedicated._started = self._started
+        return dedicated
+
+    def _key(self, key: str) -> str:
+        """The stored key of *key*: this cache's namespace, then the key."""
+        return self._namespace + key
+
+    @property
     def engine(self) -> AsyncEngine:
         """The engine of the cache's datasource."""
         from pyfly.data.relational.framework_schema import framework_engine
@@ -184,23 +272,43 @@ class PostgresCacheAdapter:
             self._dialect = backend_name(self.engine)
         return self._dialect
 
-    def _check_key(self, key: str) -> None:
-        if len(key) > MAX_KEY_LENGTH and self._backend not in _UNBOUNDED_KEY_DIALECTS:
-            raise ValueError(f"Cache keys are at most {MAX_KEY_LENGTH} characters on {self._backend}: {key[:40]!r}...")
+    def _check_key(self, stored: str) -> None:
+        """Refuse a stored key (namespace included) longer than the key column takes, before any write."""
+        if len(stored) > MAX_KEY_LENGTH and self._backend not in _UNBOUNDED_KEY_DIALECTS:
+            raise ValueError(
+                f"Cache keys are at most {MAX_KEY_LENGTH} characters on {self._backend}, the namespace "
+                f"{self._namespace!r} included: {stored[:40]!r}... has {len(stored)}"
+            )
 
     def _key_matches(self, pattern: str, *, prefix: bool = False) -> ColumnElement[bool]:
-        """The keys matching glob *pattern*, or starting with *pattern* with *prefix*, case-sensitively on
-        every backend: SQLite's ``LIKE`` ignores ASCII case, so SQLite gets its ``GLOB``."""
+        """This cache's keys matching glob *pattern*, or starting with *pattern* (taken literally) with *prefix*,
+        case-sensitively on every backend: SQLite's ``LIKE`` ignores ASCII case, so SQLite gets its ``GLOB``.
+        The namespace is matched literally in front of *pattern*."""
         column = self._table.c.cache_key
         if self._backend == "sqlite":
-            return column.bool_op("GLOB")(_sqlite_glob_prefix(pattern) if prefix else _glob_to_sqlite_glob(pattern))
-        return column.like(_like_prefix(pattern) if prefix else _glob_to_like(pattern), escape=_LIKE_ESCAPE)
+            namespace = _sqlite_glob_literal(self._namespace)
+            if prefix:
+                return column.bool_op("GLOB")(namespace + _sqlite_glob_prefix(pattern))
+            return column.bool_op("GLOB")(namespace + _glob_to_sqlite_glob(pattern))
+        namespace = _like_literal(self._namespace)
+        like = _like_prefix(pattern) if prefix else _glob_to_like(pattern)
+        return column.like(namespace + like, escape=_LIKE_ESCAPE)
+
+    def _own(self) -> ColumnElement[bool] | None:
+        """This cache's rows (``None``: the whole table, for an empty namespace)."""
+        return self._key_matches("", prefix=True) if self._namespace else None
 
     def _live(self, now: datetime) -> ColumnElement[bool]:
         from sqlalchemy import or_
 
         expires_at = self._table.c.expires_at
         return or_(expires_at.is_(None), expires_at > now)
+
+    @contextlib.asynccontextmanager
+    async def _reading(self) -> AsyncIterator[Any]:
+        """The session a read runs on: the unit of work bound for the cache's datasource, or a short read unit."""
+        async with infrastructure_unit(self._target, read_only=True) as session:
+            yield session
 
     @contextlib.asynccontextmanager
     async def _writing(self, *, single_statement: bool) -> AsyncIterator[Any]:
@@ -228,9 +336,10 @@ class PostgresCacheAdapter:
         from pyfly.data.relational.upsert import native_upsert, upsert
 
         await self._ensure_started()
-        self._check_key(key)
+        stored_key = self._key(key)
+        self._check_key(stored_key)
         values = {
-            "cache_key": key,
+            "cache_key": stored_key,
             "value": cache_dumps(value),
             "expires_at": self._clock() + ttl if ttl is not None else None,
         }
@@ -244,8 +353,8 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = select(table.c.value).where(table.c.cache_key == key, self._live(self._clock()))
-        async with infrastructure_unit(self._target, read_only=True) as session:
+        statement = select(table.c.value).where(table.c.cache_key == self._key(key), self._live(self._clock()))
+        async with self._reading() as session:
             raw = (await session.execute(statement)).scalar_one_or_none()
 
         if raw is None:
@@ -271,10 +380,15 @@ class PostgresCacheAdapter:
         from pyfly.data.relational.upsert import insert_if_absent, native_conditional_insert, take_over
 
         await self._ensure_started()
-        self._check_key(key)
+        stored_key = self._key(key)
+        self._check_key(stored_key)
         now = self._clock()
         table = self._table
-        values = {"cache_key": key, "value": cache_dumps(value), "expires_at": now + ttl if ttl is not None else None}
+        values = {
+            "cache_key": stored_key,
+            "value": cache_dumps(value),
+            "expires_at": now + ttl if ttl is not None else None,
+        }
         expired = table.c.expires_at <= now
         if native_conditional_insert(self._backend):
             async with self._writing(single_statement=True) as session:
@@ -295,14 +409,14 @@ class PostgresCacheAdapter:
         await self._ensure_started()
         table = self._table
         async with self._writing(single_statement=True) as session:
-            result = await session.execute(delete(table).where(table.c.cache_key == key))
+            result = await session.execute(delete(table).where(table.c.cache_key == self._key(key)))
         existed = bool(result.rowcount > 0)
         if existed:
             self._evictions += 1
         return existed
 
     async def evict_by_prefix(self, prefix: str) -> int:
-        """Delete every key starting with *prefix*. Returns the number deleted."""
+        """Delete every key of this cache starting with *prefix* (taken literally). Returns the number deleted."""
         from sqlalchemy import delete
 
         await self._ensure_started()
@@ -320,17 +434,24 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = select(literal(1)).where(table.c.cache_key == key, self._live(self._clock()))
-        async with infrastructure_unit(self._target, read_only=True) as session:
+        statement = select(literal(1)).where(table.c.cache_key == self._key(key), self._live(self._clock()))
+        async with self._reading() as session:
             return (await session.execute(statement)).first() is not None
 
     async def clear(self) -> None:
-        """Remove all entries from the cache table."""
+        """Delete this cache's entries (its namespace) and nothing else in the table: the caches of
+        :meth:`with_namespace`, and whatever else shares the table, survive. With an empty namespace the cache
+        owns the table, and this empties it."""
         from sqlalchemy import delete
 
         await self._ensure_started()
+        statement = delete(self._table)
+        own = self._own()
+        if own is not None:
+            statement = statement.where(own)
         async with self._writing(single_statement=True) as session:
-            await session.execute(delete(self._table))
+            result = await session.execute(statement)
+        self._evictions += int(result.rowcount)
 
     # ------------------------------------------------------------------
     # Expired rows
@@ -392,28 +513,34 @@ class PostgresCacheAdapter:
     # ------------------------------------------------------------------
 
     async def get_keys(self, pattern: str = "*", limit: int = 100) -> list[str]:
-        """Return up to *limit* non-expired keys matching the glob *pattern*."""
+        """Return up to *limit* of this cache's non-expired keys matching the glob *pattern* (``\\`` escapes a
+        wildcard), without the namespace."""
         from sqlalchemy import select
 
         await self._ensure_started()
         table = self._table
         statement = select(table.c.cache_key).where(self._key_matches(pattern), self._live(self._clock())).limit(limit)
-        async with infrastructure_unit(self._target, read_only=True) as session:
-            return [str(key) for key in (await session.execute(statement)).scalars().all()]
+        async with self._reading() as session:
+            keys = (await session.execute(statement)).scalars().all()
+        return [str(key)[len(self._namespace) :] for key in keys]
 
     async def get_stats(self) -> dict[str, Any]:
         """Return cache statistics including hit-rate."""
         from sqlalchemy import func, select
 
         await self._ensure_started()
+        own = self._own()
         statement = select(func.count()).select_from(self._table).where(self._live(self._clock()))
-        async with infrastructure_unit(self._target, read_only=True) as session:
+        if own is not None:
+            statement = statement.where(own)
+        async with self._reading() as session:
             size = int((await session.execute(statement)).scalar() or 0)
 
         requests = self._hits + self._misses
         return {
             "size": size,
             "type": "postgres",
+            "namespace": self._namespace,
             "requests": requests,
             "hits": self._hits,
             "misses": self._misses,
