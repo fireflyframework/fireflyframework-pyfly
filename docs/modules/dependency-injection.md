@@ -1972,6 +1972,11 @@ class ReportGenerator:
 class. The bean is still a normal singleton (or whatever its scope is) once resolved — only
 its *creation* is deferred.
 
+A lifecycle bean (one that defines `start()` and `stop()`) is started only if it exists when the
+context starts its lifecycle beans. A `@lazy` one first resolved after `start()` is neither started
+nor stopped (its `start()` cannot be awaited in a synchronous resolution), and the context logs a
+`lifecycle_bean_created_after_start` warning naming it. Drop `@lazy` from a lifecycle bean.
+
 ### Generics-aware injection
 
 When you depend on a parametrized generic interface such as `Repository[User, UUID]`, the

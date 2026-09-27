@@ -41,7 +41,7 @@ from sqlalchemy import Integer, String, event, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.orm import Mapped, mapped_column  # noqa: E402
 
-from pyfly.container import Provider, bean, component, configuration, service  # noqa: E402
+from pyfly.container import Provider, bean, component, configuration, lazy, service  # noqa: E402
 from pyfly.container.exceptions import BeanCreationNotAllowedError  # noqa: E402
 from pyfly.container.refresh_scope import refresh_scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
@@ -489,6 +489,32 @@ async def test_a_scanned_component_with_start_and_stop_is_started_and_stopped() 
     await ctx.stop()
 
     assert EVENTS == ["poller.start", "poller.stop"]
+
+
+@lazy
+@component
+class _LazyPoller:
+    async def start(self) -> None:
+        EVENTS.append("lazy.start")
+
+    async def stop(self) -> None:
+        EVENTS.append("lazy.stop")
+
+
+async def test_a_lazy_lifecycle_bean_created_after_start_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """The context starts the lifecycle beans that exist when it starts; a @lazy one resolved later is
+    neither started nor stopped, and that is logged instead of passing silently."""
+    import logging
+
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_LazyPoller)
+    await ctx.start()
+    with caplog.at_level(logging.WARNING, logger="pyfly.context.application_context"):
+        ctx.get_bean(_LazyPoller)
+    await ctx.stop()
+
+    assert EVENTS == []
+    assert "lifecycle_bean_created_after_start" in caplog.text
 
 
 # ---------------------------------------------------------------------------

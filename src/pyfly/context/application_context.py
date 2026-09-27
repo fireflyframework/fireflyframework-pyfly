@@ -170,6 +170,8 @@ class ApplicationContext:
         self._registered_post_processors: list[BeanPostProcessor] = []
         #: The lifecycle beans this run started, in start order.
         self._lifecycle_beans: list[Any] = []
+        #: Whether this run has started its lifecycle beans (step 5b): one created later is not managed.
+        self._lifecycle_started = False
         #: Creation sequence of each singleton this run built, by instance identity. A bean is always
         #: created after the beans it depends on, so reverse creation order is reverse dependency order.
         self._creation_order: dict[int, int] = {}
@@ -346,6 +348,7 @@ class ApplicationContext:
         # the batched passes of step 5 run, the hook only collects the non-singleton ones (the
         # singletons are on their registrations) so that step 5 processes each once.
         self._startup_created = []
+        self._lifecycle_started = False
         self._container._post_create_hook = self._on_bean_created
 
         # Whatever already carries an instance was HANDED to the container, not built by it — the
@@ -463,6 +466,7 @@ class ApplicationContext:
         # 5b. Start the lifecycle beans that did not exist at step 2e (scanned stereotypes, beans a
         # @bean did not pull in). They used to be neither started nor stopped.
         await self._start_lifecycle_beans()
+        self._lifecycle_started = True
 
         # 6. Wire decorator-based beans to their targets
         self._wire_app_event_listeners()
@@ -660,6 +664,7 @@ class ApplicationContext:
         self._event_bus.unsubscribe_owners(self._wired_listener_owners)
         self._wired_listener_owners = []
         self._lifecycle_beans = []
+        self._lifecycle_started = False
         self._post_processors = list(self._registered_post_processors)
         self._container._post_create_hook = None
         # The proxies handed to the released singletons; the next run's registrations get their own.
@@ -1709,6 +1714,16 @@ class ApplicationContext:
         instance = self._post_init_lazy_bean(instance, reg)
         if reg.scope == Scope.SINGLETON:
             self._note_created(instance)
+            if self._lifecycle_started and self._has_lifecycle_methods(instance):
+                # A @lazy singleton first resolved after start(): the context cannot await its start()
+                # in a synchronous resolution, so it neither starts nor stops it. Say so.
+                logger.warning(
+                    "lifecycle_bean_created_after_start",
+                    extra={
+                        "bean": reg.display_name,
+                        "hint": "the context neither starts nor stops it; make it eager (drop @lazy)",
+                    },
+                )
         return instance
 
     def _post_init_lazy_bean(self, instance: Any, reg: Registration) -> Any:
