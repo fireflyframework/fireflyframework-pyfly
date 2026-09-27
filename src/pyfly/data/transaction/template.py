@@ -232,18 +232,22 @@ async def _after_completion(unit: UnitOfWork, status: CompletionStatus) -> bool:
     try:
         if status is CompletionStatus.COMMITTED:
             for synchronization in list(unit.synchronizations):
-                cancelled |= await _run_callback(unit, "after_commit", synchronization.after_commit())
+                cancelled |= await _run_callback(unit, "after_commit", synchronization.after_commit)
         for synchronization in list(unit.synchronizations):
-            cancelled |= await _run_callback(unit, "after_completion", synchronization.after_completion(status))
+            cancelled |= await _run_callback(unit, "after_completion", synchronization.after_completion, status)
     finally:
         reset_state(token)
     return cancelled
 
 
-async def _run_callback(unit: UnitOfWork, phase: str, callback: Awaitable[None]) -> bool:
-    """Await *callback* shielded; log and count its failure (never raised: the unit is complete). Returns
-    whether the calling task was cancelled while it ran."""
-    _result, error, cancelled = await run_shielded(callback)
+async def _run_callback(unit: UnitOfWork, phase: str, callback: Callable[..., Awaitable[None]], *args: Any) -> bool:
+    """Run ``callback(*args)`` shielded; log and count its failure (never raised: the unit is complete).
+    Returns whether the calling task was cancelled while it ran."""
+
+    async def call() -> None:
+        await callback(*args)
+
+    _result, error, cancelled = await run_shielded(call())
     if error is not None:
         _record_synchronization_failure(unit, phase, error)
     return cancelled
