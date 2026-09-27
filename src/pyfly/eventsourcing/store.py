@@ -486,7 +486,7 @@ class SqlAlchemyEventStore:
                         page = page.where(table.c.global_position < _xid8_horizon())
                     rows = (await session.execute(page.order_by(table.c.global_position).limit(limit))).all()
                     return [self._envelope(payload, position) for payload, position in rows]
-            await self._number_committed(manager, all_rounds=False)
+            await self._number_committed(manager, at_least=limit)
             probe = False
 
     async def latest_version(self, aggregate_id: str) -> int:
@@ -589,11 +589,13 @@ class SqlAlchemyEventStore:
             )
         await self._number_committed(manager)
 
-    async def _number_committed(self, manager: TransactionManager, *, all_rounds: bool = True) -> None:
+    async def _number_committed(self, manager: TransactionManager, *, at_least: int | None = None) -> None:
         """Give the committed events that have no global position theirs, in units of their own, one
         :data:`_NUMBERING_BATCH` at a time (``READ COMMITTED`` where the backend has it: each round sees every
-        event committed before it, and no snapshot conflict can fail it). A page read runs one round (*all_rounds*
-        false), so a backlog is numbered while the pages are read rather than before the first one."""
+        event committed before it, and no snapshot conflict can fail it), until none is left or, with *at_least*,
+        that many have been numbered: a page read numbers what its page needs (its *limit*), so a backlog is
+        numbered while the pages are read rather than before the first one, and a page is only short when the
+        stream has no more committed events."""
         isolation = Isolation.READ_COMMITTED
         if not manager.capabilities.supports_isolation(isolation):
             isolation = Isolation.DEFAULT  # SQLite: one writer at a time, which is stronger
@@ -605,7 +607,7 @@ class SqlAlchemyEventStore:
                     assert unit is not None
                     count = await self._number_round(unit.resource)
                 numbered += count
-                if count < _NUMBERING_BATCH or not all_rounds:
+                if count < _NUMBERING_BATCH or (at_least is not None and numbered >= at_least):
                     break
         _logger.debug("event_store_events_numbered", extra={"table": self._table_name, "events": numbered})
 

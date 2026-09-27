@@ -395,6 +395,43 @@ async def test_catch_up_runs_at_full_speed_with_the_default_settings(relational_
     assert elapsed < 5.0, f"1000 events took {elapsed:.2f}s ({1000 / elapsed:.0f} events/s)"
 
 
+async def test_catch_up_with_pages_larger_than_a_numbering_round_never_sleeps_while_behind(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Review of WP08: a page read numbered one round (1000 events) of a backlog, so a page larger than that came
+    back short and the runner slept a poll interval every 1000 events, however far behind it was."""
+    setup = await _setup(relational_backend)
+    assert setup.store.position_strategy == "head-row"
+    for block in range(5):
+        await setup.store.append(f"bulk-{block}", "Account", [_deposit() for _ in range(1000)], expected_version=0)
+    seen: list[str] = []
+
+    async def count(event: StoredEventEnvelope) -> None:
+        seen.append(event.event_id)
+
+    checkpoints = setup.checkpoints()
+    runner = ProjectionRunner(
+        FunctionProjection("deposits", count),
+        setup.store,
+        checkpoints=checkpoints,
+        batch_size=2000,
+        poll_interval_s=10.0,
+    )
+    started = time.monotonic()
+    await runner.start()
+    try:
+        # Not setup.caught_up(): its last_position() would number the whole backlog before the runner reads it.
+        while (await checkpoints.position("deposits") or 0) < 5000:
+            assert time.monotonic() - started < 30.0, f"the projection did not catch up ({len(seen)} events)"
+            await asyncio.sleep(0.02)
+    finally:
+        await runner.stop()
+    elapsed = time.monotonic() - started
+
+    assert len(seen) == 5000 and len(set(seen)) == 5000
+    assert elapsed < 10.0, f"the runner slept a poll interval while behind: {elapsed:.2f}s for 5000 events"
+
+
 async def test_a_rebuild_is_an_explicit_reset_and_a_new_projection_can_start_at_the_head(
     relational_backend: RelationalBackend,
 ) -> None:
