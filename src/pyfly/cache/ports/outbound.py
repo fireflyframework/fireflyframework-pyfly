@@ -35,6 +35,9 @@ class CacheAdapter(Protocol):
     - **clear() is this cache's own.** It removes this cache's entries and nothing else: an adapter over a
       store other data may share (a Redis database, a database table) deletes its namespace only and never
       flushes the store.
+    - **Expired entries do not accumulate.** An entry past its TTL is never returned, and the store drops it
+      even when no one reads it again (Redis expires keys itself, the in-memory cache sweeps them): the
+      CQRS query cache writes one entry per caller's scope and relies on TTLs to bound its size.
     - **Named caches (optional).** ``with_namespace(name)`` returns a cache disjoint from this one, whose
       entries this cache's ``clear()`` never touches (see :func:`~pyfly.cache.namespaces.dedicated_cache`).
       Durable consumers (idempotency records, orchestration state) keep their entries there.

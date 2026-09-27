@@ -93,6 +93,10 @@ Every built-in adapter keeps these rules, and a custom adapter should too:
 * **`clear()` is this cache's own.** It removes this cache's entries and nothing
   else. An adapter over a store that other data may share (a Redis database, a
   database table) deletes its own namespace and never flushes the store.
+* **Expired entries do not accumulate.** An entry past its TTL is never
+  returned, and the store drops it even when no one reads it again (Redis
+  expires keys itself, the in-memory cache sweeps them). The CQRS query cache
+  writes one entry per caller's scope and relies on TTLs to bound its size.
 * **Named caches (optional).** `with_namespace(name)` returns a cache disjoint
   from this one, which this cache's `clear()` never touches. See
   [Named Caches](#named-caches-regions-and-dedicated-caches).
