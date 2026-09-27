@@ -359,6 +359,10 @@ class DatabaseEventBus:
         from pyfly.data.transaction import after_commit
 
         await self._resolve()
+        if self._relay.subscriptions and not self._relay.registered:
+            # This process consumes the group, and its relay has not registered it yet (a publish right after the
+            # context subscribed the listeners): register it here, in this unit, so this event is owed to it too.
+            await self._relay.register()
         envelope = EventEnvelope(event_type=event_type, payload=payload, destination=destination, headers=headers or {})
         await self._outbox.append(envelope)
         await after_commit(self._relay.wake)

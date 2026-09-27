@@ -147,6 +147,96 @@ class Retention:
 
 
 @dataclass(frozen=True)
+class OutboxSettings:
+    """The settings of an outbox bus, from ``pyfly.eda.outbox.*`` (see :meth:`from_config`)."""
+
+    poll_interval: float = 5.0
+    batch_size: int = 100
+    claim_timeout: float = 300.0
+    handler_timeout: float | None = 60.0
+    start_position: StartPosition = StartPosition.LATEST
+    error_strategy: ErrorStrategy = ErrorStrategy.DEAD_LETTER
+    retention: Retention = Retention()
+    create_tables: bool | None = None
+    notify: bool | None = None
+
+    @classmethod
+    def from_config(cls, config: Any, prefix: str = "pyfly.eda.outbox") -> OutboxSettings:
+        """The settings under *prefix*: ``poll-interval`` (``5s``), ``batch-size`` (``100``), ``claim-timeout``
+        (``300s``), ``handler-timeout`` (``60s``; ``0`` or ``none``: unbounded), ``start`` (``latest`` or
+        ``earliest``), ``error-strategy`` (``DEAD_LETTER``), ``retention.delivered`` (``1h``; ``none``: keep),
+        ``retention.max-age`` (unset: never), ``retention.interval`` (``1m``), ``retention.batch-size``
+        (``1000``), ``auto-create-tables`` and ``notify`` (unset: the provider decides). Durations are seconds
+        or ``500ms``, ``90s``, ``5m``, ``2h``. A value that does not parse raises ``ValueError`` naming the key.
+        """
+        from pyfly.config.properties.data import parse_bool, parse_int
+        from pyfly.resilience.registry import parse_duration
+
+        defaults = cls()
+
+        def raw(key: str) -> Any:
+            value = config.get(f"{prefix}.{key}")
+            return None if value is None or (isinstance(value, str) and not value.strip()) else value
+
+        def seconds(key: str, default: float | None, *, optional: bool = False) -> float | None:
+            value = raw(key)
+            if value is None:
+                return default
+            if optional and str(value).strip().lower() in ("none", "off", "0"):
+                return None
+            try:
+                parsed = parse_duration(value).total_seconds()
+            except ValueError as error:
+                raise ValueError(f"{prefix}.{key}: {error}") from None
+            if parsed < 0:
+                raise ValueError(f"{prefix}.{key} must not be negative, got {value!r}")
+            return parsed
+
+        def span(key: str, default: timedelta | None) -> timedelta | None:
+            value = seconds(key, None if default is None else default.total_seconds(), optional=True)
+            return None if value is None else timedelta(seconds=value)
+
+        def flag(key: str) -> bool | None:
+            value = raw(key)
+            return None if value is None else parse_bool(value, f"{prefix}.{key}")
+
+        strategy = raw("error-strategy")
+        try:
+            error_strategy = (
+                defaults.error_strategy if strategy is None else ErrorStrategy(str(strategy).strip().upper())
+            )
+        except ValueError:
+            choices = ", ".join(member.value for member in ErrorStrategy)
+            raise ValueError(f"{prefix}.error-strategy must be one of {choices}, got {strategy!r}") from None
+        batch = raw("batch-size")
+        prune_batch = raw("retention.batch-size")
+        poll_interval = seconds("poll-interval", defaults.poll_interval)
+        claim_timeout = seconds("claim-timeout", defaults.claim_timeout)
+        assert poll_interval is not None and claim_timeout is not None
+        interval = span("retention.interval", defaults.retention.interval)
+        return cls(
+            poll_interval=poll_interval,
+            batch_size=defaults.batch_size if batch is None else parse_int(batch, f"{prefix}.batch-size"),
+            claim_timeout=claim_timeout,
+            handler_timeout=seconds("handler-timeout", defaults.handler_timeout, optional=True),
+            start_position=StartPosition.of(raw("start") or defaults.start_position),
+            error_strategy=error_strategy,
+            retention=Retention(
+                delivered=span("retention.delivered", defaults.retention.delivered),
+                max_age=span("retention.max-age", None),
+                interval=interval if interval is not None else defaults.retention.interval,
+                batch_size=(
+                    defaults.retention.batch_size
+                    if prune_batch is None
+                    else parse_int(prune_batch, f"{prefix}.retention.batch-size")
+                ),
+            ),
+            create_tables=flag("auto-create-tables"),
+            notify=flag("notify"),
+        )
+
+
+@dataclass(frozen=True)
 class PruneResult:
     """What one retention sweep deleted: events every group had handled, and events past their maximum age
     (with *undelivered* deliveries still owed for them)."""
@@ -1195,13 +1285,25 @@ class OutboxRelay:
         await self.register()
         return await self._round(in_loop=self._task is not None and asyncio.current_task() is self._task)
 
+    @property
+    def registered(self) -> bool:
+        """Whether the relay registered its consumer group (or does not register one)."""
+        return self._registered or not self._register
+
     async def register(self) -> None:
-        """Register the relay's consumer group for its destinations, once (a registering relay does it before
-        its first claim, and a bus when it starts with subscriptions): from then on every event published to
-        them is owed to the group, whether or not a relay runs."""
-        if self._register and not self._registered:
-            await self._outbox.register(self._group, self._destinations, start=self._start_position)
-            self._registered = True
+        """Register the relay's consumer group for its destinations, once: from then on every event published to
+        them is owed to the group, whether or not a relay runs. A registering relay does it before its first
+        claim, a bus when it starts with subscriptions, and a bus's publish when the group has subscriptions
+        and is not registered yet: then in the publisher's unit of work, which the registration is part of."""
+        if self.registered:
+            return
+        from pyfly.data.transaction import after_commit
+
+        await self._outbox.register(self._group, self._destinations, start=self._start_position)
+        await after_commit(self._mark_registered)
+
+    def _mark_registered(self) -> None:
+        self._registered = True
 
     async def _round(self, *, in_loop: bool) -> int:
         claimed = await self._outbox.claim(
