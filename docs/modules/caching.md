@@ -157,9 +157,10 @@ The `expires_at` is computed using `time.monotonic()` plus the TTL in seconds.
 * On `exists()`, the same expiration check is performed.
 * If `ttl` is `None`, the entry never expires.
 
-This is a **lazy expiration** strategy -- expired entries are not removed until
-they are accessed. This keeps the implementation simple and fast, at the cost
-of entries consuming memory until their next read.
+Expired entries are also swept from memory whenever the number of entries has
+doubled since the last sweep (from 1024 entries on), a cost amortized over the
+puts. Entries that expire and are never read again do not accumulate, so an
+unbounded cache (`max_size=None`) is bounded by its TTLs.
 
 ---
 

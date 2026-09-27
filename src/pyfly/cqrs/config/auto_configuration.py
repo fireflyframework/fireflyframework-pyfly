@@ -19,6 +19,7 @@ Mirrors Java's ``CqrsAutoConfiguration``.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.container.bean import bean
@@ -140,11 +141,16 @@ class CqrsAutoConfiguration:
         )
 
     @bean
-    def query_cache_adapter(self, cache: CacheAdapter | None = None) -> QueryCacheAdapter:
+    def query_cache_adapter(
+        self, cache: CacheAdapter | None = None, props: CqrsProperties | None = None
+    ) -> QueryCacheAdapter:
         # Inject the pyfly.cache CacheAdapter bean when the cache subsystem is
         # active; otherwise the adapter degrades to a silent no-op. Previously no
         # CacheAdapter was ever passed, so @cacheable queries were never cached.
-        return QueryCacheAdapter(cache=cache)
+        # Scoped keys' generations expire with the bus's default TTL until the
+        # adapter has seen a handler's own.
+        generation_ttl = timedelta(seconds=props.query.cache_ttl) if props is not None else None
+        return QueryCacheAdapter(cache=cache, generation_ttl=generation_ttl)
 
     @bean
     @conditional_on_property("pyfly.cqrs.cache.invalidation.enabled", having_value="true", match_if_missing=True)

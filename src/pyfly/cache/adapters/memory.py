@@ -22,6 +22,9 @@ from typing import Any
 
 from pyfly.cache.serialization import Copy, encode_copy
 
+_SWEEP_FLOOR = 1024
+"""The entry count at which :class:`InMemoryCache` first drops its expired entries."""
+
 
 class InMemoryCache:
     """In-memory cache with optional TTL and LRU bounding.
@@ -35,6 +38,10 @@ class InMemoryCache:
     SQLAlchemy-mapped instance or a Beanie document, also inside a container or a DTO) is refused with
     :class:`~pyfly.cache.serialization.CacheValueError`: cache a DTO built from it.
 
+    An expired entry is dropped when it is read, and every expired entry is dropped whenever the number of
+    entries doubles since the last sweep (amortized over the puts), so expired entries no one reads again
+    do not accumulate.
+
     Args:
         max_size: When set, the cache holds at most this many entries and evicts
             the least-recently-used entry on overflow. ``None`` (default) leaves
@@ -44,6 +51,7 @@ class InMemoryCache:
     def __init__(self, max_size: int | None = None) -> None:
         self._store: OrderedDict[str, tuple[Copy, float | None]] = OrderedDict()
         self._max_size = max_size
+        self._sweep_at = _SWEEP_FLOOR
         self._hits = 0
         self._misses = 0
         self._evictions = 0
@@ -77,10 +85,19 @@ class InMemoryCache:
             expires_at = time.monotonic() + ttl.total_seconds()
         self._store[key] = (stored, expires_at)
         self._store.move_to_end(key)
+        if len(self._store) >= self._sweep_at:
+            self._drop_expired()
         if self._max_size is not None:
             while len(self._store) > self._max_size:
                 self._store.popitem(last=False)  # evict least-recently-used
                 self._evictions += 1
+
+    def _drop_expired(self) -> None:
+        now = time.monotonic()
+        expired = [key for key, (_, expires_at) in self._store.items() if expires_at is not None and now > expires_at]
+        for key in expired:
+            del self._store[key]
+        self._sweep_at = max(_SWEEP_FLOOR, 2 * len(self._store))
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
         """Store a copy of *value* only if *key* is absent — atomic under asyncio (audit #75)."""

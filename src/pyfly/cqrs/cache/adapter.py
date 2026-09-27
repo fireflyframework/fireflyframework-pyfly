@@ -28,6 +28,14 @@ user is never served to another. Evicting a key evicts it for every scope at the
 scoped entries of a key live under its current *generation* (``<key>|<generation>|scope=<digest>``), and
 eviction replaces the generation, which leaves the old entries unreachable until their TTL expires. No
 eviction scans the keyspace.
+
+A generation is an entry too (``<key>|generation``), and it expires: it is created with the TTL of the
+entries looked up under it, and an eviction's new generation lives as long as the longest entry TTL this
+adapter has seen (``generation_ttl`` before it has seen one). It is never refreshed: rewriting it could
+race an eviction's new generation and bring the evicted entries back. An entry stored late in its
+generation's life can therefore become unreachable before its own TTL, which costs one extra miss and
+never serves a stale value: generations are random and never reused, so an expired one is replaced by a
+fresh one that reaches no older entry.
 """
 
 from __future__ import annotations
@@ -56,6 +64,9 @@ SCOPE_SEPARATOR = "|scope="
 
 GENERATION_SUFFIX = "|generation"
 """The suffix of the entry holding a key's current generation."""
+
+DEFAULT_GENERATION_TTL = timedelta(seconds=900)
+"""How long a generation lives when the TTL of its entries is unknown: the query bus's default cache TTL."""
 
 
 def _ambient_tenant() -> str | None:
@@ -116,40 +127,65 @@ class QueryCacheAdapter:
     """Thin wrapper around pyfly's :class:`CacheAdapter` with CQRS-specific key prefixing.
 
     If no underlying cache is provided, all operations are silent no-ops.
+
+    Args:
+        cache: The application's cache; the query cache is its ``:cqrs:`` region.
+        generation_ttl: How long a key's generation lives until the adapter has seen the TTL of an entry
+            (see the module docs); :data:`DEFAULT_GENERATION_TTL` when ``None``. The auto-configuration
+            sets it to ``pyfly.cqrs.query.cache_ttl``.
     """
 
-    def __init__(self, cache: Any = None) -> None:
+    def __init__(self, cache: Any = None, *, generation_ttl: timedelta | None = None) -> None:
         self._cache = cache
         self._region: TransactionAwareCache | None = None
         if cache is not None:
             self._region = TransactionAwareCache(PrefixedCache(cache, CQRS_CACHE_PREFIX), on_write_error="log")
+        self._generation_ttl = generation_ttl if generation_ttl is not None else DEFAULT_GENERATION_TTL
+        self._longest_ttl: timedelta | None = None
 
     # ── keys ───────────────────────────────────────────────────
 
-    async def entry_key(self, cache_key: str, digest: str | None) -> str | None:
+    async def entry_key(self, cache_key: str, digest: str | None, ttl: timedelta | None = None) -> str | None:
         """The key the entry of *cache_key* lives under for the caller whose scope is *digest*
         (:func:`scope_digest`): *cache_key* itself when unscoped, else a key under the current generation of
-        *cache_key*. ``None`` when the cache cannot be read (the call is then not cached)."""
+        *cache_key*. ``None`` when the cache cannot be read (the call is then not cached).
+
+        *ttl* is the TTL the entry will be stored with: a generation this call starts expires with it
+        (``generation_ttl`` when ``None``).
+        """
+        lifetime = self._lifetime(ttl)
         if digest is None or self._region is None:
             return cache_key
         try:
-            generation = await self._generation(cache_key)
+            generation = await self._generation(cache_key, lifetime)
         except Exception as exc:
             _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
             return None
         return f"{cache_key}|{generation}{SCOPE_SEPARATOR}{digest}"
 
-    async def _generation(self, cache_key: str) -> str:
+    def _lifetime(self, ttl: timedelta | None) -> timedelta:
+        """*ttl*, noted as an entry TTL (the next eviction's generation lives as long as the longest), or
+        ``generation_ttl`` when it is unknown."""
+        if ttl is None:
+            return self._generation_ttl
+        if self._longest_ttl is None or ttl > self._longest_ttl:
+            self._longest_ttl = ttl
+        return ttl
+
+    async def _generation(self, cache_key: str, ttl: timedelta) -> str:
         assert self._region is not None
         key = cache_key + GENERATION_SUFFIX
         current = await self._region.get(key)
         if current is not None:
             return str(current)
-        # No generation yet (or it was evicted): start a fresh one, so no older entry can be reached again.
+        # No generation yet (or it expired): start a fresh one, so no older entry can be reached again.
         fresh = uuid.uuid4().hex[:12]
-        if await self._region.put_if_absent(key, fresh):
+        if await self._region.put_if_absent(key, fresh, ttl=ttl):
             return fresh
         return str(await self._region.get(key) or fresh)
+
+    def _new_generation_ttl(self) -> timedelta:
+        return self._longest_ttl if self._longest_ttl is not None else self._generation_ttl
 
     # ── read ───────────────────────────────────────────────────
 
@@ -181,6 +217,8 @@ class QueryCacheAdapter:
         """Store *value* (after the commit inside a unit of work); a failure is logged, never raised."""
         if self._region is None:
             return
+        if ttl is not None:
+            self._lifetime(ttl)
         await self._region.put(cache_key, value, ttl=ttl)
 
     # ── evict ──────────────────────────────────────────────────
@@ -191,7 +229,7 @@ class QueryCacheAdapter:
         if self._region is None:
             return False
         evicted = await self._region.evict(cache_key)
-        await self._region.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12])
+        await self._region.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12], ttl=self._new_generation_ttl())
         return evicted
 
     async def evict_prefix(self, prefix: str) -> int:

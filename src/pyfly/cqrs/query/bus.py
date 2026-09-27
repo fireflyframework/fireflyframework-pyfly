@@ -114,7 +114,7 @@ class DefaultQueryBus:
         self._cache: QueryCacheAdapter | None = (
             cache_adapter
             if cache_adapter is None or isinstance(cache_adapter, QueryCacheAdapter)
-            else QueryCacheAdapter(cache_adapter)
+            else QueryCacheAdapter(cache_adapter, generation_ttl=timedelta(seconds=default_cache_ttl))
         )
         self._default_cache_ttl = default_cache_ttl
         self._caching_enabled = caching_enabled
@@ -226,7 +226,10 @@ class DefaultQueryBus:
         if not raw:
             return None
         digest = scope_digest(handler.get_cache_scope(), context)
-        return await self._cache.entry_key(query_cache_key(handler, raw), digest)
+        return await self._cache.entry_key(query_cache_key(handler, raw), digest, ttl=self._ttl(handler))
+
+    def _ttl(self, handler: QueryHandler[Any, Any]) -> timedelta:
+        return timedelta(seconds=handler.get_cache_ttl_seconds() or self._default_cache_ttl)
 
     def _result_type_cacheable(self, handler: QueryHandler[Any, Any]) -> bool:
         handler_type = type(handler)
@@ -272,5 +275,4 @@ class DefaultQueryBus:
             return
         if result is None and not handler.caches_none():
             return  # no negative caching unless the handler opts in
-        ttl_seconds = handler.get_cache_ttl_seconds() or self._default_cache_ttl
-        await self._cache.put(cache_key, result, ttl=timedelta(seconds=ttl_seconds))
+        await self._cache.put(cache_key, result, ttl=self._ttl(handler))

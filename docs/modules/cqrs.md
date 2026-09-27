@@ -559,6 +559,14 @@ users: scoped entries live under the key's current generation
 The old entries are unreachable from then on and expire with their TTL. A scoped
 lookup reads the generation first, one extra round trip.
 
+A generation expires too: it is created with the TTL of the entries looked up
+under it, and an eviction's new generation lives as long as the longest entry TTL
+the adapter has seen (`pyfly.cqrs.query.cache_ttl` before it has seen one), so no
+query-cache key outlives the entries it serves. A generation is never refreshed,
+because rewriting it could race an eviction and bring evicted entries back: an
+entry stored late in its generation's life may become unreachable before its own
+TTL, which costs one extra miss and never serves a stale value.
+
 > **Prior behaviour (corrected in 26.09.08):** the key was the query's own key
 > only, so the first tenant (or user) to run a cacheable query filled the entry
 > every other tenant was served for `cache_ttl`, 900 seconds by default.

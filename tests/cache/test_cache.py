@@ -184,6 +184,20 @@ class TestInMemoryCache:
         await c.put("key1", "value1", ttl=timedelta(seconds=0))
         assert await c.exists("key1") is False
 
+    async def test_expired_entries_do_not_accumulate(self) -> None:
+        import asyncio
+
+        c = InMemoryCache()
+        for n in range(2000):
+            await c.put(f"short:{n}", n, ttl=timedelta(milliseconds=10))
+        await asyncio.sleep(0.05)
+        for n in range(2000):
+            await c.put(f"long:{n}", n, ttl=timedelta(minutes=5))
+        # The expired entries are gone from memory, not only hidden: an unbounded cache stays bounded by
+        # its TTLs even when no one reads an expired key again.
+        assert len(c._store) == 2000
+        assert all(key.startswith("long:") for key in c._store)
+
     @pytest.mark.asyncio
     async def test_protocol_compliance(self):
         """InMemoryCache satisfies the CacheAdapter protocol."""

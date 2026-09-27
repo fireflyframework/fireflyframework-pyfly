@@ -128,6 +128,31 @@ async def test_clearing_the_query_cache_keeps_everything_else(redis: Any) -> Non
     ]
 
 
+async def test_every_query_cache_key_expires(redis: Any) -> None:
+    @dataclass(frozen=True)
+    class StockQuery(Query[int]):
+        sku: int = 0
+
+    @query_handler(cacheable=True, cache_ttl=120)
+    class StockHandler(QueryHandler[StockQuery, int]):
+        async def do_handle(self, query: StockQuery) -> int:
+            return query.sku
+
+    registry = HandlerRegistry()
+    registry.register_query_handler(StockHandler())
+    bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(RedisCacheAdapter(redis)))
+    context = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+    for sku in range(5):
+        await bus.query_with_context(StockQuery(sku=sku), context)
+    await bus.clear_cache(StockQuery(sku=0).get_cache_key())  # a new generation for that key
+
+    keys = [key for key in await _keys(redis) if key.startswith("pyfly:cache::cqrs:")]
+    assert any(key.endswith("|generation") for key in keys)
+    ttls = {key: await redis.ttl(key) for key in keys}
+    # -1 is a key without an expiry: none may outlive the entries it serves.
+    assert all(0 < ttl <= 120 for ttl in ttls.values()), ttls
+
+
 async def test_two_instances_see_each_others_evictions(redis_url: str, redis: Any) -> None:
     import redis.asyncio as aioredis
 
