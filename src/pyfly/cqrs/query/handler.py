@@ -23,6 +23,7 @@ import logging
 import operator
 import types
 import typing
+import weakref
 from types import get_original_bases as get_orig_bases
 from typing import Any, Generic, TypeVar, get_args, get_origin
 
@@ -37,6 +38,9 @@ _logger = logging.getLogger(__name__)
 
 _MAX_DEPTH = 32
 """How many classes deep :func:`resolve_type_arguments` follows a hierarchy."""
+
+_HANDLER_TYPE_ARGS: weakref.WeakKeyDictionary[type, tuple[Any, ...]] = weakref.WeakKeyDictionary()
+"""The ``(Q, R)`` of each handler class, resolved once: the bus reads ``R`` on every cache hit."""
 
 
 def resolve_type_arguments(cls: type, generic: type) -> tuple[Any, ...]:
@@ -124,8 +128,13 @@ class QueryHandler(Generic[Q, R]):
 
     def _handler_type_args(self) -> tuple[Any, ...]:
         """The ``(Q, R)`` this handler's class gives :class:`QueryHandler` (see
-        :func:`resolve_type_arguments`); ``()`` when it gives none."""
-        return resolve_type_arguments(type(self), QueryHandler)
+        :func:`resolve_type_arguments`); ``()`` when it gives none. Resolved once per class."""
+        handler_type = type(self)
+        args = _HANDLER_TYPE_ARGS.get(handler_type)
+        if args is None:
+            args = resolve_type_arguments(handler_type, QueryHandler)
+            _HANDLER_TYPE_ARGS[handler_type] = args
+        return args
 
     def _resolve_query_type(self) -> type | None:
         args = self._handler_type_args()

@@ -181,6 +181,31 @@ def test_the_result_type_is_resolved_through_generic_bases_and_subclasses() -> N
     assert issubclass(CachedProduct, Base)
 
 
+def test_the_type_arguments_are_resolved_once_per_handler_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bus rebuilds every cache hit as the result type: walking the class hierarchy on each hit costs
+    # microseconds per hit for a handler with a generic base.
+    from pyfly.cqrs.query import handler as handler_module
+
+    resolved: list[type] = []
+    resolve = handler_module.resolve_type_arguments
+
+    def counting(cls: type, generic: type) -> tuple[Any, ...]:
+        resolved.append(cls)
+        return resolve(cls, generic)
+
+    monkeypatch.setattr(handler_module, "resolve_type_arguments", counting)
+
+    class FreshListItemsHandler(ListItemsHandler):
+        pass
+
+    first, second = FreshListItemsHandler(), FreshListItemsHandler()
+    for _ in range(3):
+        assert first.get_result_type() == Page[ItemDto]
+        assert second.get_result_type() == Page[ItemDto]
+    assert first.get_query_type() is ListItems
+    assert resolved == [FreshListItemsHandler]
+
+
 def _cache(json: bool) -> CacheAdapter:
     return RedisCacheAdapter(RedisBytesStub()) if json else InMemoryCache()
 
