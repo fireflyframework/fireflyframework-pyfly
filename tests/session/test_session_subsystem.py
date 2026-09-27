@@ -66,6 +66,15 @@ class TestHttpSession:
         assert s.id == "old-id"
         assert s.previous_id is None
 
+    def test_mark_persisted_clears_the_pending_change_until_the_next_one(self) -> None:
+        s = HttpSession("old-id", {"k": "v"})
+        s.rotate_id()
+        s.mark_persisted()
+        assert s.modified is False
+        assert s.previous_id == "old-id"  # still tells the request's other filters that the id rotated
+        s.set_attribute("k", "w")
+        assert s.modified is True
+
 
 # ---------------------------------------------------------------------------
 # InMemorySessionStore
@@ -98,6 +107,14 @@ class TestInMemorySessionStore:
 # ---------------------------------------------------------------------------
 # SessionFilter
 # ---------------------------------------------------------------------------
+class _CopyingStore(InMemorySessionStore):
+    """The in-memory store, keeping a copy of what it saves as a store over a network does (the in-memory store
+    keeps the session's own dict, so a later change shows through without a save)."""
+
+    async def save(self, session_id: str, data: dict[str, Any], ttl: int) -> None:
+        await super().save(session_id, dict(data), ttl)
+
+
 def _request(*, cookies: dict[str, str] | None = None, scheme: str = "http", headers: dict[str, str] | None = None):
     return SimpleNamespace(
         cookies=cookies or {},
@@ -213,6 +230,46 @@ class TestSessionFilter:
         assert new_id != "fixed-id"
         assert await store.get("fixed-id") is None  # old (fixed) id no longer resolves
         assert (await store.get(new_id))["user"] == "ada"  # data carried to the new id
+
+    @pytest.mark.asyncio
+    async def test_a_change_after_persist_session_is_saved_when_the_request_ends(self) -> None:
+        store = _CopyingStore()
+        await store.save("existing", {"user": "ada"}, ttl=60)
+        f = SessionFilter(store=store)
+        request = _request(cookies={"PYFLY_SESSION": "existing"})
+
+        async def call_next(req: Any) -> _Response:
+            req.state.session.set_attribute("step", 1)
+            await req.state.persist_session()
+            assert await store.get("existing") == {**req.state.session.get_data(), "step": 1}
+            req.state.session.set_attribute("step", 2)
+            return _Response()
+
+        await f.do_filter(request, call_next)
+        assert (await store.get("existing"))["step"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_session_ended_after_persist_session_is_not_saved_again(self) -> None:
+        """The OAuth2 login saves the session before registering it; a concurrent login of the same principal
+        can evict it (delete it from the store) before the login's request ends. The filter saved it again
+        then, and the evicted session was back, live and no longer counted by the cap."""
+        store = _CopyingStore()
+        await store.save("pre-auth", {"oauth2_state": "s"}, ttl=60)
+        f = SessionFilter(store=store)
+        request = _request(cookies={"PYFLY_SESSION": "pre-auth"})
+
+        async def call_next(req: Any) -> _Response:
+            session = req.state.session
+            session.rotate_id()
+            session.set_attribute("user", "ada")
+            await req.state.persist_session()
+            assert await store.exists(session.id)
+            await store.delete(session.id)  # evicted by a concurrent login
+            return _Response()
+
+        await f.do_filter(request, call_next)
+        assert not await store.exists(request.state.session.id)
+        assert not await store.exists("pre-auth")
 
 
 # ---------------------------------------------------------------------------

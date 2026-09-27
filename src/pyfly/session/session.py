@@ -114,6 +114,14 @@ class HttpSession:
         self._invalidated = True
         self._modified = True
 
+    def mark_persisted(self) -> None:
+        """Record that the store holds the session as it is now: :attr:`modified` is ``False`` until the next
+        change, so the ``SessionFilter`` saves it again only for a change made afterwards.
+
+        :attr:`previous_id` is kept: it still tells the request's other filters that the id was rotated.
+        """
+        self._modified = False
+
     def get_data(self) -> dict[str, Any]:
         """Return the raw session data dictionary."""
         return self._data

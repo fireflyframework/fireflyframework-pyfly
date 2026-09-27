@@ -234,7 +234,9 @@ class SessionConcurrencyController:
             does).
 
     A session must be in the store before its login registers it (the OAuth2 login handler saves it first),
-    or a concurrent login of the same principal takes it for a dead one.
+    or a concurrent login of the same principal takes it for a dead one, and that save must be the login's
+    last: a concurrent login may evict the session meanwhile, and saving it again would bring it back, logged
+    in and no longer counted (the ``SessionFilter`` saves an unchanged session only once).
     """
 
     #: How many registrations one step of :meth:`purge_expired` checks.

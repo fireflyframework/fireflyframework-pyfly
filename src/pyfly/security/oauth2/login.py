@@ -71,6 +71,9 @@ class OAuth2LoginHandler:
 
     Args:
         client_repository: Repository to look up client registrations.
+        concurrency: An optional ``SessionConcurrencyController``. The callback then saves the logged-in
+            session (``request.state.persist_session``) and registers it, enforcing the per-principal cap;
+            that save is the login's last write of the session.
     """
 
     def __init__(
@@ -234,11 +237,16 @@ class OAuth2LoginHandler:
         # fixation — the pre-auth id (which an attacker may have fixed) is dropped.
         session.rotate_id()
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
+        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
+        session.remove_attribute(_REDIRECT_URI_KEY)
 
         # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
         # is now bound to the (rotated) session id, so this is the one correct enforcement point.
         # The session is saved first: the controller counts a session while the store has it,
-        # so a concurrent login of the same principal must find this one there.
+        # so a concurrent login of the same principal must find this one there. That save is
+        # the login's last write of the session (every change above is made before it, and the
+        # SessionFilter does not save an unchanged session again): a concurrent login may evict
+        # this session meanwhile, and a later save would bring it back, live and uncounted.
         if self._concurrency is not None:
             persist = getattr(request.state, "persist_session", None)
             if persist is not None:
@@ -252,9 +260,6 @@ class OAuth2LoginHandler:
                 )
 
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
-
-        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
-        session.remove_attribute(_REDIRECT_URI_KEY)
         return RedirectResponse(url=str(redirect_uri), status_code=302)
 
     # ------------------------------------------------------------------

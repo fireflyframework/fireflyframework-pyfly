@@ -38,6 +38,12 @@ class SessionFilter(OncePerRequestFilter):
     ``request.state.persist_session`` saves the session at once (a coroutine function taking no
     arguments): the OAuth2 login handler saves the session it has just logged in before it registers
     the session with the concurrency controller, which counts a session while the store has it.
+
+    A save leaves the session unmodified (:meth:`HttpSession.mark_persisted`), so the persist that runs
+    when the handler returns saves it again only for a change made after ``persist_session``. That keeps
+    the login's save its last write of the session: a concurrent login of the same principal may evict
+    the session (delete it from the store) in the meantime, and saving it again would bring it back,
+    logged in and no longer counted by the cap.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE + 150
@@ -107,7 +113,8 @@ class SessionFilter(OncePerRequestFilter):
         return HttpSession(new_id, is_new=True)
 
     async def _persist_session(self, session: HttpSession) -> None:
-        """Save or delete the session in the store based on its state."""
+        """Save or delete the session in the store based on its state; a saved session is left unmodified
+        until its next change."""
         # If the id was rotated (e.g. on login), drop the pre-rotation entry so a
         # fixed/stale id can no longer resolve to this session (anti-fixation).
         if session.previous_id is not None and session.previous_id != session.id:
@@ -117,6 +124,7 @@ class SessionFilter(OncePerRequestFilter):
             await self._store.delete(session.id)
         elif session.modified:
             await self._store.save(session.id, session.get_data(), self._ttl)
+            session.mark_persisted()
 
     @staticmethod
     def _is_secure_request(request: Any) -> bool:

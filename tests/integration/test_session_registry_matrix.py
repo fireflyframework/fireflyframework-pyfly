@@ -22,6 +22,9 @@
   session held by another replica did nothing. ``SqlSessionStore`` is that store.
 - A capped login reruns its unit when MariaDB's snapshot isolation reports that a registration it read and
   is evicting changed meanwhile (error 1020): a logout or the purge must not fail a concurrent login.
+- Through the whole login request (``SessionFilter`` plus ``OAuth2LoginHandler``) on two replicas, an evicted
+  session stayed evicted only if its own login's request did not save it again when the handler returned; it
+  did, and concurrent evict-oldest logins left more logged-in sessions in ``pyfly_sessions`` than the cap.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.adapters.sql_session_store import SqlSessionStore
 from pyfly.session.concurrency import ConcurrencyControlPolicy, SessionConcurrencyController, SessionRegistration
 from pyfly.testing.statement_counter import statement_verb
+from tests.integration import _session_logins as logins
 from tests.integration._repository_harness import repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 
@@ -116,6 +120,37 @@ async def test_evict_oldest_keeps_the_cap_under_concurrent_logins(relational_bac
         # Every other session was evicted from the shared store too: only the survivor still resolves.
         resolving = [f"s{i}" for i in range(CONCURRENCY) if await store.get(f"s{i}") is not None]
         assert resolving == survivors
+
+
+@pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
+@pytest.mark.parametrize(("max_sessions", "concurrent"), [(1, 8), (2, 16)])
+async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
+    relational_backend: RelationalBackend, strategy: str, max_sessions: int, concurrent: int
+) -> None:
+    """Rounds of concurrent OAuth2 logins of one principal through two replicas' session filters and login
+    handlers: after each round the logged-in sessions in the shared store are exactly the registered ones."""
+    async with _replicas(relational_backend) as replicas:
+        flows = [
+            logins.Replica(store, _controller(store, registry, max_sessions=max_sessions, strategy=strategy))
+            for store, registry, _ in replicas
+        ]
+
+        await logins.concurrent_logins_keep_the_cap(
+            flows,
+            max_sessions=max_sessions,
+            evict_oldest=strategy == "evict-oldest",
+            concurrent=concurrent,
+            rounds=3,
+        )
+
+
+async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
+    relational_backend: RelationalBackend,
+) -> None:
+    async with _replicas(relational_backend) as replicas:
+        flows = [logins.Replica(store, _controller(store, registry, max_sessions=2)) for store, registry, _ in replicas]
+
+        await logins.concurrent_logins_keep_the_cap(flows, max_sessions=2, evict_oldest=True, concurrent=1, rounds=4)
 
 
 async def test_eviction_reaches_a_session_held_by_another_replica(relational_backend: RelationalBackend) -> None:

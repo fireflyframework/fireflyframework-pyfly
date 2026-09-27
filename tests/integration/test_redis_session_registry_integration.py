@@ -15,6 +15,9 @@
 
 The controller listed a principal's sessions and registered the new one in separate calls, so concurrent
 logins all got in. The Redis registry checks the cap, evicts and registers in one Lua script.
+
+Through the whole login request (``SessionFilter`` plus ``OAuth2LoginHandler``, on the Redis session store), a
+session a concurrent login evicted came back when its own login's request ended, and stayed live uncounted.
 """
 
 from __future__ import annotations
@@ -27,9 +30,11 @@ from typing import Any
 import pytest
 
 from pyfly.container.container import Container
+from pyfly.session.adapters.redis import RedisSessionStore
 from pyfly.session.adapters.redis_registry import RedisSessionRegistry
 from pyfly.session.concurrency import AtomicSessionRegistry, ConcurrencyControlPolicy, SessionConcurrencyController
 from pyfly.testing import requires_docker
+from tests.integration import _session_logins as logins
 
 CONCURRENCY = 20
 
@@ -77,6 +82,40 @@ async def test_concurrent_logins_keep_the_cap(redis_client: Any, strategy: str) 
     else:
         assert all(results)
         assert len(evicted) == CONCURRENCY - 1
+
+
+@requires_docker
+@pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
+@pytest.mark.parametrize(("max_sessions", "concurrent"), [(1, 8), (2, 16)])
+async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
+    redis_client: Any, redis_url: str, strategy: str, max_sessions: int, concurrent: int
+) -> None:
+    """Rounds of concurrent OAuth2 logins of one principal through two instances, each with its own client of
+    the Redis session store and registry: after each round only the registered sessions are in the store."""
+    import redis.asyncio as aioredis
+
+    other_client = aioredis.from_url(redis_url)
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    registries = [_registries(redis_client)[0]]
+    registries.append(RedisSessionRegistry(other_client, key_prefix=registries[0].key_prefix))
+    try:
+        flows = []
+        for client, registry in zip((redis_client, other_client), registries, strict=True):
+            store = RedisSessionStore(client)
+            policy = ConcurrencyControlPolicy(max_sessions=max_sessions, strategy=strategy)
+            controller = SessionConcurrencyController(registry, policy, session_store=store)
+            flows.append(logins.Replica(store, controller, principal=principal))
+
+        await logins.concurrent_logins_keep_the_cap(
+            flows,
+            max_sessions=max_sessions,
+            evict_oldest=strategy == "evict-oldest",
+            concurrent=concurrent,
+            rounds=3,
+        )
+    finally:
+        await redis_client.delete(f"{registries[0].key_prefix}{principal}")
+        await other_client.aclose()
 
 
 @requires_docker

@@ -89,6 +89,7 @@ from pyfly.session import HttpSession
 | `remove_attribute(name)` | Remove an attribute if present |
 | `get_attribute_names()` | List of all user-set attribute names (excludes internal `_*` keys) |
 | `invalidate()` | Mark the session for deletion; filter will delete cookie and store entry |
+| `mark_persisted()` | Record that the store holds the session as it is now: `modified` is `False` until the next change (the filter calls it after each save; `previous_id` is kept) |
 | `get_data()` | Raw session dict (includes internal metadata) |
 
 ### `SessionStore` protocol
@@ -181,6 +182,12 @@ Cookie properties set by the filter:
 
 On invalidation, the filter deletes the cookie and removes the store entry.
 
+`request.state.persist_session` (a coroutine function taking no arguments) saves the session at once. Every
+save leaves the session unmodified (`mark_persisted()`), so the persist that runs when the handler returns
+saves it again only for a change made after that call. The OAuth2 login handler relies on it: its save before
+registering the session is the login's last write of the session, so a concurrent login that evicts the
+session meanwhile is not undone when the login's request ends.
+
 ---
 
 ## Auto-Configuration
@@ -267,7 +274,9 @@ pyfly:
   application, lost in a restart), as Spring's `getAllSessions(principal, false)` leaves expired ones out, so
   a user whose sessions ended without a logout is never locked out. The login handler saves the session it
   logs in (`request.state.persist_session`, set by the `SessionFilter`) before registering it, so a
-  concurrent login never takes it for a dead one. This needs a store that holds every session the registry
+  concurrent login never takes it for a dead one. That save is the login's last write of the session: the
+  handler makes every change (the security context, the redirect it consumes) before it, and the filter does
+  not save the unchanged session again, so a session a concurrent login evicted stays evicted. This needs a store that holds every session the registry
   counts: beside a cross-process registry (`redis` or `postgres`), only a shared store (`store=postgres` or
   `redis`) does. With the in-memory store there, the auto-configuration does not give the store to the
   controller (it would take the other instances' live sessions for dead ones and admit logins over the cap),
@@ -289,7 +298,9 @@ pyfly:
 
 > **Before 26.09.08** the cap was a list and a register in separate transactions (max-sessions=1 let
 > concurrent logins all in), and no registration was ever removed but by logout or eviction: with
-> `reject-new`, a user whose sessions expired could never log in again.
+> `reject-new`, a user whose sessions expired could never log in again. With `evict-oldest`, the filter
+> also saved each login's session again when its request ended, bringing back the sessions concurrent logins
+> had evicted: eight concurrent logins under a cap of one left eight logged-in sessions.
 
 ### Registry Backends
 
@@ -483,7 +494,7 @@ auto-configured one entirely.
 | Method | Description |
 |---|---|
 | `__init__(registry, policy, *, session_deleter=None, session_store=None, purge_interval=timedelta(seconds=60))` | `session_store` tells live sessions from dead ones; `session_deleter` (by default the store's `delete`) is an `async (session_id) -> None` callable used to evict store entries |
-| `on_login(principal, session_id, created_at)` | Drops the principal's dead sessions, then registers the session atomically, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it |
+| `on_login(principal, session_id, created_at)` | Drops the principal's dead sessions, then registers the session atomically, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it, and do not save it again (an eviction may have deleted it) |
 | `on_logout(principal, session_id)` | Deregisters the session |
 | `purge_expired()` | Drops the due registrations whose session is gone and renews the others (an `ExpiringSessionRegistry`: the SQL and in-memory registries); returns how many were dropped |
 
