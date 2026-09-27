@@ -18,8 +18,9 @@
   and the caches dedicated to durable consumers (idempotency, orchestration), survive.
 - C024: two application instances, each a ``CacheManager`` over the shared Redis with its own in-process
   fallback, both see an eviction the other one makes.
-- C025: a JSON hit comes back as the declared return type, and a value Redis cannot hold never fails the
-  call that produced it.
+- C025: a JSON hit comes back as the declared return type (Pydantic models with aliases or computed
+  fields included, through the decorators and the query bus), and a value Redis cannot hold never fails
+  the call that produced it.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic.alias_generators import to_camel
 
 from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cache.adapters.redis import RedisCacheAdapter
@@ -40,6 +42,7 @@ from pyfly.cache.manager import CacheManager
 from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
 from pyfly.cqrs.command.registry import HandlerRegistry
+from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
@@ -195,6 +198,89 @@ async def test_a_json_hit_comes_back_as_the_declared_type(redis: Any) -> None:
     view = await get_view("F-2")
     assert await get_view("F-2") == view
     assert calls == ["F-1", "F-2"]
+
+
+class MemberDto(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel)
+
+    member_id: int
+    display_name: str
+
+
+class ShipmentDto(BaseModel):
+    tracking_no: str = Field(alias="trackingNo")
+
+
+class LineDto(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int
+    unit_price: Decimal
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> Decimal:
+        return self.quantity * self.unit_price
+
+
+async def test_aliased_and_computed_dto_hits_come_back_from_redis(redis: Any, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    cache = RedisCacheAdapter(redis)
+    calls: list[str] = []
+
+    @cacheable(cache, key="member:{n}")
+    async def get_member(n: int) -> MemberDto:
+        calls.append("member")
+        return MemberDto(memberId=n, displayName="Ada")
+
+    @cacheable(cache, key="shipment:{n}")
+    async def get_shipment(n: str) -> ShipmentDto:
+        calls.append("shipment")
+        return ShipmentDto(trackingNo=n)
+
+    @cacheable(cache, key="lines:{n}")
+    async def get_lines(n: int) -> list[LineDto]:
+        calls.append("lines")
+        return [LineDto(quantity=n, unit_price=Decimal("1.50"))]
+
+    caplog.set_level(logging.WARNING, logger="pyfly.cache")
+    for _ in range(3):
+        assert await get_member(1) == MemberDto(memberId=1, displayName="Ada")
+        assert await get_shipment("Z-9") == ShipmentDto(trackingNo="Z-9")
+        assert await get_lines(2) == [LineDto(quantity=2, unit_price=Decimal("1.50"))]
+    assert calls == ["member", "shipment", "lines"]
+    assert caplog.records == []
+
+
+async def test_a_query_bus_hit_of_an_aliased_dto_comes_back_from_redis(
+    redis: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    @dataclass(frozen=True)
+    class GetMember(Query[MemberDto]):
+        member_id: int = 0
+
+    @query_handler(cacheable=True)
+    class GetMemberHandler(QueryHandler[GetMember, MemberDto]):
+        calls = 0
+
+        async def do_handle(self, query: GetMember) -> MemberDto:
+            type(self).calls += 1
+            return MemberDto(memberId=query.member_id, displayName="Ada")
+
+    registry = HandlerRegistry()
+    registry.register_query_handler(GetMemberHandler())
+    bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(RedisCacheAdapter(redis)))
+    context = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+
+    caplog.set_level(logging.WARNING)
+    results = [await bus.query_with_context(GetMember(member_id=5), context) for _ in range(3)]
+    assert results == [MemberDto(memberId=5, displayName="Ada")] * 3
+    assert all(isinstance(result, MemberDto) for result in results)
+    assert GetMemberHandler.calls == 1
+    assert caplog.records == []
 
 
 async def test_a_value_redis_cannot_hold_never_fails_the_call(redis: Any, caplog: pytest.LogCaptureFixture) -> None:

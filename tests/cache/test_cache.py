@@ -13,16 +13,21 @@
 # limitations under the License.
 """Tests for cache abstraction, in-memory cache, @cache decorator, and CacheManager."""
 
+import fnmatch
+import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic.alias_generators import to_camel
 from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.cache.adapters import InMemoryCache
+from pyfly.cache.adapters.redis import RedisCacheAdapter
 from pyfly.cache.decorators import cache, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.ports.outbound import CacheAdapter
@@ -55,6 +60,68 @@ class WrapsAnEntity(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     product: Any
+
+
+class CamelDto(BaseModel):
+    """camelCase aliases, the usual API style: the JSON cache stores field names."""
+
+    model_config = ConfigDict(alias_generator=to_camel)
+
+    user_id: int
+    display_name: str
+
+
+class AliasedOrderDto(BaseModel):
+    order_no: str = Field(alias="orderNo")
+
+
+class PricedLineDto(BaseModel):
+    """A computed field and ``extra="forbid"``: the stored value must not carry the computed field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int
+    unit_price: Decimal
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> Decimal:
+        return self.quantity * self.unit_price
+
+
+class TeamDto(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel)
+
+    team_name: str
+    members: list[CamelDto]
+    lines: list[PricedLineDto] = []
+
+
+class RedisBytesStub:
+    """The bytes a ``redis.asyncio`` client keeps, so a :class:`RedisCacheAdapter` runs its JSON code path."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    async def set(self, key: str, value: bytes, ex: int | None = None, nx: bool = False) -> bool:
+        if nx and key in self.store:
+            return False
+        self.store[key] = value
+        return True
+
+    async def delete(self, *keys: str) -> int:
+        return sum(1 for key in keys if self.store.pop(key, None) is not None)
+
+    async def exists(self, *keys: str) -> int:
+        return sum(1 for key in keys if key in self.store)
+
+    async def scan_iter(self, match: str = "*", count: int | None = None):  # noqa: ANN201
+        for key in list(self.store):
+            if fnmatch.fnmatchcase(key, match):
+                yield key
 
 
 class TestInMemoryCache:
@@ -249,6 +316,46 @@ class TestDecoratorTypes:
         assert calls == [7]
         assert isinstance(second, ProductDto)
         assert second == ProductDto(id=7, name="gadget")
+
+
+_ALIASED_VALUES = [
+    pytest.param(CamelDto, CamelDto(userId=1, displayName="Ada"), id="alias_generator"),
+    pytest.param(AliasedOrderDto, AliasedOrderDto(orderNo="A-1"), id="field_alias"),
+    pytest.param(PricedLineDto, PricedLineDto(quantity=2, unit_price=Decimal("1.25")), id="computed_field"),
+    pytest.param(list[CamelDto], [CamelDto(userId=1, displayName="Ada")], id="list_of_aliased"),
+    pytest.param(
+        TeamDto,
+        TeamDto(
+            teamName="core",
+            members=[CamelDto(userId=2, displayName="Grace")],
+            lines=[PricedLineDto(quantity=1, unit_price=Decimal("3"))],
+        ),
+        id="nested",
+    ),
+]
+
+
+class TestJsonHits:
+    """A JSON cache (Redis, PostgreSQL) stores what the encoder writes; every hit must come back (C025)."""
+
+    @pytest.mark.parametrize(("annotation", "value"), _ALIASED_VALUES)
+    async def test_an_aliased_or_computed_dto_hit_comes_back_as_the_declared_type(
+        self, annotation: Any, value: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend = RedisCacheAdapter(RedisBytesStub())
+        calls: list[int] = []
+
+        @cacheable(backend, key="dto")
+        async def load() -> annotation:  # type: ignore[valid-type]
+            calls.append(1)
+            return value
+
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        results = [await load() for _ in range(3)]
+        assert calls == [1]
+        assert results == [value, value, value]
+        assert type(results[-1]) is type(value)
+        assert [r.getMessage() for r in caplog.records if "cache_hit_discarded" in r.getMessage()] == []
 
 
 class _EvictionFails(InMemoryCache):

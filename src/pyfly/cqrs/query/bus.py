@@ -30,8 +30,9 @@ Caching (a ``@query_handler(cacheable=True)`` handler, a cacheable query, a cach
 - **Writes wait for the commit.** Inside a unit of work the result is stored after the commit, and not
   at all on rollback (it may be a row that never commits).
 - **Hits have the declared type.** A hit is rebuilt as the handler's result type ``R``, so a JSON cache
-  (Redis, PostgreSQL) returns the DTO, not a ``dict``. A result type that is an ORM-mapped class or a
-  Beanie document is never cached (a WARNING names the handler once).
+  (Redis, PostgreSQL) returns the DTO, not a ``dict`` (fields by name or alias, see
+  :func:`~pyfly.cache.serialization.restore`). A result type that is an ORM-mapped class or a Beanie
+  document is never cached (a WARNING names the handler once).
 - **None** is cached only when the handler opts in (``cache_none``); otherwise a ``None`` result is not
   stored, and the next call runs the handler again.
 - ``pyfly.cqrs.query.caching_enabled: false`` turns the query cache off.
@@ -118,6 +119,7 @@ class DefaultQueryBus:
         self._default_cache_ttl = default_cache_ttl
         self._caching_enabled = caching_enabled
         self._uncacheable: dict[type, bool] = {}
+        self._misfits: set[type] = set()
 
     # ── QueryBus protocol ──────────────────────────────────────
 
@@ -252,8 +254,17 @@ class DefaultQueryBus:
             return None if handler.caches_none() else _CACHE_MISS
         try:
             return restore(value, handler.get_result_type())
-        except Exception as exc:  # noqa: BLE001 — an entry that no longer fits the result type is a miss
-            _logger.warning("Cached result for %s no longer fits %s: %s", cache_key, type(handler).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — an entry that does not fit the result type is a miss
+            if type(handler) not in self._misfits:
+                self._misfits.add(type(handler))
+                _logger.warning(
+                    "Cached result for %s does not fit the result type of %s (an entry written by an older "
+                    "version of the type, or a handler that returns another type than it declares); it is "
+                    "treated as a miss: %s",
+                    cache_key,
+                    type(handler).__name__,
+                    exc,
+                )
             return _CACHE_MISS
 
     async def _try_cache_put(self, cache_key: str | None, handler: QueryHandler[Any, Any], result: Any) -> None:

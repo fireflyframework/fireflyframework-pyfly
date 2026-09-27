@@ -569,7 +569,10 @@ lookup reads the generation first, one extra round trip.
   result after the commit, and not at all on rollback: it may have read a row
   that never commits.
 * **A hit has the declared type.** The bus rebuilds a hit as the handler's result
-  type `R`, so a Redis or PostgreSQL cache returns the DTO, not a `dict`. A
+  type `R`, so a Redis or PostgreSQL cache returns the DTO, not a `dict`: models
+  with aliases or computed fields included (see
+  [Return Types, Hits and Failures](caching.md#return-types-hits-and-failures)).
+  An entry that does not fit `R` is a miss, with one warning per handler. A
   result type that is an ORM-mapped class or a Beanie document is never cached
   (a `query_cache_disabled` warning names the handler once): return a DTO.
 * **`None` is cached on request.** A `None` result is not stored unless the

@@ -214,10 +214,11 @@ await cache.stop()    # Close Redis connection
 
 Values are serialized to JSON before storage and deserialized on retrieval. The
 encoder also handles datetimes, dates, `Decimal`, `UUID`, sets, bytes,
-dataclasses and Pydantic models. A hit comes back as JSON types (a Pydantic
-model as a `dict`), and the [decorators](#return-types-hits-and-failures) and
-the CQRS query bus rebuild the declared type. A live ORM object, or a value JSON
-cannot represent, raises `CacheValueError` before anything is written.
+dataclasses and Pydantic models (their field names, without computed fields). A
+hit comes back as JSON types (a Pydantic model as a `dict`), and the
+[decorators](#return-types-hits-and-failures) and the CQRS query bus rebuild the
+declared type, accepting field names and aliases. A live ORM object, or a value
+JSON cannot represent, raises `CacheValueError` before anything is written.
 
 ### TTL Handling
 
@@ -671,8 +672,18 @@ async def purge_all_users() -> None:
 * **A hit has the declared type.** The decorators rebuild a hit with a Pydantic
   `TypeAdapter` of the return annotation, so a Redis or PostgreSQL cache returns
   the DTO, dataclass, `datetime` or `Decimal` the method declares, not a `dict` or
-  a string. An entry that no longer fits the type (written by an older version of
-  the model) is treated as a miss and overwritten, with a warning.
+  a string. The JSON encoder stores a model's field names and leaves computed
+  fields out; the hit is validated by field name and by alias, so models with
+  camelCase aliases (`alias_generator=to_camel`), `Field(alias=...)` or a
+  `computed_field` on an `extra="forbid"` model come back as they went in.
+* **A hit is validated against the annotation.** It is coerced like any Pydantic
+  input: a method declared `-> int` that returned `"42"` gets `42` from a hit. An
+  entry that does not fit the type is treated as a miss and overwritten, with one
+  warning per method (`cache_hit_discarded`): an entry written by an older version
+  of the model, a method that returns something other than its declared type (it
+  then runs on every call), or a model field declared `Field(exclude=True)`
+  without a default, which the encoder leaves out. Annotate cached methods with
+  what they return.
 * **A cache failure never changes the outcome of the call.** Once the method has
   run (and may have committed), a put or an eviction that fails, including a value
   the cache refuses, is logged (`cache_put_skipped`/`cache_evict_skipped` on the

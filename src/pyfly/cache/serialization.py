@@ -244,11 +244,13 @@ def _default(obj: Any) -> Any:
     # A dataclass → a dict of its fields (encoded in turn), which restore() rebuilds.
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
-    # Pydantic v2 model → JSON-mode dict, once nothing inside it is a live ORM object.
+    # Pydantic v2 model → JSON-mode dict, once nothing inside it is a live ORM object. Computed fields are
+    # left out: they are derived from the stored fields, and a model with extra="forbid" would refuse them
+    # when restore() rebuilds it.
     model_dump = getattr(obj, "model_dump", None)
     if callable(model_dump):
         check_cacheable(obj)
-        return model_dump(mode="json")
+        return model_dump(mode="json", exclude_computed_fields=True)
     raise CacheValueError(f"Object of type {type(obj).__name__} is not cache-serializable")
 
 
@@ -308,9 +310,16 @@ def restore(value: Any, annotation: Any) -> Any:
     """*value* (a hit) as the declared type *annotation*.
 
     A JSON backend returns JSON types; this rebuilds Pydantic models, dataclasses, datetimes, decimals and
-    UUIDs from them (an in-memory hit is already of the declared type and comes back unchanged). With no
-    usable annotation the value is returned as stored. Raises ``pydantic.ValidationError`` when the stored
-    value no longer fits the type (an entry written by an older version of the model).
+    UUIDs from them (an in-memory hit is already of the declared type and comes back unchanged). Fields are
+    accepted by name and by alias: the encoder writes a model's field names (its serialization aliases when
+    the model is configured to serialize by alias), whatever validation aliases the model declares. With no
+    usable annotation the value is returned as stored.
+
+    The value is validated, so it is also coerced to the annotation: a function declared ``-> int`` that
+    returned ``"42"`` gets ``42`` from a hit. Raises ``pydantic.ValidationError`` when the stored value does
+    not fit the type: an entry written by an older version of the model, a function that returns something
+    other than its declared type, or a model field declared ``Field(exclude=True)`` without a default (the
+    encoder leaves it out).
     """
     if value is None or annotation is typing.Any or annotation is object or annotation in (None, type(None)):
         return value
@@ -320,4 +329,4 @@ def restore(value: Any, annotation: Any) -> Any:
     adapter = _type_adapter(annotation)
     if adapter is None:
         return value
-    return adapter.validate_python(value)
+    return adapter.validate_python(value, by_alias=True, by_name=True)
