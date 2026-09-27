@@ -122,8 +122,13 @@ class TestShellIntegration:
 
         await ctx.start()
 
-        exit_code, output = shell_runner.invoke(["fetch", "https://example.com"])
+        # An async command runs on the application's loop: ainvoke() awaits it there.
+        exit_code, output = await shell_runner.ainvoke(["fetch", "https://example.com"])
         assert exit_code == 0
         assert output == "Fetched https://example.com"
+
+        # The sync invoke() would have to run it on another loop: it refuses instead.
+        with pytest.raises(RuntimeError, match="ainvoke"):
+            shell_runner.invoke(["fetch", "https://example.com"])
 
         await ctx.stop()

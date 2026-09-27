@@ -1,4 +1,4 @@
-"""CLI entry point — bootstraps PyFly and runs the shell."""
+"""CLI entry point — bootstraps PyFly and runs the shell on the application's event loop."""
 
 import asyncio
 
@@ -8,9 +8,9 @@ from {{ package_name }}.app import Application
 
 
 def main() -> None:
-    """Bootstrap and run the CLI application."""
+    """Bootstrap and run the CLI application; the process exits with the command's exit code."""
     pyfly = PyFlyApplication(Application)
-    asyncio.run(pyfly.run())
+    raise SystemExit(asyncio.run(pyfly.run()))
 
 
 if __name__ == "__main__":
