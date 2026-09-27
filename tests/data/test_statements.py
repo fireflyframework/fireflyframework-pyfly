@@ -35,9 +35,10 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import ForeignKey, Integer, String, event, select
+from sqlalchemy import ForeignKey, Integer, String, create_engine, event, select
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 from sqlalchemy.engine import Dialect
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (
     Mapped,
     Session,
@@ -612,3 +613,76 @@ class TestStreams:
     def test_explicit_selectin_options_survive(self) -> None:
         statement = stream_safe(select(StShelf).options(selectinload(StShelf.books)), StShelf)
         assert "st_book" not in _sql(statement, DIALECTS["sqlite"])
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The SQLAlchemy internals the helpers read
+# ---------------------------------------------------------------------------------------------------------
+
+
+class TestSqlAlchemyInternals:
+    """The helpers read a few SQLAlchemy internals that have no public equivalent. These tests pin their shape,
+    so an upgrade that renames or reshapes one fails here, by name, instead of changing what a page, a lock or
+    a stream does."""
+
+    def test_the_select_internals(self) -> None:
+        plan = selectinload(ContractParent.children)
+        named = ContractParent.name == "a"
+        statement = (
+            select(ContractChild)
+            .join(ContractChild.parent)
+            .where(named)
+            .order_by(ContractChild.label.desc())
+            .options(plan)
+            .with_for_update(nowait=True)
+        )
+        ((target, onclause, left, flags),) = statement._setup_joins  # joins_rows
+        assert target is ContractChild.parent and onclause is None and left is None
+        assert flags == {"isouter": False, "full": False}
+        assert statement._from_obj == ()
+        assert statement.whereclause is not None
+        assert [source._deannotate() for source in statement.whereclause._from_objects] == [ContractParent.__table__]
+        assert len(statement._order_by_clauses) == 1  # distinct_entity_page
+        assert statement._with_options == (plan,)  # distinct_entity_page, row_count
+        lock = statement._for_update_arg
+        assert lock is not None and (lock.read, lock.nowait, lock.skip_locked, lock.key_share, lock.of) == (
+            False,
+            True,
+            False,
+            False,
+            None,
+        )
+        copy = statement._generate()  # _unlocked
+        assert copy is not statement and copy._for_update_arg is lock
+        assert select(ContractChild)._for_update_arg is None
+
+    def test_an_orm_result_says_when_it_must_be_made_unique(self) -> None:
+        """unique_entities and stream_all read ``_unique_filter_state``: set on a result whose joined eager load
+        of a collection repeats its entities, and on the streamed result derived from it."""
+        engine = create_engine("sqlite://")
+        tables = [ContractParent.__table__, ContractChild.__table__]
+        Base.metadata.create_all(engine, tables=tables)  # type: ignore[arg-type]
+        try:
+            with Session(engine) as session:
+                joined = session.execute(select(ContractParent).options(joinedload(ContractParent.children)))
+                assert joined._unique_filter_state is not None
+                assert session.execute(select(ContractParent))._unique_filter_state is None
+        finally:
+            engine.dispose()
+
+    async def test_a_streamed_scalar_result_keeps_the_mark(self) -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        tables = [ContractParent.__table__, ContractChild.__table__]
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
+            async with AsyncSession(engine) as session:
+                planned = select(ContractParent).options(joinedload(ContractParent.children))
+                streamed = await session.stream_scalars(planned)
+                assert streamed._unique_filter_state is not None
+                await streamed.close()
+                plain = await session.stream_scalars(select(ContractParent))
+                assert plain._unique_filter_state is None
+                await plain.close()
+        finally:
+            await engine.dispose()
