@@ -158,3 +158,49 @@ async def test_the_original_transaction_managers_are_back_after_the_test(
         assert await _committed(relational_backend) == 0
         await notes.save(_RollbackNote(body="committed"))
         assert await _committed(relational_backend) == 1
+
+
+class _Unregistered:
+    pass
+
+
+@service
+class _NeedsUnregistered:
+    def __init__(self, missing: _Unregistered) -> None:
+        self._missing = missing
+
+
+@pytest.mark.backends("pg", "mysql")
+async def test_a_slice_that_fails_fast_leaves_no_connection_open(relational_backend: RelationalBackend) -> None:
+    """C176: a slice whose fail-fast check fails is stopped: its registry is closed, and the server holds none of
+    its connections."""
+    from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    await relational_backend.create_tables(_RollbackNote)
+    for _attempt in range(3):
+        config = relational_backend.config()
+        registry = DataSourceRegistry.for_config(config)
+        async with registry.primary.engine.connect():
+            pass  # the slice's pool holds a connection, as after a store checked its table
+        with pytest.raises((NoSuchBeanError, BeanCreationException)):
+            await data_slice(NoteRepository, _NeedsUnregistered, config=config)
+        assert registry.closed
+    assert await _connections(relational_backend) == 0
+
+
+async def _connections(backend: RelationalBackend) -> int:
+    """The connections to the test's database, other than the one counting them."""
+    from sqlalchemy.engine import make_url
+
+    database = make_url(backend.url).database
+    engine = create_async_engine(backend.url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            if backend.dialect == "postgresql":
+                sql = "SELECT count(*) FROM pg_stat_activity WHERE datname = :db AND pid <> pg_backend_pid()"
+            else:
+                sql = "SELECT count(*) FROM information_schema.processlist WHERE db = :db AND id <> CONNECTION_ID()"
+            return int((await connection.execute(text(sql), {"db": database})).scalar() or 0)
+    finally:
+        await engine.dispose()
