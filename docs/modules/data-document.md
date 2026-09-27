@@ -934,22 +934,25 @@ The `after_init(bean, bean_name)` method:
 
 1. **Checks the bean type.** If the bean is not an instance of `MongoRepository`, it is returned unchanged.
 
-2. **Identifies custom methods.** Iterates over all attributes defined on the bean's class (excluding private attributes starting with `_` and methods inherited from the base `MongoRepository`).
+2. **Identifies custom methods.** Walks the repository class's MRO up to `MongoRepository`: the methods the class declares, and those it inherits from an intermediate base or a mixin (excluding private attributes starting with `_` and methods of the base `MongoRepository`; the most derived definition of a name wins).
 
 3. **Detects derived query methods.** For each method that starts with a recognized prefix (`find_by_`, `count_by_`, `exists_by_`, `delete_by_`) and is a stub, the processor:
    - Parses the method name via `QueryMethodParser.parse()`.
+   - Checks that the stub's parameters match what the name asks for (a mismatch fails at startup with `InvalidQueryMethodError`).
    - Compiles the parsed query via `MongoQueryMethodCompiler.compile()`.
-   - Wraps the compiled function to inject `bean._model`.
+   - Wraps the compiled function to inject `bean._model`, taking its arguments by position or by keyword.
    - Replaces the stub method on the bean instance.
 
 ### Stub Detection
 
-A method is considered a stub when its code object contains no meaningful constants beyond `None` and `Ellipsis`. This covers both forms:
+A derived-query method is implemented only when its body is a **stub**, recognized by the shape of its body alone (`pyfly.data.post_processor.is_stub`, shared with the SQLAlchemy adapter): an optional docstring, then nothing else, `...`, `pass`, or `raise NotImplementedError`:
 
 ```python
 async def find_by_status(self, status: str) -> list[OrderDocument]: ...    # Ellipsis stub
 async def find_by_status(self, status: str) -> list[OrderDocument]: pass   # Pass stub
 ```
+
+Any other body is a hand-written implementation and is never replaced, however little it holds (before 26.09.08, a body without a literal constant was replaced).
 
 The post-processor is registered automatically by `DocumentAutoConfiguration.mongo_post_processor()` when the MongoDB subsystem is enabled. No manual registration is required.
 
