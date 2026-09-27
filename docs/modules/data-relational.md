@@ -49,6 +49,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Configuration Reference](#configuration-reference)
   - [SQLite Setup](#sqlite-setup)
   - [Module Datasources](#module-datasources)
+  - [Framework Tables](#framework-tables)
   - [After-Begin Customizers](#after-begin-customizers)
   - [Credential Rotation](#credential-rotation)
   - [Capabilities](#capabilities)
@@ -1092,7 +1093,8 @@ The per-module URL keys are aliases that resolve through the registry:
 - `pyfly.eventsourcing.store.url`;
 - `pyfly.eventsourcing.snapshot.url`;
 - `pyfly.transactional.persistence.sqlalchemy.url`;
-- `pyfly.cache.postgres.url`.
+- `pyfly.cache.postgres.url`;
+- `pyfly.scheduling.lock.url`.
 
 Each resolves the same way:
 
@@ -1101,7 +1103,13 @@ Each resolves the same way:
   reuses that datasource's engine.
 - **Another URL** registers a named datasource that gets the same treatment (pool, connect arguments,
   SQLite setup, credential hook). The name is `event-store`, `snapshot-store`,
-  `transactional-persistence` or `cache`.
+  `transactional-persistence`, `cache` or `scheduling-lock`.
+
+The saga persistence, the SQL cache and the scheduler lock also take a `datasource` key beside the URL
+(`pyfly.transactional.persistence.sqlalchemy.datasource`, `pyfly.cache.postgres.datasource`,
+`pyfly.scheduling.lock.datasource`) that names a datasource of the registry instead; setting both is an
+error. They look the datasource up in the context's `DataSourceRegistry` bean, so an application's own
+registry bean is the one they use.
 
 A module with no URL and no primary fails with an error naming both keys. It used to fall back to
 `./app.db`, or for the cache to `localhost:5432/cache`.
@@ -1110,6 +1118,40 @@ A module with no URL and no primary fails with an error naming both keys. It use
 datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-feature",
                               url_key="pyfly.myfeature.url")
 ```
+
+### Framework Tables
+
+The tables the framework keeps in an application's database (`pyfly_orchestration_state`,
+`pyfly_cache_entries`, `pyfly_locks`, `pyfly_users`, and the other `pyfly_*` tables) are SQLAlchemy Core
+tables on one `MetaData`, `pyfly.data.relational.framework_schema.framework_metadata`, with portable
+types: bounded `Unicode` keys, `UtcTimestamp` instants (UTC with microseconds on every backend, aware in
+Python: `TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), `LONGTEXT`/`LONGBLOB` payloads on
+MySQL and MariaDB, and a naming convention for indexes.
+
+List it in Alembic's `target_metadata` so autogenerate migrates the framework tables and never drops them:
+
+```python
+# migrations/env.py
+from pyfly.data.relational.framework_schema import framework_metadata
+from pyfly.data.relational.sqlalchemy.entity import Base
+
+target_metadata = [Base.metadata, framework_metadata]
+```
+
+A store creates its tables when it starts, unless `ddl-auto` is `none`; then it checks them and fails the
+startup naming each missing table or column (`FrameworkSchemaError`). The same helper is public:
+
+```python
+from pyfly.data.relational.framework_schema import ensure_tables, locks
+
+await ensure_tables(registry.primary, locks, create=False)   # check only: migrations own the schema
+```
+
+Stores write with `pyfly.data.relational.upsert`, which sends each dialect its own statement:
+`upsert(executor, table, values, key=[...], where=...)` (`ON CONFLICT ... DO UPDATE` on PostgreSQL and
+SQLite, `ON DUPLICATE KEY UPDATE` on MySQL and MariaDB, `UPDATE` then `INSERT` in a savepoint elsewhere),
+`insert_if_absent(executor, table, values, key=[...], replace_where=...)` (returns whether it wrote), and
+`take_over(...)`. The executor is a unit of work's session (from `infrastructure_unit()`) or a connection.
 
 ### After-Begin Customizers
 
