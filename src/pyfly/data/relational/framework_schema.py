@@ -63,6 +63,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Index,
     Integer,
     LargeBinary,
     MetaData,
@@ -76,6 +77,7 @@ from sqlalchemy.dialects import mssql, mysql
 from sqlalchemy.engine import Connection, Dialect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.schema import CreateIndex
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 if TYPE_CHECKING:
@@ -411,7 +413,10 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
     """Make sure *tables* exist on *target*'s database (see :func:`framework_engine`), or fail fast.
 
     With *create*, the missing tables (with their indexes), and the missing indexes of the tables that
-    exist, are created first, in one transaction of their own. Processes starting together may all try:
+    exist, are created first, in one transaction of their own. On PostgreSQL a missing index of a table that
+    exists is built afterwards with ``CREATE INDEX CONCURRENTLY`` on an autocommit connection: a plain
+    ``CREATE INDEX`` would hold up every write to the table (those of the nodes still running the earlier
+    release during a rolling deploy) for as long as the build takes. Processes starting together may all try:
     one that loses a race gets an error from the database (MySQL and MariaDB commit each ``CREATE TABLE``
     on its own, so the others may still be creating the rest), and tries again, skipping what exists, up
     to :data:`CREATE_ATTEMPTS` times. Then every table is checked: it must exist and have every declared
@@ -426,7 +431,9 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
         for attempt in range(1, CREATE_ATTEMPTS + 1):
             try:
                 async with engine.begin() as connection:
-                    await connection.run_sync(_create, tables)
+                    deferred = await connection.run_sync(_create, tables)
+                if deferred:
+                    await _create_indexes_concurrently(engine, deferred)
             except DBAPIError as error:
                 creation_error = error
                 _logger.debug("framework_tables_creation_failed", extra={"attempt": attempt}, exc_info=True)
@@ -450,19 +457,42 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
         _logger.info("framework_tables_created_concurrently", extra={"tables": [table.name for table in tables]})
 
 
-def _create(connection: Connection, tables: Sequence[Table]) -> None:
+def _create(connection: Connection, tables: Sequence[Table]) -> list[Index]:
     """Create the missing tables, and the missing indexes of the tables that exist (a table an earlier
-    release created without them: the cache's ``expires_at`` index keeps its purge off a full scan)."""
+    release created without them: the cache's ``expires_at`` index keeps its purge off a full scan).
+
+    On PostgreSQL the missing indexes of existing tables are returned instead, for
+    :func:`_create_indexes_concurrently`."""
     inspector = inspect(connection)
     existing = [table for table in tables if inspector.has_table(table.name, schema=table.schema)]
     missing = [table for table in tables if table not in existing]
     for metadata in {id(table.metadata): table.metadata for table in missing}.values():
         metadata.create_all(connection, tables=[table for table in missing if table.metadata is metadata])
+    deferred: list[Index] = []
     for table in existing:
         present = {index["name"] for index in inspector.get_indexes(table.name, schema=table.schema)}
         for index in table.indexes:
-            if index.name not in present:
+            if index.name in present:
+                continue
+            if connection.dialect.name == "postgresql":
+                deferred.append(index)
+            else:
                 index.create(connection)
+    return deferred
+
+
+_CREATE_INDEX = re.compile(r"^CREATE (UNIQUE )?INDEX ")
+
+
+async def _create_indexes_concurrently(engine: AsyncEngine, indexes: Sequence[Index]) -> None:
+    """Build *indexes* on PostgreSQL with ``CREATE INDEX CONCURRENTLY IF NOT EXISTS``, each in autocommit (a
+    concurrent build cannot run in a transaction). A node that finds another node's build under way skips it."""
+    async with engine.connect() as connection:
+        autocommit = await connection.execution_options(isolation_level="AUTOCOMMIT")
+        for index in indexes:
+            ddl = str(CreateIndex(index, if_not_exists=True).compile(dialect=autocommit.dialect))
+            await autocommit.execute(text(_CREATE_INDEX.sub(r"CREATE \1INDEX CONCURRENTLY ", ddl, count=1)))
+            _logger.info("framework_index_created", extra={"index": index.name})
 
 
 def _problems(connection: Connection, tables: Sequence[Table]) -> list[str]:

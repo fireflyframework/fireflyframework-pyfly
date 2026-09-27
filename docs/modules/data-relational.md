@@ -1140,7 +1140,11 @@ target_metadata = [Base.metadata, framework_metadata]
 
 A store creates its tables when it starts if `ddl-auto` is `create` (the default), `create-drop` or `update`;
 with `none`, `validate` or any other value it only checks them, and fails the startup naming each missing table
-or column (`FrameworkSchemaError`). The same helper is public:
+or column (`FrameworkSchemaError`). When it may create them, it also adds the indexes a table an earlier release
+created is missing (the cache's `expires_at` index); on PostgreSQL with `CREATE INDEX CONCURRENTLY`, so the nodes
+still running the earlier release keep writing to the table during a rolling deploy. A concurrent build that is
+interrupted leaves an invalid index behind: rebuild it with `REINDEX INDEX CONCURRENTLY <name>`. The same helper
+is public:
 
 ```python
 from pyfly.data.relational.framework_schema import ensure_tables, locks

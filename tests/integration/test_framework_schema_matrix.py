@@ -178,3 +178,49 @@ async def test_a_table_an_earlier_release_created_gets_its_missing_indexes(
 
     async with engine.connect() as connection:
         assert "ix_pyfly_cache_entries_expires_at" in await connection.run_sync(indexes)
+
+
+@pytest.mark.backends(PG)
+async def test_on_postgresql_a_missing_index_is_built_while_the_old_nodes_keep_writing(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A plain ``CREATE INDEX`` takes a ``SHARE`` lock: on a large cache table it held up every write of the
+    nodes still running the earlier release, for as long as the build took, during a rolling deploy. The index
+    is now built ``CONCURRENTLY``: it waits for the transactions already open, and writes go on meanwhile."""
+    earlier = MetaData()
+    cache_entries.to_metadata(earlier).indexes.clear()
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(earlier.create_all)
+    admin = relational_backend.create_engine(isolation_level="AUTOCOMMIT")
+    old_node = relational_backend.create_engine()
+    insert_entry = text("INSERT INTO pyfly_cache_entries (cache_key, value) VALUES (:key, decode('00', 'hex'))")
+
+    async with old_node.connect() as open_transaction:
+        await open_transaction.execute(insert_entry, {"key": "written-before-the-deploy"})
+        building = asyncio.create_task(ensure_tables(engine, cache_entries))
+        for _ in range(200):  # until the build waits for the open transaction
+            async with admin.connect() as connection:
+                waiting = await connection.execute(
+                    text(
+                        "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND query ILIKE 'CREATE INDEX%' AND wait_event_type = 'Lock'"
+                    )
+                )
+                if waiting.first() is not None:
+                    break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the index build never started")
+
+        async with old_node.begin() as writer:  # another old node's write goes through meanwhile
+            await writer.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await writer.execute(insert_entry, {"key": "written-during-the-build"})
+        await open_transaction.commit()
+
+    await asyncio.wait_for(building, timeout=30)
+    async with admin.connect() as connection:
+        valid = await connection.execute(
+            text("SELECT indisvalid FROM pg_index WHERE indexrelid = 'ix_pyfly_cache_entries_expires_at'::regclass")
+        )
+        assert valid.scalar_one() is True
