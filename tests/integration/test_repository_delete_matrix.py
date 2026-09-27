@@ -37,6 +37,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data import transactional
+from pyfly.data.pageable import Sort
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from tests.integration._repository_harness import Datasources, dml, repository_datasources, sql_of
@@ -133,6 +134,29 @@ async def test_a_cascading_delete_loads_the_children_once_for_all_parents(
         with datasources.counter() as counter:
             await parents.delete_all_by_id([parent.id for parent in families])
         assert dml(counter)["SELECT"] == 2  # the parents, then their children: not one SELECT per parent
+        assert await _count(datasources, ContractChild) == 0
+
+
+async def test_deleting_the_units_own_parents_loads_their_children_once(relational_backend: RelationalBackend) -> None:
+    """Parents the unit read without their children: the flush of their deletes lazy-loaded the children one
+    parent at a time; they are now loaded for all of them with one SELECT per key chunk and one per collection."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        parents = ParentRepository()
+        await _family(parents, 7)
+
+        @transactional
+        async def delete_what_the_unit_read(by_id: bool) -> int:
+            held = await parents.find_all(Sort.by("name"))
+            with datasources.counter() as counter:
+                if by_id:
+                    await parents.delete_all_by_id([parent.id for parent in held[:3]])
+                else:
+                    await parents.delete_all(held)
+            return dml(counter)["SELECT"]
+
+        assert await delete_what_the_unit_read(by_id=True) == 2  # three parents: it was three
+        assert await delete_what_the_unit_read(by_id=False) == 2  # four parents: it was four
+        assert await _count(datasources, ContractParent) == 0
         assert await _count(datasources, ContractChild) == 0
 
 

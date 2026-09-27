@@ -99,6 +99,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstanceState, Mapper, load_only, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.orm.interfaces import MANYTOONE
 
 from pyfly.container.types import NoAutowire
 from pyfly.data.page import Page, Slice, Window
@@ -953,14 +954,41 @@ class Repository(Generic[T, ID]):
     def _holds_entities(self, session: AsyncSession) -> bool:
         return any(isinstance(entity, self._model) for entity in session.sync_session.identity_map.values())
 
-    def _delete_loads(self) -> list[Any]:
-        """``selectin`` loads of the collections deleting an entity cascades to or nulls out, so the flush does
-        not load them one entity at a time."""
+    def _delete_relationships(self) -> list[str]:
+        """The relationships the flush of a delete loads when an entity has not loaded them: those it cascades
+        to, and the collections whose foreign keys it nulls out (unless ``passive_deletes`` leaves them to the
+        database)."""
         return [
-            selectinload(getattr(self._model, relationship.key))
+            relationship.key
             for relationship in self._mapper.relationships
-            if relationship.uselist and not relationship.viewonly and not relationship.passive_deletes
+            if not relationship.viewonly
+            and not relationship.passive_deletes
+            and (relationship.direction is not MANYTOONE or relationship.cascade.delete)
         ]
+
+    def _delete_loads(self) -> list[Any]:
+        """``selectin`` loads of :meth:`_delete_relationships`, so the flush does not load them one entity at a
+        time."""
+        return [selectinload(getattr(self._model, key)) for key in self._delete_relationships()]
+
+    async def _load_for_delete(self, session: AsyncSession, entities: Sequence[Any]) -> None:
+        """Load the relationships deleting the unit's own *entities* needs and they have not loaded, for all of
+        them at once: one ``SELECT`` of their keys per chunk, and one per relationship. A single entity is left
+        to the flush, which loads what it lacks with as many statements."""
+        keys = self._delete_relationships()
+        lacking = [
+            tuple(state.identity)
+            for state in map(_state, entities)
+            if state.identity is not None and any(key not in state.dict for key in keys)
+        ]
+        if len(lacking) < 2:
+            return
+        # The entities are in the unit's identity map: the rows fill in only the relationships they lack.
+        only = load_only(*self._pk_attributes)
+        for criterion in self._in_ids(session, lacking):
+            unique_entities(
+                await session.execute(select(self._model).where(criterion).options(only, *self._delete_loads()))
+            )
 
     async def _load_identities(
         self, session: AsyncSession, identities: Sequence[tuple[Any, ...]], *, deleting: bool = False
@@ -977,6 +1005,8 @@ class Repository(Generic[T, ID]):
                 entities.append(held)
             else:
                 missing.append(identity)
+        if deleting:
+            await self._load_for_delete(session, entities)
         options = self._delete_loads() if deleting else []
         for criterion in self._in_ids(session, missing):
             stmt = select(self._model).where(criterion).options(*options)
@@ -988,16 +1018,20 @@ class Repository(Generic[T, ID]):
         are; any other by its key, with the version it carries checked against the row's."""
         sync_session = session.sync_session
         mapper = self._mapper
+        own: list[Any] = []
         others: list[tuple[Any, tuple[Any, ...]]] = []
         for entity in self._expunge_pending(session, entities):
             state = _state(entity)
             if state.session is sync_session:
-                await session.delete(entity)
+                own.append(entity)
                 continue
             identity = self._identity_of(entity)
             if identity is None or (state.key is None and self._is_new(entity)):
                 continue  # a new entity: nothing to delete
             others.append((entity, identity))
+        await self._load_for_delete(session, own)
+        for entity in own:
+            await session.delete(entity)
         if not others:
             return
         current = {
