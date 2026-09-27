@@ -37,12 +37,19 @@ after the beans it depends on:
    schema, the datasource lifecycle);
 5. every :class:`ResourceRegistry` bean (the datasource registry) is disposed, last.
 
+Until step 5 a resource registry of the context ignores a request to close itself
+(:func:`disposal_deferred`): a lifecycle bean that closes it on stop (the datasource registry's
+own) would otherwise close it at that bean's place in the order, before the beans still using it.
+
 After that the context builds no bean until it is started again.
 """
 
 from __future__ import annotations
 
 import inspect
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable
 
 #: The phase of a lifecycle bean that declares none.
@@ -108,7 +115,8 @@ class ResourceRegistry(Protocol):
     them all at once.
 
     The context calls :meth:`dispose_all` as the very last step of ``stop()``: after the consumers
-    drained, after every ``@pre_destroy`` and after every lifecycle bean stopped.
+    drained, after every ``@pre_destroy`` and after every lifecycle bean stopped. Until then its own
+    ``close()`` should check :func:`disposal_deferred` and do nothing.
     :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry` is one.
     """
 
@@ -138,3 +146,28 @@ def lifecycle_phase(bean: Any) -> int:
 def is_resource_registry(bean: Any) -> bool:
     """Whether *bean*'s class defines the coroutine ``dispose_all()`` of a :class:`ResourceRegistry`."""
     return inspect.iscoroutinefunction(getattr(type(bean), "dispose_all", None))
+
+
+# The resource registries a stopping context disposes last, by identity; empty outside a stop.
+_DEFERRED_DISPOSAL: ContextVar[frozenset[int]] = ContextVar("pyfly_deferred_disposal", default=frozenset())
+
+
+def disposal_deferred(resource: object) -> bool:
+    """Whether a stopping context disposes *resource* last, so that its ``close()`` must wait.
+
+    A :class:`ResourceRegistry` calls it at the top of ``close()``: while the context is still
+    draining, destroying and stopping the beans that use the registry, a close requested by one of
+    them (the registry's lifecycle bean) is left to the final ``dispose_all()``.
+    """
+    return id(resource) in _DEFERRED_DISPOSAL.get()
+
+
+@contextmanager
+def deferring_disposal(resources: Iterable[object]) -> Iterator[None]:
+    """Within the block, :func:`disposal_deferred` answers ``True`` for *resources* (and the tasks the
+    block starts inherit it)."""
+    token = _DEFERRED_DISPOSAL.set(_DEFERRED_DISPOSAL.get() | {id(resource) for resource in resources})
+    try:
+        yield
+    finally:
+        _DEFERRED_DISPOSAL.reset(token)

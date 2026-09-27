@@ -88,6 +88,7 @@ from pyfly.data.relational.dialect_customizers import (
     is_file_database,
     run_after_begin,
 )
+from pyfly.kernel.lifecycle import disposal_deferred
 
 __all__ = [
     "CLOSE_TIMEOUT",
@@ -727,7 +728,14 @@ class DataSourceRegistry:
         :class:`DataSourceConfigurationError` instead of silently opening a pool that nobody would ever
         dispose. A connection checked out before the close finishes its work and is closed when it is
         returned.
+
+        While an ``ApplicationContext`` that holds this registry as a bean is stopping, a close
+        requested before its final step (by the registry's lifecycle bean) does nothing: the context
+        disposes the registry last, through :meth:`dispose_all`, after every bean that may still use
+        it (:func:`~pyfly.kernel.lifecycle.disposal_deferred`).
         """
+        if disposal_deferred(self):
+            return
         with self._lock:
             if self._closed:
                 return

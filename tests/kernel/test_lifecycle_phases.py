@@ -81,3 +81,23 @@ def test_a_resource_registry_disposes_with_a_coroutine() -> None:
     assert isinstance(_Registry(), ResourceRegistry)
     assert not is_resource_registry(_SyncDisposer())
     assert not is_resource_registry(_Plain())
+
+
+async def test_disposal_is_deferred_only_inside_the_block_and_in_its_tasks() -> None:
+    import asyncio
+
+    from pyfly.kernel.lifecycle import deferring_disposal, disposal_deferred
+
+    registry, other = _Registry(), _Registry()
+    assert not disposal_deferred(registry)
+    with deferring_disposal([registry]):
+        assert disposal_deferred(registry)
+        assert not disposal_deferred(other)
+        assert await asyncio.create_task(_deferred(registry))  # a task started in the block inherits it
+    assert not disposal_deferred(registry)
+
+
+async def _deferred(resource: object) -> bool:
+    from pyfly.kernel.lifecycle import disposal_deferred
+
+    return disposal_deferred(resource)

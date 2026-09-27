@@ -385,3 +385,28 @@ async def test_lifecycle_beans_start_by_ascending_phase_and_stop_by_descending_p
         "default.stop",
         "early.stop",
     ]
+
+
+async def test_the_registry_closes_last_whatever_the_registration_order(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An embedder (or a test) that registers the relational auto-configuration by hand puts its beans
+    before the entry-point ones, so the registry's lifecycle bean is created after the engine
+    lifecycle and stops before it. The registry must still close last: create-drop drops the schema
+    on an open engine."""
+    import logging
+
+    from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    ctx = ApplicationContext(_config(url, ddl_auto="create-drop"))
+    ctx.register_bean(RelationalAutoConfiguration)
+    ctx.register_bean(_DropAuditor)
+    await ctx.start()
+    with caplog.at_level(logging.WARNING, logger="pyfly.context.application_context"):
+        await ctx.stop()
+
+    assert EVENTS == ["pre_destroy:ok"]
+    assert "adapter_stop_failed" not in caplog.text
+    with pytest.raises(Exception, match="no such table"):
+        await _bodies(url)

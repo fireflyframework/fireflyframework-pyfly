@@ -488,9 +488,43 @@ class ApplicationContext:
         was disposed before the consumers, the user lifecycle beans and every ``@pre_destroy``, and
         the writes that followed reconnected through a pool nobody disposed.
         """
-        from pyfly.kernel.lifecycle import CONSUMER_PHASE, is_resource_registry, lifecycle_phase
+        from pyfly.kernel.lifecycle import deferring_disposal, is_resource_registry
 
         shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
+        # The resource registries are disposed in step 5 and nowhere earlier: a lifecycle bean that
+        # closes one on stop (the datasource registry's) would otherwise close it at its own place in
+        # the order, before the beans that still use it, whatever the registration order was.
+        registries = [
+            reg.instance
+            for reg in self._all_registrations()
+            if reg.instance is not None and is_resource_registry(reg.instance)
+        ]
+        with deferring_disposal(registries):
+            live = await self._drain_destroy_and_stop(shutdown_timeout)
+
+        # 5. The resource registries (the datasource registry), last.
+        disposed: set[int] = set()
+        for instance in live:
+            if not is_resource_registry(instance) or id(instance) in disposed:
+                continue
+            disposed.add(id(instance))
+            try:
+                await asyncio.wait_for(instance.dispose_all(), timeout=shutdown_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "resource_registry_dispose_timeout",
+                    extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
+                )
+            except Exception:
+                logger.warning(
+                    "resource_registry_dispose_failed", extra={"bean": type(instance).__qualname__}, exc_info=True
+                )
+
+        self._release_run(live)
+
+    async def _drain_destroy_and_stop(self, shutdown_timeout: float) -> list[Any]:
+        """Steps 1 to 4 of :meth:`stop`; returns every singleton, in the order they were destroyed."""
+        from pyfly.kernel.lifecycle import CONSUMER_PHASE, lifecycle_phase
 
         # 1. Tell the application first, while it still works.
         try:
@@ -549,22 +583,10 @@ class ApplicationContext:
             if id(bean) not in stopped:
                 stopped.add(id(bean))
                 await self._stop_lifecycle_bean(bean, shutdown_timeout)
+        return live
 
-        # 5. The resource registries (the datasource registry), last.
-        for instance in live:
-            if is_resource_registry(instance):
-                try:
-                    await asyncio.wait_for(instance.dispose_all(), timeout=shutdown_timeout)
-                except TimeoutError:
-                    logger.warning(
-                        "resource_registry_dispose_timeout",
-                        extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
-                    )
-                except Exception:
-                    logger.warning(
-                        "resource_registry_dispose_failed", extra={"bean": type(instance).__qualname__}, exc_info=True
-                    )
-
+    def _release_run(self, live: list[Any]) -> None:
+        """Step 6 of :meth:`stop`: release the destroyed singletons and forget what the run added."""
         # 6. RELEASE what was just destroyed. @pre_destroy has closed these pools, stopped these
         # consumers and flushed these files, so keeping them on their registrations leaves the
         # container handing out objects that no longer work: get_bean() after a stop returned a
