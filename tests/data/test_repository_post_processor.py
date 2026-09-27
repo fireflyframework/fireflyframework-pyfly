@@ -15,17 +15,23 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from sqlalchemy import String
+from sqlalchemy import ForeignKey, String, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.data.post_processor import is_stub
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 from pyfly.data.relational.sqlalchemy.query import query
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
+from tests.support.backend_matrix import RelationalBackend
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -439,3 +445,230 @@ class TestConcreteMethodsPreserved:
         results = await repo.find_by_name("Alice")
         assert len(results) == 1
         assert results[0].name == "Alice"
+
+
+# ===========================================================================
+# 8. Stubs are recognized by the shape of their body (C002)
+# ===========================================================================
+
+
+class StubOwner(Base):
+    __tablename__ = "pp_stub_owner"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    email: Mapped[str] = mapped_column(String(100))
+
+
+class StubDoc(Base):
+    __tablename__ = "pp_stub_doc"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    owner_id: Mapped[str] = mapped_column(ForeignKey("pp_stub_owner.id"))
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True, default=None)
+
+
+class HandWrittenRepo(Repository[StubDoc, str]):
+    """Hand-written find_by_/count_by_/delete_by_ bodies without a single literal: none is a stub."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]:
+        result = await self._session.execute(select(StubDoc).where(func.lower(StubDoc.name) == func.lower(name)))
+        return list(result.scalars().all())
+
+    async def find_by_owner_email(self, email: str) -> list[StubDoc]:
+        """A join lookup: the entity has no ``owner_email`` property."""
+        statement = select(StubDoc).join(StubOwner, StubOwner.id == StubDoc.owner_id).where(StubOwner.email == email)
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def count_by_name(self, name: str) -> int:
+        return len(await self.find_by_name(name))
+
+    async def exists_by_name(self, name: str) -> bool:
+        return bool(await self.find_by_name(name))
+
+    async def delete_by_owner_id(self, owner_id: str) -> int:
+        """A soft delete: the rows stay, with ``deleted_at`` set."""
+        rows = (await self._session.execute(select(StubDoc).where(StubDoc.owner_id == owner_id))).scalars().all()
+        for row in rows:
+            row.deleted_at = datetime.now(UTC)
+        await self._session.flush()
+        return len(rows)
+
+
+class StubShapesRepo(Repository[StubDoc, str]):
+    """Every body shape that is a stub."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name(self, name: str) -> int:
+        pass
+
+    async def exists_by_name(self, name: str) -> bool:
+        """Documented, and no body at all."""
+
+    async def find_by_owner_id(self, owner_id: str) -> list[StubDoc]:
+        """Documented stub."""
+        ...
+
+    async def count_by_owner_id(self, owner_id: str) -> int:
+        raise NotImplementedError
+
+    async def exists_by_owner_id(self, owner_id: str) -> bool:
+        raise NotImplementedError()
+
+    async def find_by_id_in(self, ids: list[str]) -> list[StubDoc]:
+        raise NotImplementedError("derived")
+
+
+class StubBase(Repository[StubDoc, str]):
+    """An intermediate base: its stubs are compiled for every repository that extends it."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name(self, name: str) -> int: ...
+
+
+class InheritingRepo(StubBase):
+    """Inherits find_by_name as a stub, and overrides count_by_name with a real body."""
+
+    async def count_by_name(self, name: str) -> int:
+        return len(await self.find_by_name(name)) * 100
+
+
+@pytest.fixture
+async def file_session(relational_backend: RelationalBackend) -> AsyncIterator[AsyncSession]:
+    """A session on the sqlite-file lane (foreign keys on), with two owners and three documents."""
+    await relational_backend.create_tables(StubOwner, StubDoc)
+    engine = relational_backend.create_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all([StubOwner(id="o1", email="alice@example.com"), StubOwner(id="o2", email="bob@example.com")])
+        await session.flush()
+        session.add_all(
+            [
+                StubDoc(id="d1", name="MixedCase", owner_id="o1"),
+                StubDoc(id="d2", name="other", owner_id="o1"),
+                StubDoc(id="d3", name="other", owner_id="o2"),
+            ]
+        )
+        await session.flush()
+        yield session
+
+
+@pytest.mark.backends("sqlite-file")
+class TestStubDetection:
+    """A body with real code is never replaced, however little it holds; every stub shape is compiled."""
+
+    async def test_hand_written_bodies_without_literals_survive(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = HandWrittenRepo(StubDoc, file_session)
+        processor.after_init(repo, "handWritten")
+
+        assert not {
+            "find_by_name",
+            "find_by_owner_email",
+            "count_by_name",
+            "exists_by_name",
+            "delete_by_owner_id",
+        } & set(vars(repo))
+        assert [doc.id for doc in await repo.find_by_name("mixedcase")] == ["d1"]
+        assert sorted(doc.id for doc in await repo.find_by_owner_email("alice@example.com")) == ["d1", "d2"]
+        assert await repo.count_by_name("OTHER") == 2
+        assert await repo.exists_by_name("MIXEDCASE") is True
+
+    async def test_a_hand_written_soft_delete_keeps_its_rows(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = HandWrittenRepo(StubDoc, file_session)
+        processor.after_init(repo, "handWritten")
+
+        assert await repo.delete_by_owner_id("o1") == 2
+        rows = (await file_session.execute(text("SELECT id, deleted_at FROM pp_stub_doc ORDER BY id"))).all()
+        assert [(row[0], row[1] is not None) for row in rows] == [("d1", True), ("d2", True), ("d3", False)]
+
+    async def test_every_stub_shape_is_compiled(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = StubShapesRepo(StubDoc, file_session)
+        processor.after_init(repo, "stubShapes")
+
+        assert {
+            "find_by_name",
+            "count_by_name",
+            "exists_by_name",
+            "find_by_owner_id",
+            "count_by_owner_id",
+            "exists_by_owner_id",
+            "find_by_id_in",
+        } <= set(vars(repo))
+        assert [doc.id for doc in await repo.find_by_name("other")] in (["d2", "d3"], ["d3", "d2"])
+        assert await repo.count_by_name("other") == 2
+        assert await repo.exists_by_name("MixedCase") is True
+        assert sorted(doc.id for doc in await repo.find_by_owner_id("o1")) == ["d1", "d2"]
+        assert await repo.count_by_owner_id("o2") == 1
+        assert await repo.exists_by_owner_id("o3") is False
+        assert sorted(doc.id for doc in await repo.find_by_id_in(["d1", "d3"])) == ["d1", "d3"]
+
+    async def test_stubs_of_an_intermediate_base_are_compiled(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = InheritingRepo(StubDoc, file_session)
+        processor.after_init(repo, "inheriting")
+
+        assert sorted(doc.id for doc in await repo.find_by_name("other")) == ["d2", "d3"]
+        # The subclass's real override of the base's stub is kept.
+        assert "count_by_name" not in vars(repo)
+        assert await repo.count_by_name("other") == 200
+
+
+class TestIsStub:
+    """``is_stub`` reads the body's shape, whatever the Python version compiles it to."""
+
+    def test_stub_shapes(self):
+        async def ellipsis(self, x): ...
+
+        async def documented(self, x):
+            """Doc."""
+
+        def sync_pass(self, x):
+            pass
+
+        async def raises(self, x):
+            raise NotImplementedError
+
+        async def raises_with_message(self, x):
+            raise NotImplementedError("not yet")
+
+        for function in (ellipsis, documented, sync_pass, raises, raises_with_message):
+            assert is_stub(function), function.__name__
+
+    def test_real_bodies(self):
+        async def delegating(self, x):
+            return await self.find_all_by_spec(x)
+
+        async def returns_argument(self, x):
+            return x
+
+        async def returns_literal(self, x):
+            return "x"
+
+        async def raises_something_else(self, x):
+            raise ValueError
+
+        async def documented_and_real(self, x):
+            """Doc."""
+            return await self.find_all_by_spec(x)
+
+        for function in (delegating, returns_argument, returns_literal, raises_something_else, documented_and_real):
+            assert not is_stub(function), function.__name__
+
+    def test_a_wrapped_stub_is_read_through_its_wrappers(self):
+        async def stub(self, x): ...
+
+        @functools.wraps(stub)
+        async def wrapper(self, x):
+            return await stub(self, x)
+
+        assert is_stub(wrapper)
+        assert not is_stub(len)
