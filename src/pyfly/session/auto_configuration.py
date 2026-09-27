@@ -148,23 +148,36 @@ class SessionConcurrencyAutoConfiguration:
             ttl = int(config.get("pyfly.session.ttl", 1800))
             registry = PostgresSessionRegistry(datasource, ttl=ttl, create_table=create)
         else:
+            if registry_type == "redis":
+                logger.warning(
+                    "session_registry_fallback: pyfly.session.concurrency.registry=redis but redis.asyncio is not "
+                    "installed; the in-memory registry caps each instance's sessions on its own"
+                )
             registry_type = "memory"
             registry = InMemorySessionRegistry()
-        _report_a_process_local_store(registry_type, session_store)
+        liveness_store: SessionStore | None = session_store
+        if _process_local_store_beside_a_shared_registry(registry_type, session_store):
+            # This instance's store knows only the sessions this instance holds: asked about another
+            # instance's live session, it answers "gone", and the controller would drop that registration
+            # and admit a login over the cap. Without a store, every registration counts until its logout.
+            liveness_store = None
         return SessionConcurrencyController(
-            registry, policy, session_deleter=session_store.delete, session_store=session_store
+            registry, policy, session_deleter=session_store.delete, session_store=liveness_store
         )
 
 
-def _report_a_process_local_store(registry_type: str, session_store: SessionStore) -> None:
-    """A registry shared by the instances beside a store each instance keeps to itself: the cap counts every
-    instance's sessions, but evicting one another instance holds does not end it there."""
+def _process_local_store_beside_a_shared_registry(registry_type: str, session_store: SessionStore) -> bool:
+    """Whether the registry is shared by the instances but the session store is each instance's own, and if so
+    report what that costs (``session_registry_not_shared``)."""
     from pyfly.session.adapters.memory import InMemorySessionStore
 
-    if registry_type != "memory" and isinstance(session_store, InMemorySessionStore):
-        logger.warning(
-            "session_registry_not_shared: pyfly.session.concurrency.registry=%s is shared by every instance, "
-            "but the session store is in memory: evicting a session another instance holds leaves it usable "
-            "there. Share the sessions too (pyfly.session.store=postgres or redis).",
-            registry_type,
-        )
+    if registry_type == "memory" or not isinstance(session_store, InMemorySessionStore):
+        return False
+    logger.warning(
+        "session_registry_not_shared: pyfly.session.concurrency.registry=%s is shared by every instance, but "
+        "the session store is in memory: evicting a session another instance holds leaves it usable there, and "
+        "sessions that end without a logout (expired, lost in a restart) keep counting toward the cap. Share "
+        "the sessions too (pyfly.session.store=postgres or redis).",
+        registry_type,
+    )
+    return True

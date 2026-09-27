@@ -260,14 +260,18 @@ pyfly:
   application, lost in a restart), as Spring's `getAllSessions(principal, false)` leaves expired ones out, so
   a user whose sessions ended without a logout is never locked out. The login handler saves the session it
   logs in (`request.state.persist_session`, set by the `SessionFilter`) before registering it, so a
-  concurrent login never takes it for a dead one.
+  concurrent login never takes it for a dead one. This needs a store that holds every session the registry
+  counts: beside a cross-process registry (`redis` or `postgres`), only a shared store (`store=postgres` or
+  `redis`) does. With the in-memory store there, the auto-configuration does not give the store to the
+  controller (it would take the other instances' live sessions for dead ones and admit logins over the cap),
+  so every registered session counts until it logs out or is evicted (see [Registry Backends](#registry-backends)).
 - Counting, evicting and registering is one atomic step of the registry
   (`AtomicSessionRegistry.register_limited`): one unit of work that holds the principal's row on SQL, one Lua
   script on Redis, one lock in memory. Concurrent logins of one principal, on one instance or several, never
   exceed the cap. A custom registry without that method is serialized per principal within the process.
-- The SQL registry is purged: a registration comes due for a liveness check one session TTL after it was
-  registered or renewed; a login (at most once a minute) or `controller.purge_expired()` drops the due
-  registrations whose session is gone and renews the others.
+- The SQL registry is purged when the controller has the store: a registration comes due for a liveness
+  check one session TTL after it was registered or renewed; a login (at most once a minute) or
+  `controller.purge_expired()` drops the due registrations whose session is gone and renews the others.
 
 > **Before 26.09.08** the cap was a list and a register in separate transactions (max-sessions=1 let
 > concurrent logins all in), and no registration was ever removed but by logout or eviction: with
@@ -293,7 +297,8 @@ the box, selected by `pyfly.session.concurrency.registry`:
   principal's live sessions are stored in a Redis sorted set (score =
   `created_at`, member = `session_id`), so `list_sessions` is naturally
   oldest-first. Requires `redis.asyncio`; if it is unavailable the
-  auto-configuration falls back to the in-memory registry. The connection URL
+  auto-configuration falls back to the in-memory registry and logs a
+  `session_registry_fallback` WARNING. The connection URL
   comes from `pyfly.session.concurrency.redis.url`, falling back to
   `pyfly.session.redis.url`, then `redis://localhost:6379/0`.
 - **`postgres`** — a durable, queryable, cross-process index for
@@ -306,11 +311,23 @@ the box, selected by `pyfly.session.concurrency.registry`:
   strategy allows it, otherwise checked. The datasource is the one
   `pyfly.session.concurrency.postgres.datasource` names, or the one
   `pyfly.session.concurrency.postgres.url` resolves to in the context's
-  `DataSourceRegistry`, or the primary. Pair it with a shared session store
-  (`store=postgres` or `redis`): with the in-memory store, evicting a session
-  another instance holds leaves it usable there, and the auto-configuration
-  logs a `session_registry_not_shared` WARNING. Registrations an earlier
-  release wrote to `pyfly_session_registry` are not read (drop that table).
+  `DataSourceRegistry`, or the primary. Registrations an earlier release wrote
+  to `pyfly_session_registry` are not read (drop that table).
+
+Pair a cross-process registry (`redis` or `postgres`) with a shared session
+store (`store=postgres` or `redis`). With the in-memory store, each instance
+knows only its own sessions, and the auto-configuration logs a
+`session_registry_not_shared` WARNING. The cap still counts every instance's
+registrations, but:
+
+- evicting a session another instance holds removes its registration and leaves
+  the session usable on that instance;
+- dead sessions are not dropped: the controller does not ask a process-local
+  store about the registrations (it would take the other instances' live
+  sessions for dead ones), so a session that ends without a logout (expired,
+  lost in a restart) counts until it logs out or is evicted (on Redis, at most
+  until the principal's set expires, its `ttl` after the last login). With
+  `reject-new`, such sessions can lock the principal out, as before 26.09.08.
 
 ### Configuration (Registry Backend)
 
@@ -353,8 +370,10 @@ import their driver at module scope (hexagonal wiring).
 The controller gets the `SessionStore` (to tell live sessions from dead ones)
 and its `delete` as the `session_deleter`, so an evicted session is deleted from
 whichever store backend is active; it ends for every instance when the store is
-shared (Redis or SQL). The controller is a lifecycle bean: its start creates or
-checks the SQL registry's tables.
+shared (Redis or SQL). Beside a `redis` or `postgres` registry, the in-memory
+store is passed as the `session_deleter` only (see
+[Registry Backends](#registry-backends)). The controller is a lifecycle bean:
+its start creates or checks the SQL registry's tables.
 
 ### Key APIs
 

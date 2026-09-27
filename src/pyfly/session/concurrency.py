@@ -22,6 +22,8 @@ unchanged.
 - **Only live sessions count.** Given the session store, the controller drops, at each login, the
   registrations of the principal's sessions the store no longer has (expired, invalidated, lost in a
   restart), so a user whose sessions ended without a logout is never locked out; a purge drops the others.
+  The store must be as shared as the registry (the auto-configuration gives no process-local store to a
+  cross-process registry).
 - **The cap holds under concurrency.** Counting the principal's sessions, evicting and registering the new
   one is one atomic step of an :class:`AtomicSessionRegistry` (one unit of work that holds the principal's
   row on SQL, one script on Redis, one lock in memory), so concurrent logins, on one instance or several,
@@ -173,7 +175,9 @@ class SessionConcurrencyController:
         session_deleter: Deletes an evicted session from the session store (by default *session_store*'s
             ``delete``).
         session_store: The session store: a session counts toward the cap while the store has it (see the
-            module documentation). Without it every registered session counts until it logs out.
+            module documentation). It must hold every session the registry counts: beside a registry shared
+            by several instances, a store each instance keeps to itself takes the others' live sessions for
+            dead ones. Without it every registered session counts until it logs out or is evicted.
         purge_interval: How often a login also purges the registrations of dead sessions from a registry
             that supports it (``None``: only :meth:`purge_expired` does).
 

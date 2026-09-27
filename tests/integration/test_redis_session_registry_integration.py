@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from pyfly.container.container import Container
 from pyfly.session.adapters.redis_registry import RedisSessionRegistry
 from pyfly.session.concurrency import AtomicSessionRegistry, ConcurrencyControlPolicy, SessionConcurrencyController
 from pyfly.testing import requires_docker
@@ -93,3 +94,49 @@ async def test_register_limited_evicts_the_oldest(redis_client: Any) -> None:
     assert again.accepted and again.evicted == ()
     assert [sid for sid, _ in await registry.list_sessions("bob")] == ["s2", "s3"]
     assert await redis_client.ttl(f"{registry.key_prefix}bob") > 0
+
+
+@requires_docker
+async def test_the_redis_registry_beside_process_local_stores_caps_every_instance(
+    redis_client: Any, redis_url: str
+) -> None:
+    """C154 (review): two instances share the Redis registry, each keeps its sessions in memory. Asking its own
+    store about the other instance's live session, the second instance dropped its registration and let a
+    second login in: the auto-configuration must not hand a process-local store to the controller."""
+    from pyfly.core.config import Config
+    from pyfly.session.adapters.memory import InMemorySessionStore
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration
+
+    config = Config(
+        {
+            "pyfly": {
+                "session": {
+                    "enabled": True,
+                    "concurrency": {
+                        "enabled": True,
+                        "registry": "redis",
+                        "max-sessions": 1,
+                        "strategy": "reject-new",
+                        "redis": {"url": redis_url},
+                    },
+                }
+            }
+        }
+    )
+    stores = [InMemorySessionStore(), InMemorySessionStore()]
+    controllers = [
+        SessionConcurrencyAutoConfiguration().session_concurrency_controller(config, store, Container())
+        for store in stores
+    ]
+    principal = f"carol-{uuid.uuid4().hex[:8]}"
+    try:
+        await stores[0].save("on-first", {"user": principal}, ttl=600)
+        assert await controllers[0].on_login(principal, "on-first", 1.0)
+        await stores[1].save("on-second", {"user": principal}, ttl=600)
+
+        assert not await controllers[1].on_login(principal, "on-second", 2.0)
+        assert [sid for sid, _ in await controllers[1].registry.list_sessions(principal)] == ["on-first"]
+    finally:
+        await redis_client.delete(f"{RedisSessionRegistry(redis_client).key_prefix}{principal}")
+        for controller in controllers:
+            await controller.registry._client.aclose()  # type: ignore[attr-defined]
