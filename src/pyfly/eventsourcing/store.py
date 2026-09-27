@@ -103,6 +103,7 @@ to one event table."""
 
 _XID8_SCALE = 1 << XID8_ORDINAL_BITS
 _NUMBERING_BATCH = 1000  # committed events given positions per numbering unit
+_NUMBERING_WINDOW = 100_000  # event ids one ordered read of the events without a position fetches (about 10 MB)
 _ASSIGN_CHUNK = 500  # events per positions UPDATE (one CASE branch and one IN value each)
 
 
@@ -242,6 +243,23 @@ class InMemoryEventStore:
 _UNIT_ORDINALS: weakref.WeakKeyDictionary[UnitOfWork, dict[str, int]] = weakref.WeakKeyDictionary()
 
 
+class _Backlog:
+    """The committed events without a position, in the order they get theirs, from one ordered read of them
+    (nothing can serve that order but a sort, so a store reads it once per window, not once per numbering round).
+
+    ``reached`` is how far the store's committed rounds have got through the list. ``head`` is the head row's
+    position after the last of them: every numbering moves the head row, so while it is still there no other store
+    has numbered anything since, and the rest of the list has no position yet. ``None`` when that is not known: the
+    rest of the list is checked again as it is numbered."""
+
+    __slots__ = ("event_ids", "head", "reached")
+
+    def __init__(self, event_ids: list[str]) -> None:
+        self.event_ids = event_ids
+        self.reached = 0
+        self.head: int | None = None
+
+
 class SqlAlchemyEventStore:
     """Async SQL adapter for the event store (see the module documentation).
 
@@ -255,7 +273,8 @@ class SqlAlchemyEventStore:
 
     The application context starts the store; one built by hand starts on first use, or with :meth:`start`.
     Events a table got before it had global positions (rows an earlier release wrote, after a migration added
-    the column) are placed on the stream like any other event without one, oldest ``occurred_at`` first.
+    the column) are placed on the stream like any other event without one, oldest ``occurred_at`` first: by the
+    readers with ``head-row``, at start with ``xid8``.
     """
 
     def __init__(
@@ -282,15 +301,20 @@ class SqlAlchemyEventStore:
         self._backend = ""
         self._events_table: Table | None = None
         self._head_table: Table | None = None
+        self._backlog = _Backlog([])  # the events without a position, as the numbering rounds work through them
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Create the tables when allowed and check them, settle the position strategy, and give the committed
-        events without a position theirs. Raises ``FrameworkSchemaError`` when a table is unusable, or the
-        configured strategy is not the one the table recorded."""
+        """Create the tables when allowed and check them, and settle the position strategy; with ``xid8``, whose
+        readers never number, also give the committed events without a position (an earlier release's) theirs.
+        Raises ``FrameworkSchemaError`` when a table is unusable, or the configured strategy is not the one the
+        table recorded.
+
+        With ``head-row`` the start numbers nothing: a backlog of events without a position (a large table of an
+        earlier release) is numbered by the readers as they page, and never holds up the start."""
         await self._start(create=self._create_table)
 
     async def stop(self) -> None:
@@ -309,7 +333,8 @@ class SqlAlchemyEventStore:
             await ensure_tables(self._target, self._events, self._head, create=create)
             self._backend = backend_name(self.engine)
             strategy = await self._settle_strategy()
-            await self._number_unnumbered(resolve_manager(self._target), strategy)
+            if strategy == POSITION_XID8:
+                await self._number_unnumbered(resolve_manager(self._target))
         self._strategy = strategy
 
     async def _ready(self) -> str:
@@ -458,7 +483,13 @@ class SqlAlchemyEventStore:
         limit: int = 100,
     ) -> list[StoredEventEnvelope]:
         """The committed events after global position *after_position*, in position order (see
-        :class:`EventStore`); inside a unit of work, that unit's own events are not on the stream yet."""
+        :class:`EventStore`); inside a unit of work, that unit's own events are not on the stream yet.
+
+        With ``head-row`` a read outside a unit of work on the store's datasource first gives the committed events
+        without a position theirs (as many as the page needs). A read inside such a unit numbers nothing: it shows
+        the events a reader outside one has numbered, so a reader that only ever runs inside one (a
+        ``@transactional(read_only=True)`` endpoint) sees new events once another reader, a projection runner or
+        :meth:`last_position`, has numbered them."""
         from sqlalchemy import select
 
         _one_cursor(after_position, after_event_id)
@@ -500,7 +531,12 @@ class SqlAlchemyEventStore:
 
     async def last_position(self) -> int:
         """The global position of the last event a reader can see on the stream now (0 when there is none):
-        where a new projection that should skip the history starts."""
+        where a new projection that should skip the history starts.
+
+        With ``head-row``, outside a unit of work on the store's datasource, it first gives every committed event
+        without a position its own: over the backlog of a large table an earlier release filled, that takes as
+        long as numbering all of it (the event-sourcing guide gives the figures, and SQL that numbers such a
+        table before the upgraded application starts)."""
         from sqlalchemy import func, select
 
         strategy = await self._ready()
@@ -553,31 +589,28 @@ class SqlAlchemyEventStore:
         probe = select(table.c.event_id).where(table.c.global_position.is_(None)).limit(1)
         return (await session.execute(probe)).first() is not None
 
-    async def _number_unnumbered(self, manager: TransactionManager, strategy: str) -> None:
-        """At start, whatever the strategy: give the committed events without a position (an earlier release's
-        rows) theirs.
+    async def _number_unnumbered(self, manager: TransactionManager) -> None:
+        """At start with ``xid8``, whose readers never number: give the committed events without a position (an
+        earlier release's rows) theirs, from the head row.
 
-        On an ``xid8`` table that has ``xid8`` positions already (above the head row's), those events (a writer
-        of an earlier release still running after the upgrade) get positions below them, which a projection may
-        have passed: a WARNING says so."""
+        When the table has ``xid8`` positions already (above the head row's), those events (a writer of an earlier
+        release still running after the upgrade) get positions below them, which a projection may have passed: a
+        WARNING says so."""
         from sqlalchemy import func, select
 
         head, table = self._head, self._events
-        highest: Any = None
         async with infrastructure_unit(manager, read_only=True) as session:
-            pending = await self._unnumbered(session)
-            if pending and strategy == POSITION_XID8:
-                highest = (
-                    await session.execute(
-                        select(
-                            func.max(table.c.global_position),
-                            select(head.c.position).where(head.c.store == self._table_name).scalar_subquery(),
-                        )
+            if not await self._unnumbered(session):
+                return
+            highest = (
+                await session.execute(
+                    select(
+                        func.max(table.c.global_position),
+                        select(head.c.position).where(head.c.store == self._table_name).scalar_subquery(),
                     )
-                ).one()
-        if not pending:
-            return
-        if highest is not None and highest[0] is not None and int(highest[0]) > int(highest[1] or 0):
+                )
+            ).one()
+        if highest[0] is not None and int(highest[0]) > int(highest[1] or 0):
             _logger.warning(
                 "event_store_positions_below_readers",
                 extra={
@@ -605,16 +638,24 @@ class SqlAlchemyEventStore:
             while True:
                 async with template.transaction() as unit:
                     assert unit is not None
-                    count = await self._number_round(unit.resource)
+                    count, more, backlog, reached, head = await self._number_round(unit.resource)
+                # Only once the round has committed are the events it went through known to have positions.
+                if backlog is self._backlog and reached > backlog.reached:
+                    backlog.reached, backlog.head = reached, head
+                    if reached >= len(backlog.event_ids):
+                        self._backlog = _Backlog([])
                 numbered += count
-                if count < _NUMBERING_BATCH or (at_least is not None and numbered >= at_least):
+                if not more or (at_least is not None and numbered >= at_least):
                     break
         _logger.debug("event_store_events_numbered", extra={"table": self._table_name, "events": numbered})
 
-    async def _number_round(self, session: AsyncSession) -> int:
-        """One numbering round: lock the head row, give the next positions to the committed events that have
-        none (oldest record first, an aggregate's in sequence order), move the head row on. Returns how many."""
-        from sqlalchemy import case, func, select, update
+    async def _number_round(self, session: AsyncSession) -> tuple[int, bool, _Backlog, int, int | None]:
+        """One numbering round: lock the head row, give the next positions to the next committed events of the
+        store's backlog list that still have none (:meth:`_read_backlog`, read again when the list is used up),
+        move the head row on. Returns how many it numbered, whether events may be left without a position, the
+        list it took them from and how far it got through it, and the head row's new position when no other
+        store had numbered anything since the list was read (``None`` otherwise: see :class:`_Backlog`)."""
+        from sqlalchemy import case, select, update
 
         from pyfly.data.relational.framework_schema import FrameworkSchemaError
 
@@ -627,27 +668,74 @@ class SqlAlchemyEventStore:
                 f"The head row of event table {self._table_name} is missing from {head.name}: starting the event "
                 "store creates it again (it takes the positions on from the highest one in the table)."
             )
-        pending = (
-            select(table.c.event_id)
-            .where(table.c.global_position.is_(None))
-            .order_by(func.coalesce(table.c.recorded_at, table.c.occurred_at), table.c.aggregate_id, table.c.sequence)
-            .limit(_NUMBERING_BATCH)
-        )
-        found: Sequence[Any] = (await session.execute(pending)).scalars().all()
-        event_ids = [str(event_id) for event_id in found]
-        if not event_ids:
-            return 0
         base = int(last)
+        backlog = self._backlog
+        reached, fresh = backlog.reached, False
+        alone = backlog.head == base
+        while True:
+            if reached >= len(backlog.event_ids):
+                backlog = self._backlog = _Backlog(await self._read_backlog(session))
+                reached, fresh, alone = 0, True, True  # read under the head row's lock: current
+                if not backlog.event_ids:
+                    return 0, False, backlog, 0, None
+            chunk = backlog.event_ids[reached : reached + _NUMBERING_BATCH]
+            # Unless nobody else has numbered anything since the list was read, its events are checked again, and
+            # those numbered meanwhile are passed over.
+            event_ids = chunk if alone else await self._still_unnumbered(session, chunk)
+            reached += len(chunk)
+            if event_ids:
+                break
         await session.execute(
             update(head).where(head.c.store == self._table_name).values(position=base + len(event_ids))
         )
         for start in range(0, len(event_ids), _ASSIGN_CHUNK):
-            chunk = event_ids[start : start + _ASSIGN_CHUNK]
+            part = event_ids[start : start + _ASSIGN_CHUNK]
             positions = case(
-                {event_id: base + start + index + 1 for index, event_id in enumerate(chunk)}, value=table.c.event_id
+                {event_id: base + start + index + 1 for index, event_id in enumerate(part)}, value=table.c.event_id
             )
-            await session.execute(update(table).where(table.c.event_id.in_(chunk)).values(global_position=positions))
-        return len(event_ids)
+            await session.execute(update(table).where(table.c.event_id.in_(part)).values(global_position=positions))
+        if reached < len(backlog.event_ids):
+            more = True
+        elif fresh:
+            more = len(backlog.event_ids) == _NUMBERING_WINDOW  # the read stopped at a full window: more may follow
+        else:
+            more = await self._unnumbered(session)  # an older list is used up: events may have committed since
+        return len(event_ids), more, backlog, reached, base + len(event_ids) if alone else None
+
+    async def _read_backlog(self, session: AsyncSession) -> list[str]:
+        """The committed events without a position, up to :data:`_NUMBERING_WINDOW` of them, in the order they get
+        theirs: oldest record first (``recorded_at``, the database's clock; an earlier release's rows, which have
+        none, by ``occurred_at``), an aggregate's in sequence order.
+
+        No index serves that order, so the read sorts every event without a position: it happens once per window,
+        and the rounds number the list it returns in turn (a backlog of N events costs N/window sorts, not
+        N/round). Events that commit after the read are numbered after the list, above every position it got."""
+        from sqlalchemy import func, select
+
+        table = self._events
+        pending = (
+            select(table.c.event_id)
+            .where(table.c.global_position.is_(None))
+            .order_by(func.coalesce(table.c.recorded_at, table.c.occurred_at), table.c.aggregate_id, table.c.sequence)
+            .limit(_NUMBERING_WINDOW)
+        )
+        found: Sequence[Any] = (await session.execute(pending)).scalars().all()
+        return [str(event_id) for event_id in found]
+
+    async def _still_unnumbered(self, session: AsyncSession, event_ids: list[str]) -> list[str]:
+        """Those of *event_ids* that have no position yet, in their order: one read by primary key per
+        :data:`_ASSIGN_CHUNK` of them (with ``global_position IS NULL`` in the query, a planner may walk that
+        index over the whole backlog instead)."""
+        from sqlalchemy import select
+
+        table = self._events
+        left: set[str] = set()
+        for start in range(0, len(event_ids), _ASSIGN_CHUNK):
+            part = event_ids[start : start + _ASSIGN_CHUNK]
+            found = select(table.c.event_id, table.c.global_position).where(table.c.event_id.in_(part))
+            rows: Sequence[Any] = (await session.execute(found)).all()
+            left.update(str(event_id) for event_id, position in rows if position is None)
+        return [event_id for event_id in event_ids if event_id in left]
 
     async def _settle_strategy(self) -> str:
         """The strategy of the event table: the one recorded in its head row, recorded now by this store when

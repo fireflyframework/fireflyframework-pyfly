@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import Column, MetaData, String, Table, func, insert, select, update
@@ -492,11 +494,11 @@ async def test_the_tables_are_created_at_start_and_only_checked_without_ddl(
     assert _types(await checked.stream_all()) == ["Stored"]
 
 
-async def test_events_stored_by_an_earlier_release_get_positions_in_their_order_at_start(
+async def test_events_stored_by_an_earlier_release_get_positions_in_their_order(
     relational_backend: RelationalBackend,
 ) -> None:
     """Rows written before the table had a global position (an upgrade adds the column) are placed on the
-    stream at start, oldest first, before any event appended since."""
+    stream oldest first, before any event appended since: by the readers with head-row, at start with xid8."""
     engine = relational_backend.create_engine()
     await _store(relational_backend)  # the tables, as the upgrade's migration leaves them
     base = datetime(2026, 1, 1, tzinfo=UTC)
@@ -526,9 +528,10 @@ async def test_events_stored_by_an_earlier_release_get_positions_in_their_order_
             )
 
     store = await _store(relational_backend)
-    placed = select(event_store.c.aggregate_id).order_by(event_store.c.global_position)
+    placed = select(event_store.c.aggregate_id).where(event_store.c.global_position.is_not(None))
     async with engine.connect() as connection:
-        assert (await connection.execute(placed)).scalars().all() == ["legacy-0", "legacy-1", "legacy-2"]
+        numbered = (await connection.execute(placed.order_by(event_store.c.global_position))).scalars().all()
+    assert numbered == (["legacy-0", "legacy-1", "legacy-2"] if store.position_strategy == "xid8" else [])
     await store.append("new", "Order", [_envelope("New")], expected_version=0)
     assert _types(await _drain(store)) == ["Legacy-0", "Legacy-1", "Legacy-2", "New"]
 
@@ -711,6 +714,202 @@ async def test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order(
 
 
 # ---------------------------------------------------------------------------------------------------------
+# A backlog of events without a position (an earlier release's rows, or no reader for a while)
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def _legacy_backlog(engine: Any, count: int, *, aggregates: int = 50) -> list[tuple[str, int]]:
+    """*count* events as an earlier release left them (no ``recorded_at``, no position), inserted in an order
+    unrelated to their ``occurred_at``; returns their ``(aggregate_id, sequence)`` in ``occurred_at`` order."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = []
+    for index in range(count):
+        envelope = _envelope(f"L{index}", occurred_at=base + timedelta(milliseconds=index))
+        aggregate, sequence = f"legacy-{index % aggregates:03d}", index // aggregates + 1
+        envelope.aggregate_id, envelope.aggregate_type, envelope.sequence = aggregate, "Order", sequence
+        rows.append(
+            {
+                "event_id": envelope.event_id,
+                "aggregate_id": aggregate,
+                "aggregate_type": "Order",
+                "sequence": sequence,
+                "event_type": envelope.event_type,
+                "payload": envelope.to_json(),
+                "metadata": "{}",
+                "occurred_at": envelope.occurred_at,
+                "version": 1,
+                "tenant_id": None,
+                "recorded_at": None,
+                "global_position": None,
+            }
+        )
+    expected = [(row["aggregate_id"], row["sequence"]) for row in rows]
+    random.Random(8).shuffle(rows)
+    async with engine.begin() as connection:
+        for start in range(0, count, 1000):
+            await connection.execute(insert(event_store), rows[start : start + 1000])
+    return expected
+
+
+def _backlog_sorts(counter: StatementCounter) -> int:
+    """The reads that sort the events without a position into their numbering order."""
+    return sum(
+        1
+        for statement in counter.statements
+        if statement.verb == "SELECT"
+        and all(part in statement.sql.lower() for part in ("global_position is null", "order by coalesce("))
+    )
+
+
+def _backlog_checks(counter: StatementCounter) -> int:
+    """The reads that check again which events of a backlog list still have no position."""
+    return sum(
+        1 for statement in counter.statements if statement.verb == "SELECT" and "event_id in (" in statement.sql.lower()
+    )
+
+
+async def test_a_backlog_is_sorted_once_while_it_is_numbered(relational_backend: RelationalBackend) -> None:
+    """Review of WP08: every numbering round sorted all the events still without a position (no index can serve
+    that order) to number the next 1000 of them, so a backlog of N events cost N²/1000 row visits: an upgraded
+    table of a million events held every replica's start for 103 s on PostgreSQL. The backlog is now read in its
+    order once (per window of 100 000 events) and numbered from that list; and with the head-row strategy a start
+    leaves the numbering to the readers, which do it as they page."""
+    engine = relational_backend.create_engine()
+    await _store(relational_backend)
+    expected = await _legacy_backlog(engine, 3500)
+
+    store = SqlAlchemyEventStore(engine, position_strategy=_STRATEGY)
+    with StatementCounter(engine) as starting:
+        await store.start()
+    with StatementCounter(engine) as reading:
+        events = await _drain(store, limit=100)
+    assert [(event.aggregate_id, event.sequence) for event in events] == expected
+    assert [event.global_position for event in events] == list(range(1, 3501))
+    # With no other store numbering meanwhile, the list is not checked again either.
+    if store.position_strategy == "xid8":
+        # Its readers never number: the start does, in four rounds, sorting the backlog once.
+        assert (_backlog_sorts(starting), _backlog_checks(starting), starting.count("UPDATE") > 0) == (1, 0, True)
+        assert reading.count("UPDATE") == 0
+    else:
+        assert starting.count("UPDATE") == 0
+        assert (_backlog_sorts(reading), _backlog_checks(reading), reading.count("UPDATE") > 0) == (1, 0, True)
+
+
+async def test_a_backlog_larger_than_a_window_is_sorted_once_per_window(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pyfly.eventsourcing.store as store_module
+
+    monkeypatch.setattr(store_module, "_NUMBERING_WINDOW", 1500)
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyEventStore(engine, position_strategy="head-row")
+    await store.start()
+    expected = await _legacy_backlog(engine, 3500)
+    with StatementCounter(engine) as numbering:
+        assert await store.last_position() == 3500  # numbers every committed event
+    assert _backlog_sorts(numbering) == 3
+    events = await _drain(store, limit=1000)
+    assert [(event.aggregate_id, event.sequence) for event in events] == expected
+    assert [event.global_position for event in events] == list(range(1, 3501))
+
+
+async def test_events_another_store_numbered_meanwhile_are_not_numbered_twice(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A store works through the backlog list it read; another store (another replica) may number part of that
+    list meanwhile: the list's events are checked again, and those numbered are passed over."""
+    engine = relational_backend.create_engine()
+    await _store(relational_backend, "head-row")
+    expected = await _legacy_backlog(engine, 2500)
+    reader = await _store(relational_backend, "head-row")
+    first = await reader.stream_all(limit=100)  # reads the backlog's order and numbers its first round
+    assert [(event.aggregate_id, event.sequence) for event in first] == expected[:100]
+
+    other = await _store(relational_backend, "head-row")
+    await other.append("late", "Order", [_envelope("Late")], expected_version=0)
+    assert await other.last_position() == 2501  # the rest of the backlog, then the late event
+    await other.append("later", "Order", [_envelope("Later")], expected_version=0)
+
+    with StatementCounter(reader.engine) as reading:
+        events = first + await _drain(reader, first[-1].global_position or 0, limit=100)
+    assert [(event.aggregate_id, event.sequence) for event in events] == [*expected, ("late", 1), ("later", 1)]
+    assert [event.global_position for event in events] == list(range(1, 2503))
+    assert _backlog_checks(reading) == 3  # the reader's list, 1500 events after its first round, checked again
+
+
+async def test_a_numbering_round_that_fails_is_numbered_again_in_order(relational_backend: RelationalBackend) -> None:
+    from sqlalchemy import event as sqlalchemy_event
+
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyEventStore(engine, position_strategy="head-row")
+    await store.start()
+    expected = await _legacy_backlog(engine, 2500)
+    first = await store.stream_all(limit=1000)
+
+    def fail_the_positions(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if statement.lstrip().upper().startswith("UPDATE PYFLY_EVENT_STORE SET GLOBAL_POSITION"):
+            raise RuntimeError("the numbering unit fails")
+
+    sqlalchemy_event.listen(engine.sync_engine, "before_cursor_execute", fail_the_positions)
+    try:
+        with pytest.raises(RuntimeError, match="numbering unit fails"):
+            await store.stream_all(after_position=1000, limit=1000)
+    finally:
+        sqlalchemy_event.remove(engine.sync_engine, "before_cursor_execute", fail_the_positions)
+
+    events = first + await _drain(store, 1000, limit=1000)
+    assert [(event.aggregate_id, event.sequence) for event in events] == expected
+    assert [event.global_position for event in events] == list(range(1, 2501))
+
+
+# The set-based numbering docs/modules/eventsourcing.md gives for a large table of an earlier release.
+_NUMBER_EARLIER_EVENTS = {
+    "postgresql": """
+UPDATE pyfly_event_store AS e SET global_position = n.position
+FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
+      FROM pyfly_event_store) AS n
+WHERE e.event_id = n.event_id
+""",
+    "mysql": """
+UPDATE pyfly_event_store AS e
+JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
+      FROM pyfly_event_store) AS n ON e.event_id = n.event_id
+SET e.global_position = n.position
+""",
+}
+_MOVE_THE_HEAD_ROW_ON = """
+UPDATE pyfly_event_store_head SET position = (SELECT MAX(global_position) FROM pyfly_event_store)
+WHERE store = 'pyfly_event_store'
+"""
+
+
+async def test_the_documented_sql_numbers_an_earlier_release_s_events_before_the_first_start(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The set-based numbering the upgrade notes give for a large table, where a store has already started on it
+    (its head row is there, at 0): the head row takes the positions on from the highest one."""
+    from sqlalchemy import text
+
+    engine = relational_backend.create_engine()
+    await _store(relational_backend)
+    expected = await _legacy_backlog(engine, 1200)
+    numbering = _NUMBER_EARLIER_EVENTS["mysql" if relational_backend.dialect in ("mysql", "mariadb") else "postgresql"]
+    async with engine.begin() as connection:
+        await connection.execute(text(numbering))
+        await connection.execute(text(_MOVE_THE_HEAD_ROW_ON))
+
+    store = SqlAlchemyEventStore(engine, position_strategy=_STRATEGY)
+    with StatementCounter(engine) as reading:
+        await store.start()
+        await store.append("new", "Order", [_envelope("New")], expected_version=0)
+        events = await _drain(store, limit=500)
+    assert [(event.aggregate_id, event.sequence) for event in events] == [*expected, ("new", 1)]
+    positions = [event.global_position or 0 for event in events]
+    assert positions[:-1] == list(range(1, 1201)) and positions[-1] > 1200
+    assert _backlog_sorts(reading) == (0 if store.position_strategy == "xid8" else 1)  # only the new event is left
+
+
+# ---------------------------------------------------------------------------------------------------------
 # PostgreSQL's xid8 accelerator
 # ---------------------------------------------------------------------------------------------------------
 
@@ -730,10 +929,12 @@ _XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
     test_an_append_from_a_later_before_commit_callback_still_gets_a_position,
     test_an_append_sends_its_events_in_one_insert,
     test_the_tables_are_created_at_start_and_only_checked_without_ddl,
-    test_events_stored_by_an_earlier_release_get_positions_in_their_order_at_start,
+    test_events_stored_by_an_earlier_release_get_positions_in_their_order,
     test_a_page_of_the_stream_is_read_through_the_global_position_index,
     test_skewed_clocks_do_not_reorder_the_stream,
     test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order,
+    test_a_backlog_is_sorted_once_while_it_is_numbered,
+    test_the_documented_sql_numbers_an_earlier_release_s_events_before_the_first_start,
 )
 
 
