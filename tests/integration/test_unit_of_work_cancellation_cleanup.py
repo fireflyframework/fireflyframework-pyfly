@@ -37,6 +37,10 @@ there must see its ordinary failures as themselves. Here:
   keeps its type, since the judgment follows ``__cause__``; raised while merely handling that failure
   (``except IntegrityError: raise DomainError()``) it ends the unit as cancelled and is logged at WARNING.
 
+A test cancels a unit's body once the body says it has done its work and waits (``CcService.working``), never
+after a fixed delay: on a loaded machine a cancel after a delay lands in the work itself, before the cleanup
+under test is armed.
+
 After each, no pooled connection is checked out, PostgreSQL has no backend idle in transaction, and the
 next unit commits; a unit whose statement failed in cleanup returned its healthy connection to the pool
 instead of discarding it.
@@ -106,10 +110,14 @@ class CcService:
         self.items = items
         self.ledger = ledger
         self.seen: list[str] = []
+        # Set when a body has done its work and waits to be cancelled: a test cancels then, not after a fixed
+        # delay (under load, a cancel after a delay can land in the work, before the cleanup is armed).
+        self.working = asyncio.Event()
 
     @transactional
     async def compensate_with_a_failing_participant(self) -> None:
         await self.items.save(CcItem(id=10, name="work"))
+        self.working.set()
         try:
             await asyncio.sleep(10)
         except asyncio.CancelledError:
@@ -121,18 +129,20 @@ class CcService:
 
     @transactional(timeout=0.1)
     async def swallow_the_deadline_then_fail(self) -> None:
-        await self.items.save(CcItem(id=20, name="late"))
+        # The work comes after the deadline: done first, a slow save (a loaded machine) could take the deadline.
         try:
             await asyncio.sleep(10)
         except asyncio.CancelledError:
             task = asyncio.current_task()
             assert task is not None
             task.uncancel()  # the body handles its deadline itself
+        await self.items.save(CcItem(id=20, name="late"))
         raise InsufficientFundsError("declined after the deadline")
 
     @transactional
     async def work_then_save_a_duplicate_in_its_own_cleanup(self) -> None:
         await self.items.save(CcItem(id=30, name="work"))
+        self.working.set()
         try:
             await asyncio.sleep(10)
         finally:
@@ -141,6 +151,7 @@ class CcService:
     @transactional
     async def work_then_save_a_duplicate_in_its_own_shielded_cleanup(self) -> None:
         await self.items.save(CcItem(id=30, name="work"))
+        self.working.set()
         try:
             await anyio.sleep(10)
         finally:
@@ -150,6 +161,7 @@ class CcService:
     @transactional
     async def work_then_translate_a_duplicate_in_its_own_cleanup(self, chained: bool) -> None:
         await self.items.save(CcItem(id=30, name="work"))
+        self.working.set()
         try:
             await asyncio.sleep(10)
         finally:
@@ -163,6 +175,7 @@ class CcService:
     @transactional
     async def work_then_fail_in_its_own_cleanup(self) -> None:
         await self.items.save(CcItem(id=30, name="work"))
+        self.working.set()
         try:
             await asyncio.sleep(10)
         finally:
@@ -246,6 +259,13 @@ async def _cancel_soon(task: asyncio.Task[None]) -> None:
         await task
 
 
+async def _cancel_once_working(cleanup: Cleanup, task: asyncio.Task[None]) -> asyncio.Task[None]:
+    """Cancel *task* once its body has done its work and waits (``CcService.working``), and return it."""
+    await asyncio.wait_for(cleanup.service.working.wait(), 10)
+    task.cancel()
+    return task
+
+
 async def test_a_duplicate_saved_in_an_except_cancelled_handler_raises_integrity_error(cleanup: Cleanup) -> None:
     seen: list[str] = []
 
@@ -306,7 +326,11 @@ async def test_a_business_exception_in_anyio_shielded_cleanup_keeps_its_type(cle
 
 
 async def test_a_participant_failing_in_its_units_cancellation_handler_keeps_its_type(cleanup: Cleanup) -> None:
-    await _cancel_soon(asyncio.create_task(cleanup.service.compensate_with_a_failing_participant()))
+    task = await _cancel_once_working(
+        cleanup, asyncio.create_task(cleanup.service.compensate_with_a_failing_participant())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert cleanup.service.seen == ["InsufficientFundsError"]
     assert await cleanup.committed() == ["first"]  # the cancelled unit rolled back
 
@@ -342,9 +366,9 @@ async def test_a_business_exception_after_the_body_handled_its_deadline_keeps_it
 
 async def test_a_duplicate_saved_in_the_cancelled_units_own_cleanup_raises_integrity_error(cleanup: Cleanup) -> None:
     opened = cleanup.connections_opened
-    task = asyncio.create_task(cleanup.service.work_then_save_a_duplicate_in_its_own_cleanup())
-    await asyncio.sleep(0.05)
-    task.cancel()
+    task = await _cancel_once_working(
+        cleanup, asyncio.create_task(cleanup.service.work_then_save_a_duplicate_in_its_own_cleanup())
+    )
     with pytest.raises(IntegrityError):
         await task
     assert cleanup.connections_opened == opened  # a failed statement leaves a healthy connection
@@ -354,7 +378,10 @@ async def test_a_duplicate_saved_in_the_cancelled_units_own_cleanup_raises_integ
 async def test_a_duplicate_saved_in_the_cancelled_units_own_shielded_cleanup_raises_integrity_error(
     cleanup: Cleanup,
 ) -> None:
-    with pytest.raises(IntegrityError), anyio.move_on_after(0.05):
+    with pytest.raises(IntegrityError), anyio.CancelScope() as scope:
+        # anyio's level-triggered cancellation, delivered once the body has done its work.
+        watcher = asyncio.ensure_future(cleanup.service.working.wait())
+        watcher.add_done_callback(lambda _done: scope.cancel())
         await cleanup.service.work_then_save_a_duplicate_in_its_own_shielded_cleanup()
     assert await cleanup.committed() == ["first"]
 
@@ -362,9 +389,7 @@ async def test_a_duplicate_saved_in_the_cancelled_units_own_shielded_cleanup_rai
 async def test_a_business_exception_in_the_cancelled_units_own_cleanup_is_logged(
     cleanup: Cleanup, caplog: pytest.LogCaptureFixture
 ) -> None:
-    task = asyncio.create_task(cleanup.service.work_then_fail_in_its_own_cleanup())
-    await asyncio.sleep(0.05)
-    task.cancel()
+    task = await _cancel_once_working(cleanup, asyncio.create_task(cleanup.service.work_then_fail_in_its_own_cleanup()))
     with (
         caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
         pytest.raises(asyncio.CancelledError) as raised,
@@ -383,9 +408,9 @@ async def test_a_business_exception_in_the_cancelled_units_own_cleanup_is_logged
 async def test_a_business_exception_raised_from_a_failed_statement_in_the_units_own_cleanup_keeps_its_type(
     cleanup: Cleanup, caplog: pytest.LogCaptureFixture
 ) -> None:
-    task = asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=True))
-    await asyncio.sleep(0.05)
-    task.cancel()
+    task = await _cancel_once_working(
+        cleanup, asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=True))
+    )
     with (
         caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
         pytest.raises(DuplicateItemError) as raised,
@@ -399,9 +424,9 @@ async def test_a_business_exception_raised_from_a_failed_statement_in_the_units_
 async def test_a_business_exception_raised_while_handling_a_failed_statement_ends_as_the_cancellation(
     cleanup: Cleanup, caplog: pytest.LogCaptureFixture
 ) -> None:
-    task = asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=False))
-    await asyncio.sleep(0.05)
-    task.cancel()
+    task = await _cancel_once_working(
+        cleanup, asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=False))
+    )
     with (
         caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
         pytest.raises(asyncio.CancelledError) as raised,
