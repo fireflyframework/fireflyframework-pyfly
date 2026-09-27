@@ -121,18 +121,34 @@ def _takes_no_arguments(member: Any) -> bool:
     return True
 
 
+def _async_engine(instance: Any) -> bool:
+    """Whether *instance* is a SQLAlchemy ``AsyncEngine``, without importing SQLAlchemy.
+
+    An ``AsyncEngine`` exists only once SQLAlchemy's asyncio extension is loaded; the context package
+    stays free of SQLAlchemy imports.
+    """
+    asyncio_extension = sys.modules.get("sqlalchemy.ext.asyncio")
+    return asyncio_extension is not None and isinstance(instance, asyncio_extension.AsyncEngine)
+
+
+def _registry_engine(instance: Any) -> bool:
+    """Whether *instance* is an engine a datasource registry owns (and disposes)."""
+    if not _async_engine(instance):
+        return False
+    from pyfly.data.relational.datasource_registry import datasource_of
+
+    return datasource_of(instance) is not None
+
+
 def _close_connections_on_return(instance: Any) -> None:
     """Before an ``AsyncEngine`` bean's ``dispose()``: close each connection in use when it is returned.
 
     ``dispose()`` closes the idle connections only, and one checked out at that moment (a request, a
     health probe) went back into the disposed pool and stayed open until the garbage collector found
     it. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`. Anything
-    that is not a SQLAlchemy ``AsyncEngine`` is left alone. The context imports neither SQLAlchemy
-    (an ``AsyncEngine`` exists only once SQLAlchemy's asyncio extension is loaded) nor the data layer
-    unless the instance is one.
+    that is not a SQLAlchemy ``AsyncEngine`` is left alone, and the data layer is imported only for one.
     """
-    asyncio_extension = sys.modules.get("sqlalchemy.ext.asyncio")
-    if asyncio_extension is None or not isinstance(instance, asyncio_extension.AsyncEngine):
+    if not _async_engine(instance):
         return
     from pyfly.data.relational.datasource_registry import close_connections_on_return
 
@@ -788,6 +804,10 @@ class ApplicationContext:
                 return None
             return declared
         if not infer or _marked_names(type(instance), "__pyfly_pre_destroy__") or self._has_lifecycle_methods(instance):
+            return None
+        if _registry_engine(instance):
+            # An engine of the datasource registry (a scoped @bean handing out registry.engine("name")):
+            # the registry disposes it, last; the bean's eviction must not.
             return None
         for candidate in _INFERRED_DESTROY_METHODS:
             member = getattr(instance, candidate, None)

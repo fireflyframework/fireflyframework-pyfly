@@ -57,7 +57,7 @@ from pyfly.context.lifecycle import pre_destroy  # noqa: E402
 from pyfly.context.refresh import ContextRefresher  # noqa: E402
 from pyfly.context.request_context import RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
-from pyfly.data.relational.datasource_registry import close_connections_on_return  # noqa: E402
+from pyfly.data.relational.datasource_registry import DataSourceRegistry, close_connections_on_return  # noqa: E402
 
 DESTROYED: list[int] = []
 DISPOSED: list[int] = []
@@ -685,6 +685,60 @@ async def test_a_connection_in_use_while_the_stop_disposes_a_singleton_engine_is
         assert in_use not in closed
 
     assert in_use in closed
+
+
+@configuration
+class _RefreshScopedRegistryEngine:
+    """A refresh-scoped engine bean that hands out a named datasource of the registry."""
+
+    @bean(name="reporting_engine", scope=REFRESH_SCOPE_NAME)
+    def reporting_engine(self, registry: DataSourceRegistry) -> AsyncEngine:
+        return registry.engine("reporting")
+
+
+async def test_a_refresh_leaves_an_engine_of_the_registry_to_the_registry(tmp_path: Path) -> None:
+    """The evicted product is the registry's own engine: the inferred ``dispose()`` is not the bean's to call.
+    It used to be disposed on every refresh, and the hook that came with it left the registry's datasource
+    opening a connection per query for good."""
+    ctx = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "data": {
+                        "relational": {
+                            "enabled": "true",
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'primary.db'}",
+                            "ddl-auto": "none",
+                            "datasources": {"reporting": {"url": f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"}},
+                        }
+                    }
+                }
+            }
+        )
+    )
+    ctx.register_bean(_RefreshScopedRegistryEngine)
+    await ctx.start()
+    try:
+        engine = ctx.get_bean(DataSourceRegistry).engine("reporting")
+        assert ctx.get_bean_by_name("reporting_engine") is engine
+        disposed: list[object] = []
+        connects: list[object] = []
+        event.listen(engine.sync_engine, "engine_disposed", lambda _engine: disposed.append(object()))
+        event.listen(engine.sync_engine, "connect", lambda *_: connects.append(object()))
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
+        await ctx.get_bean(ContextRefresher).refresh()
+
+        assert ctx.get_bean_by_name("reporting_engine") is engine
+        assert disposed == []
+        connects.clear()
+        for _ in range(5):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        assert connects == []  # still the pooled connection of before the refresh
+    finally:
+        await ctx.stop()
 
 
 class ReportingDatabase:
