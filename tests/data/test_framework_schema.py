@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import insert, literal, select
 from sqlalchemy.dialects import mssql, oracle
+from sqlalchemy.engine import make_url
 from sqlalchemy.schema import CreateTable
 
 from pyfly.data.relational.framework_schema import (
@@ -92,6 +93,39 @@ def test_the_ddl_compiles_for_sql_server_with_unicode_keys_and_unbounded_payload
     assert "payload NVARCHAR(max) NOT NULL" in ddl[ORCHESTRATION_STATE]
     assert "lock_until DATETIMEOFFSET NOT NULL" in ddl[LOCKS]
     assert " TEXT" not in "".join(ddl.values())  # an unbounded TEXT key cannot be indexed
+
+
+@pytest.mark.parametrize(
+    ("url", "server_version", "collation"),
+    [
+        ("mysql://", None, "utf8mb4_0900_bin"),
+        ("mysql://", (8, 0, 36), "utf8mb4_0900_bin"),
+        ("mysql://", (5, 7, 44), "utf8mb4_bin"),
+        ("mariadb://", None, "utf8mb4_nopad_bin"),
+        ("mariadb://", (11, 4, 2, "MariaDB"), "utf8mb4_nopad_bin"),
+        ("mariadb://", (10, 1, 48, "MariaDB"), "utf8mb4_bin"),
+    ],
+)
+def test_keys_get_a_binary_collation_on_mysql_and_mariadb(
+    url: str, server_version: tuple[object, ...] | None, collation: str
+) -> None:
+    """Their default collations ignore case and accents: ``User:1`` and ``user:1`` were one key there. The
+    matrix proves the behavior on MySQL 8 and MariaDB 11; older servers get the binary collation they have."""
+    dialect = make_url(url).get_dialect()()
+    dialect.server_version_info = server_version
+
+    ddl = str(CreateTable(locks).compile(dialect=dialect))
+
+    assert f"name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE {collation} NOT NULL" in ddl
+    assert f"locked_by VARCHAR(255) CHARACTER SET utf8mb4 COLLATE {collation} NOT NULL" in ddl
+
+
+def test_a_mysql_url_on_a_mariadb_server_gets_the_mariadb_collation() -> None:
+    dialect = make_url("mysql://").get_dialect()()
+    dialect.is_mariadb = True
+    dialect.server_version_info = (11, 4, 2, "MariaDB")
+
+    assert "COLLATE utf8mb4_nopad_bin" in str(CreateTable(cache_entries).compile(dialect=dialect))
 
 
 def test_the_ddl_compiles_for_oracle_with_time_zone_aware_timestamps() -> None:

@@ -52,6 +52,22 @@ async def test_users_round_trip_and_upsert_on_every_backend(relational_backend: 
     assert await users.load_user_by_username("bob") is None
 
 
+async def test_usernames_match_exactly_on_every_backend(relational_backend: RelationalBackend) -> None:
+    """MySQL and MariaDB compared usernames with a collation that ignores case and accents: saving ``Alice``
+    overwrote ``alice``, and ``ALICE`` signed in as her, which PostgreSQL and SQLite never allowed."""
+    users = SqlUserDetailsService(relational_backend.create_engine())
+
+    await users.save(UserDetails(username="alice", password_hash="h-alice"))
+    await users.save(UserDetails(username="Alice", password_hash="h-Alice"))
+    await users.save(UserDetails(username="zoë", password_hash="h-zoe"))
+
+    alice, capital = await users.load_user_by_username("alice"), await users.load_user_by_username("Alice")
+    assert alice is not None and alice.password_hash == "h-alice"
+    assert capital is not None and capital.password_hash == "h-Alice"
+    assert await users.load_user_by_username("ALICE") is None
+    assert await users.load_user_by_username("zoe") is None
+
+
 async def test_a_custom_table_is_created_on_start(relational_backend: RelationalBackend) -> None:
     engine = relational_backend.create_engine()
     users = SqlUserDetailsService(engine, table="wp10a_accounts")

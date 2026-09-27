@@ -16,7 +16,8 @@
 Every table PyFly keeps in an application's database (``pyfly_*``) is a :class:`~sqlalchemy.Table` on
 :data:`framework_metadata`, with column types that work on every backend:
 
-- bounded :func:`key_string` keys (MySQL and MariaDB cannot index an unbounded ``TEXT`` column);
+- bounded :func:`key_string` keys (MySQL and MariaDB cannot index an unbounded ``TEXT`` column), compared
+  exactly on every backend (a binary collation on MySQL and MariaDB);
 - :class:`UtcTimestamp` instants: UTC with microseconds everywhere, aware in Python;
 - :func:`long_text` and :func:`long_binary` payloads (``LONGTEXT``/``LONGBLOB`` on MySQL and MariaDB,
   whose ``TEXT``/``BLOB`` stop at 64 KiB);
@@ -94,6 +95,7 @@ __all__ = [
     "ORCHESTRATION_STATE",
     "USERS",
     "FrameworkSchemaError",
+    "KeyString",
     "UtcTimestamp",
     "cache_entries",
     "cache_entries_table",
@@ -190,9 +192,43 @@ class UtcTimestamp(TypeDecorator[datetime]):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+class KeyString(TypeDecorator[str]):
+    """A key: Unicode text of at most *length* characters that compares exactly, as on PostgreSQL and SQLite.
+
+    - MySQL and MariaDB: ``VARCHAR(length) CHARACTER SET utf8mb4`` with a binary collation that does not pad
+      (``utf8mb4_0900_bin`` on MySQL 8, ``utf8mb4_nopad_bin`` on MariaDB, ``utf8mb4_bin`` on older servers).
+      Their default collations ignore case and accents (and MariaDB's trailing spaces), so ``User:1`` and
+      ``user:1`` would be one cache entry, one lease, one user.
+    - SQL Server: ``NVARCHAR`` (its ``VARCHAR`` is not Unicode); elsewhere ``VARCHAR(length)``.
+    """
+
+    impl = Unicode
+    cache_ok = True
+
+    def __init__(self, length: int = 255) -> None:
+        super().__init__(length=length)
+        self.length = length
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name in ("mysql", "mariadb"):
+            return dialect.type_descriptor(
+                mysql.VARCHAR(self.length, charset="utf8mb4", collation=_exact_collation(dialect))
+            )
+        return dialect.type_descriptor(Unicode(self.length))
+
+
+def _exact_collation(dialect: Dialect) -> str:
+    """The binary collation of *dialect*'s server that also compares trailing spaces (a ``mysql://`` URL on a
+    MariaDB server included: the dialect knows it is MariaDB once connected)."""
+    version = tuple(getattr(dialect, "server_version_info", None) or ())
+    if dialect.name == "mariadb" or getattr(dialect, "is_mariadb", False):
+        return "utf8mb4_nopad_bin" if not version or version >= (10, 2, 2) else "utf8mb4_bin"
+    return "utf8mb4_0900_bin" if not version or version >= (8, 0, 1) else "utf8mb4_bin"
+
+
 def key_string(length: int = 255) -> TypeEngine[str]:
-    """A key column: ``VARCHAR(length)``, ``NVARCHAR`` on SQL Server (whose ``VARCHAR`` is not Unicode)."""
-    return Unicode(length)
+    """A key column (:class:`KeyString`): ``VARCHAR(length)`` compared exactly on every backend."""
+    return KeyString(length)
 
 
 def long_text() -> TypeEngine[str]:

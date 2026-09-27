@@ -92,6 +92,17 @@ def _like_prefix(prefix: str) -> str:
     return escaped + "%"
 
 
+def _glob_to_sqlite_glob(pattern: str) -> str:
+    """Translate a glob pattern (``*`` / ``?``, every other character literal) to SQLite's ``GLOB``, where
+    ``[`` opens a character class and is matched literally as ``[[]``."""
+    return "".join("[[]" if ch == "[" else ch for ch in pattern)
+
+
+def _sqlite_glob_prefix(prefix: str) -> str:
+    """A SQLite ``GLOB`` pattern matching every key that starts with *prefix* (taken literally)."""
+    return "".join(f"[{ch}]" if ch in ("*", "?", "[") else ch for ch in prefix) + "*"
+
+
 class PostgresCacheAdapter:
     """Cache adapter backed by a SQL table (see the module documentation).
 
@@ -176,6 +187,14 @@ class PostgresCacheAdapter:
     def _check_key(self, key: str) -> None:
         if len(key) > MAX_KEY_LENGTH and self._backend not in _UNBOUNDED_KEY_DIALECTS:
             raise ValueError(f"Cache keys are at most {MAX_KEY_LENGTH} characters on {self._backend}: {key[:40]!r}...")
+
+    def _key_matches(self, pattern: str, *, prefix: bool = False) -> ColumnElement[bool]:
+        """The keys matching glob *pattern*, or starting with *pattern* with *prefix*, case-sensitively on
+        every backend: SQLite's ``LIKE`` ignores ASCII case, so SQLite gets its ``GLOB``."""
+        column = self._table.c.cache_key
+        if self._backend == "sqlite":
+            return column.bool_op("GLOB")(_sqlite_glob_prefix(pattern) if prefix else _glob_to_sqlite_glob(pattern))
+        return column.like(_like_prefix(pattern) if prefix else _glob_to_like(pattern), escape=_LIKE_ESCAPE)
 
     def _live(self, now: datetime) -> ColumnElement[bool]:
         from sqlalchemy import or_
@@ -288,7 +307,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = delete(table).where(table.c.cache_key.like(_like_prefix(prefix), escape=_LIKE_ESCAPE))
+        statement = delete(table).where(self._key_matches(prefix, prefix=True))
         async with self._writing(single_statement=True) as session:
             result = await session.execute(statement)
         count = int(result.rowcount)
@@ -378,11 +397,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = (
-            select(table.c.cache_key)
-            .where(table.c.cache_key.like(_glob_to_like(pattern), escape=_LIKE_ESCAPE), self._live(self._clock()))
-            .limit(limit)
-        )
+        statement = select(table.c.cache_key).where(self._key_matches(pattern), self._live(self._clock())).limit(limit)
         async with infrastructure_unit(self._target, read_only=True) as session:
             return [str(key) for key in (await session.execute(statement)).scalars().all()]
 

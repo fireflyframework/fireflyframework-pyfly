@@ -68,6 +68,16 @@ async def test_one_node_holds_the_lease_until_it_releases_it(relational_backend:
     await node_b.release("nightly")  # releasing a lease it no longer holds is a no-op
 
 
+async def test_lease_names_match_exactly_on_every_backend(relational_backend: RelationalBackend) -> None:
+    """MySQL and MariaDB compared lease names with a collation that ignores case and accents: ``Nightly`` and
+    ``nightly`` were one lease there, and two on PostgreSQL and SQLite."""
+    node = await _lease(relational_backend)
+
+    for name in ("nightly", "Nightly", "réport", "report"):
+        assert await node.try_acquire(name, 30.0) is True, name
+    await node.stop()
+
+
 async def test_a_lease_ends_at_its_ttl_when_the_holder_hangs(
     relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
 ) -> None:

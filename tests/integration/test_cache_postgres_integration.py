@@ -81,6 +81,23 @@ async def test_the_cache_round_trips_on_every_backend(relational_backend: Relati
     assert await cache.get("k") is None and await _rows(cache.engine) == 0
 
 
+async def test_keys_match_exactly_on_every_backend(relational_backend: RelationalBackend) -> None:
+    """MySQL and MariaDB compared keys with the database's default collation, which ignores case and accents
+    (and trailing spaces on MariaDB): ``User:1`` read the entry of ``user:1``, as PostgreSQL and SQLite never
+    did."""
+    cache = await _cache(relational_backend)
+    keys = ["user:1", "User:1", "cafe", "café", "pad", "pad "]
+
+    for value, key in enumerate(keys):
+        await cache.put(key, value)
+
+    assert [await cache.get(key) for key in keys] == list(range(len(keys)))
+    assert sorted(await cache.get_keys("user:*")) == ["user:1"]
+    assert await cache.evict_by_prefix("User") == 1
+    assert await cache.get("user:1") == 0
+    assert await cache.put_if_absent("CAFE", "new") is True
+
+
 async def test_an_entry_expires_after_its_ttl(relational_backend: RelationalBackend) -> None:
     cache = await _cache(relational_backend)
     await cache.put("short", "alive", ttl=timedelta(milliseconds=300))

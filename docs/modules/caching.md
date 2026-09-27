@@ -261,7 +261,11 @@ CREATE INDEX ix_pyfly_cache_entries_expires_at ON pyfly_cache_entries (expires_a
 ```
 
 On MySQL and MariaDB the key is `VARCHAR(512)` (keys are limited to 512
-characters there), the value `LONGBLOB` and the expiry `DATETIME(6)` in UTC.
+characters there) with a binary collation, the value `LONGBLOB` and the expiry
+`DATETIME(6)` in UTC. Keys match exactly on every backend: `User:1` and
+`user:1` are two entries (the default MySQL and MariaDB collations ignore case
+and accents), and so are `get_keys()` patterns and `evict_by_prefix()`
+prefixes, which use `GLOB` on SQLite, whose `LIKE` ignores case.
 
 Values are serialized to bytes before storage and deserialized on retrieval,
 so any serializable Python object can be cached transparently.
@@ -297,7 +301,8 @@ so an entry written by a transaction that rolls back is rolled back too; a
 write made inside a read-only unit gets a unit of its own.
 
 Prefix eviction (`evict_by_prefix`) translates the prefix to a SQL `LIKE`
-pattern and deletes all matching rows in a single statement.
+pattern (a `GLOB` on SQLite) and deletes all matching rows in a single
+statement.
 
 ### Additional methods
 
