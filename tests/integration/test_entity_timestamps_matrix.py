@@ -410,7 +410,9 @@ def _configure(project: Path, url: str) -> None:
     configured = re.sub(r"(?m)^sqlalchemy\.url = .*$", f"sqlalchemy.url = {url.replace('%', '%%')}", ini.read_text())
     assert configured != ini.read_text()
     ini.write_text(configured)
-    (project / "pyfly.yaml").write_text("pyfly:\n  data:\n    relational:\n      migrations:\n        models: [models]\n")
+    (project / "pyfly.yaml").write_text(
+        "pyfly:\n  data:\n    relational:\n      migrations:\n        models: [models]\n"
+    )
 
 
 def _upgrade_body(revision: Path) -> str:

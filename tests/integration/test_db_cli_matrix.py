@@ -56,10 +56,12 @@ class Order(Base):
     customer_id: Mapped[int] = mapped_column(ForeignKey("wp11_cli_customers.id"))
 """
 
-_INVOICE_COLUMN = '    invoice: Mapped[str | None] = mapped_column(String(40), default=None)\n'
+_INVOICE_COLUMN = "    invoice: Mapped[str | None] = mapped_column(String(40), default=None)\n"
 
 
-def pyfly(project: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def pyfly(
+    project: Path, *args: str, check: bool = True, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """``pyfly <args>`` in *project*, in a process of its own: ``Base.metadata`` holds the project's models
     only, as for a developer."""
     import os
@@ -133,7 +135,12 @@ async def test_a_project_migrates_its_models_and_the_framework_tables(
 
     # A model change: the revision adds the column and drops nothing.
     models = project / "src" / "shop" / "models.py"
-    models.write_text(models.read_text().replace('    name: Mapped[str] = mapped_column(String(50))\n', '    name: Mapped[str] = mapped_column(String(50))\n' + _INVOICE_COLUMN))
+    models.write_text(
+        models.read_text().replace(
+            "    name: Mapped[str] = mapped_column(String(50))\n",
+            "    name: Mapped[str] = mapped_column(String(50))\n" + _INVOICE_COLUMN,
+        )
+    )
     await asyncio.to_thread(pyfly, project, "db", "migrate", "-m", "invoice")
     (invoice,) = versions.glob("*_invoice.py")
     body = upgrade_body(invoice)
