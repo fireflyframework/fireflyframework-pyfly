@@ -1523,6 +1523,34 @@ class TimingPostProcessor:
 Post-processors are applied in `@order` order. They are registered with
 `ApplicationContext.register_post_processor()`.
 
+### Singletons-Only Post-Processors
+
+A post-processor that hands the beans it processes to something that outlives them (a registry, an
+event bus, a scheduler) declares `singletons_only = True`: the context then gives it singletons only.
+Running it on every instance would register a `TRANSIENT` bean again at each resolution and keep a
+`REQUEST` or refresh-scoped one registered after its scope ended (Spring's
+`ApplicationListenerDetector` registers singleton listeners only for the same reason). For each other
+instance it skipped, the context calls its optional `non_singleton_skipped(bean, bean_name, scope)`,
+so it can say why it ignores the bean.
+
+```python
+@component
+class ListenerRegistrar:
+    singletons_only = True
+
+    def before_init(self, bean, bean_name: str):
+        return bean
+
+    def after_init(self, bean, bean_name: str):
+        if hasattr(bean, "on_message"):
+            broker.register(bean)          # kept for the broker's whole life
+        return bean
+
+    def non_singleton_skipped(self, bean, bean_name: str, scope) -> None:
+        if hasattr(bean, "on_message"):
+            logger.warning("listener_not_singleton", bean=bean_name)
+```
+
 ### Built-in Post-Processors
 
 PyFly's own modules use `BeanPostProcessor` extensively:
@@ -1532,6 +1560,7 @@ PyFly's own modules use `BeanPostProcessor` extensively:
 | `AspectBeanPostProcessor` | `pyfly.aop` | Weaves AOP advice into target beans (order 0). |
 | `RepositoryBeanPostProcessor` | `pyfly.data` | Wires query methods onto repository beans; `HIGHEST_PRECEDENCE + 100`, so it runs before AOP weaving (the Mongo one too). |
 | `HttpClientBeanPostProcessor` | `pyfly.client` | Generates HTTP client method implementations. |
+| `DataSourceSpiRegistrar` | `pyfly.data.relational` | Registers after-begin customizers and credentials providers with the `DataSourceRegistry`; singletons only. |
 
 ---
 

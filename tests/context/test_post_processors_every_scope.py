@@ -209,3 +209,69 @@ async def test_post_construct_runs_on_transient_beans_and_on_lazy_beans_created_
         assert sorted(_CALLS) == ["eager", "lazy", "transient", "transient"]
     finally:
         await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# A post-processor that registers the beans it sees somewhere that outlives them declares
+# ``singletons_only``: it is given singletons only, and told about each other instance it skipped.
+# ---------------------------------------------------------------------------
+
+
+class _SingletonRegistrar:
+    singletons_only = True
+
+    def __init__(self) -> None:
+        self.registered: list[str] = []
+        self.skipped: list[tuple[str, Any]] = []
+
+    def before_init(self, bean: Any, bean_name: str) -> Any:
+        del bean_name
+        self.registered.append(f"before:{type(bean).__name__}")
+        return bean
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        del bean_name
+        self.registered.append(f"after:{type(bean).__name__}")
+        return bean
+
+    def non_singleton_skipped(self, bean: Any, bean_name: str, scope: Any) -> None:
+        self.skipped.append((bean_name, scope))
+        assert bean is not None
+
+
+class _Listener:
+    pass
+
+
+class _PerRequest:
+    pass
+
+
+class _ListenerHolder:
+    def __init__(self, listener: _Listener) -> None:
+        self.listener = listener
+
+
+async def test_a_singletons_only_post_processor_is_given_singletons_only() -> None:
+    registrar = _SingletonRegistrar()
+    ctx = ApplicationContext(Config({}))
+    ctx.register_post_processor(registrar)
+    ctx.register_bean(_Listener, scope=Scope.TRANSIENT)
+    ctx.register_bean(_PerRequest, scope=Scope.REQUEST)
+    ctx.register_bean(_ListenerHolder)
+    await ctx.start()
+    try:
+        ctx.get_bean(_Listener)
+        RequestContext.init()
+        ctx.get_bean(_PerRequest)
+    finally:
+        await ctx.stop()
+
+    assert "after:_ListenerHolder" in registrar.registered
+    assert [entry for entry in registrar.registered if "_Listener" in entry and "Holder" not in entry] == []
+    assert "after:_PerRequest" not in registrar.registered
+    assert registrar.skipped == [
+        ("_Listener", Scope.TRANSIENT),  # the one injected at startup (the batched pass)
+        ("_Listener", Scope.TRANSIENT),  # the one resolved after start
+        ("_PerRequest", Scope.REQUEST),
+    ]

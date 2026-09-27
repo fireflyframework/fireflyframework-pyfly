@@ -49,7 +49,7 @@ except ImportError:
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec, scope_name
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
@@ -231,10 +231,21 @@ class DataSourceSpiRegistrar:
     :class:`~pyfly.data.relational.dialect_customizers.DataSourceCredentialsProvider`. A method of the
     same name that is not a coroutine (respectively, is one) or that cannot be called with those
     arguments is not the SPI, and the bean is left alone.
+
+    Only singletons are registered (``singletons_only``): the registry keeps what it is given for its
+    whole life, so a TRANSIENT, REQUEST or refresh-scoped SPI bean would be registered again at each
+    creation and consulted after its scope ended (a request's tenant customizer running in the next
+    request's units of work, an evicted credentials provider answering with the old password). Such a
+    bean is ignored with a warning; declare it a singleton that reads the request or the live
+    configuration when it is called.
     """
+
+    #: The context hands this post-processor singletons only (see ``BeanPostProcessor``).
+    singletons_only = True
 
     def __init__(self, registry: DataSourceRegistry) -> None:
         self._registry = registry
+        self._warned: set[type] = set()
 
     def before_init(self, bean: Any, bean_name: str) -> Any:
         """Pass through."""
@@ -249,6 +260,24 @@ class DataSourceSpiRegistrar:
         if _defines_method(bean, "datasource_credentials", 1):
             self._registry.add_credentials_provider(bean)
         return bean
+
+    def non_singleton_skipped(self, bean: Any, bean_name: str, scope: ScopeSpec) -> None:
+        """Warn, once per class, that a non-singleton SPI bean is not registered."""
+        cls = type(bean)
+        if cls in self._warned:
+            return
+        if _defines_coroutine(bean, "after_begin", 2) or _defines_method(bean, "datasource_credentials", 1):
+            self._warned.add(cls)
+            _logger.warning(
+                "datasource_spi_bean_not_singleton",
+                extra={
+                    "bean": cls.__qualname__,
+                    "bean_name": bean_name,
+                    "scope": scope_name(scope).lower(),
+                    "hint": "only a singleton customizer or credentials provider is registered; "
+                    "make it a singleton that reads the request or the live configuration when called",
+                },
+            )
 
 
 @auto_configuration

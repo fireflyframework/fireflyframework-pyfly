@@ -815,6 +815,13 @@ bean and it applies to every datasource and its replica. To limit it, give the c
 attribute, or register it with `registry.add_customizer(customizer, datasource="name")`. Customizers
 run in `@order` order. An exception aborts the unit.
 
+A customizer bean, like a `DataSourceCredentialsProvider` bean, must be a **singleton**: the registry
+keeps it for its whole life. A `TRANSIENT`, `REQUEST` or refresh-scoped one is not registered, and a
+`datasource_spi_bean_not_singleton` warning names it. Registering one at each creation used to run a
+request's customizer in the units of work of every later request (the last tenant won) and to keep an
+evicted credentials provider answering with the old password. A singleton reads the request (a
+`ContextVar`, as below) or the live configuration when it is called.
+
 ```python
 from contextvars import ContextVar
 from sqlalchemy import text

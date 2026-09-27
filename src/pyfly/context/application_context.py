@@ -35,7 +35,7 @@ from pyfly.container.exceptions import (
 )
 from pyfly.container.ordering import get_order
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec
 from pyfly.context.condition_evaluator import ConditionEvaluator
 from pyfly.context.environment import Environment
 from pyfly.context.events import (
@@ -431,7 +431,7 @@ class ApplicationContext:
         # back to every alias — otherwise @post_construct/BeanPostProcessors run
         # twice and one alias keeps the un-woven object (audit #113). A scoped
         # instance has no alias: nothing caches it on a registration.
-        units: list[tuple[str, Any, list[Registration]]] = []
+        units: list[tuple[str, Any, list[Registration], ScopeSpec]] = []
         groups_by_id: dict[int, list[Registration]] = {}
         for reg in self._all_registrations():
             if reg.instance is None:
@@ -440,30 +440,31 @@ class ApplicationContext:
             if grp is None:
                 grp = []
                 groups_by_id[id(reg.instance)] = grp
-                units.append((reg.display_name, reg.instance, grp))
+                units.append((reg.display_name, reg.instance, grp, Scope.SINGLETON))
             grp.append(reg)
         for instance, reg in scoped_instances:
             if id(instance) not in groups_by_id:
                 groups_by_id[id(instance)] = []
-                units.append((reg.display_name, instance, []))
+                units.append((reg.display_name, instance, [], reg.scope))
 
         # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
-        for index, (bean_name, inst, aliases) in enumerate(units):
-            for pp in sorted_pps:
+        for index, (bean_name, inst, aliases, scope) in enumerate(units):
+            for pp in self._post_processors_for(sorted_pps, scope):
                 inst = pp.before_init(inst, bean_name)
             for member in aliases:
                 member.instance = inst
-            units[index] = (bean_name, inst, aliases)
+            units[index] = (bean_name, inst, aliases, scope)
 
         # Pass 2: @post_construct then after_init (weaving now sees every aspect)
-        for bean_name, inst, aliases in units:
+        for bean_name, inst, aliases, scope in units:
             await self._call_post_construct(inst)
-            for pp in sorted_pps:
+            for pp in self._post_processors_for(sorted_pps, scope):
                 inst = pp.after_init(inst, bean_name)
             for member in aliases:
                 if member.instance is not inst:
                     self._carry_creation_order(member.instance, inst)
                 member.instance = inst
+            self._report_skipped_post_processors(sorted_pps, inst, bean_name, scope)
 
         # 5b. Start the lifecycle beans that did not exist at step 2e (scanned stereotypes, beans a
         # @bean did not pull in). They used to be neither started nor stopped.
@@ -1741,12 +1742,46 @@ class ApplicationContext:
         """
         bean_name = reg.display_name
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
-        for pp in sorted_pps:
+        applied = self._post_processors_for(sorted_pps, reg.scope)
+        for pp in applied:
             instance = pp.before_init(instance, bean_name)
         self._call_post_construct_sync(instance)
-        for pp in sorted_pps:
+        for pp in applied:
             instance = pp.after_init(instance, bean_name)
+        self._report_skipped_post_processors(sorted_pps, instance, bean_name, reg.scope)
         return instance
+
+    @staticmethod
+    def _singletons_only(post_processor: BeanPostProcessor) -> bool:
+        """Whether *post_processor* declares ``singletons_only = True`` (see :class:`BeanPostProcessor`)."""
+        return getattr(post_processor, "singletons_only", False) is True
+
+    @classmethod
+    def _post_processors_for(cls, sorted_pps: list[BeanPostProcessor], scope: ScopeSpec) -> list[BeanPostProcessor]:
+        """The post-processors that process an instance of *scope*: every one for a singleton; for any
+        other scope, the ones that do not take singletons only.
+
+        A post-processor that hands the beans it processes to something that outlives them (the
+        datasource registry's SPI registrar) would otherwise register a TRANSIENT bean at each
+        resolution and keep a REQUEST or refresh-scoped one after its scope ended (Spring's
+        ``ApplicationListenerDetector`` registers singletons only for the same reason).
+        """
+        if scope == Scope.SINGLETON:
+            return sorted_pps
+        return [pp for pp in sorted_pps if not cls._singletons_only(pp)]
+
+    @classmethod
+    def _report_skipped_post_processors(
+        cls, sorted_pps: list[BeanPostProcessor], instance: Any, bean_name: str, scope: ScopeSpec
+    ) -> None:
+        """Tell each singletons-only post-processor that skipped *instance* (its optional
+        ``non_singleton_skipped(bean, bean_name, scope)``), so it can say why it ignores the bean."""
+        if scope == Scope.SINGLETON:
+            return
+        for pp in sorted_pps:
+            notify = getattr(pp, "non_singleton_skipped", None)
+            if cls._singletons_only(pp) and callable(notify):
+                notify(instance, bean_name, scope)
 
     def _call_post_construct_sync(self, instance: Any) -> None:
         """Synchronous @post_construct for lazily-created beans. Async @post_construct
