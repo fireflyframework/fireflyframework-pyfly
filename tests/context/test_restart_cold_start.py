@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pyfly.aop.decorators import around, aspect  # noqa: E402
 from pyfly.container import bean, component, configuration, service  # noqa: E402
+from pyfly.container.refresh_scope import refresh_scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.context.events import ApplicationEventPublisher, app_event_listener  # noqa: E402
 from pyfly.context.lifecycle import post_construct  # noqa: E402
@@ -183,3 +184,56 @@ async def test_stop_leaves_nothing_of_the_run_behind(tmp_path: Path) -> None:
     assert context._container._post_create_hook is None
     assert context.event_bus.listener_count(OrderPlaced) == 0
     assert [type(pp) for pp in context._post_processors] == []
+
+
+@refresh_scope(proxy=True)
+class _ProxiedSettings:
+    pass
+
+
+@service
+class _SettingsReader:
+    def __init__(self, settings: _ProxiedSettings) -> None:
+        self.settings = settings
+
+
+@component(profile="never-active")
+class _FilteredOut:
+    pass
+
+
+class _Named:
+    pass
+
+
+@configuration
+class _TwoNamed:
+    @bean
+    def first_named(self) -> _Named:
+        return _Named()
+
+    @bean
+    def second_named(self) -> _Named:
+        return _Named()
+
+
+async def test_restarts_do_not_grow_the_container_indexes(tmp_path: Path) -> None:
+    """Each run's registrations, proxies and the names of each class are dropped with the run."""
+    context = _context(tmp_path)
+    for bean_class in (_ProxiedSettings, _SettingsReader, _FilteredOut, _TwoNamed):
+        context.register_bean(bean_class)
+    container = context.container
+    sizes: list[tuple[int, int, int]] = []
+    for _ in range(3):
+        await context.start()
+        assert container._scoped_proxies  # the reader took a proxy
+        await context.stop()
+        assert container._scoped_proxies == {}
+        assert all((cls, name) != (_FilteredOut, "") for cls, name in container._all)
+        names = sum(len(each) for each in container._names_by_type.values())
+        sizes.append((len(container._all), len(container._names_by_type), names))
+    assert sizes[0] == sizes[1] == sizes[2]
+    assert _FilteredOut not in container._names_by_type
+    assert container._names_by_type[_Named] == {"first_named", "second_named"}
+    assert _Named in container._shared_types
+    assert _FilteredOut not in container._shared_types

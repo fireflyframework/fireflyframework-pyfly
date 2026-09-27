@@ -332,7 +332,8 @@ class ApplicationContext:
         for key in getattr(self, "_pipeline_registrations", frozenset()):
             self._container._registrations.pop(key, None)
         for all_key in self._pipeline_all:
-            self._container._all.pop(all_key, None)
+            if self._container._all.pop(all_key, None) is not None:
+                self._container._unindex_name(*all_key)
         for name in self._pipeline_named:
             self._container._named.pop(name, None)
         self._container.allow_creation()
@@ -661,6 +662,8 @@ class ApplicationContext:
         self._lifecycle_beans = []
         self._post_processors = list(self._registered_post_processors)
         self._container._post_create_hook = None
+        # The proxies handed to the released singletons; the next run's registrations get their own.
+        self._container._scoped_proxies.clear()
         self._task_scheduler = None
         self._creation_order.clear()
         self._wiring_counts = {}
@@ -896,10 +899,13 @@ class ApplicationContext:
             self._remove_registration(cls)
 
     def _remove_registration(self, cls: type) -> None:
-        """Remove a bean registration and its named entry."""
+        """Remove a bean registration from every index: by type, by name, and by ``(type, name)``."""
         reg = self._container._registrations.pop(cls)
         if reg.name and reg.name in self._container._named:
             del self._container._named[reg.name]
+        if self._container._all.get((cls, reg.name)) is reg:
+            del self._container._all[(cls, reg.name)]
+            self._container._unindex_name(cls, reg.name)
 
     @staticmethod
     def _declared_bean_type(return_type: Any) -> type | None:
