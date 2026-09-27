@@ -903,6 +903,13 @@ registry builds therefore gets the following setup:
   unit that would wait for the lock of a unit the same task keeps open (it suspended it with
   `REQUIRES_NEW`, or a write under `NOT_SUPPORTED`) fails at once with `IllegalTransactionStateError`
   instead of waiting `busy-timeout` for itself. A read under a suspended write unit works (WAL).
+  A child task is not refused that way: a task started inside a write unit (an `asyncio.gather()` child)
+  whose step opens a write unit of its own (`REQUIRES_NEW`, or a write under `NOT_SUPPORTED`) waits
+  `busy-timeout` for the lock its parent's unit holds, and fails with `OperationalError: database is
+  locked` at `BEGIN IMMEDIATE` while the parent waits for it. The unit cannot tell a parent that awaits
+  the child from one that commits meanwhile (a task left running, whose wait then succeeds). On SQLite,
+  let such steps join the parent's unit (`REQUIRED`: the children are serialized on it), run them after
+  the parent's unit, or put them on another datasource.
 - **An explicit `BEGIN IMMEDIATE` statement no longer works.** `session.execute(text("BEGIN IMMEDIATE"))`
   inside `session.begin()` was the way to take the write lock under pysqlite's deferred `BEGIN`. On a
   registry engine the transaction's `BEGIN` has already run, so SQLite answers "cannot start a

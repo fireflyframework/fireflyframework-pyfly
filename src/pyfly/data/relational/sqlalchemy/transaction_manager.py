@@ -44,7 +44,9 @@ held by a half-closed handle.
 SQLite has one writer. A new write unit that would wait for the write lock of a unit the same task keeps
 open (it suspended it with ``REQUIRES_NEW`` or ``NOT_SUPPORTED``) fails at once with
 :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead of waiting ``busy_timeout``
-for itself.
+for itself. A child task (``asyncio.gather``) that opens a write unit of its own while its parent's write
+unit is open is not refused: the manager cannot tell a parent that awaits it from one that commits
+meanwhile, so it waits ``busy_timeout`` and fails with ``database is locked`` when the parent awaits it.
 
 An in-memory SQLite database lives on one connection (``StaticPool``) that every session shares, so two
 units cannot overlap on it: a unit that begins while another one holds the connection (a concurrent
