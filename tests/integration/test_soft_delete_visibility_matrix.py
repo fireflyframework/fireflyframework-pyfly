@@ -216,6 +216,22 @@ async def test_merging_a_detached_soft_deleted_object_needs_including_deleted(
         assert found is not None and found.name == "dora-renamed" and found.is_deleted
 
 
+@pytest.mark.parametrize("repository", [AuthorArchive, SoftAuthorRepository])
+async def test_saving_a_soft_deleted_entity_returns_it_loaded(
+    relational_backend: RelationalBackend, repository: type[Repository[SoftAuthor, uuid.UUID]]
+) -> None:
+    """``save`` reads back what the flush left unloaded (a ``selectin`` collection here) from the entity's own
+    row, which the criteria hide once the entity is soft-deleted: it is read all the same, so the returned
+    entity is as loaded as a live one's."""
+    await relational_backend.create_tables(SoftAuthor, SoftBook)
+    factory = async_sessionmaker(relational_backend.create_engine(), expire_on_commit=False)
+    async with factory() as session:
+        authors = repository(session=session)
+        archived = await authors.save(SoftAuthor(name="archived", deleted_at=datetime.now(UTC)))
+        await session.commit()
+    assert archived.books == []  # loaded by save: the session is closed, so a lazy load would raise
+
+
 async def test_soft_delete_repository_still_reaches_deleted_rows_where_it_must(
     relational_backend: RelationalBackend,
 ) -> None:

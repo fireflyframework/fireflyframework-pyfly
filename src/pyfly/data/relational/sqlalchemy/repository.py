@@ -115,7 +115,7 @@ from pyfly.data.page import Page, Slice, Window
 from pyfly.data.pageable import KeysetPosition, NullHandling, Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
-from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete, including_deleted
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.statements import (
     RESERVED_BINDS,
@@ -779,6 +779,8 @@ class Repository(Generic[T, ID]):
         case. Generated columns alone cost one ``SELECT`` of just those columns per key chunk; an eager
         relationship costs one ``SELECT`` of the keys (and those columns) per chunk, with the eager loads a
         read of the entities runs (one more statement per ``selectin`` relationship), for every entity at once.
+        A soft-deleted entity's row, which the soft-delete criteria hide from ORM reads, is read back all the
+        same (``include_deleted``, as ``find_all_including_deleted`` reads it).
         """
         mapper = self._mapper
         columns = {attribute.key for attribute in mapper.column_attrs}
@@ -801,16 +803,23 @@ class Repository(Generic[T, ID]):
         if not stale:
             return
         keys = sorted(set().union(*(expired for _entity, expired in stale.values())))
+        hidden = any(getattr(entity, "deleted_at", None) is not None for entity, _expired in stale.values())
+        options: dict[str, Any] = {INCLUDE_DELETED: True} if hidden else {}
         if unloaded:
             # The entities are in the unit's identity map: the rows fill in only what they lack, and the
             # mapping's eager loaders run for the relationships they lack, as for any read.
             only = load_only(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
             for criterion in self._in_ids(session, list(stale)):
-                unique_entities(await session.execute(select(self._model).where(criterion).options(only)))
+                statement = select(self._model).where(criterion).options(only).execution_options(**options)
+                unique_entities(await session.execute(statement))
             return
         width = len(self._pk_keys)
         for criterion in self._in_ids(session, list(stale)):
-            statement = select(*self._pk_attributes, *(getattr(self._model, key) for key in keys)).where(criterion)
+            statement = (
+                select(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
+                .where(criterion)
+                .execution_options(**options)
+            )
             for row in (await session.execute(statement)).all():
                 entry = stale.get(tuple(row[:width]))
                 if entry is None:
