@@ -250,11 +250,12 @@ class DefaultQueryBus:
     async def _try_cache_get(self, cache_key: str | None, handler: QueryHandler[Any, Any]) -> Any:
         if cache_key is None or self._cache is None:
             return _CACHE_MISS
-        found, value = await self._cache.lookup(cache_key)
+        caches_none = handler.caches_none()
+        found, value = await self._cache.lookup(cache_key, none_cached=caches_none)
         if not found:
             return _CACHE_MISS
         if value is None:
-            return None if handler.caches_none() else _CACHE_MISS
+            return None if caches_none else _CACHE_MISS
         try:
             return restore(value, handler.get_result_type())
         except Exception as exc:  # noqa: BLE001 — an entry that does not fit the result type is a miss

@@ -68,6 +68,11 @@ class CountriesQuery(Query[list[str]]):
     pass
 
 
+@dataclass(frozen=True)
+class TenantDocsQuery(Query[list[str]]):
+    status: str = "open"
+
+
 async def _docs(engine: AsyncEngine, tenant: str | None, owner: str | None = None) -> list[str]:
     sql = "SELECT tenant || ': ' || title FROM wp14_docs WHERE tenant = :tenant"
     params = {"tenant": tenant}
@@ -108,7 +113,26 @@ def _make_handlers(engine: AsyncEngine) -> dict[str, Any]:
             type(self).calls += 1
             return ["ES", "US"]
 
-    return {"docs": ListDocsHandler(), "mine": ListMyDocsHandler(), "countries": CountriesHandler()}
+    @cacheable(scope=QueryCacheScope.TENANT)
+    @query_handler(cacheable=True)
+    class TenantDocsHandler(QueryHandler[TenantDocsQuery, list[str]]):
+        """Takes the tenant from the principal (a JWT claim), not from X-Tenant-Id: the cache sees no tenant."""
+
+        calls = 0
+
+        async def do_handle(self, query: TenantDocsQuery) -> list[str]:
+            type(self).calls += 1
+            request = RequestContext.current()
+            principal = request.security_context if request is not None else None
+            assert principal is not None
+            return await _docs(engine, principal.attributes["tenant"])
+
+    return {
+        "docs": ListDocsHandler(),
+        "mine": ListMyDocsHandler(),
+        "countries": CountriesHandler(),
+        "tenant_docs": TenantDocsHandler(),
+    }
 
 
 @pytest.fixture
@@ -185,6 +209,23 @@ async def test_the_ambient_tenant_and_user_scope_a_plain_query(setup: Setup) -> 
     assert await as_user("globex", "carol") == ["globex: widgets"]
     assert await as_user("acme", "alice") == ["acme: Q3 payroll"]
     assert type(handlers["mine"]).calls == 3
+
+
+async def test_a_tenant_scoped_handler_keys_by_user_when_no_tenant_is_visible(setup: Setup) -> None:
+    bus, handlers, _cache = setup
+
+    async def request(user: str, tenant_claim: str) -> list[str]:
+        # The tenant is a claim of the principal: no X-Tenant-Id, no ExecutionContext.
+        RequestContext.init().security_context = SecurityContext(user_id=user, attributes={"tenant": tenant_claim})
+        return await bus.query(TenantDocsQuery())
+
+    async def as_user(user: str, tenant_claim: str) -> list[str]:
+        return await asyncio.create_task(request(user, tenant_claim))
+
+    assert await as_user("alice", "acme") == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await as_user("carol", "globex") == ["globex: widgets"]
+    assert await as_user("alice", "acme") == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert type(handlers["tenant_docs"]).calls == 2
 
 
 async def test_an_explicitly_global_handler_is_shared(setup: Setup) -> None:

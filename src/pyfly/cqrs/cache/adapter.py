@@ -60,10 +60,12 @@ _logger = logging.getLogger(__name__)
 CQRS_CACHE_PREFIX = ":cqrs:"
 
 SCOPE_SEPARATOR = "|scope="
-"""What separates a scoped entry's key and generation from the digest of the caller's scope."""
+"""What separates a scoped entry's key and generation from the digest of the caller's scope. A query key
+that contains it is never cached."""
 
 GENERATION_SUFFIX = "|generation"
-"""The suffix of the entry holding a key's current generation."""
+"""The suffix of the entry holding a key's current generation. A query key that ends with it is never
+cached."""
 
 DEFAULT_GENERATION_TTL = timedelta(seconds=900)
 """How long a generation lives when the TTL of its entries is unknown: the query bus's default cache TTL."""
@@ -86,13 +88,18 @@ def _ambient_user() -> str | None:
 def scope_of(scope: QueryCacheScope, context: ExecutionContext | None) -> tuple[tuple[str, str | None], ...]:
     """The identity an entry is keyed by: the tenant and organization (and the user, for ``USER``) of
     *context*, completed with the ambient tenant (``X-Tenant-Id``) and authenticated user of the running
-    request; nothing for ``GLOBAL``."""
+    request; nothing for ``GLOBAL``.
+
+    A ``TENANT`` entry is keyed by the user too when neither a tenant nor an organization is visible: an
+    application may take the tenant from somewhere the cache cannot see (a claim of the principal), and
+    sharing the entry among every caller would then share it across tenants.
+    """
     if scope is QueryCacheScope.GLOBAL:
         return ()
     tenant = (context.tenant_id if context is not None else None) or _ambient_tenant()
     organization = context.organization_id if context is not None else None
     parts: list[tuple[str, str | None]] = [("tenant", tenant), ("organization", organization)]
-    if scope is QueryCacheScope.USER:
+    if scope is QueryCacheScope.USER or (tenant is None and organization is None):
         parts.append(("user", (context.user_id if context is not None else None) or _ambient_user()))
     return tuple(parts)
 
@@ -142,17 +149,23 @@ class QueryCacheAdapter:
             self._region = TransactionAwareCache(PrefixedCache(cache, CQRS_CACHE_PREFIX), on_write_error="log")
         self._generation_ttl = generation_ttl if generation_ttl is not None else DEFAULT_GENERATION_TTL
         self._longest_ttl: timedelta | None = None
+        self._reserved_key_reported = False
 
     # ── keys ───────────────────────────────────────────────────
 
     async def entry_key(self, cache_key: str, digest: str | None, ttl: timedelta | None = None) -> str | None:
         """The key the entry of *cache_key* lives under for the caller whose scope is *digest*
         (:func:`scope_digest`): *cache_key* itself when unscoped, else a key under the current generation of
-        *cache_key*. ``None`` when the cache cannot be read (the call is then not cached).
+        *cache_key*. ``None`` when the call is not cached: the cache cannot be read, or *cache_key* contains
+        :data:`SCOPE_SEPARATOR` or ends with :data:`GENERATION_SUFFIX` (it could then address another scope's
+        entry, or a key's generation; such a key is reported once).
 
         *ttl* is the TTL the entry will be stored with: a generation this call starts expires with it
         (``generation_ttl`` when ``None``).
         """
+        if SCOPE_SEPARATOR in cache_key or cache_key.endswith(GENERATION_SUFFIX):
+            self._report_reserved(cache_key)
+            return None
         lifetime = self._lifetime(ttl)
         if digest is None or self._region is None:
             return cache_key
@@ -162,6 +175,18 @@ class QueryCacheAdapter:
             _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
             return None
         return f"{cache_key}|{generation}{SCOPE_SEPARATOR}{digest}"
+
+    def _report_reserved(self, cache_key: str) -> None:
+        if self._reserved_key_reported:
+            return
+        self._reserved_key_reported = True
+        _logger.warning(
+            "The query cache key %r contains %r or ends with %r, which the query cache uses to separate scopes "
+            "and generations: queries with such keys are never cached",
+            cache_key,
+            SCOPE_SEPARATOR,
+            GENERATION_SUFFIX,
+        )
 
     def _lifetime(self, ttl: timedelta | None) -> timedelta:
         """*ttl*, noted as an entry TTL (the next eviction's generation lives as long as the longest), or
@@ -198,14 +223,20 @@ class QueryCacheAdapter:
             _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
             return None
 
-    async def lookup(self, cache_key: str) -> tuple[bool, Any]:
-        """``(True, value)`` for a hit, a stored ``None`` included; ``(False, None)`` for a miss."""
+    async def lookup(self, cache_key: str, *, none_cached: bool = True) -> tuple[bool, Any]:
+        """``(True, value)`` for a hit, a stored ``None`` included; ``(False, None)`` for a miss.
+
+        With *none_cached* ``False`` (the caller never stores ``None``) a stored ``None`` is a miss too, and
+        a miss costs no existence check.
+        """
         if self._region is None:
             return False, None
         try:
             value = await self._region.get(cache_key)
             if value is not None:
                 return True, value
+            if not none_cached:
+                return False, None
             return await self._region.exists(cache_key), None
         except Exception as exc:
             _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)

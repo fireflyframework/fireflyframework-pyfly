@@ -499,7 +499,8 @@ adapter = QueryCacheAdapter(cache=my_cache_instance)
 | Method | Description |
 |--------|-------------|
 | `get(key)` | Fetch cached value. |
-| `lookup(key)` | `(found, value)`: tells a stored `None` from a miss. |
+| `lookup(key, none_cached=True)` | `(found, value)`: tells a stored `None` from a miss (with `none_cached=False` a `None` is a miss, and a miss costs no existence check). |
+| `entry_key(key, digest, ttl=None)` | The key an entry lives under for a caller's scope digest; `None` when the call is not cached. |
 | `put(key, value, ttl)` | Store with optional `timedelta` TTL; after the commit inside a unit of work. |
 | `evict(key)` | Remove a key for every caller's scope; after the commit inside a unit of work. |
 | `evict_prefix(prefix)` | Remove every entry whose key starts with `prefix`. |
@@ -538,8 +539,17 @@ A handler's cache scope decides which of these count:
 | Scope | Keyed by | Use it for |
 |-------|----------|------------|
 | `QueryCacheScope.USER` (default) | tenant, organization and user | anything that may depend on who asks |
-| `QueryCacheScope.TENANT` | tenant and organization | data shared by the users of one tenant |
+| `QueryCacheScope.TENANT` | tenant and organization (the user when neither is visible) | data shared by the users of one tenant |
 | `QueryCacheScope.GLOBAL` | nothing | data that is the same for everyone (a country list) |
+
+The cache sees only the identity that reaches it: the `ExecutionContext`, the
+`X-Tenant-Id` tenant and the user of `RequestContext.security_context`. A caller
+with none of them is not scoped, and every such caller shares the entry. A
+`TENANT` handler therefore keys by the user when no tenant or organization is
+visible (an application that takes the tenant from a claim of the principal
+would otherwise share entries across tenants). If your application keeps the
+tenant or the user elsewhere, pass them in the `ExecutionContext` of
+`query_with_context()`.
 
 ```python
 from pyfly.cqrs.cache.decorators import cacheable
@@ -552,6 +562,11 @@ class ListInvoicesHandler(QueryHandler[ListInvoicesQuery, list[InvoiceDto]]): ..
 
 A `ContextAwareQueryHandler` is never served from the cache without a context:
 it refuses such a call, and a hit must not bypass that.
+
+A query key that contains `|scope=` or ends with `|generation` is never cached
+(a warning names the first one): the query cache separates scopes and
+generations with them, and a key built from user input could otherwise address
+another caller's entry.
 
 Evicting a key (`clear_cache`, a command's `get_cache_key()`, a bridge rule)
 reaches every caller's entry with one write, whatever the number of tenants and
