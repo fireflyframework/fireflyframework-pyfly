@@ -15,8 +15,9 @@
 
 A database-backed cache that follows the framework-adapter contract runs every statement through
 ``infrastructure_unit()``: it joins the unit bound for its datasource, and opens a short one otherwise.
-:class:`JoiningSqlCache` is such a cache, over a table on the application's primary datasource, and it
-records the unit each of its statements ran on.
+Every test runs twice: with :class:`JoiningSqlCache`, such a cache over a table of its own, and with the
+framework's SQL cache adapter (``PostgresCacheAdapter``, ``pyfly.cache.provider=postgres``), both on the
+application's primary datasource and both recording the unit each of their statements ran on.
 
 ``TransactionAwareCache`` defers ``put``, ``evict``, ``evict_by_prefix`` and ``clear`` to the commit, and runs
 everything else at once: reads, ``put_if_absent`` (the CQRS query cache starts a key's generation with it),
@@ -40,10 +41,11 @@ on the database of the caller's write unit is refused at once (``IllegalTransact
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -54,7 +56,9 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from pyfly.cache.adapters.postgres import PostgresCacheAdapter
 from pyfly.cache.decorators import cache_evict
+from pyfly.cache.serialization import cache_loads
 from pyfly.cache.transaction import TransactionAwareCache
 from pyfly.context.application_context import ApplicationContext
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
@@ -65,6 +69,7 @@ from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
 from pyfly.cqrs.types import Query
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
+from pyfly.data.relational.framework_schema import cache_entries
 from pyfly.data.transaction import (
     IllegalTransactionStateError,
     TransactionTemplate,
@@ -170,6 +175,52 @@ class JoiningSqlCache:
         pass
 
 
+class RecordingSqlCacheAdapter(PostgresCacheAdapter):
+    """The framework's SQL cache adapter on the primary datasource; :attr:`units` is the unit each of its
+    statements ran on, as :class:`JoiningSqlCache` records them."""
+
+    def __init__(self) -> None:
+        super().__init__("primary", purge_interval=None)
+        self.units: list[UnitOfWork] = []
+
+    def _record(self) -> None:
+        unit = current_unit_of_work("primary")
+        assert unit is not None
+        self.units.append(unit)
+
+    @contextlib.asynccontextmanager
+    async def _reading(self) -> AsyncIterator[Any]:
+        async with super()._reading() as session:
+            self._record()
+            yield session
+
+    @contextlib.asynccontextmanager
+    async def _writing(self, *, single_statement: bool) -> AsyncIterator[Any]:
+        async with super()._writing(single_statement=single_statement) as session:
+            self._record()
+            yield session
+
+
+SqlCache = JoiningSqlCache | RecordingSqlCacheAdapter
+
+
+NewCache = Callable[[], Awaitable[SqlCache]]
+
+
+@pytest.fixture(params=["joining", "sql-adapter"])
+def new_cache(request: pytest.FixtureRequest) -> NewCache:
+    """Builds the cache under test, started as the application context starts a cache bean (before any
+    business unit): :class:`JoiningSqlCache`, or the framework's SQL cache adapter."""
+    kind: str = request.param
+
+    async def build() -> SqlCache:
+        cache: SqlCache = JoiningSqlCache() if kind == "joining" else RecordingSqlCacheAdapter()
+        await cache.start()
+        return cache
+
+    return build
+
+
 @dataclass(frozen=True)
 class PriceQuery(Query[int]):
     sku: str = "a"
@@ -209,18 +260,26 @@ async def _boot(backend: RelationalBackend) -> ApplicationContext:
     return ctx
 
 
-async def _stored(backend: RelationalBackend) -> dict[str, Any]:
-    """What another process sees: an engine of its own, not the application's pool."""
+async def _stored(backend: RelationalBackend, cache: SqlCache) -> dict[str, Any]:
+    """What another process sees of *cache*: an engine of its own, not the application's pool."""
     engine = create_async_engine(backend.url, poolclass=NullPool)
     try:
         async with engine.connect() as conn:
+            if isinstance(cache, PostgresCacheAdapter):
+                entries = select(cache_entries.c.cache_key, cache_entries.c.value)
+                namespace = cache.namespace
+                return {
+                    str(key)[len(namespace) :]: cache_loads(bytes(value))
+                    for key, value in (await conn.execute(entries)).all()
+                    if str(key).startswith(namespace)
+                }
             rows = (await conn.execute(select(CACHE_TABLE.c.cache_key, CACHE_TABLE.c.value))).all()
     finally:
         await engine.dispose()
     return {key: json.loads(value) for key, value in rows}
 
 
-def _query_bus(cache: JoiningSqlCache, *handlers: QueryHandler[Any, Any]) -> DefaultQueryBus:
+def _query_bus(cache: SqlCache, *handlers: QueryHandler[Any, Any]) -> DefaultQueryBus:
     registry = HandlerRegistry()
     for handler in handlers:
         registry.register_query_handler(handler)
@@ -232,10 +291,12 @@ def _query_bus(cache: JoiningSqlCache, *handlers: QueryHandler[Any, Any]) -> Def
 # ---------------------------------------------------------------------------------------------------------
 
 
-async def test_immediate_operations_run_in_units_of_their_own(relational_backend: RelationalBackend) -> None:
+async def test_immediate_operations_run_in_units_of_their_own(
+    relational_backend: RelationalBackend, new_cache: NewCache
+) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("kept", "v")
         await cache.put("stale", "v")
         tx_cache = TransactionAwareCache(cache)
@@ -251,31 +312,35 @@ async def test_immediate_operations_run_in_units_of_their_own(relational_backend
                 assert business is not None and all(unit is not business for unit in cache.units)
                 raise Rollback
         assert len(cache.units) == 4
-        assert await _stored(relational_backend) == {"kept": "v", "generation": "g1"}
+        assert await _stored(relational_backend, cache) == {"kept": "v", "generation": "g1"}
     finally:
         await ctx.stop()
 
 
-async def test_invalidate_is_not_undone_by_the_callers_rollback(relational_backend: RelationalBackend) -> None:
+async def test_invalidate_is_not_undone_by_the_callers_rollback(
+    relational_backend: RelationalBackend, new_cache: NewCache
+) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("a", 1)
         await cache.put("b", 2)
         with pytest.raises(Rollback):
             async with TransactionTemplate(read_only=True).transaction():
                 await TransactionAwareCache(cache).invalidate()
                 raise Rollback
-        assert await _stored(relational_backend) == {}
+        assert await _stored(relational_backend, cache) == {}
     finally:
         await ctx.stop()
 
 
 @pytest.mark.backends(PG)
-async def test_a_rolled_back_write_unit_keeps_the_immediate_operations(relational_backend: RelationalBackend) -> None:
+async def test_a_rolled_back_write_unit_keeps_the_immediate_operations(
+    relational_backend: RelationalBackend, new_cache: NewCache
+) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("stale", "v")
         tx_cache = TransactionAwareCache(cache)
         cache.units.clear()
@@ -285,7 +350,7 @@ async def test_a_rolled_back_write_unit_keeps_the_immediate_operations(relationa
                 assert await tx_cache.evict_if_present("stale") is True
                 assert business is not None and all(unit is not business for unit in cache.units)
                 raise Rollback
-        assert await _stored(relational_backend) == {"generation": "g1"}
+        assert await _stored(relational_backend, cache) == {"generation": "g1"}
     finally:
         await ctx.stop()
 
@@ -293,10 +358,11 @@ async def test_a_rolled_back_write_unit_keeps_the_immediate_operations(relationa
 @pytest.mark.backends(SQLITE_FILE)
 async def test_on_sqlite_an_immediate_write_beside_the_callers_write_unit_is_refused_at_once(
     relational_backend: RelationalBackend,
+    new_cache: NewCache,
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("stale", "v")
         tx_cache = TransactionAwareCache(cache)  # on_write_error="raise"
         async with TransactionTemplate().transaction():
@@ -307,7 +373,7 @@ async def test_on_sqlite_an_immediate_write_beside_the_callers_write_unit_is_ref
                 await tx_cache.evict_if_present("stale")
             assert time.perf_counter() - started < 1.0
             assert await tx_cache.get("stale") == "v"  # reads run beside the writer (WAL)
-        assert await _stored(relational_backend) == {"stale": "v"}
+        assert await _stored(relational_backend, cache) == {"stale": "v"}
     finally:
         await ctx.stop()
 
@@ -322,11 +388,11 @@ def _refusals(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 @pytest.mark.backends(SQLITE_FILE)
 async def test_on_sqlite_log_mode_reports_a_refused_immediate_write_once_and_carries_on(
-    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+    relational_backend: RelationalBackend, new_cache: NewCache, caplog: pytest.LogCaptureFixture
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("stale", "v")
         await cache.put("kept", "v")
         tx_cache = TransactionAwareCache(cache, on_write_error="log")
@@ -335,25 +401,25 @@ async def test_on_sqlite_log_mode_reports_a_refused_immediate_write_once_and_car
             async with TransactionTemplate().transaction():
                 assert await tx_cache.put_if_absent("generation", "g1") is False  # refused: not stored
                 assert await tx_cache.evict_if_present("stale") is False  # refused: evicted after the commit
-                assert await _stored(relational_backend) == {"stale": "v", "kept": "v"}
-            assert await _stored(relational_backend) == {"kept": "v"}
+                assert await _stored(relational_backend, cache) == {"stale": "v", "kept": "v"}
+            assert await _stored(relational_backend, cache) == {"kept": "v"}
             await cache.put("stale", "v")
         assert len(_refusals(caplog)) == 1  # once per cache, then at DEBUG
         async with TransactionTemplate().transaction():
             await tx_cache.invalidate()  # refused: the cache is cleared after the commit
-            assert await _stored(relational_backend) == {"stale": "v", "kept": "v"}
-        assert await _stored(relational_backend) == {}
+            assert await _stored(relational_backend, cache) == {"stale": "v", "kept": "v"}
+        assert await _stored(relational_backend, cache) == {}
     finally:
         await ctx.stop()
 
 
 @pytest.mark.backends(SQLITE_FILE)
 async def test_on_sqlite_an_eviction_before_invocation_does_not_stop_the_business_method(
-    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+    relational_backend: RelationalBackend, new_cache: NewCache, caplog: pytest.LogCaptureFixture
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("price:a", 10)
         ran: list[str] = []
 
@@ -366,7 +432,7 @@ async def test_on_sqlite_an_eviction_before_invocation_does_not_stop_the_busines
         await reprice("a")
         await reprice("a")
         assert ran == ["a", "a"]
-        assert await _stored(relational_backend) == {}  # the refused eviction ran after the commit
+        assert await _stored(relational_backend, cache) == {}  # the refused eviction ran after the commit
         assert len(_refusals(caplog)) == 1
     finally:
         await ctx.stop()
@@ -374,11 +440,11 @@ async def test_on_sqlite_an_eviction_before_invocation_does_not_stop_the_busines
 
 @pytest.mark.backends(SQLITE_FILE)
 async def test_on_sqlite_the_query_cache_answers_uncached_and_reports_the_refusal_once(
-    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+    relational_backend: RelationalBackend, new_cache: NewCache, caplog: pytest.LogCaptureFixture
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         handler = PriceHandler()
         bus = _query_bus(cache, handler)
         caplog.set_level(logging.DEBUG)
@@ -388,7 +454,7 @@ async def test_on_sqlite_the_query_cache_answers_uncached_and_reports_the_refusa
         assert handler.calls == 3  # no generation could be started beside the write unit: not cached
         assert len(_refusals(caplog)) == 1
         assert not any("CQRS cache get failed" in record.getMessage() for record in caplog.records)
-        assert await _stored(relational_backend) == {}  # no entry under a generation that was never stored
+        assert await _stored(relational_backend, cache) == {}  # no entry under a generation that was never stored
     finally:
         await ctx.stop()
 
@@ -399,10 +465,12 @@ async def test_on_sqlite_the_query_cache_answers_uncached_and_reports_the_refusa
 
 
 @pytest.mark.backends(PG)
-async def test_a_plain_query_does_not_wait_for_another_units_generation(relational_backend: RelationalBackend) -> None:
+async def test_a_plain_query_does_not_wait_for_another_units_generation(
+    relational_backend: RelationalBackend, new_cache: NewCache
+) -> None:
     ctx = await _boot(relational_backend)
     try:
-        bus = _query_bus(JoiningSqlCache(), PriceHandler())
+        bus = _query_bus(await new_cache(), PriceHandler())
         queried, answered = asyncio.Event(), asyncio.Event()
 
         @transactional
@@ -428,10 +496,11 @@ async def test_a_plain_query_does_not_wait_for_another_units_generation(relation
 @pytest.mark.backends(PG)
 async def test_two_units_running_two_queries_in_opposite_orders_both_commit(
     relational_backend: RelationalBackend,
+    new_cache: NewCache,
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        bus = _query_bus(JoiningSqlCache(), PriceHandler(), StockHandler())
+        bus = _query_bus(await new_cache(), PriceHandler(), StockHandler())
         first_done = [asyncio.Event(), asyncio.Event()]
 
         @transactional
@@ -461,11 +530,11 @@ async def test_two_units_running_two_queries_in_opposite_orders_both_commit(
 
 
 async def test_the_writes_of_a_task_that_outlived_its_committed_unit_reach_the_store(
-    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+    relational_backend: RelationalBackend, new_cache: NewCache, caplog: pytest.LogCaptureFixture
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("stale", "v")
         await cache.put(":cqrs:OrderQuery:1", "cached")
         tx_cache = TransactionAwareCache(cache, on_write_error="log")
@@ -483,7 +552,7 @@ async def test_the_writes_of_a_task_that_outlived_its_committed_unit_reach_the_s
             task = asyncio.create_task(later())  # started and not awaited: it outlives the unit
         committed.set()
         await task
-        assert await _stored(relational_backend) == {"rate": 1.1}
+        assert await _stored(relational_backend, cache) == {"rate": 1.1}
         assert not [record.getMessage() for record in caplog.records if "skipped" in record.getMessage()]
     finally:
         await ctx.stop()
@@ -495,24 +564,26 @@ async def test_the_writes_of_a_task_that_outlived_its_committed_unit_reach_the_s
 
 
 @pytest.mark.parametrize("outcome", ["commit", "rollback"])
-async def test_deferred_writes_still_wait_for_the_commit(relational_backend: RelationalBackend, outcome: str) -> None:
+async def test_deferred_writes_still_wait_for_the_commit(
+    relational_backend: RelationalBackend, new_cache: NewCache, outcome: str
+) -> None:
     ctx = await _boot(relational_backend)
     try:
-        cache = JoiningSqlCache()
+        cache = await new_cache()
         await cache.put("name", "old")
         await cache.put("stale", "v")
         tx_cache = TransactionAwareCache(cache)
-        before = await _stored(relational_backend)
+        before = await _stored(relational_backend, cache)
         try:
             async with TransactionTemplate().transaction():
                 await tx_cache.put("name", "new")
                 await tx_cache.evict("stale")
-                assert await _stored(relational_backend) == before  # nothing is written before the commit
+                assert await _stored(relational_backend, cache) == before  # nothing is written before the commit
                 if outcome == "rollback":
                     raise Rollback
         except Rollback:
             pass
         expected = before if outcome == "rollback" else {"name": "new"}
-        assert await _stored(relational_backend) == expected
+        assert await _stored(relational_backend, cache) == expected
     finally:
         await ctx.stop()
