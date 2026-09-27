@@ -363,8 +363,9 @@ class TestFailureStopsLayers:
         assert "C" not in ctx.step_statuses
 
     @pytest.mark.anyio
-    async def test_failure_in_parallel_layer_cancels_siblings(self, ctx: SagaContext, events: AsyncMock) -> None:
-        """When one step in a parallel layer fails, other tasks are cancelled."""
+    async def test_failure_in_parallel_layer_awaits_running_siblings(self, ctx: SagaContext, events: AsyncMock) -> None:
+        """A sibling already running when a step fails is awaited to its end, never cancelled mid-commit."""
+        b_running = asyncio.Event()
 
         async def invoke(
             step_def: StepDefinition,
@@ -373,25 +374,134 @@ class TestFailureStopsLayers:
             step_input: Any = None,
         ) -> str:
             if step_def.id == "A":
+                await b_running.wait()
                 raise RuntimeError("A failed")
-            # B is slow; should be cancelled
-            await asyncio.sleep(5)
+            b_running.set()
+            await asyncio.sleep(0.05)  # still running when A fails
             return f"result-{step_def.id}"
 
         invoker = _make_invoker_from_fn(invoke)
-
-        steps = {
-            "A": _make_step_def("A"),
-            "B": _make_step_def("B"),
-        }
-        saga = _make_saga(steps)
-
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")})
         orchestrator = SagaExecutionOrchestrator(invoker, events)
 
         with pytest.raises(RuntimeError, match="A failed"):
             await orchestrator.execute(saga, ctx)
 
         assert ctx.step_statuses["A"] == StepStatus.FAILED
+        assert ctx.step_statuses["B"] == StepStatus.DONE  # settled before the failure was raised
+        assert ctx.committed_steps == ["B"]  # the engine compensates it
+
+    @pytest.mark.anyio
+    async def test_failure_in_parallel_layer_never_starts_waiting_siblings(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        """A sibling still waiting for the layer's concurrency limit when a step fails never starts."""
+        started: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            started.append(step_def.id)
+            raise RuntimeError(f"{step_def.id} failed")
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")}, layer_concurrency=1)
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(RuntimeError, match="A failed"):
+            await orchestrator.execute(saga, ctx)
+
+        assert started == ["A"]
+        assert "B" not in ctx.step_statuses
+
+    @pytest.mark.anyio
+    async def test_a_running_sibling_starts_no_new_attempt_once_a_step_failed(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        attempts: list[str] = []
+        b_failed_once = asyncio.Event()
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            attempts.append(step_def.id)
+            if step_def.id == "A":
+                await b_failed_once.wait()
+                raise RuntimeError("A failed")
+            b_failed_once.set()
+            await asyncio.sleep(0)  # A fails while B's first attempt is ending
+            raise RuntimeError("B failed")
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B", retry=3, backoff_ms=20)})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(RuntimeError, match="A failed"):
+            await orchestrator.execute(saga, ctx)
+
+        assert attempts.count("B") == 1
+        assert ctx.step_statuses["B"] == StepStatus.FAILED
+
+    @pytest.mark.anyio
+    async def test_cancelling_the_saga_cancels_and_awaits_every_step_task(self, ctx: SagaContext) -> None:
+        running = asyncio.Event()
+        ended: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            running.set()
+            try:
+                await asyncio.sleep(30)
+            finally:
+                ended.append(step_def.id)
+            return "never"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")})
+        orchestrator = SagaExecutionOrchestrator(invoker)
+
+        task = asyncio.create_task(orchestrator.execute(saga, ctx))
+        await running.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert sorted(ended) == ["A", "B"]  # both step tasks ended before the cancellation propagated
+        assert [t for t in asyncio.all_tasks() if t.get_name().startswith("saga-step-") and not t.done()] == []
+        assert ctx.step_statuses == {"A": StepStatus.FAILED, "B": StepStatus.FAILED}
+        assert ctx.committed_steps == []
+
+    @pytest.mark.anyio
+    async def test_steps_run_with_the_transaction_state_cleared(self, ctx: SagaContext) -> None:
+        from pyfly.data.transaction.context import COMMIT_TRACKERS, current_state
+
+        seen: list[object] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            seen.append(current_state().units)
+            seen.append(len(COMMIT_TRACKERS.get()))  # only the step's own attempt tracker
+            return "ok"
+
+        invoker = _make_invoker_from_fn(invoke)
+        orchestrator = SagaExecutionOrchestrator(invoker)
+        await orchestrator.execute(_make_saga({"A": _make_step_def("A")}), ctx)
+
+        assert seen == [(), 1]
 
 
 # ── Events emitted ────────────────────────────────────────────
