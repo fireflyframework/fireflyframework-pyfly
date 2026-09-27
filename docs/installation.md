@@ -306,7 +306,7 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `fastapi` | fastapi, uvicorn, python-multipart | HTTP server (FastAPI + Uvicorn), REST controllers, native OpenAPI |
 | `granian` | granian | Granian ASGI server (Rust/tokio, ~3x faster than Uvicorn) |
 | `hypercorn` | hypercorn | Hypercorn ASGI server (HTTP/2 and HTTP/3 support) |
-| `data-relational` | sqlalchemy[asyncio], alembic, aiosqlite | Async SQL database access, repositories, migrations (SQLite default) |
+| `data-relational` | sqlalchemy[asyncio] (2.0.50 or later; tested on 2.0 and 2.1), alembic, aiosqlite | Async SQL database access, repositories, migrations (SQLite default) |
 | `data-document` | motor, beanie | MongoDB document access via Beanie ODM |
 | `postgresql` | asyncpg | PostgreSQL async driver (add for production databases) |
 | `eda` | aiokafka, aio-pika | Both Kafka and RabbitMQ message brokers |

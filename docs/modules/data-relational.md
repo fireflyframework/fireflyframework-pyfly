@@ -2,6 +2,7 @@
 
 > **Package:** `pyfly.data.relational.sqlalchemy`
 > **Commons:** [`pyfly.data`](data.md) — shared ports, pagination, query parsing, entity mapping
+> **Requires:** SQLAlchemy 2.0.50 or later (async), tested on the 2.0 and 2.1 lines
 >
 > This guide covers the **SQLAlchemy adapter** for relational databases. For generic data concepts shared across all adapters (repository ports, `Page`/`Pageable`/`Sort`, `QueryMethodParser`, `Mapper`, extensibility), see the [Data Module Guide](data.md). For document databases, see the [Data Document Guide](data-document.md).
 >

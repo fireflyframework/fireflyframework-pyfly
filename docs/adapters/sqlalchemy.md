@@ -2,7 +2,7 @@
 
 > **Module:** Data Relational — [Module Guide](../modules/data-relational.md)
 > **Package:** `pyfly.data.relational.sqlalchemy`
-> **Backend:** SQLAlchemy 2.0.50+ (async), Alembic, aiosqlite
+> **Backend:** SQLAlchemy 2.0.50 or later (async; tested on the 2.0 and 2.1 lines), Alembic, aiosqlite
 
 ## Quick Start
 
