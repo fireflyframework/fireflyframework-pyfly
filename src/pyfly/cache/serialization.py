@@ -19,7 +19,7 @@ value of its own that the caller may change freely.
 - The in-memory adapter stores a copy (:func:`encode_copy`/:func:`decode_copy`): pickled bytes, or a
   deep copy for a value pickle cannot handle (an instance of a locally defined class).
 - The JSON adapters (Redis, PostgreSQL) store :func:`cache_dumps` bytes. The encoder converts the common
-  framework types (datetime, Decimal, UUID, set, bytes, Pydantic models) to a JSON-safe form, so a hit
+  framework types (datetime, Decimal, UUID, set, bytes, dataclasses, Pydantic models) to a JSON-safe form, so a hit
   comes back as JSON types; the declarative decorators and the CQRS query bus rebuild the declared type
   with :func:`restore` (a Pydantic ``TypeAdapter``).
 
@@ -34,6 +34,7 @@ entity return type when the method is decorated, before any call writes anything
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime
 import decimal
 import io
@@ -240,6 +241,9 @@ def _default(obj: Any) -> Any:
         return list(obj)
     if isinstance(obj, bytes):
         return obj.decode("utf-8", "replace")
+    # A dataclass → a dict of its fields (encoded in turn), which restore() rebuilds.
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
     # Pydantic v2 model → JSON-mode dict, once nothing inside it is a live ORM object.
     model_dump = getattr(obj, "model_dump", None)
     if callable(model_dump):

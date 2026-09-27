@@ -46,8 +46,15 @@ class FakeRedis:
     async def exists(self, *keys: str) -> int:
         return sum(1 for k in keys if k in self._store)
 
+    async def scan_iter(self, match: str = "*", count: int | None = None):  # noqa: ANN201
+        import fnmatch
+
+        for key in list(self._store):
+            if fnmatch.fnmatchcase(key, match):
+                yield key
+
     async def flushdb(self) -> None:
-        self._store.clear()
+        raise AssertionError("the cache must never flush a database it shares")
 
     async def aclose(self) -> None:
         pass
@@ -94,12 +101,15 @@ class TestRedisCacheAdapter:
 
     @pytest.mark.asyncio
     async def test_clear(self):
-        adapter = RedisCacheAdapter(FakeRedis())
+        fake = FakeRedis()
+        fake._store["pyfly:session:abc"] = b"session"  # other data in the same database
+        adapter = RedisCacheAdapter(fake)
         await adapter.put("a", 1)
         await adapter.put("b", 2)
-        await adapter.clear()
+        await adapter.clear()  # deletes the cache's namespace, never FLUSHDB (C034)
         assert await adapter.get("a") is None
         assert await adapter.get("b") is None
+        assert fake._store == {"pyfly:session:abc": b"session"}
 
     @pytest.mark.asyncio
     async def test_put_with_ttl(self):
