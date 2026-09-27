@@ -48,7 +48,7 @@ from typing import Any
 
 import anyio
 import pytest
-from sqlalchemy import Identity, Integer, String, event, text
+from sqlalchemy import Identity, Integer, String, event, insert, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
@@ -89,6 +89,10 @@ class MxItemRepository(Repository[MxItem, int]):
     async def find_setting(self, name: str) -> str | None:
         """A read method that reports a transaction-local setting (PostgreSQL)."""
         return (await self._session.execute(text(f"SELECT current_setting('{name}', true)"))).scalar_one()
+
+    async def find_and_rename(self, name: str) -> None:
+        """Misnamed: a read-named method that issues a Core UPDATE (it runs in a read auto unit)."""
+        await self._session.execute(update(MxItem).values(name=name))
 
 
 class InnerFailure(Exception):
@@ -169,6 +173,10 @@ class Outer:
     @transactional(read_only=True)
     async def orm_write_in_read_only(self) -> None:
         await self.items.save(MxItem(name="orm"))
+
+    @transactional(read_only=True)
+    async def core_write_in_read_only(self) -> None:
+        await self.items._session.execute(insert(MxItem).values(name="core"))
 
     @retry(max_attempts=3, exceptions=(ConnectionError,))
     @transactional
@@ -484,6 +492,17 @@ async def test_read_only_refuses_writes(matrix: Matrix) -> None:
     assert await matrix.committed() == []
     await matrix.outer.place("writable-again")  # the hint does not leak into the next unit
     assert await matrix.committed() == ["writable-again"]
+
+
+async def test_a_core_write_in_a_read_only_unit_is_refused_before_it_runs(matrix: Matrix) -> None:
+    """Refused by the unit's session on every backend, before the statement is sent: on PostgreSQL a read
+    auto unit runs on AUTOCOMMIT, where the write would otherwise commit at once."""
+    await matrix.outer.place("original")
+    with pytest.raises(IllegalTransactionStateError, match="read-only"):
+        await matrix.outer.core_write_in_read_only()
+    with pytest.raises(IllegalTransactionStateError, match="read-only auto unit"):
+        await matrix.outer.items.find_and_rename("renamed")
+    assert await matrix.committed() == ["original"]
 
 
 # ---------------------------------------------------------------------------------------------------------

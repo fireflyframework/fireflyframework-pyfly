@@ -16,8 +16,11 @@
 - :class:`UnitSession` is the session of a unit the transaction manager opened. Every operation runs under
   the unit's operation guard (a child task that shares the unit waits its turn instead of corrupting the
   session), refuses a completed unit, and records failures; so do the ``SAVEPOINT``, ``RELEASE`` and
-  ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``. ``commit``, ``rollback`` and ``close`` belong to the
-  unit, so calling them raises.
+  ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``. In a read-only unit (``read_only=True``, or the read
+  auto unit of a ``find*``/``count*``/``exists*``/``stream*``/``get*`` repository method) a Core
+  ``INSERT``/``UPDATE``/``DELETE`` is refused before it is sent, on every backend, as the ORM flush guard
+  refuses ORM writes (a raw ``text()`` statement is not inspected). ``commit``, ``rollback`` and ``close``
+  belong to the unit, so calling them raises.
 - :class:`ScopedAsyncSession` is what the transient ``async_session`` bean hands out. Inside a unit of
   work for its datasource the unit-of-work API (``execute``, ``scalar``, ``scalars``, ``get``,
   ``get_one``, ``add``, ``add_all``, ``delete``, ``merge``, ``flush``, ``refresh``, ``stream``,
@@ -112,6 +115,8 @@ class UnitSession(AsyncSession):
         unit = self._pyfly_unit
         if unit is None:
             return await super().execute(*args, **kwargs)
+        if unit.read_only:
+            _refuse_dml(unit, args, kwargs)
         async with unit.operation():
             return await super().execute(*args, **kwargs)
 
@@ -119,6 +124,8 @@ class UnitSession(AsyncSession):
         unit = self._pyfly_unit
         if unit is None:
             return await super().scalar(*args, **kwargs)
+        if unit.read_only:
+            _refuse_dml(unit, args, kwargs)
         async with unit.operation():
             return await super().scalar(*args, **kwargs)
 
@@ -126,6 +133,8 @@ class UnitSession(AsyncSession):
         unit = self._pyfly_unit
         if unit is None:
             return await super().scalars(*args, **kwargs)
+        if unit.read_only:
+            _refuse_dml(unit, args, kwargs)
         async with unit.operation():
             return await super().scalars(*args, **kwargs)
 
@@ -264,6 +273,24 @@ class UnitSavepoint(AsyncSessionTransaction):
     async def __aexit__(self, type_: Any, value: Any, traceback: Any) -> None:
         async with self._pyfly_unit.operation():
             await super().__aexit__(type_, value, traceback)
+
+
+def _refuse_dml(unit: UnitOfWork, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Refuse a Core ``INSERT``/``UPDATE``/``DELETE`` in a read-only unit, before it reaches the database."""
+    statement = args[0] if args else kwargs.get("statement")
+    if not getattr(statement, "is_dml", False):
+        return
+    hint = (
+        "A repository read method (find*, count*, exists*, stream*, get*) runs in a read-only auto unit; give a "
+        "method that writes another name, or call it inside @transactional."
+        if unit.auto
+        else "Drop read_only=True from the boundary, or write in a unit of its own (Propagation.REQUIRES_NEW)."
+    )
+    raise IllegalTransactionStateError(
+        f"{unit.describe()} is read-only and cannot run {type(statement).__name__.upper()} on "
+        f"{getattr(getattr(statement, 'table', None), 'name', 'a table')}. {hint}",
+        datasource=unit.datasource,
+    )
 
 
 def _completion_refused(unit: UnitOfWork, operation: str) -> IllegalTransactionStateError:

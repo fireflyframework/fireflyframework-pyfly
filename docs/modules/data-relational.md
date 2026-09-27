@@ -582,7 +582,10 @@ A repository call resolves its session when it runs:
     datasource has [after-begin customizers](#after-begin-customizers) (their transaction-local settings
     need a transaction). Elsewhere it is a short transaction that ends without writing. A read unit whose
     connection turns out to be dead (a failover, a server-side idle timeout) is retried once on a fresh
-    connection, so pool pre-ping is not needed. An ORM write inside a read unit is refused.
+    connection, so pool pre-ping is not needed. An ORM write, or a Core `insert()`/`update()`/`delete()`,
+    inside a read unit is refused before it reaches the database. A raw `text()` statement is not
+    inspected: on PostgreSQL a read unit's `AUTOCOMMIT` connection would commit it at once, and on SQLite
+    its unit would roll it back, so give a method that writes a name that is not a read name.
   - any **other** method gets a write unit that commits (on SQLite, it starts with `BEGIN IMMEDIATE`).
 
   Either way the connection goes back to the pool when the call returns. Entities returned from an auto
@@ -1326,8 +1329,10 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
   `IllegalTransactionStateError` at begin. A joining call's isolation is ignored.
 - **`read_only=True`** routes a new unit to the datasource's replica when one is configured, sets
   `session.info["read_only"]`, keeps `is_read_only()` true inside the call, refuses every ORM write
-  (`IllegalTransactionStateError` from a `before_flush` guard), and adds the dialect hint: `BEGIN READ
-  ONLY` on PostgreSQL, `SET TRANSACTION READ ONLY` on MySQL and MariaDB.
+  (`IllegalTransactionStateError` from a `before_flush` guard) and every Core `insert()`/`update()`/
+  `delete()` before it is sent, and adds the dialect hint: `BEGIN READ ONLY` on PostgreSQL,
+  `SET TRANSACTION READ ONLY` on MySQL and MariaDB (which also refuses a raw `text()` write; SQLite has
+  no read-only transaction).
 - **`timeout=`** (seconds) bounds a new unit's body with `asyncio.timeout`: on expiry the unit rolls
   back and `TransactionTimedOutError` (a `TimeoutError`) is raised. On PostgreSQL the unit also gets
   `SET LOCAL statement_timeout`, so a stuck statement is cancelled on the server. A participant cannot
