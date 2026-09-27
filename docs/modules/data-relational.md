@@ -696,8 +696,10 @@ takes over the primary. Declare the database under `pyfly.data.relational.dataso
 or a session factory bean over an engine of its own, also splits the primary while
 `pyfly.data.relational.url` is configured: the session factory, the `AsyncSession` bean and the
 repositories use that engine, and `DataSourceRegistry.primary`, with every module that looks the
-registry up, the URL. A `relational_engine_not_in_registry` WARNING says so, once per engine. A
-session factory bean over the registry's own primary engine (other session options) is no split.
+registry up, the URL. A `relational_engine_not_in_registry` WARNING says so, once per engine and
+run. A session factory bean over a named datasource or a replica of the registry splits it the same
+way and logs `relational_primary_on_named_datasource`; one over the registry's own primary engine
+(other session options) is no split.
 Driver arguments, pool settings and the credentials provider are all configurable on the registry's
 own primary, so an engine bean is rarely needed.
 

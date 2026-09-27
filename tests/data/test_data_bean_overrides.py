@@ -823,3 +823,65 @@ async def test_a_connect_suspended_in_its_connect_event_survives_the_stop_that_d
 
     assert await request == 1
     await engine.dispose()
+
+
+@configuration
+class _SessionsOverTheReportingDatasource:
+    """The application's session factory over a named datasource of the registry, not its primary."""
+
+    @bean
+    def app_sessions(self, registry: DataSourceRegistry) -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(registry.engine("reporting"), expire_on_commit=False)
+
+
+async def test_a_session_factory_over_a_named_datasource_beside_a_configured_url_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The engine is a registry engine, but not the primary: the sessions and repositories use the reporting
+    database while ``DataSourceRegistry.primary`` is the configured URL."""
+    reporting = f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"
+    config = Config(
+        {
+            "pyfly": {
+                "data": {
+                    "relational": {
+                        "enabled": "true",
+                        "url": f"sqlite+aiosqlite:///{tmp_path / 'primary.db'}",
+                        "ddl-auto": "none",
+                        "datasources": {"reporting": {"url": reporting}},
+                    }
+                }
+            }
+        }
+    )
+    ctx = ApplicationContext(config)
+    ctx.register_bean(_SessionsOverTheReportingDatasource)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        warnings = [r for r in caplog.records if r.getMessage() == "relational_primary_on_named_datasource"]
+        assert len(warnings) == 1
+        assert warnings[0].datasource == "reporting"  # type: ignore[attr-defined]
+        assert _split_warnings(caplog) == []
+    finally:
+        await ctx.stop()
+
+
+async def test_a_restarted_context_reports_the_split_primary_again(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The split is reported once per run, not once per process: the same engine handed to a context that
+    is stopped and started again is reported in both runs."""
+    config = _config(tmp_path)
+    engine = _engine("user")
+    ctx = ApplicationContext(config)
+    ctx.container.register_instance(AsyncEngine, engine)
+    try:
+        with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+            await ctx.start()
+            await ctx.stop()
+            await ctx.start()
+        assert len(_split_warnings(caplog)) == 2
+    finally:
+        await ctx.stop()
+        await engine.dispose()
