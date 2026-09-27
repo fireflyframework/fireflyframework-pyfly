@@ -441,6 +441,21 @@ For an adapter without `with_namespace`, `dedicated_cache` falls back to the
 region `pyfly.<name>::` and logs a warning once: its entries are then cleared
 with the cache.
 
+### Upgrading from 26.09.07 or earlier
+
+Data written by earlier versions is not where this version reads it:
+
+* **Redis cache entries** now live under `pyfly:cache:`. Entries written
+  before, under their bare keys, are never read again: each costs one miss.
+  Entries written without a TTL stay in Redis until you delete them.
+* **Orchestration state** kept by `CachePersistenceProvider` and **idempotency
+  records** kept by the HTTP idempotency filter moved to their dedicated caches
+  (`orchestration`, `idempotency`), and records written before the upgrade are
+  not read. Drain the sagas and workflows in flight before you upgrade: one
+  persisted before it is orphaned from recovery and compensation. A request
+  retried with an idempotency key first used before the upgrade runs again
+  instead of being replayed; deploy when no such retry is expected.
+
 ---
 
 ## Caching and Transactions
@@ -479,6 +494,19 @@ rolled back. The call itself never fails for it.
 `apply(operation, key, write)` makes several writes on the delegate one
 deferred step: they run after the commit together, or are dropped together (the
 CQRS query cache evicts a key and replaces its generation this way).
+
+Two consequences of writes that wait for the commit:
+
+* **The unit does not see its own writes.** A `@cacheable` read after a
+  `@cache_evict` in the same transaction is still served the old entry, and a
+  value a `@cache_put` stored is not there yet. Read from the database inside
+  the unit when you need what it changed.
+* **Synchronizations belong to the unit, not to a savepoint.** A write made
+  inside a `Propagation.NESTED` step that rolls back to its savepoint still runs
+  when the outer unit commits, as in Spring: a `@cache_put` there caches a value
+  that was never committed. Keep cache writes out of `NESTED` steps that may
+  fail, or evict the key where you handle the failed step: that eviction is
+  registered after the put, so it runs after it.
 
 The [decorators](#declarative-caching-decorators) and the CQRS query cache are
 transaction-aware. Wrap an adapter yourself to get the same behavior from direct

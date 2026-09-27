@@ -46,7 +46,7 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import detached, transactional
+from pyfly.data.transaction import Propagation, detached, transactional
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
@@ -98,6 +98,10 @@ class Catalog:
     async def rename(self, item_id: int, name: str) -> str:
         await self.items._session.execute(update(CacheTxItem).where(CacheTxItem.id == item_id).values(name=name))
         return name
+
+    @cache_evict(CACHE, key="name:{item_id}")
+    async def touch_nothing(self, item_id: int) -> None:
+        pass
 
     @cache_evict(CACHE, key="name:{item_id}")
     async def touch(self, item_id: int, name: str) -> None:
@@ -155,6 +159,20 @@ class Flow:
         self.seen_inside.append(await detached(self.catalog.get_name(item_id)))
         if fail:
             raise RuntimeError("a later step fails")
+
+    @transactional(propagation=Propagation.NESTED)
+    async def try_rename(self, item_id: int, name: str) -> None:
+        await self.catalog.rename(item_id, name)
+        raise RuntimeError("the step fails and rolls back to its savepoint")
+
+    @transactional
+    async def rename_in_a_failing_step(self, item_id: int, name: str) -> None:
+        try:
+            await self.try_rename(item_id, name)
+        except RuntimeError:
+            # The put the step registered belongs to this unit and runs when it commits: evict the key here,
+            # after it, as caching.md advises.
+            await self.catalog.touch_nothing(item_id)
 
     @transactional
     async def look_up_rate_in_the_background(self, currency: str, answered: asyncio.Event, *, fail: bool) -> None:
@@ -350,6 +368,20 @@ async def test_a_refused_value_never_fails_a_committed_write(
         assert await _rows(relational_backend, "wp14_cache_tx_item", "name") == ["order-1"]
         assert await CACHE.exists("created:order-1") is False
         assert any("cache_put_skipped" in record.getMessage() for record in caplog.records)
+    finally:
+        await ctx.stop()
+
+
+async def test_evicting_where_a_nested_step_failed_leaves_no_uncommitted_value_cached(
+    relational_backend: RelationalBackend,
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        await _seed(relational_backend, "original")
+        await ctx.get_bean(Flow).rename_in_a_failing_step(1, "ghost")
+        assert await _rows(relational_backend, "wp14_cache_tx_item", "name") == ["original"]
+        assert await CACHE.exists("name:1") is False
+        assert await ctx.get_bean(Catalog).get_name(1) == "original"
     finally:
         await ctx.stop()
 

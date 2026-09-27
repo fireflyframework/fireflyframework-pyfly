@@ -22,6 +22,10 @@ after-commit synchronizations (:func:`pyfly.data.transaction.after_commit`):
 - they are dropped when the unit rolls back (or its commit fails), which leaves the cache exactly as it
   was, consistent with the database.
 
+The unit's own reads do not see them before the commit. They belong to the unit, not to a savepoint: a
+write registered inside a ``Propagation.NESTED`` scope that rolls back to its savepoint still runs when the
+unit commits (evict the key where the failed step is handled; that eviction runs after it).
+
 Outside a unit they run at once. Reads (``get``, ``exists``) always run at once, and so do
 ``put_if_absent`` and the explicitly immediate :meth:`TransactionAwareCache.evict_if_present` and
 :meth:`TransactionAwareCache.invalidate`.
