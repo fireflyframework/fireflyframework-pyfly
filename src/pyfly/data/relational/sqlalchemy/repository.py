@@ -163,7 +163,7 @@ def repository_operation(
     """Wrap a repository coroutine method so every call runs in an operation scope (module documentation).
 
     *read* selects a read auto unit outside a transaction. *atomic* holds the unit's operation guard for the
-    whole call: the framework's own methods are atomic (``save`` is add, flush and refresh as one step for a
+    whole call: the framework's own methods are atomic (``save`` is attach or merge and flush as one step for a
     task that shares the unit), while a subclass method is not, since it may await anything. A method
     decorated with ``@transactional`` opens no auto unit: its own boundary provides the unit.
     """
