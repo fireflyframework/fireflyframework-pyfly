@@ -40,7 +40,9 @@ import inspect
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction, async_sessionmaker
+from sqlalchemy.orm import Session, SessionTransaction
 
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.errors import IllegalTransactionStateError
@@ -55,6 +57,7 @@ __all__ = [
     "SessionProvider",
     "UnitSavepoint",
     "UnitSession",
+    "track_savepoint",
     "unit_session_class",
 ]
 
@@ -68,6 +71,33 @@ RELEASING_SAVEPOINT = "pyfly_releasing_savepoint"
 """``UnitOfWork.attributes`` key: ``(task, SessionTransaction)`` of the savepoint the application is
 releasing, set under the operation guard while the release runs. The transaction manager attributes a
 failure of the flush that releasing runs, in that task, to that savepoint."""
+
+_SAVEPOINT_HANDLES = "pyfly_savepoint_handles"
+"""``UnitOfWork.attributes`` key: the handle of each open savepoint the unit tracks, by its
+``SessionTransaction``."""
+
+
+def track_savepoint(unit: UnitOfWork, savepoint: AsyncSessionTransaction) -> None:
+    """Record *savepoint*, which the running task just opened on *unit*'s session under the unit's operation
+    guard, as the unit's innermost savepoint (:meth:`UnitOfWork.savepoint_opened`), and report its end
+    (:meth:`UnitOfWork.savepoint_closed`) however it ends: released, rolled back, or closed along with an
+    enclosing savepoint or the session."""
+    handles: dict[SessionTransaction, AsyncSessionTransaction] | None = unit.attributes.get(_SAVEPOINT_HANDLES)
+    if handles is None:
+        handles = unit.attributes[_SAVEPOINT_HANDLES] = {}
+        tracked = handles
+
+        def _ended(_session: Session, transaction: SessionTransaction) -> None:
+            handle = tracked.pop(transaction, None)
+            if handle is not None:
+                unit.savepoint_closed(handle)
+
+        event.listen(unit.resource.sync_session, "after_transaction_end", _ended)
+    transaction = savepoint.sync_transaction
+    if transaction is None:
+        return  # it did not start: there is no savepoint to track
+    handles[transaction] = savepoint
+    unit.savepoint_opened(savepoint)
 
 
 class GuardedResult:
@@ -229,12 +259,14 @@ class UnitSession(AsyncSession):
         unit = self._pyfly_unit
         if unit is not None:
             unit.check_usable()
+            unit.check_savepoint_owner()  # the next flush would write it inside another task's savepoint
         super().add(instance, _warn=_warn)
 
     def add_all(self, instances: Any) -> None:
         unit = self._pyfly_unit
         if unit is not None:
             unit.check_usable()
+            unit.check_savepoint_owner()
         super().add_all(instances)
 
     # -- completion belongs to the unit ------------------------------------------------------------------------
@@ -273,8 +305,11 @@ class UnitSavepoint(AsyncSessionTransaction):
         self._pyfly_unit = unit
 
     async def start(self, is_ctxmanager: bool = False) -> AsyncSessionTransaction:
-        async with self._pyfly_unit.operation():
-            return await super().start(is_ctxmanager)
+        unit = self._pyfly_unit
+        async with unit.operation():  # refused while another task holds the unit's innermost savepoint
+            started = await super().start(is_ctxmanager)
+            track_savepoint(unit, self)
+        return started
 
     async def commit(self) -> None:
         unit = self._pyfly_unit

@@ -34,7 +34,12 @@ Completion rules:
   longer active: then it rolls back and the original exception propagates (never ``PendingRollbackError``).
 - ``NESTED`` runs in a savepoint; a failure rolls back to it and does not mark the outer unit. So does a
   failure of the flush that releasing the savepoint runs (what the scope left pending): the scope's caller
-  gets it, and the outer unit goes on.
+  gets it, and the outer unit goes on. A scope ends at its own depth and its own savepoint. Savepoints are a
+  stack on one connection: a ``NESTED`` scope opened from a task while another task holds the unit's
+  innermost savepoint (sibling steps in ``asyncio.gather``) raises
+  :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError`, and a scope that would end across a
+  savepoint a task it started still holds marks the unit rollback-only and raises it too, instead of
+  releasing or rolling back that task's work.
 - ``timeout`` bounds a new unit's body with ``asyncio.timeout``; on expiry the unit rolls back and
   :class:`~pyfly.data.transaction.errors.TransactionTimedOutError` is raised.
 - Commit, rollback, savepoint release and session close are shielded: they run in their own task,
@@ -397,7 +402,17 @@ class TransactionBoundary:
     """One transactional boundary as an async context manager; ``async with`` yields the unit (``None``
     when the boundary runs without one). Built by :class:`TransactionTemplate` and ``@transactional``."""
 
-    __slots__ = ("_definition", "_manager", "_mode", "_savepoint", "_since", "_timeout", "_token", "_unit")
+    __slots__ = (
+        "_definition",
+        "_depth",
+        "_manager",
+        "_mode",
+        "_savepoint",
+        "_since",
+        "_timeout",
+        "_token",
+        "_unit",
+    )
 
     def __init__(self, manager: TransactionManager, definition: TransactionDefinition) -> None:
         self._manager = manager
@@ -407,6 +422,7 @@ class TransactionBoundary:
         self._token: Token[TransactionState] | None = None
         self._timeout: asyncio.Timeout | None = None
         self._savepoint: Any = None
+        self._depth = 0  # a NESTED scope's own savepoint depth
         self._since = 0
 
     async def __aenter__(self) -> UnitOfWork | None:
@@ -468,8 +484,12 @@ class TransactionBoundary:
                 f"of datasource '{existing.datasource}' does not have",
                 datasource=existing.datasource,
             )
+        # Refused with IllegalTransactionStateError when another task holds the unit's innermost savepoint
+        # (sibling NESTED steps in asyncio.gather): the operation that opens the savepoint checks it.
         self._savepoint = await self._manager.create_savepoint(existing)
+        existing.savepoint_opened(self._savepoint)  # a manager that recorded it under its guard already did
         existing.savepoint_depth += 1
+        self._depth = existing.savepoint_depth
         self._mode = _Mode.NESTED
         self._unit = existing
         return existing
@@ -525,16 +545,19 @@ class TransactionBoundary:
         await self._exit_new(unit, exc)
 
     async def _exit_nested(self, unit: UnitOfWork, error: BaseException | None) -> None:
-        depth = unit.savepoint_depth
+        depth = self._depth  # the scope's own depth: a task this scope started may have opened one on top
         manager = self._manager
         replaced = _poison_on_cancellation(unit, error, self._since)
         if unit.poisoned:
             unit.savepoint_depth = depth - 1
             unit.set_rollback_only(error)
+            unit.savepoint_closed(self._savepoint)
             if replaced:
                 assert error is not None
                 await raise_cancellation(error)
             return
+        if not unit.completed:
+            self._refuse_ending_across_another_task(unit)
         # A failure that propagates out, or a statement that failed inside the savepoint and was caught
         # there, rolls back to the savepoint; the outer unit is not marked (Spring's NESTED semantics).
         if (
@@ -560,6 +583,8 @@ class TransactionBoundary:
                     unit.set_rollback_only(release_error)  # the connection went with the savepoint
             else:
                 unit.set_rollback_only(release_error)
+        else:
+            unit.savepoint_closed(self._savepoint)
         if cancelled:
             raise asyncio.CancelledError
         if release_error is None:
@@ -585,7 +610,37 @@ class TransactionBoundary:
             unit.set_rollback_only(rollback_error)
         else:
             unit.savepoint_rolled_back(depth)
+        unit.savepoint_closed(self._savepoint)
         return cancelled
+
+    def _refuse_ending_across_another_task(self, unit: UnitOfWork) -> None:
+        """Mark the unit rollback-only and raise ``IllegalTransactionStateError`` when this ``NESTED`` scope
+        cannot end at its own savepoint: another task ended that savepoint already, or holds one on top of
+        it that releasing or rolling back this one would end too (a task the scope started and did not
+        await). Nothing is released or rolled back across that task's savepoint."""
+        savepoint = self._savepoint
+        if not unit.savepoint_open(savepoint):
+            unit.savepoint_depth = min(unit.savepoint_depth, self._depth - 1)
+            problem = (
+                "its savepoint was already ended by another task (a rollback to an enclosing savepoint), "
+                "taking the scope's work with it"
+            )
+        else:
+            holder = unit.savepoint_holder_above(savepoint)
+            if holder is None:
+                return
+            problem = (
+                f"task {holder.get_name()!r}, which it started, still holds a savepoint on top of the scope's; "
+                "releasing or rolling back the scope's savepoint would end that savepoint too, under that task"
+            )
+        refusal = IllegalTransactionStateError(
+            f"A Propagation.NESTED scope of {unit.describe()} cannot end: {problem}. The unit is marked "
+            "rollback-only. Savepoints are a stack on the unit's one connection: await the tasks a NESTED scope "
+            "starts before it ends, and run NESTED steps one after another rather than from concurrent tasks.",
+            datasource=unit.datasource,
+        )
+        unit.set_rollback_only(refusal, depth=0)
+        raise refusal
 
     async def _exit_new(self, unit: UnitOfWork, error: BaseException | None) -> None:
         if isinstance(error, asyncio.CancelledError):

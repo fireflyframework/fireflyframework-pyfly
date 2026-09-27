@@ -24,6 +24,12 @@ child task may use its parent's unit. That is made safe here:
   task: ``gather()`` fan-out inside ``@transactional`` is serialized instead of corrupting the session. The
   guard is held for one operation (one execute, flush, commit or stream fetch), never across user code, so
   it cannot deadlock.
+- Savepoints are a stack on the unit's one connection, and the guard does not span the code inside one.
+  While a savepoint is open (a ``Propagation.NESTED`` scope, ``session.begin_nested()``), the unit belongs
+  to the task that opened it and to the tasks that task starts inside it: an operation from any other task
+  (a sibling in ``gather()``) would run inside that savepoint and be released or rolled back with it, so
+  it raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead
+  (:meth:`UnitOfWork.check_savepoint_owner`). A savepoint whose task has finished no longer holds the unit.
 - A task that uses a unit that already completed gets
   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the unit, instead of writing
   into a transaction nobody will commit. Work that must outlive its transaction runs through
@@ -47,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import itertools
+from contextvars import ContextVar
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -58,6 +65,32 @@ if TYPE_CHECKING:
     from pyfly.data.transaction.synchronization import TransactionSynchronization
 
 _IDS = itertools.count(1)
+
+
+class _Savepoint:
+    """An open savepoint of a unit: the backend's handle and the task that opened it."""
+
+    __slots__ = ("handle", "open", "owner")
+
+    def __init__(self, handle: object, owner: asyncio.Task[Any] | None) -> None:
+        self.handle: object | None = handle
+        self.owner = owner
+        self.open = True
+
+
+_HELD_SAVEPOINTS: ContextVar[tuple[_Savepoint, ...]] = ContextVar("pyfly_held_savepoints", default=())
+"""The savepoints the running task opened, and those that were open in the task that started it: a child
+task copies its parent's context, so the tasks a savepoint's owner starts inside it may use the unit too."""
+
+
+def _foreign(entry: _Savepoint, task: asyncio.Task[Any] | None, held: tuple[_Savepoint, ...]) -> bool:
+    """Whether *entry* belongs to a live task other than *task* that did not start *task* inside it."""
+    owner = entry.owner
+    return owner is not None and owner is not task and not owner.done() and entry not in held
+
+
+def _task_name(task: asyncio.Task[Any] | None) -> str:
+    return repr(task.get_name()) if task is not None else "(none)"
 
 
 def cancel_requests() -> int:
@@ -204,6 +237,8 @@ class _Operation:
         await unit.guard.acquire()
         try:
             unit.check_usable()  # it may have completed while this task waited for the guard
+            if unit._savepoints:
+                unit.check_savepoint_owner()  # another task may have opened a savepoint meanwhile
         except BaseException:
             unit.guard.release()
             raise
@@ -260,6 +295,7 @@ class UnitOfWork:
         self.attributes: dict[str, Any] = {}
         self._rollback_only_depth: int | None = None
         self._rollback_only_reason: BaseException | str | None = None
+        self._savepoints: list[_Savepoint] = []  # open savepoints, outermost first
 
     # -- state ------------------------------------------------------------------------------------------
 
@@ -304,6 +340,78 @@ class UnitOfWork:
         if self.marked_within(depth):
             self._rollback_only_depth = None
             self._rollback_only_reason = None
+
+    # -- savepoints -------------------------------------------------------------------------------------------
+
+    def savepoint_opened(self, handle: object) -> None:
+        """Record that the running task opened the savepoint *handle*, now the unit's innermost one.
+
+        A transaction manager calls it under the operation guard that ran the ``SAVEPOINT``, so no other
+        task's statement runs in between; the template calls it again for a ``NESTED`` scope (a handle
+        recorded already is left as it is). Until the savepoint ends (:meth:`savepoint_closed`), only this
+        task, and the tasks it starts meanwhile, may use the unit (:meth:`check_savepoint_owner`).
+        """
+        if any(entry.handle is handle for entry in self._savepoints):
+            return
+        entry = _Savepoint(handle, asyncio.current_task())
+        self._savepoints.append(entry)
+        _HELD_SAVEPOINTS.set((*(held for held in _HELD_SAVEPOINTS.get() if held.open), entry))
+
+    def savepoint_closed(self, handle: object) -> None:
+        """Forget the savepoint *handle*: it was released or rolled back, by its own scope or along with an
+        enclosing one (a backend reports each savepoint that ends; a handle already forgotten is ignored)."""
+        for index, entry in enumerate(self._savepoints):
+            if entry.handle is handle:
+                entry.open = False
+                entry.handle = None  # a task's context may keep the entry until its next savepoint
+                entry.owner = None
+                del self._savepoints[index]
+                return
+
+    def savepoint_open(self, handle: object) -> bool:
+        """Whether the savepoint *handle* is still open."""
+        return any(entry.handle is handle for entry in self._savepoints)
+
+    def savepoint_holder_above(self, handle: object) -> asyncio.Task[Any] | None:
+        """The task that holds an open savepoint above the savepoint *handle* and is neither the running task
+        nor one it started it from (a child task that outlived the scope that started it), if any.
+
+        Releasing or rolling back *handle*'s savepoint would end that task's savepoint too, under it.
+        """
+        held = _HELD_SAVEPOINTS.get()
+        task = asyncio.current_task()
+        above = False
+        for entry in self._savepoints:
+            if above and _foreign(entry, task, held):
+                return entry.owner
+            above = above or entry.handle is handle
+        return None
+
+    def check_savepoint_owner(self) -> None:
+        """Raise :class:`IllegalTransactionStateError` when another task holds the unit's innermost savepoint.
+
+        Savepoints are a stack on the unit's one connection: a statement, or a savepoint, from a task other
+        than the savepoint's own (or one that task started inside it) would run inside that savepoint, and a
+        ``ROLLBACK TO SAVEPOINT`` there would undo it after it reported success. A savepoint whose task has
+        finished no longer holds the unit.
+        """
+        if not self._savepoints:
+            return
+        innermost = self._savepoints[-1]
+        task = asyncio.current_task()
+        if not _foreign(innermost, task, _HELD_SAVEPOINTS.get()):
+            return
+        owner = innermost.owner
+        raise IllegalTransactionStateError(
+            f"Task {_task_name(task)} cannot use {self.describe()}: task {_task_name(owner)} holds a savepoint on "
+            "it (Propagation.NESTED or session.begin_nested()) and has not ended it. Savepoints are a stack on "
+            "the unit's one connection, so a statement or a savepoint from another task would run inside that "
+            "savepoint and be released or rolled back with it. Run NESTED steps and savepoint blocks one after "
+            "another, not from concurrent tasks (asyncio.gather), or give each concurrent step a unit of its "
+            "own: Propagation.REQUIRES_NEW (it commits on its own; on SQLite it waits for the one write lock), "
+            "or pyfly.data.transaction.detached().",
+            datasource=self.datasource,
+        )
 
     # -- operations ---------------------------------------------------------------------------------------
 

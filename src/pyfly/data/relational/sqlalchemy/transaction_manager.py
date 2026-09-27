@@ -85,7 +85,12 @@ from pyfly.data.relational.datasource_registry import (
 )
 from pyfly.data.relational.dialect_customizers import begin_execution_options, is_file_database
 from pyfly.data.relational.sqlalchemy import sqlite_discard
-from pyfly.data.relational.sqlalchemy.session import RELEASING_SAVEPOINT, UnitSession, unit_session_class
+from pyfly.data.relational.sqlalchemy.session import (
+    RELEASING_SAVEPOINT,
+    UnitSession,
+    track_savepoint,
+    unit_session_class,
+)
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
 from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError
@@ -472,10 +477,12 @@ class SqlAlchemyTransactionManager:
             _release_the_connection(unit)
 
     async def create_savepoint(self, unit: UnitOfWork) -> AsyncSessionTransaction:
-        """``SAVEPOINT`` through ``session.begin_nested()``."""
+        """``SAVEPOINT`` through ``session.begin_nested()``, recorded as the running task's (``track_savepoint``);
+        refused while another task holds the unit's innermost savepoint."""
         async with unit.operation():
             savepoint = AsyncSession.begin_nested(unit.resource)
             await savepoint
+            track_savepoint(unit, savepoint)
         # The template counts this savepoint once this returns: it is at the next depth.
         unit.attributes.setdefault(_TEMPLATE_SAVEPOINTS, []).append(
             (savepoint.sync_transaction, unit.savepoint_depth + 1)
