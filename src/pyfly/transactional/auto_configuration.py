@@ -50,6 +50,7 @@ from pyfly.transactional.core.step_invoker import StepInvoker as CoreStepInvoker
 from pyfly.transactional.core.tracer import OrchestrationTracer
 from pyfly.transactional.core.validator import OrchestrationValidator
 from pyfly.transactional.health import OrchestrationHealthIndicator
+from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
 from pyfly.transactional.post_processor import OrchestrationBeanPostProcessor
 from pyfly.transactional.rest.controllers import (
     DeadLetterController,
@@ -75,6 +76,7 @@ from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
 # Shared (legacy adapters kept for back-compat).
 from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
 from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 
 # tcc/
 from pyfly.transactional.tcc.config.properties import TccEngineProperties
@@ -179,6 +181,9 @@ class TransactionalEngineAutoConfiguration:
                           at start unless ``pyfly.data.relational.ddl-auto`` is ``none``.
         * ``cache``      — :class:`CachePersistenceProvider`; delegates to the
                           app-configured :class:`CacheAdapter` bean.
+
+        The saga and TCC engines persist through the same provider
+        (:meth:`transactional_persistence_port`).
         """
         provider = str(config.get("pyfly.transactional.persistence.provider", "memory")).lower()
 
@@ -265,10 +270,21 @@ class TransactionalEngineAutoConfiguration:
     def core_step_invoker(self, resolver: CoreArgumentResolver) -> CoreStepInvoker:
         return CoreStepInvoker(argument_resolver=resolver)
 
+    # -- Saga and TCC persistence --------------------------------------------
+
+    @bean
+    def transactional_persistence_port(self, persistence: ExecutionPersistenceProvider) -> TransactionalPersistencePort:
+        """The persistence port of the saga engine, the TCC engine and ``SagaRecoveryService``: the configured
+        :class:`ExecutionPersistenceProvider`, so ``pyfly.transactional.persistence.provider`` makes saga and
+        TCC state as durable as workflow state (audit C079: they always used the in-memory adapter)."""
+        return ProviderPersistencePort(persistence)
+
     # -- Legacy infrastructure adapters (kept for back-compat) --------------
 
     @bean
     def in_memory_persistence_adapter(self) -> InMemoryPersistenceAdapter:
+        """A standalone in-memory port, kept for applications that inject it; the engines use
+        :meth:`transactional_persistence_port`."""
         return InMemoryPersistenceAdapter()
 
     @bean
@@ -312,7 +328,7 @@ class TransactionalEngineAutoConfiguration:
         step_invoker: StepInvoker,
         execution_orchestrator: SagaExecutionOrchestrator,
         compensator: SagaCompensator,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         events_adapter: LoggerEventsAdapter,
         saga_properties: SagaEngineProperties,
     ) -> SagaEngine:
@@ -343,7 +359,7 @@ class TransactionalEngineAutoConfiguration:
     def tcc_engine(
         self,
         tcc_registry: TccRegistry,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         events_adapter: LoggerEventsAdapter,
     ) -> TccEngine:
         tcc_argument_resolver = TccArgumentResolver()
@@ -453,7 +469,7 @@ class TransactionalEngineAutoConfiguration:
     @bean
     def saga_recovery_service(
         self,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         saga_engine: SagaEngine,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaRecoveryService:

@@ -46,8 +46,12 @@ from pyfly.transactional.core.persistence import ExecutionPersistenceProvider, E
 from pyfly.transactional.core.recovery import RecoveryService
 from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 from pyfly.transactional.saga.annotations import saga, saga_step
+from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+from pyfly.transactional.saga.persistence.recovery import SagaRecoveryService
+from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 from pyfly.transactional.tcc.annotations import confirm_method, tcc, tcc_participant, try_method
 from pyfly.transactional.tcc.core.context import TccContext
+from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
 from tests.support.backend_matrix import PG, RelationalBackend
 
 # ---------------------------------------------------------------------------
@@ -403,3 +407,59 @@ async def test_with_migrations_owning_the_schema_a_missing_table_stops_the_conte
     the start instead of every recovery scan."""
     with pytest.raises(BeanCreationException, match="table pyfly_orchestration_state does not exist"):
         await _context(relational_backend, ddl_auto="none")
+
+
+async def test_saga_and_tcc_executions_are_persisted_by_the_configured_provider(
+    relational_backend: RelationalBackend,
+) -> None:
+    """C079: the saga and TCC engines always used the in-memory adapter, whatever the provider said."""
+    ctx = await _context(relational_backend, Wp10aOrderSaga, Wp10aPaymentTcc)
+    try:
+        saga_result = await ctx.get_bean(SagaEngine).execute("wp10a-order-saga")
+        tcc_result = await ctx.get_bean(TccEngine).execute("wp10a-payment-tcc")
+        assert saga_result.success and tcc_result.success
+
+        provider = ctx.get_bean(ExecutionPersistenceProvider)
+        saga_state = await provider.find(saga_result.correlation_id)
+        tcc_state = await provider.find(tcc_result.correlation_id)
+        assert saga_state is not None and tcc_state is not None
+        assert (saga_state.pattern, saga_state.status, saga_state.name) == (
+            ExecutionPattern.SAGA,
+            ExecutionStatus.COMPLETED,
+            "wp10a-order-saga",
+        )
+        assert (tcc_state.pattern, tcc_state.status, tcc_state.name) == (
+            ExecutionPattern.TCC,
+            ExecutionStatus.COMPLETED,
+            "wp10a-payment-tcc",
+        )
+    finally:
+        await ctx.stop()
+
+
+async def test_a_saga_cut_short_by_a_crash_is_recovered_by_the_next_process(
+    relational_backend: RelationalBackend,
+) -> None:
+    """C079: a pod that dies mid-saga left nothing to recover. Its in-flight state is now in the database, and
+    the next process's ``SagaRecoveryService`` finds it and marks it failed."""
+    first = await _context(relational_backend)
+    try:
+        await first.get_bean(TransactionalPersistencePort).persist_state(  # type: ignore[type-abstract]
+            {
+                "saga_name": "wp10a-order-saga",
+                "correlation_id": "wp10a-crashed",
+                "headers": {},
+                "started_at": datetime.now(UTC) - timedelta(minutes=5),
+            }
+        )
+    finally:
+        await first.stop()  # the process dies before the saga completes
+
+    second = await _context(relational_backend)
+    try:
+        assert await second.get_bean(SagaRecoveryService).recover_stale(stale_threshold_seconds=0) == 1
+        port = second.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+        recovered = await port.get_state("wp10a-crashed")
+        assert recovered is not None and recovered["status"] == "FAILED" and recovered["successful"] is False
+    finally:
+        await second.stop()

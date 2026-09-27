@@ -604,3 +604,103 @@ class TestOrchestrationPersistenceProviderSelection:
                 await result.start()
         finally:
             await registry.close()
+
+
+# ===========================================================================
+# ProviderPersistencePort — the saga/TCC port on a provider (C079)
+# ===========================================================================
+
+
+class TestProviderPersistencePort:
+    """The port the saga and TCC engines use, on a real provider: the in-memory one and the SQL one."""
+
+    @pytest.fixture(params=["memory", "sqlalchemy"])
+    async def port(self, request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Any]:
+        from pyfly.transactional.core.persistence import InMemoryPersistenceProvider
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+
+        if request.param == "memory":
+            yield ProviderPersistencePort(InMemoryPersistenceProvider())
+            return
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'port.db'}")
+        provider = SqlAlchemyPersistenceProvider(engine)
+        await provider.start()
+        try:
+            yield ProviderPersistencePort(provider)
+        finally:
+            await engine.dispose()
+
+    async def test_a_saga_state_goes_in_flight_then_completes(self, port: Any) -> None:
+        started = datetime.now(UTC) - timedelta(seconds=5)
+        await port.persist_state(
+            {"saga_name": "order", "correlation_id": "s-1", "headers": {"a": "1"}, "started_at": started}
+        )
+
+        state = await port.get_state("s-1")
+        assert state is not None
+        assert (state["status"], state["saga_name"], state["headers"]) == ("IN_FLIGHT", "order", {"a": "1"})
+        assert state["started_at"] == started
+        assert [s["correlation_id"] for s in await port.get_in_flight()] == ["s-1"]
+
+        await port.update_step_status("s-1", "reserve", "DONE")
+        await port.mark_completed("s-1", successful=True)
+        done = await port.get_state("s-1")
+        assert done is not None
+        assert (done["status"], done["successful"], done["steps"]) == (
+            "COMPLETED",
+            True,
+            {"reserve": {"status": "DONE"}},
+        )
+        assert done["completed_at"] is not None
+        assert await port.get_in_flight() == []
+
+        execution = await port.provider.find("s-1")
+        assert (execution.pattern, execution.status, execution.name) == (
+            ExecutionPattern.SAGA,
+            ExecutionStatus.COMPLETED,
+            "order",
+        )
+
+    async def test_a_tcc_state_with_an_iso_start_is_a_tcc_execution(self, port: Any) -> None:
+        started = datetime.now(UTC)
+        await port.persist_state({"tcc_name": "pay", "correlation_id": "t-1", "started_at": started.isoformat()})
+        await port.mark_completed("t-1", successful=False)
+
+        execution = await port.provider.find("t-1")
+        assert (execution.pattern, execution.status, execution.name) == (
+            ExecutionPattern.TCC,
+            ExecutionStatus.FAILED,
+            "pay",
+        )
+        assert execution.started_at == started
+
+    async def test_stale_in_flight_states_are_found_and_old_completed_ones_cleaned(self, port: Any) -> None:
+        await port.persist_state({"saga_name": "order", "correlation_id": "stale"})
+        await port.persist_state({"saga_name": "order", "correlation_id": "done"})
+        await port.mark_completed("done", successful=True)
+
+        assert [s["correlation_id"] for s in await port.get_stale(datetime.now(UTC) + timedelta(seconds=1))] == [
+            "stale"
+        ]
+        assert await port.get_stale(datetime.now(UTC) - timedelta(hours=1)) == []
+        assert await port.cleanup(timedelta(hours=1)) == 0
+        assert await port.cleanup(timedelta(seconds=-1)) == 1  # a cutoff in the future: "done" is old enough
+        assert await port.get_state("done") is None
+        assert await port.get_state("stale") is not None
+        assert await port.is_healthy() is True
+
+    async def test_a_workflow_execution_of_the_same_provider_is_not_the_ports(self, port: Any) -> None:
+        workflow = _make_state(pattern=ExecutionPattern.WORKFLOW, minutes_ago=60)
+        await port.provider.save(workflow)
+
+        assert await port.get_state(workflow.correlation_id) is None
+        assert await port.get_stale(datetime.now(UTC)) == []
+        assert await port.get_in_flight() == []
+
+    async def test_completing_an_unknown_execution_raises_key_error(self, port: Any) -> None:
+        with pytest.raises(KeyError):
+            await port.mark_completed("never-started", successful=True)
