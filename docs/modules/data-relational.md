@@ -609,7 +609,7 @@ A plain repository's `delete_by_` sends one bulk `DELETE` when the mapper has no
 
 ### Statements Built Once
 
-Each derived method builds its statement once per shape, with its arguments as bound parameters (Spring Data's `PartTreeJpaQuery` caches its criteria query the same way), and reuses it on every call, so a call costs what running a prebuilt statement costs. The statement varies only with the pattern of `None` arguments (`IS NULL` instead of `= ?`); a method comparing a relationship builds its own per call, and so does every method of a repository that overrides `_criteria()` (its read criteria may change from call to call, a tenant filter for one). A repository class compiles its methods once, however many instances a transient or request scope creates.
+Each derived method builds its statement once per shape, with its arguments as bound parameters (Spring Data's `PartTreeJpaQuery` caches its criteria query the same way), and reuses it on every call, so a call costs what running a prebuilt statement costs. The statement varies only with the pattern of `None` arguments (`IS NULL` instead of `= ?`); a method comparing a relationship or a composite builds its own per call, and so does every method of a repository that overrides `_criteria()` (its read criteria may change from call to call, a tenant filter for one). A repository class's derived and `@query` methods are described, checked and compiled once, for its first instance, and bound to every later one, so a transient or request-scoped repository costs a few attribute assignments per instance (a subclass of `RepositoryBeanPostProcessor` that overrides how methods are built builds them per instance, as before).
 
 ### Complete Derived Query Examples
 

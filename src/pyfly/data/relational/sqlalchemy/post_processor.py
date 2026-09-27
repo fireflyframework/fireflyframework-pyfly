@@ -32,10 +32,23 @@ from pyfly.data.transaction.registry import TransactionManagerRegistry
 _READ_FLAG = "__pyfly_read_operation__"
 
 _COMPILED: weakref.WeakKeyDictionary[type, dict[tuple[type, str], DerivedQuery]] = weakref.WeakKeyDictionary()
-"""The derived queries compiled per repository class, by entity and method name: a transient or request-scoped
-repository compiles its methods once, not once per instance."""
+"""The derived queries compiled per repository class, by entity and method name, for a post-processor that
+builds its methods its own way (the others reuse the whole method, :meth:`_shares_implementations`)."""
 
 _COMPILED_LOCK = threading.Lock()
+
+_IMPLEMENTATION_HOOKS = (
+    "_implement_derived",
+    "_derived_query",
+    "_process_query_decorated",
+    "_compile_derived",
+    "_wrap_derived_method",
+    "_parse",
+    "_properties",
+    "_is_stub",
+    "_get_repository_type",
+)
+"""The hooks that decide how a method is built: a subclass that overrides one may build it per instance."""
 
 
 class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
@@ -46,7 +59,9 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     starting with ``find_by_``, ``count_by_``, ``exists_by_``, or
     ``delete_by_``), parses the method name against the entity's properties and compiles a corresponding
     SQLAlchemy query (:mod:`~pyfly.data.relational.sqlalchemy.query_compiler`), whose statement is built once.
-    A method that does not match its entity fails here, when the repository is built.
+    A method that does not match its entity fails here, when the repository is built. The methods of a
+    repository class are built for its first instance and bound to every later one, so a transient or
+    request-scoped repository costs a few attribute assignments per instance.
 
     Every compiled method is a repository operation like the inherited ones: it joins the current unit of
     work or runs in an auto unit (a read unit for ``find_by_``/``count_by_``/``exists_by_`` and ``SELECT``
@@ -75,6 +90,14 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         if resolved is not None:
             self._transaction_managers = resolved
         return resolved
+
+    def _shares_implementations(self) -> bool:
+        """True unless a subclass overrides how methods are built: the methods this class builds read the
+        repository they are called on (its session, unit of work, criteria read on every call) and capture
+        nothing of the instance they were built for, so a repository class's methods are built once, for its
+        first instance, and bound to every later one."""
+        cls = type(self)
+        return all(getattr(cls, hook) is getattr(RepositoryBeanPostProcessor, hook) for hook in _IMPLEMENTATION_HOOKS)
 
     def after_init(self, bean: Any, bean_name: str) -> Any:
         """Compile the query methods, and bind the transaction managers of the context."""

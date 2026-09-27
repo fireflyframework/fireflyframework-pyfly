@@ -26,6 +26,10 @@ NotImplementedError`` (with or without a literal message). Any other body is a h
 is never replaced, however little it holds: a case-insensitive lookup, a join, a delegation to another method,
 a hand-written soft delete.
 
+**Once per class.** An adapter whose implementations read the repository they are called on
+(:meth:`BaseRepositoryPostProcessor._shares_implementations`, the relational one) builds a repository class's
+methods for its first instance and binds the same functions to every later instance of the class and entity.
+
 **Arguments.** A compiled method takes its arguments as the stub declares them, by position or by keyword. The
 number of value parameters must match what the name asks for (a ``_between`` takes two, an ``_is_null`` none),
 or the repository fails to build with :class:`~pyfly.data.query_parser.InvalidQueryMethodError`; parameters
@@ -37,6 +41,7 @@ from __future__ import annotations
 import dis
 import functools
 import inspect
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
@@ -322,6 +327,29 @@ def _positional(function: Callable[..., Any], method: QueryMethod) -> Callable[.
     return bound
 
 
+_Plan = list[tuple[str, Callable[..., Any]]]
+
+_PLANS_ATTRIBUTE = "__pyfly_repository_plans__"
+"""The class attribute a repository class keeps its built methods in (it goes with the class)."""
+
+_PLANS_LOCK = threading.Lock()
+
+
+def _plan_of(cls: type, key: tuple[type, Any]) -> _Plan | None:
+    """The methods built for *cls* under *key* (the post-processor's class and the entity), or ``None``."""
+    plans: dict[tuple[type, Any], _Plan] | None = vars(cls).get(_PLANS_ATTRIBUTE)
+    return plans.get(key) if plans is not None else None
+
+
+def _remember_plan(cls: type, key: tuple[type, Any], plan: _Plan) -> None:
+    with _PLANS_LOCK:
+        plans: dict[tuple[type, Any], _Plan] | None = vars(cls).get(_PLANS_ATTRIBUTE)
+        if plans is None:
+            plans = {}
+            type.__setattr__(cls, _PLANS_ATTRIBUTE, plans)
+        plans.setdefault(key, plan)
+
+
 @order(REPOSITORY_POST_PROCESSOR_ORDER)
 class BaseRepositoryPostProcessor(ABC):
     """Template base for repository bean post-processors.
@@ -349,14 +377,28 @@ class BaseRepositoryPostProcessor(ABC):
 
         entity = bean._model  # type: ignore[attr-defined]
         cls = type(bean)
+        shared = self._shares_implementations()
+        if shared:
+            known = _plan_of(cls, (type(self), entity))
+            if known is not None:
+                for name, function in known:
+                    setattr(bean, name, function.__get__(bean, cls))
+                return bean
 
         # Collect names defined on the base repository class so we never
         # replace them.
         base_names = set(dir(repo_type))
+        plan: _Plan = []
 
         for attr_name, attr in declared_methods(cls, repo_type):
             # --- Adapter-specific decorated methods (e.g., @query) ---
             if self._process_query_decorated(bean, cls, attr_name, attr, entity):
+                bound = vars(bean).get(attr_name)
+                unbound = getattr(bound, "__func__", None)
+                if callable(unbound) and getattr(bound, "__self__", None) is bean:
+                    plan.append((attr_name, unbound))
+                else:  # the adapter bound something else: nothing to reuse for the next instance
+                    shared = False
                 continue
 
             # --- Derived query methods ---
@@ -367,8 +409,18 @@ class BaseRepositoryPostProcessor(ABC):
                 method = describe_method(cls, attr_name, attr, entity)
                 implementation = self._implement_derived(bean, method)
                 setattr(bean, attr_name, implementation.__get__(bean, cls))
+                plan.append((attr_name, implementation))
 
+        if shared:
+            _remember_plan(cls, (type(self), entity), plan)
         return bean
+
+    def _shares_implementations(self) -> bool:
+        """Whether the implementations built for one instance of a repository class serve every instance of it
+        (and of its entity), so :meth:`after_init` builds them once per class and binds them to each later
+        instance, a transient or request-scoped one included. False here: an adapter whose implementations read
+        the repository they are called on, and capture nothing of the instance they were built for, says so."""
+        return False
 
     # ------------------------------------------------------------------
     # Derived query methods

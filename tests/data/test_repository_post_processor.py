@@ -19,6 +19,7 @@ import functools
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -26,14 +27,16 @@ from sqlalchemy import ForeignKey, String, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from pyfly.data import post_processor as base_post_processor_module
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
-from pyfly.data.post_processor import is_stub
-from pyfly.data.query_parser import InvalidQueryMethodError
+from pyfly.data.post_processor import describe_method, is_stub
+from pyfly.data.query_parser import InvalidQueryMethodError, QueryMethodParser
 from pyfly.data.relational.sqlalchemy import post_processor as post_processor_module
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
-from pyfly.data.relational.sqlalchemy.query import query
+from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query
+from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
@@ -847,6 +850,11 @@ class _Valid(Repository[CheckedItem, int]):
     async def delete_by_tag(self, tag: str) -> None: ...
 
 
+class _ValidWithQuery(_Valid):
+    @query("SELECT c FROM CheckedItem c WHERE c.tag = :tag")
+    async def by_tag(self, tag: str) -> list[CheckedItem]: ...
+
+
 class TestDerivedMethodsAreCheckedAtStartup:
     """A derived method that cannot work fails when the post-processor builds the repository, not on its first
     call (Spring rejects such a method at bootstrap)."""
@@ -885,9 +893,58 @@ class TestDerivedMethodsAreCheckedAtStartup:
         compiled = {name for name in vars(repository) if not name.startswith("_")}
         assert compiled == {name for name in vars(_Valid) if not name.startswith("_")}
 
-    def test_a_transient_repository_compiles_its_methods_once(self, processor: RepositoryBeanPostProcessor):
-        first = processor.after_init(_Valid(CheckedItem), "first")
-        second = RepositoryBeanPostProcessor().after_init(_Valid(CheckedItem), "second")
-        assert first.count_by_tag is not second.count_by_tag
-        query_of = post_processor_module._COMPILED[_Valid]
-        assert (CheckedItem, "count_by_tag") in query_of
+    def test_a_transient_repository_compiles_its_methods_once(
+        self, processor: RepositoryBeanPostProcessor, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The methods are built for the first instance of a class and bound to every later one: a transient or
+        request-scoped repository describes, parses and compiles nothing per instance."""
+        first = processor.after_init(_ValidWithQuery(CheckedItem), "first")
+        built: list[str] = []
+        for owner, name in (
+            (QueryMethodCompiler, "compile"),
+            (QueryExecutor, "compile_query_method"),
+            (QueryMethodParser, "parse"),
+        ):
+            monkeypatch.setattr(owner, name, _counted(getattr(owner, name), built, name))
+        for module in (post_processor_module, base_post_processor_module):
+            monkeypatch.setattr(module, "describe_method", _counted(describe_method, built, "describe_method"))
+        second = RepositoryBeanPostProcessor().after_init(_ValidWithQuery(CheckedItem), "second")
+        assert built == []
+        for name in ("count_by_tag", "by_tag"):
+            assert getattr(second, name).__func__ is getattr(first, name).__func__
+            assert getattr(second, name).__self__ is second and getattr(first, name).__self__ is first
+
+    async def test_each_instance_runs_on_its_own_session(self, processor: RepositoryBeanPostProcessor, seeded_session):
+        """A shared implementation reads the repository it is called on: its session, its unit of work."""
+        seeded = processor.after_init(MixedRepo(PPItem, seeded_session), "seeded")
+        engine = seeded_session.bind
+        async with AsyncSession(engine) as empty_session:
+            empty = processor.after_init(MixedRepo(PPItem, empty_session), "empty")
+            assert [item.name for item in await seeded.find_by_name("Alice")] == ["Alice"]
+            assert [item.name for item in await seeded.find_by_role_query("user")] == ["Bob", "Dave"]
+            assert await empty.find_by_name("Alice") == []  # the seeded rows are not committed
+            assert await empty.find_by_role_query("user") == []
+
+    def test_a_processor_that_builds_methods_its_own_way_builds_them_per_instance(self):
+        built: list[int] = []
+
+        class Tracing(RepositoryBeanPostProcessor):
+            def _implement_derived(self, bean: Any, method: Any) -> Any:
+                built.append(id(bean))
+                return super()._implement_derived(bean, method)
+
+        first, second = _Valid(CheckedItem), _Valid(CheckedItem)
+        Tracing().after_init(first, "first")
+        Tracing().after_init(second, "second")
+        assert set(built) == {id(first), id(second)}
+
+
+def _counted(function: Any, calls: list[str], name: str) -> Any:
+    """*function*, recording *name* in *calls* each time it runs."""
+
+    @functools.wraps(function)
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(name)
+        return function(*args, **kwargs)
+
+    return counted
