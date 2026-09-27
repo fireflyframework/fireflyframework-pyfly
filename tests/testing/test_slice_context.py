@@ -175,3 +175,133 @@ async def test_a_file_database_keeps_nothing_a_rolled_back_slice_wrote(tmp_path:
             members = ctx.get_bean(SliceMemberRepository)
             assert await members.count() == 0
             await members.save(_SliceMember(email="once@example.com"))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The application's own engine, and units that overlap in time
+# ---------------------------------------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import contextlib  # noqa: E402
+import sqlite3  # noqa: E402
+
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
+
+from pyfly.container.bean import bean  # noqa: E402
+from pyfly.container.stereotypes import configuration  # noqa: E402
+from pyfly.data.relational.dialect_customizers import uses_sqlite_begin_recipe  # noqa: E402
+from pyfly.data.transaction import IllegalTransactionStateError, Propagation, detached, transactional  # noqa: E402
+
+_APPLICATION_ENGINE: dict[str, AsyncEngine] = {}
+
+
+@configuration
+class _ApplicationEngine:
+    """An application that brings its own engine: a plain ``create_async_engine``, without PyFly's SQLite
+    ``BEGIN`` recipe."""
+
+    @bean
+    def async_engine(self) -> AsyncEngine:
+        return _APPLICATION_ENGINE["engine"]
+
+
+@service
+class _MemberService:
+    def __init__(self, members: SliceMemberRepository) -> None:
+        self._members = members
+
+    @transactional
+    async def join(self, email: str) -> None:
+        await self._members.save(_SliceMember(email=email))
+
+    @transactional
+    async def join_slowly(self, email: str) -> None:
+        await self._members.save(_SliceMember(email=email))
+        await asyncio.sleep(0.05)
+
+    @transactional(propagation=Propagation.REQUIRES_NEW)
+    async def join_apart(self, email: str) -> None:
+        await self._members.save(_SliceMember(email=email))
+
+    @transactional
+    async def join_with_a_child_task(self, email: str) -> None:
+        await self._members.save(_SliceMember(email=email))
+        await asyncio.create_task(self.join_apart(f"child-{email}"))
+
+
+def _rows(path: Path) -> int:
+    with contextlib.closing(sqlite3.connect(path)) as connection:
+        row = connection.execute("SELECT count(*) FROM wp11_slice_member").fetchone()
+    return int(row[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine_options", [{}, {"isolation_level": "AUTOCOMMIT"}], ids=["plain", "autocommit"])
+async def test_an_application_sqlite_engine_rolls_back_too(tmp_path: Path, engine_options: dict[str, str]) -> None:
+    """The driver of a plain SQLite engine defers its BEGIN (and an AUTOCOMMIT one never sends it): the first
+    unit's SAVEPOINT started the transaction and its RELEASE committed it, so every unit of the test was
+    committed for real. The test's connection starts its transaction itself."""
+    path = tmp_path / "app.db"
+    url = f"sqlite+aiosqlite:///{path}"
+    engine = create_async_engine(url, **engine_options)
+    _APPLICATION_ENGINE["engine"] = engine
+    try:
+        async with await data_slice(
+            SliceMemberRepository, _MemberService, _ApplicationEngine, config=_relational(url), rollback=True
+        ) as ctx:
+            assert ctx.get_bean(AsyncEngine) is engine
+            assert not uses_sqlite_begin_recipe(engine)
+            members = ctx.get_bean(SliceMemberRepository)
+            await ctx.get_bean(_MemberService).join("service@example.com")
+            await members.save(_SliceMember(email="repository@example.com"))
+            assert await members.count() == 2
+            assert _rows(path) == 0  # nothing is committed while the test runs
+    finally:
+        await engine.dispose()
+    assert _rows(path) == 0
+
+
+@pytest.mark.asyncio
+async def test_units_that_overlap_in_time_are_refused_and_the_test_goes_on(tmp_path: Path) -> None:
+    """Two tasks with a unit each at the same time cannot share the test's connection: their savepoints would
+    interleave ('no such savepoint', then a closed connection for the rest of the test). The second unit is
+    refused before it touches the connection, naming the limitation."""
+    path = tmp_path / "app.db"
+    config = _relational(f"sqlite+aiosqlite:///{path}")
+    async with await data_slice(SliceMemberRepository, _MemberService, config=config, rollback=True) as ctx:
+        members = ctx.get_bean(SliceMemberRepository)
+        member_service = ctx.get_bean(_MemberService)
+        writes = await asyncio.gather(
+            member_service.join_slowly("first@example.com"),
+            member_service.join_slowly("second@example.com"),
+            return_exceptions=True,
+        )
+        assert writes[0] is None
+        assert isinstance(writes[1], IllegalTransactionStateError)
+        assert "overlap" in str(writes[1])
+        await member_service.join("third@example.com")
+        reads = await asyncio.gather(*(members.count() for _ in range(3)), return_exceptions=True)
+        assert reads[0] == 2
+        assert all(isinstance(read, IllegalTransactionStateError) for read in reads[1:])
+        assert sorted(member.email for member in await members.find_all()) == [
+            "first@example.com",
+            "third@example.com",
+        ]
+    assert _rows(path) == 0
+
+
+@pytest.mark.asyncio
+async def test_units_that_wait_for_each_other_share_the_test_connection(tmp_path: Path) -> None:
+    """A task that waits for the unit of a task it started, or for its own detached work, runs them one after
+    another: nothing overlaps, and nothing is refused."""
+    path = tmp_path / "app.db"
+    config = _relational(f"sqlite+aiosqlite:///{path}")
+    async with await data_slice(SliceMemberRepository, _MemberService, config=config, rollback=True) as ctx:
+        members = ctx.get_bean(SliceMemberRepository)
+        member_service = ctx.get_bean(_MemberService)
+        await member_service.join_with_a_child_task("parent@example.com")
+        await detached(member_service.join("detached@example.com"))
+        for email in ("one@example.com", "two@example.com"):
+            await asyncio.create_task(member_service.join(email))
+        assert await members.count() == 5
+    assert _rows(path) == 0

@@ -772,12 +772,17 @@ services, `SessionProvider` units and the framework stores all take part. Each u
 (its savepoint is released or rolled back, its after-commit callbacks run), so a failing unit leaves the
 test's earlier writes in place, on PostgreSQL too. What differs from production, by construction:
 
-- every unit of a datasource runs on one connection: tasks that each open a unit of their own and run at the
-  same time cannot share it, so run them one after another;
+- every unit of a datasource runs on one connection, so the units must nest: tasks that each open a unit of
+  their own and run at the same time (`asyncio.gather` of `@transactional` calls or of repository calls, a
+  background task started during the test) cannot share it. A unit that starts while another task's unit is
+  open there is refused with `IllegalTransactionStateError`, and the test goes on; run such work one after
+  another. A task that waits for the units of tasks it started is fine;
 - `REQUIRES_NEW` gets a savepoint too, so the outer unit's rollback undoes it;
 - a unit's isolation level, read-only hint and SQLite `BEGIN IMMEDIATE` are the test transaction's (a
   read-only unit still refuses ORM writes), and what a unit sets with `SET LOCAL` lasts until the test ends
-  unless the unit rolls back;
+  unless the unit rolls back. The test transaction is a real one on an application's own engine too: on a
+  plain SQLite engine (without PyFly's `BEGIN` handling) the test's connection sends its `BEGIN` itself, and
+  an engine that runs in `AUTOCOMMIT` gets the database's default isolation level for the test;
 - DDL inside the test commits on MySQL and MariaDB, and a session the code opens itself outside every unit
   commits for real;
 - the context's background work started before the test runs on its own connections and commits.

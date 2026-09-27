@@ -35,12 +35,16 @@ background work (started before the block) keeps running on the datasource's own
 What differs from production, by construction:
 
 - every unit of a datasource runs on one connection: units that overlap in time (tasks that each open a
-  unit of their own and run at the same time) cannot share it, so run them one after another;
+  unit of their own and run at the same time) cannot share it, so run them one after another. A unit that
+  starts while another task's unit is open there is refused with ``IllegalTransactionStateError`` before
+  it touches the connection, and the test's transaction goes on;
 - ``REQUIRES_NEW`` gets a savepoint too, so the outer unit's rollback undoes it;
 - the settings of a transaction are the test transaction's: a unit's isolation level, read-only hint and
   SQLite ``BEGIN IMMEDIATE`` are not applied (a read-only unit still refuses ORM writes), and what a unit sets
   with ``SET LOCAL`` (a PostgreSQL statement timeout, an after-begin customizer's setting) lasts until the
-  test ends unless the unit rolls back;
+  test ends unless the unit rolls back. The test's transaction is a real one on an application's own engine
+  too: a plain SQLite engine gets its ``BEGIN`` from the test's connection, and an ``AUTOCOMMIT`` engine the
+  database's default isolation level;
 - DDL inside the test commits on MySQL and MariaDB (their DDL ends the transaction), and a session the
   application opens itself outside every unit (``async with factory() as session``) commits for real.
 
@@ -133,7 +137,7 @@ class RollbackTransaction:
 
         connection = await original.engine.connect()
         try:
-            transaction = await connection.begin()
+            transaction = await _begin(connection)
         except BaseException:
             await connection.close()
             raise
@@ -162,3 +166,25 @@ class RollbackTransaction:
                     await transaction.rollback()
             finally:
                 await connection.close()
+
+
+async def _begin(connection: AsyncConnection) -> AsyncTransaction:
+    """Begin the test's transaction on *connection*, and make sure the database holds it open.
+
+    An engine that runs in ``AUTOCOMMIT`` (an application's own) would send no ``BEGIN``: the test's
+    transaction runs at the database's default isolation level instead. On SQLite, a plain pysqlite or
+    aiosqlite engine (without PyFly's ``BEGIN`` recipe) defers its ``BEGIN`` until the first write, so the
+    first unit's ``SAVEPOINT`` would start the transaction and its ``RELEASE SAVEPOINT`` commit it: the
+    ``BEGIN`` is sent here.
+    """
+    from pyfly.data.relational.dialect_customizers import is_autocommit
+
+    sync_connection = connection.sync_connection
+    if sync_connection is not None and is_autocommit(sync_connection):
+        await connection.execution_options(isolation_level=connection.default_isolation_level)
+    transaction = await connection.begin()
+    if connection.dialect.name == "sqlite":
+        raw = await connection.get_raw_connection()
+        if not getattr(raw.driver_connection, "in_transaction", False):
+            await connection.exec_driver_sql("BEGIN")
+    return transaction

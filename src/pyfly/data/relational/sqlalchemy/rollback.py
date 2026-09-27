@@ -30,13 +30,19 @@ from pyfly.data.relational.datasource_registry import DataSource
 from pyfly.data.relational.sqlalchemy import transaction_manager as _adapter
 from pyfly.data.relational.sqlalchemy.session import UnitSession, unit_session_class
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
+from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.manager import TransactionCapabilities
-from pyfly.data.transaction.unit_of_work import UnitOfWork
+from pyfly.data.transaction.unit_of_work import UnitOfWork, UnitStatus
 
 # The dialect statements a unit issues right after BEGIN (MySQL's SET TRANSACTION READ ONLY) set the
 # characteristics of a transaction that has not started yet: inside the test's transaction they fail.
 _NO_BEGIN_STATEMENTS = {"mysql": "mysql (savepoint)", "mariadb": "mariadb (savepoint)"}
+
+# A unit in one of these states has released (or rolled back to) its savepoint: it no longer holds the
+# connection, even before its session closes.
+_ENDED = (UnitStatus.COMMITTED, UnitStatus.ROLLED_BACK)
 
 
 class RollbackTransactionManager(SqlAlchemyTransactionManager):
@@ -50,6 +56,13 @@ class RollbackTransactionManager(SqlAlchemyTransactionManager):
     transaction's: a unit's own are not applied; a read-only unit keeps refusing ORM writes. A unit whose
     operation was cancelled rolls back to its savepoint instead of discarding the connection, which would
     end the test's transaction.
+
+    The units share one connection, so they must nest: a unit that starts while a unit of another task is
+    open on it (``asyncio.gather`` of ``@transactional`` calls or of repository calls, a background task
+    started during the test) is refused with ``IllegalTransactionStateError`` before it touches the
+    connection. Their savepoints would interleave, the first release would fail with "no such savepoint",
+    and the test's transaction would be lost for the rest of the test. A task that waits for the units of
+    tasks it started (they see its unit) is not refused.
 
     A unit that *serves* asks (a callable) whether the running task belongs to the test; units of other tasks
     (the context's background work started before the test) run on *original*, the datasource's own manager.
@@ -67,6 +80,7 @@ class RollbackTransactionManager(SqlAlchemyTransactionManager):
         self._original = original
         self._connection = connection
         self._serves = serves
+        self._open: list[UnitOfWork] = []  # the units on the connection, in the order they started
 
     @property
     def original(self) -> SqlAlchemyTransactionManager:
@@ -127,12 +141,37 @@ class RollbackTransactionManager(SqlAlchemyTransactionManager):
         read_only: bool,
         dialect: str,
     ) -> None:
+        # Checked and recorded before the first await: two tasks starting at once see each other.
+        self._refuse_overlapping(unit)
+        self._open.append(unit)
         # A cancelled unit rolls back to its savepoint: discarding the connection would end the test's
         # transaction (the adapter keeps an in-memory database's single connection the same way).
         unit.attributes.setdefault(_adapter._SHARED_CONNECTION, self.engine.sync_engine.pool)
         await super()._start(
             unit, session, {}, target, read_only=read_only, dialect=_NO_BEGIN_STATEMENTS.get(dialect, dialect)
         )
+
+    def _refuse_overlapping(self, unit: UnitOfWork) -> None:
+        waiting = current_state().held_units(self.datasource)
+        for other in self._open:
+            if other.owner_task is unit.owner_task or other.status in _ENDED or other in waiting:
+                continue
+            raise IllegalTransactionStateError(
+                f"A new unit of work on datasource '{self.datasource}' would overlap {other.describe()} on the "
+                "test's connection. In a test that rolls back (data_slice(rollback=True), @DataTest, "
+                "RollbackTransaction) every unit of a datasource runs on that one connection, as a savepoint of "
+                "the test's transaction, so units of tasks that run at the same time (asyncio.gather of "
+                "@transactional calls or of repository calls, a background task started during the test) "
+                "cannot share it: run them one after another.",
+                datasource=self.datasource,
+            )
+
+    async def _close(self, unit: UnitOfWork, *, invalidate: bool) -> None:
+        try:
+            await super()._close(unit, invalidate=invalidate)
+        finally:
+            if unit in self._open:
+                self._open.remove(unit)
 
     def __repr__(self) -> str:
         return f"RollbackTransactionManager(datasource={self.datasource!r}, original={self._original!r})"

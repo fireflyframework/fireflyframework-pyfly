@@ -26,11 +26,12 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Integer, String, text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
-from pyfly.container.stereotypes import repository, service
+from pyfly.container.bean import bean
+from pyfly.container.stereotypes import configuration, repository, service
 from pyfly.data.relational.sqlalchemy import Base, Repository
 from pyfly.data.relational.sqlalchemy.session import SessionProvider
 from pyfly.data.transaction import Isolation, Propagation, transactional
@@ -158,6 +159,38 @@ async def test_the_original_transaction_managers_are_back_after_the_test(
         assert await _committed(relational_backend) == 0
         await notes.save(_RollbackNote(body="committed"))
         assert await _committed(relational_backend) == 1
+
+
+_APPLICATION_ENGINE: dict[str, AsyncEngine] = {}
+
+
+@configuration
+class _ApplicationEngine:
+    """An application that brings its own engine (it replaces the primary one)."""
+
+    @bean
+    def async_engine(self) -> AsyncEngine:
+        return _APPLICATION_ENGINE["engine"]
+
+
+@pytest.mark.parametrize("engine_options", [{}, {"isolation_level": "AUTOCOMMIT"}], ids=["plain", "autocommit"])
+async def test_the_application_engine_rolls_back_too(
+    relational_backend: RelationalBackend, engine_options: dict[str, str]
+) -> None:
+    """An application's own engine, a plain one or one that runs in AUTOCOMMIT: the test's connection holds a
+    real transaction (on SQLite, and in AUTOCOMMIT, nothing would send its BEGIN), so the first unit's
+    RELEASE SAVEPOINT commits nothing."""
+    await relational_backend.create_tables(_RollbackNote)
+    _APPLICATION_ENGINE["engine"] = relational_backend.create_engine(**engine_options)
+    async with await data_slice(
+        NoteRepository, NoteService, _ApplicationEngine, config=relational_backend.config(), rollback=True
+    ) as context:
+        assert context.get_bean(AsyncEngine) is _APPLICATION_ENGINE["engine"]
+        await context.get_bean(NoteService).add("transactional")
+        await context.get_bean(NoteRepository).save(_RollbackNote(body="auto-unit"))
+        assert await context.get_bean(NoteRepository).count() == 2
+        assert await _committed(relational_backend) == 0
+    assert await _committed(relational_backend) == 0
 
 
 class _Unregistered:
