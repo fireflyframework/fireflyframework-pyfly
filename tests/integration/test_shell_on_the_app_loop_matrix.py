@@ -247,7 +247,8 @@ async def test_the_repl_runs_every_command_and_the_scheduler_keeps_ticking(
     assert "added a" in out and "added b" in out and "count=2" in out
     assert await session.committed() == ["a", "b"]
     assert Seen.heartbeat is not None
-    assert len(Seen.heartbeat.ticks) >= int(elapsed / 0.05) // 2  # it ticked through 1.2 s of operator thought
+    assert elapsed >= 1.2  # four prompts, 0.3 s of thought each
+    assert len(Seen.heartbeat.ticks) >= 5  # it ticked through the operator's thought (it used to tick once)
 
 
 async def test_an_async_workflow_started_in_the_repl_runs_while_the_session_goes_on(

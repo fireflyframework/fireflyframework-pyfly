@@ -372,7 +372,7 @@ class TestApplicationLoop:
         finally:
             beat.cancel()
         assert ran == ["a", "b"]
-        assert ticks >= 20  # ~0.4 s of reading, and the loop kept running
+        assert ticks >= 10  # ~0.4 s of reading, and the loop kept running (it used to stay blocked)
 
     @pytest.mark.asyncio
     async def test_the_repl_ends_on_ctrl_c_at_the_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:

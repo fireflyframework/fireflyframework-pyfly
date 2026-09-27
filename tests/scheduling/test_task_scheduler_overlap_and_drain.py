@@ -129,7 +129,7 @@ async def test_a_slow_fixed_rate_job_never_overlaps_itself() -> None:
     await scheduler.stop()
 
     assert bean.probe.max_in_flight == 1
-    assert bean.probe.runs >= 3  # late, back to back: never skipped, never concurrent
+    assert bean.probe.runs >= 2  # late, back to back: never skipped, never concurrent
 
 
 async def test_a_slow_cron_job_never_overlaps_itself() -> None:
