@@ -20,6 +20,7 @@ import dataclasses
 import functools
 import inspect
 import logging
+import sys
 import types
 import typing
 import weakref
@@ -126,16 +127,16 @@ def _close_connections_on_return(instance: Any) -> None:
     ``dispose()`` closes the idle connections only, and one checked out at that moment (a request, a
     health probe) went back into the disposed pool and stayed open until the garbage collector found
     it. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`. Anything
-    that is not a SQLAlchemy ``AsyncEngine`` is left alone, and SQLAlchemy is imported only for one.
+    that is not a SQLAlchemy ``AsyncEngine`` is left alone. The context imports neither SQLAlchemy
+    (an ``AsyncEngine`` exists only once SQLAlchemy's asyncio extension is loaded) nor the data layer
+    unless the instance is one.
     """
-    if not type(instance).__module__.startswith("sqlalchemy."):
+    asyncio_extension = sys.modules.get("sqlalchemy.ext.asyncio")
+    if asyncio_extension is None or not isinstance(instance, asyncio_extension.AsyncEngine):
         return
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from pyfly.data.relational.datasource_registry import close_connections_on_return
 
-    if isinstance(instance, AsyncEngine):
-        from pyfly.data.relational.datasource_registry import close_connections_on_return
-
-        close_connections_on_return(instance)
+    close_connections_on_return(instance)
 
 
 def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
