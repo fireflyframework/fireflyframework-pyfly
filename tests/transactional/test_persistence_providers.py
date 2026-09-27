@@ -25,6 +25,7 @@ No Docker required; all tests run in the fast suite.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -701,6 +702,33 @@ class TestProviderPersistencePort:
         assert await port.get_stale(datetime.now(UTC)) == []
         assert await port.get_in_flight() == []
 
+    async def test_cleanup_leaves_the_workflow_executions_of_the_same_provider(self, port: Any) -> None:
+        workflow = _make_state(
+            status=ExecutionStatus.COMPLETED, pattern=ExecutionPattern.WORKFLOW, minutes_ago=60, completed=True
+        )
+        await port.provider.save(workflow)
+        await port.persist_state({"tcc_name": "pay", "correlation_id": "t-1"})
+        await port.mark_completed("t-1", successful=True)
+
+        assert await port.cleanup(timedelta(seconds=-1)) == 1
+        assert await port.get_state("t-1") is None
+        assert await port.provider.find(workflow.correlation_id) is not None
+
     async def test_completing_an_unknown_execution_raises_key_error(self, port: Any) -> None:
         with pytest.raises(KeyError):
             await port.mark_completed("never-started", successful=True)
+
+    async def test_updates_of_one_execution_are_serialized_and_their_locks_dropped(self, port: Any) -> None:
+        await port.persist_state({"saga_name": "order", "correlation_id": "s-1"})
+        await port.persist_state({"saga_name": "order", "correlation_id": "s-2"})
+
+        await asyncio.gather(
+            *(port.update_step_status("s-1", f"step-{index}", "DONE") for index in range(5)),
+            *(port.update_step_status("s-2", f"step-{index}", "DONE") for index in range(5)),
+            port.mark_completed("s-2", successful=True),
+        )
+
+        first, second = await port.get_state("s-1"), await port.get_state("s-2")
+        assert first is not None and set(first["steps"]) == {f"step-{index}" for index in range(5)}
+        assert second is not None and second["status"] == "COMPLETED"
+        assert port._serials == {}  # one lock per execution in flight, none kept afterwards

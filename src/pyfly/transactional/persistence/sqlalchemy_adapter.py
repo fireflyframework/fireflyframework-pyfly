@@ -36,6 +36,7 @@ optional ``data-relational`` extra is absent.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -192,8 +193,10 @@ class SqlAlchemyPersistenceProvider:
             result = await session.execute(delete(table).where(table.c.correlation_id == correlation_id))
         return bool(result.rowcount > 0)
 
-    async def cleanup(self, older_than: timedelta) -> int:
-        """Delete the executions that ended (or were last updated) more than *older_than* ago."""
+    async def cleanup(self, older_than: timedelta, *, patterns: Collection[ExecutionPattern] | None = None) -> int:
+        """Delete the executions that ended (or were last updated) more than *older_than* ago, only those of
+        *patterns* when given (the saga and TCC port cleans up its own executions this way, in one
+        statement)."""
         from sqlalchemy import delete, func, literal
 
         from pyfly.data.relational.framework_schema import UtcTimestamp
@@ -203,6 +206,8 @@ class SqlAlchemyPersistenceProvider:
         statement = delete(table).where(
             table.c.status.in_(_TERMINAL), func.coalesce(table.c.completed_at, table.c.updated_at) < cutoff
         )
+        if patterns is not None:
+            statement = statement.where(table.c.pattern.in_([pattern.value for pattern in patterns]))
         async with infrastructure_unit(self._target, single_statement=True) as session:
             result = await session.execute(statement)
         return int(result.rowcount)

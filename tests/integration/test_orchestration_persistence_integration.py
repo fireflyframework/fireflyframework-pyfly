@@ -25,6 +25,7 @@ Run the server lanes via:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
@@ -44,6 +45,7 @@ from pyfly.testing import requires_docker
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import ExecutionPersistenceProvider, ExecutionState
 from pyfly.transactional.core.recovery import RecoveryService
+from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
 from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 from pyfly.transactional.saga.annotations import saga, saga_step
 from pyfly.transactional.saga.engine.saga_engine import SagaEngine
@@ -309,6 +311,69 @@ async def test_state_saved_in_a_transaction_commits_or_rolls_back_with_it(
     assert await provider.find(kept.correlation_id) is not None
 
 
+async def test_completions_inside_and_outside_transactions_share_a_small_pool(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The port serialized every completion of the process on one lock held across the database I/O. Two sagas
+    completing inside business transactions waited on it while holding the pool's two connections, and the
+    holder, a saga completing outside a transaction, waited for a connection: a cycle broken only by
+    ``pool_timeout``, whose ``TimeoutError`` escaped a saga that had succeeded and left it ``IN_FLIGHT``."""
+    engine = relational_backend.create_engine(pool_size=2, max_overflow=0, pool_timeout=3)
+    provider = SqlAlchemyPersistenceProvider(engine)
+    await provider.start()
+    port = ProviderPersistencePort(provider)
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+    for correlation_id in ("in-tx-1", "in-tx-2", "outside"):
+        await port.persist_state({"saga_name": "order", "correlation_id": correlation_id})
+    holding = [asyncio.Event(), asyncio.Event()]
+    outside_waiting = asyncio.Event()
+
+    async def complete_in_a_transaction(correlation_id: str, holds: asyncio.Event) -> str:
+        async with template.transaction():
+            await provider.find(correlation_id)  # the business step: the unit now holds a pooled connection
+            holds.set()
+            await outside_waiting.wait()
+            await port.mark_completed(correlation_id, successful=True)
+        return correlation_id
+
+    async def complete_outside() -> str:
+        await asyncio.gather(*(event.wait() for event in holding))
+        completion = asyncio.create_task(port.mark_completed("outside", successful=True))
+        await asyncio.sleep(0.2)  # it is waiting for a connection now: the pool's two are in use
+        outside_waiting.set()
+        await completion
+        return "outside"
+
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            complete_in_a_transaction("in-tx-1", holding[0]),
+            complete_in_a_transaction("in-tx-2", holding[1]),
+            complete_outside(),
+            return_exceptions=True,
+        ),
+        timeout=30,
+    )
+
+    assert results == ["in-tx-1", "in-tx-2", "outside"]
+    for correlation_id in ("in-tx-1", "in-tx-2", "outside"):
+        state = await port.get_state(correlation_id)
+        assert state is not None and state["status"] == "COMPLETED"
+
+
+async def test_parallel_steps_of_one_execution_keep_every_step_status(relational_backend: RelationalBackend) -> None:
+    """The steps of one layer finish together: each update reads the state, changes it and saves it, so the
+    updates of one execution are serialized, or all but one step status would be lost."""
+    provider = await _sql_provider(relational_backend)
+    port = ProviderPersistencePort(provider)
+    await port.persist_state({"saga_name": "order", "correlation_id": "fan-out"})
+
+    steps = [f"step-{index}" for index in range(8)]
+    await asyncio.gather(*(port.update_step_status("fan-out", step, "DONE") for step in steps))
+
+    state = await port.get_state("fan-out")
+    assert state is not None and state["steps"] == {step: {"status": "DONE"} for step in steps}
+
+
 async def test_without_ddl_a_missing_table_fails_fast_at_start(relational_backend: RelationalBackend) -> None:
     provider = SqlAlchemyPersistenceProvider(relational_backend.create_engine(), create_table=False)
     with pytest.raises(FrameworkSchemaError, match="table pyfly_orchestration_state does not exist"):
@@ -339,6 +404,31 @@ async def test_each_operation_is_one_round_trip_on_postgresql(relational_backend
     await provider.delete(state.correlation_id)
 
     assert not [query for query in wire if query.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))]
+
+
+@pytest.mark.backends(PG)
+async def test_the_port_cleans_up_its_executions_in_one_statement(relational_backend: RelationalBackend) -> None:
+    """The port listed every saga and TCC execution, decoded each payload and deleted them one by one."""
+    engine = relational_backend.create_engine()
+    wire: list[str] = []
+    _log_wire_queries(engine, wire)
+    provider = SqlAlchemyPersistenceProvider(engine)
+    await provider.start()
+    port = ProviderPersistencePort(provider)
+    for index in range(3):
+        await port.persist_state({"saga_name": "order", "correlation_id": f"done-{index}"})
+        await port.mark_completed(f"done-{index}", successful=True)
+    workflow = _make_state(status=ExecutionStatus.COMPLETED, pattern=ExecutionPattern.WORKFLOW, completed=True)
+    await provider.save(workflow)
+    statements: list[str] = []
+    event.listen(engine.sync_engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    wire.clear()
+
+    assert await port.cleanup(timedelta(seconds=-1)) == 3
+
+    assert [statement.split()[0].upper() for statement in statements] == ["DELETE"]
+    assert wire == []  # and no BEGIN/COMMIT around it: one round trip
+    assert await provider.find(workflow.correlation_id) is not None
 
 
 # ===========================================================================

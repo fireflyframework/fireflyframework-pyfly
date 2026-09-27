@@ -38,13 +38,22 @@ the whole state                  ``payload`` (JSON-safe: instants as ISO-8601 st
 
 Only saga and TCC executions are the port's: a workflow execution of the same provider is never returned
 or cleaned up through it.
+
+``update_step_status`` and ``mark_completed`` read the execution, change it and save it. They are serialized
+per execution (the steps of one layer finish together, and each must keep the others' statuses), never
+across executions: a lock shared by every execution, held across the database I/O, deadlocked with the
+connection pool when completions inside business transactions (each holding its unit's connection) waited
+for it while its holder, a completion outside any transaction, waited for a connection.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
+from collections.abc import AsyncIterator, Callable, Collection
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol, cast
 
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import ExecutionPersistenceProvider, ExecutionState
@@ -86,18 +95,43 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+class _PatternScopedCleanup(Protocol):
+    async def cleanup(self, older_than: timedelta, *, patterns: Collection[ExecutionPattern] | None = None) -> int: ...
+
+
+def _takes_keyword(function: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get(name)
+    return parameter is not None and parameter.kind in (parameter.KEYWORD_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+
+
+class _Serial:
+    """The lock of one execution, and how many callers hold or wait for it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 class ProviderPersistencePort:
     """A :class:`~pyfly.transactional.shared.ports.outbound.TransactionalPersistencePort` on an
     :class:`~pyfly.transactional.core.persistence.ExecutionPersistenceProvider` (see the module
     documentation).
 
     ``update_step_status`` and ``mark_completed`` read the execution, change it and save it; they are
-    serialized within the process (one engine completes a given execution).
+    serialized per execution within the process (one engine drives a given execution), and executions never
+    wait for one another.
     """
 
     def __init__(self, provider: ExecutionPersistenceProvider) -> None:
         self._provider = provider
-        self._lock = asyncio.Lock()
+        self._serials: dict[str, _Serial] = {}
+        self._cleans_up_by_pattern = _takes_keyword(provider.cleanup, "patterns")
 
     @property
     def provider(self) -> ExecutionPersistenceProvider:
@@ -125,7 +159,7 @@ class ProviderPersistencePort:
 
     async def update_step_status(self, correlation_id: str, step_id: str, status: str) -> None:
         """Record *status* for step *step_id*. Raises ``KeyError`` for an unknown execution."""
-        async with self._lock:
+        async with self._serialized(correlation_id):
             state = await self._require(correlation_id)
             steps: dict[str, dict[str, Any]] = state.setdefault("steps", {})
             steps.setdefault(step_id, {})["status"] = status
@@ -133,7 +167,7 @@ class ProviderPersistencePort:
 
     async def mark_completed(self, correlation_id: str, successful: bool) -> None:
         """Mark the execution ``COMPLETED`` or ``FAILED``. Raises ``KeyError`` for an unknown execution."""
-        async with self._lock:
+        async with self._serialized(correlation_id):
             state = await self._require(correlation_id)
             now = datetime.now(UTC)
             state["status"] = "COMPLETED" if successful else "FAILED"
@@ -154,7 +188,13 @@ class ProviderPersistencePort:
         return [self._state(execution) for execution in stale if execution.pattern in _PATTERNS]
 
     async def cleanup(self, older_than: timedelta) -> int:
-        """Delete the saga and TCC executions that completed more than *older_than* ago."""
+        """Delete the saga and TCC executions that completed more than *older_than* ago.
+
+        A provider whose ``cleanup`` takes a ``patterns`` keyword (the SQL provider: one ``DELETE``) deletes
+        them itself; with any other, they are listed and deleted one by one."""
+        if self._cleans_up_by_pattern:
+            scoped = cast("_PatternScopedCleanup", self._provider)
+            return await scoped.cleanup(older_than, patterns=_PATTERNS)
         cutoff = datetime.now(UTC) - older_than
         deleted = 0
         for pattern in _PATTERNS:
@@ -173,6 +213,21 @@ class ProviderPersistencePort:
         return await self._provider.is_healthy()
 
     # -- mapping ------------------------------------------------------------------------------------------
+
+    @contextlib.asynccontextmanager
+    async def _serialized(self, correlation_id: str) -> AsyncIterator[None]:
+        """Hold execution *correlation_id*'s lock; the lock is dropped when its last user leaves."""
+        serial = self._serials.get(correlation_id)
+        if serial is None:
+            serial = self._serials[correlation_id] = _Serial()
+        serial.users += 1
+        try:
+            async with serial.lock:
+                yield
+        finally:
+            serial.users -= 1
+            if serial.users == 0 and self._serials.get(correlation_id) is serial:
+                del self._serials[correlation_id]
 
     async def _require(self, correlation_id: str) -> dict[str, Any]:
         state = await self.get_state(correlation_id)
