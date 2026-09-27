@@ -1178,26 +1178,30 @@ The check is bounded:
 - Each check has `pyfly.data.relational.health.timeout` seconds (2 by default), and the probe answers
   by then whatever the driver does. The `SELECT 1` runs in a task of its own, and the probe stops
   waiting for it at the deadline. This matters when the database goes silent on a connection that is
-  already pooled: cancelling the query makes asyncpg open another connection to send a cancel request,
-  and it waits for that one without a timeout.
+  already pooled: cancelling the query makes asyncpg send a cancel request over a new connection and
+  then wait, with no timeout, for the server's answer on the silent one.
 - The late check does not keep its connection. The socket of the connection it holds, or is still
   checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
   `terminate`, which sends nothing and waits for nothing), and then the check is cancelled. This
-  matters when a firewall, NAT or load balancer silently forgets idle flows (a cloud NAT after its idle
-  timeout): those pooled connections are black-holed while the database still accepts new ones.
-  Cancelled on one of them without this, asyncpg sends a cancel request and waits for the server's
-  answer on the dead socket with no timeout, even once the connection is lost, so the check would
-  never end and would keep its pool slot. With it, the check usually ends at once and its pool slot is
-  free again. When the driver turns the cancellation into a disconnect error instead (a pre-ping whose
-  rollback fails on the closed socket), SQLAlchemy reconnects, within the connect timeout, and the
-  check runs its `SELECT 1` on the new connection.
+  matters when a middlebox drops the packets of flows it has expired without a reset, such as an Azure
+  Load Balancer without TCP reset on idle (its default) or a stateful firewall that drops packets of
+  flows it no longer tracks: those pooled connections are black-holed while the database still accepts
+  new ones. (A middlebox that answers them with a reset, such as an AWS NAT gateway or an Azure NAT
+  Gateway, makes the connection fail at once instead: with `pool.pre-ping` on the check reconnects,
+  and without it that probe answers `DOWN` with the disconnect error.) Cancelled on a black-holed
+  connection without this, asyncpg sends a cancel request and waits for the server's answer on the
+  dead socket with no timeout, even once the connection is lost, so the check would never end and
+  would keep its pool slot. With it, the check usually ends at once and its pool slot is free again.
+  When the driver turns the cancellation into a disconnect error instead (a pre-ping whose rollback
+  fails on the closed socket), SQLAlchemy reconnects, within the connect timeout, and the check runs
+  its `SELECT 1` on the new connection.
 - Each black-holed pooled connection costs one probe, with `pool.pre-ping` on or off: that probe
-  answers `DOWN`, and the next one runs on another connection. When a NAT forgets every idle flow at
-  once, up to one probe per idle connection answers `DOWN`. With the readiness probe's default
-  `failureThreshold` of 3, a pool holding three or more idle connections can therefore take the
-  replica out of rotation until a probe answers `UP` again. A check still in its checkout is reached
-  through the pool entry that the registry's pool (`MeteredAsyncQueuePool`) reports, so this holds for
-  every engine the [datasource registry](data-relational.md#datasource-registry) builds.
+  answers `DOWN`, and the next one runs on another connection. When a middlebox silently forgets every
+  idle flow at once, up to one probe per idle connection answers `DOWN`. With the readiness probe's
+  default `failureThreshold` of 3, a pool holding three or more idle connections can therefore take
+  the replica out of rotation until a probe answers `UP` again. A check still in its checkout is
+  reached through the pool entry that the registry's pool (`MeteredAsyncQueuePool`) reports, so this
+  holds for every engine the [datasource registry](data-relational.md#datasource-registry) builds.
 - On a connection the pool shares with the application (`StaticPool`, SQLite `:memory:`) the late
   check is neither closed nor cancelled, since that would close the application's connection; it runs
   after the statement ahead of it.

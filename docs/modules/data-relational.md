@@ -719,23 +719,26 @@ nearly doubles a short unit of work). These cover the same failures without that
 
 Turn pre-ping on where connections are closed while they sit idle in the pool: by the server's own
 idle timeout (PostgreSQL `idle_session_timeout`, MySQL `wait_timeout`), by a restart or a failover
-that closes them, or by a proxy or middlebox that answers a forgotten flow with a reset. The ping then
-fails at once and SQLAlchemy replaces the connection before the application gets it; without
-pre-ping, the first statement on that connection fails.
+that closes them, or by a middlebox that answers the packets of a flow it has expired with a reset,
+such as an AWS NAT gateway, an Azure NAT Gateway, or an Azure Load Balancer with TCP reset on idle
+enabled. The ping then fails at once and SQLAlchemy replaces the connection before the application
+gets it; without pre-ping, the first statement on that connection fails.
 
-Pre-ping does not help when a middlebox forgets a flow silently, dropping its packets without a reset
-(a cloud NAT or load balancer after its idle timeout). The ping then waits like any statement until
-the connection is lost: when the kernel gives up retransmitting (about 15 minutes on Linux), or never
+Pre-ping does not help when a middlebox drops the packets of flows it has expired without a reset,
+such as an Azure Load Balancer without TCP reset on idle (its default) or a stateful firewall that
+drops packets of flows it no longer tracks. The ping then waits like any statement until the
+connection is lost: when the kernel gives up retransmitting (about 15 minutes on Linux), or never
 behind a proxy that keeps acknowledging. asyncpg's `command_timeout` does not bound it: the timed-out
 statement leaves a cancel request pending, and asyncpg then waits for the server's answer on the dead
 socket with no timeout, even once the connection is lost.
 
-For silent drops, set `pool.recycle` below the middlebox's idle timeout; the 1800 s default is above
-common ones (350 s on an AWS NAT gateway, 4 minutes by default on an Azure NAT gateway). A connection
-idle for longer than that timeout is then always older than `pool.recycle`, so the checkout replaces
-it instead of using it; on asyncpg the replacement waits up to 2 s for the old connection to close.
-Or keep the flows alive with TCP keepalives more frequent than that timeout: on PostgreSQL,
-`connect-args.server_settings.tcp_keepalives_idle` (seconds) makes the server send them.
+In both cases, set `pool.recycle` below the middlebox's idle timeout: 350 s on an AWS NAT gateway,
+and 4 minutes by default on an Azure NAT Gateway and on an Azure Load Balancer, for example, all below
+the 1800 s default. A connection idle for longer than that timeout is then always older than
+`pool.recycle`, so the checkout replaces it instead of using it, with no reset for a pre-ping to
+absorb and no dropped packets to wait on; on asyncpg the replacement waits up to 2 s for the old
+connection to close. Or keep the flows alive with TCP keepalives more frequent than that timeout: on
+PostgreSQL, `connect-args.server_settings.tcp_keepalives_idle` (seconds) makes the server send them.
 
 On PostgreSQL, every connection carries `pyfly.app.name` as its `application_name`, which makes it
 visible in `pg_stat_activity`. Set `connect-args.server_settings.application_name` to override it.

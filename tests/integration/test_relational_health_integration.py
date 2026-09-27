@@ -20,13 +20,13 @@ second connection to send a cancel request, which the partition swallows too. Th
 answer DOWN within its timeout, give its pool slot back, answer the next probe in time as well, and
 report UP once the network is back.
 
-The same proxy also reproduces a middlebox that forgot an idle flow (a cloud NAT or load balancer after
-its idle timeout): the pooled connection loses every byte while new connections reach the server. The
-check that landed on it answers DOWN, closes that connection's socket instead of leaving the check in
-the driver's cleanup, and the next probe answers UP on a fresh connection. That case runs on
-PostgreSQL, MySQL and MariaDB, each with pool pre-ping off and on: with pre-ping on, the check hangs in
-the checkout's pre-ping, before it holds the connection, and asyncpg's cancel protocol would otherwise
-wait on the dead socket for good.
+The same proxy also reproduces a middlebox that drops the packets of a flow it has expired, without a
+reset (an Azure Load Balancer without TCP reset on idle, say): the pooled connection loses every byte
+while new connections reach the server. The check that landed on it answers DOWN, closes that
+connection's socket instead of leaving the check in the driver's cleanup, and the next probe answers UP
+on a fresh connection. That case runs on PostgreSQL, MySQL and MariaDB, each with pool pre-ping off and
+on: with pre-ping on, the check hangs in the checkout's pre-ping, before it holds the connection, and
+asyncpg's cancel protocol would otherwise wait on the dead socket for good.
 """
 
 from __future__ import annotations

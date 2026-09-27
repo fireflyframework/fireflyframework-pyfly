@@ -24,21 +24,25 @@ The indicator is built for the Kubernetes readiness probe, and only for it:
 - each check answers within ``timeout`` (2 s by default, ``pyfly.data.relational.health.timeout``),
   whatever the driver does. The ``SELECT 1`` runs in a task of its own, and the probe stops waiting
   for it at the deadline: a database that went silent on an already pooled connection would otherwise
-  keep the probe waiting in the driver's cleanup (asyncpg opens a new connection to cancel the query,
-  and waits for it without a timeout);
+  keep the probe waiting in the driver's cleanup (asyncpg sends a cancel request over a new connection,
+  then waits, with no timeout, for the server's answer on the silent one);
 - the late check does not keep its connection. The socket of the connection it holds, or is still
   checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
   ``terminate``, which sends nothing and waits for nothing), and then the check is cancelled. A
-  middlebox that forgot idle flows (a cloud NAT or load balancer after its idle timeout) black-holes
-  those pooled connections while the database accepts new ones. Cancelled on one of them without
-  this, asyncpg sends a cancel request and waits for the server's answer on the dead socket with no
-  timeout, even once the connection is lost: the check would never end and would keep its pool slot.
-  With it, the check usually ends at once and gives its slot back. When the driver turns the
-  cancellation into a disconnect error instead (a pre-ping whose rollback fails on the closed socket),
-  SQLAlchemy reconnects, within the connect timeout, and the check runs its ``SELECT 1`` on the new
-  connection. Each black-holed pooled connection costs one probe, pre-ping on or off: that probe
-  answers DOWN and the next one runs on another connection. When a NAT forgets every idle flow at
-  once, up to one probe per idle connection answers DOWN, so with the readiness probe's default
+  middlebox that drops the packets of flows it has expired, without a reset (an Azure Load Balancer
+  without TCP reset on idle, its default, or a stateful firewall that drops packets of flows it no
+  longer tracks), black-holes those pooled connections while the database accepts new ones. (One that
+  answers them with a reset, such as an AWS NAT gateway or an Azure NAT Gateway, makes the connection
+  fail at once instead: with pre-ping on the check reconnects, and without it that probe answers DOWN
+  with the disconnect error.) Cancelled on a black-holed connection without this, asyncpg sends a
+  cancel request and waits for the server's answer on the dead socket with no timeout, even once the
+  connection is lost: the check would never end and would keep its pool slot. With it, the check
+  usually ends at once and gives its slot back. When the driver turns the cancellation into a
+  disconnect error instead (a pre-ping whose rollback fails on the closed socket), SQLAlchemy
+  reconnects, within the connect timeout, and the check runs its ``SELECT 1`` on the new connection.
+  Each black-holed pooled connection costs one probe, pre-ping on or off: that probe answers DOWN and
+  the next one runs on another connection. When a middlebox silently forgets every idle flow at once,
+  up to one probe per idle connection answers DOWN, so with the readiness probe's default
   ``failureThreshold`` of 3 a pool holding three or more idle connections can take the replica out of
   rotation until a probe answers UP again. A check still in its checkout is reached through the pool
   entry that the registry's pool
