@@ -247,7 +247,8 @@ def repository_stream(function: Callable[..., AsyncGenerator[Any, None]]) -> Cal
     connection until the iterator is exhausted or ``aclose()``d.
 
     The wrapper returns the stream itself (it is not a generator around it), so ``aclose()`` reaches the
-    code that completes the unit at once.
+    code that completes the unit at once. A persistence exception leaves the stream translated, as it leaves a
+    :func:`repository_operation`.
     """
 
     @functools.wraps(function)
@@ -509,49 +510,57 @@ class Repository(Generic[T, ID]):
     async def _pyfly_stream(
         self, function: Callable[..., AsyncGenerator[Any, None]], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> AsyncIterator[Any]:
-        if self._manual_session is not None:
-            async for item in function(self, *args, **kwargs):
-                yield item
-            return
-        datasource = self._datasource
-        state = current_state()
-        unit = state.scope(datasource) or state.unit(datasource)
-        owned = unit is None
-        since = cancel_requests()
-        if unit is None:
-            unit = await self._transaction_manager().open_auto_unit(read_only=True, autocommit=False)
-        else:
-            unit.check_usable()
-        inner = function(self, *args, **kwargs)
-        step = inner.__anext__
-        # The state the stream's steps run in, built once: the unit is bound only while the inner generator
-        # runs a step, never across a yield (the consumer's own code between items is not inside it).
-        scoped = current_state().with_scope(datasource, unit)
-        error: BaseException | None = None
+        """The stream of :func:`repository_stream`. A persistence exception leaves it translated to the kernel's,
+        raised from the backend's, once the unit of work has seen the original (as :func:`repository_operation`)."""
         try:
-            while True:
-                # Rows come from a fetched batch without touching the unit: a stream iterated after the unit
-                # it captured completed still fails loudly.
+            if self._manual_session is not None:
+                async for item in function(self, *args, **kwargs):
+                    yield item
+                return
+            datasource = self._datasource
+            state = current_state()
+            unit = state.scope(datasource) or state.unit(datasource)
+            owned = unit is None
+            since = cancel_requests()
+            if unit is None:
+                unit = await self._transaction_manager().open_auto_unit(read_only=True, autocommit=False)
+            else:
                 unit.check_usable()
+            inner = function(self, *args, **kwargs)
+            step = inner.__anext__
+            # The state the stream's steps run in, built once: the unit is bound only while the inner generator
+            # runs a step, never across a yield (the consumer's own code between items is not inside it).
+            scoped = current_state().with_scope(datasource, unit)
+            error: BaseException | None = None
+            try:
+                while True:
+                    # Rows come from a fetched batch without touching the unit: a stream iterated after the unit
+                    # it captured completed still fails loudly.
+                    unit.check_usable()
+                    token = bind_state(scoped)
+                    try:
+                        item = await step()
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        reset_state(token)
+                    yield item
+            except BaseException as raised:
+                error = raised
+                raise
+            finally:
                 token = bind_state(scoped)
                 try:
-                    item = await step()
-                except StopAsyncIteration:
-                    break
+                    await inner.aclose()
                 finally:
                     reset_state(token)
-                yield item
-        except BaseException as raised:
-            error = raised
-            raise
-        finally:
-            token = bind_state(scoped)
-            try:
-                await inner.aclose()
-            finally:
-                reset_state(token)
-            if owned:
-                await complete_auto_unit(unit, error, since=since)
+                if owned:
+                    await complete_auto_unit(unit, error, since=since)
+        except Exception as failure:
+            translated = translate_exception(failure)
+            if translated is failure:
+                raise
+            raise translated from failure
 
     # ------------------------------------------------------------------
     # Mapping helpers

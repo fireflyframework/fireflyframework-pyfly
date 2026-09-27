@@ -36,6 +36,7 @@ import pytest
 from sqlalchemy import DateTime, Identity, Integer, String, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.pool import NullPool
 
 from pyfly.container.stereotypes import component, repository
@@ -49,6 +50,7 @@ from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository, is_read_method
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.transaction import IllegalTransactionStateError, is_transaction_active
+from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from pyfly.testing.statement_counter import StatementCounter
 
 
@@ -105,6 +107,14 @@ class SeamItemRepository(Repository[SeamItem, int]):
 @repository
 class SeamSoftRepository(SoftDeleteRepository[SeamSoft, int]):
     pass
+
+
+@repository
+class SeamStreamRepository(Repository[SeamItem, int]):
+    async def stream_then_conflict(self) -> AsyncIterator[str]:
+        """A subclass stream whose persistence work fails after its first item, as a flush would."""
+        yield "first"
+        raise StaleDataError("UPDATE statement on table 'seam_item' expected to update 1 row(s); 0 were matched.")
 
 
 @repository
@@ -178,6 +188,7 @@ async def seam(tmp_path: Path) -> AsyncIterator[Harness]:
         RelationalAutoConfiguration,
         SeamItemRepository,
         SeamSoftRepository,
+        SeamStreamRepository,
         SeamReportRepository,
         FanOutItemRepository,
         FanOutSoftRepository,
@@ -362,6 +373,26 @@ class TestStreamAll:
         with pytest.raises(IllegalTransactionStateError, match="already"):
             await stream.__anext__()
         await stream.aclose()
+
+    async def test_a_persistence_failure_leaves_the_stream_translated(self, seam: Harness) -> None:
+        """A stream raises the kernel's exceptions, raised from the backend's, as every other repository call
+        does, whether it runs in a read unit of its own or in the caller's unit, and its unit sees the original
+        (the connection is released)."""
+        streams = seam.ctx.get_bean(SeamStreamRepository)
+        seen: list[str] = []
+        with pytest.raises(OptimisticLockingFailureException) as raised:
+            async for item in streams.stream_then_conflict():
+                seen.append(item)
+        assert seen == ["first"] and isinstance(raised.value.__cause__, StaleDataError)
+        assert seam.checked_out() == 0
+
+        @transactional
+        async def inside() -> list[str]:
+            return [item async for item in streams.stream_then_conflict()]
+
+        with pytest.raises(OptimisticLockingFailureException) as raised:
+            await inside()
+        assert isinstance(raised.value.__cause__, StaleDataError)
 
     async def test_select_through_the_session_of_a_custom_method(self, seam: Harness) -> None:
         items = seam.ctx.get_bean(SeamItemRepository)
