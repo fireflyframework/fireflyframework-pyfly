@@ -33,7 +33,10 @@ child task may use its parent's unit. That is made safe here:
   partial work; the outermost boundary then rolls back and raises
   :class:`~pyfly.data.transaction.errors.UnexpectedRollbackError`.
 - A cancellation that lands while an operation is in flight marks the unit *poisoned*: its connection is
-  in an unknown state, so the backend discards it instead of returning it to the pool.
+  in an unknown state, so the backend discards it instead of returning it to the pool. A driver error that
+  takes the place of the cancellation (aiosqlite's ``ValueError('Connection closed')`` once an anyio scope
+  re-cancelled SQLAlchemy's own cleanup, asyncmy's ``InterfaceError('Cancelled during execution')``) is
+  turned back into the cancellation (:func:`cancellation_replaced_by`), so a cancel scope still catches it.
 """
 
 from __future__ import annotations
@@ -42,16 +45,76 @@ import asyncio
 import enum
 import itertools
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from pyfly.data.transaction.definition import Isolation, TransactionDefinition
-from pyfly.data.transaction.errors import IllegalTransactionStateError
+from pyfly.data.transaction.errors import IllegalTransactionStateError, TransactionError
 
 if TYPE_CHECKING:
     from pyfly.data.transaction.manager import TransactionManager
     from pyfly.data.transaction.synchronization import TransactionSynchronization
 
 _IDS = itertools.count(1)
+
+
+def cancellation_replaced_by(error: BaseException | None) -> bool:
+    """Whether *error* stands in for a cancellation of the running task.
+
+    While a task is being cancelled (``Task.cancelling() > 0``: a cancel scope expired, ``wait_for`` timed
+    out, a client disconnected), a driver can raise its own error instead of the ``CancelledError``: anyio
+    re-cancels SQLAlchemy's cleanup of the interrupted statement, aiosqlite then refuses the rollback with
+    ``ValueError('Connection closed')``, and asyncmy reports ``InterfaceError('Cancelled during
+    execution')``. Such an error must end the task as cancelled, or the cancel scope cannot catch it. The
+    unit of work's own errors, and the end of a streamed result, never stand in for a cancellation.
+    """
+    if (
+        error is None
+        or not isinstance(error, Exception)
+        or isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
+    ):
+        return False
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+def _cancellation_behind(error: BaseException) -> asyncio.CancelledError | None:
+    """The ``CancelledError`` *error* was raised while handling (its ``__context__``/``__cause__`` chain)."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, asyncio.CancelledError):
+            return current
+        pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+    return None
+
+
+def cancelled_from(error: BaseException) -> asyncio.CancelledError:
+    """The ``CancelledError`` to raise in place of *error* (see :func:`cancellation_replaced_by`).
+
+    It carries the arguments of the cancellation *error* replaced, when its chain holds one: anyio
+    recognizes its own cancellation by that message, so the cancel scope that fired catches it. It is
+    chained from *error*, so the driver's error stays in the traceback.
+    """
+    original = _cancellation_behind(error)
+    cancelled = asyncio.CancelledError(*original.args) if original is not None else asyncio.CancelledError()
+    cancelled.__cause__ = error
+    return cancelled
+
+
+async def raise_cancellation(error: BaseException) -> NoReturn:
+    """Raise the cancellation *error* stood in for (:func:`cancelled_from`).
+
+    When *error* carries no trace of it, the running task's cancel scope is given one more chance to
+    deliver its own (anyio re-delivers a scope's cancellation at every await; native ``asyncio`` delivered
+    it already), so the scope that fired still recognizes and catches it.
+    """
+    if _cancellation_behind(error) is None:
+        await asyncio.sleep(0)
+    raise cancelled_from(error)
 
 
 class UnitStatus(enum.Enum):
@@ -131,8 +194,14 @@ class _Operation:
     ) -> None:
         unit = self._unit
         unit.guard.release()
-        if exc is not None:
-            unit.operation_failed(exc)
+        if exc is None:
+            return
+        if cancellation_replaced_by(exc):
+            # The driver raised its own error in place of this task's cancellation: the connection is in an
+            # unknown state, and the caller must see the cancellation.
+            unit.poisoned = True
+            await raise_cancellation(exc)
+        unit.operation_failed(exc)
 
 
 class UnitOfWork:

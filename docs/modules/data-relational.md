@@ -1322,6 +1322,19 @@ scope) never returns a poisoned or leaked connection to the pool. A commit whose
 `COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
 blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transactions)).
 
+A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
+cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises
+`ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. While the task
+is being cancelled, such an error ends the operation, and the unit, as the cancellation it stood in for:
+the unit's connection is discarded, `CancelledError` is raised (chained from the driver's error), and the
+cancel scope that fired catches it, `wait_for` times out, or the unit's own `timeout` raises
+`TransactionTimedOutError`.
+
+On SQLite a discarded connection rolls back on aiosqlite's worker thread before its handle closes, and a
+statement still running there is interrupted, so a cancelled unit never leaves `BEGIN IMMEDIATE`'s write
+lock held by a half-closed handle (which would make every other writer wait `busy_timeout` and fail with
+"database is locked" until the garbage collector ran).
+
 ---
 
 ### Soft Delete & Optimistic Locking

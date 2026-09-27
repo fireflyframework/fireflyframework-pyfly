@@ -36,7 +36,10 @@ their own statement there. A write auto unit commits.
 A commit whose connection fails while ``COMMIT`` is in flight raises
 :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`. A unit whose operation was cancelled in
 flight (the unit is *poisoned*) has its connection invalidated instead of rolled back, so the pool never
-gets back a connection in an unknown state.
+gets back a connection in an unknown state. On SQLite the discarded connection rolls back on aiosqlite's
+worker thread first, and a statement still running there is interrupted
+(:mod:`~pyfly.data.relational.sqlalchemy.sqlite_discard`): a cancelled unit never leaves the write lock
+held by a half-closed handle.
 
 SQLite has one writer. A new write unit that would wait for the write lock of a unit the same task keeps
 open (it suspended it with ``REQUIRES_NEW`` or ``NOT_SUPPORTED``) fails at once with
@@ -72,6 +75,7 @@ from pyfly.data.relational.datasource_registry import (
     datasource_of,
 )
 from pyfly.data.relational.dialect_customizers import begin_execution_options, is_file_database
+from pyfly.data.relational.sqlalchemy import sqlite_discard
 from pyfly.data.relational.sqlalchemy.session import UnitSession, unit_session_class
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
@@ -94,7 +98,7 @@ _AUTOCOMMIT = "pyfly_autocommit"
 """``UnitOfWork.attributes`` key: the unit runs on an ``AUTOCOMMIT`` connection."""
 
 _DRIVER_CONNECTION = "pyfly_driver_connection"
-"""``UnitOfWork.attributes`` key: the driver connection of a SQLite unit, to interrupt a statement in flight."""
+"""``UnitOfWork.attributes`` key: the driver connection of a SQLite unit, whose write lock a discard releases."""
 
 _READ_ONLY_DIALECT_STATEMENT = {"mysql": "SET TRANSACTION READ ONLY", "mariadb": "SET TRANSACTION READ ONLY"}
 
@@ -322,7 +326,9 @@ class SqlAlchemyTransactionManager:
                 async with unit.operation():
                     connection = await AsyncSession.connection(session, execution_options=options)
                     if dialect == "sqlite":
-                        # aiosqlite runs a statement on its own thread; a cancelled one is interrupted there.
+                        # aiosqlite runs statements on a thread of its own: a discarded connection rolls
+                        # back there before it closes, so it never keeps the write lock.
+                        sqlite_discard.install(connection.engine)
                         unit.attributes[_DRIVER_CONNECTION] = _driver_of(connection)
                     statement = _READ_ONLY_DIALECT_STATEMENT.get(dialect) if read_only else None
                     if statement is not None and not unit.attributes.get(_AUTOCOMMIT):
@@ -474,26 +480,24 @@ def _driver_of(connection: AsyncConnection) -> Any:
 
 
 async def _discard_connections(unit: UnitOfWork) -> None:
-    """Invalidate the unit's connections with the driver's forced terminate, without waiting.
+    """Invalidate the unit's connections with the driver's forced terminate.
 
-    A SQLite statement still running on aiosqlite's thread is interrupted first (a cancelled write would
-    otherwise keep the database's write lock until it finished). The invalidation runs outside SQLAlchemy's
-    greenlet on purpose: there the dialect terminates the connection at once (asyncpg aborts the socket,
-    aiosqlite stops its thread) instead of attempting a graceful close, which can wait forever on a
-    connection a cancelled statement left half-closed. The pool then drops the connection instead of handing
-    it to the next caller.
+    The invalidation runs outside SQLAlchemy's greenlet on purpose: there the dialect terminates the
+    connection at once (asyncpg aborts the socket, aiosqlite stops its thread) instead of attempting a
+    graceful close, which can wait forever on a connection a cancelled statement left half-closed. The pool
+    then drops the connection instead of handing it to the next caller.
+
+    On SQLite the pool's discard listener has queued a rollback on aiosqlite's worker thread ahead of the
+    close (interrupting a statement that still runs there); this waits, bounded, until it ran, so the next
+    writer finds the write lock free.
     """
-    driver = unit.attributes.get(_DRIVER_CONNECTION)
-    interrupt = getattr(driver, "interrupt", None)
-    if callable(interrupt):
-        try:
-            await interrupt()
-        except Exception:  # noqa: BLE001 — nothing may be running, or the connection may be closed already
-            _logger.debug("unit_of_work_statement_interrupt_failed", exc_info=True)
     try:
         unit.resource.sync_session.invalidate()
     except Exception:  # noqa: BLE001 — discarding is best effort; the connection is gone either way
         _logger.debug("unit_of_work_connection_discard_failed", exc_info=True)
+    driver = unit.attributes.get(_DRIVER_CONNECTION)
+    if driver is not None:
+        await sqlite_discard.wait_released(driver)
 
 
 def _backend(engine: AsyncEngine) -> str:

@@ -39,6 +39,9 @@ Completion rules:
   awaited under ``asyncio`` and ``anyio`` shields until done, and a cancellation that arrived meanwhile is
   re-raised afterwards. A client disconnect in mid-transaction never returns a poisoned or leaked
   connection to the pool.
+- A boundary whose body ends with a driver error while its task is being cancelled ends as cancelled:
+  the unit is poisoned (its connection discarded) and ``CancelledError`` is raised, chained from the
+  driver's error (:func:`~pyfly.data.transaction.unit_of_work.cancellation_replaced_by`).
 """
 
 from __future__ import annotations
@@ -66,13 +69,14 @@ from pyfly.data.transaction.errors import (
     CommitOutcomeUnknownError,
     IllegalTransactionStateError,
     NestedTransactionNotSupportedError,
+    TransactionError,
     TransactionTimedOutError,
     UnexpectedRollbackError,
 )
 from pyfly.data.transaction.manager import TransactionManager
 from pyfly.data.transaction.registry import installed_registry, resolve_manager
 from pyfly.data.transaction.synchronization import CompletionStatus
-from pyfly.data.transaction.unit_of_work import UnitOfWork, UnitStatus
+from pyfly.data.transaction.unit_of_work import UnitOfWork, UnitStatus, cancellation_replaced_by, raise_cancellation
 
 _logger = logging.getLogger(__name__)
 
@@ -80,7 +84,7 @@ T = TypeVar("T")
 
 SYNCHRONIZATION_FAILURES = "pyfly_tx_synchronization_failures"
 """The counter (``pyfly.tx.synchronization.failures``) a failing ``after_commit``/``after_completion``
-callback increments, labelled by datasource and phase."""
+callback increments, labeled by datasource and phase."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -312,16 +316,24 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
         outcome.status = CompletionStatus.ROLLED_BACK
 
 
-def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None) -> None:
+def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None) -> bool:
     """A unit that ends because its task was cancelled discards its connection instead of rolling it back.
 
     The cancellation may have landed while a statement was in flight, and the driver may then be half
     closed underneath SQLAlchemy (an anyio scope re-cancels the driver's own cleanup), so nothing on that
     connection is awaited again. Closing it rolls the transaction back on the server; the pool opens a new
     connection when it next needs one.
+
+    Returns whether *error* is a driver error that stood in for the cancellation: the boundary then raises
+    the cancellation instead (:func:`~pyfly.data.transaction.unit_of_work.raise_cancellation`).
     """
     if isinstance(error, asyncio.CancelledError):
         unit.poisoned = True
+        return False
+    if cancellation_replaced_by(error):
+        unit.poisoned = True
+        return True
+    return False
 
 
 async def _complete(unit: UnitOfWork, definition: TransactionDefinition, error: BaseException | None) -> _Outcome:
@@ -480,9 +492,12 @@ class TransactionBoundary:
         unit = self._unit
         if mode is _Mode.JOIN:
             assert unit is not None
-            _poison_on_cancellation(unit, exc)
+            replaced = _poison_on_cancellation(unit, exc)
             if exc is not None and self._definition.rollback_on(exc):
                 unit.set_rollback_only(exc)
+            if replaced:
+                assert exc is not None
+                await raise_cancellation(exc)
             return
         if mode is _Mode.NONE:
             if self._token is not None:
@@ -498,9 +513,12 @@ class TransactionBoundary:
         depth = unit.savepoint_depth
         unit.savepoint_depth -= 1
         manager = self._manager
-        _poison_on_cancellation(unit, error)
+        replaced = _poison_on_cancellation(unit, error)
         if unit.poisoned:
             unit.set_rollback_only(error)
+            if replaced:
+                assert error is not None
+                await raise_cancellation(error)
             return
         # A failure that propagates out, or a statement that failed inside the savepoint and was caught
         # there, rolls back to the savepoint; the outer unit is not marked (Spring's NESTED semantics).
@@ -522,18 +540,25 @@ class TransactionBoundary:
             raise asyncio.CancelledError
 
     async def _exit_new(self, unit: UnitOfWork, error: BaseException | None) -> None:
-        _poison_on_cancellation(unit, error)
+        if isinstance(error, asyncio.CancelledError):
+            unit.poisoned = True
         body_error = error
-        if self._timeout is not None:
+        replaced = False
+        timeout = self._timeout
+        if timeout is not None:
             try:
-                await self._timeout.__aexit__(type(error) if error is not None else None, error, None)
+                await timeout.__aexit__(type(error) if error is not None else None, error, None)
             except TimeoutError as expired:
-                body_error = TransactionTimedOutError(
-                    f"{unit.describe()} exceeded its timeout of {self._definition.timeout} s and rolled back",
-                    datasource=unit.datasource,
-                    context={"unit": unit.id},
-                )
-                body_error.__cause__ = expired
+                body_error = self._timed_out(unit, expired)
+            else:
+                if timeout.expired() and _driver_error(error):
+                    # The unit's own deadline cancelled the body and a driver error stood in for that
+                    # cancellation (the deadline has withdrawn its cancel request by now): it timed out.
+                    assert error is not None
+                    unit.poisoned = True
+                    body_error = self._timed_out(unit, error)
+        if body_error is error:
+            replaced = _poison_on_cancellation(unit, error)
         try:
             outcome = await _complete(unit, self._definition, body_error)
         finally:
@@ -542,10 +567,28 @@ class TransactionBoundary:
         await _after_completion(unit, outcome.status)
         if outcome.cancelled:
             raise asyncio.CancelledError
+        if replaced:
+            assert error is not None
+            await raise_cancellation(error)
         if outcome.error is not None and outcome.error is not body_error:
             raise outcome.error
         if body_error is not error and body_error is not None:
             raise body_error
+
+    def _timed_out(self, unit: UnitOfWork, cause: BaseException) -> TransactionTimedOutError:
+        timed_out = TransactionTimedOutError(
+            f"{unit.describe()} exceeded its timeout of {self._definition.timeout} s and rolled back",
+            datasource=unit.datasource,
+            context={"unit": unit.id},
+        )
+        timed_out.__cause__ = cause
+        return timed_out
+
+
+def _driver_error(error: BaseException | None) -> bool:
+    """Whether *error* may be a driver's stand-in for a cancellation (an ordinary exception that is not the
+    unit of work's own, nor the end of a streamed result)."""
+    return isinstance(error, Exception) and not isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -594,10 +637,10 @@ async def complete_auto_unit(
     A write unit commits; a read unit ends without writing (a rollback, nothing on autocommit) and is
     reported to its synchronizations as committed. *reset* is the token of the scope the unit was bound
     with, restored before the after-completion callbacks run. Raises the completion's own error (an
-    ``UnexpectedRollbackError``, a commit failure) and a cancellation that arrived meanwhile; the caller
-    re-raises *error* itself.
+    ``UnexpectedRollbackError``, a commit failure), a cancellation that arrived meanwhile, and the
+    cancellation a driver error in *error* stood in for; otherwise the caller re-raises *error* itself.
     """
-    _poison_on_cancellation(unit, error)
+    replaced = _poison_on_cancellation(unit, error)
     outcome = _Outcome()
     try:
         if error is not None:
@@ -612,6 +655,9 @@ async def complete_auto_unit(
     await _after_completion(unit, outcome.status)
     if outcome.cancelled:
         raise asyncio.CancelledError
+    if replaced:
+        assert error is not None
+        await raise_cancellation(error)
     if outcome.error is not None and outcome.error is not error:
         raise outcome.error
 

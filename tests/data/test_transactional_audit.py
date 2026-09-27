@@ -23,6 +23,9 @@ checked out and the next call succeeding:
 - the same cancel landing while a statement is in flight (the statement is interrupted and its
   connection discarded, not reused);
 - two native cancels while the unit completes;
+- a driver error raised in place of the cancellation (aiosqlite's ``ValueError('Connection closed')``)
+  still ends the call as the cancellation: the anyio scope catches it, ``wait_for`` times out, and the
+  unit's own deadline raises ``TransactionTimedOutError`` (WP01-12);
 - a commit whose connection fails in flight raises ``CommitOutcomeUnknownError`` (WP01-12), and
   ``@retry`` never retries it, whichever order the two decorators are written in (WP01-17).
 
@@ -33,6 +36,7 @@ partitioned network) are in ``tests/integration/test_transaction_manager_matrix.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -57,6 +61,7 @@ from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transaction import (
     CommitOutcomeUnknownError,
     TransactionSynchronizationAdapter,
+    TransactionTimedOutError,
     register_synchronization,
 )
 from pyfly.resilience.retry import retry
@@ -123,6 +128,30 @@ class CxService:
     @transactional
     async def place(self, name: str) -> None:
         await self.items.save(CxItem(name=name))
+
+    @transactional
+    async def save_then_stand_in_for_the_cancel(self, name: str) -> None:
+        await self.items.save(CxItem(name=name))
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            # What aiosqlite does once an anyio scope re-cancelled SQLAlchemy's cleanup.
+            raise ValueError("Connection closed") from None
+
+    @transactional
+    async def save_then_lose_the_cancel(self, name: str) -> None:
+        await self.items.save(CxItem(name=name))
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(5)
+        raise ValueError("Connection closed")  # raised with no trace of the cancellation it replaced
+
+    @transactional(timeout=0.1)
+    async def time_out_behind_a_driver_error(self, name: str) -> None:
+        await self.items.save(CxItem(name=name))
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise ValueError("Connection closed") from None
 
     @transactional
     async def fail_behind_gate(self, gate: _Gate) -> None:
@@ -230,6 +259,33 @@ async def test_an_anyio_cancel_during_a_statement_interrupts_it_and_discards_the
     # The interrupted statement released the write lock: no busy_timeout wait (5 s) for the next writer.
     assert time.perf_counter() - started < 2.0
     assert await app.committed() == ["next"]
+
+
+@pytest.mark.parametrize("method", ["save_then_stand_in_for_the_cancel", "save_then_lose_the_cancel"])
+async def test_a_driver_error_in_place_of_an_anyio_cancel_ends_as_the_cancellation(app: App, method: str) -> None:
+    with anyio.move_on_after(0.1) as scope:
+        await getattr(app.service, method)("cancelled")
+    assert scope.cancelled_caught
+    assert app.checked_out() == 0
+    assert await app.committed() == []
+    await app.service.place("next")
+    assert await app.committed() == ["next"]
+
+
+async def test_a_driver_error_in_place_of_a_native_cancel_ends_as_a_timeout(app: App) -> None:
+    with pytest.raises(TimeoutError) as raised:
+        await asyncio.wait_for(app.service.save_then_stand_in_for_the_cancel("cancelled"), 0.1)
+    assert not isinstance(raised.value, TransactionTimedOutError)  # wait_for's own timeout
+    assert app.checked_out() == 0
+    assert await app.committed() == []
+
+
+async def test_a_driver_error_in_place_of_the_units_own_deadline_is_a_timeout(app: App) -> None:
+    with pytest.raises(TransactionTimedOutError) as raised:
+        await app.service.time_out_behind_a_driver_error("late")
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert app.checked_out() == 0
+    assert await app.committed() == []
 
 
 async def test_two_native_cancels_while_the_unit_completes(app: App) -> None:
