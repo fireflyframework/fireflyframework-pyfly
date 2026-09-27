@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 from pyfly.transactional.persistence.cache_adapter import CachePersistenceProvider
+from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
 from pyfly.transactional.persistence.redis_adapter import RedisPersistenceProvider
 from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
 __all__ = [
     "CachePersistenceProvider",
+    "ProviderPersistencePort",
     "RedisPersistenceProvider",
     "SqlAlchemyPersistenceProvider",
 ]

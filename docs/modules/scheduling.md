@@ -64,9 +64,9 @@ The module is built around a hexagonal architecture:
   execution strategies; **AsyncIOTaskExecutor** and **ThreadPoolTaskExecutor**
   are the built-in adapters, selectable via `pyfly.scheduling.executor.type`.
 - **DistributedLock** coordinates `@scheduled(lock=...)` jobs across instances;
-  **LocalLock**, **InProcessDistributedLock**, **RedisDistributedLock**, and
-  **PostgresAdvisoryLock** are the built-in providers, selectable via
-  `pyfly.scheduling.lock.provider`.
+  **LocalLock**, **InProcessDistributedLock**, **RedisDistributedLock**,
+  **LeaseLock** (the database lease table) and **PostgresAdvisoryLock** are the
+  built-in providers, selectable via `pyfly.scheduling.lock.provider`.
 
 All public types are available from a single import:
 
@@ -85,6 +85,7 @@ from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 # Built-in cluster-coordination lock adapters (normally selected via config):
 from pyfly.scheduling.adapters.redis_lock import RedisDistributedLock
+from pyfly.scheduling.adapters.lease_lock import LeaseLock
 from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
 ```
 
@@ -194,7 +195,9 @@ fire once *per instance*. The `lock` parameter provides ShedLock / Spring
 `@SchedulerLock` parity: before each tick the scheduler tries to acquire a
 named lock, and **skips the run** if it is already held elsewhere, so only one
 instance executes the job per fire. The lock is always released when the body
-finishes (the `lock_ttl` is the safety valve if an instance crashes mid-run).
+finishes, and `lock_ttl` is the safety valve: every built-in provider ends a
+lock after `lock_ttl` even when its holder hangs or crashes mid-run, so the job
+runs elsewhere after at most `lock_ttl`.
 
 ```python
 class ReportService:
@@ -594,14 +597,16 @@ every `@scheduled(lock=...)` job:
 | `none` *(default)* | `LocalLock` | single instance (always acquires) | none |
 | `memory` | `InProcessDistributedLock` | one process (real mutual exclusion within the process) | none |
 | `redis` | `RedisDistributedLock` | cross-process / cluster | Redis |
-| `postgres` | `PostgresAdvisoryLock` | cross-process / cluster | none beyond an existing Postgres |
+| `database` | `LeaseLock` | cross-process / cluster | none beyond the application's database (any backend) |
+| `postgres` | `LeaseLock`, or `PostgresAdvisoryLock` with `postgres.advisory: true` | cross-process / cluster | none beyond an existing Postgres |
 
 ```yaml
 # pyfly.yaml
 pyfly:
   scheduling:
     lock:
-      provider: postgres   # none | memory | redis | postgres
+      provider: database   # none | memory | redis | database | postgres
+      datasource: primary  # the datasource of the lease table (default: the primary)
 ```
 
 - **`none`** — `LocalLock`; `try_acquire` always returns `True`. Single-instance
@@ -609,7 +614,8 @@ pyfly:
 - **`memory`** — `InProcessDistributedLock`; real mutual exclusion **within one
   process** (with a TTL self-heal so a crashed/never-released name auto-frees
   after `lock_ttl`). Prevents a slow tick from overlapping its next tick in the
-  same process, but does **not** coordinate across processes.
+  same process, but does **not** coordinate across processes. A tick whose lock
+  ended at `lock_ttl` does not release the lock the next tick took since.
 - **`redis`** — `RedisDistributedLock`; cross-process via an atomic Redis
   `SET key value NX PX <ttl-ms>`, with an owner-token compare-and-delete release
   (an instance only releases a lock it still owns). The async Redis client is
@@ -617,24 +623,57 @@ pyfly:
   `redis://localhost:6379/0`) and injected — the adapter never imports `redis`
   itself. Selected only when `redis.asyncio` is importable; otherwise the bean
   falls back to `LocalLock`. Keys are prefixed `pyfly:schedlock:`.
-- **`postgres`** — `PostgresAdvisoryLock`; cross-process via Postgres
-  **session-level advisory locks** (`pg_try_advisory_lock` /
-  `pg_advisory_unlock`). For apps already on Postgres this gives cluster-safe
-  coordination with **no extra infrastructure**. The lock name is mapped to a
-  stable signed 64-bit key (blake2b, deterministic across processes). The
-  `AsyncEngine` is resolved lazily from the container on first acquire (so
-  bean-ordering does not matter). Note there is **no TTL** for this provider:
-  the advisory lock lives with the holding connection and is auto-released when
-  the connection closes — including when the process dies, which is the
-  crash-safety mechanism in lieu of `lock_ttl`.
+- **`database`** — `LeaseLock`; a ShedLock-style **lease table**
+  (`pyfly_locks`: `name`, `lock_until`, `locked_at`, `locked_by`, `fence`) on
+  the datasource named by `pyfly.scheduling.lock.datasource` (or given by
+  `pyfly.scheduling.lock.url`), by default the primary. Taking a lock is one
+  statement on PostgreSQL and SQLite, `INSERT ... ON CONFLICT (name) DO UPDATE
+  ... WHERE lock_until <= now` (it inserts the row, takes an ended lease over,
+  or leaves a live one alone); on MySQL and MariaDB a conditional `UPDATE ...
+  WHERE lock_until <= now`, after an `INSERT IGNORE` when the node has not
+  found the row yet. Each runs in a short unit of its own that commits at once
+  (an autocommit statement on PostgreSQL); releasing it sets `lock_until` to
+  now. It works on every backend,
+  holds **no connection** while the job runs, and honors `lock_ttl`: a hung job
+  blocks its schedule for at most `lock_ttl`. When the hung job finally ends,
+  it does not release the lease another node took since, and a WARNING
+  (`scheduler_lease_expired_before_release`) says the job outlived its TTL. The
+  nodes compare `lock_until` with their own clocks: keep them synchronized (NTP).
+  The table is created at startup if `pyfly.data.relational.ddl-auto` is
+  `create` (the default), `create-drop` or `update`, and only checked with
+  `none` or `validate`. Lock names match exactly on every backend (a binary
+  collation on MySQL and MariaDB, so `Nightly` and `nightly` are two leases). A
+  lock name is at most 255 characters
+  (`LeaseLock.MAX_NAME_LENGTH`, the length of `pyfly_locks.name`): a longer one
+  raises `ValueError` before any statement runs, where MySQL and MariaDB would
+  otherwise truncate it into a lease nobody could release. `LeaseLock.acquire(name, ttl, wait=...)`,
+  `extend()` and `holder()` (with a fencing token that grows at every
+  acquisition) serve other work that must run on one node at a time.
+- **`postgres`** — the same lease table on a PostgreSQL datasource. With
+  `pyfly.scheduling.lock.postgres.advisory: true` it is `PostgresAdvisoryLock`
+  instead, an opt-in accelerator on Postgres **session-level advisory locks**
+  (`pg_try_advisory_lock` / `pg_advisory_unlock`): the server releases the lock
+  the moment the holder's connection goes away. The lock name is mapped to a
+  stable signed 64-bit key (blake2b, deterministic across processes). The lock
+  holds a pooled connection for the whole job, in `AUTOCOMMIT` (idle, never
+  idle in transaction, so `idle_in_transaction_session_timeout` cannot drop it
+  mid-job); a watchdog ends the lock at `lock_ttl` with a WARNING
+  (`scheduler_advisory_lock_expired`) but does not cancel the job, as with the
+  lease table; and an acquisition or an unlock that fails (a cancellation
+  included) discards the connection instead of returning a session that may
+  hold the lock to the pool. An acquisition belongs to the task that took it:
+  a tick whose lock ended at `lock_ttl` (or whose session the server ended,
+  logged as `scheduler_advisory_lock_lost`) does not release the lock the next
+  tick of the process took since. The datasource must be PostgreSQL, or the
+  startup fails.
 
 **When to use which:**
 
 - Single instance, no cluster → leave the default `none` (or `memory` if you
   want to prevent in-process overlap of a slow job).
 - Multiple instances and you already run Redis → `redis`.
-- Multiple instances and you already run Postgres (but no Redis) → `postgres`,
-  to avoid standing up new infrastructure just for scheduling.
+- Multiple instances on a relational database (but no Redis) → `database`, to
+  avoid standing up new infrastructure just for scheduling.
 
 ### Cross-Process Coordination (custom)
 

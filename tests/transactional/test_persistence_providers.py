@@ -14,24 +14,32 @@
 """Unit tests for the durable persistence providers.
 
 * CachePersistenceProvider — backed by a real InMemoryCache.
-* SqlAlchemyPersistenceProvider — backed by aiosqlite in-memory DB.
+* SqlAlchemyPersistenceProvider — backed by a SQLite file database (every server backend runs in
+  ``tests/integration/test_orchestration_persistence_integration.py``).
+* ProviderPersistencePort — the saga/TCC port on a real in-memory provider and on the SQL provider.
 * RedisPersistenceProvider — backed by fakeredis if available, else skipped.
-* Provider-selection auto-config — parametrized, mocked client/engine creation.
+* Provider-selection auto-config — parametrized, mocked client creation.
 
 No Docker required; all tests run in the fast suite.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pyfly.container import bean, component, configuration
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import ExecutionState
+from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -233,10 +241,10 @@ class TestCachePersistenceProvider:
 
 
 class TestSqlAlchemyPersistenceProvider:
-    """SqlAlchemyPersistenceProvider backed by an aiosqlite in-memory database."""
+    """SqlAlchemyPersistenceProvider backed by a SQLite file database."""
 
     @pytest.fixture
-    async def provider(self) -> Any:
+    async def provider(self, tmp_path: Path) -> AsyncIterator[Any]:
         try:
             from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found]
         except ImportError:
@@ -246,10 +254,13 @@ class TestSqlAlchemyPersistenceProvider:
             SqlAlchemyPersistenceProvider,
         )
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}", echo=False)
         p = SqlAlchemyPersistenceProvider(engine)
-        await p.initialize()
-        return p
+        await p.start()
+        try:
+            yield p
+        finally:
+            await engine.dispose()
 
     async def test_save_and_find_roundtrip(self, provider: Any) -> None:
         state = _make_state()
@@ -449,7 +460,7 @@ class TestOrchestrationPersistenceProviderSelection:
         try:
             result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
             assert isinstance(result, SqlAlchemyPersistenceProvider)
-            assert result._engine is registry.get("transactional-persistence").engine
+            assert result.engine is registry.get("transactional-persistence").engine
         finally:
             await registry.close()
 
@@ -472,7 +483,7 @@ class TestOrchestrationPersistenceProviderSelection:
         try:
             result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
             assert isinstance(result, SqlAlchemyPersistenceProvider)
-            assert result._engine is registry.primary.engine
+            assert result.engine is registry.primary.engine
         finally:
             await registry.close()
 
@@ -515,3 +526,291 @@ class TestOrchestrationPersistenceProviderSelection:
                 {"pyfly": {"transactional": {"persistence": {"provider": "cache"}}}},
                 cache_adapter=None,
             )
+
+    async def test_sqlalchemy_runs_on_the_datasource_the_datasource_key_names(self, tmp_path: Path) -> None:
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {"persistence": {"provider": "sqlalchemy", "sqlalchemy": {"datasource": "sagas"}}},
+                    "data": {
+                        "relational": {
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                            "datasources": {"sagas": {"url": f"sqlite+aiosqlite:///{tmp_path / 'sagas.db'}"}},
+                        }
+                    },
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            assert result.engine is registry.get("sagas").engine
+        finally:
+            await registry.close()
+
+    def test_sqlalchemy_refuses_both_a_datasource_and_a_url(self) -> None:
+        from pyfly.data.relational.datasource_registry import DataSourceConfigurationError
+
+        with pytest.raises(DataSourceConfigurationError, match="both set"):
+            self._call_bean(
+                {
+                    "pyfly": {
+                        "transactional": {
+                            "persistence": {
+                                "provider": "sqlalchemy",
+                                "sqlalchemy": {"datasource": "primary", "url": "sqlite+aiosqlite:///:memory:"},
+                            }
+                        }
+                    }
+                }
+            )
+
+    async def test_sqlalchemy_uses_the_context_datasource_registry_bean(self, tmp_path: Path) -> None:
+        """An application's DataSourceRegistry bean is the one the provider runs on, not the configuration's."""
+        from pyfly.container.container import Container
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        app_url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+        cfg = Config({"pyfly": {"transactional": {"persistence": {"provider": "sqlalchemy"}}}})
+        own = DataSourceRegistry(Config({"pyfly": {"data": {"relational": {"url": app_url}}}}))
+        container = Container()
+        container.register_instance(DataSourceRegistry, own)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None, container)
+            assert result.engine is own.primary.engine
+        finally:
+            await own.close()
+
+    async def test_sqlalchemy_only_checks_its_table_when_ddl_auto_is_none(self, tmp_path: Path) -> None:
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.data.relational.framework_schema import FrameworkSchemaError
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {"persistence": {"provider": "sqlalchemy"}},
+                    "data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}", "ddl-auto": "none"}},
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            with pytest.raises(FrameworkSchemaError, match="pyfly_orchestration_state does not exist"):
+                await result.start()
+        finally:
+            await registry.close()
+
+
+# ===========================================================================
+# ProviderPersistencePort — the saga/TCC port on a provider (C079)
+# ===========================================================================
+
+
+class TestProviderPersistencePort:
+    """The port the saga and TCC engines use, on a real provider: the in-memory one and the SQL one."""
+
+    @pytest.fixture(params=["memory", "sqlalchemy"])
+    async def port(self, request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Any]:
+        from pyfly.transactional.core.persistence import InMemoryPersistenceProvider
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+
+        if request.param == "memory":
+            yield ProviderPersistencePort(InMemoryPersistenceProvider())
+            return
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'port.db'}")
+        provider = SqlAlchemyPersistenceProvider(engine)
+        await provider.start()
+        try:
+            yield ProviderPersistencePort(provider)
+        finally:
+            await engine.dispose()
+
+    async def test_a_saga_state_goes_in_flight_then_completes(self, port: Any) -> None:
+        started = datetime.now(UTC) - timedelta(seconds=5)
+        await port.persist_state(
+            {"saga_name": "order", "correlation_id": "s-1", "headers": {"a": "1"}, "started_at": started}
+        )
+
+        state = await port.get_state("s-1")
+        assert state is not None
+        assert (state["status"], state["saga_name"], state["headers"]) == ("IN_FLIGHT", "order", {"a": "1"})
+        assert state["started_at"] == started
+        assert [s["correlation_id"] for s in await port.get_in_flight()] == ["s-1"]
+
+        await port.update_step_status("s-1", "reserve", "DONE")
+        await port.mark_completed("s-1", successful=True)
+        done = await port.get_state("s-1")
+        assert done is not None
+        assert (done["status"], done["successful"], done["steps"]) == (
+            "COMPLETED",
+            True,
+            {"reserve": {"status": "DONE"}},
+        )
+        assert done["completed_at"] is not None
+        assert await port.get_in_flight() == []
+
+        execution = await port.provider.find("s-1")
+        assert (execution.pattern, execution.status, execution.name) == (
+            ExecutionPattern.SAGA,
+            ExecutionStatus.COMPLETED,
+            "order",
+        )
+
+    async def test_a_tcc_state_with_an_iso_start_is_a_tcc_execution(self, port: Any) -> None:
+        started = datetime.now(UTC)
+        await port.persist_state({"tcc_name": "pay", "correlation_id": "t-1", "started_at": started.isoformat()})
+        await port.mark_completed("t-1", successful=False)
+
+        execution = await port.provider.find("t-1")
+        assert (execution.pattern, execution.status, execution.name) == (
+            ExecutionPattern.TCC,
+            ExecutionStatus.FAILED,
+            "pay",
+        )
+        assert execution.started_at == started
+
+    async def test_stale_in_flight_states_are_found_and_old_completed_ones_cleaned(self, port: Any) -> None:
+        await port.persist_state({"saga_name": "order", "correlation_id": "stale"})
+        await port.persist_state({"saga_name": "order", "correlation_id": "done"})
+        await port.mark_completed("done", successful=True)
+
+        assert [s["correlation_id"] for s in await port.get_stale(datetime.now(UTC) + timedelta(seconds=1))] == [
+            "stale"
+        ]
+        assert await port.get_stale(datetime.now(UTC) - timedelta(hours=1)) == []
+        assert await port.cleanup(timedelta(hours=1)) == 0
+        assert await port.cleanup(timedelta(seconds=-1)) == 1  # a cutoff in the future: "done" is old enough
+        assert await port.get_state("done") is None
+        assert await port.get_state("stale") is not None
+        assert await port.is_healthy() is True
+
+    async def test_a_workflow_execution_of_the_same_provider_is_not_the_ports(self, port: Any) -> None:
+        workflow = _make_state(pattern=ExecutionPattern.WORKFLOW, minutes_ago=60)
+        await port.provider.save(workflow)
+
+        assert await port.get_state(workflow.correlation_id) is None
+        assert await port.get_stale(datetime.now(UTC)) == []
+        assert await port.get_in_flight() == []
+
+    async def test_cleanup_leaves_the_workflow_executions_of_the_same_provider(self, port: Any) -> None:
+        workflow = _make_state(
+            status=ExecutionStatus.COMPLETED, pattern=ExecutionPattern.WORKFLOW, minutes_ago=60, completed=True
+        )
+        await port.provider.save(workflow)
+        await port.persist_state({"tcc_name": "pay", "correlation_id": "t-1"})
+        await port.mark_completed("t-1", successful=True)
+
+        assert await port.cleanup(timedelta(seconds=-1)) == 1
+        assert await port.get_state("t-1") is None
+        assert await port.provider.find(workflow.correlation_id) is not None
+
+    async def test_completing_an_unknown_execution_raises_key_error(self, port: Any) -> None:
+        with pytest.raises(KeyError):
+            await port.mark_completed("never-started", successful=True)
+
+    async def test_updates_of_one_execution_are_serialized_and_their_locks_dropped(self, port: Any) -> None:
+        await port.persist_state({"saga_name": "order", "correlation_id": "s-1"})
+        await port.persist_state({"saga_name": "order", "correlation_id": "s-2"})
+
+        await asyncio.gather(
+            *(port.update_step_status("s-1", f"step-{index}", "DONE") for index in range(5)),
+            *(port.update_step_status("s-2", f"step-{index}", "DONE") for index in range(5)),
+            port.mark_completed("s-2", successful=True),
+        )
+
+        first, second = await port.get_state("s-1"), await port.get_state("s-2")
+        assert first is not None and set(first["steps"]) == {f"step-{index}" for index in range(5)}
+        assert second is not None and second["status"] == "COMPLETED"
+        assert port._serials == {}  # one lock per execution in flight, none kept afterwards
+
+
+# ===========================================================================
+# The port bean: the configured provider's, unless the application has its own
+# ===========================================================================
+
+
+class _ApplicationPort(InMemoryPersistenceAdapter):
+    """An application's own TransactionalPersistencePort."""
+
+
+@configuration
+class _ApplicationPortConfiguration:
+    @bean
+    def application_port(self) -> TransactionalPersistencePort:
+        return _ApplicationPort()
+
+
+@component
+class _ApplicationPortComponent(InMemoryPersistenceAdapter, TransactionalPersistencePort):
+    """An application's own port, declared as a component implementing the port."""
+
+
+class TestTransactionalPersistencePortBean:
+    async def test_the_engines_persist_through_the_configured_provider(self) -> None:
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            assert isinstance(port, ProviderPersistencePort)
+            assert ctx.get_bean(SagaEngine)._persistence_port is port
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.parametrize("declaration", [_ApplicationPortConfiguration, _ApplicationPortComponent])
+    async def test_an_application_port_bean_replaces_the_provider_s(self, declaration: type) -> None:
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+        from pyfly.transactional.saga.persistence.recovery import SagaRecoveryService
+        from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        ctx.register_bean(declaration)
+        if declaration is _ApplicationPortComponent:
+            # What scanning the component does: it is bound to the port it implements.
+            ctx.container.bind(TransactionalPersistencePort, _ApplicationPortComponent)  # type: ignore[type-abstract]
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            assert isinstance(port, _ApplicationPort | _ApplicationPortComponent)
+            assert ctx.get_bean(SagaEngine)._persistence_port is port
+            assert ctx.get_bean(TccEngine)._persistence_port is port
+            assert ctx.get_bean(SagaRecoveryService)._persistence_port is port
+            assert not [reg for reg in ctx.container._all.values() if isinstance(reg.instance, ProviderPersistencePort)]
+        finally:
+            await ctx.stop()
+
+    async def test_the_admin_dashboard_counts_the_in_flight_executions_of_the_engines_port(self) -> None:
+        """The dashboard counted the legacy in-memory adapter's executions, which the engines no longer use."""
+        from pyfly.admin.providers.transactions_provider import TransactionsProvider
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            await port.persist_state({"saga_name": "order", "correlation_id": "in-flight"})
+
+            assert (await TransactionsProvider(ctx).get_transactions())["in_flight"] == 1
+        finally:
+            await ctx.stop()

@@ -29,5 +29,7 @@ class CacheProperties:
     enabled: bool = False
     provider: str = "auto"
     redis: dict[str, Any] = field(default_factory=lambda: {"url": "redis://localhost:6379/0"})
-    postgres: dict[str, Any] = field(default_factory=lambda: {"url": "postgresql+asyncpg://localhost:5432/cache"})
+    # No URL and no datasource: the cache is on the primary datasource (pyfly.data.relational.url). A URL is
+    # an alias resolved through the datasource registry; datasource names one of its datasources instead.
+    postgres: dict[str, Any] = field(default_factory=lambda: {"url": None, "datasource": None, "purge-interval": 60})
     ttl: int = 300

@@ -1027,6 +1027,38 @@ The `memory` provider is the default and requires no additional packages.
 The `redis`, `sqlalchemy`, and `cache` providers are **durable**: they survive
 process restarts because execution state is held outside the Python process.
 
+The provider stores the state of **every** engine. Workflows use it directly;
+the saga engine, the TCC engine and `SagaRecoveryService` persist through the
+`transactional_persistence_port` bean, a `ProviderPersistencePort`
+(`pyfly.transactional.persistence.provider_port`) that implements
+`TransactionalPersistencePort` on the configured provider. A saga cut short by
+a crash is therefore still there for the next process: its
+`SagaRecoveryService.recover_stale()` finds it in flight and marks it failed,
+and `/api/orchestration/executions` lists sagas and TCC transactions beside
+workflows. (Before 26.09.08 the saga and TCC engines always used an in-memory
+adapter, whatever the provider.) An application's own
+`TransactionalPersistencePort` bean replaces `transactional_persistence_port`.
+
+The engines record when an execution starts (`persist_state`, its
+`IN_FLIGHT` row) and how it ends (`mark_completed`); they do not persist step
+statuses (the `SagaResult` carries them). The port's `update_step_status` is
+there for callers that record step progress themselves. The port serializes
+the updates of one execution (`update_step_status`, `mark_completed`: two
+updates that run together each keep the other's change), and executions never
+wait for one another.
+
+With the `sqlalchemy` provider, saga and TCC state is written through the unit
+of work bound for the provider's datasource, like any other state: a saga run
+inside a `@transactional` method writes its `IN_FLIGHT` row and its completion
+in the caller's transaction. Three consequences follow. Until the caller
+commits, no other process sees the saga, so a crash mid-saga leaves nothing to
+recover; when the caller rolls back, the record of the saga (including the
+remote steps it already ran) is rolled back with it; and when a step left that
+transaction unusable (on PostgreSQL, a failed statement aborts it), the
+engine's final `mark_completed` fails on it and its error replaces the
+`SagaResult` (the `memory` provider has no such failure). Start a saga outside
+the business transaction when its log must outlive it.
+
 #### Redis provider
 
 ```yaml
@@ -1051,19 +1083,42 @@ pyfly:
     persistence:
       provider: sqlalchemy
       sqlalchemy:
-        url: postgresql+asyncpg://user:pass@host/db
+        datasource: orchestration   # a datasource of pyfly.data.relational.datasources
+        # url: postgresql+asyncpg://user:pass@host/db   (or its URL; not both)
 ```
 
 Config key `pyfly.transactional.persistence.sqlalchemy.url` resolves
-through the [datasource registry](data-relational.md#module-datasources).
-With no URL the adapter uses the primary datasource
-(`pyfly.data.relational.url`); a `DataSourceConfigurationError` (a
-`ValueError`) naming both keys is raised if neither is configured. A URL
-identical to a registered datasource's reuses that datasource's engine, and
-another URL registers the `transactional-persistence` datasource. The adapter creates
-the table `pyfly_orchestration_state` on first use and requires
-`sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres,
-`aiosqlite` for SQLite).
+through the [datasource registry](data-relational.md#module-datasources) (the
+application's `DataSourceRegistry` bean when it defines one), and
+`pyfly.transactional.persistence.sqlalchemy.datasource` names one of its
+datasources; setting both is an error. With neither the adapter uses the
+primary datasource (`pyfly.data.relational.url`); a
+`DataSourceConfigurationError` (a `ValueError`) naming both keys is raised if
+no primary is configured either. A URL identical to a registered datasource's
+reuses that datasource's engine, and another URL registers the
+`transactional-persistence` datasource. The adapter requires
+`sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres, `asyncmy`
+for MySQL and MariaDB, `aiosqlite` for SQLite).
+
+The state lives in the framework table `pyfly_orchestration_state`
+(`pyfly.data.relational.framework_schema.orchestration_state`): the columns the
+recovery scan filters on (`status`, `updated_at` and the other instants as UTC
+timestamps with microseconds on every backend) and the execution's JSON in
+`payload`. The provider creates the table when the context starts if
+`pyfly.data.relational.ddl-auto` is `create` (the default), `create-drop` or
+`update`; with `none` or `validate` a migration must create it (list
+`framework_metadata` in Alembic's `target_metadata`), or the startup fails
+naming it. `save()` is the dialect's upsert, so the provider runs on
+PostgreSQL, MySQL, MariaDB and SQLite. Its operations join the unit of work
+bound for its datasource (the state commits or rolls back with the business
+step that wrote it); outside one each is a single statement on an autocommit
+connection on PostgreSQL.
+
+A table created by an earlier release on PostgreSQL has `TIMESTAMP` columns,
+which the provider refuses at startup with the statement that converts them:
+`ALTER TABLE pyfly_orchestration_state ALTER COLUMN started_at TYPE TIMESTAMPTZ
+USING started_at AT TIME ZONE 'UTC'` (and the same for `updated_at` and
+`completed_at`).
 
 #### Cache provider
 
@@ -1084,8 +1139,11 @@ A `ValueError` is raised at startup if no `CacheAdapter` bean is present
 
 ### InMemoryPersistenceAdapter
 
-The default adapter stores all state in a Python `dict`. All state is lost
-on process restart.
+A standalone in-memory `TransactionalPersistencePort` that stores all state in
+a Python `dict` (lost on process restart). The auto-configuration still
+registers it as the `in_memory_persistence_adapter` bean for applications that
+inject it, but the engines persist through the configured provider (see
+[Persistence Providers](#persistence-providers)).
 
 ```python
 from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
@@ -1303,7 +1361,8 @@ DI container:
 | `tcc_engine_properties` | `TccEngineProperties` | TCC configuration. |
 | `backpressure_properties` | `BackpressureProperties` | Backpressure configuration. |
 | `orchestration_persistence` | `ExecutionPersistenceProvider` | Provider selected by `pyfly.transactional.persistence.provider` (`InMemoryPersistenceProvider`, `RedisPersistenceProvider`, `SqlAlchemyPersistenceProvider`, or `CachePersistenceProvider`). |
-| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat). |
+| `transactional_persistence_port` | `TransactionalPersistencePort` | `ProviderPersistencePort` on `orchestration_persistence`: what the saga engine, the TCC engine and `SagaRecoveryService` persist through (unless the application defines its own `TransactionalPersistencePort` bean). |
+| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat; the engines do not use it). |
 | `logger_events_adapter` | `LoggerEventsAdapter` | Default logging events adapter. |
 | `saga_argument_resolver` | `ArgumentResolver` | Parameter injection resolver. |
 | `saga_step_invoker` | `StepInvoker` | Saga step and compensation invoker. |
@@ -1328,8 +1387,8 @@ class TransactionalEngineAutoConfiguration:
 
 When more advanced infrastructure is available:
 
-* **Persistence**: If `pyfly.data` provides a database adapter, it replaces
-  `InMemoryPersistenceAdapter`.
+* **Persistence**: `pyfly.transactional.persistence.provider` selects the
+  store of every engine (see [Persistence Providers](#persistence-providers)).
 * **Events**: If `pyfly.eda` or `pyfly.observability` are available, a
   `CompositeEventsAdapter` is created that fans events to Logger + EDA +
   Metrics.

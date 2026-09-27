@@ -198,9 +198,11 @@ removed server-side without any lazy-deletion overhead.
 ## PostgresCacheAdapter
 
 The `PostgresCacheAdapter` is a **durable, production-grade** cache backend
-backed by a PostgreSQL table via an async SQLAlchemy engine. It is suited for
+backed by a SQL table on one of the application's datasources. It is suited for
 environments where Redis is not available but PostgreSQL already is, or when
-cache durability across process restarts is required.
+cache durability across process restarts is required. PostgreSQL is its main
+target; the table and its statements are portable, so it also runs on SQLite,
+MySQL and MariaDB.
 
 **Install:** `uv add "pyfly[data-relational,postgresql]"` (this pulls in
 `sqlalchemy[asyncio]` and `asyncpg`). A clear `ValueError` is raised at
@@ -211,9 +213,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from pyfly.cache.adapters.postgres import PostgresCacheAdapter
 
 engine = create_async_engine("postgresql+asyncpg://user:pass@host/db")
-cache = PostgresCacheAdapter(engine=engine)
+cache = PostgresCacheAdapter(engine)
 
-# The adapter creates the table on first use (lazy DDL):
+# Creates the table if it is missing (the first operation does it too):
 await cache.start()
 
 # Store a value with a 10-minute TTL
@@ -235,44 +237,72 @@ await cache.clear()
 
 ### Constructor
 
-| Parameter | Type          | Description |
-|-----------|---------------|-------------|
-| `engine`  | `AsyncEngine` | An SQLAlchemy async engine. The adapter does not dispose it on `stop()` because the engine lifecycle belongs to the caller. |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `engine` | `AsyncEngine`, `DataSource` or datasource name | Where the entries live. The adapter does not dispose it on `stop()`: the engine belongs to the datasource registry (or to the caller). |
+| `create_table` | `bool` (default `True`) | Create the table on `start()` when it is missing; with `False` the table is only checked, and a missing one fails the start. |
+| `purge_interval` | `timedelta \| None` (default 60 s) | How often a write purges a batch of expired rows; `None` leaves purging to `purge_expired()`. |
+| `table_name` | `str` (default `pyfly_cache_entries`) | The table. |
 
 ### Table schema
 
-`PostgresCacheAdapter` creates the table `pyfly_cache_entries` on `start()`
-(or lazily on the first operation if `start()` was not awaited):
+The table `pyfly_cache_entries` is a framework table
+(`pyfly.data.relational.framework_schema.cache_entries`), so an Alembic
+`env.py` that lists `framework_metadata` in `target_metadata` migrates it and
+never drops it. On PostgreSQL it is:
 
 ```sql
-CREATE TABLE IF NOT EXISTS pyfly_cache_entries (
-    cache_key   TEXT PRIMARY KEY,
+CREATE TABLE pyfly_cache_entries (
+    cache_key   TEXT NOT NULL PRIMARY KEY,
     value       BYTEA NOT NULL,
-    expires_at  TIMESTAMPTZ NULL
-)
+    expires_at  TIMESTAMP WITH TIME ZONE
+);
+CREATE INDEX ix_pyfly_cache_entries_expires_at ON pyfly_cache_entries (expires_at);
 ```
+
+On MySQL and MariaDB the key is `VARCHAR(512)` (keys are limited to 512
+characters there) with a binary collation, the value `LONGBLOB` and the expiry
+`DATETIME(6)` in UTC. Keys match exactly on every backend: `User:1` and
+`user:1` are two entries (the default MySQL and MariaDB collations ignore case
+and accents), and so are `get_keys()` patterns and `evict_by_prefix()`
+prefixes, which use `GLOB` on SQLite, whose `LIKE` ignores case.
 
 Values are serialized to bytes before storage and deserialized on retrieval,
 so any serializable Python object can be cached transparently.
 
 ### TTL and expiry
 
-When `ttl` is provided the adapter computes an absolute UTC timestamp and
-stores it in the `expires_at` column. Expiry is enforced at **read time**:
-the `WHERE expires_at IS NULL OR expires_at > :now` clause filters expired
-rows on `get()`, `exists()`, and `get_keys()`. There is no background
-eviction process — expired rows linger until the key is accessed or
-`clear()` is called.
+When `ttl` is provided the adapter stores the expiry as a UTC instant in
+`expires_at`, bound as a typed value: an entry expires after its TTL whatever
+the process's time zone, and nodes in different zones agree. Expiry is
+enforced at read time (`get()`, `exists()`, `get_keys()` and `get_stats()`
+skip expired rows), and expired rows are **purged**: at most once per
+`pyfly.cache.postgres.purge-interval` (60 s by default) a write deletes one
+batch of them (`PURGE_BATCH`, 1000 rows), after its transaction commits. While
+a batch comes back full the purge stays due and the next write deletes the
+next batch, so a backlog (the expired rows of a release that never purged) is
+worked off a batch per write instead of landing on one request.
+`purge_expired()` deletes them all on demand, for a scheduled sweep.
 
 ### Write semantics
 
-`put()` issues an `INSERT ... ON CONFLICT (cache_key) DO UPDATE` statement
-(upsert), so concurrent writers are safe against unique-key violations.
-`put_if_absent()` uses `ON CONFLICT DO NOTHING` and returns `True` only if
-a row was actually inserted.
+`put()` is the dialect's upsert (`INSERT ... ON CONFLICT (cache_key) DO UPDATE`
+on PostgreSQL and SQLite, `ON DUPLICATE KEY UPDATE` on MySQL and MariaDB).
+`put_if_absent()` stores the value when the key is absent **or its entry
+expired**, and returns `True` only when this call stored it: on PostgreSQL and
+SQLite it is one `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE expires_at <= now`.
+A lock or a dedupe marker with a TTL therefore comes free once it expires, as
+with Redis `SET NX`.
+
+Outside a transaction every operation is a single statement on an autocommit
+connection on PostgreSQL: one round trip instead of `BEGIN`, the statement and
+`COMMIT`. Inside a unit of work on the cache's datasource the adapter joins it,
+so an entry written by a transaction that rolls back is rolled back too; a
+write made inside a read-only unit gets a unit of its own.
 
 Prefix eviction (`evict_by_prefix`) translates the prefix to a SQL `LIKE`
-pattern and deletes all matching rows in a single statement.
+pattern (a `GLOB` on SQLite) and deletes all matching rows in a single
+statement.
 
 ### Additional methods
 
@@ -280,10 +310,12 @@ pattern and deletes all matching rows in a single statement.
 |--------|-------------|
 | `get_keys(pattern, limit)` | Return up to `limit` non-expired keys matching a glob pattern (`*` / `?`). |
 | `get_stats()` | Return a `dict` with `size`, `type`, `requests`, `hits`, `misses`, `evictions`, `hit_rate`. |
+| `purge_expired()` | Delete every expired entry now; returns how many were deleted. |
 
 ### Auto-configuration
 
-Set `pyfly.cache.provider=postgres` and supply the connection URL:
+Set `pyfly.cache.provider=postgres`. The cache is on the primary datasource
+unless you name another one or give its URL:
 
 ```yaml
 pyfly:
@@ -291,8 +323,14 @@ pyfly:
     enabled: true
     provider: postgres
     postgres:
-      url: postgresql+asyncpg://user:pass@host/db
+      datasource: caching          # a datasource of pyfly.data.relational.datasources
+      # url: postgresql+asyncpg://user:pass@host/db   (or its URL; not both)
+      purge-interval: 60s          # seconds or a duration (500ms, 2m, 1h); 0 turns the purge on writes off
 ```
+
+The table is created at startup if `pyfly.data.relational.ddl-auto` is
+`create` (the default), `create-drop` or `update`; with `none` or `validate` it
+must exist (a migration creates it) or the startup fails, naming it.
 
 If `sqlalchemy.ext.asyncio` is not installed, a `ValueError` is raised
 immediately at startup with a message directing you to install
@@ -619,11 +657,14 @@ pyfly:
 | `pyfly.cache.ttl`          | `300`                        | Default TTL in seconds, applied when decorators do not specify their own TTL. |
 | `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (used when provider is `"redis"` or auto-detected). |
 | `pyfly.cache.postgres.url` | *(none)*: the primary datasource | PostgreSQL connection URL (used when provider is `"postgres"`). See below. |
+| `pyfly.cache.postgres.datasource` | *(none)*: the primary datasource | Name of the datasource the cache table lives on (instead of a URL). |
+| `pyfly.cache.postgres.purge-interval` | `60` | Time between purges of expired rows made by writes: seconds or a duration (`90s`, `500ms`, `2m`, `1h`); `0` turns them off. |
 
 `pyfly.cache.postgres.url` resolves through the
-[datasource registry](data-relational.md#module-datasources). With no URL, the cache uses the primary
-datasource (`pyfly.data.relational.url`), and with no primary either, startup fails with an error that
-names both keys. Before 26.09.08 it connected to `postgresql+asyncpg://localhost:5432/cache`. A URL
+[datasource registry](data-relational.md#module-datasources) (the application's `DataSourceRegistry` bean
+when it defines one), and `pyfly.cache.postgres.datasource` names one of its datasources; setting both is
+an error. With neither, the cache uses the primary datasource (`pyfly.data.relational.url`), and with no
+primary either, startup fails with an error that names both keys. Before 26.09.08 it connected to `postgresql+asyncpg://localhost:5432/cache`. A URL
 identical to a registered datasource's reuses that datasource's engine. Another URL registers the
 `cache` datasource, which gets the primary's pool settings and is disposed on shutdown.
 
