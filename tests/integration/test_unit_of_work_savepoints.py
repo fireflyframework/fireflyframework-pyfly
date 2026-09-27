@@ -27,6 +27,11 @@ A failure the application catches without rolling its savepoint back still dooms
 the transaction is dead until then, and the same rule holds on every backend): the unit rolls back and
 ``UnexpectedRollbackError`` is raised. Inside ``Propagation.NESTED``, such a failure rolls the NESTED
 scope back to its own savepoint instead, and the outer unit commits.
+
+A ``Propagation.NESTED`` scope that leaves changes pending (an added entity, a changed one) has them
+flushed when its savepoint is released. When that flush fails, the scope rolls back to its savepoint and
+its caller gets the failure; the outer unit is not marked and goes on, through ``@transactional`` and
+through ``TransactionTemplate``.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ import contextlib
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import Identity, Integer, String, text
+from sqlalchemy import Identity, Integer, String, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,7 +54,7 @@ from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.session import SessionProvider
-from pyfly.data.transaction import UnexpectedRollbackError
+from pyfly.data.transaction import TransactionTemplate, UnexpectedRollbackError
 from tests.support.backend_matrix import MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL)
@@ -74,6 +79,17 @@ _DUPLICATE_SAFE_INSERT = "INSERT INTO sp_item (name) VALUES (:name)"
 class SpInner:
     def __init__(self, items: SpItemRepository) -> None:
         self.items = items
+
+    @transactional(propagation=Propagation.NESTED)
+    async def add_without_flush(self, name: str) -> None:
+        self.items._session.add(SpItem(name=name))  # flushed when the NESTED scope's savepoint is released
+
+    @transactional(propagation=Propagation.NESTED)
+    async def rename_without_flush(self, name: str, new_name: str) -> None:
+        session = self.items._session
+        item = await session.scalar(select(SpItem).where(SpItem.name == name))
+        assert item is not None
+        item.name = new_name  # a dirty change, flushed when the NESTED scope's savepoint is released
 
     @transactional(propagation=Propagation.NESTED)
     async def nested_with_a_savepoint_left_open(self) -> None:
@@ -144,6 +160,29 @@ class SpService:
                 await savepoint.commit()
             except IntegrityError:
                 await savepoint.rollback()
+
+    @transactional
+    async def outer_around_a_nested_release_failure(self, variant: str, via: str) -> None:
+        await self.items.save(SpItem(name="a"))
+        await self.items.save(SpItem(name="b"))
+        try:
+            if via == "decorator":
+                if variant == "add":
+                    await self.inner.add_without_flush("a")
+                else:
+                    await self.inner.rename_without_flush("b", "a")
+            else:
+                async with TransactionTemplate(propagation=Propagation.NESTED).transaction():
+                    session = self.items._session
+                    if variant == "add":
+                        session.add(SpItem(name="a"))
+                    else:
+                        item = await session.scalar(select(SpItem).where(SpItem.name == "b"))
+                        assert item is not None
+                        item.name = "a"
+        except IntegrityError:
+            pass  # the NESTED scope rolled back to its savepoint; the outer unit goes on
+        await self.items.save(SpItem(name="c"))
 
     @transactional
     async def insert_raw_ignoring_duplicates(self, names: list[str]) -> None:
@@ -264,3 +303,12 @@ async def test_a_savepoint_left_open_with_a_failure_inside_nested_rolls_back_onl
 ) -> None:
     await savepoints.service.outer_around_a_nested_scope()
     assert await savepoints.committed() == ["outer", "outer-after"]
+
+
+@pytest.mark.parametrize("via", ["decorator", "template"])
+@pytest.mark.parametrize("variant", ["add", "dirty"])
+async def test_a_nested_scope_whose_release_fails_rolls_back_only_that_scope(
+    savepoints: Savepoints, variant: str, via: str
+) -> None:
+    await savepoints.service.outer_around_a_nested_release_failure(variant, via)
+    assert await savepoints.committed() == ["a", "b", "c"]

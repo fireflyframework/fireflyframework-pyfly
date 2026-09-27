@@ -1322,6 +1322,10 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
   unit rolls back with `UnexpectedRollbackError`). Inside `NESTED`, it rolls the `NESTED` scope back to
   its own savepoint instead. A savepoint's `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` run under the unit's
   operation guard.
+- A `NESTED` scope that leaves changes pending (an added entity, a changed one) has them flushed when its
+  savepoint is released. When that flush fails (a duplicate), the scope rolls back to its savepoint, its
+  caller gets the failure, and the outer unit is not marked: it goes on, exactly as when the failure is
+  raised inside the scope.
 - A failure that leaves the transaction healthy (a `before_flush` hook that refuses a flush before it
   writes anything, caught by the application) does not mark the unit, and its connection goes back to the
   pool as usual.

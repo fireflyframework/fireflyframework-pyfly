@@ -483,12 +483,14 @@ class SqlAlchemyTransactionManager:
         return savepoint
 
     async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
-        """``RELEASE SAVEPOINT`` (flushing what the nested scope left pending)."""
-        try:
-            async with unit.operation():
-                await savepoint.commit()
-        finally:
-            _forget_template_savepoint(unit, savepoint)
+        """``RELEASE SAVEPOINT``, flushing what the nested scope left pending first.
+
+        When that flush fails, SQLAlchemy rolls the savepoint back on the connection and leaves it open and
+        deactivated: it stays the ``NESTED`` scope's until ``rollback_to_savepoint`` closes it.
+        """
+        async with unit.operation():
+            await savepoint.commit()
+        _forget_template_savepoint(unit, savepoint)
 
     async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
         """``ROLLBACK TO SAVEPOINT``."""

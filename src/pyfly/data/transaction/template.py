@@ -32,7 +32,9 @@ Completion rules:
   :class:`~pyfly.data.transaction.errors.UnexpectedRollbackError`.
 - A ``no_rollback_for`` exception commits, unless the unit is rollback-only or its transaction is no
   longer active: then it rolls back and the original exception propagates (never ``PendingRollbackError``).
-- ``NESTED`` runs in a savepoint; a failure rolls back to it and does not mark the outer unit.
+- ``NESTED`` runs in a savepoint; a failure rolls back to it and does not mark the outer unit. So does a
+  failure of the flush that releasing the savepoint runs (what the scope left pending): the scope's caller
+  gets it, and the outer unit goes on.
 - ``timeout`` bounds a new unit's body with ``asyncio.timeout``; on expiry the unit rolls back and
   :class:`~pyfly.data.transaction.errors.TransactionTimedOutError` is raised.
 - Commit, rollback, savepoint release and session close are shielded: they run in their own task,
@@ -524,10 +526,10 @@ class TransactionBoundary:
 
     async def _exit_nested(self, unit: UnitOfWork, error: BaseException | None) -> None:
         depth = unit.savepoint_depth
-        unit.savepoint_depth -= 1
         manager = self._manager
         replaced = _poison_on_cancellation(unit, error, self._since)
         if unit.poisoned:
+            unit.savepoint_depth = depth - 1
             unit.set_rollback_only(error)
             if replaced:
                 assert error is not None
@@ -540,21 +542,50 @@ class TransactionBoundary:
             or unit.marked_within(depth)
             or _failed_within_savepoint(manager, unit, self._savepoint)
         ):
-            _result, rollback_error, cancelled = await run_shielded(
-                manager.rollback_to_savepoint(unit, self._savepoint)
-            )
-            if rollback_error is not None:
-                unit.set_rollback_only(rollback_error)
+            unit.savepoint_depth = depth - 1
+            cancelled = await self._roll_back_to_savepoint(unit, depth)
+            if cancelled:
+                raise asyncio.CancelledError
+            return
+        # Releasing flushes what the scope left pending (an added or a changed entity). That runs at the
+        # scope's depth: a failure there is the scope's, as one in its body would be. It rolls the scope back
+        # to its savepoint (SQLAlchemy leaves the failed savepoint open and deactivated) and reaches the
+        # scope's caller; the outer unit goes on.
+        _result, release_error, cancelled = await run_shielded(manager.release_savepoint(unit, self._savepoint))
+        unit.savepoint_depth = depth - 1
+        if release_error is not None:
+            if isinstance(release_error, Exception) and not unit.poisoned:
+                cancelled = await self._roll_back_to_savepoint(unit, depth) or cancelled
+                if manager.is_disconnect(release_error):
+                    unit.set_rollback_only(release_error)  # the connection went with the savepoint
             else:
-                unit.savepoint_rolled_back(depth)
-        else:
-            _result, release_error, cancelled = await run_shielded(manager.release_savepoint(unit, self._savepoint))
-            if release_error is not None:
                 unit.set_rollback_only(release_error)
-                if error is None:
-                    raise release_error
         if cancelled:
             raise asyncio.CancelledError
+        if release_error is None:
+            return
+        if error is not None:
+            # A no_rollback_for exception left the scope, and releasing its savepoint failed.
+            _logger.error(
+                "transaction_application_exception_overridden_by_commit_exception",
+                extra={"datasource": unit.datasource},
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            release_error.__context__ = error
+        raise release_error
+
+    async def _roll_back_to_savepoint(self, unit: UnitOfWork, depth: int) -> bool:
+        """``ROLLBACK TO SAVEPOINT`` of this ``NESTED`` scope, shielded: it forgets a rollback-only mark set
+        inside the scope, or marks the outer unit when it fails. Returns whether the task was cancelled
+        meanwhile."""
+        _result, rollback_error, cancelled = await run_shielded(
+            self._manager.rollback_to_savepoint(unit, self._savepoint)
+        )
+        if rollback_error is not None:
+            unit.set_rollback_only(rollback_error)
+        else:
+            unit.savepoint_rolled_back(depth)
+        return cancelled
 
     async def _exit_new(self, unit: UnitOfWork, error: BaseException | None) -> None:
         if isinstance(error, asyncio.CancelledError):

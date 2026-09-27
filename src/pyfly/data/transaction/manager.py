@@ -101,7 +101,8 @@ class TransactionManager(Protocol):
         ...
 
     async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
-        """Release (commit) *savepoint*."""
+        """Release (commit) *savepoint*. When that fails, the template rolls back to *savepoint* (which must
+        still be usable for that) and hands the failure to the ``NESTED`` scope's caller."""
         ...
 
     async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
