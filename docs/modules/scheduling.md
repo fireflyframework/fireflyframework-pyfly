@@ -614,7 +614,8 @@ pyfly:
 - **`memory`** — `InProcessDistributedLock`; real mutual exclusion **within one
   process** (with a TTL self-heal so a crashed/never-released name auto-frees
   after `lock_ttl`). Prevents a slow tick from overlapping its next tick in the
-  same process, but does **not** coordinate across processes.
+  same process, but does **not** coordinate across processes. A tick whose lock
+  ended at `lock_ttl` does not release the lock the next tick took since.
 - **`redis`** — `RedisDistributedLock`; cross-process via an atomic Redis
   `SET key value NX PX <ttl-ms>`, with an owner-token compare-and-delete release
   (an instance only releases a lock it still owns). The async Redis client is
@@ -636,9 +637,12 @@ pyfly:
   nodes compare `lock_until` with their own clocks: keep them synchronized (NTP).
   The table is created at startup if `pyfly.data.relational.ddl-auto` is
   `create` (the default), `create-drop` or `update`, and only checked with
-  `none` or `validate`. `LeaseLock.acquire(name, ttl, wait=...)`, `extend()` and `holder()`
-  (with a fencing token that grows at every acquisition) serve other work that
-  must run on one node at a time.
+  `none` or `validate`. A lock name is at most 255 characters
+  (`LeaseLock.MAX_NAME_LENGTH`, the length of `pyfly_locks.name`): a longer one
+  raises `ValueError` before any statement runs, where MySQL and MariaDB would
+  otherwise truncate it into a lease nobody could release. `LeaseLock.acquire(name, ttl, wait=...)`,
+  `extend()` and `holder()` (with a fencing token that grows at every
+  acquisition) serve other work that must run on one node at a time.
 - **`postgres`** — the same lease table on a PostgreSQL datasource. With
   `pyfly.scheduling.lock.postgres.advisory: true` it is `PostgresAdvisoryLock`
   instead, an opt-in accelerator on Postgres **session-level advisory locks**
@@ -648,9 +652,11 @@ pyfly:
   holds a pooled connection for the whole job, in `AUTOCOMMIT` (idle, never
   idle in transaction, so `idle_in_transaction_session_timeout` cannot drop it
   mid-job); a watchdog ends the lock at `lock_ttl` with a WARNING
-  (`scheduler_advisory_lock_expired`); and an unlock that fails discards the
-  connection instead of returning a session that still holds the lock to the
-  pool. The datasource must be PostgreSQL, or the startup fails.
+  (`scheduler_advisory_lock_expired`) but does not cancel the job, as with the
+  lease table; and an acquisition or an unlock that fails (a cancellation
+  included) discards the connection instead of returning a session that may
+  hold the lock to the pool. The datasource must be PostgreSQL, or the startup
+  fails.
 
 **When to use which:**
 
