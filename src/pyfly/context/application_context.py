@@ -23,7 +23,6 @@ import logging
 import sys
 import types
 import typing
-import weakref
 from collections import deque
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -47,6 +46,7 @@ from pyfly.context.events import (
     ContextClosedEvent,
     ContextRefreshedEvent,
 )
+from pyfly.context.lifecycle import marked_method_names
 from pyfly.context.post_processor import BeanPostProcessor
 from pyfly.core.config import Config
 
@@ -75,33 +75,6 @@ class _DeferredBeanMethod:
 
     def with_cause(self, cause: NoSuchBeanError | NoUniqueBeanError) -> _DeferredBeanMethod:
         return dataclasses.replace(self, cause=cause)
-
-
-# The names of each class's methods marked with a lifecycle marker (``__pyfly_post_construct__``,
-# ``__pyfly_pre_destroy__``), found once per class. Every bean the container creates is scanned, so
-# a transient bean resolved per call must not pay a full ``dir()`` walk each time.
-_MARKED_NAMES: weakref.WeakKeyDictionary[type, dict[str, tuple[str, ...]]] = weakref.WeakKeyDictionary()
-
-
-def _marked_names(cls: type, marker: str) -> tuple[str, ...]:
-    """The attribute names of *cls* whose function carries *marker* (properties are never evaluated)."""
-    try:
-        per_class = _MARKED_NAMES.setdefault(cls, {})
-    except TypeError:  # a class that cannot be weakly referenced is scanned every time
-        per_class = {}
-    names = per_class.get(marker)
-    if names is None:
-        found: list[str] = []
-        for attr_name in dir(cls):
-            static_attr = inspect.getattr_static(cls, attr_name, None)
-            if isinstance(static_attr, (property, functools.cached_property)):
-                continue
-            if isinstance(static_attr, (staticmethod, classmethod)):
-                static_attr = static_attr.__func__
-            if getattr(static_attr, marker, False):
-                found.append(attr_name)
-        names = per_class[marker] = tuple(found)
-    return names
 
 
 #: The methods a scoped ``@bean`` product that declares no other destruction is destroyed with, in the
@@ -162,7 +135,7 @@ def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
     AOP-woven wrapper) is the one called.
     """
     members: list[tuple[str, Any]] = []
-    for attr_name in _marked_names(type(instance), marker):
+    for attr_name in marked_method_names(type(instance), marker):
         try:
             member = getattr(instance, attr_name)
         except Exception:  # noqa: BLE001 — a failing attribute is not a lifecycle method
@@ -803,11 +776,11 @@ class ApplicationContext:
                 )
                 return None
             return declared
-        if not infer or _marked_names(type(instance), "__pyfly_pre_destroy__") or self._has_lifecycle_methods(instance):
+        if not infer or marked_method_names(type(instance), "__pyfly_pre_destroy__"):
             return None
-        if _registry_engine(instance):
-            # An engine of the datasource registry (a scoped @bean handing out registry.engine("name")):
-            # the registry disposes it, last; the bean's eviction must not.
+        if self._has_lifecycle_methods(instance) or _registry_engine(instance):
+            # A lifecycle bean releases what it holds in stop(). An engine of the datasource registry (a
+            # scoped @bean handing out registry.engine("name")) is the registry's to dispose, last.
             return None
         for candidate in _INFERRED_DESTROY_METHODS:
             member = getattr(instance, candidate, None)

@@ -29,6 +29,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from pyfly.context.events import RefreshScopeRefreshedEvent
+from pyfly.context.lifecycle import marked_method_names
 
 if TYPE_CHECKING:
     from pyfly.container.container import Container
@@ -41,10 +42,8 @@ _logger = logging.getLogger(__name__)
 
 async def _run_pre_destroy(key: str, instance: Any) -> None:
     """Call the ``@pre_destroy`` methods of *instance*; a failure is logged, not raised."""
-    from pyfly.context.application_context import _marked_names
-
     del key
-    for attr_name in _marked_names(type(instance), "__pyfly_pre_destroy__"):
+    for attr_name in marked_method_names(type(instance), "__pyfly_pre_destroy__"):
         try:
             result = getattr(instance, attr_name)()
             if inspect.isawaitable(result):
