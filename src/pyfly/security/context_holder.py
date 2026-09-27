@@ -25,6 +25,8 @@ returns, in this order:
    bearer token, HTTP Basic, X.509, the session a form login, an OAuth2 login or a switch-user stored)
    is the one seen, including a filter that sets only ``request.state``;
 3. ``RequestContext.current().security_context``, the older bridge some filters and applications set.
+   It also wins over an anonymous ``request.state.security_context`` (what ``SecurityFilter`` sets when
+   it authenticated nobody) when it holds an authenticated principal.
 
 Values set on the holder follow ``contextvars`` rules: a task started from the block inherits them, and
 leaving the block restores the previous one.
@@ -64,9 +66,14 @@ class SecurityContextHolder:
             return None
         state: Any = request_context.get(REQUEST_STATE_ATTRIBUTE)
         established = getattr(state, "security_context", None) if state is not None else None
-        if isinstance(established, SecurityContext):
-            return established
-        return request_context.security_context
+        bridged = request_context.security_context
+        if not isinstance(established, SecurityContext):
+            return bridged
+        if not established.is_authenticated and bridged is not None and bridged.is_authenticated:
+            # SecurityFilter sets the anonymous context when it authenticated nobody; a principal a custom
+            # filter or the application put on RequestContext is the one that counts then.
+            return bridged
+        return established
 
     @staticmethod
     def get_authenticated_user_id() -> str | None:

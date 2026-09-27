@@ -45,13 +45,15 @@ import inspect
 import threading
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from contextvars import Token
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
 
-from pyfly.security.context import SecurityContext
-from pyfly.security.context_holder import SecurityContextHolder
+if TYPE_CHECKING:
+    # Imported where they are used: pyfly.security pulls in the web adapters, and the relational entities
+    # import this module, so a data-only application does not pay for them at import time.
+    from pyfly.security.context import SecurityContext
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -85,6 +87,8 @@ class SecurityContextAuditorAware(AuditorAware):
     :class:`~pyfly.security.context_holder.SecurityContextHolder`, or ``None``."""
 
     def get_current_auditor(self) -> str | None:
+        from pyfly.security.context_holder import SecurityContextHolder
+
         return SecurityContextHolder.get_authenticated_user_id()
 
 
@@ -204,25 +208,44 @@ async def current_auditor() -> str | None:
 # ---------------------------------------------------------------------------------------------------------
 
 
+_run_as_tokens: ContextVar[tuple[tuple[RunAs, Token[SecurityContext | None]], ...]] = ContextVar(
+    "pyfly_run_as_tokens", default=()
+)
+"""The restore points of the ``run_as`` blocks the current task is in, innermost last. They live in the
+task's context, not on the :class:`RunAs`: one instance (a module-level ``SYSTEM = run_as("system")``) is
+entered by many tasks at once, and each must restore its own previous context."""
+
+
 class RunAs:
-    """A block, or every call of a function, that runs as a given principal (:func:`run_as`)."""
+    """A block, or every call of a function, that runs as a given principal (:func:`run_as`).
+
+    One instance may be shared: entered by concurrent tasks, or nested in itself.
+    """
 
     def __init__(self, context: SecurityContext) -> None:
         self._context = context
-        self._tokens: list[Token[SecurityContext | None]] = []
 
     @property
     def context(self) -> SecurityContext:
         return self._context
 
     def __enter__(self) -> SecurityContext:
-        self._tokens.append(SecurityContextHolder.set_context(self._context))
+        from pyfly.security.context_holder import SecurityContextHolder
+
+        token = SecurityContextHolder.set_context(self._context)
+        _run_as_tokens.set((*_run_as_tokens.get(), (self, token)))
         return self._context
 
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        SecurityContextHolder.reset_context(self._tokens.pop())
+        from pyfly.security.context_holder import SecurityContextHolder
+
+        entered = _run_as_tokens.get()
+        if not entered or entered[-1][0] is not self:
+            raise RuntimeError("run_as blocks must be left in the reverse order they were entered, in the same task")
+        _run_as_tokens.set(entered[:-1])
+        SecurityContextHolder.reset_context(entered[-1][1])
 
     def __call__(self, function: F) -> F:
         """Decorate *function* (``async def`` or not) so that every call runs as the principal."""
@@ -246,6 +269,8 @@ class RunAs:
 
 @contextmanager
 def _using(context: SecurityContext) -> Iterator[None]:
+    from pyfly.security.context_holder import SecurityContextHolder
+
     token = SecurityContextHolder.set_context(context)
     try:
         yield
@@ -266,5 +291,7 @@ def run_as(principal: str | SecurityContext) -> RunAs:
         with run_as("system:import"):
             await importer.load(rows)
     """
+    from pyfly.security.context import SecurityContext
+
     context = principal if isinstance(principal, SecurityContext) else SecurityContext(user_id=principal)
     return RunAs(context)

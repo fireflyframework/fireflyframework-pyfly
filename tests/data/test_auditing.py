@@ -502,6 +502,51 @@ async def test_run_as_names_the_auditor_of_a_block_and_of_a_function(tmp_path: P
     }
 
 
+SYSTEM_IMPORTER = run_as("system:importer")
+"""One principal shared by every job that uses it, declared once at module level."""
+
+
+async def test_one_run_as_instance_is_shared_by_concurrent_tasks() -> None:
+    """Each task entering the shared block keeps its own restore point: before, the instance kept the
+    tokens, so the first task to leave popped the other's and both raised ``ValueError``."""
+
+    async def job(delay: float) -> tuple[str | None, str | None]:
+        with SYSTEM_IMPORTER:
+            await asyncio.sleep(delay)
+            inside = SecurityContextHolder.get_authenticated_user_id()
+        return inside, SecurityContextHolder.get_authenticated_user_id()
+
+    results = await asyncio.gather(job(0.01), job(0.05), job(0.0))
+    assert results == [("system:importer", None)] * 3
+    assert SecurityContextHolder.get_context() is None
+
+    with SYSTEM_IMPORTER:  # nested in itself, then left in order
+        with SYSTEM_IMPORTER:
+            assert SecurityContextHolder.get_authenticated_user_id() == "system:importer"
+        assert SecurityContextHolder.get_authenticated_user_id() == "system:importer"
+    assert SecurityContextHolder.get_context() is None
+
+
+async def test_concurrent_jobs_sharing_a_run_as_instance_record_it(tmp_path: Path) -> None:
+    async with _context(tmp_path) as (ctx, url):
+        service_ = ctx.get_bean(AuditedDocService)
+
+        async def job(title: str, delay: float) -> None:
+            with SYSTEM_IMPORTER:
+                await asyncio.sleep(delay)
+                await service_.create(title)
+
+        await asyncio.gather(job("first", 0.0), job("second", 0.05))  # first leaves first
+        await service_.create("after")
+
+    rows = await _rows(url, AuditedDoc)
+    assert {title: row[:2] for title, row in rows.items()} == {
+        "first": ("system:importer", "system:importer"),
+        "second": ("system:importer", "system:importer"),
+        "after": (None, None),
+    }
+
+
 async def test_an_update_without_a_principal_does_not_keep_the_last_user(tmp_path: Path) -> None:
     async with _context(tmp_path) as (ctx, url):
         service_ = ctx.get_bean(AuditedDocService)

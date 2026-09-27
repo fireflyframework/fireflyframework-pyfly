@@ -77,9 +77,27 @@ def test_the_request_state_is_read_live_and_wins_over_request_context() -> None:
         assert SecurityContextHolder.get_authenticated_user_id() == "bearer-subject"
         request.state.security_context = SecurityContext(user_id="session-user")  # a later filter
         assert SecurityContextHolder.get_authenticated_user_id() == "session-user"
+        request_context.security_context = None
         request.state.security_context = SecurityContext.anonymous()
         assert SecurityContextHolder.get_context() == SecurityContext.anonymous()
         assert SecurityContextHolder.get_authenticated_user_id() is None
+    finally:
+        RequestContext.clear()
+
+
+def test_an_authenticated_request_context_wins_over_an_anonymous_request_state() -> None:
+    """``SecurityFilter`` always sets ``request.state.security_context``, the anonymous context when it
+    authenticated nobody; a principal a custom filter or the application put on ``RequestContext`` (the
+    older bridge) is still the one seen then."""
+    request = _request()
+    request_context = RequestContext.init()
+    request_context.set(REQUEST_STATE_ATTRIBUTE, request.state)
+    try:
+        request.state.security_context = SecurityContext.anonymous()
+        request_context.security_context = SecurityContext(user_id="custom-filter-user")
+        assert SecurityContextHolder.get_authenticated_user_id() == "custom-filter-user"
+        request_context.security_context = SecurityContext.anonymous()
+        assert SecurityContextHolder.get_context() == SecurityContext.anonymous()
     finally:
         RequestContext.clear()
 
