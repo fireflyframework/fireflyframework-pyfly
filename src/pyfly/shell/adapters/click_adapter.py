@@ -96,16 +96,6 @@ def _build_click_param(sp: ShellParam) -> click.Parameter:
     return click.Argument([sp.name], **kwargs_arg)
 
 
-def _wrap_handler(handler: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap *handler* so Click can call it.
-
-    Click's callback of an async handler returns the handler's coroutine instead of running it: the adapter
-    awaits it on the running loop (:meth:`ClickShellAdapter.ainvoke`), or runs it with ``asyncio.run()`` when
-    no loop is running (:meth:`ClickShellAdapter.invoke`).
-    """
-    return handler
-
-
 async def _read_line(prompt: str) -> str:
     """Read a line with ``input()`` in a daemon thread, keeping the event loop free.
 
@@ -165,7 +155,10 @@ class ClickShellAdapter:
 
         cmd = click.Command(
             name=key,
-            callback=_wrap_handler(handler),
+            # Click's callback of an async handler returns the handler's coroutine instead of running it: the
+            # adapter awaits it on the running loop (ainvoke), or runs it with asyncio.run() when no loop runs
+            # (invoke).
+            callback=handler,
             params=click_params,
             help=help_text or None,
         )
