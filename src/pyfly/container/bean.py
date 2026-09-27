@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar, overload
 
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec
 
 F = TypeVar("F", bound=Callable[..., Any])
 T = TypeVar("T", bound=type)
@@ -38,7 +38,7 @@ def bean(func: F) -> F: ...
 def bean(
     *,
     name: str = "",
-    scope: Scope = Scope.SINGLETON,
+    scope: ScopeSpec = Scope.SINGLETON,
     primary: bool = False,
     profile: str = "",
     destroy_method: str = INFER_DESTROY_METHOD,
@@ -49,7 +49,7 @@ def bean(
     func: F | None = None,
     *,
     name: str = "",
-    scope: Scope = Scope.SINGLETON,
+    scope: ScopeSpec = Scope.SINGLETON,
     primary: bool = False,
     profile: str = "",
     destroy_method: str = INFER_DESTROY_METHOD,
@@ -60,7 +60,8 @@ def bean(
 
     Args:
         name: Explicit bean name (defaults to the method name).
-        scope: Bean scope (default singleton).
+        scope: Bean scope (default singleton): a :class:`Scope`, or the name of a custom scope
+            such as ``"refresh"``.
         primary: Mark this the primary candidate when several beans share an
             interface — the ``@Bean @Primary`` equivalent.
         profile: Only create this bean when the expression matches the active

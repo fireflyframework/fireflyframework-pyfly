@@ -398,12 +398,12 @@ class _ScopedDataSource:
 @configuration
 class _RefreshScopedDataSources:
     @scoped_proxy
-    @bean(name="orders_source", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="orders_source", scope=REFRESH_SCOPE_NAME)
     def orders_source(self) -> _ScopedDataSource:
         return _ScopedDataSource(_REFRESH_URLS["orders"], _REFRESH_URLS["app"])
 
     @scoped_proxy
-    @bean(name="audit_source", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="audit_source", scope=REFRESH_SCOPE_NAME)
     def audit_source(self) -> _ScopedDataSource:
         return _ScopedDataSource(_REFRESH_URLS["audit"], _REFRESH_URLS["app"])
 
@@ -485,7 +485,7 @@ class _RefreshScopedEngine:
     """A proxied refresh-scoped engine bean, nothing else."""
 
     @scoped_proxy
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self) -> AsyncEngine:
         return _app_engine(_REPORTING["url"], _REPORTING["app"])
 

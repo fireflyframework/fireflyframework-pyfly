@@ -56,7 +56,7 @@ async def test_union_registration_key_is_introspectable() -> None:
     c = Container()
     c.register(Alpha, scope=Scope.SINGLETON)
     c.register(Beta, scope=Scope.SINGLETON)
-    c.register(Alpha | Beta, scope=Scope.SINGLETON)  # type: ignore[arg-type]
+    c.register(Alpha | Beta, scope=Scope.SINGLETON)
     provider = _provider(c)
 
     json.dumps(await provider.get_bean_graph())
@@ -68,7 +68,7 @@ async def test_typevar_registration_key_is_introspectable() -> None:
     t = TypeVar("T")
     c = Container()
     c.register(Alpha, scope=Scope.SINGLETON)
-    c.register(t, scope=Scope.SINGLETON)  # type: ignore[arg-type]
+    c.register(t, scope=Scope.SINGLETON)
     provider = _provider(c)
 
     json.dumps(await provider.get_bean_graph())

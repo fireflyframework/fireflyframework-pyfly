@@ -253,7 +253,7 @@ async def test_a_user_session_factory_replaces_the_auto_configured_one(tmp_path:
     try:
         factory = ctx.get_bean(async_sessionmaker)
         assert await _database_of(factory) == "user.db"
-        assert ctx.get_bean(RoutingSessionFactory)._primary is factory  # type: ignore[attr-defined]
+        assert ctx.get_bean(RoutingSessionFactory)._primary is factory
     finally:
         await ctx.stop()
         await factory.kw["bind"].dispose()
@@ -346,8 +346,9 @@ async def _own(tmp_path: Path, name: str, owner: str) -> str:
     engine = create_async_engine(url)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(_DatabaseOwner.__table__.create)
-            await conn.execute(_DatabaseOwner.__table__.insert().values(id=1, name=owner))
+            table = Base.metadata.tables[_DatabaseOwner.__tablename__]
+            await conn.run_sync(table.create)
+            await conn.execute(table.insert().values(id=1, name=owner))
     finally:
         await engine.dispose()
     _URLS[name] = url
@@ -438,7 +439,7 @@ async def test_a_request_scoped_session_factory_leaves_the_primary_in_place(tmp_
 
 @configuration
 class _AuditSessions:
-    @bean(name="audit_sessions", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="audit_sessions", scope=REFRESH_SCOPE_NAME)
     def audit_sessions(self) -> async_sessionmaker[AsyncSession]:
         return _scoped_sessions("audit")
 
@@ -464,7 +465,7 @@ async def test_a_refresh_scoped_session_factory_leaves_the_primary_in_place(tmp_
 @configuration
 class _ReportingEngine:
     @scoped_proxy
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self) -> AsyncEngine:
         return create_async_engine(_URLS["reporting"])
 

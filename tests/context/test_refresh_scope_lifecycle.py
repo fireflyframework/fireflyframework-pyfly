@@ -237,7 +237,7 @@ _BUILT: list[AsyncEngine] = []
 @configuration
 class _ScopedEngineConfiguration:
     @scoped_proxy
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self, config: Config) -> AsyncEngine:
         engine = create_async_engine(str(config.get("reporting.url")))
         _BUILT.append(engine)
@@ -329,7 +329,7 @@ class _DocumentedScopedEngine:
     """A proxied refresh-scoped engine bean and nothing else: no ``@pre_destroy`` anywhere."""
 
     @scoped_proxy
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self, config: Config) -> AsyncEngine:
         engine = create_async_engine(str(config.get("reporting.url")))
         seq = len(_ENGINES) + 1
@@ -469,27 +469,27 @@ class _OwnPreDestroy(_Declared, _WithPreDestroy):
 
 @configuration
 class _ScopedResources:
-    @bean(scope=REFRESH_SCOPE_NAME, destroy_method="shutdown")  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME, destroy_method="shutdown")
     def explicit(self) -> _Explicit:
         return _Explicit("explicit")
 
-    @bean(scope=REFRESH_SCOPE_NAME, destroy_method="")  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME, destroy_method="")
     def disabled(self) -> _Disabled:
         return _Disabled("disabled")
 
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def inferred(self) -> _Inferred:
         return _Inferred("inferred")
 
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def inferred_aclose(self) -> _InferredAclose:
         return _InferredAclose("aclose")
 
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def inferred_skips_arguments(self) -> _InferredSkipsArguments:
         return _InferredSkipsArguments("arguments")
 
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def own_pre_destroy(self) -> _OwnPreDestroy:
         return _OwnPreDestroy("own")
 
@@ -701,7 +701,7 @@ class ReportingDatabase:
 @configuration
 class _ReportingConfiguration:
     @scoped_proxy
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_database(self, config: Config) -> ReportingDatabase:
         return ReportingDatabase(str(config.get("reporting.url")))
 

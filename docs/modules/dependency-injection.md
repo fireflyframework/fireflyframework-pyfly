@@ -153,7 +153,7 @@ The `Registration` dataclass has these fields:
 | Field | Type | Description |
 |---|---|---|
 | `impl_type` | `type` | The concrete class being registered. |
-| `scope` | `Scope` | Lifecycle scope (default `SINGLETON`). |
+| `scope` | `Scope \| str` | Lifecycle scope (default `SINGLETON`), or a custom scope name. |
 | `condition` | `Callable \| None` | Optional condition callable. |
 | `instance` | `Any` | Cached singleton instance (set after first resolution). |
 | `name` | `str` | Bean name for named resolution. |
@@ -440,7 +440,7 @@ class PaymentService:
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | `""` | Bean name for named resolution. |
-| `scope` | `Scope` | `Scope.SINGLETON` | Lifecycle scope. |
+| `scope` | `Scope \| str` | `Scope.SINGLETON` | Lifecycle scope: a `Scope`, or a custom scope name such as `"refresh"`. |
 | `profile` | `str` | `""` | Only activate when this profile is active. Supports negation (`"!test"`) and comma-separated values (`"dev,staging"`). |
 | `condition` | `Callable[..., bool] \| None` | `None` | Callable that must return `True` for the bean to be registered. |
 
@@ -826,7 +826,7 @@ During `ApplicationContext.start()`, the context:
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | `""` | Bean name. Defaults to the method name if not specified. |
-| `scope` | `Scope` | `Scope.SINGLETON` | Lifecycle scope of the produced bean. |
+| `scope` | `Scope \| str` | `Scope.SINGLETON` | Lifecycle scope of the produced bean: a `Scope`, or a custom scope name such as `"refresh"`. |
 | `primary` | `bool` | `False` | The primary candidate among beans of one type (see [@bean(primary=..., profile=...)](#beanprimary-profile)). |
 | `profile` | `str` | `""` | Create the bean only for matching profiles. |
 | `destroy_method` | `str` | `INFER_DESTROY_METHOD` | The method called on the product when the bean is destroyed, after its `@pre_destroy` (a coroutine is awaited). `""` declares none. |
@@ -2160,7 +2160,7 @@ The full `@bean` signature is now:
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | `""` | Bean name (defaults to the method name). |
-| `scope` | `Scope` | `Scope.SINGLETON` | Lifecycle scope of the produced bean. |
+| `scope` | `Scope \| str` | `Scope.SINGLETON` | Lifecycle scope of the produced bean: a `Scope`, or a custom scope name such as `"refresh"`. |
 | `primary` | `bool` | `False` | Mark this the primary candidate for its interface. |
 | `profile` | `str` | `""` | Only create the bean when the profile expression matches. |
 

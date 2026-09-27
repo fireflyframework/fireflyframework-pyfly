@@ -121,7 +121,7 @@ async def test_a_transient_factory_runs_once_per_resolution() -> None:
 
 @configuration
 class _ReportingConfiguration:
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self, config: Config) -> AsyncEngine:
         engine = create_async_engine(str(config.get("reporting.url")))
         _BUILT.append(engine)
@@ -267,7 +267,7 @@ async def test_a_request_scoped_factory_with_a_parametrized_hint_runs_only_insid
 
 @configuration
 class _ReportingSessionFactories:
-    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(scope=REFRESH_SCOPE_NAME)
     def reporting_sessions(self, config: Config) -> async_sessionmaker[AsyncSession]:
         _CALLS.append("reporting_sessions")
         return _sessions(str(config.get("reporting.url")))

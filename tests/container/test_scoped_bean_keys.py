@@ -86,11 +86,11 @@ async def _write(factory: async_sessionmaker[AsyncSession], body: str) -> None:
 
 @configuration
 class _RefreshScopedFactories:
-    @bean(name="reporting_sessions", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="reporting_sessions", scope=REFRESH_SCOPE_NAME)
     def reporting_sessions(self) -> async_sessionmaker:  # type: ignore[type-arg]
         return async_sessionmaker(_ENGINES["reporting"], expire_on_commit=False)
 
-    @bean(name="analytics_sessions", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="analytics_sessions", scope=REFRESH_SCOPE_NAME)
     def analytics_sessions(self) -> async_sessionmaker:  # type: ignore[type-arg]
         return async_sessionmaker(_ENGINES["analytics"], expire_on_commit=False)
 
@@ -160,11 +160,11 @@ async def test_two_refresh_scoped_factories_keep_their_database_beside_the_relat
 
 @configuration
 class _RefreshScopedEngines:
-    @bean(name="reporting_engine", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="reporting_engine", scope=REFRESH_SCOPE_NAME)
     def reporting_engine(self) -> AsyncEngine:
         return create_async_engine(_ENGINES["reporting"].url)
 
-    @bean(name="analytics_engine", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    @bean(name="analytics_engine", scope=REFRESH_SCOPE_NAME)
     def analytics_engine(self) -> AsyncEngine:
         return create_async_engine(_ENGINES["analytics"].url)
 
