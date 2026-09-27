@@ -32,12 +32,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from pyfly.session.adapters.sql_session_store import SqlSessionStore
 from sqlalchemy import func, select
 
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, session_registrations, sessions
 from pyfly.security.context import SecurityContext
 from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
+from pyfly.session.adapters.sql_session_store import SqlSessionStore
 from pyfly.session.concurrency import ConcurrencyControlPolicy, SessionConcurrencyController
 from tests.integration._repository_harness import repository_datasources
 from tests.support.backend_matrix import RelationalBackend

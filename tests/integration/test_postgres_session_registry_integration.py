@@ -27,6 +27,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from pyfly.context.application_context import ApplicationContext
+from pyfly.data.relational.framework_schema import session_principals, session_registrations, sessions
 from pyfly.session.concurrency import SessionConcurrencyController
 from pyfly.session.ports.outbound import SessionStore
 from tests.support.backend_matrix import RelationalBackend
@@ -36,8 +37,11 @@ CONCURRENCY = 20
 
 @contextlib.asynccontextmanager
 async def _instances(backend: RelationalBackend, strategy: str) -> AsyncIterator[list[tuple[Any, Any]]]:
+    # The framework tables are created here and the contexts keep ddl-auto=none: with create, each context
+    # would run create_all over Base.metadata, which holds every model imported in the run (some of them
+    # use DDL that MySQL/MariaDB reject). The store and the registry then only check their tables at start.
+    await backend.create_tables(sessions, session_registrations, session_principals)
     overrides = {
-        "pyfly.data.relational.ddl-auto": "create",
         "pyfly.session.enabled": "true",
         "pyfly.session.store": "postgres",
         "pyfly.session.concurrency.enabled": "true",

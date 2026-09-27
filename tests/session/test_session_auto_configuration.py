@@ -22,13 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pyfly.session.adapters.sql_session_store import SqlSessionStore
 
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.session.adapters.memory import InMemorySessionStore
 from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
+from pyfly.session.adapters.sql_session_store import SqlSessionStore
 from pyfly.session.concurrency import SessionConcurrencyController
 from pyfly.session.ports.outbound import SessionStore
 
