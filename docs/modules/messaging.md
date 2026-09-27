@@ -16,14 +16,15 @@ runtime.
 3. [MessageBrokerPort Protocol](#messagebrokerport-protocol)
 4. [MessageHandler Callable](#messagehandler-callable)
 5. [The @message_listener Decorator](#the-message_listener-decorator)
-6. [Adapters](#adapters)
+6. [Delivery Guarantees](#delivery-guarantees)
+7. [Adapters](#adapters)
    - [InMemoryMessageBroker](#inmemorymessagebroker)
    - [KafkaAdapter](#kafkaadapter)
    - [RabbitMQAdapter](#rabbitmqadapter)
-7. [Auto-Configuration](#auto-configuration)
-8. [Configuration Reference](#configuration-reference)
-9. [Complete Example: Order Processing Pipeline](#complete-example-order-processing-pipeline)
-10. [Testing with the In-Memory Broker](#testing-with-the-in-memory-broker)
+8. [Auto-Configuration](#auto-configuration)
+9. [Configuration Reference](#configuration-reference)
+10. [Complete Example: Order Processing Pipeline](#complete-example-order-processing-pipeline)
+11. [Testing with the In-Memory Broker](#testing-with-the-in-memory-broker)
 
 ---
 
@@ -77,6 +78,10 @@ msg = Message(
 | `value`   | `bytes`           | *required* | The raw message payload. Serialization is up to you (JSON, Avro, Protobuf, etc.). |
 | `key`     | `bytes \| None`   | `None`     | An optional partition/routing key. Kafka uses this for partition assignment; RabbitMQ ignores it. |
 | `headers` | `dict[str, str]`  | `{}`       | Key-value metadata headers attached to the message. |
+| `partition` | `int \| None`  | `None`     | The Kafka partition the message was read from. |
+| `offset`  | `int \| None`    | `None`     | The Kafka offset of the message. With `topic` and `partition`, a key to deduplicate on. |
+| `message_id` | `str \| None` | `None`     | The AMQP message id on RabbitMQ. `RabbitMQAdapter.publish()` gives every message one, and a redelivery or a retry keeps it. |
+| `delivery_attempt` | `int`   | `1`        | How many times this message has been delivered to the listener, this delivery included. |
 
 Because the dataclass is frozen, `Message` instances are immutable and safe to
 pass across async boundaries.
@@ -168,9 +173,9 @@ async def handle_order(msg: Message) -> None:
 |---------------------|----------------|------------|-------------|
 | `topic`             | `str`          | *required* | The topic to listen on. |
 | `group`             | `str \| None`  | `None`     | Consumer group name. Handlers in the same group receive messages in round-robin fashion (only one handler per group processes each message). |
-| `retries`           | `int`          | `0`        | Number of times to re-invoke the handler if it raises. Keyword-only. |
-| `retry_delay`       | `float`        | `0.0`      | Base delay in seconds between retries; attempt *N* waits `retry_delay * N` (linear backoff). Keyword-only. |
-| `dead_letter_topic` | `str \| None`  | `None`     | When set, a message still failing after `retries` is re-published here instead of propagating. Keyword-only. |
+| `retries`           | `int \| None`  | `None`     | Deliveries after the first one when the handler fails (`0` dead-letters at the first failure). `None` keeps the container's `retry.max-attempts` (5 attempts in all). Keyword-only. |
+| `retry_delay`       | `float \| None` | `None`    | Linear back-off: attempt *N+1* waits `retry_delay * N` seconds. `None` keeps the container's exponential back-off (1 s, doubling, at most 30 s). Keyword-only. |
+| `dead_letter_topic` | `str \| None`  | `None`     | Where a message still failing after its last attempt goes, instead of `<topic>.DLT` (Kafka) or `<queue>.dlq` (RabbitMQ). Keyword-only. |
 
 ### How It Works
 
@@ -182,13 +187,15 @@ function:
 | `__pyfly_message_listener__`       | `True` |
 | `__pyfly_listener_topic__`         | The topic string |
 | `__pyfly_listener_group__`         | The group string (or `None`) |
-| `__pyfly_listener_retries__`       | The retry count |
-| `__pyfly_listener_retry_delay__`   | The base retry delay (seconds) |
+| `__pyfly_listener_retries__`       | The retry count (or `None`) |
+| `__pyfly_listener_retry_delay__`   | The base retry delay in seconds (or `None`) |
 | `__pyfly_listener_dlq__`           | The dead-letter topic (or `None`) |
 
 During application startup, the framework scans registered beans for functions
 carrying `__pyfly_message_listener__ = True` and calls
-`broker.subscribe(topic, handler, group)` automatically.
+`broker.subscribe(topic, handler, group)` automatically. On Kafka and RabbitMQ the
+handler reaches the broker as a `ListenerEndpoint` that carries its `retries`,
+`retry_delay` and `dead_letter_topic`; the broker's listener container applies them.
 
 ### Using Inside a Service Class
 
@@ -208,16 +215,17 @@ class PaymentProcessor:
         await self._process_payment(data)
 ```
 
-### Retry and Dead-Letter Routing
+### Retries and Dead Letters
 
-A listener can transparently retry on failure and route exhausted messages to a
-dead-letter topic (DLQ). This is **adapter-agnostic**: the handler is wrapped
-once at wiring time, so retry/DLQ behaves identically across the Kafka,
-RabbitMQ, and in-memory brokers. It mirrors Spring Kafka's `@RetryableTopic` /
-`DefaultErrorHandler` dead-letter routing.
+A failing listener is attempted again after a back-off, and after its last attempt its
+message is dead-lettered. On Kafka and RabbitMQ the listener container does this outside
+the delivery's unit of work, and each attempt reaches the broker again (see
+[Delivery Guarantees](#delivery-guarantees)); on the in-memory broker the handler is
+retried in process.
 
 ```python
 from pyfly.container import service
+from pyfly.data.transactional import transactional
 from pyfly.messaging import message_listener, Message
 
 @service
@@ -226,34 +234,33 @@ class PaymentProcessor:
     @message_listener(
         topic="payments",
         group="payment-group",
-        retries=3,                      # re-invoke up to 3 times on failure
-        retry_delay=0.5,                # linear backoff: 0.5s, 1.0s, 1.5s
+        retries=3,                      # up to 4 deliveries in all
+        retry_delay=0.5,                # linear back-off: 0.5 s, 1.0 s, 1.5 s
         dead_letter_topic="payments.DLQ",
     )
+    @transactional
     async def on_payment(self, msg: Message) -> None:
         data = json.loads(msg.value)
-        await self._charge(data)        # if this keeps raising -> DLQ
+        await self._charge(data)        # if this keeps raising -> payments.DLQ
 ```
 
-Behavior:
+Without `retries` and `retry_delay`, a listener gets the container's policy
+(`pyfly.messaging.listener.retry.*`): 5 attempts, 1 s apart and doubling, at most 30 s.
+Without `dead_letter_topic`, the dead letter goes to `<topic>.DLT` on Kafka and to the
+queue `<queue>.dlq` behind the exchange `pyfly.dlx` on RabbitMQ.
 
-* The handler is invoked, and on any `Exception` it is retried up to `retries`
-  times. Attempt *N* sleeps for `retry_delay * N` seconds before retrying
-  (linear backoff). With `retry_delay=0.0` (the default), retries happen
-  immediately.
-* After the retries are exhausted, if `dead_letter_topic` is set the original
-  message is re-published there (preserving `value` and `key`) and the
-  exception is swallowed so the consumer keeps running. If no
-  `dead_letter_topic` is set, the exception propagates.
-* The DLQ message carries the original headers plus two diagnostic headers:
+The dead-letter message keeps the original value, key and headers, and adds:
 
-  | Header             | Value |
-  |--------------------|-------|
-  | `x-original-topic` | The topic the message was originally consumed from. |
-  | `x-exception`      | The class name of the exception (e.g. `ValueError`). |
-
-* When both `retries <= 0` and `dead_letter_topic is None`, the handler is
-  registered unchanged with zero overhead.
+| Header                    | Value |
+|---------------------------|-------|
+| `x-original-topic`        | The topic the message was consumed from. |
+| `x-exception`             | The class name of the exception (e.g. `ValueError`). |
+| `x-exception-message`     | The exception's message (at most 1000 characters). |
+| `x-dlt-attempts`          | How many times the message was delivered. |
+| `x-dlt-reason`            | The class name of the exception, as the EDA buses name it. |
+| `x-dlt-source-topic`      | The topic, again. |
+| `x-dlt-source-partition`, `x-dlt-source-offset` | Where the record was, on Kafka. |
+| `x-dlt-source-queue`      | The queue the message was consumed from, on RabbitMQ. |
 
 You can inspect dead-lettered messages by subscribing to the DLQ topic like any
 other listener:
@@ -266,7 +273,75 @@ async def on_dead_letter(self, msg: Message) -> None:
     print(f"DLQ: {original} failed with {exc}: {msg.value!r}")
 ```
 
+On RabbitMQ a `dead_letter_topic` is a routing key on the adapter's exchange: when no
+queue is bound to it, the publish is returned and the message goes to `<queue>.dlq`
+instead, so a dead letter is never dropped.
+
+On the **in-memory broker** the handler is invoked again in process, up to `retries`
+times with the `retry_delay` back-off, and then, if `dead_letter_topic` is set,
+republished there; without one the exception propagates to the publisher. With no
+retries and no dead-letter topic the handler is registered unchanged.
+
 ---
+
+## Delivery Guarantees
+
+Kafka and RabbitMQ listeners consume through one **listener container**
+(`pyfly.messaging.listener_container`), shared with the Kafka and RabbitMQ buses of
+`pyfly.eda`. Delivery is **at-least-once**, with the semantics of Spring Kafka and
+Spring AMQP:
+
+* **Each delivery runs in a unit of work the container opens**, `REQUIRED` on the
+  default datasource (`pyfly.messaging.listener.datasource` names another). The
+  listener's `@transactional` joins it, and so do its repository calls, so everything
+  one delivery writes commits together or not at all. The message is acknowledged
+  only after that unit committed: the Kafka offset is committed, the AMQP message is
+  acked. An application without a data layer runs its listeners without a unit and
+  acknowledges once they return; `pyfly.messaging.listener.transactional: false`
+  does the same with one.
+* **A failure is attempted again, after a back-off.** Kafka seeks the partition back
+  to the record and pauses it for the delay, so the record is fetched again and the
+  records after it keep their order. RabbitMQ holds the message for the delay, then
+  republishes it to its own queue with the attempt count in the
+  `x-pyfly-delivery-attempt` header and acks the original. A transient failure (a lost
+  connection, a pool or statement timeout, a deadlock, a lock or serialization
+  conflict) is always attempted again.
+* **After the last attempt, the message is dead-lettered, then acknowledged.** When
+  the dead-letter publish fails, nothing is acknowledged: the offset stays where it
+  was, the AMQP message is requeued, and the dead letter is published again later.
+  `pyfly.messaging.kafka.dlt.enabled: false` switches the Kafka dead-letter topic off:
+  the record is then logged at `ERROR` and skipped after its last attempt.
+* **Concurrency is bounded.** A Kafka consumer handles one record at a time. Each
+  RabbitMQ consumer has a channel of its own with a prefetch of 20
+  (`pyfly.messaging.rabbitmq.prefetch`), and the adapter's consumers share a limit on
+  the handlers running at once, sized from the datasource's connection pool (one on
+  SQLite; `pyfly.messaging.listener.concurrency` sets it). A backlog therefore never
+  becomes more handlers than connections, and never times out on the pool.
+* **Stopping is graceful.** The adapters are
+  [`CONSUMER_PHASE`](dependency-injection.md#lifecycle-phases) lifecycle beans: the application context
+  stops them before any `@pre_destroy`. `stop()` stops fetching, waits for the
+  deliveries in flight for `pyfly.messaging.listener.shutdown-timeout` (10 s), then
+  cancels the rest. A cancelled delivery rolls back and is not acknowledged: its offset
+  is not committed, its message goes back to the queue, and the next consumer gets it
+  again. Keep the listener timeout below `pyfly.context.shutdown-timeout` (30 s).
+* **Deliveries do not join the caller's transaction.** The containers run their work in
+  tasks started with `pyfly.data.transaction.detached`, so a consumer started inside a
+  request never inherits its unit of work.
+
+What this does *not* give you is exactly-once processing. A message whose unit
+committed can still be delivered again: the process can stop between the commit and
+the acknowledgement, and a Kafka rebalance can hand a partition over while its offsets
+wait for the end of a poll. A listener with side effects that must not happen twice
+keys them on `Message.offset` (with `topic` and `partition`) or `Message.message_id`,
+or records what it applied in the same unit of work. Without a consumer `group`, a
+Kafka listener commits no offset at all, so a restart delivers nothing again; the
+container warns about it.
+
+Until 26.09.08 none of this held. The Kafka adapter kept aiokafka's auto-commit and
+skipped a failed record, and `stop()` committed the offset of a handler it had just
+cancelled. The RabbitMQ adapter rejected a failed message without requeue into a queue
+with no dead-letter exchange, and ran a whole backlog at once with no prefetch. A
+listener whose transaction failed once lost its message.
 
 ## Adapters
 
@@ -351,7 +426,7 @@ await broker.publish(
     headers={"event-type": "order.created"},
 )
 
-await broker.stop()    # Cancels consumer tasks, stops producer
+await broker.stop()    # Drains the records in flight, then stops the producer
 ```
 
 #### Constructor
@@ -359,18 +434,29 @@ await broker.stop()    # Cancels consumer tasks, stops producer
 | Parameter            | Type  | Default            | Description |
 |----------------------|-------|--------------------|-------------|
 | `bootstrap_servers`  | `str` | `"localhost:9092"` | Comma-separated list of Kafka bootstrap servers. |
+| `settings`           | `ListenerContainerSettings \| None` | defaults | Retry policy, unit of work, shutdown timeout. Keyword-only. |
+| `auto_offset_reset`  | `str` | `"latest"`         | Where a group with no committed offset starts (`latest` or `earliest`). Keyword-only. |
+| `dead_letter_suffix` | `str \| None` | `".DLT"`  | Suffix of the dead-letter topic; `None` logs and skips a record after its last attempt. Keyword-only. |
+| `consumer_factory`, `producer_factory` | callables | aiokafka | Build the aiokafka clients (pass a `functools.partial` to add SSL or SASL settings). Keyword-only. |
 
 #### Internal Behavior
 
 * **Producer**: An `AIOKafkaProducer` is created on `start()` and sends
   messages with `send_and_wait()` for reliable delivery.
-* **Consumers**: One `AIOKafkaConsumer` per unique (topic, group) pair is
-  created on `start()`, each running in its own `asyncio.Task`.
+* **Consumers**: One `AIOKafkaConsumer` per (topic, group) pair, with
+  `enable_auto_commit=False`, run by a `KafkaListenerContainer` in a task of its
+  own. The handlers of one (topic, group) share the consumer (a subscription made
+  after `start()` joins it), and each record goes to all of them in one unit of
+  work.
+* **Offsets**: committed after each poll's records are done, before a partition is
+  sought back, when partitions are revoked in a rebalance, and at stop: always the
+  offset after the last record whose unit committed or that was dead-lettered.
 * **Headers**: Kafka headers are byte-encoded on publish and decoded back to
   strings on consume. Non-decodable header values fall back to hex
   representation.
-* **Shutdown**: `stop()` cancels all consumer tasks, stops every consumer, then
-  stops the producer.
+* **Shutdown**: `stop()` stops every consumer gracefully and in parallel (see
+  [Delivery Guarantees](#delivery-guarantees)), then stops the producer, so a
+  handler in flight can still publish.
 
 ---
 
@@ -403,17 +489,28 @@ await broker.stop()
 |------------------|-------|-------------------------------------|-------------|
 | `url`            | `str` | `"amqp://guest:guest@localhost/"`   | AMQP connection URL. |
 | `exchange_name`  | `str` | `"pyfly"`                           | Name of the direct exchange to declare. |
+| `settings`       | `ListenerContainerSettings \| None` | defaults | Retry policy, unit of work, prefetch, concurrency, shutdown timeout. Keyword-only. |
+| `dead_letter_exchange` | `str \| None` | `"<exchange_name>.dlx"` | The exchange a message goes to after its last attempt. Keyword-only. |
+| `connection_factory` | callable | `aio_pika.connect_robust` | Opens the connection. Keyword-only. |
 
 #### Internal Behavior
 
 * **Connection**: Uses `aio_pika.connect_robust()` for automatic reconnection.
 * **Exchange**: A durable direct exchange is declared on `start()`.
+* **Publishing**: Messages are persistent (`delivery_mode=2`) and carry a
+  `message_id`.
 * **Queues**: Each subscription creates a durable queue. The queue name is the
   `group` parameter if provided, otherwise `"pyfly.{topic}"`. The queue is
-  bound to the exchange with the topic as the routing key.
-* **Message acknowledgement**: Messages are processed inside
-  `message.process()`, which handles acknowledgement automatically.
-* **Shutdown**: `stop()` closes the underlying AMQP connection.
+  bound to the exchange with the topic as the routing key. Its dead-letter queue
+  `<queue>.dlq` is bound to the dead-letter exchange with the queue name as the
+  routing key.
+* **Consumers**: Each subscription is consumed by a `RabbitListenerContainer` on a
+  channel of its own, with publisher confirms, a `basic.qos` prefetch and manual
+  acknowledgement: a message is acked after its unit of work committed, republished
+  with its attempt count after a failure, or dead-lettered after its last attempt
+  (see [Delivery Guarantees](#delivery-guarantees)).
+* **Shutdown**: `stop()` cancels the consumers, waits for the deliveries in flight,
+  requeues the ones it had to cancel, and closes the connection.
 
 ---
 
@@ -448,13 +545,33 @@ pyfly:
 
     rabbitmq:
       url: amqp://guest:guest@localhost/
+      prefetch: 20
+
+    listener:
+      shutdown-timeout: 10
+      retry:
+        max-attempts: 5
+        initial-delay: 1.0
 ```
 
 | Property                              | Default                            | Description |
 |---------------------------------------|------------------------------------|-------------|
 | `pyfly.messaging.provider`            | `"memory"`                         | Which adapter to use: `"kafka"`, `"rabbitmq"`, or `"memory"`. |
 | `pyfly.messaging.kafka.bootstrap-servers` | `"localhost:9092"`            | Kafka bootstrap servers (comma-separated). |
+| `pyfly.messaging.kafka.auto-offset-reset` | `"latest"`                    | Where a consumer group with no committed offset starts: `latest` or `earliest`. |
+| `pyfly.messaging.kafka.dlt.enabled`   | `true`                             | Dead-letter a record after its last attempt; `false` logs it and skips it. |
+| `pyfly.messaging.kafka.dlt.suffix`    | `".DLT"`                           | Suffix of the dead-letter topic. |
 | `pyfly.messaging.rabbitmq.url`        | `"amqp://guest:guest@localhost/"`  | AMQP connection URL for RabbitMQ. |
+| `pyfly.messaging.rabbitmq.prefetch`   | `20`                               | `basic.qos` prefetch of each consumer channel. |
+| `pyfly.messaging.rabbitmq.dead-letter-exchange` | `"pyfly.dlx"`            | The exchange a message goes to after its last attempt (into `<queue>.dlq`). |
+| `pyfly.messaging.listener.transactional` | `true`                          | Run each delivery in a unit of work the container opens. |
+| `pyfly.messaging.listener.datasource` | *(default datasource)*             | The datasource of that unit. |
+| `pyfly.messaging.listener.shutdown-timeout` | `10`                         | Seconds `stop()` waits for the deliveries in flight before it cancels them. |
+| `pyfly.messaging.listener.concurrency` | *(pool size; 1 on SQLite)*        | The most RabbitMQ deliveries the adapter runs at once, never more than the prefetch. |
+| `pyfly.messaging.listener.retry.max-attempts` | `5`                        | Deliveries of a failing message, the first included. |
+| `pyfly.messaging.listener.retry.initial-delay` | `1.0`                     | Seconds before the second attempt. |
+| `pyfly.messaging.listener.retry.multiplier` | `2.0`                        | Factor each later delay grows by. |
+| `pyfly.messaging.listener.retry.max-delay` | `30.0`                        | The longest delay between two attempts. |
 
 > **Note:** The `RabbitMQAdapter` exchange name is fixed at `"pyfly"` when auto-configured. To use a different exchange name, construct the `RabbitMQAdapter` manually and register it as a bean.
 
