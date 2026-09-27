@@ -585,7 +585,10 @@ A repository call resolves its session when it runs:
     connection, so pool pre-ping is not needed. An ORM write, or a Core `insert()`/`update()`/`delete()`,
     inside a read unit is refused before it reaches the database. A raw `text()` statement is not
     inspected: on PostgreSQL a read unit's `AUTOCOMMIT` connection would commit it at once, and on SQLite
-    its unit would roll it back, so give a method that writes a name that is not a read name.
+    its unit would roll it back, so give a method that writes a name that is not a read name. The rule
+    is the prefix alone: `get_or_create`, `find_or_create` and `find_and_update` are read methods too,
+    and their writes are refused outside a transaction. Call such a method inside `@transactional`, or
+    name it `create_if_missing`, `upsert` or similar.
   - any **other** method gets a write unit that commits (on SQLite, it starts with `BEGIN IMMEDIATE`).
 
   Either way the connection goes back to the pool when the call returns. Entities returned from an auto
@@ -1410,6 +1413,11 @@ On SQLite a discarded connection rolls back on aiosqlite's worker thread before 
 statement still running there is interrupted, so a cancelled unit never leaves `BEGIN IMMEDIATE`'s write
 lock held by a half-closed handle (which would make every other writer wait `busy_timeout` and fail with
 "database is locked" until the garbage collector ran).
+
+Under anyio (Starlette), a cancel that hits a statement in flight also makes SQLAlchemy's pool log
+`Exception terminating connection` at `ERROR`, with the `CancelledError` traceback: SQLAlchemy's own
+cleanup of the interrupted statement is cancelled again while it terminates the connection. It reports
+the discard of that connection; the pool is healthy afterwards, and the unit ends as described above.
 
 ---
 
