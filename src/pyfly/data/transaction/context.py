@@ -158,12 +158,20 @@ def current_unit_of_work(datasource: str | None = None) -> UnitOfWork | None:
 
 
 def is_transaction_active(datasource: str | None = None) -> bool:
-    """Whether a transactional unit (not an auto unit) is active for *datasource*, or for any datasource."""
+    """Whether a transaction is active for *datasource*, or for any datasource: a transactional unit, or the
+    write auto unit of the repository call running now (it commits at the end of that call, and a boundary
+    inside it joins it). A read auto unit is not a transaction."""
     state = current_state()
     if datasource is not None:
-        unit = state.unit(datasource)
+        unit = state.unit(datasource) or _write_auto_unit(state.scope(datasource))
         return unit is not None and not unit.completed
-    return any(isinstance(bound, UnitOfWork) and not bound.completed for _name, bound in state.units)
+    if any(isinstance(bound, UnitOfWork) and not bound.completed for _name, bound in state.units):
+        return True
+    return any((unit := _write_auto_unit(scoped)) is not None and not unit.completed for _name, scoped in state.scopes)
+
+
+def _write_auto_unit(unit: UnitOfWork | None) -> UnitOfWork | None:
+    return unit if unit is not None and unit.auto and not unit.read_only else None
 
 
 def is_current_transaction_read_only() -> bool:

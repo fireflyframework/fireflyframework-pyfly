@@ -31,7 +31,9 @@ or ``DataSourceRegistry`` bean that replaced it. Every unit it opens gets a fres
 - for a unit with a timeout on PostgreSQL, ``SET LOCAL statement_timeout``, so a stuck statement is
   cancelled on the server too.
 
-Auto units (a repository call outside a transaction) use the same path. A read auto unit on a dialect with
+Auto units (a repository call outside a transaction) use the same path, with one difference: their sessions
+never expire on commit, whatever the session factory says, since what the call returns outlives the unit. A
+read auto unit on a dialect with
 fast autocommit reads (PostgreSQL) runs on an ``AUTOCOMMIT`` connection, one round trip instead of three,
 unless the datasource has after-begin customizers: their transaction-local settings would not outlive
 their own statement there. A write auto unit commits.
@@ -359,7 +361,8 @@ class SqlAlchemyTransactionManager:
             else self._begin_options(target, dialect, read_only=read_only)
         )
         self._refuse_sharing_the_connection(engine)
-        session = self._new_session(self._sessionmaker)
+        # What an auto unit's call returns outlives its commit: it is never expired, whatever the factory says.
+        session = self._new_session(self._sessionmaker, expire_on_commit=False)
         unit = UnitOfWork(self, self.datasource, session, auto=True, read_only=read_only)
         unit.attributes[_AUTOCOMMIT] = autocommit
         _claim_the_connection(engine, unit)
@@ -367,10 +370,19 @@ class SqlAlchemyTransactionManager:
         return unit
 
     def _new_session(
-        self, factory: async_sessionmaker[AsyncSession], *, bind: AsyncEngine | None = None
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        *,
+        bind: AsyncEngine | None = None,
+        expire_on_commit: bool | None = None,
     ) -> UnitSession:
         session_class = unit_session_class(factory.class_)
-        session = session_class(**(factory.kw if bind is None else {**factory.kw, "bind": bind}))
+        options = dict(factory.kw)
+        if bind is not None:
+            options["bind"] = bind
+        if expire_on_commit is not None:
+            options["expire_on_commit"] = expire_on_commit
+        session = session_class(**options)
         assert isinstance(session, UnitSession)
         return session
 
