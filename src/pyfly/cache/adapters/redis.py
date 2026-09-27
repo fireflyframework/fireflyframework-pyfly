@@ -50,7 +50,8 @@ class RedisCacheAdapter:
     cache shares with sessions, locks, the event bus and other applications. Keys passed to and returned
     by the adapter are the cache's own (``product:1`` is stored as ``pyfly:cache:product:1``), and
     :meth:`clear` deletes the namespace only: the cache never runs ``FLUSHDB``. An empty namespace
-    declares that the cache owns the whole database; :meth:`clear` then deletes every key in it.
+    declares that the cache owns the whole database; :meth:`clear` then deletes every key in it, the caches
+    of :meth:`with_namespace` included (a WARNING says so when the first one is made).
 
     A namespace always ends with ``:`` (``myapp`` becomes ``myapp:``): otherwise :meth:`clear` would also
     delete the keys of any namespace that merely starts with it (``myapp2``, or the ``myapp.idempotency``
@@ -69,6 +70,7 @@ class RedisCacheAdapter:
         self._evictions = 0
         self._available = True
         self._owns_client = True
+        self._shared_namespace_reported = False
 
     @property
     def namespace(self) -> str:
@@ -177,7 +179,18 @@ class RedisCacheAdapter:
 
     def with_namespace(self, name: str) -> RedisCacheAdapter:
         """A cache dedicated to *name* on the same client, disjoint from this one: :meth:`clear` never
-        touches it (``pyfly:cache.<name>:`` for the default namespace)."""
+        touches it (``pyfly:cache.<name>:`` for the default namespace).
+
+        With an empty namespace this cache owns the whole database, and its :meth:`clear` deletes the
+        dedicated cache (``<name>:``) too; the first one made logs a ``cache_not_dedicated`` WARNING. Give
+        the cache a namespace to keep idempotency records and orchestration state through a clear."""
+        if not self._namespace and not self._shared_namespace_reported:
+            self._shared_namespace_reported = True
+            _logger.warning(
+                "cache_not_dedicated: this RedisCacheAdapter has an empty namespace (it owns the whole database), "
+                "so its clear() also deletes the dedicated cache %r and every other one; give it a namespace",
+                name,
+            )
         base = self._namespace[:-1] if self._namespace.endswith(":") else self._namespace
         dedicated = RedisCacheAdapter(self._client, namespace=f"{base}.{name}:" if base else f"{name}:")
         dedicated._owns_client = False  # the client stays this adapter's to close

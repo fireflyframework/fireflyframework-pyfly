@@ -437,6 +437,20 @@ class TestRedisNamespaces:
         assert await other_app.get("product:1") == {"id": 2}
         assert root.namespace.endswith(":")
 
+    async def test_a_dedicated_cache_of_a_cache_that_owns_the_database_is_reported(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = RedisBytesStub()
+        root = RedisCacheAdapter(client, namespace="")  # owns the whole database: clear() deletes every key
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        idempotency = root.with_namespace("idempotency")
+        root.with_namespace("orchestration")
+        await idempotency.put("idem:k1", {"status": 201})
+        await root.clear()
+        assert await idempotency.get("idem:k1") is None  # the database was the root cache's to clear
+        warnings = [r.getMessage() for r in caplog.records if r.getMessage().startswith("cache_not_dedicated")]
+        assert len(warnings) == 1 and "namespace" in warnings[0]
+
 
 class TestJsonHits:
     """A JSON cache (Redis, PostgreSQL) stores what the encoder writes; every hit must come back (C025)."""

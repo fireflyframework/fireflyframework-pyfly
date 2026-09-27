@@ -213,7 +213,7 @@ await cache.stop()    # Close Redis connection
 | Parameter   | Type                  | Default          | Description |
 |-------------|-----------------------|------------------|-------------|
 | `client`    | `redis.asyncio.Redis` | *required*       | An async Redis client instance. |
-| `namespace` | `str`                 | `"pyfly:cache:"` | Keyword-only. The key prefix of the cache's entries; a `:` is appended when it does not end with one (`myapp` becomes `myapp:`), so `clear()` never reaches a namespace that merely starts with it. An empty namespace declares that the cache owns the whole database; `clear()` then deletes every key in it. |
+| `namespace` | `str`                 | `"pyfly:cache:"` | Keyword-only. The key prefix of the cache's entries; a `:` is appended when it does not end with one (`myapp` becomes `myapp:`), so `clear()` never reaches a namespace that merely starts with it. An empty namespace declares that the cache owns the whole database; `clear()` then deletes every key in it, the [dedicated caches](#named-caches-regions-and-dedicated-caches) of `with_namespace()` included (a `cache_not_dedicated` warning says so). |
 
 ### Serialization
 
