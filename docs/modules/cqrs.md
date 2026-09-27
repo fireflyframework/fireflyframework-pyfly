@@ -105,7 +105,7 @@ Metadata uses `object.__setattr__`, so it works safely with `frozen=True`.
 | `validate()` | `ValidationResult.success()` | Custom business-rule validation. |
 | `authorize()` | `AuthorizationResult.success()` | Authorization check. |
 | `authorize_with_context(ctx)` | Delegates to `authorize()` | Authorization with `ExecutionContext`. |
-| `get_cache_key()` | `None` | Cache-invalidation key. |
+| `get_cache_key()` | `None` | Cache-invalidation key: a query's `get_cache_key()` whose cached results the command makes stale. The command bus evicts it after the command commits (see [Command-side invalidation](#command-side-invalidation)). |
 
 ---
 
@@ -193,7 +193,9 @@ class TransferFundsHandler(ContextAwareCommandHandler[TransferFundsCommand, str]
 ## Query Handlers
 
 `QueryHandler[Q, R]` follows the same template-method pattern. It adds
-caching metadata methods: `supports_caching()` and `get_cache_ttl_seconds()`.
+caching metadata methods: `supports_caching()`, `get_cache_ttl_seconds()`,
+`get_cache_key_prefix()`, `get_cache_scope()`, `caches_none()`,
+`get_cache_evict_events()` and `get_result_type()` (the declared `R`).
 
 ```python
 from pyfly.cqrs.query.handler import QueryHandler
@@ -202,12 +204,14 @@ from pyfly.container import service
 
 @query_handler(cacheable=True, cache_ttl=300)
 @service
-class GetOrderHandler(QueryHandler[GetOrderQuery, dict | None]):
+class GetOrderHandler(QueryHandler[GetOrderQuery, OrderDto | None]):
     def __init__(self, repo: OrderRepository) -> None:
         self._repo = repo
 
-    async def do_handle(self, query: GetOrderQuery) -> dict | None:
-        return await self._repo.find_by_id(query.order_id)
+    async def do_handle(self, query: GetOrderQuery) -> OrderDto | None:
+        order = await self._repo.find_by_id(query.order_id)
+        # A cacheable handler returns a DTO: an ORM entity is never cached.
+        return OrderDto.model_validate(order, from_attributes=True) if order else None
 ```
 
 Lifecycle hooks are identical to `CommandHandler`. Use
@@ -255,7 +259,7 @@ from pyfly.cqrs.decorators import query_handler
 | `tracing` | `bool` | `True` | Enable tracing. |
 | `cacheable` | `bool` | `False` | Enable result caching. |
 | `cache_ttl` | `int \| None` | `None` | Cache TTL (seconds). |
-| `cache_key_prefix` | `str \| None` | `None` | Key prefix. |
+| `cache_key_prefix` | `str \| None` | `None` | Key prefix: results are stored under `<prefix>:<query cache key>`, and the prefix names the group an event-tag eviction removes. |
 | `priority` | `int` | `0` | Lower = higher priority. |
 | `tags` | `tuple[str, ...]` | `()` | Arbitrary tags. |
 | `description` | `str` | `""` | Description. |
@@ -480,9 +484,11 @@ from pyfly.cqrs.tracing.correlation import CorrelationContext
 
 ## Caching
 
-`QueryCacheAdapter` bridges pyfly's cache module with CQRS, prefixing all
-keys with `:cqrs:`. Without an underlying `CacheAdapter` bean, all operations
-are silent no-ops (the query bus still works — results are just not cached).
+`QueryCacheAdapter` bridges pyfly's cache module with CQRS. The query cache is
+the `:cqrs:` [region](caching.md#named-caches-regions-and-dedicated-caches) of
+the application's `CacheAdapter` bean. Without an underlying `CacheAdapter`
+bean, all operations are silent no-ops (the query bus still works — results are
+just not cached).
 
 ```python
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
@@ -492,19 +498,118 @@ adapter = QueryCacheAdapter(cache=my_cache_instance)
 | Method | Description |
 |--------|-------------|
 | `get(key)` | Fetch cached value. |
-| `put(key, value, ttl)` | Store with optional `timedelta` TTL. |
-| `evict(key)` | Remove a key. |
-| `clear()` | Remove all entries. |
+| `lookup(key)` | `(found, value)`: tells a stored `None` from a miss. |
+| `put(key, value, ttl)` | Store with optional `timedelta` TTL; after the commit inside a unit of work. |
+| `evict(key)` | Remove a key for every caller's scope; after the commit inside a unit of work. |
+| `evict_prefix(prefix)` | Remove every entry whose key starts with `prefix`. |
+| `clear()` | Remove every query-cache entry (the `:cqrs:` prefix), and nothing else the cache holds. |
 | `is_available` | Whether an underlying cache is configured. |
+
+A cache failure is logged and never fails the query or the command that caused
+it.
 
 Enable caching on a handler: `@query_handler(cacheable=True, cache_ttl=600)`.
 The query must also have `is_cacheable()` return `True` (the default). Invalidate
-programmatically via `await query_bus.clear_cache("key")` or
-`await query_bus.clear_all_cache()`.
+programmatically via `await query_bus.clear_cache(query.get_cache_key())` (the
+key for every caller, and under every handler's `cache_key_prefix`) or
+`await query_bus.clear_all_cache()` (the query cache only: orchestration state,
+idempotency records and `@cacheable` entries in the same cache are left alone).
 
 When `pyfly.cqrs.enabled=true` and a `CacheAdapter` bean is present, the
 `query_cache_adapter` bean is wired automatically by `CqrsAutoConfiguration`
-and injected into the `DefaultQueryBus`. No extra configuration is required.
+and injected into the `DefaultQueryBus` and the `DefaultCommandBus`. No extra
+configuration is required. `pyfly.cqrs.query.caching_enabled: false` turns the
+query cache off.
+
+### Whose results an entry holds
+
+A cached result is never served to another tenant or user. The bus keys an
+entry by the query's `get_cache_key()` and by the caller:
+
+* the tenant, organization and user of the `ExecutionContext` passed to
+  `query_with_context()`;
+* completed with the ambient tenant (`X-Tenant-Id`, set by the web filters) and
+  the authenticated user of the request, so a plain `query()` behind the web
+  layer is keyed too.
+
+A handler's cache scope decides which of these count:
+
+| Scope | Keyed by | Use it for |
+|-------|----------|------------|
+| `QueryCacheScope.USER` (default) | tenant, organization and user | anything that may depend on who asks |
+| `QueryCacheScope.TENANT` | tenant and organization | data shared by the users of one tenant |
+| `QueryCacheScope.GLOBAL` | nothing | data that is the same for everyone (a country list) |
+
+```python
+from pyfly.cqrs.cache.decorators import cacheable
+from pyfly.cqrs.types import QueryCacheScope
+
+@cacheable(scope=QueryCacheScope.TENANT)
+@query_handler(cacheable=True, cache_ttl=600)
+class ListInvoicesHandler(QueryHandler[ListInvoicesQuery, list[InvoiceDto]]): ...
+```
+
+A `ContextAwareQueryHandler` is never served from the cache without a context:
+it refuses such a call, and a hit must not bypass that.
+
+> **Prior behaviour (corrected in 26.09.08):** the key was the query's own key
+> only, so the first tenant (or user) to run a cacheable query filled the entry
+> every other tenant was served for `cache_ttl`, 900 seconds by default.
+
+### Transactions, types and None
+
+* **Writes wait for the commit.** A query run inside a unit of work stores its
+  result after the commit, and not at all on rollback: it may have read a row
+  that never commits.
+* **A hit has the declared type.** The bus rebuilds a hit as the handler's result
+  type `R`, so a Redis or PostgreSQL cache returns the DTO, not a `dict`. A
+  result type that is an ORM-mapped class or a Beanie document is never cached
+  (a `query_cache_disabled` warning names the handler once): return a DTO.
+* **`None` is cached on request.** A `None` result is not stored unless the
+  handler declares `@cacheable(cache_none=True)`; then it is served from the
+  cache like any other result, and a lookup for a missing row stops reaching
+  the database.
+
+### Command-side invalidation
+
+The command bus evicts what a command made stale once the command's unit of
+work commits (at once when the command runs outside one, and never when it fails
+or rolls back):
+
+* the command's `get_cache_key()`, a query's cache key, for every caller and
+  under every registered handler's `cache_key_prefix`;
+* every cached result of the query handlers tagged with `@cache_evict(Event)`
+  (from `pyfly.cqrs.cache.decorators`) for an event the command produced
+  (`domain_events` on its result or on the command), or for an event its own
+  handler is tagged with.
+
+```python
+from pyfly.cqrs.cache.decorators import cache_evict
+
+@dataclass(frozen=True)
+class ShipOrder(Command[None]):
+    order_id: str
+
+    def get_cache_key(self) -> str | None:
+        return GetOrderQuery(order_id=self.order_id).get_cache_key()
+
+@cache_evict(OrderUpdated)                  # its entries are stale once an OrderUpdated happens
+@query_handler(cacheable=True, cache_key_prefix="orders")
+class ListOrdersHandler(QueryHandler[ListOrdersQuery, list[OrderDto]]): ...
+
+@cache_evict(OrderUpdated)                  # this command stands for an OrderUpdated
+@command_handler
+class RenameOrderHandler(CommandHandler[RenameOrder, None]): ...
+```
+
+An event-tag eviction removes the handler's group: `<cache_key_prefix>:`, or
+`<QueryClass>:` for the default query keys. Declare a `cache_key_prefix` on a
+tagged handler whose query overrides `get_cache_key()`.
+
+> **Prior behaviour (corrected in 26.09.08):** `Command.get_cache_key()`,
+> `@cache_evict(events)`, `cache_key_prefix` and `caching_enabled` were read by
+> nothing, so after a committed update the query kept returning the old result
+> for `cache_ttl`.
 
 ### EDA-driven cache invalidation
 
@@ -559,7 +664,11 @@ if bridge:
   still proceeds for resolvable keys.
 
 The full prefixed cache key evicted is `:cqrs:<resolved_pattern>` (the
-`QueryCacheAdapter` applies the `:cqrs:` prefix transparently).
+`QueryCacheAdapter` applies the `:cqrs:` prefix transparently), for every
+caller's scope. A pattern must resolve to a query's cache key: a query that uses
+the default key (`<QueryClass>:<digest>`) needs `get_cache_key()` overridden
+(for example to `order:{order_id}`) for a payload-field rule to match it.
+Inside a unit of work the eviction waits for the commit.
 
 > **Prior behaviour (corrected):** Before SP-8 the `QueryCacheAdapter` never
 > received a real `CacheAdapter` at startup, so `@cacheable` queries were
@@ -699,7 +808,7 @@ pyfly:
 | `pyfly.cqrs.command.metrics_enabled` | `bool` | `true` | Command metrics. |
 | `pyfly.cqrs.command.tracing_enabled` | `bool` | `true` | Command tracing. |
 | `pyfly.cqrs.query.timeout` | `int` | `15` | Query timeout (seconds). |
-| `pyfly.cqrs.query.caching_enabled` | `bool` | `true` | Query caching. |
+| `pyfly.cqrs.query.caching_enabled` | `bool` | `true` | Query caching; `false` turns the query cache off. |
 | `pyfly.cqrs.query.cache_ttl` | `int` | `900` | Default cache TTL (seconds). |
 | `pyfly.cqrs.query.metrics_enabled` | `bool` | `true` | Query metrics. |
 | `pyfly.cqrs.query.tracing_enabled` | `bool` | `true` | Query tracing. |

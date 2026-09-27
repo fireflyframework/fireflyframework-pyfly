@@ -16,17 +16,20 @@ with pluggable backends. Following the hexagonal architecture pattern, a
 4. [RedisCacheAdapter](#rediscacheadapter)
 5. [PostgresCacheAdapter](#postgrescacheadapter)
 6. [CacheManager: Failover and Resilience](#cachemanager-failover-and-resilience)
-7. [Declarative Caching Decorators](#declarative-caching-decorators)
+7. [Named Caches: Regions and Dedicated Caches](#named-caches-regions-and-dedicated-caches)
+8. [Caching and Transactions](#caching-and-transactions)
+9. [Declarative Caching Decorators](#declarative-caching-decorators)
    - [@cache](#cache)
    - [@cacheable](#cacheable)
      - [Conditional Caching: condition and unless](#conditional-caching-condition-and-unless)
    - [@cache_put](#cache_put)
    - [@cache_evict](#cache_evict)
-8. [Key Templates](#key-templates)
-9. [Auto-Configuration](#auto-configuration)
-10. [Configuration Reference](#configuration-reference)
-11. [Complete Example: Product Catalog Service](#complete-example-product-catalog-service)
-12. [Testing with InMemoryCache](#testing-with-inmemorycache)
+   - [Return Types, Hits and Failures](#return-types-hits-and-failures)
+10. [Key Templates](#key-templates)
+11. [Auto-Configuration](#auto-configuration)
+12. [Configuration Reference](#configuration-reference)
+13. [Complete Example: Product Catalog Service](#complete-example-product-catalog-service)
+14. [Testing with InMemoryCache](#testing-with-inmemorycache)
 
 ---
 
@@ -48,8 +51,8 @@ Application Code (decorators / direct calls)
 
 Your application depends only on the `CacheAdapter` protocol. You can swap
 backends (in-memory to Redis) without changing a single line of business logic.
-The `CacheManager` adds a resilience layer by mirroring writes and falling back
-on read failures.
+The `CacheManager` adds a resilience layer: a per-process fallback that serves
+only while the shared primary fails.
 
 ---
 
@@ -64,12 +67,35 @@ from pyfly.cache import CacheAdapter
 class CacheAdapter(Protocol):
     async def get(self, key: str) -> Any | None: ...
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None: ...
+    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool: ...
     async def evict(self, key: str) -> bool: ...
+    async def evict_by_prefix(self, prefix: str) -> int: ...
     async def exists(self, key: str) -> bool: ...
     async def clear(self) -> None: ...
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 ```
+
+### The Contract
+
+Every built-in adapter keeps these rules, and a custom adapter should too:
+
+* **Values are copies.** `put` stores a copy of the value, and `get` returns a
+  value that belongs to the caller. Changing either never changes the entry, on
+  any backend.
+* **No live ORM objects.** `put` and `put_if_absent` raise `CacheValueError`
+  (from `pyfly.cache`, a `TypeError`) for a SQLAlchemy-mapped instance or a
+  Beanie document, also inside a list, a dict or a DTO, and for a value the
+  backend cannot encode. Nothing is written. A cached entity would be shared by
+  every request and outlive the session that loaded it: one request would see
+  another's uncommitted edits, and after a rollback every hit would fail with
+  `DetachedInstanceError`. Cache a DTO built from the entity instead.
+* **`clear()` is this cache's own.** It removes this cache's entries and nothing
+  else. An adapter over a store that other data may share (a Redis database, a
+  database table) deletes its own namespace and never flushes the store.
+* **Named caches (optional).** `with_namespace(name)` returns a cache disjoint
+  from this one, which this cache's `clear()` never touches. See
+  [Named Caches](#named-caches-regions-and-dedicated-caches).
 
 ### Method Reference
 
@@ -77,9 +103,11 @@ class CacheAdapter(Protocol):
 |----------------------------------|---------------|-------------|
 | `get(key)`                       | `Any \| None` | Retrieve a cached value by key. Returns `None` if the key does not exist or has expired. |
 | `put(key, value, ttl=None)`      | `None`        | Store a value under the given key. If `ttl` is provided, the entry expires after the specified duration. |
+| `put_if_absent(key, value, ttl=None)` | `bool`   | Store the value only when the key is absent, atomically. Returns whether it was stored. |
 | `evict(key)`                     | `bool`        | Remove a specific key. Returns `True` if the key existed, `False` otherwise. |
-| `exists(key)`                    | `bool`        | Check whether a key exists and has not expired. |
-| `clear()`                        | `None`        | Remove all entries from the cache. |
+| `evict_by_prefix(prefix)`        | `int`         | Remove every key of this cache that starts with `prefix` (taken literally). Returns how many were removed. |
+| `exists(key)`                    | `bool`        | Check whether a key exists and has not expired. A stored `None` counts. |
+| `clear()`                        | `None`        | Remove every entry of this cache, and nothing else in its store. |
 | `start()`                        | `None`        | Initialize the cache backend (called during application startup). |
 | `stop()`                         | `None`        | Shut down the cache backend (called during application shutdown). |
 
@@ -90,6 +118,12 @@ class CacheAdapter(Protocol):
 The `InMemoryCache` is a simple dictionary-backed cache with optional TTL
 support. It is suitable for **development, testing, and single-process
 applications**.
+
+It stores copies. `put` pickles the value (or deep-copies it when pickle cannot
+handle it, for example an instance of a class defined inside a function), and
+every `get` returns a new copy. Two requests never share one cached object, and
+the in-memory cache behaves like the Redis and PostgreSQL ones. A live ORM
+object is refused with `CacheValueError`.
 
 ```python
 from datetime import timedelta
@@ -115,7 +149,7 @@ await cache.clear()
 
 ### How TTL Works
 
-Internally, `InMemoryCache` stores each entry as a `(value, expires_at)` tuple.
+Internally, `InMemoryCache` stores each entry as a `(copy, expires_at)` tuple.
 The `expires_at` is computed using `time.monotonic()` plus the TTL in seconds.
 
 * On `get()`, if the current monotonic time exceeds `expires_at`, the entry is
@@ -133,6 +167,12 @@ of entries consuming memory until their next read.
 
 The `RedisCacheAdapter` is the production cache backend. It delegates to a
 `redis.asyncio.Redis` client and transparently handles JSON serialization.
+
+The cache usually shares its Redis database with sessions, locks, the event bus
+or other applications, so its entries live under a namespace, `pyfly:cache:` by
+default. The keys you pass and get back are the cache's own: `user:123` is
+stored as `pyfly:cache:user:123`. `clear()` deletes that namespace and nothing
+else. The adapter never runs `FLUSHDB`.
 
 **Install:** `uv add "pyfly[redis]"` (this pulls in `redis`).
 
@@ -155,7 +195,7 @@ await cache.evict("user:123")
 # Check existence
 await cache.exists("user:123")  # False
 
-# Clear the entire Redis database
+# Clear the cache's own entries (the pyfly:cache: namespace), nothing else
 await cache.clear()
 
 await cache.start()   # Validate Redis connectivity
@@ -165,16 +205,19 @@ await cache.stop()    # Close Redis connection
 
 ### Constructor
 
-| Parameter | Type                     | Description |
-|-----------|--------------------------|-------------|
-| `client`  | `redis.asyncio.Redis`    | An async Redis client instance. |
+| Parameter   | Type                  | Default          | Description |
+|-------------|-----------------------|------------------|-------------|
+| `client`    | `redis.asyncio.Redis` | *required*       | An async Redis client instance. |
+| `namespace` | `str`                 | `"pyfly:cache:"` | Keyword-only. The key prefix of the cache's entries. An empty namespace declares that the cache owns the whole database; `clear()` then deletes every key in it. |
 
 ### Serialization
 
-Values are serialized to JSON with `json.dumps()` before storage and
-deserialized with `json.loads()` on retrieval. This means any JSON-compatible
-Python object (dicts, lists, strings, numbers, booleans, `None`) can be cached
-transparently.
+Values are serialized to JSON before storage and deserialized on retrieval. The
+encoder also handles datetimes, dates, `Decimal`, `UUID`, sets, bytes,
+dataclasses and Pydantic models. A hit comes back as JSON types (a Pydantic
+model as a `dict`), and the [decorators](#return-types-hits-and-failures) and
+the CQRS query bus rebuild the declared type. A live ORM object, or a value JSON
+cannot represent, raises `CacheValueError` before anything is written.
 
 ### TTL Handling
 
@@ -187,7 +230,12 @@ removed server-side without any lazy-deletion overhead.
 | Method    | Description |
 |-----------|-------------|
 | `start()` | Validates connectivity by pinging Redis (`await client.ping()`). Called automatically during application startup. |
-| `stop()` | Closes the underlying Redis connection (`await client.aclose()`). Called automatically during application shutdown. |
+| `stop()` | Closes the underlying Redis connection (`await client.aclose()`). Called automatically during application shutdown. A `with_namespace` cache leaves the client to its source. |
+| `get_keys(pattern, limit)` | Up to `limit` of the cache's keys matching a glob `pattern`, through `SCAN`. |
+| `with_namespace(name)` | A cache dedicated to `name` on the same client (`pyfly:cache.<name>:`), which `clear()` never touches. |
+
+`evict_by_prefix` and `clear` walk the database once with `SCAN` (`COUNT 1000`)
+and delete in batches. Glob characters in a prefix are taken literally.
 
 > **Note:** When using auto-configuration, `start()` and `stop()` are called automatically
 > by the `ApplicationContext` during startup and shutdown. You only need to call them
@@ -318,34 +366,117 @@ manager = CacheManager(primary=primary, fallback=fallback)
 
 ### Constructor
 
-| Parameter  | Type           | Description |
-|------------|----------------|-------------|
-| `primary`  | `CacheAdapter` | The primary cache backend (typically Redis). |
-| `fallback` | `CacheAdapter` | The fallback cache backend (typically in-memory). |
+| Parameter      | Type                | Default          | Description |
+|----------------|---------------------|------------------|-------------|
+| `primary`      | `CacheAdapter`      | *required*       | The shared cache backend (typically Redis). |
+| `fallback`     | `CacheAdapter`      | *required*       | The per-process fallback (typically in-memory). |
+| `fallback_ttl` | `timedelta \| None` | 60 seconds       | Keyword-only. The longest a value written during an outage lives in the fallback. `None` keeps the TTL each write asks for. |
 
 ### Behavior
 
+The primary is the only source of truth while it answers. The fallback is used
+only while the primary **fails** (raises).
+
 | Operation | Behavior |
 |-----------|----------|
-| `get(key)` | Try the primary. If the primary returns a value, return it. If the primary raises an exception, log a warning and try the fallback. If the primary returns `None`, also check the fallback. |
-| `put(key, value, ttl)` | Write to the primary (catching exceptions). **Always** write to the fallback as well, keeping it warm. |
+| `get(key)` | Read the primary. A miss is a miss: the fallback is not consulted. If the primary raises, read the fallback. |
+| `put(key, value, ttl)` | Write the primary only. If it raises, write the fallback, with the TTL capped at `fallback_ttl`. |
 | `evict(key)` | Evict from both primary and fallback. Returns `True` if either had the key. |
-| `clear()` | Clear both primary and fallback. |
+| `clear()` | Clear both primary and fallback (each its own entries). |
+| `exists`, `put_if_absent` | The primary; the fallback only while the primary raises. |
 
 This design means that:
 
-* If Redis goes down, reads seamlessly degrade to the in-memory fallback.
-* The fallback is always warm because every write is mirrored.
-* When Redis comes back up, new writes immediately go to both caches.
+* An eviction on one node reaches every node. Each node used to keep its own
+  copy in its fallback and serve it after another node evicted the entry, so
+  different replicas served different, old versions.
+* If Redis goes down, reads and writes degrade to the in-memory fallback, whose
+  entries expire within `fallback_ttl` because no other node can evict them.
+* The first operation Redis answers again ends the outage and clears the
+  fallback, so nothing written during one outage is served during the next.
+* A value the cache refuses (`CacheValueError`) is not an outage. It propagates,
+  and the fallback is left alone.
 
 ### Logging
 
-Failover events are logged at `WARNING` level via the `pyfly.cache` logger:
+Failover events are logged via the `pyfly.cache` logger:
 
 ```
-WARNING  Primary cache failed for GET 'user:123', falling back
-WARNING  Primary cache failed for PUT 'user:123', using fallback only
+WARNING  Primary cache failed for GET 'user:123', using the fallback until it recovers
+INFO     Primary cache recovered; clearing the fallback written during the outage
 ```
+
+---
+
+## Named Caches: Regions and Dedicated Caches
+
+One `CacheAdapter` bean serves several consumers: the decorators, the CQRS query
+cache, HTTP idempotency records and orchestration state. They must not clear
+each other's entries, so PyFly gives them named caches:
+
+* A **region** is a named part of a cache. `cache_region(cache, "users")`
+  returns a `PrefixedCache` whose keys live under `users::` and whose `clear()`
+  evicts that prefix only. Clearing the cache it belongs to clears the region
+  too, which is right for evictable data. The CQRS query cache is the `:cqrs:`
+  region of the application cache, and the decorators' `cache_name` parameter
+  names a region.
+* A **dedicated cache** is disjoint from the cache it comes from.
+  `dedicated_cache(cache, "idempotency")` calls the adapter's
+  `with_namespace("idempotency")`: a separate store in memory, the
+  `pyfly:cache.idempotency:` namespace on Redis. Clearing the application cache
+  never touches it. The HTTP idempotency filter and the cache-backed
+  orchestration persistence keep their records in dedicated caches.
+
+```python
+from pyfly.cache import cache_region, dedicated_cache
+
+users = cache_region(cache, "users")          # cleared with the cache
+tokens = dedicated_cache(cache, "tokens")     # survives cache.clear()
+await users.clear()                           # evicts users:: only
+```
+
+For an adapter without `with_namespace`, `dedicated_cache` falls back to the
+region `pyfly.<name>::` and logs a warning once: its entries are then cleared
+with the cache.
+
+---
+
+## Caching and Transactions
+
+Writes to a cache inside a unit of work (`@transactional`, a
+`TransactionTemplate` block, a repository call) wait for its commit.
+`TransactionAwareCache` (Spring's `TransactionAwareCacheDecorator`) registers
+`put`, `evict`, `evict_by_prefix` and `clear` as
+[after-commit synchronizations](data-relational.md#synchronizations):
+
+* they run once the unit has committed, so no request is served a value that was
+  never committed, and no concurrent reader re-caches the old value after an
+  eviction that ran too early;
+* they are dropped when the unit rolls back or its commit fails, which leaves the
+  cache consistent with the database.
+
+Outside a unit they run at once. Reads, `put_if_absent`, and the explicitly
+immediate `evict_if_present(key)` and `invalidate()` always run at once. A
+deferred `put` stores a copy of the value taken when it was registered, so a
+value the cache refuses is refused right there, before the commit.
+
+The [decorators](#declarative-caching-decorators) and the CQRS query cache are
+transaction-aware. Wrap an adapter yourself to get the same behavior from direct
+calls:
+
+```python
+from pyfly.cache import TransactionAwareCache
+
+tx_cache = TransactionAwareCache(cache)
+
+@transactional
+async def rename(self, product_id: int, name: str) -> None:
+    await self.products.rename(product_id, name)
+    await tx_cache.evict(f"product:{product_id}")   # runs after the commit
+```
+
+With `on_write_error="log"`, a failing write is logged (a put at `WARNING`, an
+eviction at `ERROR`) instead of raised.
 
 ---
 
@@ -353,6 +484,13 @@ WARNING  Primary cache failed for PUT 'user:123', using fallback only
 
 PyFly provides four decorators for declarative caching. They handle cache key
 resolution, lookup, and storage automatically based on function arguments.
+
+The decorators are [transaction-aware](#caching-and-transactions): inside a unit
+of work, the value `@cache`/`@cacheable`/`@cache_put` store and the eviction
+`@cache_evict` makes wait for the commit, and are dropped on rollback. Every
+decorator accepts `cache_name`, a named [region](#named-caches-regions-and-dedicated-caches)
+of the backend that `@cache_evict(all_entries=True, cache_name=...)` clears on
+its own.
 
 ### @cache
 
@@ -453,6 +591,7 @@ await get_user("123")
 | `ttl`       | `timedelta \| None`           | `None`     | Time-to-live. `None` means the entry never expires. |
 | `condition` | `Callable[..., bool] \| None` | `None`     | Keyword-only. Predicate over the call arguments; returning `False` bypasses the cache (no read or write). |
 | `unless`    | `Callable[[Any], bool] \| None` | `None`   | Keyword-only. Predicate over the result; returning `True` returns the value without storing it. |
+| `cache_name` | `str \| None`               | `None`     | Keyword-only. A named region of `backend` (keys under `<cache_name>::`). |
 
 ### @cache_put
 
@@ -480,6 +619,7 @@ async def update_user(user_id: str, data: dict) -> dict:
 | `backend` | `CacheAdapter`        | *required* | The cache backend to use. |
 | `key`     | `str`                 | *required* | Key template with `{param}` placeholders. |
 | `ttl`     | `timedelta \| None`   | `None`     | Time-to-live for the updated cache entry. |
+| `cache_name` | `str \| None`      | `None`     | Keyword-only. A named region of `backend`. |
 
 #### @cache vs. @cache_put
 
@@ -491,8 +631,9 @@ async def update_user(user_id: str, data: dict) -> dict:
 
 ### @cache_evict
 
-Removes a cache entry (or clears the entire cache) **after** the decorated
-function executes.
+Removes a cache entry (or clears the cache) **after** the decorated function
+executes, and after the commit when it runs inside a unit of work. An eviction
+before the commit would let a concurrent reader re-cache the old row for good.
 
 ```python
 from pyfly.cache import cache_evict
@@ -503,11 +644,11 @@ async def delete_user(user_id: str) -> None:
     await database.delete_user(user_id)
     # After this returns, cache entry "user:{user_id}" is evicted
 
-# Clear all entries
-@cache_evict(backend=backend, all_entries=True)
+# Clear the "users" region only
+@cache_evict(backend=backend, all_entries=True, cache_name="users")
 async def purge_all_users() -> None:
     await database.delete_all_users()
-    # After this returns, the entire cache is cleared
+    # After this returns (after the commit), the users:: entries are evicted
 ```
 
 #### Parameters
@@ -516,7 +657,29 @@ async def purge_all_users() -> None:
 |---------------|----------------|------------|-------------|
 | `backend`     | `CacheAdapter` | *required* | The cache backend to use. |
 | `key`         | `str`          | `""`       | Key template with `{param}` placeholders. Ignored when `all_entries=True`. |
-| `all_entries` | `bool`         | `False`    | When `True`, calls `backend.clear()` instead of evicting a single key. |
+| `all_entries` | `bool`         | `False`    | When `True`, clears the `cache_name` region, or `backend` itself (its own entries only) when no region is named. |
+| `before_invocation` | `bool`   | `False`    | Keyword-only. Evict at once, before the method runs, even inside a unit of work (Spring's `beforeInvocation`). A failure then propagates, since nothing has run yet. |
+| `cache_name`  | `str \| None`  | `None`     | Keyword-only. A named region of `backend`. |
+
+### Return Types, Hits and Failures
+
+* **The declared return type is checked when a method is decorated.** A type the
+  cache cannot hold, an ORM-mapped class or a Beanie document (also as
+  `list[Order]` or `Order | None`), raises `TypeError` right there. A forward
+  reference that cannot be resolved yet is checked at the first call, before the
+  method runs.
+* **A hit has the declared type.** The decorators rebuild a hit with a Pydantic
+  `TypeAdapter` of the return annotation, so a Redis or PostgreSQL cache returns
+  the DTO, dataclass, `datetime` or `Decimal` the method declares, not a `dict` or
+  a string. An entry that no longer fits the type (written by an older version of
+  the model) is treated as a miss and overwritten, with a warning.
+* **A cache failure never changes the outcome of the call.** Once the method has
+  run (and may have committed), a put or an eviction that fails, including a value
+  the cache refuses, is logged (`cache_put_skipped`/`cache_evict_skipped` on the
+  `pyfly.cache` logger) and the result is returned. Raising there made the
+  client retry a write that had already committed. A failing read, before the
+  method runs, still propagates. A bad key template raises before the method
+  runs.
 
 ---
 
@@ -743,7 +906,7 @@ class ProductService:
 
     @cache_evict(backend=None, all_entries=True)
     async def clear_catalog(self) -> None:
-        """Remove all products and clear the entire cache."""
+        """Remove all products and clear the cache (its own entries, never a shared store)."""
         self._db.clear()
 ```
 
