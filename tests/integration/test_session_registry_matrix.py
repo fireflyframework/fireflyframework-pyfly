@@ -20,6 +20,8 @@
   and the table grew forever. Dead sessions are dropped at the next login and by a purge.
 - C154: the "relational, cross-process" registry had no relational session store behind it, so evicting a
   session held by another replica did nothing. ``SqlSessionStore`` is that store.
+- A capped login reruns its unit when MariaDB's snapshot isolation reports that a registration it read and
+  is evicting changed meanwhile (error 1020): a logout or the purge must not fail a concurrent login.
 """
 
 from __future__ import annotations
@@ -27,18 +29,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.util import await_only
 
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, session_registrations, sessions
+from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from pyfly.security.context import SecurityContext
 from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.adapters.sql_session_store import SqlSessionStore
-from pyfly.session.concurrency import ConcurrencyControlPolicy, SessionConcurrencyController
+from pyfly.session.concurrency import ConcurrencyControlPolicy, SessionConcurrencyController, SessionRegistration
+from pyfly.testing.statement_counter import statement_verb
 from tests.integration._repository_harness import repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 
@@ -135,6 +144,97 @@ async def test_principals_and_session_ids_compare_exactly(relational_backend: Re
 
         assert [sid for sid, _ in await registry.list_sessions("Bob")] == ["s-upper"]
         assert await store.get("S-LOWER") is not None and await store.get("s-lower") is not None
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A capped login racing a deregistration or a renewal of the session it evicts
+# ---------------------------------------------------------------------------------------------------------
+
+_PAUSED_LOGIN: ContextVar[bool] = ContextVar("wp10b_paused_login", default=False)
+
+
+@contextlib.contextmanager
+def _hold_deletes(engine: AsyncEngine, times: int) -> Iterator[asyncio.Queue[asyncio.Event]]:
+    """Hold the task that set ``_PAUSED_LOGIN`` before each of its first *times* DELETEs: each hold puts an
+    event on the yielded queue, and the task goes on once that event is set."""
+    holds: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+    held = 0
+
+    def before(_conn: Connection, _cursor: Any, statement: str, *_args: Any) -> None:
+        nonlocal held
+        if not _PAUSED_LOGIN.get() or held == times or statement_verb(statement) != "DELETE":
+            return
+        held += 1
+        resume = asyncio.Event()
+        holds.put_nowait(resume)
+        await_only(resume.wait())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before)
+    try:
+        yield holds
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", before)
+
+
+async def _capped_login(registry: PostgresSessionRegistry) -> SessionRegistration:
+    """Alice's third login under a cap of two, evicting the oldest, held at its DELETEs by ``_hold_deletes``."""
+    _PAUSED_LOGIN.set(True)
+    return await registry.register_limited("alice", "new", 3.0, max_sessions=2, evict_oldest=True)
+
+
+@pytest.mark.parametrize("racer", ["deregister", "renew"])
+async def test_a_capped_login_survives_a_change_to_the_registration_it_evicts(
+    relational_backend: RelationalBackend, racer: str
+) -> None:
+    """A logout, a login's drop of a dead session and the purge change registrations without the principal's
+    lock. When a capped login has read the registrations and is about to evict one of them, such a change
+    commits first: MariaDB's snapshot isolation then fails the login's DELETE ("Record has changed since last
+    read", error 1020), and the login failed with a raw driver error after its session was saved. The login
+    reruns its unit instead: it is accepted, and the cap holds."""
+    async with _replicas(relational_backend, count=1) as [(_store, registry, engine)]:
+        await registry.register_limited("alice", "old", 1.0, max_sessions=5, evict_oldest=True)
+        await registry.register_limited("alice", "live", 2.0, max_sessions=5, evict_oldest=True)
+
+        async def change() -> None:
+            if racer == "deregister":  # a logout, a login's drop of a dead session, the purge
+                await registry.deregister("alice", "old")
+            else:  # the purge renewing the registration of a live session
+                await registry.renew(["old"])
+
+        with _hold_deletes(engine, times=1) as holds:
+            login_task = asyncio.create_task(_capped_login(registry))
+            resume = await asyncio.wait_for(holds.get(), 10)
+            change_task = asyncio.create_task(change())
+            # On a server the change needs no lock the login holds and commits at once; on SQLite it waits
+            # for the login's write lock, so the login resumes first.
+            await asyncio.wait({change_task}, timeout=1)
+            resume.set()
+            registration, _ = await asyncio.gather(login_task, change_task)
+
+        assert registration.accepted
+        assert [sid for sid, _ in await registry.list_sessions("alice")] == ["live", "new"]
+
+
+@pytest.mark.backends("mariadb")
+async def test_a_capped_login_gives_up_after_three_conflicts(relational_backend: RelationalBackend) -> None:
+    """The rerun is bounded: a login whose eviction meets a changed registration on every attempt fails with
+    the translated OptimisticLockingFailureException (from the driver's error) after three attempts, and
+    changes nothing."""
+    async with _replicas(relational_backend, count=1) as [(_store, registry, engine)]:
+        await registry.register_limited("alice", "old", 1.0, max_sessions=5, evict_oldest=True)
+        await registry.register_limited("alice", "live", 2.0, max_sessions=5, evict_oldest=True)
+
+        with _hold_deletes(engine, times=3) as holds:
+            login_task = asyncio.create_task(_capped_login(registry))
+            for _attempt in range(3):
+                resume = await asyncio.wait_for(holds.get(), 10)
+                await registry.renew(["old"])
+                resume.set()
+            with pytest.raises(OptimisticLockingFailureException) as raised:
+                await login_task
+
+        assert isinstance(raised.value.__cause__, OperationalError)
+        assert [sid for sid, _ in await registry.list_sessions("alice")] == ["old", "live"]
 
 
 # ---------------------------------------------------------------------------------------------------------

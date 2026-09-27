@@ -17,11 +17,15 @@
 Durable, queryable, cross-process session concurrency control, with no Redis required. PostgreSQL is the
 provider's name; the registry runs on every backend SQLAlchemy supports, on the framework tables
 ``pyfly_session_registrations`` (a row per session: principal, creation, next liveness check) and
-``pyfly_session_principals`` (a row per principal).
+``pyfly_session_principals`` (a row per principal, kept after the principal's last session ends: deleting it
+would race the next login that locks it).
 
 - **An atomic cap.** :meth:`PostgresSessionRegistry.register_limited` locks the principal's row
   (``UPDATE ... SET version = version + 1``), then counts, evicts and registers in the same unit of work: the
-  logins of one principal take turns, on every instance, so max-sessions holds under concurrency.
+  logins of one principal take turns, on every instance, so max-sessions holds under concurrency. A logout
+  or the purge changes registrations without that lock; on MariaDB, whose snapshot isolation refuses to
+  evict a registration that changed since the login read it (error 1020, an
+  :class:`~pyfly.kernel.exceptions.OptimisticLockingFailureException`), the login runs its unit again.
 - **Purged.** A registration is due for a liveness check one *ttl* after it was registered or last renewed;
   the controller's purge (``SessionConcurrencyController.purge_expired``, also run by logins) drops those whose
   session the store no longer has and renews the others.
@@ -39,20 +43,29 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.transaction import infrastructure_unit, outside_transaction
+from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from pyfly.session.concurrency import SessionRegistration, plan_registration
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+_logger = logging.getLogger(__name__)
+
 # Guard against SQL injection via a misconfigured table name.
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_CAPPED_ATTEMPTS = 3
+"""How many times a capped registration runs its unit when a registration it read changed before it wrote
+(:meth:`PostgresSessionRegistry._register_capped`)."""
 
 
 class PostgresSessionRegistry:
@@ -225,13 +238,42 @@ class PostgresSessionRegistry:
         """Count, evict and register in one unit of work that holds the principal's row (module
         documentation). The principal's first capped login inserts that row first, in a short unit of its
         own (a conditional insert beside the lock would deadlock MySQL's concurrent first logins)."""
-        result = await self._register_locked(principal, session_id, created_at, max_sessions, evict_oldest)
+        result = await self._register_capped(principal, session_id, created_at, max_sessions, evict_oldest)
         if result is None:
             await self._add_principal(principal)
-            result = await self._register_locked(principal, session_id, created_at, max_sessions, evict_oldest)
+            result = await self._register_capped(principal, session_id, created_at, max_sessions, evict_oldest)
         if result is None:  # the principal rows are never deleted: this cannot happen twice in a row
             raise RuntimeError(f"The session registry has no row for principal {principal!r}")
         return result
+
+    async def _register_capped(
+        self, principal: str, session_id: str, created_at: float, max_sessions: int, evict_oldest: bool
+    ) -> SessionRegistration | None:
+        """:meth:`_register_locked`, run again when a registration it read changed before it wrote.
+
+        :meth:`deregister` and :meth:`renew` (a logout, a login's drop of a dead session, the purge) do not
+        take the principal's lock, so one of them can commit between the unit's read of the registrations and
+        its eviction. PostgreSQL, MySQL and SQLite write the latest committed rows and carry on; MariaDB's
+        snapshot isolation (``innodb_snapshot_isolation``, on by default since 11.6) refuses the write
+        instead ("Record has changed since last read", error 1020), which translates to
+        :class:`~pyfly.kernel.exceptions.OptimisticLockingFailureException`. The unit rolled back whole and did
+        nothing else, so it runs again and plans on a fresh read, up to ``_CAPPED_ATTEMPTS`` times; then the
+        translated exception is raised. Any other failure is raised as it is.
+        """
+        attempt = 1
+        while True:
+            try:
+                return await self._register_locked(principal, session_id, created_at, max_sessions, evict_oldest)
+            except Exception as error:
+                translated = translate_exception(error)
+                if not isinstance(translated, OptimisticLockingFailureException):
+                    raise
+                if attempt == _CAPPED_ATTEMPTS:
+                    if translated is error:
+                        raise
+                    raise translated from error
+                _logger.debug("session_registration_retried", extra={"principal": principal, "attempt": attempt})
+                attempt += 1
 
     async def _register_locked(
         self, principal: str, session_id: str, created_at: float, max_sessions: int, evict_oldest: bool

@@ -274,6 +274,10 @@ pyfly:
   (`AtomicSessionRegistry.register_limited`): one unit of work that holds the principal's row on SQL, one Lua
   script on Redis, one lock in memory. Concurrent logins of one principal, on one instance or several, never
   exceed the cap. A custom registry without that method is serialized per principal within the process.
+  Logouts and the purge change SQL registrations without the principal's lock; on MariaDB, whose snapshot
+  isolation refuses to evict a registration that changed after the login read it ("Record has changed since
+  last read", error 1020), the login runs its unit again on a fresh read, up to three times, and then raises
+  `OptimisticLockingFailureException`.
 - The SQL registry is purged when the controller has the store: a registration comes due for a liveness
   check one session TTL after it was registered or renewed; `controller.purge_expired()` drops the due
   registrations whose session is gone and renews the others. A login also checks up to
@@ -314,7 +318,10 @@ the box, selected by `pyfly.session.concurrency.registry`:
   `pyfly_session_registrations` (`session_id` PK, `principal`, `created_at`,
   `expires_at`: when the registration comes due for a liveness check), and
   `pyfly_session_principals` holds one row per principal, which a capped login
-  locks. The tables are created when the controller starts if the schema
+  locks. A principal's row stays after its last session ends (the table grows
+  with the number of principals who ever logged in under a cap, not with their
+  logins): deleting it would race the next login that locks it. The tables are
+  created when the controller starts if the schema
   strategy allows it, otherwise checked. The datasource is the one
   `pyfly.session.concurrency.postgres.datasource` names, or the one
   `pyfly.session.concurrency.postgres.url` resolves to in the context's
