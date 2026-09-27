@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Column, MetaData, String, Table, func, insert, select
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from pyfly.container.container import Container
 from pyfly.container.exceptions import BeanCreationException
@@ -191,6 +192,84 @@ async def test_the_context_starts_the_stores_and_they_join_transactional(tmp_pat
 async def test_with_migrations_owning_the_schema_a_missing_table_stops_the_context(tmp_path: Path) -> None:
     context = ApplicationContext(_config(tmp_path, _SQL, **{"ddl-auto": "none"}))
     with pytest.raises(BeanCreationException, match="table pyfly_event_store does not exist"):
+        await context.start()
+
+
+@pytest.mark.parametrize("relational", [{"enabled": "false"}, {}], ids=["relational-off", "relational-on"])
+async def test_an_event_store_configured_by_its_url_alone_needs_no_primary_datasource(
+    tmp_path: Path, relational: dict[str, str]
+) -> None:
+    """Review of WP08: the checkpoint store, which follows the event store's provider, looked for the primary
+    datasource, so an application whose only database is ``pyfly.eventsourcing.store.url`` stopped starting.
+    With no primary and no datasource of their own, the checkpoints live with the events."""
+    context = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "eventsourcing": {
+                        "enabled": "true",
+                        "store": {"provider": "sqlalchemy", "url": _sqlite(tmp_path / "events.db")},
+                    },
+                    "data": {"relational": {**relational, "ddl-auto": "create"}},
+                }
+            }
+        )
+    )
+    await context.start()
+    try:
+        store = context.get_bean(EventStore)
+        assert isinstance(store, SqlAlchemyEventStore)
+        await store.append("account-1", "Account", [StoredEventEnvelope(event_type="Opened")], expected_version=0)
+        assert [event.event_type for event in await store.stream_all()] == ["Opened"]
+        checkpoints = context.get_bean(CheckpointStore)
+        assert isinstance(checkpoints, SqlAlchemyCheckpointStore) and checkpoints.engine is store.engine
+        assert await checkpoints.load("accounts") == 0
+    finally:
+        await context.stop()
+
+
+async def test_the_checkpoints_stay_on_the_primary_when_there_is_one(tmp_path: Path) -> None:
+    config = _config(tmp_path, {"store": {"provider": "sqlalchemy", "url": _sqlite(tmp_path / "events.db")}})
+    registry = DataSourceRegistry.for_config(config)
+    try:
+        checkpoints = EventSourcingAutoConfiguration().projection_checkpoint_store(config, Container())
+        assert isinstance(checkpoints, SqlAlchemyCheckpointStore) and checkpoints.engine is registry.primary.engine
+    finally:
+        await registry.close()
+
+
+async def test_with_migrations_owning_the_schema_an_application_without_projections_needs_no_checkpoint_table(
+    tmp_path: Path,
+) -> None:
+    """Review of WP08: with ``ddl-auto: none``, the checkpoint store the event store's provider brings along
+    checked ``pyfly_projection_checkpoints`` and ``pyfly_locks`` at start, so an application that uses no
+    projection had to create them. It checks them when it is first used; a checkpoint provider configured
+    explicitly still checks them at start."""
+    from pyfly.data.relational.framework_schema import (
+        FrameworkSchemaError,
+        ensure_tables,
+        event_store,
+        event_store_head,
+        snapshots,
+    )
+
+    migrations = create_async_engine(_sqlite(tmp_path / "app.db"))
+    await ensure_tables(migrations, event_store, event_store_head, snapshots)
+    await migrations.dispose()
+
+    context = ApplicationContext(_config(tmp_path, _SQL, **{"ddl-auto": "none"}))
+    await context.start()
+    try:
+        store = context.get_bean(EventStore)
+        await store.append("account-1", "Account", [StoredEventEnvelope(event_type="Opened")], expected_version=0)
+        with pytest.raises(FrameworkSchemaError, match="table pyfly_projection_checkpoints does not exist"):
+            await context.get_bean(CheckpointStore).load("accounts")
+    finally:
+        await context.stop()
+
+    explicit = {**_SQL, "projection": {"checkpoint": {"provider": "sqlalchemy"}}}
+    context = ApplicationContext(_config(tmp_path, explicit, **{"ddl-auto": "none"}))
+    with pytest.raises(BeanCreationException, match="table pyfly_projection_checkpoints does not exist"):
         await context.start()
 
 

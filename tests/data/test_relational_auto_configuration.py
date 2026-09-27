@@ -156,16 +156,12 @@ class TestDisposal:
             ensure_tables,
             event_store,
             event_store_head,
-            locks,
             orchestration_state,
-            projection_checkpoints,
             snapshots,
         )
 
         migrations = create_async_engine(url)
-        await ensure_tables(
-            migrations, orchestration_state, event_store, event_store_head, snapshots, projection_checkpoints, locks
-        )
+        await ensure_tables(migrations, orchestration_state, event_store, event_store_head, snapshots)
         await migrations.dispose()
         context = await _started(
             _config(
@@ -211,22 +207,11 @@ class TestDisposal:
 
     async def test_a_module_on_another_database_gets_a_configured_datasource(self, tmp_path: Path) -> None:
         # ddl-auto=none: the event-sourcing stores check their tables at start, as a migration would have created them.
-        from pyfly.data.relational.framework_schema import (
-            ensure_tables,
-            event_store,
-            event_store_head,
-            locks,
-            projection_checkpoints,
-            snapshots,
-        )
+        from pyfly.data.relational.framework_schema import ensure_tables, event_store, event_store_head, snapshots
 
-        for database, tables in (
-            ("app.db", [projection_checkpoints, locks]),  # the checkpoints follow the event store's provider
-            ("events.db", [event_store, event_store_head, snapshots]),
-        ):
-            migrations = create_async_engine(_sqlite(tmp_path / database))
-            await ensure_tables(migrations, *tables)
-            await migrations.dispose()
+        migrations = create_async_engine(_sqlite(tmp_path / "events.db"))
+        await ensure_tables(migrations, event_store, event_store_head, snapshots)
+        await migrations.dispose()
         context = await _started(
             _config(
                 {"url": _sqlite(tmp_path / "app.db"), "pool": {"size": 2}},

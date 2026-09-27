@@ -173,16 +173,24 @@ class SqlAlchemyCheckpointStore:
 
     *datasource* is where they live, with the read models they track: an ``AsyncEngine``, a registry
     ``DataSource`` or a datasource name. *table_name* renames the table. With *create_table* false the store never
-    creates its table and only checks it at :meth:`start` (migrations own the schema); the projection lease's
-    table (``pyfly_locks``) is treated the same way.
+    creates its table and only checks it (migrations own the schema); the projection lease's table
+    (``pyfly_locks``) is treated the same way. With *check_at_start* false, :meth:`start` leaves creating and
+    checking them to the store's first use (the auto-configured store does, when its provider only follows the
+    event store's: an application with no projection needs neither table).
     """
 
     def __init__(
-        self, datasource: Any, *, table_name: str = "pyfly_projection_checkpoints", create_table: bool = True
+        self,
+        datasource: Any,
+        *,
+        table_name: str = "pyfly_projection_checkpoints",
+        create_table: bool = True,
+        check_at_start: bool = True,
     ) -> None:
         self._target = datasource
         self._table_name = table_name
         self._create_table = create_table
+        self._check_at_start = check_at_start
         self._table_object: Table | None = None
         self._lease: LeaseLock | None = None
         self._started = False
@@ -193,9 +201,14 @@ class SqlAlchemyCheckpointStore:
 
     async def start(self) -> None:
         """Create the checkpoint table and the lease table (``pyfly_locks``, for :meth:`projection_lease`) when
-        allowed, then check them; raises ``FrameworkSchemaError`` when one is unusable.
+        allowed, then check them; raises ``FrameworkSchemaError`` when one is unusable (with *check_at_start*
+        false, this happens on first use instead).
 
         The application context starts the store; one built by hand starts on first use."""
+        if self._check_at_start:
+            await self._prepare()
+
+    async def _prepare(self) -> None:
         from pyfly.data.relational.framework_schema import ensure_tables, locks_table
 
         with outside_transaction():
@@ -204,7 +217,7 @@ class SqlAlchemyCheckpointStore:
 
     async def _ready(self) -> None:
         if not self._started:
-            await self.start()
+            await self._prepare()
 
     async def stop(self) -> None:
         """Nothing to release: the engine belongs to the datasource registry (or to the caller)."""

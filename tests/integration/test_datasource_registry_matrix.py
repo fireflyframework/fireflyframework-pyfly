@@ -99,23 +99,12 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
         ensure_tables,
         event_store,
         event_store_head,
-        locks,
         orchestration_state,
-        projection_checkpoints,
         snapshots,
     )
 
     migrations = create_async_engine(url, poolclass=NullPool)
-    await ensure_tables(
-        migrations,
-        orchestration_state,
-        cache_entries,
-        event_store,
-        event_store_head,
-        snapshots,
-        projection_checkpoints,
-        locks,
-    )
+    await ensure_tables(migrations, orchestration_state, cache_entries, event_store, event_store_head, snapshots)
     await migrations.dispose()
     context = ApplicationContext(relational_backend.config(overrides))
     await context.start()
