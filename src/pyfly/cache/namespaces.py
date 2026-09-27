@@ -43,6 +43,10 @@ _logger = logging.getLogger("pyfly.cache")
 REGION_SEPARATOR = "::"
 """What separates a region's name from the keys in it."""
 
+NAMESPACE_SEPARATOR = ":"
+"""What ends a key namespace (``pyfly:cache:``, ``pyfly:cache.idempotency:``); a dedicated cache's name cannot
+hold it."""
+
 _WARNED: set[type] = set()
 
 
@@ -130,15 +134,30 @@ def cache_region(cache: CacheAdapter, name: str) -> PrefixedCache:
     return PrefixedCache(cache, f"{name}{REGION_SEPARATOR}")
 
 
+def dedicated_cache_name(name: str) -> str:
+    """*name*, checked as the name of a dedicated cache (``with_namespace(name)``): not empty, and without
+    :data:`NAMESPACE_SEPARATOR`, which ends a namespace. ``with_namespace("a:b")`` would otherwise store its
+    entries under ``pyfly:cache.a:b:``, inside the namespace ``with_namespace("a")`` clears (and a key
+    ``b:k`` of that cache would be one of its keys). A ``.`` is fine: ``pyfly:cache.a.b:`` is disjoint from
+    ``pyfly:cache.a:``. Raises ``ValueError``."""
+    if not name:
+        raise ValueError("A dedicated cache needs a name")
+    if NAMESPACE_SEPARATOR in name:
+        raise ValueError(
+            f"A dedicated cache's name cannot contain {NAMESPACE_SEPARATOR!r}, which ends a namespace (it would "
+            f"be part of another dedicated cache): {name!r}"
+        )
+    return name
+
+
 def dedicated_cache(cache: CacheAdapter, name: str) -> CacheAdapter:
-    """A cache for *name* that *cache*'s ``clear()`` never touches.
+    """A cache for *name* that *cache*'s ``clear()`` never touches (*name*: :func:`dedicated_cache_name`).
 
     Adapters that implement ``with_namespace(name)`` (every built-in one) return a disjoint cache that
     shares their connection. For another adapter this falls back to the region ``pyfly.<name>::`` of
     *cache*, logged once per adapter type: its entries are then cleared with *cache*.
     """
-    if not name:
-        raise ValueError("A dedicated cache needs a name")
+    dedicated_cache_name(name)
     factory: Any = getattr(cache, "with_namespace", None)
     if callable(factory):
         dedicated: CacheAdapter = factory(name)

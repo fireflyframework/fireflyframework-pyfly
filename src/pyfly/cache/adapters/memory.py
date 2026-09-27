@@ -20,6 +20,7 @@ from collections import OrderedDict
 from datetime import timedelta
 from typing import Any
 
+from pyfly.cache.namespaces import dedicated_cache_name
 from pyfly.cache.serialization import Copy, encode_copy
 
 _SWEEP_FLOOR = 1024
@@ -162,9 +163,10 @@ class InMemoryCache:
         """A cache of its own for *name*, disjoint from this one: :meth:`clear` never touches it.
 
         Durable consumers (idempotency records, orchestration state) keep their entries there, so clearing
-        the evictable cache cannot drop them. The same name always gives the same cache.
+        the evictable cache cannot drop them. The same name always gives the same cache. *name* cannot be
+        empty or contain ``:``, as with every built-in adapter (:func:`~pyfly.cache.namespaces.dedicated_cache_name`).
         """
-        dedicated = self._dedicated.get(name)
+        dedicated = self._dedicated.get(dedicated_cache_name(name))
         if dedicated is None:
             dedicated = InMemoryCache(max_size=self._max_size)
             self._dedicated[name] = dedicated

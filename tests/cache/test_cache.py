@@ -31,6 +31,7 @@ from pyfly.cache.adapters import InMemoryCache
 from pyfly.cache.adapters.redis import RedisCacheAdapter
 from pyfly.cache.decorators import cache, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
+from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import CacheValueError, restore
 from pyfly.data.relational.sqlalchemy.entity import Base
@@ -450,6 +451,25 @@ class TestRedisNamespaces:
         assert await idempotency.get("idem:k1") is None  # the database was the root cache's to clear
         warnings = [r.getMessage() for r in caplog.records if r.getMessage().startswith("cache_not_dedicated")]
         assert len(warnings) == 1 and "namespace" in warnings[0]
+
+    @pytest.mark.parametrize("name", ["idempotency:v2", "a:b", ":", ""])
+    def test_a_dedicated_cache_name_cannot_hold_the_namespace_separator(self, name: str) -> None:
+        """``:`` ends a namespace: ``with_namespace("a:b")`` would store under ``pyfly:cache.a:b:``, inside what
+        ``with_namespace("a").clear()`` deletes. Every built-in adapter refuses such a name (and an empty one),
+        so a name that works in memory works on Redis and in the PostgreSQL adapter too."""
+        for adapter in (RedisCacheAdapter(RedisBytesStub()), InMemoryCache()):
+            with pytest.raises(ValueError, match="name"):
+                adapter.with_namespace(name)
+        with pytest.raises(ValueError, match="name"):
+            dedicated_cache(RedisCacheAdapter(RedisBytesStub()), name)
+
+    async def test_dedicated_caches_with_related_names_are_disjoint(self) -> None:
+        root = RedisCacheAdapter(RedisBytesStub())
+        first, second = root.with_namespace("orders"), root.with_namespace("orders.archive")
+        await first.put("k", 1)
+        await second.put("k", 2)
+        await first.clear()
+        assert await first.get("k") is None and await second.get("k") == 2
 
 
 class TestJsonHits:

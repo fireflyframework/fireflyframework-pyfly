@@ -39,7 +39,9 @@ class CacheAdapter(Protocol):
       even when no one reads it again (Redis expires keys itself, the in-memory cache sweeps them): the
       CQRS query cache writes one entry per caller's scope and relies on TTLs to bound its size.
     - **Named caches (optional).** ``with_namespace(name)`` returns a cache disjoint from this one, whose
-      entries this cache's ``clear()`` never touches (see :func:`~pyfly.cache.namespaces.dedicated_cache`).
+      entries this cache's ``clear()`` never touches (see :func:`~pyfly.cache.namespaces.dedicated_cache`); a
+      name that is empty or contains ``:`` is refused with ``ValueError``
+      (:func:`~pyfly.cache.namespaces.dedicated_cache_name`).
       Durable consumers (idempotency records, orchestration state) keep their entries there.
 
     Writes are not transaction-aware by themselves; wrap the adapter in

@@ -87,7 +87,7 @@ Implements `CacheAdapter` using `redis.asyncio.Redis`.
 | `evict(key)` | Remove a key from the cache |
 | `exists(key)` | Check if a key exists |
 | `clear()` | Delete the cache's own keys (its namespace, through `SCAN`); never `FLUSHDB` |
-| `with_namespace(name)` | A cache dedicated to `name` (`pyfly:cache.<name>:`) that `clear()` never touches |
+| `with_namespace(name)` | A cache dedicated to `name` (`pyfly:cache.<name>:`) that `clear()` never touches; a name with `:` (or an empty one) raises `ValueError` |
 
 ### In-Memory Fallback
 

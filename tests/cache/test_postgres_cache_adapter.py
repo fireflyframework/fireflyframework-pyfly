@@ -90,6 +90,21 @@ class TestPostgresCacheAdapterSQLite:
         assert await adapter.get("x") == 42
 
     @pytest.mark.asyncio
+    async def test_a_dedicated_cache_name_cannot_hold_the_namespace_separator(
+        self, cache: PostgresCacheAdapter
+    ) -> None:
+        """``with_namespace("a:b")`` would store under ``pyfly:cache.a:b:``, inside what
+        ``with_namespace("a").clear()`` deletes: the name is refused, and names that share a start stay apart."""
+        for name in ("a:b", ""):
+            with pytest.raises(ValueError, match="name"):
+                cache.with_namespace(name)
+        first, second = cache.with_namespace("orders"), cache.with_namespace("orders.archive")
+        await first.put("k", 1)
+        await second.put("k", 2)
+        await first.clear()
+        assert await first.get("k") is None and await second.get("k") == 2
+
+    @pytest.mark.asyncio
     async def test_put_and_get_scalar(self, cache: PostgresCacheAdapter) -> None:
         await cache.put("num", 123)
         assert await cache.get("num") == 123

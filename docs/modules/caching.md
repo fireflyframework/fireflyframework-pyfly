@@ -98,7 +98,10 @@ Every built-in adapter keeps these rules, and a custom adapter should too:
   expires keys itself, the in-memory cache sweeps them). The CQRS query cache
   writes one entry per caller's scope and relies on TTLs to bound its size.
 * **Named caches (optional).** `with_namespace(name)` returns a cache disjoint
-  from this one, which this cache's `clear()` never touches. See
+  from this one, which this cache's `clear()` never touches. The name cannot be
+  empty or contain `:`, which ends a namespace (`with_namespace("a:b")` would
+  live inside what `with_namespace("a").clear()` deletes): every built-in
+  adapter raises `ValueError` for it. See
   [Named Caches](#named-caches-regions-and-dedicated-caches).
 
 Every built-in adapter keeps these rules: the in-memory, Redis and PostgreSQL
@@ -248,7 +251,7 @@ removed server-side without any lazy-deletion overhead.
 | `start()` | Validates connectivity by pinging Redis (`await client.ping()`). Called automatically during application startup. |
 | `stop()` | Closes the underlying Redis connection (`await client.aclose()`). Called automatically during application shutdown. A `with_namespace` cache leaves the client to its source. |
 | `get_keys(pattern, limit)` | Up to `limit` of the cache's keys matching a glob `pattern`, through `SCAN`. |
-| `with_namespace(name)` | A cache dedicated to `name` on the same client (`pyfly:cache.<name>:`), which `clear()` never touches. |
+| `with_namespace(name)` | A cache dedicated to `name` on the same client (`pyfly:cache.<name>:`), which `clear()` never touches. A name that is empty or contains `:` raises `ValueError`. |
 
 `evict_by_prefix` and `clear` walk the database once with `SCAN` (`COUNT 1000`)
 and delete in batches. Glob characters in a prefix are taken literally.
@@ -406,7 +409,7 @@ deletes all matching rows in a single statement.
 |--------|-------------|
 | `get_keys(pattern, limit)` | Return up to `limit` of this cache's non-expired keys matching a glob pattern (`*` / `?`; a backslash makes the next character literal), without the namespace. |
 | `get_stats()` | Return a `dict` with `size` (this cache's live entries), `type`, `namespace`, `requests`, `hits`, `misses`, `evictions`, `hit_rate`. |
-| `with_namespace(name)` | A cache dedicated to `name` on the same table (`pyfly:cache.<name>:`), which `clear()` never touches. |
+| `with_namespace(name)` | A cache dedicated to `name` on the same table (`pyfly:cache.<name>:`), which `clear()` never touches. A name that is empty or contains `:` raises `ValueError`. |
 | `purge_expired()` | Delete every expired entry now; returns how many were deleted. |
 
 ### Auto-configuration

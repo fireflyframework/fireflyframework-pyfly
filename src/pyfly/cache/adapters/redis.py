@@ -19,6 +19,7 @@ import logging
 from datetime import timedelta
 from typing import Any, cast
 
+from pyfly.cache.namespaces import dedicated_cache_name
 from pyfly.cache.serialization import cache_dumps, cache_loads
 
 _logger = logging.getLogger(__name__)
@@ -183,7 +184,9 @@ class RedisCacheAdapter:
 
         With an empty namespace this cache owns the whole database, and its :meth:`clear` deletes the
         dedicated cache (``<name>:``) too; the first one made logs a ``cache_not_dedicated`` WARNING. Give
-        the cache a namespace to keep idempotency records and orchestration state through a clear."""
+        the cache a namespace to keep idempotency records and orchestration state through a clear. *name*
+        cannot be empty or contain ``:`` (:func:`~pyfly.cache.namespaces.dedicated_cache_name`)."""
+        dedicated_cache_name(name)
         if not self._namespace and not self._shared_namespace_reported:
             self._shared_namespace_reported = True
             _logger.warning(

@@ -58,6 +58,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pyfly.cache.namespaces import dedicated_cache_name
 from pyfly.cache.serialization import cache_dumps, cache_loads
 from pyfly.data.transaction import (
     Propagation,
@@ -223,9 +224,9 @@ class PostgresCacheAdapter:
 
         With an empty namespace this cache owns the whole table, and its :meth:`clear` deletes the dedicated
         cache (``<name>:``) too; the first one made logs a ``cache_not_dedicated`` WARNING. Give the cache a
-        namespace to keep idempotency records and orchestration state through a clear."""
-        if not name:
-            raise ValueError("A dedicated cache needs a name")
+        namespace to keep idempotency records and orchestration state through a clear. *name* cannot be empty
+        or contain ``:`` (:func:`~pyfly.cache.namespaces.dedicated_cache_name`)."""
+        dedicated_cache_name(name)
         if not self._namespace and not self._shared_namespace_reported:
             self._shared_namespace_reported = True
             _logger.warning(
