@@ -56,7 +56,9 @@ import anyio
 import pytest
 from sqlalchemy import Identity, Integer, String, event, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio.result import AsyncCommon
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
@@ -71,6 +73,7 @@ from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transaction import (
     IllegalTransactionStateError,
     TransactionSynchronizationAdapter,
+    UnexpectedRollbackError,
     register_synchronization,
 )
 from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
@@ -235,6 +238,17 @@ class StService:
             if streamed == 10:
                 break  # the stream's close, in a task of its own, waits for the guard while count() runs
         return await self.items.count()
+
+    @transactional
+    async def break_out_then_wait(self) -> int:
+        streamed = 0
+        async for _item in self.items.stream_all():
+            streamed += 1
+            if streamed == 10:
+                break
+        for _ in range(10):
+            await asyncio.sleep(0)  # the abandoned stream is closed now, in a task of its own
+        return streamed
 
     @transactional
     async def write_after_closing_a_stream_early(self) -> int:
@@ -504,6 +518,20 @@ async def test_a_stream_abandoned_open_closes_quietly_when_its_unit_completes_fi
     # The stream's close waits for the guard while count() runs, and gets it once the unit is completing: it
     # must not raise the unit's refusal into its own task (the harness fails on what the loop reports).
     assert await bounded(harness.service.break_out_then_count()) == ROWS
+
+
+@pytest.mark.backends(SQLITE_FILE, PG)
+async def test_a_driver_error_in_a_late_close_is_the_units_not_its_tasks(harness: Harness) -> None:
+    # The close of the stream a break abandoned runs in a task nobody awaits: its driver error must reach the
+    # unit (rollback-only), never that task (the harness fails on what the event loop reports).
+    async def failing_close(_result: object) -> None:
+        raise OperationalError("CLOSE", {}, Exception("injected by the test"))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(AsyncCommon, "close", failing_close)
+        with pytest.raises(UnexpectedRollbackError) as raised:
+            await bounded(harness.service.break_out_then_wait())
+    assert isinstance(raised.value.__cause__, OperationalError)
 
 
 @IGNORE_UNBUFFERED_RESULT_COLLECTED

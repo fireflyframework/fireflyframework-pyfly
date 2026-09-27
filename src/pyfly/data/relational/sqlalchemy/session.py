@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -56,6 +57,8 @@ from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.registry import PRIMARY, TransactionManagerRegistry, installed_registry, resolve_manager
 from pyfly.data.transaction.template import infrastructure_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork
+
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "RELEASING_SAVEPOINT",
@@ -178,12 +181,23 @@ class GuardedResult:
 
         Closing is cleanup, and it often runs in a task of its own: Python closes an async generator left
         unfinished (a ``break`` out of ``stream_all``) later, in a new task. So it never raises the unit's
-        own refusals, and it leaves the cursor to the unit when the unit cannot take its close now: once the
-        unit is completing (its ``COMMIT`` or ``ROLLBACK`` closes the stream first, under its guard:
-        :func:`close_open_stream`), when the close is refused (the unit started completing while this waited
-        for its guard, or another task holds a savepoint on it: the end of the unit, or of that savepoint,
-        closes the stream), and when a cancellation or a driver error interrupted a fetch (the connection is
-        in an unknown state, and the unit discards it). Until then the stream keeps holding the unit.
+        own refusals, nor a driver error, and it leaves the cursor to the unit when the unit cannot take its
+        close now:
+
+        - once the unit is completing: its ``COMMIT`` or ``ROLLBACK`` closes the stream first, under its
+          guard (:func:`close_open_stream`);
+        - when the close is refused (the unit started completing while this waited for its guard, or another
+          task holds a savepoint on it): the end of the unit, or of that savepoint, closes the stream;
+        - after a cancellation interrupted a fetch: the unit is poisoned, and its connection is discarded
+          without another statement;
+        - after a driver error in a fetch or in this close: the unit is marked rollback-only, as by any
+          failed statement, the stream is never read to its end (``close_open_stream`` only forgets it), and
+          the connection is discarded if the unit's ``ROLLBACK`` then fails. A driver error of this close is
+          logged at WARNING (``unit_of_work_stream_close_failed``) instead of raised: a boundary that would
+          commit the unit rolls back and raises
+          :class:`~pyfly.data.transaction.errors.UnexpectedRollbackError`, caused by it.
+
+        Until then the stream keeps holding the unit.
         """
         unit = self._unit
         stream = self._stream
@@ -201,6 +215,14 @@ class GuardedResult:
                     self._failed(error)
                     raise
         except IllegalTransactionStateError:
+            return
+        except DBAPIError as error:
+            # The operation recorded it on the unit (rollback-only); a cleanup's caller has nothing to add.
+            _logger.warning(
+                "unit_of_work_stream_close_failed",
+                extra={"datasource": unit.datasource, "unit": unit.describe()},
+                exc_info=(type(error), error, error.__traceback__),
+            )
             return
         if stream is not None:
             unit.stream_closed(stream)
