@@ -605,6 +605,28 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
   methods are atomic (`save` is add, flush and refresh as one step). An atomic method never calls a
   method a subclass may override while it holds the guard (`exists_by_id` does not go through
   `find_by_id`), so an override that fans out cannot wait for its own caller.
+- Savepoints do not fan out. They are a stack on the unit's one connection, and the guard does not span
+  the code inside a savepoint, so while a task holds one (a `Propagation.NESTED` step, a
+  `session.begin_nested()` block) the unit belongs to that task and to the tasks it starts inside the
+  savepoint. A statement, a savepoint or a `NESTED` step from any other task, such as a sibling in
+  `gather()`, raises `IllegalTransactionStateError` instead of running inside that savepoint, where a
+  `ROLLBACK TO SAVEPOINT` would undo it after it reported success. Run `NESTED` steps and savepoint
+  blocks one after another; to run steps concurrently, give each one a unit of its own
+  (`Propagation.REQUIRES_NEW`, which commits on its own, or `detached()`). A `NESTED` scope that ends
+  while a task it started still holds a savepoint on top of its own neither releases nor rolls back
+  across it: the unit is marked rollback-only and the scope raises `IllegalTransactionStateError`.
+
+  ```python
+  @transactional
+  async def import_rows(self, rows: list[Row]) -> list[Row]:
+      rejected = []
+      for row in rows:  # one after another: not asyncio.gather()
+          try:
+              await self.importer.import_row(row)  # @transactional(propagation=Propagation.NESTED)
+          except IntegrityError:
+              rejected.append(row)  # rolled back to its savepoint; the rest of the unit goes on
+      return rejected
+  ```
 - A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
   instead of writing into a transaction nobody will commit.
 - Work that must outlive its caller's unit runs through `detached()`, with the transaction state cleared:
