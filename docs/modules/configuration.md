@@ -272,7 +272,7 @@ no restart — by issuing a single management request.
 
 ```bash
 curl -X POST http://localhost:8080/actuator/refresh
-# {"refreshed": ["FeatureFlags-singleton", "PricingProperties-singleton"]}
+# {"refreshed": ["__pyfly_bean_myapp.flags.FeatureFlags"]}
 ```
 
 ### What happens on POST /actuator/refresh
@@ -290,10 +290,17 @@ performs the following steps in order (`src/pyfly/context/refresh.py`):
 3. **Resets `@config_properties` singletons.** Their backing instances are cleared so they
    re-`bind()` from the live `Config` (which now reflects the re-read files, env-var
    overrides, and resolved `${...}` placeholders) on next resolution.
-4. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
+4. **Destroys the evicted refresh-scoped instances**: their `@pre_destroy` methods run, after the
+   swap, so a refresh-scoped bean that owns an engine or a client closes it instead of leaking it.
+5. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
 
-The response is `{"refreshed": [...]}`, listing the cache keys of the evicted
-refresh-scoped beans (an empty list when none are registered).
+The response is `{"refreshed": [...]}`, listing the scope keys of the evicted
+refresh-scoped beans (`__pyfly_bean_<module>.<class>`, plus `#<bean name>` for a named bean; an
+empty list when none are registered).
+
+A singleton that injected a refresh-scoped bean keeps the instance it received unless the bean is
+declared `@refresh_scope(proxy=True)` (a scoped proxy that follows each refresh) or the singleton
+injects `Provider[T]`; see the dependency-injection guide.
 
 ### Picking up file changes in your beans
 
@@ -315,8 +322,8 @@ class PricingProperties:
     base_rate: float = 1.0      # edit pyfly.yaml + POST /actuator/refresh -> re-bound
 
 
+@refresh_scope   # either order works; the refresh scope survives the stereotype
 @component
-@refresh_scope
 class FeatureFlags:
     new_checkout: bool = Value("${features.new-checkout:false}")
     # next resolution after refresh re-reads ${features.new-checkout} from the live Config

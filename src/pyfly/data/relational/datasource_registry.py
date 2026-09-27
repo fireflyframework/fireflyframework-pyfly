@@ -90,6 +90,7 @@ from pyfly.data.relational.dialect_customizers import (
 )
 
 __all__ = [
+    "CLOSE_TIMEOUT",
     "PRIMARY",
     "DataSource",
     "DataSourceCapabilities",

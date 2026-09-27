@@ -206,10 +206,21 @@ def resolve(self, cls: type[T]) -> T:
 
 Resolves an instance of the given type. The resolution order is:
 
-1. **Direct registration** -- if `cls` is registered, resolve it.
+1. **Direct registration** -- if `cls` is registered, resolve it. When several beans share that
+   exact class (two `@bean` methods that both return `AsyncEngine`), the one marked `@primary`
+   (or `@bean(primary=True)`) answers; without exactly one primary the lookup raises
+   `NoUniqueBeanError`, naming the beans. Until 26.09.07 the bean registered **last** answered
+   silently. Resolve one of them by name or `Qualifier`, or all of them with `list[T]`.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
 3. **Multiple bindings** -- pick the implementation marked `@primary`.
 4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if multiple candidates exist without a `@primary`.
+
+Once `ApplicationContext.stop()` starts destroying beans, resolving a bean that does not exist yet
+(a singleton the stop released, a transient or scoped bean) raises
+`BeanCreationNotAllowedError` (Spring's `BeanCreationNotAllowedException`): a bean built then would
+outlive the stop, as an `AsyncEngine` rebuilt after the datasource registry closed did. The
+instances that still exist are handed out until the stop releases them; `start()` allows creation
+again.
 
 Constructor parameters are resolved recursively via type hints. If a parameter uses
 `Annotated[T, Qualifier("name")]`, the container resolves by name instead of type.
@@ -514,6 +525,12 @@ class CurrentUser:
     ...
 ```
 
+A singleton cannot take a request-scoped bean as a plain dependency: there is no request when the
+singleton is built. Mark the bean `@scoped_proxy` (from `pyfly.container.refresh_scope`) and the
+singleton receives a proxy that resolves the current request's instance on every use (see
+[Scoped proxies](#scoped-proxies)), or inject `Provider[CurrentUser]` and call `get()` inside the
+request.
+
 ### SESSION
 
 `Scope.SESSION` creates **one instance per HTTP session**. The instance is stored as an
@@ -554,6 +571,17 @@ class ScopeHandler(Protocol):
 - `get(name, object_factory)` returns the cached instance for `name`, or calls
   `object_factory()` (at most once), caches the result, and returns it.
 - `remove(name)` evicts `name`, returning the removed instance or `None`.
+- Optionally, `evict_all() -> dict[str, Any]` evicts every cached instance and returns them by
+  name. When a handler has it, `ApplicationContext.stop()` calls it and runs the `@pre_destroy`
+  methods of the returned instances, before destroying the singletons (the built-in refresh
+  scope implements it).
+
+`name` is the bean's scope key: `__pyfly_bean_<module>.<class qualname>`, followed by
+`#<bean name>` for a named bean. It identifies the bean *definition*, so two `@bean` methods that
+return one class (two request- or refresh-scoped session factories, one per database) get two
+instances; until 26.09.07 the key was the class `__qualname__` alone, and every name after the
+first received the first one's instance. A `SESSION`-scoped bean stored by an older version under
+the old key is adopted and moved when exactly one session-scoped bean maps to that key.
 
 ```python
 from collections.abc import Callable
@@ -602,28 +630,85 @@ handler under that name during construction, so no `register_scope()` call is ne
 from pyfly.container import component, refresh_scope
 from pyfly.core.value import Value
 
-@refresh_scope            # must be the OUTER (top) decorator
+@refresh_scope
 @component
 class FeatureFlags:
     # re-read from the live Config every time the bean is rebuilt after a refresh
     enabled: bool = Value("${features.checkout.enabled:false}")
 ```
 
-`refresh_scope`, `RefreshScope`, and `REFRESH_SCOPE_NAME` (`= "refresh"`) live in
+`refresh_scope`, `scoped_proxy`, `RefreshScope`, and `REFRESH_SCOPE_NAME` (`= "refresh"`) live in
 `pyfly.container.refresh_scope` (`refresh_scope` and `RefreshScope` are also re-exported
 from `pyfly.container`). The decorator sets `__pyfly_scope__ = "refresh"` on the class.
 
-> **Decorator order matters.** A stereotype like `@component` always assigns its own
-> `scope=` (default `SINGLETON`), so it must run **before** (i.e. be listed *below*)
-> `@refresh_scope`. Equivalently, skip the marker and write the scope inline:
-> `@component(scope="refresh")`.
+The decorator order no longer matters: `@component` written above `@refresh_scope` used to reset
+the scope to `SINGLETON`, and the container now keeps the refresh scope either way. You can also
+write the scope inline: `@component(scope="refresh")`.
+
+**Evicted instances are destroyed.** A refresh evicts the cached instances and then runs their
+`@pre_destroy` methods, after the swap: a new resolution already gets the rebuilt bean while the
+evicted one closes. A refresh-scoped bean that owns an engine therefore disposes it in
+`@pre_destroy`, and `ApplicationContext.stop()` destroys the instances still cached. Until 26.09.07
+nothing was destroyed, so each refresh of such a bean leaked a connection pool.
+
+**Injecting a refresh-scoped bean into a singleton.** A singleton receives the instance that exists
+when it is built and keeps it: a refresh does not reach it. Either declare the bean with
+`@refresh_scope(proxy=True)`, which injects a [scoped proxy](#scoped-proxies) that always forwards
+to the current instance (Spring Cloud proxies refresh-scoped beans by default; PyFly makes it
+opt-in), or inject `Provider[FeatureFlags]` and call `get()` each time.
+
+```python
+@refresh_scope(proxy=True)
+@component
+class ReportingDataSource:
+    def __init__(self, config: Config) -> None:
+        self.engine = create_async_engine(str(config.get("reporting.url")))
+
+    @pre_destroy
+    async def close(self) -> None:
+        await self.engine.dispose()     # runs when a refresh evicts this instance
+
+
+@service
+class ReportService:
+    def __init__(self, reporting: ReportingDataSource) -> None:
+        self.reporting = reporting       # a proxy: follows every refresh
+```
+
+For the application's own datasources you need none of this: inject the `DataSourceRegistry`, the
+`AsyncEngine` or the session factory beans. They are stable singletons, and a refresh that rotates
+the credentials evicts their pools in place (see the data-relational guide).
+
+#### Scoped proxies
+
+A scoped proxy stands in for a bean of a narrower scope (request, session, refresh or any custom
+scope) and resolves the instance its scope holds on every use: an attribute, a call, `async with`.
+`isinstance(proxy, Target)` is true; `type(proxy)` is `ScopedProxy`, and
+`pyfly.container.scoped_proxy.proxy_target(proxy)` returns the current instance. Opt in per bean:
+
+- `@refresh_scope(proxy=True)` on a class;
+- `@scoped_proxy` on a class (with any non-singleton scope) or on a non-singleton `@bean` method,
+  written above `@bean`. On a singleton or transient `@bean` method it raises `TypeError`.
+
+```python
+from pyfly.container.refresh_scope import scoped_proxy
+
+@configuration
+class ReportingConfiguration:
+    @scoped_proxy
+    @bean(scope="refresh")
+    def reporting_engine(self, config: Config) -> AsyncEngine:
+        return create_async_engine(str(config.get("reporting.url")))
+```
 
 #### Triggering a refresh — ContextRefresher
 
 `ApplicationContext` also registers a singleton `ContextRefresher` (from `pyfly.context`)
 that you can inject. Calling its async `refresh()` evicts all refresh-scoped beans, resets
 `@config_properties` beans (so they re-bind from the live `Config` on next resolution),
-and publishes a `RefreshScopeRefreshedEvent`. It returns the cache keys that were evicted.
+destroys the evicted instances (their `@pre_destroy` methods), and publishes a
+`RefreshScopeRefreshedEvent`. It returns the scope keys that were evicted
+(`__pyfly_bean_<module>.<class>` or `...#<bean name>`).
 
 ```python
 from pyfly.context import ContextRefresher, app_event_listener, RefreshScopeRefreshedEvent
@@ -678,8 +763,16 @@ During `ApplicationContext.start()`, the context:
 2. Resolves the configuration class itself (so it can receive injected dependencies).
 3. Iterates over methods marked with `__pyfly_bean__ = True`.
 4. Reads the return type hint to determine the bean's type.
-5. Calls the method (injecting any method parameters from the container).
-6. Registers the returned object as a singleton (or the specified scope).
+5. For a **singleton**, calls the method (injecting any method parameters from the container) and
+   registers the returned object under its concrete class and under the declared return type.
+6. For a **non-singleton** (`TRANSIENT`, `REQUEST`, `SESSION`, `"refresh"`, a custom scope) whose
+   return hint declares one class, does **not** call the method: it registers the method as the
+   factory of that class, and the scope calls it when it needs an instance. Until 26.09.07 every
+   `@bean` method ran once at startup whatever its scope, so a refresh-scoped or transient factory
+   built an object for nothing (an extra engine per scoped datasource) and a request-scoped
+   factory ran outside any request. A non-singleton is therefore resolvable by its declared
+   return type, not by the concrete class it returns (as in Spring). A hint that declares no
+   single class (`A | B`) still makes the method run once at startup to learn the type.
 
 ### @bean Parameters
 
@@ -861,13 +954,23 @@ class OrderService:
 ### How It Works
 
 1. The container creates the instance via constructor injection (as before).
-2. It calls `typing.get_type_hints()` on the class to discover field annotations.
-3. For each field whose class-level default is an `Autowired()` instance:
+2. It finds the annotated class attributes (across the MRO) whose class-level default is an
+   `Autowired()` or `Value()` instance. A class without any (every third-party `@bean` product,
+   such as SQLAlchemy's `AsyncSession`) is left alone: no annotation is evaluated.
+3. For each such field it resolves **that field's annotation only**, in the module of the class
+   that declares it:
    - If `qualifier` is set, resolve by name via `resolve_by_name()`.
-   - If the type hint uses `Annotated[T, Qualifier("name")]`, resolve via the qualifier.
-   - Otherwise, resolve by type via `resolve()`.
+   - Otherwise the annotation is resolved like a constructor parameter: a class,
+     `Annotated[T, Qualifier("name")]`, `T | None`, `list[T]`, `Provider[T]` and generics all work.
    - If resolution fails and `required=False`, set the field to `None`.
 4. The resolved value is injected via `setattr()`.
+
+An annotation elsewhere in the class that cannot be resolved at runtime (a name imported under
+`TYPE_CHECKING`) no longer matters. If the annotation of a **required** `Autowired` field itself
+cannot be resolved, the creation fails with a `BeanCreationException` naming the field; an optional
+one is set to `None` with a warning. Until 26.09.07 any unresolvable annotation made the container
+log one warning and skip every `Autowired` field of the class, which left required fields holding
+the `Autowired` sentinel (and every transient `AsyncSession` logged that warning).
 
 ### Mixing Constructor and Field Injection
 
@@ -915,6 +1018,11 @@ class ShippingService:
     def __init__(self, tracker: ShipmentTracker | None = None) -> None:
         self.tracker = tracker  # None if ShipmentTracker is not registered
 ```
+
+The inner type of an Optional is resolved like any other parameter, so generics, `list[T]`,
+`Provider[T]` and `Annotated[T, Qualifier("name")]` work inside it:
+`async_sessionmaker[AsyncSession] | None`, `Provider[Job] | None` and `Repository[User, int] | None`
+receive the bean (until 26.09.07 they always received `None`), and `None` when no candidate exists.
 
 ### list[T]
 
@@ -1178,27 +1286,78 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
     factories may depend on each other); a dependency nobody registers raises the same
     `NoSuchBeanError`, naming the configuration, the method and the parameter, that an eager
     failure raised before.
-2e. **Start infrastructure** -- starts any bean that implements `start()`/`stop()` lifecycle
-    methods (e.g., cache adapters, message brokers, HTTP clients). Failures here raise
-    `BeanCreationException` for fast feedback.
+2e. **Start the lifecycle beans the `@bean` methods produced** -- every singleton whose class
+    defines `start()` and `stop()` (cache adapters, message brokers, HTTP clients, the schema
+    initializer, a user relay). They start in ascending **phase** and, within a phase, in
+    **creation order**, so a bean starts after the beans it depends on: a user lifecycle bean
+    that takes the session factory starts after `ddl-auto` and the migrations. A bean registered
+    under several types (a `@bean` declared as a port) is one instance and starts once. Failures
+    here raise `BeanCreationException` for fast feedback.
 3. **Auto-discover `BeanPostProcessor` implementations** from registered beans.
 3b. **Bind `@config_properties` beans** -- sets a factory on each `@config_properties`
     registration so instances are produced by `Config.bind()` and injectable by type.
 4. **Eagerly resolve all singletons** -- sorted by `@order` value.
-5. **Run post-processors and lifecycle hooks** -- for each resolved bean:
+5. **Run post-processors and lifecycle hooks** -- for each resolved bean, and for each
+   non-singleton bean created so far (a transient repository injected into a singleton):
    - `BeanPostProcessor.before_init()`
    - `@post_construct` methods
    - `BeanPostProcessor.after_init()`
+
+   From this step on, every bean the container creates goes through the same pipeline when it is
+   created: a `@lazy` singleton first resolved by a `@post_construct`, an event listener or a
+   runner, and every `TRANSIENT`, `REQUEST`, `SESSION` or custom-scoped bean.
+5b. **Start the remaining lifecycle beans** -- the ones created since step 2e (a scanned
+    `@component` or `@service` with `start()`/`stop()`), in the same order. They used to be
+    neither started nor stopped.
 6. **Wire decorator-based beans** -- connects `@app_event_listener`, `@message_listener`,
    CQRS handlers, `@scheduled` methods, and `@async_method` to their targets.
 7. **Publish lifecycle events** -- `ContextRefreshedEvent`, then `ApplicationReadyEvent`.
 
+#### Lifecycle phases
+
+A lifecycle bean's phase is its `phase` attribute or property when it declares an `int` one
+(Spring's `SmartLifecycle.getPhase()`, see `pyfly.kernel.lifecycle`). Otherwise a bean that takes
+subscriptions (its class defines `subscribe`: an event bus, a message broker) is in
+`CONSUMER_PHASE` and every other bean in `DEFAULT_PHASE` (0). Lower phases start earlier and stop
+later.
+
+```python
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
+
+class OutboxRelay:
+    phase = CONSUMER_PHASE    # starts last, stops first (with the consumers)
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+```
+
 ### The stop() Lifecycle
 
-When `ApplicationContext.stop()` is called:
+When `ApplicationContext.stop()` is called (each step bounded per bean by
+`pyfly.context.shutdown-timeout`, 30 s by default):
 
-1. `@pre_destroy` methods are called on all resolved beans in **reverse** initialization order.
-2. `ContextClosedEvent` is published.
+1. **`ContextClosedEvent` is published**, while every bean still works (Spring publishes it first
+   too).
+2. **Drain** -- background tasks are cancelled, the `TaskScheduler` stops (it waits for the jobs in
+   flight), and the lifecycle beans of `CONSUMER_PHASE` and above stop, so nothing dispatches new
+   work into the beans about to be destroyed.
+3. **Destroy** -- from here on the container builds no bean (`BeanCreationNotAllowedError`). The
+   instances the custom scopes hold (refresh-scoped beans) get their `@pre_destroy`, then every
+   singleton does, each bean **before the beans it depends on** (reverse creation order).
+4. **Stop the other lifecycle beans** -- highest phase first, in reverse start order within a
+   phase. They own the resources the destroyed beans used (clients, the `create-drop` schema).
+5. **Dispose the resource registries** -- every bean that implements
+   `pyfly.kernel.lifecycle.ResourceRegistry` (`async dispose_all()`): the `DataSourceRegistry`
+   closes every engine, **last**.
+6. **Release** -- the singletons this run built are released, and everything the run added (the
+   started lifecycle beans, the post-processors discovered from beans, the event listeners it
+   wired, the post-create hook) is forgotten, so a later `start()` is a cold start.
+
+Until 26.09.07 the lifecycle beans stopped first, in reverse registration order, then
+`@pre_destroy` ran and `ContextClosedEvent` came last: the primary engine was disposed before the
+consumers, the user lifecycle beans and every `@pre_destroy`, and their writes reconnected through
+a pool nobody disposed. A restart also restarted the previous run's adapters and delivered each
+event to the previous run's listeners.
 
 ---
 
@@ -1238,7 +1397,9 @@ class DatabasePool:
 ```
 
 `@pre_destroy` marks a method to be called during shutdown. Like `@post_construct`, it
-supports both sync and async methods. Beans are destroyed in reverse initialization order.
+supports both sync and async methods. Beans are destroyed in reverse creation order, so each bean
+is destroyed before the beans it depends on, and the datasources are still open: a `@pre_destroy`
+that flushes rows to the database succeeds (the registry closes after every `@pre_destroy`).
 The decorator sets `__pyfly_pre_destroy__ = True` on the method.
 
 ---
@@ -1246,8 +1407,11 @@ The decorator sets `__pyfly_pre_destroy__ = True` on the method.
 ## BeanPostProcessor
 
 `BeanPostProcessor` is a `Protocol` (runtime-checkable) that lets you hook into the bean
-creation lifecycle. Implementations are called for **every** bean resolved by the
-`ApplicationContext`.
+creation lifecycle. Implementations are called for **every** bean the `ApplicationContext`
+creates: eager and lazy singletons, and every `TRANSIENT`, `REQUEST`, `SESSION` and custom-scoped
+instance (until 26.09.07 only singletons, so a transient or request-scoped repository kept its
+derived-query stubs). Post-processors run in `@order`; the repository post-processors declare a
+high precedence so that AOP advice wraps the compiled derived and `@query` methods.
 
 ```python
 from pyfly.context import BeanPostProcessor
@@ -1311,8 +1475,8 @@ PyFly's own modules use `BeanPostProcessor` extensively:
 
 | Post-Processor | Module | Purpose |
 |---|---|---|
-| `AspectBeanPostProcessor` | `pyfly.aop` | Weaves AOP advice into target beans. |
-| `RepositoryBeanPostProcessor` | `pyfly.data` | Wires query methods onto repository beans. |
+| `AspectBeanPostProcessor` | `pyfly.aop` | Weaves AOP advice into target beans (order 0). |
+| `RepositoryBeanPostProcessor` | `pyfly.data` | Wires query methods onto repository beans; `HIGHEST_PRECEDENCE + 100`, so it runs before AOP weaving (the Mongo one too). |
 | `HttpClientBeanPostProcessor` | `pyfly.client` | Generates HTTP client method implementations. |
 
 ---
@@ -1392,7 +1556,10 @@ class InMemoryCacheFallback:
 The bean is only registered if **no** other bean of the specified type (or a subclass)
 exists. This is the key mechanism for "default with override" patterns: auto-configuration
 provides a default that is automatically skipped when the user provides their own
-implementation.
+implementation. The data auto-configurations follow it for the beans an application replaces:
+`AsyncEngine` (`async_engine`), `async_sessionmaker` (`async_session_factory`),
+`RoutingSessionFactory`, `DataSourceRegistry` and the Mongo `AsyncMongoClient` (until 26.09.07 a
+user engine or session factory, even `primary=True`, was shadowed by the framework's).
 
 ### @conditional_on_single_candidate
 
@@ -1519,7 +1686,7 @@ All events inherit from the `ApplicationEvent` base class.
 |---|---|
 | `ContextRefreshedEvent` | The `ApplicationContext` is fully initialized (all beans created, all post-processors run). |
 | `ApplicationReadyEvent` | The application is ready to serve requests (published immediately after `ContextRefreshedEvent`). |
-| `ContextClosedEvent` | The `ApplicationContext` is shutting down (published after all `@pre_destroy` methods). |
+| `ContextClosedEvent` | The `ApplicationContext` is shutting down: the first step of `stop()`, published while every bean still works (before the drain and every `@pre_destroy`). |
 
 ### @app_event_listener
 

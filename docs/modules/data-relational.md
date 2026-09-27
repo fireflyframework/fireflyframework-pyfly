@@ -679,6 +679,27 @@ A relational application with no `pyfly.data.relational.url` **fails at startup*
 it silently opened `./app.db` in the working directory. With the `dev` profile active, it falls back
 to `sqlite+aiosqlite:///./app.db` and logs a warning.
 
+**Overriding the beans.** `async_engine`, `async_session_factory`, `routing_session_factory` and
+`datasource_registry` carry `@conditional_on_missing_bean`: declare your own `AsyncEngine`,
+`async_sessionmaker`, `RoutingSessionFactory` or `DataSourceRegistry` bean and the framework's backs
+off (the beans that take them, such as the health indicator and the engine lifecycle, use yours, and
+the engine lifecycle disposes an engine that is not a registry engine). When several beans share a
+class, the `@primary` one is injected, and a lookup by that class raises `NoUniqueBeanError` when
+none is primary. Named and module datasources are still built by the registry.
+
+**Closing.** The context closes the registry **last** when it stops: after the consumers drained,
+after every `@pre_destroy` and after every lifecycle bean stopped, so the last writes of the
+application still have their datasource (see the stop() lifecycle in the dependency-injection
+guide). `close()` disposes the engines concurrently and waits for them at most
+`pyfly.data.relational.datasource_registry.CLOSE_TIMEOUT` seconds (5 by default, or
+`close(timeout=...)`): a dispose that
+is still waiting is on a database that stopped answering, and it is cancelled while the connections
+left idle in its pool are terminated (their sockets closed, nothing sent), so `ctx.stop()` ends on
+time. From the moment it is closed, the registry's engines **refuse to connect**: using one raises
+`DataSourceConfigurationError` instead of silently opening a pool that nobody would dispose, and
+the db health indicator of a closed registry answers `OUT_OF_SERVICE` without touching them. A
+restarted context builds a new registry.
+
 ### Configuration Reference
 
 Every key is read for its exact name, so `${...}` placeholders resolve and a `PYFLY_*` environment
@@ -1188,6 +1209,12 @@ This adds a `version` column. SQLAlchemy automatically appends `WHERE version = 
 ## RepositoryBeanPostProcessor
 
 The `RepositoryBeanPostProcessor` is a `BeanPostProcessor` that runs after each repository bean is initialized. It scans the repository class for stub methods and replaces them with real query implementations.
+
+It runs for every repository the container creates, whatever its scope: a singleton, a `@lazy` one
+first resolved during startup, and a `TRANSIENT`, `REQUEST` or custom-scoped one (until 26.09.07
+those kept their stubs, and `find_by_*` answered `None`). It declares `@order(HIGHEST_PRECEDENCE +
+100)`, ahead of the AOP post-processor, so an aspect on `repository.*.*` wraps the compiled
+derived and `@query` methods instead of being replaced by them.
 
 ### How It Works
 
