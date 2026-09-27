@@ -263,3 +263,26 @@ counts every match: the query compiler adopts the probe in WP04.
 ms); with `unique()` on every list it measured 30.6 to 33.3 ms. A `save()` of an entity whose mapping loads a
 collection with `selectin` and another with a join costs `{'INSERT': 1, 'SELECT': 2}`, what the base's
 `refresh()` cost; a mapping without eager relationships stays at `{'INSERT': 1}`.
+
+### After the second review of WP03
+
+- **Date:** 2026-09-27, same machine (the VM shared with other running lanes).
+- **Command:** a statement-count probe through the repository harness, run on the SQLite file and
+  PostgreSQL lanes against this branch and against the base's `src/pyfly` (`75112cc`); latencies are the
+  median of 400 calls, each in its own write auto unit.
+
+| Measure | Base, SQLite file | This branch, SQLite file | Base, PostgreSQL | This branch, PostgreSQL |
+| --- | --- | --- | --- | --- |
+| `delete(detached)`, no cascade | `{'DELETE': 1}`, 544 µs | `{'SELECT': 1, 'DELETE': 1}`, 693 µs | `{'DELETE': 1}`, 2.11 ms | `{'SELECT': 1, 'DELETE': 1}`, 2.49 ms |
+| `delete(detached)`, two cascaded children | `{'SELECT': 1, 'DELETE': 2}` | `{'SELECT': 2, 'DELETE': 2}` | same as SQLite | same as SQLite |
+| `delete_all(6 held parents)`, children not loaded | `{'SELECT': 6, 'DELETE': 12}` | `{'SELECT': 2, 'DELETE': 2}` | same as SQLite | same as SQLite |
+| page of a specification joined to a many-to-one | n/a | `{'SELECT': 2}`, no `DISTINCT` | n/a | same as SQLite |
+
+`delete(entity)` of a detached entity reads the row before it deletes it, as Spring's `delete` finds the
+entity first: that read is what makes a missing row a no-op and a stale version a `StaleDataError` for an
+entity of any session, and it costs one round trip (about 0.15 ms on the SQLite file, 0.4 ms on PostgreSQL).
+The base re-attached the detached instance and sent the `DELETE` alone. The cascaded collections of the
+entities a delete needs are loaded once for all of them, the unit's own included: deleting six parents the
+unit read without their children went from one lazy `SELECT` per parent to two statements. A specification
+that joins a many-to-one pages with a plain `LIMIT` and `COUNT` (after the first review it paid the distinct
+keys and a `DISTINCT` count).

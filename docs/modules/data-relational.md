@@ -282,8 +282,10 @@ orders = await repo.find_all(status="PENDING", customer_id="abc")
 # Equivalent to: SELECT * FROM orders WHERE status = 'PENDING' AND customer_id = 'abc'
 ```
 
-A read method's `load` (and `find_by_id`'s `lock`) keyword is never a filter: filter on a column with one of
-those names through a [Specification](#specifications).
+A relationship to one entity filters by the entity it refers to: `find_all(customer=customer)` is
+`customer_id = :id` (and `customer=None` is `customer_id IS NULL`). A collection cannot be compared that way;
+filter through it with a [Specification](#specifications). A read method's `load` (and `find_by_id`'s `lock`)
+keyword is never a filter: filter on a column with one of those names through a Specification.
 
 #### Deletes
 
@@ -291,9 +293,16 @@ The delete family follows Spring Data: `delete(entity)`, `delete_by_id(id)`, `de
 `delete_all()` and `delete_all_by_id(ids)` delete **entity by entity through the ORM**, so relationship
 cascades (`cascade="all, delete-orphan"`), version checks and `before_delete`/`after_delete` listeners run,
 the same on every backend. They load the entities first (one `SELECT` per id chunk; the unit's own
-entities need none) and send the `DELETE`s in one flush. When the mapper has no cascade, no version column,
-no inheritance and no delete listener, a bulk `DELETE ... WHERE id IN (...)` does the same work, and that is
-what they send.
+entities need none), with the collections the flush cascades to or nulls out (one `SELECT` per collection
+for all of them, also for the unit's own entities that have not loaded them), and send the `DELETE`s in one
+flush. When the mapper has no cascade, no version column, no inheritance and no delete listener, a bulk
+`DELETE ... WHERE id IN (...)` does the same work, and that is what they send.
+
+Deleting a detached entity (every entity a call outside a transaction returns) reads its row first, as
+Spring's `delete` finds the entity before it removes it: a `SELECT` (plus one per collection the delete
+cascades to or nulls out) and the `DELETE`, where earlier releases re-attached the detached instance and
+sent the `DELETE` alone. The read is what lets a missing row be ignored and a stale version be reported for
+any entity, whichever session it came from.
 
 A new entity is ignored, and so is an entity whose row is gone; a detached entity whose version is stale
 raises `StaleDataError`. `delete_all_in_batch()` and `delete_all_by_id_in_batch(ids)` are the explicit bulk
@@ -367,10 +376,13 @@ async for order in repo.stream_all(Sort.by("name")):
 ```
 
 A `lazy="joined"` collection works in every list method (results are made unique) and in `stream_all`,
-which loads such collections with `selectin` per batch. On MySQL and MariaDB, where nothing else runs on a
-connection while its cursor is open, a stream that loads relationships with statements of their own per
-batch (a fetch plan, a `selectin`, `subquery` or `immediate` relationship, a joined collection) is read in
-full first; a joined many-to-one comes with its row and is streamed from the cursor.
+which loads such collections with `selectin` per batch. A fetch plan that itself joins a collection
+(`load=joinedload(Order.lines)`) spreads each order over several rows, which make it whole only when they are
+read together: that stream reads its result in full first, on every backend (`load="lines"` loads the lines
+per batch instead). On MySQL and MariaDB, where nothing else runs on a connection while its cursor is open, a
+stream that loads relationships with statements of their own per batch (a fetch plan, a `selectin`,
+`subquery` or `immediate` relationship, a joined collection) is read in full first; a joined many-to-one
+comes with its row and is streamed from the cursor.
 
 ---
 
@@ -674,12 +686,20 @@ it gives the total too; an unpaged request is never counted.
 Pages, slices and windows count **entities**, not rows. A [Specification](#specifications) that joins a
 collection (`q.join(Order.lines).where(Line.sku == sku)`) repeats an order once per matching line; a
 `LIMIT` on those rows would cut a page short and hide the orders after it. When a specification's
-statement reads rows of another table (a join or another `FROM`), the page is cut from the distinct primary
-keys instead, in the page's order, and the entities are selected by joining those keys (one statement,
-portable to SQL Server 2012 and later and to Oracle); the `COUNT` counts the distinct keys. Order such a
-page by the entity's own properties: an order on a joined row's column repeats the entity once per value.
-An `EXISTS` predicate (`Order.lines.any(Line.sku == sku)`) needs none of this and is often the cheaper
-query.
+statement may repeat an entity (a join other than along a many-to-one, or another `FROM`), the page is cut
+from the distinct primary keys instead, in the page's order, and the entities are selected by joining those
+keys (one statement, portable to SQL Server 2012 and later and to Oracle); the `COUNT` counts the distinct
+keys. A join along a many-to-one (`q.join(Order.customer).where(Customer.country == "ES")`) matches one row
+per order, so it pages with a plain `LIMIT` and `COUNT`. Order such a page by the entity's own properties:
+an order on a joined row's column repeats the entity once per value. An `EXISTS` predicate
+(`Order.lines.any(Line.sku == sku)`) needs none of this and is often the cheaper query.
+
+What a specification asks of the entities it reads applies on every path: its loader options (a fetch plan,
+`with_loader_criteria`) and execution options go on the statement that reads the entities, and its loader
+criteria and execution options on the `COUNT` too. A lock (`with_for_update`) takes the rows of the entities
+the page reads (`FOR UPDATE OF` their table where the database names tables, unless the specification names
+what to lock); the distinct keys are read unlocked, since PostgreSQL and Oracle refuse `FOR UPDATE` on a
+`DISTINCT`, and a `COUNT` locks nothing.
 
 ### Slices and keyset scrolling
 
@@ -724,9 +744,10 @@ its text).
 ### Validated sort and filter names
 
 Sort orders and `find_all(**filters)` keys often come from a request, so they are validated against the
-entity's mapped columns by `PropertyResolver`: a relationship, a Python `@property`, a private name, a typo
-or an operator key (`$where`) raises `InvalidPropertyError`, an `InvalidRequestException` the web layer
-answers with 400. Allow-lists keep hidden columns out:
+entity's mapped columns by `PropertyResolver`: a relationship (a filter may name a relationship to one
+entity), a Python `@property`, a private name, a typo or an operator key (`$where`) raises
+`InvalidPropertyError`, an `InvalidRequestException` the web layer answers with 400. Allow-lists keep hidden
+columns out:
 
 ```python
 class UserRepository(Repository[User, UUID]):
@@ -736,6 +757,9 @@ class UserRepository(Repository[User, UUID]):
 
 A name in an allow-list that is not a property of the entity raises `ValueError` when the repository is
 built, so the application context fails at start rather than on the first request.
+
+A custom query orders with the repository's helper, `self._apply_orders(statement, sort)`, which validates
+the names and renders NULL placement, case folding and the primary-key tie-break as the paging paths do.
 
 ### Paginated Specification Queries
 
@@ -1887,7 +1911,9 @@ keeps the time it was first deleted). The entity passed in, and the unit's own c
 where the database has `UPDATE ... RETURNING` (PostgreSQL, SQLite) exactly the copies of the rows the
 `UPDATE` changed; on MySQL and MariaDB the copies of the requested keys that are active in memory, which is
 wrong only for a copy whose row another transaction deleted after it was read. An id list goes one `UPDATE`
-per chunk, and each chunk leaves room for the values the `UPDATE` sets.
+per chunk, and each chunk leaves room for the values the `UPDATE` sets. A soft delete of every active row
+inside a unit that holds entities of the model updates the rows of the held keys first, returning their
+keys, and then every other active row without `RETURNING`, so what it returns does not grow with the table.
 
 | Method | Behavior |
 |--------|----------|
