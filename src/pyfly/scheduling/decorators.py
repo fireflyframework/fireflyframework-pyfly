@@ -29,13 +29,17 @@ def scheduled(
     zone: str | None = None,
     lock: str | bool | None = None,
     lock_ttl: timedelta | None = None,
+    concurrent: int = 1,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a method to be scheduled for periodic execution.
 
-    Exactly one of cron, fixed_rate, or fixed_delay must be provided.
+    Exactly one of cron, fixed_rate, or fixed_delay must be provided. A job never runs concurrently with
+    itself unless *concurrent* says so (Spring's scheduler contract).
 
-    - cron: 5- or 6-field cron expression (e.g., "0 0 * * *" for midnight)
-    - fixed_rate: Run at fixed intervals regardless of execution time
+    - cron: 5- or 6-field cron expression (e.g., "0 0 * * *" for midnight); the next fire time is computed
+      once the previous run has ended (fires missed meanwhile are skipped)
+    - fixed_rate: Start a run every interval; a run still going when the next is due delays it (the next run
+      starts late, never alongside it)
     - fixed_delay: Wait delay after previous run completes
     - initial_delay: Optional delay before first execution
     - zone: IANA time zone for ``cron`` evaluation (e.g. "America/New_York");
@@ -44,11 +48,18 @@ def scheduled(
       (ShedLock / Spring ``@SchedulerLock``). ``True`` auto-derives the name
       ``"Class.method"``; a string sets an explicit shared name; ``None`` disables.
       Requires a ``DistributedLock`` bean for cross-process coordination.
-    - lock_ttl: max time the lock is held before auto-expiry (default 60s).
+    - lock_ttl: max time the lock is held before auto-expiry (default 60s). A run still going at the ttl is
+      cancelled: the lock has ended, and another instance may start the job.
+    - concurrent: how many runs of the job may be in flight at once (``fixed_rate`` and ``cron``; default 1).
+      Each run of a ``@transactional`` job holds a pooled connection, so keep it well below the pool size.
     """
     triggers = sum(x is not None for x in (cron, fixed_rate, fixed_delay))
     if triggers != 1:
         raise ValueError("Exactly one of cron, fixed_rate, or fixed_delay must be specified")
+    if concurrent < 1:
+        raise ValueError(f"concurrent must be at least 1, got {concurrent}")
+    if fixed_delay is not None and concurrent != 1:
+        raise ValueError("fixed_delay starts a run after the previous one ended: concurrent must be 1")
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         func.__pyfly_scheduled__ = True  # type: ignore[attr-defined]
@@ -59,6 +70,7 @@ def scheduled(
         func.__pyfly_scheduled_zone__ = zone  # type: ignore[attr-defined]
         func.__pyfly_scheduled_lock__ = lock  # type: ignore[attr-defined]
         func.__pyfly_scheduled_lock_ttl__ = lock_ttl.total_seconds() if lock_ttl else None  # type: ignore[attr-defined]
+        func.__pyfly_scheduled_concurrent__ = concurrent  # type: ignore[attr-defined]
         return func
 
     return decorator

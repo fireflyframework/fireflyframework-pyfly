@@ -19,18 +19,41 @@ import asyncio
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
+from pyfly.data.transaction import detached
+from pyfly.data.transaction.template import run_shielded
+
 T = TypeVar("T")
 
 
+async def drain(tasks: set[asyncio.Task[Any]]) -> None:
+    """Wait until every task in *tasks* (a live set: tasks submitted meanwhile count too) has ended.
+
+    When the caller is cancelled (a shutdown timeout), the tasks still running are cancelled and awaited,
+    whatever further cancellations arrive, before the cancellation propagates.
+    """
+    while pending := {task for task in tasks if not task.done()}:
+        try:
+            await asyncio.wait(pending)
+        except asyncio.CancelledError:
+            for task in pending:
+                task.cancel()
+            await run_shielded(asyncio.wait(pending))
+            raise
+
+
 class AsyncIOTaskExecutor:
-    """Default TaskExecutor using asyncio.create_task."""
+    """Default TaskExecutor: each submitted coroutine runs in an asyncio task of its own.
+
+    The task is started with the transaction state cleared (:func:`pyfly.data.transaction.detached`): the work
+    gets its own units of work and never joins the submitter's, which may end before it does.
+    """
 
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def submit(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         """Submit a coroutine for execution. Returns an asyncio.Task."""
-        task = asyncio.create_task(coro)
+        task = detached(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -39,7 +62,6 @@ class AsyncIOTaskExecutor:
         """No-op -- asyncio executor is ready after construction."""
 
     async def stop(self) -> None:
-        """Stop the executor, waiting for pending tasks to complete."""
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        """Stop the executor, waiting for pending tasks to complete (cancelling them if the wait is cancelled)."""
+        await drain(self._tasks)
         self._tasks.clear()

@@ -105,10 +105,11 @@ from pyfly.scheduling import scheduled
 ### fixed_rate
 
 Runs the method at a fixed interval, measured from the **start** of each
-invocation. If the method takes longer than the interval, the next run begins
-immediately after the current one finishes, but there is no overlap -- the
-scheduler awaits the executor's `submit()` then sleeps for the remaining
-interval.
+invocation. A job never runs concurrently with itself (Spring's scheduler
+contract): if a run takes longer than the interval, the next run starts as soon
+as it ends, late but never alongside it, and the following one an interval after
+that start. Each run of a `@transactional` job holds one pooled connection, so a
+database slowdown can no longer pile up one run (and one connection) per period.
 
 The parameter accepts a `datetime.timedelta`:
 
@@ -136,17 +137,27 @@ class DataSyncer:
         await self.pull_upstream_changes()
 ```
 
-The key difference from `fixed_rate`: with `fixed_delay`, the scheduler waits
-for the task to complete (`await task`), then sleeps for the full delay before
-running again. With `fixed_rate`, the scheduler fires-and-forgets the task,
-sleeps for the interval, then fires again.
+The key difference from `fixed_rate`: with `fixed_delay` the gap is measured
+from the end of a run, with `fixed_rate` from its start.
+
+### concurrent
+
+`@scheduled(concurrent=N)` lets up to *N* runs of a `fixed_rate` or `cron` job be
+in flight at once (the default is 1: no overlap). Keep it well below the
+connection pool's size when the job is `@transactional`. `fixed_delay` takes no
+`concurrent` (a `ValueError`): it starts a run after the previous one ended.
+
+Until 26.09.07 `fixed_rate` and `cron` submitted a run every period whether the
+previous one had ended or not, so a slow job overlapped itself without bound.
 
 ### cron
 
 Runs the method according to a cron expression. The scheduler calculates
 `seconds_until_next()` via `CronExpression`, sleeps that long, then executes
-the method. Both the standard 5-field format and the Spring-style 6-field
-(seconds-first) format are accepted.
+the method. The next fire time is computed once the previous run has ended, as
+Spring's cron trigger does: fire times that pass while a run is going are
+skipped, never run late or concurrently. Both the standard 5-field format and the
+Spring-style 6-field (seconds-first) format are accepted.
 
 ```python
 class ReportGenerator:
@@ -214,7 +225,18 @@ class ReportService:
 - `lock=None` (default) — no locking.
 - `lock_ttl` — a `timedelta` for the maximum time the lock may be held before
   it auto-expires. Defaults to 60 seconds. Set it comfortably longer than the
-  job's worst-case runtime.
+  job's worst-case runtime: the run is time-boxed to it. The lock ends at its
+  TTL whatever the run does, and another instance may then start the job, so a
+  run still going at the TTL is cancelled (its `@transactional` work rolls back)
+  and logged at `ERROR` with the job's name. A synchronous job's thread cannot be
+  cancelled and goes on.
+
+A failure to take or release the lock (the lock's database or Redis is down, a
+misconfigured provider) is logged at `ERROR` with the job's name, like a
+failure of the job itself, and the tick is skipped; it used to escape as an
+unnamed "Task exception was never retrieved". A provider that cannot work on the
+configured datasource fails at startup (the lease table is checked, the advisory
+lock needs PostgreSQL).
 
 ```python
 from datetime import timedelta
@@ -247,6 +269,8 @@ function:
 | `__pyfly_scheduled_initial_delay__` | The `timedelta`, or `None` |
 | `__pyfly_scheduled_zone__` | The IANA zone string, or `None` |
 | `__pyfly_scheduled_lock__` | `True`, the lock-name string, or `None` |
+| `__pyfly_scheduled_lock_ttl__` | The TTL in seconds, or `None` |
+| `__pyfly_scheduled_concurrent__` | How many runs may be in flight at once |
 | `__pyfly_scheduled_lock_ttl__` | The TTL in seconds (`float`), or `None` |
 
 The `TaskScheduler` reads these attributes during its discovery phase. A
@@ -440,8 +464,9 @@ print(f"Found {count} scheduled methods")
 ### Starting and Stopping
 
 `start()` and `stop()` are async methods. `start()` creates an
-`asyncio.Task` for each discovered entry. `stop()` cancels all loop tasks,
-gathers them, clears the task list, and stops the executor:
+`asyncio.Task` loop for each entry discovered since the last start (calling it
+again starts only the new ones). `stop()` stops the loops and then drains the
+runs in flight through the executor:
 
 ```python
 await scheduler.start()
@@ -449,26 +474,37 @@ await scheduler.start()
 await scheduler.stop()
 ```
 
-Stops all scheduling loops and the executor. Always waits for pending tasks
-to complete (graceful shutdown).
+A loop only ever waits (for its next fire time, a free slot or its run's end),
+so stopping it never cancels a run: every run in flight finishes, whatever its
+trigger. When the caller cuts the drain short (the application context bounds
+it by `pyfly.context.shutdown-timeout`), the runs still going are cancelled and
+awaited. Until 26.09.07 `stop()` cancelled an in-flight `fixed_delay` run at once
+(rolling its transaction back) while it let `fixed_rate` and `cron` runs finish.
+
+`TaskScheduler` is a lifecycle bean of `CONSUMER_PHASE`: the application context
+stops it before any `@pre_destroy`, while the beans its jobs use still work.
 
 ### How Loops Work Internally
 
-Each trigger type has its own loop coroutine inside `TaskScheduler`:
+Each trigger type has its own loop coroutine inside `TaskScheduler`, and each
+entry has as many slots as its `concurrent` (1 by default); a run holds a slot
+until it ends:
 
-- **Cron loop** (`_run_cron_loop`): Calculates `seconds_until_next()` from a
-  `CronExpression`, sleeps that duration, submits the method to the executor,
+- **Cron loop** (`_run_cron_loop`): waits for a free slot, calculates
+  `seconds_until_next()` from a `CronExpression` (so, with one slot, after the
+  previous run ended), sleeps that duration, submits a run, then repeats.
+- **Fixed-rate loop** (`_run_fixed_rate_loop`): optionally sleeps for
+  `initial_delay`, then sleeps until the next start time, waits for a free slot,
+  submits a run and sets the next start time one interval later.
+- **Fixed-delay loop** (`_run_fixed_delay_loop`): optionally sleeps for
+  `initial_delay`, then submits a run, waits for it to end, sleeps for the delay,
   then repeats.
-- **Fixed-rate loop** (`_run_fixed_rate_loop`): Optionally sleeps for
-  `initial_delay`, then enters a loop that submits the method and sleeps for
-  the rate interval.
-- **Fixed-delay loop** (`_run_fixed_delay_loop`): Optionally sleeps for
-  `initial_delay`, then enters a loop that submits the method, **awaits
-  the returned task** (waits for completion), sleeps for the delay, then
-  repeats.
 
-Both sync and async methods are supported transparently. The static
-`_invoke()` helper calls the method and, if the result is awaitable, awaits it.
+Runs are submitted as tasks started with the transaction state cleared
+(`pyfly.data.transaction.detached`): a run's `@transactional` work is a unit of
+its own. Both sync and async methods are supported: an async method is awaited,
+a sync one runs in the executor's thread pool (`ThreadPoolTaskExecutor.run_sync`)
+or, with the asyncio executor, `asyncio.to_thread`.
 
 ---
 
@@ -488,14 +524,21 @@ class TaskExecutorPort(Protocol):
 ```
 
 You can implement this protocol to create custom executors -- for example, one
-that publishes tasks to a distributed queue or logs execution metrics.
+that publishes tasks to a distributed queue or logs execution metrics. Two
+rules keep the scheduler's guarantees: `submit()` runs the coroutine outside the
+submitter's unit of work (start the task with `pyfly.data.transaction.detached`,
+as the built-in executors do: an `@async_method` call made inside
+`@transactional` must not join, or outlive, the caller's transaction), and
+`stop()` waits for the tasks in flight, cancelling and awaiting them when it is
+cancelled itself.
 
 ---
 
 ## AsyncIOTaskExecutor
 
-The default executor. Wraps `asyncio.create_task()` and tracks running tasks in
-a `set` for clean shutdown:
+The default executor. Starts each coroutine in a task of its own with the
+transaction state cleared (`pyfly.data.transaction.detached`) and tracks the
+running tasks in a `set` for clean shutdown:
 
 ```python
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
@@ -505,10 +548,12 @@ task = await executor.submit(some_coroutine())
 await executor.stop()  # Wait for all pending tasks
 ```
 
-- **submit()**: Creates an `asyncio.Task` via `create_task()`, adds it to an
+- **submit()**: Creates an `asyncio.Task` via `detached()`, adds it to an
   internal tracking set, and registers a done-callback that removes it.
 - **start()**: No-op (ready after construction).
-- **stop()**: Waits for all pending tasks to complete, then clears the task set.
+- **stop()**: Waits for all pending tasks to complete (tasks submitted meanwhile
+  included), then clears the task set. Cancelled while it waits, it cancels the
+  pending tasks and waits for them to end before the cancellation propagates.
 
 This executor is ideal for I/O-bound tasks that use `async`/`await`.
 
@@ -525,12 +570,15 @@ from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 executor = ThreadPoolTaskExecutor(max_workers=4)
 ```
 
-It exposes two submission methods:
+It exposes three submission methods:
 
 - **submit(coro)**: Works identically to `AsyncIOTaskExecutor.submit()` --
-  creates an `asyncio.Task` for async coroutines.
+  creates a detached `asyncio.Task` for async coroutines.
 - **submit_sync(func, *args)**: Runs a synchronous function in the thread pool
   via `loop.run_in_executor()`, wraps the result with `asyncio.ensure_future()`.
+- **run_sync(func, *args)**: Awaits a synchronous function run in the thread
+  pool. The `TaskScheduler` runs synchronous `@scheduled` methods through it, so
+  `max_workers` bounds their threads.
 
 ```python
 # Async coroutine
@@ -549,7 +597,7 @@ task = executor.submit_sync(cpu_heavy_function, arg1, arg2)
 **API:**
 
 - **start()**: No-op (ready after construction).
-- **stop()**: Waits for all pending tasks, clears task set, shuts down the thread pool.
+- **stop()**: Waits for all pending tasks (as `AsyncIOTaskExecutor.stop()`), clears task set, shuts down the thread pool.
 
 ---
 
