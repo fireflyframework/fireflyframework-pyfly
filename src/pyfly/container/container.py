@@ -186,6 +186,9 @@ class Container:
         # two @bean methods returning the same concrete type would collapse and
         # one bean would silently vanish from type/list resolution.
         self._all: dict[tuple[type, str], Registration] = {}
+        # The classes registered under two or more bean names: only a lookup of one of these has to
+        # choose among several beans (see _registration_for); every other lookup stays one dict hit.
+        self._names_by_type: dict[type, set[str]] = {}
         self._lock = threading.RLock()
         # Called with every instance the container creates, of every scope, before it is cached or
         # handed out; it returns the instance to use. ApplicationContext installs it for the whole
@@ -268,6 +271,7 @@ class Container:
         )
         self._registrations[cls] = reg
         self._all[(cls, bean_name)] = reg
+        self._names_by_type.setdefault(cls, set()).add(bean_name)
         if bean_name:
             self._named[bean_name] = reg
 
@@ -354,6 +358,8 @@ class Container:
         one of them by name or ``Qualifier``, or all of them with ``list[T]``.
         """
         slot = self._registrations[cls]
+        if len(self._names_by_type.get(cls, ())) < 2:
+            return slot
         siblings = self._same_type_registrations(cls)
         if len(siblings) < 2:
             return slot
