@@ -102,10 +102,16 @@ def conditional_on_class(module_name: str) -> Callable[[F], F]:
     return decorator
 
 
-def conditional_on_missing_bean(bean_type: type) -> Callable[[F], F]:
+def conditional_on_missing_bean(bean_type: type, *, singletons_only: bool = False) -> Callable[[F], F]:
     """Only register this bean if no other bean of the given type exists.
 
     Evaluated at ApplicationContext startup after initial registration.
+
+    A bean of any scope counts, as in Spring. With ``singletons_only=True`` only a singleton does: a
+    ``TRANSIENT``, ``REQUEST``, ``SESSION`` or custom-scoped (``"refresh"``) bean of the type is taken
+    for an additional bean, and this one is still registered beside it. The data auto-configurations
+    use it, so a request- or refresh-scoped ``AsyncEngine`` or ``async_sessionmaker`` (a second
+    database) leaves the application's primary in place, while a singleton replaces it.
     """
 
     def decorator(cls: F) -> F:
@@ -114,6 +120,7 @@ def conditional_on_missing_bean(bean_type: type) -> Callable[[F], F]:
             {
                 "type": "on_missing_bean",
                 "bean_type": bean_type,
+                "singletons_only": singletons_only,
             }
         )
         cls.__pyfly_conditions__ = conditions  # type: ignore[attr-defined]

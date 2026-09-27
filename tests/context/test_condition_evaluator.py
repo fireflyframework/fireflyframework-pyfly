@@ -14,6 +14,8 @@
 """Unit tests for ConditionEvaluator."""
 
 from pyfly.container.container import Container
+from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME
+from pyfly.container.types import Scope
 from pyfly.context.condition_evaluator import ConditionEvaluator
 from pyfly.context.conditions import (
     conditional_on_bean,
@@ -158,6 +160,93 @@ class TestOnMissingBean:
             pass
 
         assert evaluator.should_include(FallbackCache, bean_pass=True) is False
+
+    def test_a_scoped_bean_counts_by_default(self):
+        evaluator, container = _make_evaluator()
+
+        class CacheAdapter:
+            pass
+
+        container.register(CacheAdapter, scope=Scope.REQUEST)
+
+        @conditional_on_missing_bean(CacheAdapter)
+        class FallbackCache:
+            pass
+
+        assert evaluator.should_include(FallbackCache, bean_pass=True) is False
+
+
+class TestOnMissingBeanSingletonsOnly:
+    """``singletons_only=True``: only a singleton of the type makes the bean back off.
+
+    The data auto-configurations use it: a request- or refresh-scoped ``AsyncEngine`` or
+    ``async_sessionmaker`` bean is a secondary database, and the application's primary must stay.
+    """
+
+    def test_a_non_singleton_bean_of_the_type_does_not_count(self):
+        evaluator, container = _make_evaluator()
+
+        class Engine:
+            pass
+
+        container.register(Engine, scope=Scope.REQUEST, name="tenant_engine")
+        container.register(Engine, scope=Scope.TRANSIENT, name="scratch_engine")
+        container.register(Engine, scope=REFRESH_SCOPE_NAME, name="reporting_engine")
+
+        @conditional_on_missing_bean(Engine, singletons_only=True)
+        class PrimaryEngine:
+            pass
+
+        assert evaluator.should_include(PrimaryEngine, bean_pass=True) is True
+
+    def test_a_singleton_counts_beside_a_scoped_bean_of_the_same_class(self):
+        # The by-type slot holds the LAST registration of a class; the singleton registered before a
+        # scoped bean of the same class must still be seen.
+        evaluator, container = _make_evaluator()
+
+        class Engine:
+            pass
+
+        container.register(Engine, name="user_engine")
+        container.register(Engine, scope=REFRESH_SCOPE_NAME, name="reporting_engine")
+
+        @conditional_on_missing_bean(Engine, singletons_only=True)
+        class PrimaryEngine:
+            pass
+
+        assert evaluator.should_include(PrimaryEngine, bean_pass=True) is False
+
+    def test_a_singleton_subclass_counts(self):
+        evaluator, container = _make_evaluator()
+
+        class Engine:
+            pass
+
+        class PooledEngine(Engine):
+            pass
+
+        container.register(PooledEngine)
+
+        @conditional_on_missing_bean(Engine, singletons_only=True)
+        class PrimaryEngine:
+            pass
+
+        assert evaluator.should_include(PrimaryEngine, bean_pass=True) is False
+
+    def test_it_applies_to_a_bean_method(self):
+        evaluator, container = _make_evaluator()
+
+        class Engine:
+            pass
+
+        container.register(Engine, scope=REFRESH_SCOPE_NAME, name="reporting_engine")
+
+        class Factories:
+            @conditional_on_missing_bean(Engine, singletons_only=True)
+            def primary_engine(self) -> Engine:
+                return Engine()
+
+        assert evaluator.should_include_method(Factories().primary_engine) is True
 
 
 # ------------------------------------------------------------------
