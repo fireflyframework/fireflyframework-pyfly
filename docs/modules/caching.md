@@ -323,9 +323,9 @@ pyfly:
       purge-interval: 60           # seconds; 0 turns the purge on writes off
 ```
 
-The table is created at startup unless `pyfly.data.relational.ddl-auto` is
-`none`; then it must exist (a migration creates it) or the startup fails,
-naming it.
+The table is created at startup if `pyfly.data.relational.ddl-auto` is
+`create` (the default), `create-drop` or `update`; with `none` or `validate` it
+must exist (a migration creates it) or the startup fails, naming it.
 
 If `sqlalchemy.ext.asyncio` is not installed, a `ValueError` is raised
 immediately at startup with a message directing you to install

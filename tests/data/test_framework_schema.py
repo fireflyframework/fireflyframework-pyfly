@@ -121,3 +121,32 @@ def test_the_portable_upsert_statements_compile_where_there_is_no_native_upsert(
     assert "ON CONFLICT" not in updating + inserting and "DUPLICATE" not in updating + inserting
     if isinstance(dialect, oracle.dialect):
         assert "FROM DUAL" in probe  # a bare SELECT 1 fails on Oracle
+
+
+def test_two_datasource_registry_beans_without_a_primary_are_an_error_not_a_third_registry() -> None:
+    """The store's auto-configuration swallowed the ambiguity and built the configuration's registry, a third
+    set of pools beside the application's two."""
+    from pyfly.container.container import Container
+    from pyfly.container.exceptions import NoUniqueBeanError
+    from pyfly.core.config import Config
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+    from pyfly.data.relational.framework_schema import context_datasource_registry
+
+    config = Config({"pyfly": {"data": {"relational": {"url": "sqlite+aiosqlite:///:memory:"}}}})
+    container = Container()
+    container.register_instance(DataSourceRegistry, DataSourceRegistry(config), name="first")
+    container.register_instance(DataSourceRegistry, DataSourceRegistry(config), name="second")
+
+    with pytest.raises(NoUniqueBeanError):
+        context_datasource_registry(config, container)
+
+
+def test_without_a_registry_bean_the_configuration_s_registry_is_used() -> None:
+    from pyfly.container.container import Container
+    from pyfly.core.config import Config
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+    from pyfly.data.relational.framework_schema import context_datasource_registry
+
+    config = Config({"pyfly": {"data": {"relational": {"url": "sqlite+aiosqlite:///:memory:"}}}})
+    assert context_datasource_registry(config, Container()) is DataSourceRegistry.for_config(config)
+    assert context_datasource_registry(config) is DataSourceRegistry.for_config(config)

@@ -53,8 +53,8 @@ class SchedulingAutoConfiguration:
 
         A database lock runs on the datasource named by ``pyfly.scheduling.lock.datasource`` (or given by
         ``pyfly.scheduling.lock.url``), by default the primary, looked up in the context's datasource
-        registry; the lease table is created at start unless ``pyfly.data.relational.ddl-auto`` is
-        ``none``. The Redis client / datasource are obtained here (the composition root) and injected;
+        registry; the lease table is created at start when ``pyfly.data.relational.ddl-auto`` allows it
+        (:func:`~pyfly.data.relational.framework_schema.creates_tables`). The Redis client / datasource are obtained here (the composition root) and injected;
         the adapters never import their driver at module scope.
         """
         provider = str(config.get("pyfly.scheduling.lock.provider", "none")).lower()

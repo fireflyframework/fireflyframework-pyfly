@@ -1097,10 +1097,11 @@ The state lives in the framework table `pyfly_orchestration_state`
 (`pyfly.data.relational.framework_schema.orchestration_state`): the columns the
 recovery scan filters on (`status`, `updated_at` and the other instants as UTC
 timestamps with microseconds on every backend) and the execution's JSON in
-`payload`. The provider creates the table when the context starts unless
-`pyfly.data.relational.ddl-auto` is `none`; then a migration must create it
-(list `framework_metadata` in Alembic's `target_metadata`), or the startup
-fails naming it. `save()` is the dialect's upsert, so the provider runs on
+`payload`. The provider creates the table when the context starts if
+`pyfly.data.relational.ddl-auto` is `create` (the default), `create-drop` or
+`update`; with `none` or `validate` a migration must create it (list
+`framework_metadata` in Alembic's `target_metadata`), or the startup fails
+naming it. `save()` is the dialect's upsert, so the provider runs on
 PostgreSQL, MySQL, MariaDB and SQLite. Its operations join the unit of work
 bound for its datasource (the state commits or rolls back with the business
 step that wrote it); outside one each is a single statement on an autocommit

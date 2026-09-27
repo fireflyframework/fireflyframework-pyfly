@@ -1138,8 +1138,9 @@ from pyfly.data.relational.sqlalchemy.entity import Base
 target_metadata = [Base.metadata, framework_metadata]
 ```
 
-A store creates its tables when it starts, unless `ddl-auto` is `none`; then it checks them and fails the
-startup naming each missing table or column (`FrameworkSchemaError`). The same helper is public:
+A store creates its tables when it starts if `ddl-auto` is `create` (the default), `create-drop` or `update`;
+with `none`, `validate` or any other value it only checks them, and fails the startup naming each missing table
+or column (`FrameworkSchemaError`). The same helper is public:
 
 ```python
 from pyfly.data.relational.framework_schema import ensure_tables, locks

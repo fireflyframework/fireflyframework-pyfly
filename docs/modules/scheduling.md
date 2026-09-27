@@ -634,8 +634,9 @@ pyfly:
   it does not release the lease another node took since, and a WARNING
   (`scheduler_lease_expired_before_release`) says the job outlived its TTL. The
   nodes compare `lock_until` with their own clocks: keep them synchronized (NTP).
-  The table is created at startup unless `pyfly.data.relational.ddl-auto` is
-  `none`. `LeaseLock.acquire(name, ttl, wait=...)`, `extend()` and `holder()`
+  The table is created at startup if `pyfly.data.relational.ddl-auto` is
+  `create` (the default), `create-drop` or `update`, and only checked with
+  `none` or `validate`. `LeaseLock.acquire(name, ttl, wait=...)`, `extend()` and `holder()`
   (with a fencing token that grows at every acquisition) serve other work that
   must run on one node at a time.
 - **`postgres`** — the same lease table on a PostgreSQL datasource. With

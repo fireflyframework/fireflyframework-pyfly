@@ -164,7 +164,8 @@ class TransactionalEngineAutoConfiguration:
         * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy. It runs on the
                           datasource named by ``pyfly.transactional.persistence.sqlalchemy.datasource``, or
                           the one whose URL is ``...sqlalchemy.url``, or the primary; it creates its table
-                          at start unless ``pyfly.data.relational.ddl-auto`` is ``none``.
+                          at start when ``pyfly.data.relational.ddl-auto`` allows it
+                          (:func:`~pyfly.data.relational.framework_schema.creates_tables`).
         * ``cache``      — :class:`CachePersistenceProvider`; delegates to the
                           app-configured :class:`CacheAdapter` bean.
 

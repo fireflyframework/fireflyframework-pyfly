@@ -42,7 +42,8 @@ factory function (:func:`orchestration_state_table` and the others), so a migrat
 builds the store's table the same way sees it.
 
 Stores call :func:`ensure_tables` when they start: it creates their tables when the schema strategy
-allows it (:func:`creates_tables`: ``pyfly.data.relational.ddl-auto`` other than ``none``), then checks
+allows it (:func:`creates_tables`: ``pyfly.data.relational.ddl-auto`` is ``create``, ``create-drop`` or
+``update``; with ``none``, ``validate`` or any other value the tables are left to migrations), then checks
 that every table and column is there, and fails fast with :class:`FrameworkSchemaError` naming what is
 missing. Declaring a new framework table: add a factory function next to the others (a ``Table`` on
 :data:`framework_metadata` built by :func:`_declare`), its module-level default table, and a row above.
@@ -340,23 +341,26 @@ _CREATING_STRATEGIES = frozenset({"create", "create-drop", "update"})
 
 def creates_tables(ddl_auto: str | None) -> bool:
     """Whether a store creates its missing framework tables when it starts, under the schema strategy
-    *ddl_auto* (``pyfly.data.relational.ddl-auto``): ``create`` and ``create-drop`` do (the framework
-    tables are never dropped); ``none`` and ``validate`` leave the schema to migrations, and the store
-    only checks it."""
+    *ddl_auto* (``pyfly.data.relational.ddl-auto``): ``create``, ``create-drop`` and ``update`` do (the
+    framework tables are never dropped); ``none``, ``validate`` and any other value leave the schema to
+    migrations, and the store only checks it."""
     return str(ddl_auto or "").strip().lower() in _CREATING_STRATEGIES
 
 
 def context_datasource_registry(config: Config, container: Container | None = None) -> DataSourceRegistry:
     """The ``DataSourceRegistry`` a framework store's auto-configuration resolves its datasource in: the
     context's bean (an application's singleton registry replaces the configuration's), or the registry of
-    *config* when there is no container or no such bean."""
-    from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
+    *config* when there is no container or no such bean.
+
+    Several registry beans with no ``@primary`` among them raise ``NoUniqueBeanError``: building the
+    configuration's registry instead would open a third set of pools beside the application's."""
+    from pyfly.container.exceptions import NoSuchBeanError
     from pyfly.data.relational.datasource_registry import DataSourceRegistry
 
     if container is not None:
         try:
             return container.resolve(DataSourceRegistry)
-        except (NoSuchBeanError, NoUniqueBeanError):
+        except NoSuchBeanError:
             pass
     return DataSourceRegistry.for_config(config)
 
