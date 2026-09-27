@@ -172,9 +172,11 @@ class ApplicationContext:
         self._lifecycle_beans: list[Any] = []
         #: Whether this run has started its lifecycle beans (step 5b): one created later is not managed.
         self._lifecycle_started = False
-        #: Creation sequence of each singleton this run built, by instance identity. A bean is always
-        #: created after the beans it depends on, so reverse creation order is reverse dependency order.
-        self._creation_order: dict[int, int] = {}
+        #: Creation sequence of each singleton this run built, by instance identity, with the instance
+        #: itself: holding it keeps its id from passing to another object during the run (an original a
+        #: post-processor replaced is referenced by nothing else). A bean is always created after the
+        #: beans it depends on, so reverse creation order is reverse dependency order.
+        self._creation_order: dict[int, tuple[int, Any]] = {}
         #: The beans whose @app_event_listener methods this run subscribed.
         self._wired_listener_owners: list[Any] = []
         self._task_scheduler: Any | None = None
@@ -781,7 +783,7 @@ class ApplicationContext:
                 instances.append(reg.instance)
         position = {id(instance): index for index, instance in enumerate(instances)}
         instances.sort(
-            key=lambda instance: (self._creation_order.get(id(instance), -1), position[id(instance)]),
+            key=lambda instance: (self._creation_index(instance), position[id(instance)]),
             reverse=True,
         )
         return instances
@@ -803,13 +805,18 @@ class ApplicationContext:
     def _note_created(self, instance: Any) -> None:
         """Record that singleton *instance* now exists (its place in the destroy order)."""
         if id(instance) not in self._creation_order:
-            self._creation_order[id(instance)] = len(self._creation_order)
+            self._creation_order[id(instance)] = (len(self._creation_order), instance)
 
     def _carry_creation_order(self, previous: Any, replacement: Any) -> None:
         """A post-processor replaced *previous* with *replacement*: it keeps the original's place."""
-        order_index = self._creation_order.get(id(previous))
-        if order_index is not None:
-            self._creation_order.setdefault(id(replacement), order_index)
+        entry = self._creation_order.get(id(previous))
+        if entry is not None:
+            self._creation_order.setdefault(id(replacement), (entry[0], replacement))
+
+    def _creation_index(self, instance: Any) -> int:
+        """The place of *instance* in this run's creation order, or ``-1`` when the run did not build it."""
+        entry = self._creation_order.get(id(instance))
+        return -1 if entry is None else entry[0]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -840,7 +847,7 @@ class ApplicationContext:
             started.add(id(instance))
             if self._has_lifecycle_methods(instance):
                 candidates.append(instance)
-        candidates.sort(key=lambda bean: (lifecycle_phase(bean), self._creation_order.get(id(bean), -1)))
+        candidates.sort(key=lambda bean: (lifecycle_phase(bean), self._creation_index(bean)))
 
         for adapter in candidates:
             try:

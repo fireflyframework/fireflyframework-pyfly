@@ -517,6 +517,51 @@ async def test_a_lazy_lifecycle_bean_created_after_start_is_reported(caplog: pyt
     assert "lifecycle_bean_created_after_start" in caplog.text
 
 
+class _Replaced:
+    pass
+
+
+class _Replacement:
+    pass
+
+
+_ORIGINALS: list[Any] = []
+
+
+@component
+class _ReplacingPostProcessor:
+    """Replaces a bean with an object that does not hold it (the original is referenced by nobody)."""
+
+    def before_init(self, bean: Any, bean_name: str) -> Any:
+        return bean
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        if isinstance(bean, _Replaced):
+            import weakref
+
+            _ORIGINALS.append(weakref.ref(bean))
+            return _Replacement()
+        return bean
+
+
+async def test_the_destroy_order_keeps_a_replaced_instance_until_the_stop() -> None:
+    """The destroy order is keyed by instance identity; an instance a post-processor replaced must stay
+    alive for the run, or a later object could take its id, and its place in the order."""
+    import gc
+
+    _ORIGINALS.clear()
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_ReplacingPostProcessor)
+    ctx.register_bean(_Replaced)
+    await ctx.start()
+    gc.collect()
+    assert len(_ORIGINALS) == 1
+    assert _ORIGINALS[0]() is not None
+    await ctx.stop()
+    gc.collect()
+    assert _ORIGINALS[0]() is None
+
+
 # ---------------------------------------------------------------------------
 # A declared phase orders lifecycle beans before creation order does.
 # ---------------------------------------------------------------------------
