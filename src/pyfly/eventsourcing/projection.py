@@ -23,6 +23,7 @@ from typing import Protocol, runtime_checkable
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.store import EventStore
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
 _logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ class Projection(Protocol):
 
 class ProjectionRunner:
     """Polls the event store and feeds new events to a projection."""
+
+    #: The poller stops before any ``@pre_destroy``, so no event reaches a destroyed projection or
+    #: read model (see :mod:`pyfly.kernel.lifecycle`).
+    phase = CONSUMER_PHASE
 
     def __init__(
         self,

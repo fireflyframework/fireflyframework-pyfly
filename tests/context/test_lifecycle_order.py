@@ -50,8 +50,14 @@ from pyfly.context.lifecycle import post_construct, pre_destroy  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
 from pyfly.data.relational.datasource_registry import DataSourceRegistry  # noqa: E402
 from pyfly.data.relational.sqlalchemy.entity import Base  # noqa: E402
+from pyfly.eventsourcing.event import StoredEventEnvelope  # noqa: E402
+from pyfly.eventsourcing.outbox import TransactionalOutbox  # noqa: E402
+from pyfly.eventsourcing.projection import ProjectionRunner  # noqa: E402
+from pyfly.eventsourcing.store import InMemoryEventStore  # noqa: E402
 from pyfly.kernel.lifecycle import CONSUMER_PHASE  # noqa: E402
 from pyfly.scheduling.decorators import scheduled  # noqa: E402
+from pyfly.transactional.core.recovery import RecoveryService  # noqa: E402
+from pyfly.transactional.core.scheduling import OrchestrationScheduler, ScheduledTask  # noqa: E402
 
 EVENTS: list[str] = []
 
@@ -700,3 +706,152 @@ async def test_every_bean_is_initialized_and_scheduled_once() -> None:
         "second.post_construct",
     ]
     assert sorted(event for event in EVENTS if event.endswith(".beep")) == ["first.beep", "port.beep", "second.beep"]
+
+
+# ---------------------------------------------------------------------------
+# The framework's schedulers and pollers drain before any @pre_destroy: none of them runs a job, a
+# scan, a relay or a projection into a bean that is being destroyed.
+# ---------------------------------------------------------------------------
+
+
+@service
+class _Mailer:
+    """The bean every poller works through; its ``@pre_destroy`` flushes for a while."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def touch(self, source: str) -> None:
+        EVENTS.append(f"{source}:ran-after-pre_destroy" if self.closed else f"{source}:ran")
+
+    @pre_destroy
+    async def close(self) -> None:
+        EVENTS.append("mailer.pre_destroy")
+        self.closed = True
+        await asyncio.sleep(0.1)  # ten ticks of every poller below
+
+
+class _Broker:
+    """The EDA publisher the outbox relays through: it takes subscriptions, so it is a consumer."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def subscribe(self, pattern: str, handler: Any) -> None:
+        del pattern, handler
+
+    async def publish(self, envelope: Any) -> None:
+        del envelope
+        if self.stopped:
+            EVENTS.append("outbox:published-into-a-stopped-broker")
+        raise ConnectionError("broker unavailable")  # the record stays pending: the relay retries each poll
+
+    async def start(self) -> None:
+        self.stopped = False
+
+    async def stop(self) -> None:
+        EVENTS.append("broker.stop")
+        self.stopped = True
+
+
+class _MailingPersistence:
+    """An in-memory saga persistence whose stale scan goes through the mailer."""
+
+    def __init__(self, mailer: _Mailer) -> None:
+        from pyfly.transactional.core.persistence import InMemoryPersistenceProvider
+
+        self._mailer = mailer
+        self._store = InMemoryPersistenceProvider()
+
+    async def find_stale(self, before: Any) -> list[Any]:
+        self._mailer.touch("recovery")
+        return await self._store.find_stale(before)
+
+    async def cleanup(self, older_than: timedelta) -> int:
+        return await self._store.cleanup(older_than)
+
+
+class _MailingProjection:
+    name = "mailing"
+
+    def __init__(self, mailer: _Mailer) -> None:
+        self._mailer = mailer
+
+    async def handle(self, event: Any) -> None:
+        del event
+        self._mailer.touch("projection")
+
+
+class _BusyEventStore(InMemoryEventStore):
+    """An event store with one new event at every poll."""
+
+    async def stream_all(self, *, after_event_id: str | None = None, limit: int = 100) -> list[StoredEventEnvelope]:
+        del after_event_id, limit
+        return [StoredEventEnvelope(event_type="Sent")]
+
+
+def _recording_stop(bean: Any, name: str) -> Any:
+    """Record *name* when *bean* (a real framework poller) is stopped, then stop it."""
+    stop = bean.stop
+
+    async def recorded() -> None:
+        EVENTS.append(f"{name}.stop")
+        await stop()
+
+    bean.stop = recorded
+    return bean
+
+
+@configuration
+class _PollerConfiguration:
+    @bean
+    def mail_scheduler(self, mailer: _Mailer) -> OrchestrationScheduler:
+        scheduler = OrchestrationScheduler()
+
+        async def tick() -> None:
+            mailer.touch("saga")
+
+        scheduler.register(ScheduledTask(id="saga:mail", callback=tick, fixed_rate_ms=10))
+        return _recording_stop(scheduler, "scheduler")
+
+    @bean
+    def mail_recovery(self, mailer: _Mailer) -> RecoveryService:
+        recovery = RecoveryService(_MailingPersistence(mailer), scan_interval=timedelta(milliseconds=10))  # type: ignore[arg-type]
+        return _recording_stop(recovery, "recovery")
+
+    @bean
+    def broker(self) -> _Broker:
+        return _Broker()
+
+    @bean
+    def mail_outbox(self, broker: _Broker, mailer: _Mailer) -> TransactionalOutbox:
+        async def relay(envelope: StoredEventEnvelope) -> None:
+            mailer.touch("outbox")
+            await broker.publish(envelope)
+
+        return _recording_stop(TransactionalOutbox(relay, max_attempts=10_000, poll_interval_s=0.01), "outbox")
+
+    @bean
+    def mail_projection(self, mailer: _Mailer) -> ProjectionRunner:
+        runner = ProjectionRunner(_MailingProjection(mailer), _BusyEventStore(), poll_interval_s=0.01)
+        return _recording_stop(runner, "projection")
+
+
+async def test_framework_schedulers_and_pollers_drain_before_any_pre_destroy() -> None:
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_Mailer)
+    ctx.register_bean(_PollerConfiguration)
+    await ctx.start()
+    await ctx.get_bean(TransactionalOutbox).enqueue(StoredEventEnvelope(event_type="Sent"))
+    for _ in range(100):  # every poller has run at least once
+        if {"saga:ran", "recovery:ran", "outbox:ran", "projection:ran"} <= set(EVENTS):
+            break
+        await asyncio.sleep(0.01)
+    assert {"saga:ran", "recovery:ran", "outbox:ran", "projection:ran"} <= set(EVENTS)
+
+    await ctx.stop()
+
+    stops = [event for event in EVENTS if event.endswith(".stop") or event == "mailer.pre_destroy"]
+    assert stops.index("mailer.pre_destroy") == len(stops) - 1, stops  # every poller stopped before it
+    assert stops.index("outbox.stop") < stops.index("broker.stop")  # the relay stops before its broker
+    assert [event for event in EVENTS if "after-pre_destroy" in event or "stopped-broker" in event] == []

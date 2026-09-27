@@ -60,7 +60,8 @@ DEFAULT_PHASE = 0
 #: The phase of message consumers, pollers and schedulers: they start after every other lifecycle
 #: bean and stop first, before ``@pre_destroy``, draining the work in flight. A lifecycle bean that
 #: takes subscriptions (it defines ``subscribe``: an event bus, a message broker) is in this phase
-#: unless it declares another.
+#: unless it declares another; a poller or scheduler declares it (the framework's
+#: ``OrchestrationScheduler``, ``RecoveryService``, ``TransactionalOutbox`` and ``ProjectionRunner`` do).
 CONSUMER_PHASE = 1 << 30
 
 

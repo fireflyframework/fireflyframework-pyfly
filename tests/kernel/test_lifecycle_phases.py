@@ -101,3 +101,24 @@ async def _deferred(resource: object) -> bool:
     from pyfly.kernel.lifecycle import disposal_deferred
 
     return disposal_deferred(resource)
+
+
+def test_the_framework_schedulers_and_pollers_are_consumers() -> None:
+    """They dispatch work into other beans, so they stop before any ``@pre_destroy``."""
+    from pyfly.eventsourcing.outbox import TransactionalOutbox
+    from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
+    from pyfly.eventsourcing.store import InMemoryEventStore
+    from pyfly.transactional.core.persistence import InMemoryPersistenceProvider
+    from pyfly.transactional.core.recovery import RecoveryService
+    from pyfly.transactional.core.scheduling import OrchestrationScheduler
+
+    async def publish(envelope: Any) -> None:
+        del envelope
+
+    pollers = [
+        OrchestrationScheduler(),
+        RecoveryService(InMemoryPersistenceProvider()),
+        TransactionalOutbox(publish),
+        ProjectionRunner(FunctionProjection("noop", publish), InMemoryEventStore()),
+    ]
+    assert [lifecycle_phase(poller) for poller in pollers] == [CONSUMER_PHASE] * 4
