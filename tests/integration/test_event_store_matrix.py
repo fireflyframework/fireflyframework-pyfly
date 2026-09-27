@@ -513,3 +513,78 @@ async def test_a_missing_head_row_is_reported_and_a_start_brings_it_back(relatio
     events = await _drain(store)
     assert _types(events) == ["First", "Second"]
     assert [event.global_position for event in events] == [1, 2]
+
+
+# The event table as release 26.09.07 created it, and the upgrade docs/modules/eventsourcing.md gives for each
+# backend (PostgreSQL's is in test_eventsourcing_postgres_integration.py).
+_EARLIER_EVENT_STORE = """
+CREATE TABLE IF NOT EXISTS pyfly_event_store (
+    event_id        VARCHAR(64) PRIMARY KEY,
+    aggregate_id    VARCHAR(64) NOT NULL,
+    aggregate_type  VARCHAR(255) NOT NULL,
+    sequence        INTEGER NOT NULL,
+    event_type      VARCHAR(255) NOT NULL,
+    payload         TEXT NOT NULL,
+    metadata        TEXT NOT NULL,
+    occurred_at     TIMESTAMP NOT NULL,
+    version         INTEGER NOT NULL,
+    tenant_id       VARCHAR(64) NULL,
+    UNIQUE (aggregate_id, sequence)
+)
+"""
+_UPGRADES = {
+    "sqlite": [
+        "ALTER TABLE pyfly_event_store ADD COLUMN recorded_at DATETIME",
+        "ALTER TABLE pyfly_event_store ADD COLUMN global_position BIGINT",
+    ],
+    "mysql": [
+        "SET time_zone = '+00:00'",
+        "ALTER TABLE pyfly_event_store ADD COLUMN recorded_at DATETIME(6) NULL, "
+        "ADD COLUMN global_position BIGINT NULL, MODIFY occurred_at DATETIME(6) NOT NULL, "
+        "MODIFY payload LONGTEXT NOT NULL, MODIFY metadata LONGTEXT NOT NULL",
+    ],
+}
+
+
+@pytest.mark.backends("sqlite-file", MYSQL, MARIADB)
+async def test_the_event_table_of_an_earlier_release_upgrades_with_the_documented_migration(
+    relational_backend: RelationalBackend,
+) -> None:
+    from sqlalchemy import text
+
+    engine = relational_backend.create_engine()
+    base = datetime(2026, 1, 1, 12, 0)
+    async with engine.begin() as connection:
+        await connection.execute(text(_EARLIER_EVENT_STORE))
+        for index, name in ((1, "Second"), (0, "First")):
+            envelope = StoredEventEnvelope(event_type=name, aggregate_id=f"old-{index}", aggregate_type="Order")
+            envelope.sequence, envelope.occurred_at = 1, (base + timedelta(minutes=index)).replace(tzinfo=UTC)
+            await connection.execute(
+                text(
+                    "INSERT INTO pyfly_event_store (event_id, aggregate_id, aggregate_type, sequence, event_type, "
+                    "payload, metadata, occurred_at, version, tenant_id) VALUES (:eid, :aid, 'Order', 1, :etype, "
+                    ":payload, '{}', :occurred, 1, NULL)"
+                ),
+                {
+                    "eid": envelope.event_id,
+                    "aid": envelope.aggregate_id,
+                    "etype": name,
+                    "payload": envelope.to_json(),
+                    "occurred": str(base + timedelta(minutes=index)),  # what sqlite3's default adapter wrote
+                },
+            )
+
+    store = SqlAlchemyEventStore(engine)
+    with pytest.raises(FrameworkSchemaError, match="pyfly_event_store.global_position does not exist"):
+        await store.start()
+    upgrade = _UPGRADES["sqlite" if relational_backend.dialect == "sqlite" else "mysql"]
+    async with engine.connect() as connection:
+        for statement in upgrade:
+            await connection.execute(text(statement))
+        await connection.commit()
+    await store.start()  # creates the head row and the global_position index, and places the old events
+
+    await store.append("new", "Order", [_envelope("New")], expected_version=0)
+    events = await _drain(store)
+    assert _types(events) == ["First", "Second", "New"]
+    assert [event.global_position for event in events] == [1, 2, 3]
