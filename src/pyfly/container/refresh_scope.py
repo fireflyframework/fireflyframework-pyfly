@@ -136,7 +136,8 @@ def scoped_proxy(target: T) -> T:
         @bean(scope="refresh")
         def reporting_engine(self, config: Config) -> AsyncEngine: ...
 
-    Raises ``TypeError`` on a singleton or transient ``@bean`` method, which a proxy cannot serve.
+    Raises ``TypeError`` on a singleton or transient ``@bean`` method, which a proxy cannot serve; a
+    class marked with it raises the same when it is registered as a singleton or transient bean.
     """
     bean_scope = getattr(target, "__pyfly_bean_scope__", None)
     if bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):

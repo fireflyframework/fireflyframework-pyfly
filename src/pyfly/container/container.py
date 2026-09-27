@@ -41,7 +41,7 @@ from pyfly.container.metrics import BeanMetrics
 from pyfly.container.ordering import get_order
 from pyfly.container.provider import Provider
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope, ScopeHandler, ScopeSpec
+from pyfly.container.types import Scope, ScopeHandler, ScopeSpec, scope_name
 
 T = TypeVar("T")
 
@@ -319,12 +319,19 @@ class Container:
         if getattr(cls, "__pyfly_refresh_scope__", False):
             # @refresh_scope survives a stereotype applied after it (which resets __pyfly_scope__).
             bean_scope = REFRESH_SCOPE_NAME
+        scoped_proxy = bool(getattr(cls, "__pyfly_scoped_proxy__", False))
+        if scoped_proxy and bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):
+            # The marker used to be ignored here: the dependants silently got the instance itself.
+            raise TypeError(
+                f"a scoped proxy needs a REQUEST, SESSION or custom scope; "
+                f"{getattr(cls, '__qualname__', cls)!r} is registered {scope_name(bean_scope)}"
+            )
         reg = Registration(
             impl_type=cls,
             scope=bean_scope,
             condition=condition,
             name=bean_name,
-            scoped_proxy=bool(getattr(cls, "__pyfly_scoped_proxy__", False)),
+            scoped_proxy=scoped_proxy,
         )
         self._registrations[cls] = reg
         self._all[(cls, bean_name)] = reg

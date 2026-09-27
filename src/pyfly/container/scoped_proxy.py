@@ -28,6 +28,7 @@ explicit alternative: ``provider.get()`` resolves the current instance too.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 
@@ -82,17 +83,44 @@ class ScopedProxy:
     def __getitem__(self, key: Any) -> Any:
         return _current(self)[key]
 
+    # A ``with`` / ``async with`` block exits on the instance it entered, even when the scope swapped
+    # it in between (a refresh inside the block): the entered instance is pinned until the exit.
     def __enter__(self) -> Any:
-        return _current(self).__enter__()
+        target = _current(self)
+        entered = target.__enter__()
+        _pin(self, target)
+        return entered
 
     def __exit__(self, *exc_info: Any) -> Any:
-        return _current(self).__exit__(*exc_info)
+        return _unpin(self).__exit__(*exc_info)
 
     async def __aenter__(self) -> Any:
-        return await _current(self).__aenter__()
+        target = _current(self)
+        entered = await target.__aenter__()
+        _pin(self, target)
+        return entered
 
     async def __aexit__(self, *exc_info: Any) -> Any:
-        return await _current(self).__aexit__(*exc_info)
+        return await _unpin(self).__aexit__(*exc_info)
+
+
+# The instances the open ``with`` blocks of this thread or task entered, innermost last, each with
+# the identity of its proxy. A context variable, since one proxy is shared by every request and task.
+_ENTERED: ContextVar[tuple[tuple[int, Any], ...]] = ContextVar("pyfly_scoped_proxy_entered", default=())
+
+
+def _pin(proxy: ScopedProxy, target: Any) -> None:
+    _ENTERED.set((*_ENTERED.get(), (id(proxy), target)))
+
+
+def _unpin(proxy: ScopedProxy) -> Any:
+    """The instance the innermost open block of *proxy* entered (forgotten now), or the current one."""
+    entered = _ENTERED.get()
+    for index in range(len(entered) - 1, -1, -1):
+        if entered[index][0] == id(proxy):
+            _ENTERED.set(entered[:index] + entered[index + 1 :])
+            return entered[index][1]
+    return _current(proxy)
 
 
 def _current(proxy: ScopedProxy) -> Any:

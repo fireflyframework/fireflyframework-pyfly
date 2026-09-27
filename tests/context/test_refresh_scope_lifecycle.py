@@ -612,3 +612,81 @@ async def test_a_singleton_destroy_method_runs_after_the_lifecycle_beans_stop(ur
     assert EVENTS == ["checkpointer.stop", "engine.disposed"]
     assert await _rows(urls["a"]) == ["checkpoint"]
     assert _SINGLETON_ENGINES[0].pool.checkedin() == 0
+
+
+# ---------------------------------------------------------------------------
+# The scoped proxy: a context manager exits on the instance it entered, and a class that a proxy
+# cannot serve is refused.
+# ---------------------------------------------------------------------------
+
+
+@refresh_scope(proxy=True)
+@component
+class _Gate:
+    opened = 0
+
+    def __init__(self) -> None:
+        _Gate.opened += 1
+        self.generation = _Gate.opened
+        self.depth = 0
+
+    def __enter__(self) -> int:
+        self.depth += 1
+        EVENTS.append(f"enter:{self.generation}")
+        return self.generation
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.depth -= 1
+        EVENTS.append(f"exit:{self.generation}")
+
+    async def __aenter__(self) -> int:
+        return self.__enter__()
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.__exit__(*exc_info)
+
+
+@service
+class _GateKeeper:
+    def __init__(self, gate: _Gate) -> None:
+        self.gate = gate
+
+
+async def test_a_proxied_context_manager_exits_on_the_instance_it_entered() -> None:
+    """Across a refresh, ``__exit__`` used to reach the rebuilt instance, not the one entered."""
+    EVENTS.clear()
+    _Gate.opened = 0
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_Gate)
+    ctx.register_bean(_GateKeeper)
+    await ctx.start()
+    try:
+        gate = ctx.get_bean(_GateKeeper).gate
+        refresher = ctx.get_bean(ContextRefresher)
+        async with gate as outer:
+            await refresher.refresh()
+            with gate as inner:  # the rebuilt instance, pinned too
+                await refresher.refresh()
+            assert (outer, inner) == (1, 2)
+        assert EVENTS == ["enter:1", "enter:2", "exit:2", "exit:1"]
+    finally:
+        await ctx.stop()
+
+
+def test_a_singleton_or_transient_class_cannot_be_proxied() -> None:
+    """The marker used to be ignored on a class: the singleton got the instance, not a proxy."""
+
+    @scoped_proxy
+    @component
+    class _SingletonProxy:
+        pass
+
+    @scoped_proxy
+    class _TransientProxy:
+        pass
+
+    ctx = ApplicationContext(Config({}))
+    with pytest.raises(TypeError, match="scoped proxy"):
+        ctx.register_bean(_SingletonProxy)
+    with pytest.raises(TypeError, match="scoped proxy"):
+        ctx.register_bean(_TransientProxy, scope=Scope.TRANSIENT)

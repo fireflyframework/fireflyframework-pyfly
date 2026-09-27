@@ -698,8 +698,12 @@ scope) and resolves the instance its scope holds on every use: an attribute, a c
 `pyfly.container.scoped_proxy.proxy_target(proxy)` returns the current instance. Opt in per bean:
 
 - `@refresh_scope(proxy=True)` on a class;
-- `@scoped_proxy` on a class (with any non-singleton scope) or on a non-singleton `@bean` method,
-  written above `@bean`. On a singleton or transient `@bean` method it raises `TypeError`.
+- `@scoped_proxy` on a class (with a request, session or custom scope) or on a non-singleton
+  `@bean` method, written above `@bean`. On a singleton or transient `@bean` method it raises
+  `TypeError`, and so does registering a `@scoped_proxy` class as a singleton or transient bean.
+
+A `with` or `async with` block on a proxy exits on the instance it entered, even when a refresh
+swapped the scope's instance inside the block.
 
 ```python
 from pyfly.container.refresh_scope import scoped_proxy
