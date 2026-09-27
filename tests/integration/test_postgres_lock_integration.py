@@ -437,6 +437,38 @@ async def test_a_failed_unlock_discards_the_connection_holding_the_lock(
 
 
 @pytest.mark.backends(PG)
+async def test_a_failed_acquisition_discards_its_connection_and_any_lock_it_took(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """``try_acquire`` returned its connection to the pool after an error. When the server had granted the lock
+    and only the reply was lost (an error after it, a cancellation), the session lock went back to the pool
+    with it, taken for good (C175's failure mode on the acquiring side)."""
+    async with admin.connect() as connection:
+        # A real function earlier on the search path than pg_catalog's: it takes the lock, then fails.
+        await connection.execute(text("CREATE SCHEMA wp10a_trap"))
+        await connection.execute(
+            text(
+                "CREATE FUNCTION wp10a_trap.pg_try_advisory_lock(key bigint) RETURNS boolean LANGUAGE plpgsql AS "
+                "$$ BEGIN PERFORM pg_catalog.pg_try_advisory_lock(key); "
+                "RAISE EXCEPTION 'the reply was lost'; END $$"
+            )
+        )
+    trapped = relational_backend.create_engine(
+        pool_size=1, max_overflow=0, connect_args={"server_settings": {"search_path": "wp10a_trap, pg_catalog"}}
+    )
+    node_a = PostgresAdvisoryLock(trapped)
+    node_b = PostgresAdvisoryLock(relational_backend.create_engine())
+
+    with pytest.raises(Exception, match="the reply was lost"):
+        await node_a.try_acquire("nightly", 60.0)
+
+    assert trapped.pool.checkedout() == 0  # type: ignore[attr-defined]
+    assert await _eventually_free(admin, "nightly") == []  # the session that took it is gone
+    assert await node_b.try_acquire("nightly", 60.0) is True
+    await node_b.release("nightly")
+
+
+@pytest.mark.backends(PG)
 async def test_the_advisory_lock_stop_releases_what_it_holds(relational_backend: RelationalBackend) -> None:
     node_a = PostgresAdvisoryLock(relational_backend.create_engine())
     node_b = PostgresAdvisoryLock(relational_backend.create_engine())

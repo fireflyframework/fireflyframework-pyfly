@@ -26,8 +26,9 @@ A session-level advisory lock lives with the connection that took it, so that co
   server's ``idle_in_transaction_session_timeout`` cannot drop it (and the lock) mid-job;
 - a watchdog ends the lock at its TTL: a hung job's lock is released (the connection closed) and a WARNING
   logged, so the job runs elsewhere after ``lock_ttl`` instead of never;
-- an unlock that fails, whatever the error, discards the connection instead of returning it to the pool:
-  the pool's reset (a ``ROLLBACK``) keeps a session lock, which would stay taken for good.
+- an acquisition or an unlock that fails, whatever the error (a cancellation included), discards the
+  connection instead of returning it to the pool: the pool's reset (a ``ROLLBACK``) keeps a session lock,
+  which would stay taken for good.
 """
 
 from __future__ import annotations
@@ -109,7 +110,9 @@ class PostgresAdvisoryLock:
             result = await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
             acquired = bool(result.scalar())
         except BaseException:
-            await conn.close()
+            # The server may have granted the lock before the error (or the cancellation) reached us: discard
+            # the session, never return it to the pool, whose ROLLBACK would keep the lock for good.
+            await self._discard(conn)
             raise
         if not acquired:
             await conn.close()  # don't leak the connection when the lock is held elsewhere
@@ -145,10 +148,17 @@ class PostgresAdvisoryLock:
                 _logger.warning("scheduler_advisory_lock_not_held", extra={"lock": name})
         except BaseException:
             # Discard, never return: a pooled session keeps the lock through the pool's ROLLBACK.
-            with contextlib.suppress(Exception):
-                await conn.invalidate()
+            await self._discard(conn)
             raise
-        finally:
+        await conn.close()
+
+    @staticmethod
+    async def _discard(conn: Any) -> None:
+        """Invalidate *conn* (the server ends its session, and the session's locks) and give its pool slot
+        back."""
+        with contextlib.suppress(Exception):
+            await conn.invalidate()
+        with contextlib.suppress(Exception):
             await conn.close()
 
     def _expire(self, name: str, hold: _Hold) -> None:
