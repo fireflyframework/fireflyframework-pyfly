@@ -11,35 +11,71 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Integration test: Postgres SessionRegistry against a real Postgres (v26.06.68)."""
+"""Session concurrency control between two application contexts on one database (WP10b: C154, C155).
+
+Two contexts are two instances of the application: each builds its own datasource registry, SQL session store
+(``pyfly.session.store=postgres``), SQL registry and controller from configuration. max-sessions=1 must hold
+across them, and an eviction on one must end the session the other holds.
+"""
 
 from __future__ import annotations
 
-import pytest
+import asyncio
+import contextlib
+import time
+from collections.abc import AsyncIterator
+from typing import Any
 
-from pyfly.testing import requires_docker  # the `pg_url` fixture is provided by conftest.py
+from pyfly.context.application_context import ApplicationContext
+from pyfly.session.concurrency import SessionConcurrencyController
+from pyfly.session.ports.outbound import SessionStore
+from tests.support.backend_matrix import RelationalBackend
+
+CONCURRENCY = 20
 
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_postgres_session_registry_against_real_postgres(pg_url: str) -> None:
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
-
-    engine = create_async_engine(pg_url)
+@contextlib.asynccontextmanager
+async def _instances(backend: RelationalBackend, strategy: str) -> AsyncIterator[list[tuple[Any, Any]]]:
+    overrides = {
+        "pyfly.data.relational.ddl-auto": "create",
+        "pyfly.session.enabled": "true",
+        "pyfly.session.store": "postgres",
+        "pyfly.session.concurrency.enabled": "true",
+        "pyfly.session.concurrency.registry": "postgres",
+        "pyfly.session.concurrency.max-sessions": "1",
+        "pyfly.session.concurrency.strategy": strategy,
+    }
+    contexts = [ApplicationContext(backend.config(overrides)) for _ in range(2)]
+    started: list[ApplicationContext] = []
     try:
-        reg = PostgresSessionRegistry(lambda: engine)
-        await reg.register("alice", "s2", 2.0)
-        await reg.register("alice", "s1", 1.0)  # older score, inserted second
-        assert await reg.count("alice") == 2
-        assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s1", "s2"]  # oldest-first
-
-        await reg.register("alice", "s2", 9.0)  # upsert (same session_id) must not duplicate
-        assert await reg.count("alice") == 2
-
-        await reg.deregister("alice", "s1")
-        assert await reg.count("alice") == 1
-        assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s2"]
+        for ctx in contexts:
+            await ctx.start()
+            started.append(ctx)
+        yield [(ctx.get_bean(SessionConcurrencyController), ctx.get_bean(SessionStore)) for ctx in contexts]
     finally:
-        await engine.dispose()
+        for ctx in reversed(started):
+            await ctx.stop()
+
+
+async def _login(instance: tuple[Any, Any], principal: str, session_id: str) -> bool:
+    controller, store = instance
+    await store.save(session_id, {"user": principal}, ttl=600)
+    return bool(await controller.on_login(principal, session_id, time.time()))
+
+
+async def test_max_sessions_one_admits_one_login_across_two_instances(relational_backend: RelationalBackend) -> None:
+    async with _instances(relational_backend, "reject-new") as instances:
+        results = await asyncio.gather(
+            *(_login(instances[index % 2], "alice", f"s{index}") for index in range(CONCURRENCY))
+        )
+
+        assert results.count(True) == 1
+
+
+async def test_an_eviction_on_one_instance_ends_the_session_on_the_other(relational_backend: RelationalBackend) -> None:
+    async with _instances(relational_backend, "evict-oldest") as (first, second):
+        assert await _login(first, "bob", "on-first")
+        assert await _login(second, "bob", "on-second")
+
+        assert await first[1].get("on-first") is None
+        assert await first[1].get("on-second") is not None
