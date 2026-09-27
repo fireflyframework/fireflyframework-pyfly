@@ -15,8 +15,9 @@
 
 - :class:`UnitSession` is the session of a unit the transaction manager opened. Every operation runs under
   the unit's operation guard (a child task that shares the unit waits its turn instead of corrupting the
-  session), refuses a completed unit, and records failures; ``commit``, ``rollback`` and ``close`` belong
-  to the unit, so calling them raises.
+  session), refuses a completed unit, and records failures; so do the ``SAVEPOINT``, ``RELEASE`` and
+  ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``. ``commit``, ``rollback`` and ``close`` belong to the
+  unit, so calling them raises.
 - :class:`ScopedAsyncSession` is what the transient ``async_session`` bean hands out. Inside a unit of
   work for its datasource the unit-of-work API (``execute``, ``scalar``, ``scalars``, ``get``,
   ``get_one``, ``add``, ``add_all``, ``delete``, ``merge``, ``flush``, ``refresh``, ``stream``,
@@ -35,7 +36,7 @@ import inspect
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction, async_sessionmaker
 
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.errors import IllegalTransactionStateError
@@ -43,7 +44,14 @@ from pyfly.data.transaction.registry import PRIMARY, TransactionManagerRegistry,
 from pyfly.data.transaction.template import infrastructure_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
-__all__ = ["GuardedResult", "ScopedAsyncSession", "SessionProvider", "UnitSession", "unit_session_class"]
+__all__ = [
+    "GuardedResult",
+    "ScopedAsyncSession",
+    "SessionProvider",
+    "UnitSavepoint",
+    "UnitSession",
+    "unit_session_class",
+]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -191,6 +199,12 @@ class UnitSession(AsyncSession):
         async with unit.operation():
             return GuardedResult(await super().stream_scalars(*args, **kwargs), unit)
 
+    def begin_nested(self) -> AsyncSessionTransaction:
+        unit = self._pyfly_unit
+        if unit is None:
+            return super().begin_nested()
+        return UnitSavepoint(self, unit)
+
     def add(self, instance: object, _warn: bool = True) -> None:
         unit = self._pyfly_unit
         if unit is not None:
@@ -219,6 +233,34 @@ class UnitSession(AsyncSession):
         if self._pyfly_unit is not None:
             raise _completion_refused(self._pyfly_unit, "close")
         await super().close()
+
+
+class UnitSavepoint(AsyncSessionTransaction):
+    """A savepoint the application opens on a unit's session (``session.begin_nested()``): its
+    ``SAVEPOINT``, ``RELEASE SAVEPOINT`` and ``ROLLBACK TO SAVEPOINT`` run under the unit's operation guard,
+    like every other statement of the unit, and never across the code inside the block."""
+
+    __slots__ = ("_pyfly_unit",)
+
+    def __init__(self, session: AsyncSession, unit: UnitOfWork) -> None:
+        super().__init__(session, nested=True)
+        self._pyfly_unit = unit
+
+    async def start(self, is_ctxmanager: bool = False) -> AsyncSessionTransaction:
+        async with self._pyfly_unit.operation():
+            return await super().start(is_ctxmanager)
+
+    async def commit(self) -> None:
+        async with self._pyfly_unit.operation():
+            await super().commit()
+
+    async def rollback(self) -> None:
+        async with self._pyfly_unit.operation():
+            await super().rollback()
+
+    async def __aexit__(self, type_: Any, value: Any, traceback: Any) -> None:
+        async with self._pyfly_unit.operation():
+            await super().__aexit__(type_, value, traceback)
 
 
 def _completion_refused(unit: UnitOfWork, operation: str) -> IllegalTransactionStateError:

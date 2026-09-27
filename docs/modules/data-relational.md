@@ -614,7 +614,9 @@ async def rebuild_projection(order_id: str) -> None: ...
 ```
 
 A statement that fails inside a unit marks it **rollback-only**: on PostgreSQL the transaction is dead
-after any failed statement, and the same rule on every backend gives the same code the same outcome. A
+after any failed statement, and the same rule on every backend gives the same code the same outcome (a
+failure inside a savepoint the application rolls back does not count; see
+[Rollback rules and rollback-only](#rollback-rules-and-rollback-only)). A
 unit whose task is cancelled (a client disconnect, a timeout) discards its connection instead of
 returning it to the pool, and commit, rollback and release run shielded (their own task, under `asyncio`
 and `anyio` shields) before the cancellation is re-raised.
@@ -1277,6 +1279,29 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
   **rollback-only**, and so does any failed statement. When the outermost boundary then completes
   normally, it rolls back and raises `UnexpectedRollbackError`. To try a step and carry on after it
   fails, use `NESTED`: its failure rolls back to the savepoint only.
+- A statement that fails inside a savepoint the application opened itself does not mark the unit when
+  that savepoint rolls back: after `ROLLBACK TO SAVEPOINT` the transaction is healthy on every backend.
+  The SQLAlchemy idiom works as it does without PyFly, on the repository's `_session`, an injected
+  `AsyncSession` or `SessionProvider.current()`:
+
+  ```python
+  @transactional
+  async def import_tags(self, names: list[str]) -> None:
+      session = self.tags._session
+      for name in names:
+          try:
+              async with session.begin_nested():
+                  session.add(Tag(name=name))
+                  await session.flush()
+          except IntegrityError:
+              pass  # a duplicate: its savepoint rolled back, the unit goes on
+  ```
+
+  A failure caught while its savepoint stays open counts when the savepoint is released (it moves to the
+  enclosing savepoint, or marks the unit), and when the unit completes with the savepoint still open (the
+  unit rolls back with `UnexpectedRollbackError`). Inside `NESTED`, it rolls the `NESTED` scope back to
+  its own savepoint instead. A savepoint's `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` run under the unit's
+  operation guard.
 - A `no_rollback_for` exception on a unit whose transaction is already dead rolls back and re-raises the
   original exception (never `PendingRollbackError`).
 

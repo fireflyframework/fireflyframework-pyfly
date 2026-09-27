@@ -263,14 +263,16 @@ class UnitOfWork:
         """What marked the unit rollback-only: the failure, or a message."""
         return self._rollback_only_reason
 
-    def set_rollback_only(self, reason: BaseException | str | None = None) -> None:
+    def set_rollback_only(self, reason: BaseException | str | None = None, *, depth: int | None = None) -> None:
         """Mark the unit rollback-only; the outermost boundary will roll it back.
 
         A mark set inside a savepoint (``NESTED``) is cleared when the savepoint rolls back, as Spring
-        resets its connection holder's flag there.
+        resets its connection holder's flag there. *depth* places the mark in the savepoint at that depth
+        (``0``: the unit itself) instead of the current one.
         """
-        if self._rollback_only_depth is None or self.savepoint_depth < self._rollback_only_depth:
-            self._rollback_only_depth = self.savepoint_depth
+        level = self.savepoint_depth if depth is None else depth
+        if self._rollback_only_depth is None or level < self._rollback_only_depth:
+            self._rollback_only_depth = level
             self._rollback_only_reason = reason
 
     def marked_within(self, depth: int) -> bool:

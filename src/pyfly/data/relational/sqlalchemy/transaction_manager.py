@@ -64,7 +64,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSessionTransaction,
     async_sessionmaker,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from pyfly.data.relational.datasource_registry import (
     DataSource,
@@ -99,6 +99,13 @@ _AUTOCOMMIT = "pyfly_autocommit"
 
 _DRIVER_CONNECTION = "pyfly_driver_connection"
 """``UnitOfWork.attributes`` key: the driver connection of a SQLite unit, whose write lock a discard releases."""
+
+_TEMPLATE_SAVEPOINTS = "pyfly_template_savepoints"
+"""``UnitOfWork.attributes`` key: the savepoints of the unit's ``Propagation.NESTED`` scopes, with their depth."""
+
+_SAVEPOINT_FAILURES = "pyfly_savepoint_failures"
+"""``UnitOfWork.attributes`` key: statements that failed inside savepoints the application opened, until those
+savepoints roll back (see ``marks_rollback_only``)."""
 
 _READ_ONLY_DIALECT_STATEMENT = {"mysql": "SET TRANSACTION READ ONLY", "mariadb": "SET TRANSACTION READ ONLY"}
 
@@ -422,29 +429,61 @@ class SqlAlchemyTransactionManager:
         async with unit.operation():
             savepoint = AsyncSession.begin_nested(unit.resource)
             await savepoint
-            return savepoint
+        # The template counts this savepoint once this returns: it is at the next depth.
+        unit.attributes.setdefault(_TEMPLATE_SAVEPOINTS, []).append(
+            (savepoint.sync_transaction, unit.savepoint_depth + 1)
+        )
+        return savepoint
 
     async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
         """``RELEASE SAVEPOINT`` (flushing what the nested scope left pending)."""
-        async with unit.operation():
-            await savepoint.commit()
+        try:
+            async with unit.operation():
+                await savepoint.commit()
+        finally:
+            _forget_template_savepoint(unit, savepoint)
 
     async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
         """``ROLLBACK TO SAVEPOINT``."""
-        async with unit.operation():
-            await savepoint.rollback()
+        try:
+            async with unit.operation():
+                await savepoint.rollback()
+        finally:
+            _forget_template_savepoint(unit, savepoint)
+
+    def failed_within_savepoint(self, unit: UnitOfWork, savepoint: Any) -> bool:
+        """Whether a statement failed inside a savepoint the application opened within *savepoint* (a
+        ``NESTED`` scope's) and left open: the ``NESTED`` scope then rolls back to *savepoint*."""
+        container = savepoint.sync_transaction
+        return any(_within(failed, container) for failed, _error in unit.attributes.get(_SAVEPOINT_FAILURES, ()))
 
     # -- state ---------------------------------------------------------------------------------------------
 
     def resource_active(self, unit: UnitOfWork) -> bool:
-        """Whether the session's (outermost) transaction can still commit."""
-        session: AsyncSession = unit.resource
-        transaction = session.sync_session.get_transaction()
-        return transaction is None or transaction.is_active
+        """Whether the unit can still commit: its session's (outermost) transaction is active, and no
+        savepoint the application opened and left open holds a failed statement.
+
+        Asked as the unit completes; such a failure then marks the unit rollback-only (with the failure as
+        the reason), as it would have if no savepoint had been open.
+        """
+        failures = unit.attributes.get(_SAVEPOINT_FAILURES)
+        if failures:
+            for _savepoint, error in failures:
+                unit.set_rollback_only(error, depth=0)
+            failures.clear()
+            return False
+        return _transaction_active(unit)
 
     def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool:
         """Every driver error marks the unit: on PostgreSQL the transaction is dead after any failed
         statement, and the same rule on every backend keeps one outcome for the same code.
+
+        A statement that fails inside a savepoint the application opened (``session.begin_nested()``) is
+        recorded against that savepoint instead: ``ROLLBACK TO SAVEPOINT`` leaves the transaction healthy on
+        every backend, so the failure is forgotten when the savepoint rolls back (the ``async with
+        session.begin_nested():`` idiom around an insert that may be a duplicate). It moves to the enclosing
+        savepoint when the savepoint is released, and it marks the unit when the savepoint is still open as
+        the unit completes (``resource_active``).
 
         An error that is neither SQLAlchemy's nor the unit of work's also poisons the unit: a raw driver
         error (aiosqlite's "Connection closed" once its thread stopped), or what SQLAlchemy raised in place
@@ -453,7 +492,13 @@ class SqlAlchemyTransactionManager:
         """
         if not isinstance(error, (SQLAlchemyError, TransactionError)):
             unit.poisoned = True
-        return isinstance(error, DBAPIError) or not self.resource_active(unit)
+        marks = isinstance(error, DBAPIError) or not _transaction_active(unit)
+        if marks and not unit.poisoned and not self.is_disconnect(error):
+            savepoint = _application_savepoint(unit)
+            if savepoint is not None:
+                _record_savepoint_failure(unit, savepoint, error)
+                return False
+        return marks
 
     def is_disconnect(self, error: BaseException) -> bool:
         """Whether *error* invalidated its connection (the server or the network dropped it)."""
@@ -498,6 +543,87 @@ async def _discard_connections(unit: UnitOfWork) -> None:
     driver = unit.attributes.get(_DRIVER_CONNECTION)
     if driver is not None:
         await sqlite_discard.wait_released(driver)
+
+
+def _transaction_active(unit: UnitOfWork) -> bool:
+    """Whether the unit session's outermost transaction can still commit."""
+    session: AsyncSession = unit.resource
+    transaction = session.sync_session.get_transaction()
+    return transaction is None or transaction.is_active
+
+
+def _forget_template_savepoint(unit: UnitOfWork, savepoint: Any) -> None:
+    held = unit.attributes.get(_TEMPLATE_SAVEPOINTS)
+    if held:
+        held[:] = [entry for entry in held if entry[0] is not savepoint.sync_transaction]
+
+
+def _template_depth(unit: UnitOfWork, transaction: SessionTransaction) -> int | None:
+    """The depth of *transaction* when it is a ``NESTED`` scope's savepoint, else ``None``."""
+    for held, depth in unit.attributes.get(_TEMPLATE_SAVEPOINTS, ()):
+        if held is transaction:
+            return int(depth)
+    return None
+
+
+def _application_savepoint(unit: UnitOfWork) -> SessionTransaction | None:
+    """The innermost savepoint of the unit's session when the application opened it (not a ``NESTED`` scope)."""
+    session: AsyncSession = unit.resource
+    nested = session.sync_session.get_nested_transaction()
+    if nested is None or _template_depth(unit, nested) is not None:
+        return None
+    return nested
+
+
+def _within(transaction: SessionTransaction | None, container: SessionTransaction) -> bool:
+    """Whether *transaction* is *container* or runs inside it."""
+    current = transaction
+    while current is not None:
+        if current is container:
+            return True
+        current = current.parent
+    return False
+
+
+def _enclosing_savepoint(transaction: SessionTransaction) -> SessionTransaction | None:
+    current = transaction.parent
+    while current is not None and not current.nested:
+        current = current.parent
+    return current
+
+
+def _record_savepoint_failure(unit: UnitOfWork, savepoint: SessionTransaction, error: BaseException) -> None:
+    """Record *error* against the application's *savepoint* (the first failure per savepoint is kept)."""
+    failures: list[tuple[SessionTransaction, BaseException]] | None = unit.attributes.get(_SAVEPOINT_FAILURES)
+    if failures is None:
+        failures = unit.attributes[_SAVEPOINT_FAILURES] = []
+        sync_session = unit.resource.sync_session
+
+        def _ended(_session: Session, transaction: SessionTransaction) -> None:
+            # A savepoint that ends without being released rolled back (ROLLBACK TO SAVEPOINT, or the failed
+            # flush's own rollback before the savepoint closed): what failed inside it is gone, and the
+            # transaction is healthy again. A released one was handled by _released just before.
+            failures[:] = [entry for entry in failures if not _within(entry[0], transaction)]
+
+        def _released(session: Session) -> None:
+            released = session.get_nested_transaction()
+            if released is None:
+                return
+            for index, (failed, reason) in enumerate(failures):
+                if failed is released:
+                    del failures[index]
+                    enclosing = _enclosing_savepoint(released)
+                    depth = _template_depth(unit, enclosing) if enclosing is not None else 0
+                    if enclosing is not None and depth is None:
+                        _record_savepoint_failure(unit, enclosing, reason)  # the application's own savepoint
+                    else:
+                        unit.set_rollback_only(reason, depth=depth or 0)
+                    return
+
+        event.listen(sync_session, "after_commit", _released)
+        event.listen(sync_session, "after_transaction_end", _ended)
+    if not any(failed is savepoint for failed, _error in failures):
+        failures.append((savepoint, error))
 
 
 def _backend(engine: AsyncEngine) -> str:

@@ -522,7 +522,11 @@ class TransactionBoundary:
             return
         # A failure that propagates out, or a statement that failed inside the savepoint and was caught
         # there, rolls back to the savepoint; the outer unit is not marked (Spring's NESTED semantics).
-        if (error is not None and self._definition.rollback_on(error)) or unit.marked_within(depth):
+        if (
+            (error is not None and self._definition.rollback_on(error))
+            or unit.marked_within(depth)
+            or _failed_within_savepoint(manager, unit, self._savepoint)
+        ):
             _result, rollback_error, cancelled = await run_shielded(
                 manager.rollback_to_savepoint(unit, self._savepoint)
             )
@@ -583,6 +587,13 @@ class TransactionBoundary:
         )
         timed_out.__cause__ = cause
         return timed_out
+
+
+def _failed_within_savepoint(manager: TransactionManager, unit: UnitOfWork, savepoint: Any) -> bool:
+    """Whether a statement failed inside a savepoint the application opened within *savepoint* and left
+    open (the optional ``failed_within_savepoint`` of a manager whose backend has savepoints)."""
+    probe = getattr(manager, "failed_within_savepoint", None)
+    return bool(probe(unit, savepoint)) if callable(probe) else False
 
 
 def _driver_error(error: BaseException | None) -> bool:
