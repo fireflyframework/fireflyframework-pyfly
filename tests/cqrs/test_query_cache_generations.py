@@ -15,9 +15,9 @@
 
 A scoped entry lives under its key's current generation (``<key>|<generation>|scope=<digest>``); the
 generation is itself an entry (``<key>|generation``). Every distinct query key looked up by a scoped
-caller creates one, and every eviction replaces one: without a TTL they outlive their entries forever, an
-unbounded leak in the default in-memory cache and keys that a volatile-* Redis maxmemory policy can never
-evict.
+caller creates one, and the first lookup after an eviction (which deletes it) creates a fresh one: without
+a TTL they outlive their entries forever, an unbounded leak in the default in-memory cache and keys that a
+volatile-* Redis maxmemory policy can never evict. An eviction itself writes nothing.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ async def test_no_query_cache_key_outlives_the_ttl_of_its_entries() -> None:
     for sku in range(50):
         await bus.query_with_context(GetStock(sku=sku), context)
     for sku in range(0, 50, 5):
-        await bus.clear_cache(GetStock(sku=sku).get_cache_key())  # replaces those keys' generations
+        await bus.clear_cache(GetStock(sku=sku).get_cache_key())  # deletes those keys' generations
     assert any(key.endswith(GENERATION_SUFFIX) for key in root.get_keys())
 
     await asyncio.sleep(1.1)
@@ -72,11 +72,41 @@ async def test_a_generation_expires_with_the_ttl_of_its_entries() -> None:
     key = await adapter.entry_key("Report:1", "digest", ttl=timedelta(milliseconds=50))
     assert key is not None
     await adapter.put(key, "result", ttl=timedelta(milliseconds=50))
-    await adapter.evict("Report:1")
-    assert ":cqrs:Report:1|generation" in root.get_keys()  # the new generation
+    assert ":cqrs:Report:1|generation" in root.get_keys()
 
     await asyncio.sleep(0.1)
     assert root.get_keys() == []
+
+
+class CountingCache(InMemoryCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[str] = []
+
+    async def put(self, key: str, value: object, ttl: timedelta | None = None) -> None:
+        self.writes.append(key)
+        await super().put(key, value, ttl=ttl)
+
+    async def put_if_absent(self, key: str, value: object, ttl: timedelta | None = None) -> bool:
+        self.writes.append(key)
+        return await super().put_if_absent(key, value, ttl=ttl)
+
+
+async def test_an_eviction_deletes_the_generation_and_writes_nothing() -> None:
+    root = CountingCache()
+    adapter = QueryCacheAdapter(root)
+    key = await adapter.entry_key("Report:1", "digest", ttl=timedelta(seconds=60))
+    assert key is not None
+    await adapter.put(key, "result", ttl=timedelta(seconds=60))
+    root.writes.clear()
+
+    assert await adapter.evict("Report:1") is True
+    assert await adapter.evict("Report:2") is False  # never cached
+    assert root.writes == []
+    assert root.get_keys() == [":cqrs:" + key]  # unreachable now, it expires with its TTL
+    after = await adapter.entry_key("Report:1", "digest", ttl=timedelta(seconds=60))
+    assert after is not None and after != key
+    assert await adapter.lookup(after) == (False, None)
 
 
 async def test_an_expired_generation_never_brings_back_an_evicted_entry() -> None:

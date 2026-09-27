@@ -156,13 +156,70 @@ async def test_every_query_cache_key_expires(redis: Any) -> None:
     context = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
     for sku in range(5):
         await bus.query_with_context(StockQuery(sku=sku), context)
-    await bus.clear_cache(StockQuery(sku=0).get_cache_key())  # a new generation for that key
+    await bus.clear_cache(StockQuery(sku=0).get_cache_key())  # that key's generation is deleted
 
     keys = [key for key in await _keys(redis) if key.startswith("pyfly:cache::cqrs:")]
     assert any(key.endswith("|generation") for key in keys)
     ttls = {key: await redis.ttl(key) for key in keys}
     # -1 is a key without an expiry: none may outlive the entries it serves.
     assert all(0 < ttl <= 120 for ttl in ttls.values()), ttls
+
+
+async def test_evicting_a_query_key_deletes_and_writes_nothing(redis: Any) -> None:
+    """A command's ``get_cache_key()`` eviction: one step of concurrent deletes (each key's unscoped entry
+    and generation, under every ``cache_key_prefix``), and not a single write, whether the key was ever
+    cached or not."""
+
+    @dataclass(frozen=True)
+    class StockQuery(Query[int]):
+        sku: int = 0
+
+        def get_cache_key(self) -> str | None:
+            return f"stock:{self.sku}"
+
+    def prefixed_handler(n: int) -> QueryHandler[Any, int]:
+        @dataclass(frozen=True)
+        class PrefixedStockQuery(StockQuery):
+            pass
+
+        @query_cacheable(cache_key_prefix=f"p{n}")
+        @query_handler(cacheable=True)
+        class PrefixedStockHandler(QueryHandler[PrefixedStockQuery, int]):
+            async def do_handle(self, query: PrefixedStockQuery) -> int:
+                return query.sku
+
+        return PrefixedStockHandler()
+
+    registry = HandlerRegistry()
+    handlers = [prefixed_handler(n) for n in range(5)]
+    for handler in handlers:
+        registry.register_query_handler(handler)
+    cache = RedisCacheAdapter(redis)
+    queries = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(cache))
+    context = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+    await queries.query_with_context(handlers[0].get_query_type()(sku=1), context)
+    before = await _keys(redis)
+    assert any(key.endswith("p0:stock:1|generation") for key in before)
+
+    commands: list[tuple[Any, ...]] = []
+    execute = redis.execute_command
+
+    async def recorded(*args: Any, **kwargs: Any) -> Any:
+        commands.append(args)
+        return await execute(*args, **kwargs)
+
+    redis.execute_command = recorded
+    try:
+        await queries.clear_cache("stock:1")  # cached under p0 only
+        await queries.clear_cache("stock:2")  # never cached
+    finally:
+        redis.execute_command = execute
+
+    names = [str(command[0]).upper() for command in commands]
+    assert set(names) == {"DEL"}, names  # no SET: nothing is written for a key never cached
+    assert len(names) == 2 * 2 * 6  # two keys, each its entry and generation, bare and under five prefixes
+    left = [key for key in await _keys(redis) if "stock:1" in key]
+    assert left and all("|scope=" in key for key in left)  # unreachable (its generation is gone) until its TTL
 
 
 async def test_two_instances_see_each_others_evictions(redis_url: str, redis: Any) -> None:

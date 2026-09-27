@@ -25,25 +25,26 @@ command that caused it.
 
 An entry is keyed by the caller's scope too (:func:`scope_of`, :func:`scope_digest`): a result cached for
 one tenant or user is never served to another, and a call whose caller the cache cannot identify is not
-cached at all (it fails closed). Evicting a key evicts it for every scope at the cost of one write: the
-scoped entries of a key live under its current *generation* (``<key>|<generation>|scope=<digest>``), and
-eviction replaces the generation, which leaves the old entries unreachable until their TTL expires. No
-eviction scans the keyspace.
+cached at all (it fails closed). Evicting a key evicts it for every scope with two deletes and no write:
+the scoped entries of a key live under its current *generation* (``<key>|<generation>|scope=<digest>``),
+and eviction deletes the generation (and the key's unscoped entry), which leaves the old entries
+unreachable until their TTL expires. The next lookup of the key starts a fresh generation. No eviction by
+key scans the keyspace, and a key that was never cached costs no write.
 
 A generation is an entry too (``<key>|generation``), and it expires: it is created with the TTL of the
-entries looked up under it, and an eviction's new generation lives as long as the longest entry TTL this
-adapter has seen (``generation_ttl`` before it has seen one). It is never refreshed: rewriting it could
-race an eviction's new generation and bring the evicted entries back. An entry stored late in its
-generation's life can therefore become unreachable before its own TTL, which costs one extra miss and
-never serves a stale value: generations are random and never reused, so an expired one is replaced by a
-fresh one that reaches no older entry.
+entries looked up under it. It is never refreshed: rewriting it could race an eviction and bring the
+evicted entries back. An entry stored late in its generation's life can therefore become unreachable
+before its own TTL, which costs one extra miss and never serves a stale value: generations are random and
+never reused, so a deleted or expired one is replaced by a fresh one that reaches no older entry.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import uuid
+from collections.abc import Iterable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -156,9 +157,9 @@ class QueryCacheAdapter:
 
     Args:
         cache: The application's cache; the query cache is its ``:cqrs:`` region.
-        generation_ttl: How long a key's generation lives until the adapter has seen the TTL of an entry
-            (see the module docs); :data:`DEFAULT_GENERATION_TTL` when ``None``. The auto-configuration
-            sets it to ``pyfly.cqrs.query.cache_ttl``.
+        generation_ttl: How long a key's generation lives when the TTL of the entries looked up under it is
+            not known (see the module docs); :data:`DEFAULT_GENERATION_TTL` when ``None``. The
+            auto-configuration sets it to ``pyfly.cqrs.query.cache_ttl``.
     """
 
     def __init__(self, cache: Any = None, *, generation_ttl: timedelta | None = None) -> None:
@@ -167,7 +168,6 @@ class QueryCacheAdapter:
         if cache is not None:
             self._region = TransactionAwareCache(PrefixedCache(cache, CQRS_CACHE_PREFIX), on_write_error="log")
         self._generation_ttl = generation_ttl if generation_ttl is not None else DEFAULT_GENERATION_TTL
-        self._longest_ttl: timedelta | None = None
         self._reserved_key_reported = False
 
     # ── keys ───────────────────────────────────────────────────
@@ -185,7 +185,7 @@ class QueryCacheAdapter:
         if SCOPE_SEPARATOR in cache_key or cache_key.endswith(GENERATION_SUFFIX):
             self._report_reserved(cache_key)
             return None
-        lifetime = self._lifetime(ttl)
+        lifetime = ttl if ttl is not None else self._generation_ttl
         if digest is None or self._region is None:
             return cache_key
         try:
@@ -207,15 +207,6 @@ class QueryCacheAdapter:
             GENERATION_SUFFIX,
         )
 
-    def _lifetime(self, ttl: timedelta | None) -> timedelta:
-        """*ttl*, noted as an entry TTL (the next eviction's generation lives as long as the longest), or
-        ``generation_ttl`` when it is unknown."""
-        if ttl is None:
-            return self._generation_ttl
-        if self._longest_ttl is None or ttl > self._longest_ttl:
-            self._longest_ttl = ttl
-        return ttl
-
     async def _generation(self, cache_key: str, ttl: timedelta) -> str:
         assert self._region is not None
         key = cache_key + GENERATION_SUFFIX
@@ -227,9 +218,6 @@ class QueryCacheAdapter:
         if await self._region.put_if_absent(key, fresh, ttl=ttl):
             return fresh
         return str(await self._region.get(key) or fresh)
-
-    def _new_generation_ttl(self) -> timedelta:
-        return self._longest_ttl if self._longest_ttl is not None else self._generation_ttl
 
     # ── read ───────────────────────────────────────────────────
 
@@ -267,28 +255,39 @@ class QueryCacheAdapter:
         """Store *value* (after the commit inside a unit of work); a failure is logged, never raised."""
         if self._region is None:
             return
-        if ttl is not None:
-            self._lifetime(ttl)
         await self._region.put(cache_key, value, ttl=ttl)
 
     # ── evict ──────────────────────────────────────────────────
 
     async def evict(self, cache_key: str) -> bool:
-        """Evict *cache_key* for every caller's scope: its unscoped entry, and its scoped entries by moving it
-        to a new generation. After the commit inside a unit of work, where it returns ``False``. Both writes
-        are one step: they run together, to completion even when the calling task is cancelled meanwhile."""
+        """Evict *cache_key* for every caller's scope (see :meth:`evict_keys`); whether anything was cached
+        for it. After the commit inside a unit of work, where it returns ``False``."""
+        return await self.evict_keys([cache_key]) > 0
+
+    async def evict_keys(self, cache_keys: Iterable[str]) -> int:
+        """Evict each of *cache_keys* for every caller's scope: its unscoped entry, and its scoped entries by
+        deleting its generation; how many of the keys had anything cached. Nothing is written.
+
+        The deletes are one step: they run concurrently, after the commit inside a unit of work (``0`` is
+        returned then) and at once outside one, and to completion even when the calling task is cancelled
+        meanwhile. A failing delete is logged once the others have run."""
         region = self._region
-        if region is None:
-            return False
+        targets = [key for cache_key in dict.fromkeys(cache_keys) for key in (cache_key, cache_key + GENERATION_SUFFIX)]
+        if region is None or not targets:
+            return 0
         store = region.delegate
-        generation_ttl = self._new_generation_ttl()
 
-        async def evict_every_scope() -> bool:
-            evicted = await store.evict(cache_key)
-            await store.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12], ttl=generation_ttl)
-            return evicted
+        async def evict_every_scope() -> int:
+            outcomes = await asyncio.gather(*(store.evict(key) for key in targets), return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+            found = {
+                key.removesuffix(GENERATION_SUFFIX) for key, existed in zip(targets, outcomes, strict=True) if existed
+            }
+            return len(found)
 
-        return bool(await region.apply("evict", cache_key, evict_every_scope))
+        return int(await region.apply("evict", targets[0], evict_every_scope) or 0)
 
     async def evict_prefix(self, prefix: str) -> int:
         """Evict every entry whose key starts with *prefix* (a query handler's group), for every scope. This
@@ -312,12 +311,11 @@ class QueryCacheAdapter:
 
 async def evict_query_key(cache: QueryCacheAdapter, registry: HandlerRegistry, cache_key: str) -> None:
     """Evict *cache_key* (a query's ``get_cache_key()``) for every caller's scope, as stored by a handler
-    without a ``cache_key_prefix`` and by each registered handler that declares one."""
-    await cache.evict(cache_key)
+    without a ``cache_key_prefix`` and by each registered handler that declares one: one step of concurrent
+    deletes (:meth:`QueryCacheAdapter.evict_keys`)."""
     prefixes = {
         prefix
         for query_type in registry.get_registered_query_types()
         if (prefix := registry.find_query_handler(query_type).get_cache_key_prefix()) is not None
     }
-    for prefix in sorted(prefixes):
-        await cache.evict(f"{prefix}:{cache_key}")
+    await cache.evict_keys([cache_key, *(f"{prefix}:{cache_key}" for prefix in sorted(prefixes))])

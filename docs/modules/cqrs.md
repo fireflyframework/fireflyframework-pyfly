@@ -503,7 +503,8 @@ adapter = QueryCacheAdapter(cache=my_cache_instance)
 | `entry_key(key, digest, ttl=None)` | The key an entry lives under for a caller's scope digest; `None` when the call is not cached. |
 | `put(key, value, ttl)` | Store with optional `timedelta` TTL; after the commit inside a unit of work. |
 | `evict(key)` | Remove a key for every caller's scope; after the commit inside a unit of work. |
-| `evict_prefix(prefix)` | Remove every entry whose key starts with `prefix`. |
+| `evict_keys(keys)` | `evict` for several keys as one step of concurrent deletes. |
+| `evict_prefix(prefix)` | Remove every entry whose key starts with `prefix` (scans the query cache's keys: `SCAN` on Redis). |
 | `clear()` | Remove every query-cache entry (the `:cqrs:` prefix), and nothing else the cache holds. |
 | `is_available` | Whether an underlying cache is configured. |
 
@@ -582,15 +583,17 @@ generations with them, and a key built from user input could otherwise address
 another caller's entry.
 
 Evicting a key (`clear_cache`, a command's `get_cache_key()`, a bridge rule)
-reaches every caller's entry with one write, whatever the number of tenants and
-users: scoped entries live under the key's current generation
-(`<key>|<generation>|scope=<digest>`), and the eviction replaces the generation.
-The old entries are unreachable from then on and expire with their TTL. A scoped
+reaches every caller's entry with two deletes and no write, whatever the number
+of tenants and users: scoped entries live under the key's current generation
+(`<key>|<generation>|scope=<digest>`), and the eviction deletes the generation
+(`<key>|generation`) and the key's unscoped entry. The old entries are
+unreachable from then on and expire with their TTL; the next lookup starts a
+fresh generation. A key that was never cached costs no write, and the deletes of
+one eviction (the key under every `cache_key_prefix`) run concurrently. A scoped
 lookup reads the generation first, one extra round trip.
 
 A generation expires too: it is created with the TTL of the entries looked up
-under it, and an eviction's new generation lives as long as the longest entry TTL
-the adapter has seen (`pyfly.cqrs.query.cache_ttl` before it has seen one), so no
+under it (`pyfly.cqrs.query.cache_ttl` when that is not known), so no
 query-cache key outlives the entries it serves. A generation is never refreshed,
 because rewriting it could race an eviction and bring evicted entries back: an
 entry stored late in its generation's life may become unreachable before its own
@@ -659,6 +662,13 @@ An event-tag eviction removes the handler's group: `<cache_key_prefix>:`, or
 tagged handler whose query overrides `get_cache_key()`: its keys need not start
 with `<QueryClass>:`, and the first eviction that may miss them logs a
 `query_cache_eviction_may_miss` warning naming the handler.
+
+A group eviction scans the query cache's keys, once per tagged handler: on
+Redis a `SCAN` of the whole database, whose cost grows with everything the
+database holds (sessions, locks, other applications' keys), not only with the
+query cache. Evicting by key (`get_cache_key()`) never scans. Keep event tags
+for events that are rare next to the queries they invalidate, and prefer
+`get_cache_key()` on hot commands.
 
 The invalidation comes before the publication of the command's domain events,
 and runs to completion even when the task is cancelled meanwhile: a handler whose
