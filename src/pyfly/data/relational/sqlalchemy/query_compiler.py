@@ -17,10 +17,11 @@ Implements :class:`~pyfly.data.ports.compiler.QueryMethodCompilerPort` for the
 SQLAlchemy data adapter.
 
 A compiled method (:class:`DerivedQuery`) is checked against the entity when it is compiled, at startup: every
-field is a property of the entity (a column, a synonym, a hybrid, or a relationship to one entity compared with
-an instance), ``_ignore_case`` applies to string properties, ``_true``/``_false`` to boolean ones, and the
-return annotation is one a query of its prefix can return (:class:`~pyfly.data.query_parser.ResultShape`). A
-method that is not raises :class:`~pyfly.data.query_parser.InvalidQueryMethodError`.
+field is a property of the entity (a column, a synonym, a hybrid, or a relationship to one entity or a composite,
+compared with an instance of its class or ``None``), ``_ignore_case`` applies to string properties,
+``_true``/``_false`` to boolean ones, and the return annotation is one a query of its prefix can return
+(:class:`~pyfly.data.query_parser.ResultShape`). A method that is not raises
+:class:`~pyfly.data.query_parser.InvalidQueryMethodError`.
 
 Its statement is **built once** per shape and reused on every call, with its arguments bound as parameters
 (Spring Data's ``PartTreeJpaQuery`` caches its criteria query the same way): SQLAlchemy memoizes a statement's
@@ -29,14 +30,14 @@ cache key on the statement, so a call costs what running a prebuilt statement co
 - ``None`` compares with ``IS NULL`` (``_not`` with ``IS NOT NULL``), a variant of the statement kept per
   pattern of ``None`` arguments;
 - an ``_in`` list is one ``= ANY(:array)`` bind on PostgreSQL (the same statement for every length) and an
-  expanding bind elsewhere, padded to the next power of two (``statements.padded``); a list longer than the
-  dialect binds in one statement runs one statement per chunk, where that gives the same answer (an unordered
-  ``find_by``, ``exists_by``, ``delete_by``, and ``count_by`` without ``_or_``), and raises ``ValueError``
-  otherwise;
+  expanding bind elsewhere, padded to the next power of two (``statements.padded``) within its share of what
+  the dialect binds in one statement (the lists of a statement split it); a longer list runs one statement per
+  chunk, where that gives the same answer (an unordered ``find_by`` of entities, a projection without ``_or_``,
+  ``exists_by``, ``delete_by``, and ``count_by`` without ``_or_``), and raises ``ValueError`` otherwise;
 - ``_containing``, ``_starting_with`` and ``_ending_with`` match their argument as it is (its ``%`` and ``_``
   escaped, ``ESCAPE '/'``); ``_like`` takes a pattern;
-- a relationship compared with an instance, and a repository whose ``_criteria()`` is its own override (read on
-  every call), build their statement per call.
+- a relationship or a composite compared with an instance, and a repository whose ``_criteria()`` is its own
+  override (read on every call), build their statement per call.
 
 What each prefix runs:
 
@@ -66,7 +67,22 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from sqlalchemy import ARRAY, Boolean, Enum, String, all_, and_, any_, bindparam, false, func, or_, select, true
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    Enum,
+    String,
+    all_,
+    and_,
+    any_,
+    bindparam,
+    false,
+    func,
+    not_,
+    or_,
+    select,
+    true,
+)
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
@@ -120,6 +136,7 @@ _NULL_AWARE = frozenset({"eq", "not"})
 
 _LIST_OPERATORS = frozenset({"in", "not_in"})
 _RELATIONSHIP_OPERATORS = frozenset({"eq", "not", "is_null", "is_not_null"})
+"""What a relationship or a composite compares with: an instance of its class, or ``None``."""
 _BOOLEAN_OPERATORS = frozenset({"is_true", "is_false"})
 _ESCAPED_PATTERNS: dict[str, Callable[[str], str]] = {
     "containing": lambda value: f"%{value}%",
@@ -136,7 +153,8 @@ def escape_like(value: str) -> str:
 
 def derived_properties(entity: type) -> dict[str, str]:
     """The property names a derived query of *entity* may name: its columns, synonyms and hybrids
-    (:class:`~pyfly.data.property_resolver.PropertyResolver`), and its relationships to one entity."""
+    (:class:`~pyfly.data.property_resolver.PropertyResolver`), its relationships to one entity and its
+    composites (both compared with a value of their class)."""
     properties = dict(PropertyResolver.for_entity(entity).properties)
     mapper: Mapper[Any] = sa_inspect(entity)
     properties.update(
@@ -144,6 +162,7 @@ def derived_properties(entity: type) -> dict[str, str]:
         for relationship in mapper.relationships
         if not relationship.uselist and not relationship.key.startswith("_")
     )
+    properties.update((prop.key, prop.key) for prop in mapper.composites if not prop.key.startswith("_"))
     return properties
 
 
@@ -171,6 +190,18 @@ class _Part:
     relationship: RelationshipProperty[Any] | None
     folds: bool
     first: int
+    composite: Any = None
+    """The composite property the attribute is (compared with a value of its class), or ``None``."""
+
+    @property
+    def by_value(self) -> type | None:
+        """The class of the value a relationship or a composite compares with (``None`` for a column): such a
+        comparison is built per call, with the value."""
+        if self.relationship is not None:
+            return cast(type, self.relationship.mapper.class_)
+        if self.composite is not None:
+            return cast(type, self.composite.composite_class)
+        return None
 
     @property
     def operator(self) -> str:
@@ -222,7 +253,8 @@ class DerivedQuery:
         self._soft_deletes = soft_deletes
         self._mapper: Mapper[Any] = sa_inspect(entity)
         self._parts = self._compile_parts()
-        self._dynamic = self._criteria is None or any(part.relationship is not None for part in self._parts)
+        self._dynamic = self._criteria is None or any(part.by_value is not None for part in self._parts)
+        self._lists = sum(1 for part in self._parts if part.operator in _LIST_OPERATORS)
         self._orders = self._compile_orders()
         self._columns = self._projection_columns()
         self._statements: dict[tuple[Any, ...], Any] = {}
@@ -266,22 +298,25 @@ class DerivedQuery:
                 )
             attribute = getattr(self._entity, properties[name])
             relationship = self._mapper.relationships.get(name)
+            composite = self._mapper.composites.get(name)
             operator = predicate.operator
-            if relationship is not None and operator not in _RELATIONSHIP_OPERATORS:
+            if (relationship is not None or composite is not None) and operator not in _RELATIONSHIP_OPERATORS:
+                kind = "a relationship" if relationship is not None else "a composite"
                 raise self._fail(
-                    f"{name} is a relationship: it compares with an instance or None (equals, _not, _is_null, "
+                    f"{name} is {kind}: it compares with an instance or None (equals, _not, _is_null, "
                     f"_is_not_null), not with {operator}"
                 )
+            by_value = relationship is not None or composite is not None
             if operator in _BOOLEAN_OPERATORS and not isinstance(_sql_type(attribute), Boolean):
                 raise self._fail(f"{name} is not a boolean property, so it cannot be _true or _false")
             folds = False
             if predicate.ignore_case:
-                if operator not in CASE_FOLDING_OPERATORS or relationship is not None or not _is_string(attribute):
+                if operator not in CASE_FOLDING_OPERATORS or by_value or not _is_string(attribute):
                     raise self._fail(f"{name} {operator} cannot ignore case: it applies to a string property's value")
                 folds = True
             elif self._parsed.all_ignore_case:
-                folds = operator in CASE_FOLDING_OPERATORS and relationship is None and _is_string(attribute)
-            parts.append(_Part(predicate, attribute, relationship, folds, position))
+                folds = operator in CASE_FOLDING_OPERATORS and not by_value and _is_string(attribute)
+            parts.append(_Part(predicate, attribute, relationship, folds, position, composite))
             position += predicate.arguments
         return parts
 
@@ -374,6 +409,11 @@ class DerivedQuery:
     def _condition(self, part: _Part, dialect: Dialect, call: _Call, index: int) -> Any:
         column = part.attribute
         operator = part.operator
+        if part.composite is not None:
+            # A composite compares column by column (all of them NULL for None); its _not is the negation.
+            value = None if operator in ("is_null", "is_not_null") else call.literals[part.first]
+            matches = column == value
+            return matches if operator in ("eq", "is_null") else not_(matches)
         if operator == "is_null" or (operator == "eq" and call.nulls[index]):
             return column.is_(None)
         if operator == "is_not_null" or (operator == "not" and call.nulls[index]):
@@ -436,13 +476,13 @@ class DerivedQuery:
         literals: dict[int, Any] = {}
         overflowing: list[tuple[_Part, list[Any]]] = []
         backend = backend_name(dialect)
-        capacity = in_list_limit(dialect) if backend in _PER_LIST else in_list_limit(dialect) - RESERVED_BINDS
+        capacity = self._capacity(dialect, backend)
         for part in self._parts:
             first = values[part.first] if part.predicate.arguments else None
-            nulls.append(part.operator in _NULL_AWARE and part.relationship is None and first is None)
+            nulls.append(part.operator in _NULL_AWARE and part.by_value is None and first is None)
             if nulls[-1] or not part.predicate.arguments:
                 continue
-            if part.relationship is not None:
+            if part.by_value is not None:
                 literals[part.first] = self._related(part, first)
                 continue
             if part.operator in _LIST_OPERATORS:
@@ -463,6 +503,14 @@ class DerivedQuery:
             return _Call(tuple(nulls), [parameters], literals)
         return _Call(tuple(nulls), self._chunked(parameters, overflowing, capacity, backend), literals)
 
+    def _capacity(self, dialect: Dialect, backend: str) -> int:
+        """How many values one IN list of the statement binds, padding included: the dialect's limit per list
+        (Oracle), or its share of the statement's (the limit, less the binds reserved for the rest of the
+        statement, split between its lists), so the lists together never bind more than the dialect takes."""
+        if backend in _PER_LIST:
+            return in_list_limit(dialect)
+        return max(1, (in_list_limit(dialect) - RESERVED_BINDS) // max(1, self._lists))
+
     def _listed(self, part: _Part, value: Any) -> list[Any]:
         if value is None or isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
             raise TypeError(f"{self._name}: {part.predicate.field_name} {part.operator} takes a collection of values")
@@ -473,8 +521,8 @@ class DerivedQuery:
             return items
 
     def _related(self, part: _Part, value: Any) -> Any:
-        relationship = cast(RelationshipProperty[Any], part.relationship)
-        target = relationship.mapper.class_
+        """The value a relationship or a composite is compared with: an instance of its class, or ``None``."""
+        target = cast(type, part.by_value)
         if value is not None and not isinstance(value, target):
             raise InvalidPropertyError(
                 f"{self._name}: {part.predicate.field_name} is compared with a {target.__name__} or None, not a "
@@ -502,6 +550,11 @@ class DerivedQuery:
             refusal = "a NOT IN list must be one list"
         elif self._parsed.prefix == "count_by" and len(self._parsed.groups) > 1:
             refusal = "a count with _or_ would count a row once per chunk it matches"
+        elif self._shape.element is ElementKind.PROJECTION and len(self._parsed.groups) > 1:
+            refusal = (
+                "a projection with _or_ would return a row once per chunk it matches, and has no identity to tell "
+                "the copies apart"
+            )
         elif self._parsed.prefix == "find_by" and (
             self._orders or self._shape.kind in (ResultKind.PAGE, ResultKind.SLICE)
         ):
@@ -648,6 +701,7 @@ class DerivedQuery:
         keys: list[tuple[Any, ...]] = []
         for parameters in call.parameters:
             keys.extend(tuple(row) for row in (await session.execute(statement, parameters)).all())
+        keys = list(dict.fromkeys(keys))  # a row an _or_ group matches comes back with every chunk
         if not keys:
             return self._deleted([], 0)
         stamps = await soft._stamps()

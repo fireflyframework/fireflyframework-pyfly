@@ -23,7 +23,9 @@
   position or keyword, and a method that does not match its entity fails when the repository is built
   (C128).
 - Statements are built once per shape and reused (C170, C171): ``None`` compares with ``IS NULL``, IN lists are
-  one ``= ANY`` bind on PostgreSQL and padded elsewhere, and a list longer than the dialect's limit is split.
+  one ``= ANY`` bind on PostgreSQL and padded elsewhere, the lists of a statement share the dialect's limit, and
+  a list longer than its share is split where that keeps the answer (never for a projection with ``_or_``).
+- A composite compares with a value of its class, as it did before the names were checked at startup.
 - ``exists_by_*`` probes one row (``SELECT 1 ... LIMIT 1``), and every derived method is a repository operation:
   a unit of work of its own outside a transaction, and exceptions translated to the kernel's.
 """
@@ -31,6 +33,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 from collections.abc import Iterator
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -39,12 +42,13 @@ from typing import Any, Protocol
 import pytest
 from sqlalchemy import Boolean, ForeignKey, Integer, String, event, insert, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, composite, mapped_column, relationship
 
 from pyfly.data import transactional
 from pyfly.data.page import Page, Slice
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.projection import projection
+from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import IncorrectResultSizeException
 from pyfly.data.relational.sqlalchemy import statements
 from pyfly.data.relational.sqlalchemy.entity import Base, SoftDeleteMixin
@@ -151,6 +155,10 @@ class AccountRepository(Repository[DqAccount, int]):
 
     async def find_by_owner(self, owner: str) -> AccountView | None: ...
 
+    async def find_by_id_in_or_tag(self, ids: list[int], tag: str) -> list[AccountView]: ...
+
+    async def find_by_id_in_and_tag_in(self, ids: list[int], tags: list[str]) -> list[DqAccount]: ...
+
 
 ROWS = [
     {"id": 1, "owner": "ann", "tag": "x", "balance": 0, "name": "discount 50% off", "logged_in": True,
@@ -164,6 +172,35 @@ ROWS = [
     {"id": 5, "owner": "eve", "tag": "y", "balance": 5, "name": "Plain", "logged_in": False,
      "terms_and_conditions_accepted": False, "note": None},
 ]  # fmt: skip
+
+
+@dataclasses.dataclass
+class Point:
+    """A composite value: two columns of a row."""
+
+    x: int | None
+    y: int | None
+
+
+class DqPlace(Base):
+    __tablename__ = "dq_place"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    at: Mapped[Point] = composite("x", "y")
+
+
+class PlaceRepository(Repository[DqPlace, int]):
+    async def find_by_at(self, at: Point | None) -> list[DqPlace]: ...
+
+    async def find_by_at_not(self, at: Point) -> list[DqPlace]: ...
+
+    async def count_by_at_is_null(self) -> int: ...
+
+    async def exists_by_at(self, at: Point) -> bool: ...
+
+    async def delete_by_at(self, at: Point) -> int: ...
 
 
 class DqOrder(SoftDeleteMixin, Base):
@@ -250,7 +287,7 @@ class TenantAccountRepository(Repository[DqAccount, int]):
     async def count_by_logged_in(self, logged_in: bool) -> int: ...
 
 
-MODELS = (DqAccount, DqOrder, DqShelf, DqBook, DqCustomer, DqInvoice)
+MODELS = (DqAccount, DqOrder, DqShelf, DqBook, DqCustomer, DqInvoice, DqPlace)
 
 
 def _built(repository: Any) -> Any:
@@ -561,6 +598,72 @@ async def test_an_in_list_longer_than_the_dialect_allows_is_split(
                 await accounts.find_by_id_in_order_by_id_desc([1, 2, 3, 4])
         assert await accounts.delete_by_id_in([1, 2, 3]) == 3
         assert _ids(await accounts.find_all()) == [4, 5]
+
+
+async def test_a_split_in_list_never_repeats_a_projected_row(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row the ``_or_`` group matches would come back once per chunk of the list, and a projection has no
+    identity to tell the copies apart: such a list is refused instead of split."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        accounts = await _accounts(datasources)
+        dialect = datasources.engine.dialect
+        monkeypatch.setitem(statements._IN_LIMITS, statements.backend_name(dialect), statements.RESERVED_BINDS + 2)
+        if datasources.dialect == "postgresql":  # one array bind: never split
+            views = await accounts.find_by_id_in_or_tag([1, 3, 5, 7], "t")
+            assert sorted(view.owner for view in views) == ["ann", "bob", "cat", "eve"]
+        else:
+            with pytest.raises(ValueError, match="_or_"):
+                await accounts.find_by_id_in_or_tag([1, 3, 5, 7], "t")
+        views = await accounts.find_by_id_in_or_tag([1, 3], "t")  # one statement: nothing to repeat
+        assert sorted(view.owner for view in views) == ["ann", "bob", "cat"]
+
+
+async def test_the_lists_of_a_statement_share_what_it_binds(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two IN lists share the dialect's limit: each one is padded and split within its half, so no statement
+    binds more than the dialect takes, where each list padded to the whole limit did."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        accounts = await _accounts(datasources)
+        dialect = datasources.engine.dialect
+        # Four values per statement (beside the binds reserved for the rest of it): two per list.
+        monkeypatch.setitem(statements._IN_LIMITS, statements.backend_name(dialect), statements.RESERVED_BINDS + 4)
+        with datasources.counter() as counter:
+            assert _ids(await accounts.find_by_id_in_and_tag_in([1, 2, 3, 4], ["x"])) == [1, 4]
+        if datasources.dialect != "postgresql":
+            selects = sql_of(counter, "SELECT")
+            assert len(selects) == 2  # the four ids in two chunks of two
+            assert all(sql.count("?") + sql.count("%s") <= 4 for sql in selects)
+            with pytest.raises(ValueError, match="more than one such list"):
+                await accounts.find_by_id_in_and_tag_in([1, 2, 3], ["x", "t", "y"])
+
+
+async def test_a_composite_compares_with_its_value(relational_backend: RelationalBackend) -> None:
+    """A composite attribute compares with a value of its class, or ``None`` (every column null), as it did
+    before derived queries were checked against the entity."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        async with datasources.engine.begin() as conn:
+            await conn.execute(
+                insert(DqPlace),
+                [
+                    {"id": 1, "x": 1, "y": 2},
+                    {"id": 2, "x": 3, "y": 4},
+                    {"id": 3, "x": 1, "y": 4},
+                    {"id": 4, "x": None, "y": None},
+                ],
+            )
+        places = _built(PlaceRepository())
+        assert _ids(await places.find_by_at(Point(1, 2))) == [1]
+        assert _ids(await places.find_by_at_not(Point(1, 2))) == [2, 3]
+        assert _ids(await places.find_by_at(None)) == [4]
+        assert await places.count_by_at_is_null() == 1
+        assert await places.exists_by_at(Point(3, 4)) is True
+        assert await places.exists_by_at(Point(4, 3)) is False
+        with pytest.raises(InvalidPropertyError, match="Point"):
+            await places.find_by_at((1, 2))
+        assert await places.delete_by_at(Point(1, 4)) == 1
+        assert _ids(await places.find_all()) == [1, 2, 4]
 
 
 async def test_exists_probes_one_row(relational_backend: RelationalBackend) -> None:

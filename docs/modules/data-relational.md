@@ -573,7 +573,7 @@ For the full naming convention reference (prefixes, operators, connectors, order
 
 A derived method is checked against its entity when the repository is built, as Spring Data does at bootstrap. A method that cannot work fails `ApplicationContext.start()` with `InvalidQueryMethodError` (from `pyfly.data.query_parser`), naming the repository and the method, instead of failing on its first call:
 
-- **Every field is a property of the entity**: a column, a synonym, a hybrid property, or a relationship to one entity (compared with an instance of it, or `None`). A typo (`find_by_nmae`), a plain Python `@property` or a collection fails.
+- **Every field is a property of the entity**: a column, a synonym, a hybrid property, a relationship to one entity or a composite (both compared with an instance of their class, or `None`: `find_by_location(Point(1, 2))`, with `_not`, `_is_null` and `_is_not_null` too). A typo (`find_by_nmae`), a plain Python `@property` or a collection fails.
 - **The name is read against those properties**, so a property whose name ends in an operator word or holds a connector is read whole: `find_by_logged_in` is `logged_in = ?` (not `logged IN ?`), and `find_by_terms_and_conditions_accepted` is one property. When two readings are possible, the longest property wins.
 - **The parameters match the name**: `find_by_age_between(low, high)` takes two values, `find_by_email_is_null()` none. A parameter annotated `Pageable` or `Sort` binds no value (see below). A forgotten `_and_id` no longer drops an argument silently (which widened a `delete_by_`).
 - **The return annotation is one the prefix returns** (the next section), `_ignore_case` applies to a string property, and `_true`/`_false` to a boolean one.
@@ -596,7 +596,7 @@ A derived method is checked against its entity when the repository is built, as 
 - **`and` binds tighter than `or`**, as in Spring and SQL: `find_by_owner_or_tag_and_balance(o, t, b)` is `owner = o OR (tag = t AND balance = b)`.
 - **`_containing`, `_starting_with` and `_ending_with` match their argument as it is**: its `%` and `_` are escaped (`LIKE ... ESCAPE '/'`), so `find_by_name_containing("50%")` does not match `"500"`. `_like` takes a pattern whose wildcards stay wildcards.
 - **`None` compares with `IS NULL`**: `find_by_email(None)` is `email IS NULL`, `find_by_email_not(None)` is `email IS NOT NULL`.
-- **An `_in` list** is one `= ANY(:array)` bind on PostgreSQL (the same statement for every length) and an expanding bind elsewhere, padded to the next power of two so a handful of statements cover every length. A list longer than one statement binds runs one statement per chunk in the same unit of work where that gives the same answer (an unordered `find_by_`, `exists_by_`, `delete_by_`, and `count_by_` without `_or_`), and raises `ValueError` otherwise.
+- **An `_in` list** is one `= ANY(:array)` bind on PostgreSQL (the same statement for every length) and an expanding bind elsewhere, padded to the next power of two so a handful of statements cover every length. The lists of one statement share what the dialect binds (two lists get half each). A list longer than its share runs one statement per chunk in the same unit of work where that gives the same answer (an unordered `find_by_` of entities, a projection without `_or_`, `exists_by_`, `delete_by_`, and `count_by_` without `_or_`), and raises `ValueError` otherwise (two lists that overflow, an order, a page, a count or a projection with `_or_`, which would return a row once per chunk).
 
 ### Soft Delete
 
