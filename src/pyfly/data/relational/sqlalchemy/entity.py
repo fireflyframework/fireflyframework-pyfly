@@ -11,17 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Base entity with audit fields for all domain entities."""
+"""Base entity with audit fields for all domain entities.
+
+:class:`Base` carries :data:`NAMING_CONVENTION`, so every constraint the application leaves unnamed gets
+one deterministic name on every backend, and one Alembic history runs on SQLite, PostgreSQL, MySQL and
+MariaDB alike.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Integer, String
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Integer, MetaData, String, Table
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+from sqlalchemy.sql.schema import ColumnCollectionConstraint, Constraint
 
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
@@ -30,13 +37,86 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+MAX_CONSTRAINT_NAME_LENGTH = 63
+"""The longest constraint name the convention produces: PostgreSQL's identifier limit, the tightest of the
+supported backends. A longer name is cut and suffixed with a hash of the full name, the same on every
+backend (left to the dialects, PostgreSQL and MySQL would each truncate it their own way)."""
+
+
+def _bounded(name: str) -> str:
+    if len(name) <= MAX_CONSTRAINT_NAME_LENGTH:
+        return name
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    return f"{name[: MAX_CONSTRAINT_NAME_LENGTH - len(digest) - 1]}_{digest}"
+
+
+def _column_names(constraint: Constraint) -> list[str]:
+    if isinstance(constraint, ForeignKeyConstraint):
+        return [element.parent.name for element in constraint.elements]
+    if isinstance(constraint, ColumnCollectionConstraint):
+        return [column.name for column in constraint.columns]
+    return []
+
+
+def _unique_name(constraint: Constraint, table: Table) -> str:
+    return _bounded("_".join(["uq", table.name, *_column_names(constraint)]))
+
+
+def _foreign_key_name(constraint: Constraint, table: Table) -> str:
+    assert isinstance(constraint, ForeignKeyConstraint)
+    referred = constraint.elements[0].target_fullname.split(".")[-2]
+    return _bounded("_".join(["fk", table.name, *_column_names(constraint), referred]))
+
+
+def _check_name(constraint: Constraint, table: Table) -> str:
+    # A CHECK has no column list to name it by: an unnamed one is named after its SQL text. Name your
+    # CHECK constraints to get readable names (an explicit name is kept as it is).
+    assert isinstance(constraint, CheckConstraint)
+    digest = hashlib.sha256(str(constraint.sqltext).encode()).hexdigest()[:8]
+    return _bounded(f"ck_{table.name}_{digest}")
+
+
+def _primary_key_name(constraint: Constraint, table: Table) -> str:
+    return _bounded(f"pk_{table.name}")
+
+
+NAMING_CONVENTION: dict[str, Any] = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "%(pyfly_unique_name)s",
+    "ck": "%(pyfly_check_name)s",
+    "fk": "%(pyfly_foreign_key_name)s",
+    "pk": "%(pyfly_primary_key_name)s",
+    "pyfly_unique_name": _unique_name,
+    "pyfly_check_name": _check_name,
+    "pyfly_foreign_key_name": _foreign_key_name,
+    "pyfly_primary_key_name": _primary_key_name,
+}
+"""The constraint naming convention of :class:`Base` (``Base.metadata.naming_convention``).
+
+An unnamed constraint gets:
+
+- ``uq_<table>_<column>_<column>...`` for a UNIQUE constraint (``unique=True`` included);
+- ``fk_<table>_<column>..._<referred table>`` for a FOREIGN KEY;
+- ``ck_<table>_<hash of its SQL>`` for a CHECK;
+- ``pk_<table>`` for the PRIMARY KEY (MySQL and MariaDB always call it ``PRIMARY``);
+- ``ix_<table>_<column>`` for an index (``index=True``), as SQLAlchemy has always named them.
+
+Names are at most :data:`MAX_CONSTRAINT_NAME_LENGTH` characters on every backend. A constraint the
+application names keeps its name. A table created before 26.09.08 keeps the names its backend gave it: see
+the relational module documentation for the one-time rename migration.
+"""
+
+
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base for all PyFly entities.
 
-    A :class:`VersionedMixin` entity that declares its own ``__mapper_args__`` (``polymorphic_on`` on an
+    Its ``metadata`` names every unnamed constraint with :data:`NAMING_CONVENTION`. A
+    :class:`VersionedMixin` entity that declares its own ``__mapper_args__`` (``polymorphic_on`` on an
     inheritance root, ``eager_defaults``) keeps its optimistic locking: the mixin's ``version_id_col`` is
     merged into the entity's arguments.
     """
+
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         _keep_version_id_col(cls)

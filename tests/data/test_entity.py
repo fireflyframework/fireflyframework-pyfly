@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
-from sqlalchemy import String
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -30,7 +30,7 @@ from sqlalchemy.schema import CreateTable
 
 from pyfly.data.page import Page
 from pyfly.data.relational.sqlalchemy import UtcDateTime as ExportedUtcDateTime
-from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
+from pyfly.data.relational.sqlalchemy.entity import MAX_CONSTRAINT_NAME_LENGTH, NAMING_CONVENTION, Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime, to_utc
 
 
@@ -40,6 +40,29 @@ class User(BaseEntity):
     __tablename__ = "users"
 
     name: Mapped[str] = mapped_column(String(100))
+
+
+class ConventionParent(Base):
+    __tablename__ = "entity_convention_parent_with_a_rather_long_table_name"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+
+class ConventionChild(Base):
+    __tablename__ = "entity_convention_child_with_an_equally_long_table_name"
+    __table_args__ = (
+        UniqueConstraint("first_rather_long_column_name", "second_rather_long_column_name"),
+        CheckConstraint("amount >= 0"),
+        CheckConstraint("amount < 100", name="child_amount_below_100"),
+        UniqueConstraint("code", name="child_code_is_unique"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    first_rather_long_column_name: Mapped[int] = mapped_column(Integer)
+    second_rather_long_column_name: Mapped[int] = mapped_column(Integer)
+    code: Mapped[str] = mapped_column(String(10), index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("entity_convention_parent_with_a_rather_long_table_name.id"))
 
 
 class StrictReading(Base):
@@ -191,6 +214,55 @@ class TestUtcDateTime:
     def test_repr_renders_for_migrations(self) -> None:
         assert repr(UtcDateTime()) == "UtcDateTime()"
         assert repr(UtcDateTime(strict=True)) == "UtcDateTime(strict=True)"
+
+
+class TestNamingConvention:
+    """``Base.metadata`` names unnamed constraints the same way on every backend (C126); the reflected names
+    and a migration that runs on every lane are ``tests/integration/test_naming_convention_matrix.py``."""
+
+    def test_base_metadata_carries_the_convention(self) -> None:
+        assert Base.metadata.naming_convention == NAMING_CONVENTION
+
+    def test_long_names_are_cut_with_a_hash_at_the_postgresql_limit(self) -> None:
+        constraints = ConventionChild.__table__.constraints
+        assert all(len(str(constraint.name)) <= MAX_CONSTRAINT_NAME_LENGTH for constraint in constraints)
+        unique = next(
+            str(constraint.name)
+            for constraint in constraints
+            if isinstance(constraint, UniqueConstraint) and len(constraint.columns) == 2
+        )
+        assert unique.startswith("uq_entity_convention_child")
+        assert len(unique) == MAX_CONSTRAINT_NAME_LENGTH and unique[-9] == "_"
+
+    @pytest.mark.parametrize(
+        "dialect", [postgresql.dialect(), mysql.dialect(), sqlite.dialect(), mssql.dialect(), oracle.dialect()]
+    )
+    def test_every_dialect_renders_the_same_names(self, dialect: object) -> None:
+        ddl = _ddl(ConventionChild, dialect)
+        for constraint in ConventionChild.__table__.constraints:
+            if isinstance(constraint.name, str) and not constraint.name.startswith("pk_"):
+                assert f"CONSTRAINT {constraint.name} " in ddl, (constraint.name, ddl)
+
+    def test_explicit_names_are_kept(self) -> None:
+        names = {str(constraint.name) for constraint in ConventionChild.__table__.constraints}
+        assert {"child_amount_below_100", "child_code_is_unique"} <= names
+
+    def test_an_unnamed_check_is_named_after_its_sql(self) -> None:
+        checks = [
+            str(constraint.name)
+            for constraint in ConventionChild.__table__.constraints
+            if isinstance(constraint, CheckConstraint) and str(constraint.sqltext) == "amount >= 0"
+        ]
+        assert len(checks) == 1 and checks[0].startswith("ck_entity_convention_child")
+
+    def test_primary_key_foreign_key_and_index_names(self) -> None:
+        table = ConventionChild.__table__
+        assert table.primary_key.name == "pk_entity_convention_child_with_an_equally_long_table_name"
+        (foreign_key,) = table.foreign_key_constraints
+        assert str(foreign_key.name).startswith("fk_entity_convention_child")
+        assert len(str(foreign_key.name)) == MAX_CONSTRAINT_NAME_LENGTH
+        (index,) = table.indexes
+        assert index.name == "ix_entity_convention_child_with_an_equally_long_table_name_code"
 
 
 class TestPage:

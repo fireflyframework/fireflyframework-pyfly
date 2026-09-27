@@ -16,6 +16,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
 - [Architecture Overview](#architecture-overview)
 - [Entity Definition](#entity-definition)
   - [Base (DeclarativeBase)](#base-declarativebase)
+    - [Constraint Naming Convention](#constraint-naming-convention)
   - [BaseEntity: Audit Trail Fields](#baseentity-audit-trail-fields)
   - [UtcDateTime: One Instant on Every Backend](#utcdatetime-one-instant-on-every-backend)
   - [Defining Your Own Entities](#defining-your-own-entities)
@@ -105,6 +106,28 @@ from pyfly.data.relational.sqlalchemy import Base
 ```
 
 Use `Base` directly when you need SQLAlchemy entities without the built-in audit trail fields.
+
+#### Constraint Naming Convention
+
+`Base.metadata` names every constraint you leave unnamed (`NAMING_CONVENTION` in
+`pyfly.data.relational.sqlalchemy.entity`), so each constraint has one name on SQLite, PostgreSQL, MySQL
+and MariaDB, and one Alembic history upgrades all of them. Without it the backend chose the name
+(`accounts_email_key` on PostgreSQL, `email` on MySQL, none on SQLite), and a revision that dropped or
+changed a constraint ran only on the backend it was authored on.
+
+| Constraint | Name |
+|------------|------|
+| `UNIQUE` (`unique=True` too) | `uq_<table>_<column>_<column>...` |
+| `FOREIGN KEY` | `fk_<table>_<column>..._<referred table>` |
+| `CHECK` | `ck_<table>_<hash of its SQL>`; name your checks to get readable names |
+| `PRIMARY KEY` | `pk_<table>` (MySQL and MariaDB always call it `PRIMARY`) |
+| index (`index=True`) | `ix_<table>_<column>`, as before |
+
+A constraint you name keeps its name. Names are at most 63 characters (PostgreSQL's limit) on every
+backend: a longer one is cut and suffixed with a hash of the full name.
+
+**Databases created before 26.09.08** keep the names their backend gave them. Nothing breaks at runtime:
+names matter only to migrations, and a revision written against the convention names needs them in place.
 
 ### BaseEntity: Audit Trail Fields
 
