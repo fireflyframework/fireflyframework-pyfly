@@ -209,8 +209,9 @@ Resolves an instance of the given type. The resolution order is:
 1. **Direct registration** -- if `cls` is registered, resolve it. When several beans share that
    exact class (two `@bean` methods that both return `AsyncEngine`), the one marked `@primary`
    (or `@bean(primary=True)`) answers; without exactly one primary the lookup raises
-   `NoUniqueBeanError`, naming the beans (and, when several are `@primary`, those). Until 26.09.07 the bean registered **last** answered
-   silently. Resolve one of them by name or `Qualifier`, or all of them with `list[T]`.
+   `NoUniqueBeanError`, naming the beans (and, when several are `@primary`, those). Until 26.09.07
+   the bean registered **last** answered silently. Resolve one of them by name or `Qualifier`, or
+   all of them with `list[T]`.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
 3. **Multiple bindings** -- pick the implementation marked `@primary`.
 4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if multiple candidates exist without a `@primary`.
