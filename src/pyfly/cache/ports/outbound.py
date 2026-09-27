@@ -23,22 +23,54 @@ from typing import Any, Protocol, runtime_checkable
 class CacheAdapter(Protocol):
     """Abstract cache interface.
 
-    All cache backends (Redis, in-memory, etc.) must implement this protocol.
+    All cache backends (Redis, in-memory, etc.) must implement this protocol. The contract every built-in
+    adapter keeps, and a custom one should keep:
+
+    - **Values are copies.** ``put`` stores a copy of the value and ``get`` returns a value of the caller's
+      own: changing either never changes the entry, whatever the backend.
+    - **No live ORM objects.** ``put`` and ``put_if_absent`` raise
+      :class:`~pyfly.cache.serialization.CacheValueError` (a ``TypeError``) for a SQLAlchemy-mapped instance
+      or a Beanie document, also inside a container or a DTO, and for a value the backend cannot encode,
+      before anything is written.
+    - **clear() is this cache's own.** It removes this cache's entries and nothing else: an adapter over a
+      store other data may share (a Redis database, a database table) deletes its namespace only and never
+      flushes the store.
+    - **Named caches (optional).** ``with_namespace(name)`` returns a cache disjoint from this one, whose
+      entries this cache's ``clear()`` never touches (see :func:`~pyfly.cache.namespaces.dedicated_cache`).
+      Durable consumers (idempotency records, orchestration state) keep their entries there.
+
+    Writes are not transaction-aware by themselves; wrap the adapter in
+    :class:`~pyfly.cache.transaction.TransactionAwareCache` (the decorators and the CQRS query cache do) to
+    defer them to the commit of the current unit of work.
     """
 
-    async def get(self, key: str) -> Any | None: ...
+    async def get(self, key: str) -> Any | None:
+        """The value stored for *key* (a copy), or ``None`` when absent or expired."""
+        ...
 
-    async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None: ...
+    async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
+        """Store a copy of *value* under *key*, expiring after *ttl* (never when ``None``)."""
+        ...
 
-    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool: ...
+    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
+        """Store *value* only when *key* is absent, atomically; whether it was stored."""
+        ...
 
-    async def evict(self, key: str) -> bool: ...
+    async def evict(self, key: str) -> bool:
+        """Remove *key*; whether it existed."""
+        ...
 
-    async def evict_by_prefix(self, prefix: str) -> int: ...
+    async def evict_by_prefix(self, prefix: str) -> int:
+        """Remove every key of this cache starting with *prefix* (taken literally); how many were removed."""
+        ...
 
-    async def exists(self, key: str) -> bool: ...
+    async def exists(self, key: str) -> bool:
+        """Whether *key* is present and not expired (a stored ``None`` counts)."""
+        ...
 
-    async def clear(self) -> None: ...
+    async def clear(self) -> None:
+        """Remove every entry of this cache, and nothing else in its store."""
+        ...
 
     async def start(self) -> None: ...
 
