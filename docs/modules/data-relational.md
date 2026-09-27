@@ -1241,6 +1241,10 @@ model of `Base.metadata`:
 | `create` | The missing tables are created (`create_all`). An existing table is never altered: a new column needs a migration. |
 | `create-drop` | As `create`, and the tables are dropped when the context stops. |
 
+`validate` compares every model of `Base.metadata` with the primary datasource: an application whose entities
+also live on a named datasource (`pyfly.data.relational.datasources.<name>`) finds those tables reported
+missing, so keep `validate` for models that all live on the primary.
+
 **The default depends on the database.** Unset, it is `create` for an embedded database (SQLite, or no URL at
 all in the `dev` profile) and `none` for a database server, as Spring Boot does. With startup migrations
 enabled it is `none` whatever the database, and setting `create` or `create-drop` beside them fails the startup:
@@ -1252,13 +1256,18 @@ the tables `create_all()` would add hide a missing migration until the deploy th
 **Order.** The startup migrations run first, then the schema strategy, then every other lifecycle bean (the
 framework stores that check their tables, your own beans). The lifecycle phases say so:
 `MIGRATION_PHASE < SCHEMA_PHASE < DEFAULT_PHASE`. The framework's own tables follow the same value: a store
-creates its tables with `create` or `create-drop` and only checks them otherwise (they are never dropped).
+creates its tables with `create` or `create-drop` and only checks them otherwise (they are never dropped). The
+stores resolve it from the configuration (`pyfly.data.relational.url`), the schema strategy from the engine it
+runs on: an application that brings its own `AsyncEngine` bean on another database than the configured URL
+should set `ddl-auto` explicitly, and a module datasource on another server gets the primary's value.
 
 **Instances that start together** change the schema one at a time: the migrations and the strategy each run
 under a schema lock, and the other instances wait for it (`pyfly.data.relational.schema.lock-timeout`, 300 s),
 then find the work done. The lock is PostgreSQL's advisory lock, MySQL's and MariaDB's `GET_LOCK` (named after
-the database), SQLite's write lock (`BEGIN IMMEDIATE`), and a lease of the framework lock table
-(`pyfly_locks`) on any other backend. Before 26.09.08 every instance but one failed its first start on a
+the database), SQLite's write lock (`BEGIN IMMEDIATE`, which waits `pyfly.data.relational.sqlite.busy-timeout`,
+5 s, rather than `lock-timeout`), and a lease of the framework lock table (`pyfly_locks`) on any other
+backend. An `env.py` generated before 26.09.08 opens a connection of its own, so its migrations are not
+serialized on SQLite. Before 26.09.08 every instance but one failed its first start on a
 duplicate `CREATE TABLE` or `alembic_version` row.
 
 **The `create-drop` teardown** runs after every other lifecycle bean has stopped. It waits for the units of work
@@ -1306,8 +1315,9 @@ When enabled, `MigrationAutoConfiguration` registers a `MigrationRunner` bean. `
   generated before 26.09.08) runs in a worker thread on the application's URL instead, escaped for Alembic's
   configuration parser: a percent-encoded password (`p%40ss`) no longer aborts the startup.
 - **Logging untouched.** The runner tells `env.py` not to load `alembic.ini`'s logging configuration
-  (`config.attributes["configure_logger"] = False`) and hides the file name from an `env.py` that would call
-  `logging.config.fileConfig` anyway. Before 26.09.08 that call disabled every existing logger, removed PyFly's
+  (`config.attributes["configure_logger"] = False`) and hides the file name (`config.config_file_name`) from an
+  `env.py` that never reads that attribute and would call `logging.config.fileConfig` anyway; an `env.py` that
+  reads it keeps the name for its own paths. Before 26.09.08 that call disabled every existing logger, removed PyFly's
   handlers and set the root logger to WARNING, and every record after startup was lost.
 - **One instance at a time**, under the schema lock of the [schema strategy](#schema-strategy-ddl-auto).
 - **SQLite.** The migrations run with foreign keys off (Alembic's batch mode rebuilds a table by dropping it,
