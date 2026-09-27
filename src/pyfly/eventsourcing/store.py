@@ -739,7 +739,8 @@ class SqlAlchemyEventStore:
 
     async def _settle_strategy(self) -> str:
         """The strategy of the event table: the one recorded in its head row, recorded now by this store when
-        the table has none. Creates the head row when it is missing."""
+        the table has none. Creates the head row when it is missing (and writes nothing when it is there: a store
+        first used inside a unit of work that holds SQLite's write lock does not wait for that unit)."""
         from sqlalchemy import func, select
 
         from pyfly.data.relational.framework_schema import FrameworkSchemaError
@@ -753,9 +754,11 @@ class SqlAlchemyEventStore:
             )
         wanted = POSITION_HEAD_ROW if self._configured == POSITION_AUTO else self._configured
         head, table = self._head, self._events
-        async with infrastructure_unit(self._target) as session:
-            recorded = (await session.execute(select(head.c.strategy).where(head.c.store == self._table_name))).scalar()
-            if recorded is None:
+        strategy = select(head.c.strategy).where(head.c.store == self._table_name)
+        async with infrastructure_unit(self._target, read_only=True) as session:
+            recorded = (await session.execute(strategy)).scalar()
+        if recorded is None:
+            async with infrastructure_unit(self._target) as session:
                 # A head row created after its table lost it takes the positions on from the highest one given out.
                 highest = select(func.coalesce(func.max(table.c.global_position), 0)).scalar_subquery()
                 await insert_if_absent(
@@ -764,9 +767,7 @@ class SqlAlchemyEventStore:
                     {"store": self._table_name, "position": highest, "strategy": wanted},
                     key=["store"],
                 )
-                recorded = (
-                    await session.execute(select(head.c.strategy).where(head.c.store == self._table_name))
-                ).scalar_one()
+                recorded = (await session.execute(strategy)).scalar_one()
         recorded = str(recorded)
         if recorded == wanted:
             return wanted

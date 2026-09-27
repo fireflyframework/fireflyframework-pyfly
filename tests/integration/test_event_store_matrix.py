@@ -47,6 +47,7 @@ from pyfly.data.transaction import (
     detached,
     infrastructure_unit,
     register_synchronization,
+    resolve_manager,
 )
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.store import ConcurrencyError, SqlAlchemyEventStore
@@ -397,6 +398,37 @@ async def test_an_append_rolled_back_to_a_savepoint_leaves_the_rest_of_the_unit_
     assert await store.load("undone") == []
     if store.position_strategy == "head-row":
         assert [event.global_position for event in events] == [1, 2]  # only committed events are numbered
+
+
+async def test_a_store_first_used_inside_a_unit_that_has_written_joins_it(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Review of WP08: on SQLite through the datasource registry (its write units take the write lock at
+    ``BEGIN``), a store built by hand and first used inside a unit that had written opened a write unit of its
+    own to read the strategy its table recorded, which waits for that unit: ``IllegalTransactionStateError``.
+    Once the tables and their head row exist, starting reads and writes nothing else."""
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry(relational_backend.config())
+    try:
+        datasource = registry.primary
+        await SqlAlchemyEventStore(datasource, position_strategy=_STRATEGY).start()  # the tables and the head row
+        await SqlAlchemyEventStore(datasource, position_strategy=_STRATEGY).append(
+            "earlier", "Order", [_envelope("Earlier")], expected_version=0
+        )
+        async with datasource.engine.begin() as connection:
+            await connection.run_sync(orders.create, checkfirst=True)
+
+        store = SqlAlchemyEventStore(datasource, position_strategy=_STRATEGY)  # built by hand, not started
+        async with TransactionTemplate(resolve_manager(datasource)).transaction():
+            async with infrastructure_unit(datasource) as session:
+                await session.execute(insert(orders).values(id="order-1", name="first"))
+            await store.append("order-1", "Order", [_envelope("OrderPlaced")], expected_version=0)
+        assert _types(await _drain(store)) == ["Earlier", "OrderPlaced"]
+        async with datasource.engine.connect() as connection:
+            assert (await connection.execute(select(func.count()).select_from(orders))).scalar() == 1
+    finally:
+        await registry.close()
 
 
 @pytest.mark.backends(PG, MYSQL, MARIADB)
@@ -925,6 +957,7 @@ _XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
     test_after_event_id_still_pages_and_an_unknown_id_is_refused,
     test_events_commit_and_roll_back_with_the_business_unit,
     test_an_append_rolled_back_to_a_savepoint_leaves_the_rest_of_the_unit_on_the_stream,
+    test_a_store_first_used_inside_a_unit_that_has_written_joins_it,
     test_business_units_that_append_do_not_wait_for_or_fail_on_one_another,
     test_an_append_from_a_later_before_commit_callback_still_gets_a_position,
     test_an_append_sends_its_events_in_one_insert,
