@@ -50,7 +50,9 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Unit of Work](#unit-of-work)
   - [Programmatic Transactions](#programmatic-transactions)
   - [reactive_transactional](#reactive_transactional)
+- [Schema Strategy (ddl-auto)](#schema-strategy-ddl-auto)
 - [Run Migrations on Startup (Flyway-Style)](#run-migrations-on-startup-flyway-style)
+  - [The Alembic Environment of pyfly db](#the-alembic-environment-of-pyfly-db)
 - [Datasource Registry](#datasource-registry)
   - [Configuration Reference](#configuration-reference)
   - [SQLite Setup](#sqlite-setup)
@@ -150,12 +152,13 @@ there.
 
 A history written under the convention can opt its operations in, so an unnamed constraint in a
 hand-written revision gets the convention's name on every backend too. Add one line to `env.py`, after
-`target_metadata = Base.metadata`:
+the `target_metadata = ...` line (the `env.py` of `pyfly db init` lists `Base.metadata` first, and Alembic's
+operations take the naming convention of that first `MetaData`):
 
 ```python
 from pyfly.data.relational.sqlalchemy.naming import apply_convention_to_operations
 
-apply_convention_to_operations(target_metadata)
+apply_convention_to_operations()  # Base.metadata
 ```
 
 Do it only when every revision of the history was first applied under the convention: a history started
@@ -265,8 +268,9 @@ the framework stamped there are already UTC wall times, so they read back correc
 It stays `UtcDateTime`, so MySQL and MariaDB get `DATETIME(6)`, but Alembic imports nothing for a type from
 outside SQLAlchemy. The `env.py` that `pyfly db init` generates passes Alembic the `render_item` hook of
 `pyfly.data.relational.sqlalchemy.types`, which adds `import pyfly.data.relational.sqlalchemy.types` to
-the revision. An `env.py` generated earlier, or written by hand, needs the same in both
-`context.configure` calls:
+the revision (and `import pyfly.data.relational.framework_schema` for the types of the
+[framework tables](#framework-tables), `UtcTimestamp` and `KeyString`). An `env.py` generated earlier, or
+written by hand, needs the same in both `context.configure` calls:
 
 ```python
 from pyfly.data.relational.sqlalchemy.types import render_item
@@ -1224,6 +1228,58 @@ await transfer_funds("acc-1", "acc-2", 100.0)
 
 ---
 
+## Schema Strategy (ddl-auto)
+
+`pyfly.data.relational.ddl-auto` decides what the application does to the primary datasource's schema when it
+starts. `engine_lifecycle` applies it through a `SchemaInitializer` (`pyfly.data.relational.schema`), to every
+model of `Base.metadata`:
+
+| Value | What happens |
+|-------|--------------|
+| `none` | Nothing: migrations own the schema. |
+| `validate` | Every table and column of the models must exist, or the startup fails with `SchemaValidationError` naming what is missing (a migration nobody wrote). A different column type or nullability is logged as a WARNING (`schema_validation_differences`), never fatal. |
+| `create` | The missing tables are created (`create_all`). An existing table is never altered: a new column needs a migration. |
+| `create-drop` | As `create`, and the tables are dropped when the context stops. |
+
+**The default depends on the database.** Unset, it is `create` for an embedded database (SQLite, or no URL at
+all in the `dev` profile) and `none` for a database server, as Spring Boot does. With startup migrations
+enabled it is `none` whatever the database, and setting `create` or `create-drop` beside them fails the startup:
+the tables `create_all()` would add hide a missing migration until the deploy that finally adds it fails with
+"table already exists". Pair migrations with `validate` instead. `false`, `off` and `no` mean `none` (YAML reads
+`ddl-auto: off` as a boolean); any other value, `update` included, fails the startup naming the key. Until
+26.09.08 the default was `create` on every database and a typo silently became `create`.
+
+**Order.** The startup migrations run first, then the schema strategy, then every other lifecycle bean (the
+framework stores that check their tables, your own beans). The lifecycle phases say so:
+`MIGRATION_PHASE < SCHEMA_PHASE < DEFAULT_PHASE`. The framework's own tables follow the same value: a store
+creates its tables with `create` or `create-drop` and only checks them otherwise (they are never dropped).
+
+**Instances that start together** change the schema one at a time: the migrations and the strategy each run
+under a schema lock, and the other instances wait for it (`pyfly.data.relational.schema.lock-timeout`, 300 s),
+then find the work done. The lock is PostgreSQL's advisory lock, MySQL's and MariaDB's `GET_LOCK` (named after
+the database), SQLite's write lock (`BEGIN IMMEDIATE`), and a lease of the framework lock table
+(`pyfly_locks`) on any other backend. Before 26.09.08 every instance but one failed its first start on a
+duplicate `CREATE TABLE` or `alembic_version` row.
+
+**The `create-drop` teardown** runs after every other lifecycle bean has stopped. It waits for the units of work
+still using the database, then drops the tables within `pyfly.data.relational.schema.drop-timeout` (10 s),
+bounded on the server itself (`lock_timeout` on PostgreSQL, `lock_wait_timeout` on MySQL and MariaDB,
+`busy_timeout` on SQLite), so a drop that gives up never runs later. When another connection holds the tables
+past the timeout, the schema is left as it is and a WARNING (`schema_drop_failed`) says why; a standalone
+engine is disposed anyway. It used to hang `ctx.stop()` for 30 s, and on MySQL the abandoned `DROP` kept
+waiting on the server and dropped the table later, under every other process.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `pyfly.data.relational.ddl-auto` | `create` on SQLite, `none` otherwise | `none`, `validate`, `create` or `create-drop`. |
+| `pyfly.data.relational.schema.lock-timeout` | `300` | Seconds an instance waits for another one's schema changes. |
+| `pyfly.data.relational.schema.drop-timeout` | `10` | Seconds the `create-drop` teardown may take. |
+
+**Source:** `src/pyfly/data/relational/schema.py` (`SchemaInitializer`, `schema_lock`) ·
+`src/pyfly/config/properties/data.py` (`ddl_auto_strategy`)
+
+---
+
 ## Run Migrations on Startup (Flyway-Style)
 
 By default schema migrations are applied with the [`pyfly db`](../cli.md#pyfly-db) CLI commands. PyFly can also apply them **automatically on application startup** — the equivalent of Spring Boot's Flyway/Liquibase auto-migrate. This is **opt-in** and reuses the existing Alembic environment created by `pyfly db init`; the CLI commands keep working exactly as before.
@@ -1235,15 +1291,30 @@ pyfly:
   data:
     relational:
       url: postgresql+asyncpg://user:pass@primary:5432/app
+      ddl-auto: validate         # optional: check the models against the migrated schema
       migrations:
         enabled: true            # apply `alembic upgrade head` on startup
         config: alembic.ini      # path to the Alembic config (default: alembic.ini)
         revision: head           # target revision (default: head)
 ```
 
-When enabled, `MigrationAutoConfiguration` registers a `MigrationRunner` bean. `MigrationRunner` implements the `start()` / `stop()` lifecycle, so the `ApplicationContext` auto-discovers it as an infrastructure adapter and calls `start()` once during startup. On `start()` it runs `alembic upgrade <revision>` against the **same datasource** the app uses (it forwards `pyfly.data.relational.url` into Alembic's `sqlalchemy.url`, so there is a single source of truth for the connection string).
+When enabled, `MigrationAutoConfiguration` registers a `MigrationRunner` bean. `MigrationRunner` implements the `start()` / `stop()` lifecycle in `MIGRATION_PHASE`, so the `ApplicationContext` calls `start()` once, before the schema strategy and every other lifecycle bean. On `start()` it runs `alembic upgrade <revision>` against the **same datasource** the app uses:
 
-The upgrade runs in a worker thread (`asyncio.to_thread`) because the generated async `alembic/env.py` calls `asyncio.run` internally, which must not be nested inside the running event loop.
+- **On the application's engine.** The runner hands `env.py` a connection of the primary engine
+  (`config.attributes["connection"]`, Alembic's connection sharing), so the migrations get the application's
+  URL, connect arguments and SQLite setup. An `env.py` that opens its own engine (one `pyfly db init`
+  generated before 26.09.08) runs in a worker thread on the application's URL instead, escaped for Alembic's
+  configuration parser: a percent-encoded password (`p%40ss`) no longer aborts the startup.
+- **Logging untouched.** The runner tells `env.py` not to load `alembic.ini`'s logging configuration
+  (`config.attributes["configure_logger"] = False`) and hides the file name from an `env.py` that would call
+  `logging.config.fileConfig` anyway. Before 26.09.08 that call disabled every existing logger, removed PyFly's
+  handlers and set the root logger to WARNING, and every record after startup was lost.
+- **One instance at a time**, under the schema lock of the [schema strategy](#schema-strategy-ddl-auto).
+- **SQLite.** The migrations run with foreign keys off (Alembic's batch mode rebuilds a table by dropping it,
+  which enforced keys would cascade or refuse), and `PRAGMA foreign_key_check` must find nothing before they
+  commit. A batch rebuild that would drop an unnamed `CHECK` constraint fails instead of losing the rule
+  silently (Alembic cannot carry an unnamed `CHECK` over); `Base`'s naming convention names every constraint,
+  so the tables it creates keep theirs.
 
 If the Alembic config file is not found, startup migration is **skipped with a warning** (rather than failing) telling you to run `pyfly db init` first:
 
@@ -1257,10 +1328,32 @@ run 'pyfly db init' to create the Alembic environment; skipping migrations.
 | `pyfly.data.relational.migrations.enabled` | `false` (absent) | Apply migrations on startup when `true`. |
 | `pyfly.data.relational.migrations.config` | `alembic.ini` | Path to the Alembic config file. |
 | `pyfly.data.relational.migrations.revision` | `head` | Target revision passed to `alembic upgrade`. |
+| `pyfly.data.relational.migrations.models` | the project's package | The modules that declare your entities, imported by `env.py` (a package with every module under it). |
 
-> **Migrations vs. `ddl-auto`:** startup migrations are independent of the `engine_lifecycle` `ddl-auto` schema strategy. For an Alembic-managed database, set `pyfly.data.relational.ddl-auto: none` so the engine does not also create tables from `Base.metadata`, and let migrations own the schema.
+> **Migrations vs. `ddl-auto`:** with startup migrations enabled, `ddl-auto` defaults to `none` and may not be `create` or `create-drop`; `validate` checks the models against the migrated schema.
 
-**Source:** `src/pyfly/data/relational/migrations.py` (`MigrationRunner`) · `src/pyfly/data/relational/auto_configuration.py` (`MigrationAutoConfiguration`)
+### The Alembic Environment of pyfly db
+
+The `env.py` of `pyfly db init` calls the helpers of `pyfly.data.relational.migrations`, so `pyfly db` and the
+startup migrations see the same database and the same models:
+
+- `target_metadata = migration_metadata(config, default_models=MODEL_PACKAGES)` imports the modules of
+  `pyfly.data.relational.migrations.models` (or `MODEL_PACKAGES`, the project's package `pyfly db init` found),
+  and lists `Base.metadata` and the [framework tables](#framework-tables). Autogenerate compares the database
+  with both and never proposes dropping either. Before 26.09.08 the generated `env.py` imported no model, so
+  `pyfly db migrate` on a database with tables wrote a revision that dropped every one of them.
+- An autogenerate that sees no model and would drop tables stops (`refuse_destructive_autogenerate`) instead
+  of writing that revision.
+- The commands run on the application's primary datasource: `pyfly.data.relational.url` from `pyfly.yaml`, with
+  the active profiles (`PYFLY_PROFILES_ACTIVE`) and the environment, built as the application builds it; the
+  `sqlalchemy.url` of `alembic.ini` is used only when the configuration names no URL.
+- From the command line, `alembic.ini` configures Alembic's loggers and leaves the others alone
+  (`disable_existing_loggers=False`).
+
+An `env.py` written by hand can take the same helpers, or list the framework tables itself (see
+[Framework Tables](#framework-tables)).
+
+**Source:** `src/pyfly/data/relational/migrations.py` (`MigrationRunner`, `migration_metadata`, `migration_connection`) · `src/pyfly/cli/db.py` (the `env.py` template) · `src/pyfly/data/relational/auto_configuration.py` (`MigrationAutoConfiguration`)
 
 ---
 
@@ -1452,7 +1545,10 @@ such as `event-store` in YAML, where the environment can still override its keys
 |-----|---------|-------------|
 | `pyfly.data.relational.url` | — (required) | Primary datasource URL. |
 | `pyfly.data.relational.echo` | `false` | Log SQL: `true`, `false`, or `debug` (also logs result rows). |
-| `pyfly.data.relational.ddl-auto` | `create` | Schema strategy of `engine_lifecycle` (`create`, `create-drop`, `none`). |
+| `pyfly.data.relational.ddl-auto` | `create` on SQLite, `none` otherwise | Schema strategy of `engine_lifecycle` (`none`, `validate`, `create`, `create-drop`; see [Schema Strategy](#schema-strategy-ddl-auto)). |
+| `pyfly.data.relational.schema.lock-timeout` | `300` | Seconds an instance waits for another one's schema changes. |
+| `pyfly.data.relational.schema.drop-timeout` | `10` | Seconds the `create-drop` teardown may take. |
+| `pyfly.data.relational.migrations.*` | — | Startup migrations: `enabled`, `config`, `revision`, `models` (see [Run Migrations on Startup](#run-migrations-on-startup-flyway-style)). |
 | `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Pool size (queue pools only). |
 | `pyfly.data.relational.pool.max-overflow` | SQLAlchemy's (10) | Connections beyond `size`. |
 | `pyfly.data.relational.pool.timeout` | SQLAlchemy's (30) | Seconds to wait for a connection. |
@@ -1592,7 +1688,9 @@ collations ignore case and accents), `UtcTimestamp` instants (UTC with microseco
 Python: `TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), `LONGTEXT`/`LONGBLOB` payloads on
 MySQL and MariaDB, and a naming convention for indexes.
 
-List it in Alembic's `target_metadata` so autogenerate migrates the framework tables and never drops them:
+The `env.py` of `pyfly db init` lists it in Alembic's `target_metadata`, so autogenerate migrates the framework
+tables (their revisions import `pyfly.data.relational.framework_schema` for its column types) and never drops
+them. An `env.py` written by hand lists it too:
 
 ```python
 # migrations/env.py
@@ -1602,9 +1700,10 @@ from pyfly.data.relational.sqlalchemy.entity import Base
 target_metadata = [Base.metadata, framework_metadata]
 ```
 
-A store creates its tables when it starts if `ddl-auto` is `create` (the default), `create-drop` or `update`;
-with `none`, `validate` or any other value it only checks them, and fails the startup naming each missing table
-or column (`FrameworkSchemaError`). When it may create them, it also adds the indexes a table an earlier release
+A store creates its tables when it starts if `ddl-auto` is `create` or `create-drop` (`create` is the default
+on an embedded database); with `none` (the default on a database server and beside startup migrations) or
+`validate` it only checks them, and fails the startup naming each missing table or column
+(`FrameworkSchemaError`). When it may create them, it also adds the indexes a table an earlier release
 created is missing (the cache's `expires_at` index); on PostgreSQL with `CREATE INDEX CONCURRENTLY`, so the nodes
 still running the earlier release keep writing to the table during a rolling deploy. Indexes only speed the
 stores up, so a problem with one does not fail the startup; it logs a WARNING instead. `framework_index_missing`

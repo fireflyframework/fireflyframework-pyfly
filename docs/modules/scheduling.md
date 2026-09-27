@@ -640,8 +640,9 @@ pyfly:
   (`scheduler_lease_expired_before_release`) says the job outlived its TTL. The
   nodes compare `lock_until` with their own clocks: keep them synchronized (NTP).
   The table is created at startup if `pyfly.data.relational.ddl-auto` is
-  `create` (the default), `create-drop` or `update`, and only checked with
-  `none` or `validate`. Lock names match exactly on every backend (a binary
+  `create` (the default on an embedded database) or `create-drop`, and only
+  checked with `none` (the default on a database server and beside startup
+  migrations) or `validate`. Lock names match exactly on every backend (a binary
   collation on MySQL and MariaDB, so `Nightly` and `nightly` are two leases). A
   lock name is at most 255 characters
   (`LeaseLock.MAX_NAME_LENGTH`, the length of `pyfly_locks.name`): a longer one

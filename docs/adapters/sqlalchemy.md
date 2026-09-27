@@ -54,7 +54,7 @@ class OrderRepository(Repository[OrderEntity, int]):
 | `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter |
 | `pyfly.data.relational.url` | `str` | *(required)* | Database connection URL. Startup fails without it, except in the `dev` profile (`sqlite+aiosqlite:///./app.db`, with a warning) |
 | `pyfly.data.relational.echo` | `bool` or `debug` | `false` | Log all SQL statements (`debug` also logs rows); `"false"` from an env var is `false` |
-| `pyfly.data.relational.ddl-auto` | `str` | `"create"` | DDL strategy: `create`, `create-drop`, or `none` |
+| `pyfly.data.relational.ddl-auto` | `str` | `create` on SQLite, `none` otherwise | Schema strategy: `none`, `validate`, `create` or `create-drop`; any other value fails the startup ([Schema Strategy](../modules/data-relational.md#schema-strategy-ddl-auto)) |
 | `pyfly.data.relational.pool.size` | `int` | *(driver default)* | Connection pool size (`pool_size`) |
 | `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
 | `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
@@ -118,24 +118,31 @@ results = await repository.find_all_by_spec(spec)
 ### Alembic Migrations
 
 ```bash
-pyfly db init          # Initialize Alembic
+pyfly db init          # Initialize Alembic (env.py imports your models and the framework tables)
 pyfly db migrate -m "add orders table"
-pyfly db upgrade       # Apply pending migrations
+pyfly db upgrade       # Apply pending migrations to pyfly.data.relational.url
 ```
 
 ---
 
 ## Testing
 
-Use SQLite in-memory for tests:
+Test repositories with `@DataTest` (or `data_slice(..., rollback=True)`): each test's units of work roll back
+when it ends. By default the slice runs on a SQLite **file** in the test's `tmp_path`; point it at the
+database you run in production with a container ([Testing](../modules/testing.md#datatest)):
 
-```yaml
-# pyfly-test.yaml
-pyfly:
-  data:
-    relational:
-      url: "sqlite+aiosqlite:///:memory:"
+```python
+@DataTest(beans=[OrderRepository])
+class TestOrders:
+    async def test_saves(self, data_context) -> None:
+        orders = data_context.get_bean(OrderRepository)
+        await orders.save(OrderEntity(name="first"))
+        assert await orders.count() == 1
 ```
+
+Do not test transaction semantics on `sqlite+aiosqlite:///:memory:`: an in-memory database lives on one
+connection that every session shares, so one session sees (and another's commit commits) writes that were never
+committed. It suits single-session unit tests only.
 
 ---
 
