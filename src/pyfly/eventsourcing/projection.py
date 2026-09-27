@@ -158,7 +158,9 @@ class ProjectionRunner:
         if self._start_from == "latest":
             last_position: Callable[[], Awaitable[int]] = self._store.last_position  # type: ignore[attr-defined]
             self._latest = await last_position()
-        if self._own_checkpoints and self._positions and getattr(self._store, "engine", None) is not None:
+        # A store with an engine (read off its class: a datasource name resolves only once a manager is installed)
+        # keeps its events across restarts.
+        if self._own_checkpoints and self._positions and getattr(type(self._store), "engine", None) is not None:
             _logger.warning(
                 "projection_checkpoints_in_memory",
                 extra={
