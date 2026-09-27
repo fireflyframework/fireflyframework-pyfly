@@ -18,6 +18,9 @@ guide covers both in depth.
 6. [EventHandler Callable](#eventhandler-callable)
 7. [InMemoryEventBus](#inmemoryeventbus)
 8. [Provider Selection](#provider-selection)
+   - [The transactional outbox: `postgres` and `database`](#the-transactional-outbox-postgres-and-database)
+   - [Postgres: what privileges a serving process actually needs](#postgres-what-privileges-a-serving-process-actually-needs)
+   - [Dead letters](#dead-letters)
 9. [Declarative Decorators](#declarative-decorators)
    - [@event_publisher](#event_publisher)
    - [@publish_result](#publish_result)
@@ -27,6 +30,8 @@ guide covers both in depth.
     - [ApplicationEventBus](#applicationeventbus)
     - [ApplicationEventPublisher (injectable)](#applicationeventpublisher-injectable)
     - [@app_event_listener](#app_event_listener)
+    - [Transaction phases](#transaction-phases)
+    - [Domain events of aggregates](#domain-events-of-aggregates)
 11. [Events vs. Messaging: When to Use Which](#events-vs-messaging-when-to-use-which)
 12. [Complete Example: Order Domain Events](#complete-example-order-domain-events)
 13. [Testing with InMemoryEventBus](#testing-with-inmemoryeventbus)
@@ -46,7 +51,8 @@ Application / Domain Services
           +-- InMemoryEventBus      (single-process, local pub/sub)
           +-- KafkaEventBus         (Apache Kafka via aiokafka)
           +-- RedisStreamsEventBus   (Redis Streams via redis-py)
-          +-- PostgresEventBus      (pg_notify via asyncpg)
+          +-- PostgresEventBus      (transactional outbox, LISTEN/NOTIFY wake-ups)
+          +-- DatabaseEventBus      (transactional outbox on any SQL datasource)
           +-- RabbitMqEventBus      (RabbitMQ via aio-pika)
 ```
 
@@ -111,24 +117,32 @@ The dataclass is frozen, making envelopes immutable once created.
 
 ## ErrorStrategy Enum
 
-`ErrorStrategy` defines how the system should behave when an error occurs
-during event processing. It is an enum with five members:
+`ErrorStrategy` says what a failed delivery leads to on the **outbox buses** (the `postgres` and `database`
+providers), through `pyfly.eda.outbox.error-strategy`. It is an enum with five members:
 
 ```python
 from pyfly.eda import ErrorStrategy
 ```
 
-| Member              | Value              | Behavior |
-|---------------------|--------------------|----------|
-| `IGNORE`            | `"IGNORE"`         | Silently swallow the exception. Processing continues with the next handler/event. |
-| `LOG_AND_CONTINUE`  | `"LOG_AND_CONTINUE"` | Log the error at warning/error level, then continue processing. |
-| `RETRY`             | `"RETRY"`          | Re-attempt delivery of the event to the failed handler. Retry policy (count, backoff) is configured separately. |
-| `DEAD_LETTER`       | `"DEAD_LETTER"`    | Move the failed event to a dead-letter destination for later inspection and reprocessing. |
-| `FAIL_FAST`         | `"FAIL_FAST"`      | Immediately propagate the exception to the caller. No further handlers are invoked. |
+| Member              | Value              | On an outbox bus |
+|---------------------|--------------------|------------------|
+| `DEAD_LETTER`       | `"DEAD_LETTER"`    | **The default.** The failing subscription is attempted again after the retry policy's back-off (`pyfly.eda.listener.retry.*`: 5 attempts, 1 s doubling to 30 s), and after the last attempt the event is copied into the dead-letter table for it. |
+| `RETRY`             | `"RETRY"`          | Attempted again after the back-off for as long as it fails; never dead-lettered. |
+| `FAIL_FAST`         | `"FAIL_FAST"`      | Dead-lettered at the first failure. |
+| `LOG_AND_CONTINUE`  | `"LOG_AND_CONTINUE"` | Logged at WARNING, and the delivery is done: not attempted again. |
+| `IGNORE`            | `"IGNORE"`         | Logged at DEBUG, and the delivery is done. |
 
-Choose the strategy that matches your reliability requirements. For most
-applications, `LOG_AND_CONTINUE` is a sensible default; for financial
-transactions, `RETRY` or `DEAD_LETTER` may be more appropriate.
+Whatever the strategy, a failure never stalls the group: each subscription of a delivery is settled on its
+own (the ones that succeeded are not run again), and the group's other events are delivered meanwhile.
+
+The Kafka and RabbitMQ buses do not read `ErrorStrategy`: they consume through the listener container of
+`pyfly.messaging`, which attempts a failed delivery again after a back-off and then dead-letters it to the
+broker (`<topic>.DLT`, the dead-letter exchange); see
+[Kafka: keys, the dead-letter topic and the family envelope](#kafka-keys-the-dead-letter-topic-and-the-family-envelope)
+and [Delivery Guarantees](messaging.md#delivery-guarantees). No bus retries in the publishing process, and
+the in-memory bus propagates a handler's exception to the caller of `publish()`.
+
+Before 26.09.08 this section described retries and dead letters that no bus implemented.
 
 ---
 
@@ -242,7 +256,7 @@ property. All keys are optional; the defaults work for local development.
 
 | Config key | Type | Default | Description |
 |---|---|---|---|
-| `pyfly.eda.provider` | `str` | `auto` | `auto \| memory \| kafka \| redis \| postgres \| rabbitmq`. When `auto`, the strongest available broker library wins (kafka > postgres > redis > rabbitmq > memory). |
+| `pyfly.eda.provider` | `str` | `auto` | `auto \| memory \| kafka \| redis \| postgres \| database \| rabbitmq`. When `auto`, the strongest available broker library wins (kafka > postgres > redis > rabbitmq > memory). |
 | `pyfly.eda.destinations` | `str` | `pyfly.events` | Comma-separated list of topics / streams / routing keys to consume from. |
 | `pyfly.eda.group` | `str` | `pyfly-default` | Consumer group name (used as Kafka group ID, Redis consumer group, Postgres cursor name, or RabbitMQ queue prefix). |
 | `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `firefly-json`, `avro`, or `protobuf`. `firefly-json` writes the LaraFly (PHP) envelope shape for topics shared with a PHP service; both JSON serializers read both shapes. |
@@ -251,16 +265,30 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.kafka.dlt.enabled` | `bool` | `true` | Dead-letter a record to `<topic><suffix>`, verbatim, when the serializer cannot read it or its handlers failed on every attempt, and only then commit its offset. `false` logs it and skips it. |
 | `pyfly.eda.kafka.dlt.suffix` | `str` | `.DLT` | Suffix of the dead-letter topic. |
 | `pyfly.eda.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL. |
-| `pyfly.eda.postgres.dsn` | `str` | *(required)* | PostgreSQL DSN for the producer connection pool. |
-| `pyfly.eda.postgres.listen-dsn` | `str` | same as `dsn` | Optional dedicated DSN for the LISTEN connection. |
+| `pyfly.eda.outbox.datasource` | `str` | the primary | The datasource of the `postgres` and `database` buses, by name. |
+| `pyfly.eda.outbox.url` | `str` | | Its URL instead: an alias resolved through the registry (the datasource with that URL, or a new datasource `eda` with the registry's pool settings). |
+| `pyfly.eda.postgres.datasource` / `pyfly.eda.postgres.dsn` | `str` | | The same two keys for `postgres`; `dsn` is the key it always had. Before 26.09.08 `dsn` was required, and the bus opened a connection pool of its own. |
+| `pyfly.eda.postgres.listen-dsn` | `str` | | A direct DSN for the LISTEN connection (behind a pooler in transaction mode); by default it is checked out of the datasource's pool. |
 | `pyfly.eda.postgres.channel` | `str` | `pyfly_eda` | `pg_notify` channel name. |
-| `pyfly.eda.postgres.auto-create-tables` | `bool` | `true` | Create `pyfly_eda_outbox` / `pyfly_eda_offsets` when they are missing. The DDL is skipped when they already exist, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all. |
+| `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | `true` | Create the outbox tables when they are missing. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all (the tables are only checked). |
+| `pyfly.eda.outbox.poll-interval` | duration | `5s` | How often an idle relay polls (seconds, or `500ms`, `90s`, `5m`, `2h`). |
+| `pyfly.eda.outbox.batch-size` | `int` | `100` | Deliveries claimed per round. |
+| `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. |
+| `pyfly.eda.outbox.handler-timeout` | duration | `60s` | How long one handler may run before it is cancelled and the attempt counts as failed (`none`: no limit). Must be shorter than `claim-timeout`. |
+| `pyfly.eda.outbox.start` | `str` | `latest` | Where a consumer group that registers for the first time starts: `latest` (the events published from then on) or `earliest` (every event the outbox still holds for its destinations). |
+| `pyfly.eda.outbox.error-strategy` | `str` | `DEAD_LETTER` | See [ErrorStrategy](#errorstrategy-enum). |
+| `pyfly.eda.outbox.retention.delivered` | duration | `1h` | An event every group handled is deleted once older than this (`none`: kept). |
+| `pyfly.eda.outbox.retention.max-age` | duration | | An event older than this is deleted with the deliveries still owed for it (a group that stopped consuming loses them; a WARNING says how many). Unset: never. |
+| `pyfly.eda.outbox.retention.interval` / `retention.batch-size` | duration / `int` | `1m` / `1000` | How often a relay prunes, and how many events one statement deletes. |
+| `pyfly.eda.outbox.notify` | `bool` | | LISTEN/NOTIFY wake-ups; unset: on when the datasource is PostgreSQL. |
+| `pyfly.eda.domain-events.enabled` | `bool` | `true` | Publish the events aggregates raise as their unit of work commits ([Domain events of aggregates](#domain-events-of-aggregates)). |
+| `pyfly.eda.domain-events.destination` | `str` | | Also publish them through the event publisher, to this destination. |
 | `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
 | `pyfly.eda.rabbitmq.exchange-name` | `str` | `pyfly` | Name of the durable DIRECT exchange to declare. |
 | `pyfly.eda.rabbitmq.prefetch` | `int` | `20` | `basic.qos` prefetch of each consumer channel. |
 | `pyfly.eda.rabbitmq.dead-letter-exchange` | `str` | `<exchange-name>.dlx` | The exchange an event goes to after its last attempt, into the queue `<group>.<destination>.dlq`. |
 | `pyfly.eda.kafka.max-poll-records` | `int` | `100` | The most records one poll of the Kafka bus returns; their offsets are committed when they are all done. |
-| `pyfly.eda.listener.*` | | | The Kafka and RabbitMQ listener container, with the keys and defaults of `pyfly.messaging.listener.*`: `transactional`, `datasource`, `shutdown-timeout`, `concurrency`, `retry.max-attempts` (5), `retry.initial-delay` (1.0), `retry.multiplier` (2.0), `retry.max-delay` (30.0). See [Delivery Guarantees](messaging.md#delivery-guarantees). |
+| `pyfly.eda.listener.*` | | | The Kafka, RabbitMQ and outbox buses' listener container, with the keys and defaults of `pyfly.messaging.listener.*`: `transactional`, `datasource`, `shutdown-timeout`, `concurrency`, `retry.max-attempts` (5), `retry.initial-delay` (1.0), `retry.multiplier` (2.0), `retry.max-delay` (30.0). See [Delivery Guarantees](messaging.md#delivery-guarantees). |
 
 ### Example configuration
 
@@ -328,33 +356,104 @@ The JSON serializer **reads both envelope shapes** of the Firefly family — PyF
 empty object) — and raises one typed `EnvelopeDecodeError` for anything else. To *write* the
 LaraFly shape (its key order, `DATE_ATOM` timestamps), select `serialization-format: firefly-json`.
 
+### The transactional outbox: `postgres` and `database`
+
+The `postgres` and `database` providers are one bus, `DatabaseEventBus` (`PostgresEventBus` keeps the
+constructor the Postgres adapter always had): a **transactional outbox** on a datasource of the application's
+`DataSourceRegistry`, with that datasource's pool, connect arguments and dialect setup. `database` runs on any
+SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/NOTIFY as a wake-up.
+
+- **A publish is part of the publisher's unit of work.** `publish()` writes the event into
+  `pyfly_outbox_events` in the unit bound for the outbox's datasource (a short unit of its own outside one):
+  a `@transactional` method that rolls back published nothing, and one that commits cannot lose its event.
+  The event is owed to every consumer group registered for its destination (a row in
+  `pyfly_outbox_deliveries` per group). On PostgreSQL a publish is one statement, `NOTIFY` included, and
+  the server delivers the notification only if the unit commits. A publish never starts the bus: after
+  `stop()` (from a `@pre_destroy` method) the event is still written, for this or another process to deliver.
+- **Deliveries are claimed by state.** A group's relay claims the delivery rows that are due, for a lease
+  (`claim-timeout`), with `FOR UPDATE SKIP LOCKED` where the backend has it (PostgreSQL, MySQL 8, MariaDB
+  10.6) and an optimistic update elsewhere. An event whose transaction commits after a later one's is claimed
+  when it becomes visible; several processes of one group share the deliveries without taking one twice; the
+  deliveries of a process that dies are claimed again when their lease ends. At-least-once: a handler may see
+  an event twice (after a crash between its commit and the settling), so deduplicate on
+  `envelope.event_id`.
+- **Each subscription is settled on its own.** A delivery runs every handler of the group whose pattern
+  matches; the ones that succeed are recorded, and a failing one is attempted again alone, after the retry
+  policy's back-off, then dead-lettered ([ErrorStrategy](#errorstrategy-enum)). The group's other events go on
+  meanwhile. A handler runs in the unit of work its `@transactional` gives it, as on the Kafka and RabbitMQ
+  buses (`pyfly.eda.listener.transactional`), and is cancelled after `handler-timeout`.
+- **Consumer groups.** A process's group is registered (for `pyfly.eda.destinations`) once a handler
+  subscribes: a process that only publishes owes nothing to its own group. A new group starts at
+  `pyfly.eda.outbox.start` (`latest`). Every process of a group must subscribe the same handlers: each event
+  goes to one of them.
+- **Retention.** The relays delete, in batches, the events every group handled (`retention.delivered`), and
+  with `retention.max-age` the older ones whatever is still owed for them.
+- **Lifecycle and health.** `start()` checks (and creates) the tables, opens the LISTEN connection and starts
+  the relay, serialized and idempotent; a failed start closes what it opened. The relay is a
+  `CONSUMER_PHASE` lifecycle bean: the context stops it before any `@pre_destroy`, after the delivery in
+  flight (`pyfly.eda.listener.shutdown-timeout`). The LISTEN connection is kept alive by the relay's polls and
+  reopened when it is lost; meanwhile the relay polls every `poll-interval` and the EDA health indicator is
+  `DOWN` (`"listener": "reconnecting"`). It is also `DOWN` when the bus is not running or its database does
+  not answer.
+
+Before 26.09.08 the Postgres bus wrote on a pool of its own, outside the business transaction, and consumed
+by an id cursor: an event that committed after a higher id had been consumed was skipped for good (about 0.2 %
+of the events under ordinary concurrency), a failing handler stalled its whole group and re-ran the others on
+every retry, the table was never pruned, a new group replayed the whole history, concurrent first publishes
+raced the DDL and leaked pools, a publish after `stop()` restarted everything, and a lost LISTEN connection was
+never reopened while the health indicator said UP.
+
+**Upgrading from 26.09.07.** The bus no longer reads `pyfly_eda_outbox` and `pyfly_eda_offsets`. Let every
+consumer group drain them before the upgrade (or copy what a group had not consumed into
+`pyfly_outbox_events` and its deliveries), then drop them.
+
 ### Postgres: what privileges a serving process actually needs
 
-`PostgresEventBus.start()` used to run `CREATE TABLE IF NOT EXISTS` and
-`CREATE INDEX IF NOT EXISTS` for the outbox in **every** process at **every** boot — including a
-process that only publishes, since `publish()` lazily starts the bus. Postgres checks `CREATE` on
-the schema *before* it checks `IF NOT EXISTS`, so an existing table did not save a role without
-that right; and `CREATE INDEX IF NOT EXISTS` on a table you do not own fails even when the index
-is already there, which a `GRANT CREATE ON SCHEMA` does not fix. The practical consequence was
-that a serving role had to own two framework-internal tables, or belong to a role that did.
-
-`start()` now **probes first**: one `to_regclass` round trip, which needs nothing beyond `USAGE`
-on the schema, and the DDL runs only when a table is genuinely missing. A first boot against an
-empty database still creates everything, so `pyfly new` needs no configuration. Set
-`pyfly.eda.postgres.auto-create-tables: false` when migrations own the schema and the framework
-must not issue DDL under any circumstance.
+Postgres checks `CREATE` on the schema *before* it checks `IF NOT EXISTS`, so replaying `CREATE TABLE IF NOT
+EXISTS` at every boot, as the adapter used to, needed schema-creation rights for work it never did. The outbox
+tables are framework tables (`pyfly.data.relational.framework_schema`): `start()` creates the ones that are
+missing, and when they all exist it only reads the catalog, which needs nothing beyond `USAGE` on the schema. A
+first boot against an empty database still creates everything. Set `pyfly.eda.postgres.auto-create-tables:
+false` when migrations own the schema (list `framework_metadata` in Alembic's `target_metadata`) and the
+framework must not issue DDL under any circumstance.
 
 A serving process therefore needs only:
 
 ```sql
 GRANT USAGE ON SCHEMA public TO serving;
-GRANT SELECT, INSERT, UPDATE ON pyfly_eda_outbox, pyfly_eda_offsets TO serving;
-GRANT USAGE ON SEQUENCE pyfly_eda_outbox_id_seq TO serving;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON pyfly_outbox_events, pyfly_outbox_deliveries, pyfly_outbox_consumers, pyfly_outbox_dead_letters
+  TO serving;
 ```
 
-The consumer group's cursor row (`INSERT ... ON CONFLICT DO NOTHING` into `pyfly_eda_offsets`) is
-issued on every boot regardless: it is data, not schema, it needs only `INSERT`, and a new
-consumer group joining an existing deployment still has to create its own.
+`DELETE` is new: a handled delivery row is deleted, and retention deletes the events every group handled.
+The identity column of `pyfly_outbox_events` needs no grant on its sequence. Before 26.09.08 the grant was
+`SELECT, INSERT, UPDATE` on `pyfly_eda_outbox` and `pyfly_eda_offsets` plus `USAGE` on
+`pyfly_eda_outbox_id_seq`.
+
+### Dead letters
+
+An `EdaDeadLetterStore` records the events whose handlers failed on every attempt. The outbox buses write
+theirs to `pyfly_outbox_dead_letters` in the unit that settles the delivery, with the consumer group, the
+subscription, the event and the last failure; `bus.outbox.dead_letters(group)` reads them. The Kafka and
+RabbitMQ buses dead-letter to their broker and record the event in the store the application defines as a
+bean, after the broker has it (best effort there: a failure is logged and counted, not retried, except that
+with the Kafka dead-letter topic off the store is the only copy and the record waits for it).
+`SqlEdaDeadLetterStore` is the durable store, on the same table of any datasource:
+
+```python
+from pyfly.container import bean, configuration
+from pyfly.eda.dlq import EdaDeadLetterStore, SqlEdaDeadLetterStore
+
+
+@configuration
+class DeadLetters:
+    @bean
+    def dead_letters(self) -> EdaDeadLetterStore:
+        return SqlEdaDeadLetterStore("primary")
+```
+
+Given such a bean, the outbox buses hand their dead letters to it instead of writing them in the settling unit.
 
 ---
 
@@ -567,6 +666,8 @@ bus.subscribe(
     listener: Callable[..., Awaitable[None]],  # The async handler
     *,
     owner_cls: type | None = None,  # Optional: the class that owns this listener (for ordering)
+    owner: object | None = None,  # Optional: the bean it belongs to (unsubscribed when destroyed)
+    phase: TransactionPhase | None = None,  # Optional: run at this transaction phase (see below)
 )
 ```
 
@@ -685,6 +786,55 @@ class OrderService:
 > result only when it is awaitable, so a synchronous `def` listener will not
 > break startup.
 
+### Transaction phases
+
+A listener runs inline in `publish()`, inside the caller's transaction when there is one: a listener that
+sends an e-mail would send it even if that transaction then rolls back. Declare the transaction phase it runs
+at instead (Spring's `@TransactionalEventListener`):
+
+```python
+from pyfly.context.events import app_event_listener
+from pyfly.data.transaction import TransactionPhase
+
+
+@service
+class Notifications:
+    @app_event_listener(phase=TransactionPhase.AFTER_COMMIT)
+    async def send_receipt(self, event: OrderPlacedEvent) -> None:
+        await self.mailer.send(...)  # only once the order committed
+```
+
+| Phase | Runs |
+|-------|------|
+| `BEFORE_COMMIT` | Inside the unit of work the event was published in, right before it commits; an exception rolls it back. |
+| `AFTER_COMMIT` | Once the unit committed, outside it (repository calls get units of their own); not when it rolls back. |
+| `AFTER_ROLLBACK` | Only once the unit rolled back. |
+| `AFTER_COMPLETION` | Once the unit completed, either way. |
+
+Outside a transaction every phase but `AFTER_ROLLBACK` runs at once, and an `AFTER_ROLLBACK` listener does
+not run. An `AFTER_*` listener's exception is logged and counted (`pyfly.tx.synchronization.failures`),
+never raised: the unit has completed. For a delivery guarantee, publish through an outbox bus instead.
+
+### Domain events of aggregates
+
+The events a `pyfly.domain.AggregateRoot` raises are published when the unit of work that persists it
+commits, by the `DomainEventPublisher` the EDA auto-configuration registers
+(`pyfly.eda.domain-events.enabled`):
+
+- to the application's listeners: a plain `@app_event_listener` runs inside the unit, right before it
+  commits; one with a phase runs at that phase;
+- with `pyfly.eda.domain-events.destination`, through the EDA event publisher too, as
+  `publish(destination, event.event_type, event.to_payload(), headers)` with the headers
+  `x-pyfly-event-id`, `x-pyfly-aggregate-type` and `x-pyfly-aggregate-id`. An outbox bus writes them in the
+  committing unit itself, so they are published exactly when the aggregate's changes are; a broker bus gets
+  them after the commit.
+
+It collects every event an aggregate raises inside a unit of work, and the pending events of an aggregate a
+relational unit of work saves (`Repository.save` of a new or detached aggregate: events raised in a factory,
+before any unit existed). A unit that rolls back publishes nothing. Raise the events on the instance the unit
+holds (the one `save()` returns). `DomainEventPublisher.publish(*aggregates)` publishes by hand, inside the
+unit; without the EDA auto-configuration, register a `DomainEventPublisher(ApplicationEventPublisher)` bean.
+
 ---
 
 ## Events vs. Messaging: When to Use Which
@@ -698,7 +848,7 @@ PyFly provides both an EDA module (`pyfly.eda`) and a messaging module
 | **Transport** | `InMemoryEventBus` (direct calls) or a broker-backed bus: Kafka, Redis Streams, Postgres, RabbitMQ. | Kafka, RabbitMQ, or other external brokers. |
 | **Payload** | `EventEnvelope` with typed `dict` payload. | Raw `bytes` -- you choose the serialization format. |
 | **Pattern** | Glob-matched event types (`"order.*"`). | Topic-based with consumer groups. |
-| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Postgres outbox, Redis Streams, RabbitMQ, Kafka with a consumer group). | At-least-once on Kafka and RabbitMQ: acknowledged after the listener's unit of work commits (see [Delivery Guarantees](messaging.md#delivery-guarantees)). |
+| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Redis Streams, RabbitMQ, Kafka with a consumer group). Outbox buses (`postgres`, `database`): transactional, published with the publisher's unit of work, then at-least-once. | At-least-once on Kafka and RabbitMQ: acknowledged after the listener's unit of work commits (see [Delivery Guarantees](messaging.md#delivery-guarantees)). |
 | **Use case** | Decoupling domain services within a monolith. | Decoupling microservices across network boundaries. |
 
 **Rule of thumb**: If the producer and consumer live in the same process, use
