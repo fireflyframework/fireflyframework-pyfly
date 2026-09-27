@@ -706,7 +706,8 @@ scope) and resolves the instance its scope holds on every use: an attribute, a c
 - `@refresh_scope(proxy=True)` on a class;
 - `@scoped_proxy` on a class (with a request, session or custom scope) or on a non-singleton
   `@bean` method, written above `@bean`. On a singleton or transient `@bean` method it raises
-  `TypeError`, and so does registering a `@scoped_proxy` class as a singleton or transient bean.
+  `TypeError` (written below `@bean`, when the context starts: it used to be ignored there), and so
+  does registering a `@scoped_proxy` class as a singleton or transient bean.
 
 A `with` or `async with` block on a proxy exits on the instance it entered, even when a refresh
 swapped the scope's instance inside the block.

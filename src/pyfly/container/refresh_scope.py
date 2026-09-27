@@ -139,8 +139,9 @@ def scoped_proxy(target: T) -> T:
     (A holder of the engine, not an ``AsyncEngine`` bean: a singleton ``AsyncEngine`` bean replaces
     the application's primary database, and an injection by type receives the primary.)
 
-    Raises ``TypeError`` on a singleton or transient ``@bean`` method, which a proxy cannot serve; a
-    class marked with it raises the same when it is registered as a singleton or transient bean.
+    Raises ``TypeError`` on a singleton or transient ``@bean`` method, which a proxy cannot serve
+    (written below ``@bean``, the ``ApplicationContext`` raises it when it starts); a class marked
+    with it raises the same when it is registered as a singleton or transient bean.
     """
     bean_scope = getattr(target, "__pyfly_bean_scope__", None)
     if bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):

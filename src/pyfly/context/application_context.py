@@ -1054,6 +1054,16 @@ class ApplicationContext:
                 if return_type is None:
                     continue
 
+                # @scoped_proxy written above @bean refuses a singleton or transient method itself; written
+                # below, it runs before the scope is set, and the marker used to be silently ignored.
+                bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
+                proxied = getattr(method, "__pyfly_scoped_proxy__", False)
+                if proxied and bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):
+                    raise TypeError(
+                        f"a scoped proxy needs a REQUEST, SESSION or custom scope; "
+                        f"{type(config_instance).__qualname__}.{attr_name}() is {bean_scope.name}"
+                    )
+
                 # A non-singleton bean is built when its scope asks for an instance, never here: a
                 # REQUEST-scoped factory has no request at startup (one that reads the request or
                 # takes another request-scoped bean failed start()), and the product of a

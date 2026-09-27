@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionma
 
 from pyfly.container import Provider, bean, component, configuration, service  # noqa: E402
 from pyfly.container.bean import INFER_DESTROY_METHOD  # noqa: E402
+from pyfly.container.exceptions import BeanCreationException  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, refresh_scope, scoped_proxy  # noqa: E402
 from pyfly.container.scoped_proxy import proxy_target  # noqa: E402
 from pyfly.container.types import Scope  # noqa: E402
@@ -804,3 +805,36 @@ def test_a_singleton_or_transient_class_cannot_be_proxied() -> None:
         ctx.register_bean(_SingletonProxy)
     with pytest.raises(TypeError, match="scoped proxy"):
         ctx.register_bean(_TransientProxy, scope=Scope.TRANSIENT)
+
+
+class _Snapshot:
+    pass
+
+
+@configuration
+class _ProxyBelowSingletonBean:
+    @bean
+    @scoped_proxy
+    def snapshot(self) -> _Snapshot:
+        return _Snapshot()
+
+
+@configuration
+class _ProxyBelowTransientBean:
+    @bean(scope=Scope.TRANSIENT)
+    @scoped_proxy
+    def snapshot(self) -> _Snapshot:
+        return _Snapshot()
+
+
+@pytest.mark.parametrize("configuration_class", [_ProxyBelowSingletonBean, _ProxyBelowTransientBean])
+async def test_a_scoped_proxy_written_below_bean_is_refused_on_a_singleton_or_transient_method(
+    configuration_class: type,
+) -> None:
+    """Written below ``@bean``, the marker is applied before the scope is known, and it used to be ignored:
+    the dependants silently got the instance itself."""
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(configuration_class)
+    with pytest.raises(BeanCreationException, match="scoped proxy") as raised:
+        await ctx.start()
+    assert isinstance(raised.value.__cause__, TypeError)
