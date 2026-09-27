@@ -23,8 +23,9 @@ nothing else, so resetting the query cache never drops the orchestration state, 
 for the commit and are dropped on rollback. A cache failure is logged and never fails the query or the
 command that caused it.
 
-An entry is keyed by the caller's scope too (:func:`scope_digest`): a result cached for one tenant or
-user is never served to another. Evicting a key evicts it for every scope at the cost of one write: the
+An entry is keyed by the caller's scope too (:func:`scope_of`, :func:`scope_digest`): a result cached for
+one tenant or user is never served to another, and a call whose caller the cache cannot identify is not
+cached at all (it fails closed). Evicting a key evicts it for every scope at the cost of one write: the
 scoped entries of a key live under its current *generation* (``<key>|<generation>|scope=<digest>``), and
 eviction replaces the generation, which leaves the old entries unreachable until their TTL expires. No
 eviction scans the keyspace.
@@ -72,35 +73,54 @@ DEFAULT_GENERATION_TTL = timedelta(seconds=900)
 
 
 def _ambient_tenant() -> str | None:
+    """The ``X-Tenant-Id`` of the running request: client-supplied and never authenticated."""
     from pyfly.observability.correlation import get_tenant_id
 
     return get_tenant_id()
 
 
 def _ambient_user() -> str | None:
+    """The authenticated principal of the running request (``RequestContext.security_context``)."""
     from pyfly.context.request_context import RequestContext
 
     request = RequestContext.current()
     security = request.security_context if request is not None else None
-    return security.user_id if security is not None else None
+    return security.user_id if security is not None and security.is_authenticated else None
 
 
-def scope_of(scope: QueryCacheScope, context: ExecutionContext | None) -> tuple[tuple[str, str | None], ...]:
-    """The identity an entry is keyed by: the tenant and organization (and the user, for ``USER``) of
-    *context*, completed with the ambient tenant (``X-Tenant-Id``) and authenticated user of the running
-    request; nothing for ``GLOBAL``.
+Scope = tuple[tuple[str, str | None], ...]
+"""The identity an entry is keyed by (:func:`scope_of`): ``(name, value)`` pairs."""
 
-    A ``TENANT`` entry is keyed by the user too when neither a tenant nor an organization is visible: an
-    application may take the tenant from somewhere the cache cannot see (a claim of the principal), and
-    sharing the entry among every caller would then share it across tenants.
+
+def scope_of(scope: QueryCacheScope, context: ExecutionContext | None) -> Scope | None:
+    """The identity an entry of a *scope* handler is keyed by for the running caller; ``()`` for ``GLOBAL``,
+    and ``None`` when the identity the scope needs is not visible, so the call must not be cached.
+
+    Only a trusted identity lets a call be cached: the tenant, organization and user of *context* (the
+    application built it), and the authenticated principal of the running request. ``USER`` needs a user
+    (the context's or the principal), ``TENANT`` a tenant or organization of the context, or else a user
+    (an application may take the tenant from somewhere the cache cannot see, such as a claim of the
+    principal). The ``X-Tenant-Id`` header of the request is client-supplied and never authenticated: its
+    value is part of every scoped key, so it can only narrow an entry, but it never identifies a caller.
+    Every identity that is visible narrows the key; a ``TENANT`` entry keyed by a trusted tenant leaves
+    the users out, so the users of a tenant share it.
     """
     if scope is QueryCacheScope.GLOBAL:
         return ()
-    tenant = (context.tenant_id if context is not None else None) or _ambient_tenant()
+    tenant = context.tenant_id if context is not None else None
     organization = context.organization_id if context is not None else None
-    parts: list[tuple[str, str | None]] = [("tenant", tenant), ("organization", organization)]
-    if scope is QueryCacheScope.USER or (tenant is None and organization is None):
-        parts.append(("user", (context.user_id if context is not None else None) or _ambient_user()))
+    parts: list[tuple[str, str | None]] = [
+        ("tenant", tenant),
+        ("organization", organization),
+        ("tenant_header", _ambient_tenant()),
+    ]
+    if scope is QueryCacheScope.TENANT and (tenant is not None or organization is not None):
+        return tuple(parts)
+    user = context.user_id if context is not None else None
+    principal = _ambient_user()
+    if user is None and principal is None:
+        return None
+    parts += [("user", user), ("principal", principal)]
     return tuple(parts)
 
 
@@ -121,13 +141,12 @@ def query_cache_group(handler: QueryHandler[Any, Any]) -> str:
     return f"{query_type.__name__ if query_type is not None else type(handler).__name__}:"
 
 
-def scope_digest(scope: QueryCacheScope, context: ExecutionContext | None) -> str | None:
-    """A digest of the caller's scope (:func:`scope_of`), or ``None`` for a ``GLOBAL`` handler and for a
-    caller with no tenant, organization or user at all (their entries are not scoped)."""
-    parts = scope_of(scope, context)
-    if all(value is None for _name, value in parts):
+def scope_digest(scope: Scope) -> str | None:
+    """A digest of *scope* (:func:`scope_of`) to key an entry by; ``None`` for ``()`` (a ``GLOBAL`` entry is
+    not scoped)."""
+    if not scope:
         return None
-    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(repr(scope).encode("utf-8")).hexdigest()[:16]
 
 
 class QueryCacheAdapter:

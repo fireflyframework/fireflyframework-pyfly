@@ -41,12 +41,13 @@ from pyfly.cache.decorators import cache_evict, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
+from pyfly.cqrs.cache.decorators import cacheable as query_cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
-from pyfly.cqrs.types import Query
+from pyfly.cqrs.types import Query, QueryCacheScope
 
 
 @pytest.fixture
@@ -117,6 +118,7 @@ async def test_clearing_the_query_cache_keeps_everything_else(redis: Any) -> Non
     class PriceQuery(Query[int]):
         sku: str = ""
 
+    @query_cacheable(scope=QueryCacheScope.GLOBAL)  # a list price is the same for every caller
     @query_handler(cacheable=True)
     class PriceHandler(QueryHandler[PriceQuery, int]):
         async def do_handle(self, query: PriceQuery) -> int:

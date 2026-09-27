@@ -20,13 +20,17 @@ implementation.  The full pipeline is:
 
 Caching (a ``@query_handler(cacheable=True)`` handler, a cacheable query, a cache adapter):
 
-- **Keys carry the caller's scope.** An entry is keyed by the query's ``get_cache_key()`` (after the
-  handler's ``cache_key_prefix``) and by the caller: the tenant, organization and user of the
-  ``ExecutionContext`` of :meth:`DefaultQueryBus.query_with_context`, completed with the ambient tenant
-  (``X-Tenant-Id``) and authenticated user of the request. A result cached for one tenant or user is never
-  served to another. The handler's cache scope narrows that (``TENANT``) or lifts it (``GLOBAL``, for data
-  that is the same for everyone). A ``ContextAwareQueryHandler`` is never served from the cache without a
-  context: it refuses such a call.
+- **Keys carry the caller's scope, and the cache fails closed.** An entry is keyed by the query's
+  ``get_cache_key()`` (after the handler's ``cache_key_prefix``) and by the caller: the tenant,
+  organization and user of the ``ExecutionContext`` of :meth:`DefaultQueryBus.query_with_context`, and the
+  authenticated principal of the request (see :func:`~pyfly.cqrs.cache.adapter.scope_of`). A result cached
+  for one tenant or user is never served to another. The handler's cache scope decides who shares an
+  entry: one user (``USER``, the default), the users of a tenant (``TENANT``), or everyone (``GLOBAL``, for
+  data that is the same for everyone). A call whose caller the scope cannot identify (no user for
+  ``USER``; no tenant in the context, and no user, for ``TENANT``) is not cached, with one WARNING per
+  handler: the ``X-Tenant-Id`` header narrows an entry but never identifies a caller, since any client can
+  send it. A ``ContextAwareQueryHandler`` is never served from the cache without a context: it refuses
+  such a call.
 - **Writes wait for the commit.** Inside a unit of work the result is stored after the commit, and not
   at all on rollback (it may be a row that never commits).
 - **Hits have the declared type.** A hit is rebuilt as the handler's result type ``R``, so a JSON cache
@@ -46,7 +50,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pyfly.cache.serialization import restore, uncacheable_type
 from pyfly.cqrs.authorization.service import AuthorizationService
-from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_key, scope_digest
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_key, scope_digest, scope_of
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
@@ -54,7 +58,7 @@ from pyfly.cqrs.context.execution_context import ExecutionContext
 from pyfly.cqrs.exceptions import QueryProcessingException
 from pyfly.cqrs.query.handler import ContextAwareQueryHandler, QueryHandler
 from pyfly.cqrs.tracing.correlation import CorrelationContext
-from pyfly.cqrs.types import Query
+from pyfly.cqrs.types import Query, QueryCacheScope
 
 _logger = logging.getLogger(__name__)
 
@@ -120,6 +124,7 @@ class DefaultQueryBus:
         self._caching_enabled = caching_enabled
         self._uncacheable: dict[type, bool] = {}
         self._misfits: set[type] = set()
+        self._unidentified: set[type] = set()
 
     # ── QueryBus protocol ──────────────────────────────────────
 
@@ -225,8 +230,28 @@ class DefaultQueryBus:
         raw = query.get_cache_key()
         if not raw:
             return None
-        digest = scope_digest(handler.get_cache_scope(), context)
-        return await self._cache.entry_key(query_cache_key(handler, raw), digest, ttl=self._ttl(handler))
+        scope = handler.get_cache_scope()
+        caller = scope_of(scope, context)
+        if caller is None:
+            self._report_unidentified(handler, scope)
+            return None  # fail closed: the entry would be shared by every caller the cache cannot tell apart
+        return await self._cache.entry_key(query_cache_key(handler, raw), scope_digest(caller), ttl=self._ttl(handler))
+
+    def _report_unidentified(self, handler: QueryHandler[Any, Any], scope: QueryCacheScope) -> None:
+        handler_type = type(handler)
+        if handler_type in self._unidentified:
+            return
+        self._unidentified.add(handler_type)
+        needs = "a user" if scope is QueryCacheScope.USER else "a tenant or organization in the context, or a user"
+        _logger.warning(
+            "query_cache_skipped handler=%s scope=%s: no caller identity is visible to the query cache (it needs "
+            "%s), so the result is not cached; pass an ExecutionContext with the tenant and user to "
+            "query_with_context(), or declare @cacheable(scope=QueryCacheScope.GLOBAL) for data that is the same "
+            "for everyone",
+            handler_type.__qualname__,
+            scope.name,
+            needs,
+        )
 
     def _ttl(self, handler: QueryHandler[Any, Any]) -> timedelta:
         return timedelta(seconds=handler.get_cache_ttl_seconds() or self._default_cache_ttl)

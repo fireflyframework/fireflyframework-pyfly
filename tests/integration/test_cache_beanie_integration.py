@@ -37,6 +37,7 @@ from pyfly.cache.decorators import cacheable
 from pyfly.cache.serialization import CacheValueError, cache_dumps
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
 from pyfly.cqrs.command.registry import HandlerRegistry
+from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
@@ -130,9 +131,10 @@ async def test_the_query_bus_never_caches_a_document_result_type(
     registry = HandlerRegistry()
     registry.register_query_handler(GetNoteHandler())
     bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(cache))
+    caller = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
     caplog.set_level(logging.WARNING)
     for _ in range(2):
-        result = await bus.query(GetNoteQuery(title="minutes"))
+        result = await bus.query_with_context(GetNoteQuery(title="minutes"), caller)
         assert isinstance(result, CachedNote)
         assert result.body == "first draft"
     assert GetNoteHandler.calls == 2

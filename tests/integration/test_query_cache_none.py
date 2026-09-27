@@ -33,6 +33,7 @@ from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
 from pyfly.cqrs.cache.decorators import cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
+from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
@@ -41,6 +42,9 @@ from pyfly.testing.statement_counter import StatementCounter
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
+
+CALLER = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+"""Who runs the queries: the query cache caches a call only when it can see who the caller is."""
 
 
 @dataclass(frozen=True)
@@ -91,18 +95,19 @@ async def test_a_none_result_is_not_stored_by_default(world: dict[str, Any]) -> 
     bus: DefaultQueryBus = world["bus"]
     with StatementCounter(world["engine"]) as counter:
         for _ in range(3):
-            assert await bus.query(FindUserByEmail(email="nobody@example.com")) is None
+            assert await bus.query_with_context(FindUserByEmail(email="nobody@example.com"), CALLER) is None
     assert counter.count("SELECT") == 3  # every call asks the database: nothing was cached
-    assert world["cache"].get_keys() == []  # and no write was wasted on an entry never read back
+    # No write was wasted on an entry never read back (the key's generation is all the lookups stored).
+    assert [key for key in world["cache"].get_keys() if not key.endswith("|generation")] == []
 
 
 async def test_a_handler_that_opts_in_is_served_its_cached_none(world: dict[str, Any]) -> None:
     bus: DefaultQueryBus = world["bus"]
     with StatementCounter(world["engine"]) as counter:
         for _ in range(3):
-            assert await bus.query(FindAccountByEmail(email="nobody@example.com")) is None
-        assert await bus.query(FindAccountByEmail(email="ann@example.com")) == "Ann"
-        assert await bus.query(FindAccountByEmail(email="ann@example.com")) == "Ann"
+            assert await bus.query_with_context(FindAccountByEmail(email="nobody@example.com"), CALLER) is None
+        assert await bus.query_with_context(FindAccountByEmail(email="ann@example.com"), CALLER) == "Ann"
+        assert await bus.query_with_context(FindAccountByEmail(email="ann@example.com"), CALLER) == "Ann"
     assert counter.count("SELECT") == 2
 
 
@@ -110,5 +115,5 @@ async def test_a_found_row_is_cached_as_before(world: dict[str, Any]) -> None:
     bus: DefaultQueryBus = world["bus"]
     with StatementCounter(world["engine"]) as counter:
         for _ in range(3):
-            assert await bus.query(FindUserByEmail(email="ann@example.com")) == "Ann"
+            assert await bus.query_with_context(FindUserByEmail(email="ann@example.com"), CALLER) == "Ann"
     assert counter.count("SELECT") == 1

@@ -16,7 +16,9 @@
 The query cache key used to be the query's own key only, so the first tenant (or user) to run a
 cacheable query filled the entry every other tenant was then served for ``cache_ttl``. The key now
 carries the caller's scope: the ``ExecutionContext`` of ``query_with_context`` (tenant, organization,
-user), or the ambient tenant (``X-Tenant-Id``) and authenticated user of a plain ``query``.
+user), or the authenticated user of a plain ``query`` (and the ``X-Tenant-Id`` header, which narrows an
+entry but never identifies a caller: a client sets it). The cache fails closed: a call whose caller it
+cannot identify is not cached at all, unless the handler declares its data the same for everyone.
 
 The handler reads real rows scoped by tenant from a SQLite file database (foreign keys on) and from
 PostgreSQL, as a multi-tenant service does.
@@ -25,6 +27,7 @@ PostgreSQL, as a multi-tenant service does.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -71,6 +74,21 @@ class CountriesQuery(Query[list[str]]):
 @dataclass(frozen=True)
 class TenantDocsQuery(Query[list[str]]):
     status: str = "open"
+
+
+@dataclass(frozen=True)
+class SharedDocsQuery(Query[list[str]]):
+    status: str = "open"
+
+
+@dataclass(frozen=True)
+class PriceListQuery(Query[list[str]]):
+    status: str = "open"
+
+
+current_tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_tenant", default=None)
+"""Where an application keeps the tenant it resolved (the tenant-GUC pattern of
+``pyfly.data.relational.dialect_customizers``): invisible to the query cache."""
 
 
 async def _docs(engine: AsyncEngine, tenant: str | None, owner: str | None = None) -> list[str]:
@@ -127,11 +145,34 @@ def _make_handlers(engine: AsyncEngine) -> dict[str, Any]:
             assert principal is not None
             return await _docs(engine, principal.attributes["tenant"])
 
+    @cacheable(scope=QueryCacheScope.TENANT)
+    @query_handler(cacheable=True)
+    class SharedDocsHandler(ContextAwareQueryHandler[SharedDocsQuery, list[str]]):
+        """Every user of a tenant sees the same documents: the tenant comes from the ExecutionContext."""
+
+        calls = 0
+
+        async def do_handle_with_context(self, query: SharedDocsQuery, context: ExecutionContext) -> list[str]:
+            type(self).calls += 1
+            return await _docs(engine, context.tenant_id)
+
+    @query_handler(cacheable=True)
+    class PriceListHandler(QueryHandler[PriceListQuery, list[str]]):
+        """The default USER scope; the tenant lives in an application ContextVar the cache cannot see."""
+
+        calls = 0
+
+        async def do_handle(self, query: PriceListQuery) -> list[str]:
+            type(self).calls += 1
+            return await _docs(engine, current_tenant.get())
+
     return {
         "docs": ListDocsHandler(),
         "mine": ListMyDocsHandler(),
         "countries": CountriesHandler(),
         "tenant_docs": TenantDocsHandler(),
+        "shared_docs": SharedDocsHandler(),
+        "prices": PriceListHandler(),
     }
 
 
@@ -169,12 +210,27 @@ def _ctx(tenant: str, user: str | None = None) -> ExecutionContext:
 
 async def test_two_tenants_get_their_own_results(setup: Setup) -> None:
     bus, handlers, _cache = setup
-    assert await bus.query_with_context(ListDocsQuery(), _ctx("acme")) == ["acme: Q3 payroll", "acme: bonus plan"]
-    assert await bus.query_with_context(ListDocsQuery(), _ctx("globex")) == ["globex: widgets"]
+    acme, globex = _ctx("acme", "alice"), _ctx("globex", "carol")
+    assert await bus.query_with_context(ListDocsQuery(), acme) == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await bus.query_with_context(ListDocsQuery(), globex) == ["globex: widgets"]
     # Each tenant's entry is reused by that tenant only.
-    assert await bus.query_with_context(ListDocsQuery(), _ctx("acme")) == ["acme: Q3 payroll", "acme: bonus plan"]
-    assert await bus.query_with_context(ListDocsQuery(), _ctx("globex")) == ["globex: widgets"]
+    assert await bus.query_with_context(ListDocsQuery(), acme) == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await bus.query_with_context(ListDocsQuery(), globex) == ["globex: widgets"]
     assert type(handlers["docs"]).calls == 2
+
+
+async def test_a_tenant_scoped_entry_is_shared_by_the_users_of_the_context_tenant(setup: Setup) -> None:
+    bus, handlers, _cache = setup
+    assert await bus.query_with_context(SharedDocsQuery(), _ctx("acme", "alice")) == [
+        "acme: Q3 payroll",
+        "acme: bonus plan",
+    ]
+    assert await bus.query_with_context(SharedDocsQuery(), _ctx("acme", "bob")) == [
+        "acme: Q3 payroll",
+        "acme: bonus plan",
+    ]
+    assert await bus.query_with_context(SharedDocsQuery(), _ctx("globex", "carol")) == ["globex: widgets"]
+    assert type(handlers["shared_docs"]).calls == 2
 
 
 async def test_two_users_of_one_tenant_get_their_own_results(setup: Setup) -> None:
@@ -187,7 +243,10 @@ async def test_two_users_of_one_tenant_get_their_own_results(setup: Setup) -> No
 
 async def test_a_context_aware_handler_is_never_served_without_a_context(setup: Setup) -> None:
     bus, _handlers, _cache = setup
-    assert await bus.query_with_context(ListDocsQuery(), _ctx("acme")) == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await bus.query_with_context(ListDocsQuery(), _ctx("acme", "alice")) == [
+        "acme: Q3 payroll",
+        "acme: bonus plan",
+    ]
     with pytest.raises(QueryProcessingException, match="requires an ExecutionContext"):
         await bus.query(ListDocsQuery())
 
@@ -228,6 +287,49 @@ async def test_a_tenant_scoped_handler_keys_by_user_when_no_tenant_is_visible(se
     assert type(handlers["tenant_docs"]).calls == 2
 
 
+async def test_a_caller_the_cache_cannot_identify_is_never_served_another_callers_entry(setup: Setup) -> None:
+    bus, handlers, _cache = setup
+
+    async def request(tenant: str) -> list[str]:
+        # The application resolved the tenant (from the host name, a session) into its own ContextVar, and
+        # the caller is anonymous to the cache: no ExecutionContext, no authenticated principal.
+        current_tenant.set(tenant)
+        RequestContext.init().security_context = SecurityContext.anonymous()
+        return await bus.query(PriceListQuery())
+
+    async def as_tenant(tenant: str) -> list[str]:
+        return await asyncio.create_task(request(tenant))
+
+    assert await as_tenant("acme") == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await as_tenant("globex") == ["globex: widgets"]
+    assert await as_tenant("acme") == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert type(handlers["prices"]).calls == 3  # not cached: nobody is served another caller's entry
+
+
+async def test_a_forged_tenant_header_can_neither_read_nor_poison_another_tenants_entry(setup: Setup) -> None:
+    bus, handlers, cache = setup
+
+    async def request(user: str, tenant_claim: str, header: str) -> list[str]:
+        # The application trusts the principal's claim; the client also sends X-Tenant-Id, which the
+        # correlation filter copies into the ambient tenant without authenticating it.
+        correlation.set_tenant_id(header)
+        RequestContext.init().security_context = SecurityContext(user_id=user, attributes={"tenant": tenant_claim})
+        return await bus.query(TenantDocsQuery())
+
+    async def as_user(user: str, tenant_claim: str, header: str) -> list[str]:
+        return await asyncio.create_task(request(user, tenant_claim, header))
+
+    # carol (globex) fills an entry; mallory (acme) sends X-Tenant-Id: globex and cannot read it.
+    assert await as_user("carol", "globex", "globex") == ["globex: widgets"]
+    assert await as_user("mallory", "acme", "globex") == ["acme: Q3 payroll", "acme: bonus plan"]
+
+    # On an empty cache, mallory goes first with the forged header: carol is not served what mallory got.
+    await cache.clear()
+    assert await as_user("mallory", "acme", "globex") == ["acme: Q3 payroll", "acme: bonus plan"]
+    assert await as_user("carol", "globex", "globex") == ["globex: widgets"]
+    assert type(handlers["tenant_docs"]).calls == 4
+
+
 async def test_an_explicitly_global_handler_is_shared(setup: Setup) -> None:
     bus, handlers, _cache = setup
     assert await bus.query_with_context(CountriesQuery(), _ctx("acme", "alice")) == ["ES", "US"]
@@ -237,13 +339,14 @@ async def test_an_explicitly_global_handler_is_shared(setup: Setup) -> None:
 
 async def test_clearing_a_key_clears_it_for_every_scope(setup: Setup) -> None:
     bus, handlers, _cache = setup
-    await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
-    await bus.query_with_context(ListDocsQuery(), _ctx("globex"))
-    await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
+    acme, globex = _ctx("acme", "alice"), _ctx("globex", "carol")
+    await bus.query_with_context(ListDocsQuery(), acme)
+    await bus.query_with_context(ListDocsQuery(), globex)
+    await bus.query_with_context(ListDocsQuery(), acme)
     assert type(handlers["docs"]).calls == 2
     await bus.clear_cache(ListDocsQuery().get_cache_key())
-    await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
-    await bus.query_with_context(ListDocsQuery(), _ctx("globex"))
+    await bus.query_with_context(ListDocsQuery(), acme)
+    await bus.query_with_context(ListDocsQuery(), globex)
     assert type(handlers["docs"]).calls == 4
 
 
@@ -258,6 +361,6 @@ async def test_evicting_a_key_never_scans_the_cache(setup: Setup) -> None:
 
     cache.evict_by_prefix = recorded  # type: ignore[method-assign]
     for tenant in ("acme", "globex", "initech"):
-        await bus.query_with_context(ListDocsQuery(), _ctx(tenant))
+        await bus.query_with_context(ListDocsQuery(), _ctx(tenant, "admin"))
     await bus.clear_cache(ListDocsQuery().get_cache_key())
     assert scans == []  # one write moves the key to a new generation, whatever the number of scopes

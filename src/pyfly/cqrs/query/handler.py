@@ -172,9 +172,10 @@ class QueryHandler(Generic[Q, R]):
     def get_cache_scope(self) -> QueryCacheScope:
         """Whose results a cached entry holds (``USER`` unless the handler declares otherwise).
 
-        ``USER`` keys an entry by tenant, organization and user, ``TENANT`` by tenant and organization (and
-        by user when neither is visible), and ``GLOBAL`` shares it with every caller (declare it only for data
-        that is the same for everyone).
+        ``USER`` keys an entry by tenant, organization and user, ``TENANT`` by the tenant and organization
+        of the ``ExecutionContext`` (by user when the context has neither), and ``GLOBAL`` shares it with
+        every caller (declare it only for data that is the same for everyone). A call whose caller the scope
+        cannot identify is not cached (see :class:`~pyfly.cqrs.types.QueryCacheScope`).
         """
         scope = getattr(type(self), "__pyfly_cache_scope__", None)
         return QueryCacheScope(scope) if scope is not None else QueryCacheScope.USER

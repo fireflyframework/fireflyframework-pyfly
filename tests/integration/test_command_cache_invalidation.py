@@ -270,10 +270,16 @@ async def test_a_failed_command_evicts_nothing(relational_backend: RelationalBac
     ctx = await _boot(relational_backend)
     try:
         queries = ctx.get_bean(DefaultQueryBus)
-        assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
+        assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+            "id": 1,
+            "status": "PENDING",
+        }
         with pytest.raises(CommandProcessingException, match="carrier refused"):
             await ctx.get_bean(DefaultCommandBus).send(ShipOrder(order_id=1, fail=True))
-        assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
+        assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+            "id": 1,
+            "status": "PENDING",
+        }
         assert ctx.get_bean(GetOrderHandler).calls == 1  # still cached, and still true
     finally:
         await ctx.stop()
@@ -284,15 +290,24 @@ async def test_inside_a_wider_unit_the_eviction_waits_for_its_commit(relational_
     try:
         queries = ctx.get_bean(DefaultQueryBus)
         fulfillment = ctx.get_bean(Fulfillment)
-        assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
+        assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+            "id": 1,
+            "status": "PENDING",
+        }
 
         with pytest.raises(RuntimeError, match="invoicing failed"):
             await fulfillment.ship_and_then(1, fail=True)
-        assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
+        assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+            "id": 1,
+            "status": "PENDING",
+        }
 
         await fulfillment.ship_and_then(1, fail=False)
         assert fulfillment.seen_inside == [True, True]
-        assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "SHIPPED"}
+        assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+            "id": 1,
+            "status": "SHIPPED",
+        }
         assert ctx.get_bean(GetOrderHandler).calls == 2
     finally:
         await ctx.stop()
@@ -328,7 +343,10 @@ async def test_the_query_cache_can_be_switched_off(relational_backend: Relationa
     try:
         queries = ctx.get_bean(DefaultQueryBus)
         for _ in range(3):
-            assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
+            assert await queries.query_with_context(GetOrderQuery(order_id=1), _as("acme", "alice")) == {
+                "id": 1,
+                "status": "PENDING",
+            }
         assert ctx.get_bean(GetOrderHandler).calls == 3
         assert await _keys(ctx.get_bean(CacheAdapter)) == []
     finally:
@@ -350,12 +368,12 @@ async def test_a_failed_publication_after_the_commit_still_evicts(relational_bac
             event_failure_strategy=EventFailureStrategy.RAISE,
             query_cache=ctx.get_bean(QueryCacheAdapter),
         )
-        assert await queries.query(OrderStatusQuery(order_id=1)) == "PENDING"
+        assert await queries.query_with_context(OrderStatusQuery(order_id=1), _as("acme", "alice")) == "PENDING"
 
         # The handler's own unit committed; only the publication of OrderRenamed failed.
         with pytest.raises(CommandProcessingException, match="failed to publish"):
             await commands.send(RenameOrder(order_id=1, status="ON_HOLD"))
-        assert await queries.query(OrderStatusQuery(order_id=1)) == "ON_HOLD"
+        assert await queries.query_with_context(OrderStatusQuery(order_id=1), _as("acme", "alice")) == "ON_HOLD"
         assert ctx.get_bean(OrderStatusHandler).calls == 2
     finally:
         await ctx.stop()

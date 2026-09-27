@@ -38,22 +38,27 @@ R = TypeVar("R")
 class QueryCacheScope(enum.Enum):
     """Whose results a cached query entry holds, and so who may be served it.
 
-    The query bus keys an entry by the caller's identity: the ``ExecutionContext`` of
-    ``query_with_context``, completed with the ambient tenant (``X-Tenant-Id``) and authenticated user of
-    the request. Declare a handler's scope with ``@cacheable(scope=...)`` from
-    :mod:`pyfly.cqrs.cache.decorators`.
+    The query bus keys an entry by the caller's identity: the tenant, organization and user of the
+    ``ExecutionContext`` of ``query_with_context``, and the authenticated principal of the request
+    (``RequestContext.security_context``). The ``X-Tenant-Id`` header is part of the key too, so it can only
+    narrow an entry, but it never identifies a caller: any client can send it. The cache fails closed: a
+    call whose caller the scope cannot identify is not cached. Declare a handler's scope with
+    ``@cacheable(scope=...)`` from :mod:`pyfly.cqrs.cache.decorators`.
     """
 
     USER = "user"
-    """Keyed by tenant, organization and user (the default): nobody is served another user's result."""
+    """Keyed by tenant, organization and user (the default): nobody is served another user's result. A call
+    with no user (none in the context, no authenticated principal) is not cached."""
 
     TENANT = "tenant"
-    """Keyed by tenant and organization: the users of one tenant share entries. Keyed by the user too when
-    neither a tenant nor an organization is visible to the cache (the tenant may come from somewhere it
-    cannot see, such as a claim of the principal)."""
+    """Keyed by the tenant and organization of the ``ExecutionContext``: the users of one tenant share
+    entries. Without either in the context it is keyed by the user instead (the tenant may come from
+    somewhere the cache cannot see, such as a claim of the principal, or only from the ``X-Tenant-Id``
+    header), and a call with no user either is not cached."""
 
     GLOBAL = "global"
-    """Not keyed by caller: every caller shares the entry. Only for data that is the same for everyone."""
+    """Not keyed by caller: every caller shares the entry, anonymous ones included. Only for data that is
+    the same for everyone."""
 
 
 class Command(Generic[R]):

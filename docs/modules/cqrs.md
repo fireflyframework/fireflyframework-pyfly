@@ -526,30 +526,43 @@ query cache off.
 ### Whose results an entry holds
 
 A cached result is never served to another tenant or user. The bus keys an
-entry by the query's `get_cache_key()` and by the caller:
+entry by the query's `get_cache_key()` and by the caller, as far as the cache
+can trust it:
 
 * the tenant, organization and user of the `ExecutionContext` passed to
-  `query_with_context()`;
-* completed with the ambient tenant (`X-Tenant-Id`, set by the web filters) and
-  the authenticated user of the request, so a plain `query()` behind the web
-  layer is keyed too.
+  `query_with_context()` (your application built it);
+* the authenticated principal of the request (`RequestContext.security_context`,
+  set by the bearer-token security middleware), so a plain `query()` behind the
+  web layer is keyed too;
+* the `X-Tenant-Id` header of the request. Any client can send it and nothing
+  authenticates it, so it only *narrows* an entry: it is part of the key, but
+  it never identifies a caller by itself.
 
-A handler's cache scope decides which of these count:
+A handler's cache scope decides who shares an entry, and which identity it
+needs:
 
-| Scope | Keyed by | Use it for |
-|-------|----------|------------|
-| `QueryCacheScope.USER` (default) | tenant, organization and user | anything that may depend on who asks |
-| `QueryCacheScope.TENANT` | tenant and organization (the user when neither is visible) | data shared by the users of one tenant |
-| `QueryCacheScope.GLOBAL` | nothing | data that is the same for everyone (a country list) |
+| Scope | Keyed by | Needs | Use it for |
+|-------|----------|-------|------------|
+| `QueryCacheScope.USER` (default) | tenant, organization and user | a user: the context's or the principal | anything that may depend on who asks |
+| `QueryCacheScope.TENANT` | the context's tenant and organization | a tenant or organization in the context, or else a user (then it is keyed by the user) | data shared by the users of one tenant |
+| `QueryCacheScope.GLOBAL` | nothing | nothing | data that is the same for everyone (a country list) |
 
-The cache sees only the identity that reaches it: the `ExecutionContext`, the
-`X-Tenant-Id` tenant and the user of `RequestContext.security_context`. A caller
-with none of them is not scoped, and every such caller shares the entry. A
-`TENANT` handler therefore keys by the user when no tenant or organization is
-visible (an application that takes the tenant from a claim of the principal
-would otherwise share entries across tenants). If your application keeps the
-tenant or the user elsewhere, pass them in the `ExecutionContext` of
-`query_with_context()`.
+The cache fails closed. A call whose caller the scope cannot identify is not
+cached at all, and a warning (`query_cache_skipped`) names the handler once:
+caching it would share one entry among every caller the cache cannot tell
+apart. That covers anonymous requests, message consumers and background jobs,
+a `USER` call whose context names only a tenant, and callers whose identity
+lives somewhere the cache cannot see: a session-authenticated principal kept
+only on `request.state`, or a tenant kept in an application `ContextVar` (the
+tenant-GUC pattern of `pyfly.data.relational.dialect_customizers`). Pass that
+identity in the `ExecutionContext` of `query_with_context()`, or declare
+`GLOBAL` for data that really is the same for everyone.
+
+A tenant seen only in `X-Tenant-Id` does not make a `TENANT` entry shareable
+across users: the entry is keyed by the user as well, so a client that forges
+the header can neither read another tenant's entry nor poison it. If your
+gateway authenticates the header, put its value in the `ExecutionContext`
+(`with_tenant_id(...)`): that is the explicit statement that you trust it.
 
 ```python
 from pyfly.cqrs.cache.decorators import cacheable

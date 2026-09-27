@@ -25,11 +25,12 @@ from dataclasses import dataclass
 
 from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
+from pyfly.cqrs.cache.decorators import cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
-from pyfly.cqrs.types import Query
+from pyfly.cqrs.types import Query, QueryCacheScope
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class CountQuery(Query[int]):
     n: int = 0
 
 
+@cacheable(scope=QueryCacheScope.GLOBAL)  # the same result for every caller
 @query_handler(cacheable=True)
 class CountHandler(QueryHandler[CountQuery, int]):
     def __init__(self) -> None:

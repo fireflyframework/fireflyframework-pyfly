@@ -30,6 +30,9 @@ from pyfly.cqrs.types import Query
 from pyfly.cqrs.validation.exceptions import CqrsValidationException
 from pyfly.cqrs.validation.types import ValidationResult
 
+CALLER = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+"""Who runs the cached queries: the query cache caches a call only when it can see who the caller is."""
+
 # -- Test messages ----------------------------------------------------------
 
 
@@ -152,12 +155,12 @@ class TestDefaultQueryBus:
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query1 = GetOrderQuery(order_id="ord-cached")
-        result1 = await bus.query(query1)
+        result1 = await bus.query_with_context(query1, CALLER)
         assert result1 == {"id": "ord-cached", "status": "fresh"}
         assert handler.call_count == 1
 
         query2 = GetOrderQuery(order_id="ord-cached")
-        result2 = await bus.query(query2)
+        result2 = await bus.query_with_context(query2, CALLER)
         assert result2 == {"id": "ord-cached", "status": "fresh"}
         assert handler.call_count == 1  # handler not called again
 
@@ -167,7 +170,7 @@ class TestDefaultQueryBus:
         cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        result = await bus.query(GetOrderQuery(order_id="ord-new"))
+        result = await bus.query_with_context(GetOrderQuery(order_id="ord-new"), CALLER)
         assert result == {"id": "ord-new", "status": "fresh"}
         assert handler.call_count == 1
 
@@ -179,11 +182,11 @@ class TestDefaultQueryBus:
 
         q1 = GetOrderQuery(order_id="ord-1")
         q1.set_cacheable(False)
-        await bus.query(q1)
+        await bus.query_with_context(q1, CALLER)
 
         q2 = GetOrderQuery(order_id="ord-1")
         q2.set_cacheable(False)
-        await bus.query(q2)
+        await bus.query_with_context(q2, CALLER)
 
         assert handler.call_count == 2  # handler called each time
 
@@ -193,8 +196,8 @@ class TestDefaultQueryBus:
         cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        await bus.query(GetOrderQuery(order_id="ord-1"))
-        await bus.query(GetOrderQuery(order_id="ord-1"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-1"), CALLER)
+        await bus.query_with_context(GetOrderQuery(order_id="ord-1"), CALLER)
         # no error, runs fine without caching
 
     async def test_clear_cache_evicts_key(self, registry: HandlerRegistry) -> None:
@@ -204,7 +207,7 @@ class TestDefaultQueryBus:
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query = GetOrderQuery(order_id="ord-evict")
-        await bus.query(query)
+        await bus.query_with_context(query, CALLER)
         assert handler.call_count == 1
 
         # The bus takes the query's own key and evicts it for every caller (the ":cqrs:" prefix and the
@@ -212,7 +215,7 @@ class TestDefaultQueryBus:
         cache_key = query.get_cache_key()
         await bus.clear_cache(cache_key)
 
-        await bus.query(GetOrderQuery(order_id="ord-evict"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-evict"), CALLER)
         assert handler.call_count == 2
 
     async def test_clear_all_cache(self, registry: HandlerRegistry) -> None:
@@ -221,12 +224,12 @@ class TestDefaultQueryBus:
         cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        await bus.query(GetOrderQuery(order_id="ord-all"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-all"), CALLER)
         assert handler.call_count == 1
 
         await bus.clear_all_cache()
 
-        await bus.query(GetOrderQuery(order_id="ord-all"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-all"), CALLER)
         assert handler.call_count == 2
 
     async def test_clear_cache_no_adapter_is_noop(self) -> None:

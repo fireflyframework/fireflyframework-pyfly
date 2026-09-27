@@ -33,6 +33,7 @@ from pyfly.cqrs.cache.decorators import cache_evict, cacheable
 from pyfly.cqrs.command.bus import DefaultCommandBus
 from pyfly.cqrs.command.handler import CommandHandler
 from pyfly.cqrs.command.registry import HandlerRegistry
+from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
 from pyfly.cqrs.decorators import command_handler, query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
@@ -71,7 +72,10 @@ class StockBySkuHandler(QueryHandler[StockBySku, int]):
 @cacheable(cache_key_prefix="stock-summary")
 @query_handler(cacheable=True)
 class StockSummaryHandler(QueryHandler[StockSummary, int]):
+    calls = 0
+
     async def do_handle(self, query: StockSummary) -> int:
+        type(self).calls += 1
         return 30
 
 
@@ -101,7 +105,11 @@ async def test_a_tagged_handler_whose_keys_miss_its_group_is_reported_once(caplo
     cache = QueryCacheAdapter(InMemoryCache())
     queries = DefaultQueryBus(registry=registry, cache_adapter=cache)
     commands = DefaultCommandBus(registry=registry, query_cache=cache)
-    assert await queries.query(StockSummary(region="eu")) == 30
+    alice = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+    StockSummaryHandler.calls = 0
+    for _ in range(2):
+        assert await queries.query_with_context(StockSummary(region="eu"), alice) == 30
+    assert StockSummaryHandler.calls == 1
 
     caplog.set_level(logging.WARNING, logger="pyfly.cqrs.command.bus")
     await commands.send(MoveStock(sku="A"))
@@ -110,4 +118,5 @@ async def test_a_tagged_handler_whose_keys_miss_its_group_is_reported_once(caplo
     warnings = [record.getMessage() for record in caplog.records]
     assert len(warnings) == 1
     assert "StockBySkuHandler" in warnings[0] and "cache_key_prefix" in warnings[0]
-    assert await cache.lookup("stock-summary:summary:eu") == (False, None)  # the prefixed group was evicted
+    assert await queries.query_with_context(StockSummary(region="eu"), alice) == 30
+    assert StockSummaryHandler.calls == 2  # the prefixed group was evicted
