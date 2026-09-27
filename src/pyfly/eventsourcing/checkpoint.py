@@ -28,7 +28,7 @@ and runs each batch as one unit of work on its datasource:
 - the unit commits the read model's writes and the checkpoint together, or rolls both back.
 
 A read model on the checkpoint's datasource therefore gets every event exactly once, across restarts, failures
-and replicas. A handler whose effects live elsewhere (another database, a broker, an e-mail) gets every event
+and replicas. A handler whose effects live elsewhere (another database, a broker, an email) gets every event
 at least once: a batch that fails after such an effect runs again. The store also hands out the lease that makes
 one replica the projection's active runner (:meth:`SqlAlchemyCheckpointStore.projection_lease`, a
 :class:`~pyfly.scheduling.adapters.lease_lock.LeaseLock` on the same datasource).

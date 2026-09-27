@@ -140,10 +140,13 @@ await runner.start()                         # or declare the runner as a bean: 
 
 Every event gets a **global position** on the store's global stream, and `stream_all(after_position=p,
 limit=n)` returns the committed events after position `p`, in position order, each with its
-`global_position` set. Positions follow commit order: once a reader has seen position `p`, no event commits below
-it later. A projection therefore keeps one number as its place, and never skips an event whose transaction
-committed late, never gets an event twice from paging, and never stalls on events that share a timestamp.
-`occurred_at` is the event's data (the clock of the process that built it), never a cursor.
+`global_position` set. Positions only move forward for a reader: once it has seen position `p`, no event appears
+below it later, and an aggregate's events are on the stream in sequence order. A projection therefore keeps one
+number as its place, and never skips an event whose transaction committed late, never gets an event twice from
+paging, and never stalls on events that share a timestamp. `occurred_at` is the event's data (the clock of the
+process that built it), never a cursor. The order across aggregates depends on the
+[position strategy](#position-strategies): with the default one an event appended after another one committed
+comes after it on the stream.
 
 `stream_all(after_event_id=...)`, the cursor of earlier releases, still works: it pages from that event's
 position, and raises `ValueError` for an id that is not on the stream (it used to return nothing, forever).
@@ -168,7 +171,7 @@ the checkpoints' datasource:
 3. the unit commits the read model's writes and the checkpoint together, or rolls both back.
 
 A read model on the checkpoints' datasource therefore gets **every event exactly once**, across restarts,
-failures and replicas. Effects elsewhere (another database, a broker, an e-mail) happen **at least once**: a batch
+failures and replicas. Effects elsewhere (another database, a broker, an email) happen **at least once**: a batch
 that fails after one runs again. `InMemoryCheckpointStore` keeps the positions in the process (tests and
 single-process development); it is not transactional, so a failed batch keeps what it applied before its
 failure.
@@ -189,11 +192,14 @@ another runner has moved meanwhile applies nothing, and its runner carries on fr
 
 - **Full speed while behind.** The runner reads the next page as soon as a full one is applied, and sleeps
   `poll_interval_s` (1 s) only on a short page, once it has caught up. `batch_size` (100) is the page and the
-  batch. Before 26.09.08 the runner slept after every page, 100 events a second at the defaults.
+  batch, of any size: a page read numbers as many committed events as the page needs, so a page is short only
+  when the stream has nothing more. Before 26.09.08 the runner slept after every page, 100 events a second at the
+  defaults.
 - **In order, never past a failure.** A handler that raises stops its batch. The events before it are applied
   (in a batch of their own when the failed batch rolled back), and the failed event is retried after
-  `poll_interval_s` until it succeeds; `projection_event_failed` is logged at ERROR with the event's id. A batch
-  whose commit fails is retried one event at a time, which finds the event that breaks it.
+  `poll_interval_s` until it succeeds; `projection_event_failed` is logged at ERROR with the event's id. The
+  events of a batch whose commit fails are retried one at a time until the runner is past them, which finds the
+  event that breaks it and lets the others through.
 - **Detached.** The runner works in a task of its own, outside any unit of work of the code that started it
   (`pyfly.data.transaction.detached`). It is a lifecycle bean of the consumer phase: it stops, finishing the batch
   in flight, before any `@pre_destroy`.
@@ -239,7 +245,7 @@ pyfly:
       provider: sqlalchemy
       datasource: events                            # optional: a named datasource
       # url: postgresql+asyncpg://user:pass@host/db # or a URL (not both)
-      # position-strategy: auto                     # auto | head-row | xid8
+      # position-strategy: auto                     # auto (head-row for a new table) | head-row | xid8
 ```
 
 The store runs on a datasource of the context's
@@ -285,33 +291,42 @@ event in one `INSERT`; the `UNIQUE (aggregate_id, sequence)` constraint turns a 
 #### Position strategies
 
 The first store that starts on an event table records the table's strategy in its head row. `auto` (the
-default) follows what the table recorded, and chooses for a new table; an explicit strategy that differs from
-the recorded one is refused at start, since two strategies on one table would let readers skip events. Changing a
-table's strategy is a migration with every writer stopped.
+default) follows what the table recorded, and records `head-row` for a new table, on every backend; an explicit
+strategy that differs from the recorded one is refused at start, since two strategies on one table would let
+readers skip events. Changing a table's strategy is a migration with every writer stopped.
 
-- **`head-row`** (every backend; the default except on PostgreSQL). An event is inserted without a position.
-  Reading the stream first numbers the events that have committed since the last read, in a short `READ
-  COMMITTED` unit of its own that locks the head row: a position only ever goes to a committed event, above every
-  position given before, and the positions follow one another without gaps (unless events are deleted). The events of one round are ordered by `recorded_at` (one
-  clock, the database's), then by aggregate and sequence, so an aggregate's events keep their order and an event
-  appended after another committed comes after it. An append never touches the head row: business transactions
-  never wait for one another there, and none fails on it under snapshot isolation (MariaDB 11's `REPEATABLE
-  READ`, PostgreSQL's). The reader needs write access to the tables, and a read inside a unit of work on the
-  store's datasource shows only what is already numbered.
-- **`xid8`** (PostgreSQL 13 or later; the default there). An event's position is its writer's transaction id
-  times 2^20 plus its place among that transaction's events, set as it is inserted; a reader sees only the
-  positions below its snapshot's horizon (`pg_snapshot_xmin(pg_current_snapshot())`). Every transaction below the
-  horizon has ended, so nothing can commit below what a reader has seen, and reading writes nothing. The
-  trade-off: a transaction left open anywhere on the server (idle in transaction) holds the stream back until it
-  ends. Delivery waits; nothing is skipped. Keep `idle_in_transaction_session_timeout` set. A server that speaks
-  PostgreSQL's protocol without these functions gets `head-row`.
+- **`head-row`** (every backend; the default). An event is inserted without a position. Reading the stream first
+  numbers the events that have committed since the last read (as many as the page needs), in short `READ
+  COMMITTED` units of their own that lock the head row: a position only ever goes to a committed event, above
+  every position given before, and the positions follow one another without gaps (unless events are deleted).
+  The events of one round are ordered by `recorded_at` (one clock, the database's), then by aggregate and
+  sequence, so an aggregate's events keep their order and an event appended after another one committed comes
+  after it. On SQLite `recorded_at` counts milliseconds: two events of different aggregates recorded in the same
+  millisecond and numbered in the same round are ordered by aggregate id. An append never touches the head row:
+  business transactions never wait for one another there, and none fails on it under snapshot isolation
+  (MariaDB 11's `REPEATABLE READ`, PostgreSQL's). The reader needs write access to the tables, and a read inside
+  a unit of work on the store's datasource shows only what is already numbered.
+- **`xid8`** (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing). An event's position is
+  its writer's transaction id times 2^20 plus its place among that transaction's events, set as it is inserted;
+  a reader sees only the positions below its snapshot's horizon (`pg_snapshot_xmin(pg_current_snapshot())`).
+  Every transaction below the horizon has ended, so nothing can appear below what a reader has seen. A server
+  without these functions (one that speaks PostgreSQL's protocol) refuses `xid8` at start. The stream follows the
+  order in which the writers took their transaction ids, not the order they committed in. An aggregate's order
+  is kept by a guard: an append whose transaction's id is below the id of an event the aggregate already has (a
+  unit that wrote something first, then appended to an aggregate another unit had appended to and committed
+  meanwhile) raises `ConcurrencyError`, and the command runs again in a new unit, with a new id. The order across
+  aggregates is not kept: an event appended after reading another aggregate's committed event can stream before
+  that event, so a projection that relates aggregates needs `head-row`. And a transaction left open anywhere on
+  the server (idle in transaction) holds the stream back until it ends: delivery waits, nothing is skipped; keep
+  `idle_in_transaction_session_timeout` set.
 
 #### Upgrading from 26.09.07
 
 Earlier releases created `pyfly_event_store` with `occurred_at TIMESTAMP` and no global position, and ordered the
 stream by `occurred_at`. The store refuses such a table at start (`pyfly_event_store.global_position does not
-exist`). Stop the writers of the earlier release, then add the columns (and on PostgreSQL convert the timestamps
-to UTC instants):
+exist`). Stop the writers of the earlier release (an event they insert later has no position; on an `xid8` table
+the next start places it below what projections may have passed, with an `event_store_positions_below_readers`
+WARNING), then add the columns (and on PostgreSQL convert the timestamps to UTC instants):
 
 ```sql
 -- PostgreSQL
@@ -333,11 +348,12 @@ ALTER TABLE pyfly_event_store ADD COLUMN recorded_at DATETIME;
 ALTER TABLE pyfly_event_store ADD COLUMN global_position BIGINT;
 ```
 
-With migrations owning the schema, also create the head table and the index
-(`CREATE UNIQUE INDEX ix_pyfly_event_store_global_position ON pyfly_event_store (global_position)`), or let
-Alembic autogenerate them from `framework_metadata`; otherwise the store creates both when it starts. Starting
-then places the events already stored on the stream, oldest `occurred_at` first, before any event appended
-since. Projections built by the earlier runner replayed the store at every start: give them
+With migrations owning the schema (`ddl-auto: none`), also create the head table `pyfly_event_store_head` and the
+index (`CREATE UNIQUE INDEX ix_pyfly_event_store_global_position ON pyfly_event_store (global_position)`), and the
+tables of the `projection_checkpoint_store` bean, which follows the event store's provider by default:
+`pyfly_projection_checkpoints` and the lease table `pyfly_locks`. Alembic autogenerates all four from
+`framework_metadata`; otherwise the stores create them when they start. Starting then places the events already
+stored on the stream, oldest `occurred_at` first, before any event appended since. Projections built by the earlier runner replayed the store at every start: give them
 `start_from="latest"` (or reset their checkpoint to `last_position()`) on the first start with checkpoints, so
 they do not replay it once more.
 
@@ -430,7 +446,7 @@ consumers, and every store resolves its datasource in the context's `DataSourceR
 | `pyfly.eventsourcing.store.provider` | `memory` | Event store backend: `memory` or `sqlalchemy`. |
 | `pyfly.eventsourcing.store.datasource` | *(none)* | The datasource the event store runs on (`primary` or a named datasource). Not with `url`. |
 | `pyfly.eventsourcing.store.url` | *(none)* | Async SQLAlchemy URL for the event store. None (and no `datasource`): the primary datasource (no primary is a startup error). The same URL as a registered datasource reuses its engine; another URL registers the `event-store` datasource. |
-| `pyfly.eventsourcing.store.position-strategy` | `auto` | How global positions are given out: `auto`, `head-row` or `xid8` (see [Position strategies](#position-strategies)). |
+| `pyfly.eventsourcing.store.position-strategy` | `auto` | How global positions are given out: `auto` (what the table recorded; `head-row` for a new table), `head-row` or `xid8` (PostgreSQL, opt-in; see [Position strategies](#position-strategies)). |
 | `pyfly.eventsourcing.snapshot.provider` | `memory` | Snapshot store backend: `memory` or `sqlalchemy`. |
 | `pyfly.eventsourcing.snapshot.datasource` | *(none)* | The datasource the snapshot store runs on. Not with `url`. |
 | `pyfly.eventsourcing.snapshot.url` | *(none)* | Async SQLAlchemy URL for the snapshot store. None (and no `datasource`): the primary datasource (no primary is a startup error). The same URL as a registered datasource reuses its engine; another URL registers the `snapshot-store` datasource. |
@@ -443,17 +459,20 @@ consumers, and every store resolves its datasource in the context's `DataSourceR
 
 The in-memory adapters and the runner's paging, failure policy and SPI compatibility are covered in
 `tests/eventsourcing/`. Every SQL adapter runs on every relational lane of the backend matrix (SQLite file in
-the fast suite; PostgreSQL with both position strategies, MySQL 8 and MariaDB 11 with `-m integration`):
+the fast suite; PostgreSQL, MySQL 8 and MariaDB 11 with `-m integration`; PostgreSQL runs the event store and
+projection scenarios once per position strategy):
 
 - `tests/integration/test_event_store_matrix.py`: commit order, ties, a transaction committing late, concurrent
-  appends, the business transaction's rollback (proof p10), one `INSERT` per append, the upgrade of an earlier
-  release's table;
+  appends, an aggregate appended to across units, the business transaction's rollback (proof p10), one `INSERT`
+  per append, the upgrade of an earlier release's table;
 - `tests/integration/test_snapshot_store_matrix.py`: the conditional upsert, UTC instants, snapshots and events
   committing together;
 - `tests/integration/test_projection_matrix.py`: restart without replay, two replicas on one non-idempotent
-  read model, a handler failing between its two writes, a late-committing writer, catch-up of 1000 events at
-  the default settings, rebuilds;
-- `tests/integration/test_eventsourcing_postgres_integration.py`: the `xid8` horizon and the PostgreSQL upgrade.
+  read model, a handler failing between its two writes, a batch failing at commit, a late-committing writer, an
+  aggregate's events in order across units, catch-up of 1000 events at the default settings and of 5000 with
+  pages larger than a numbering round, rebuilds;
+- `tests/integration/test_eventsourcing_postgres_integration.py`: the `xid8` horizon, events left without a
+  position on an `xid8` table, and the PostgreSQL upgrade.
 
 ```
 uv run pytest tests/eventsourcing tests/integration/test_event_store_matrix.py -q        # SQLite lane
