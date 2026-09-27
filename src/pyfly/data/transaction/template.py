@@ -328,8 +328,11 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
             rollback_error.__cause__ = reason
         outcome.error = rollback_error
         return
-    # Checked right before the unit leaves ACTIVE, with no await in between: a savepoint opened after this
-    # check cannot hold work the commit takes, since the unit refuses every operation from here on.
+    # Checked right before the unit leaves ACTIVE, with no await in between. A savepoint recorded after this
+    # check (one opened later, or one whose SAVEPOINT was in flight under the guard and is recorded once it
+    # returns) cannot hold work the commit takes: work inside it is an operation that starts after this
+    # point, and the unit refuses every operation from here on. The task that opened it then fails loudly
+    # when its scope tries to end the savepoint on the completed unit.
     refusal = _commit_refused(unit)
     if refusal is not None:
         unit.set_rollback_only(refusal, depth=0)
