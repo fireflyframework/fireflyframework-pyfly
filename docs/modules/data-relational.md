@@ -1512,10 +1512,13 @@ this order:
 2. inside an HTTP request, the context the security filters established for it
    (`request.state.security_context`), whichever filter did: a bearer token, HTTP Basic, X.509, or a
    session (form login, OAuth2 login, switch-user impersonation);
-3. `RequestContext.current().security_context`.
+3. `RequestContext.current().security_context`, which also wins over an anonymous
+   `request.state.security_context` (what `SecurityFilter` sets when it authenticated nobody) when it holds
+   an authenticated principal.
 
 Scheduled jobs, message listeners and shell commands have no request. Declare who they act as with
-`run_as`, as a decorator or a block:
+`run_as`, as a decorator or a block. One `run_as(...)` object can be shared (a module-level
+`SYSTEM = run_as("system")` entered by concurrent jobs): each task restores its own previous context.
 
 ```python
 from pyfly.data.auditing import run_as

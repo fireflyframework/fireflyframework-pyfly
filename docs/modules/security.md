@@ -246,7 +246,9 @@ code that is not handed the request: services, auditing (`AuditorAware`), backgr
 2. inside an HTTP request, the context the security filters established (`request.state.security_context`),
    read live, whichever filter authenticated the request: a bearer token, HTTP Basic, X.509, or the session
    a form login, OAuth2 login or switch-user stored (restored by `OAuth2SessionSecurityFilter`);
-3. `RequestContext.current().security_context`.
+3. `RequestContext.current().security_context`, which also wins over an anonymous
+   `request.state.security_context` (what `SecurityFilter` sets when it authenticated nobody) when it holds
+   an authenticated principal.
 
 ```python
 from pyfly.security import SecurityContext, SecurityContextHolder
