@@ -215,12 +215,13 @@ Resolves an instance of the given type. The resolution order is:
 3. **Multiple bindings** -- pick the implementation marked `@primary`.
 4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if multiple candidates exist without a `@primary`.
 
-Once `ApplicationContext.stop()` starts destroying beans, resolving a bean that does not exist yet
-(a singleton the stop released, a transient or scoped bean) raises
-`BeanCreationNotAllowedError` (Spring's `BeanCreationNotAllowedException`): a bean built then would
-outlive the stop, as an `AsyncEngine` rebuilt after the datasource registry closed did. The
-instances that still exist are handed out until the stop releases them; `start()` allows creation
-again.
+Once `ApplicationContext.stop()` starts destroying beans, resolving a singleton that does not
+exist yet raises `BeanCreationNotAllowedError` (Spring's `BeanCreationNotAllowedException`): a bean
+built then would outlive the stop, as an `AsyncEngine` rebuilt after the datasource registry closed
+did. Transient and scoped beans are still built while the singletons are destroyed, so a
+`@pre_destroy` can use them; once the stop has released the singletons, no bean of any scope is
+built. The instances that still exist are handed out until the stop releases them; `start()` allows
+creation again.
 
 Constructor parameters are resolved recursively via type hints. If a parameter uses
 `Annotated[T, Qualifier("name")]`, the container resolves by name instead of type.
@@ -572,9 +573,8 @@ class ScopeHandler(Protocol):
   `object_factory()` (at most once), caches the result, and returns it.
 - `remove(name)` evicts `name`, returning the removed instance or `None`.
 - Optionally, `evict_all() -> dict[str, Any]` evicts every cached instance and returns them by
-  name. When a handler has it, `ApplicationContext.stop()` calls it and runs the `@pre_destroy`
-  methods of the returned instances, before destroying the singletons (the built-in refresh
-  scope implements it).
+  name. When a handler has it, `ApplicationContext.stop()` calls it and destroys the returned
+  instances after the singletons' `@pre_destroy` (the built-in refresh scope implements it).
 
 `name` is the bean's scope key: `__pyfly_bean_<module>.<class qualname>`, followed by
 `#<bean name>` for a named bean. It identifies the bean *definition*, so two `@bean` methods that
@@ -1349,17 +1349,24 @@ When `ApplicationContext.stop()` is called (each step bounded per bean by
 2. **Drain** -- background tasks are cancelled, the `TaskScheduler` stops (it waits for the jobs in
    flight), and the lifecycle beans of `CONSUMER_PHASE` and above stop, so nothing dispatches new
    work into the beans about to be destroyed.
-3. **Destroy** -- from here on the container builds no bean (`BeanCreationNotAllowedError`). The
-   instances the custom scopes hold (refresh-scoped beans) get their `@pre_destroy`, then every
-   singleton does, each bean **before the beans it depends on** (reverse creation order).
+3. **Destroy** -- from here on the container builds no **singleton**
+   (`BeanCreationNotAllowedError`), while transient and scoped beans are still built (Spring's
+   "singletons currently in destruction"). Every singleton gets its `@pre_destroy`, each bean
+   **before the beans it depends on** (reverse creation order), so a `@pre_destroy` that writes
+   through a `Provider[AsyncSession]` or a proxied refresh-scoped datasource succeeds. Then the
+   instances the custom scopes hold (refresh-scoped beans) are destroyed, after the singletons that
+   used them.
 4. **Stop the other lifecycle beans** -- highest phase first, in reverse start order within a
-   phase. They own the resources the destroyed beans used (clients, the `create-drop` schema).
+   phase. They own the resources the destroyed beans used (clients, the `create-drop` schema). A
+   scoped instance one of them builds while stopping is destroyed right after; from then on no
+   scoped instance is built either, since nothing would destroy it.
 5. **Dispose the resource registries** -- every bean that implements
    `pyfly.kernel.lifecycle.ResourceRegistry` (`async dispose_all()`): the `DataSourceRegistry`
    closes every engine, **last**.
 6. **Release** -- the singletons this run built are released, and everything the run added (the
    started lifecycle beans, the post-processors discovered from beans, the event listeners it
-   wired, the post-create hook) is forgotten, so a later `start()` is a cold start.
+   wired, the post-create hook) is forgotten, so a later `start()` is a cold start. From here on
+   the container builds no bean of any scope until the context starts again.
 
 Until 26.09.07 the lifecycle beans stopped first, in reverse registration order, then
 `@pre_destroy` ran and `ContextClosedEvent` came last: the primary engine was disposed before the

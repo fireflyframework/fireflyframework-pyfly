@@ -32,7 +32,9 @@ after the beans it depends on:
 2. the drain: background tasks are cancelled, the ``TaskScheduler`` stops (waiting for the jobs in
    flight), and the lifecycle beans of :data:`CONSUMER_PHASE` or above stop, so that nothing
    dispatches new work into beans that are about to be destroyed;
-3. ``@pre_destroy`` runs on every bean, each before the beans it depends on;
+3. ``@pre_destroy`` runs on every singleton, each before the beans it depends on (no singleton
+   is created from here on, a transient or scoped bean still is), then the instances the custom
+   scopes hold (refresh-scoped beans) are destroyed;
 4. the other lifecycle beans stop: they own the resources the destroyed beans used (clients,
    schema, the datasource lifecycle);
 5. every :class:`ResourceRegistry` bean (the datasource registry) is disposed, last.

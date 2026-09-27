@@ -16,6 +16,9 @@
 - C033/C101: a ``@pre_destroy`` and a user lifecycle bean write during the stop and succeed, because
   the datasource registry closes after them; afterwards the server holds no connection of the
   application, and nothing (a late ``get_bean(AsyncEngine)``, a bean that kept the engine) reopens one.
+  A ``@pre_destroy`` that writes through a ``Provider[AsyncSession]`` or a proxied refresh-scoped
+  datasource succeeds too: only singleton creation stops while the singletons are destroyed, and the
+  scoped instances are destroyed after them.
 - A database that went silent at shutdown (a middlebox black-holes the pooled connections) used to
   keep ``ctx.stop()`` waiting in the driver's close until the kernel gave up on the socket; the close
   is now bounded and the stuck connections are terminated.
@@ -38,9 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
-from pyfly.container import Qualifier, bean, configuration, service
+from pyfly.container import Provider, Qualifier, bean, configuration, service
 from pyfly.container.exceptions import BeanCreationNotAllowedError
-from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy
+from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, refresh_scope, scoped_proxy
 from pyfly.context.application_context import ApplicationContext
 from pyfly.context.lifecycle import pre_destroy
 from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
@@ -155,6 +158,78 @@ async def test_stop_releases_every_connection_after_the_last_write(relational_ba
     finally:
         await check.dispose()
     assert bodies == ["relay-start", "pre_destroy", "relay-final"]
+
+
+def _app_engine(url: str, app_name: str) -> AsyncEngine:
+    """An engine of the application's own, visible to :func:`_server_connections` on every lane."""
+    if make_url(url).get_backend_name() == "postgresql":
+        return create_async_engine(url, connect_args={"server_settings": {"application_name": app_name}})
+    return create_async_engine(url)  # MySQL/MariaDB count every connection to the test's database
+
+
+@service
+class _ProviderAuditor:
+    def __init__(self, sessions: Provider[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    @pre_destroy
+    async def flush(self) -> None:
+        async with self._sessions.get() as session, session.begin():
+            session.add(_ShutdownNote(body="provider-pre_destroy"))
+        _OUTCOMES.append("provider-pre_destroy")
+
+
+_REPORTING: dict[str, str] = {}
+
+
+@refresh_scope(proxy=True)
+class _ReportingSource:
+    def __init__(self) -> None:
+        self.engine = _app_engine(_REPORTING["url"], _REPORTING["app"])
+
+    async def write(self, body: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("INSERT INTO wp07_shutdown_note (body) VALUES (:body)"), {"body": body})
+
+    @pre_destroy
+    async def close(self) -> None:
+        _OUTCOMES.append("reporting-destroyed")
+        await self.engine.dispose()
+
+
+@service
+class _ReportingLedger:
+    def __init__(self, reporting: _ReportingSource) -> None:
+        self.reporting = reporting
+
+    @pre_destroy
+    async def flush(self) -> None:
+        await self.reporting.write("proxy-pre_destroy")
+        _OUTCOMES.append("proxy-pre_destroy")
+
+
+async def test_pre_destroy_writes_through_transient_sessions_and_a_proxied_datasource(
+    relational_backend: RelationalBackend,
+) -> None:
+    _OUTCOMES.clear()
+    app_name = f"pyfly-predestroy-{uuid.uuid4().hex[:8]}"
+    await relational_backend.create_tables(_ShutdownNote)
+    _REPORTING.update({"url": relational_backend.url, "app": app_name})
+    context = ApplicationContext(relational_backend.config({"pyfly.app.name": app_name}))
+    context.register_bean(_ProviderAuditor)
+    context.register_bean(_ReportingSource)
+    context.register_bean(_ReportingLedger)
+    await context.start()
+    await context.get_bean(_ReportingLedger).reporting.write("running")
+
+    await context.stop()
+
+    # Both singletons wrote; the scoped datasource was destroyed after them.
+    assert sorted(_OUTCOMES[:2]) == ["provider-pre_destroy", "proxy-pre_destroy"]
+    assert _OUTCOMES[2:] == ["reporting-destroyed"]
+    if not relational_backend.is_embedded:
+        assert await _settles_at_zero(relational_backend, app_name) == 0
+    assert sorted(await _bodies(relational_backend.url)) == ["provider-pre_destroy", "proxy-pre_destroy", "running"]
 
 
 def _proxied(backend: RelationalBackend, port: int) -> str:

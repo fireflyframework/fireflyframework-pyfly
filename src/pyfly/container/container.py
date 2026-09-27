@@ -25,7 +25,7 @@ import time
 import types
 import typing
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Annotated, Any, TypeVar, Union, cast, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
@@ -247,10 +247,13 @@ class Container:
         # The scoped proxy of each proxied registration, by registration identity (the registration
         # is kept with it, so a recycled id never hands out another registration's proxy).
         self._scoped_proxies: dict[int, tuple[Registration, Any]] = {}
-        # Why the container builds no bean at the moment, or None while it may. ApplicationContext
-        # sets it when stop() starts destroying beans and clears it when start() begins, so a
-        # stopped context never rebuilds a singleton it released (an engine nobody would dispose).
+        # Why the container builds no bean at the moment, or None while it may, and the scopes that
+        # applies to (None: every scope). ApplicationContext refuses singletons when stop() starts
+        # destroying beans, every scope once they are released, and allows creation again when start()
+        # begins, so a stopped context never rebuilds a singleton it released (an engine nobody would
+        # dispose).
         self._creation_refused: str | None = None
+        self._refused_scopes: frozenset[ScopeSpec] | None = None
 
     @property
     def _resolving(self) -> dict[type, None]:
@@ -261,22 +264,26 @@ class Container:
             self._resolving_local.stack = stack
         return stack
 
-    def refuse_creation(self, reason: str) -> None:
-        """Build no bean from now on; resolving one that does not exist yet raises
-        :class:`~pyfly.container.exceptions.BeanCreationNotAllowedError` with *reason*.
+    def refuse_creation(self, reason: str, *, scopes: Iterable[ScopeSpec] | None = None) -> None:
+        """Build no bean of *scopes* (of any scope when ``None``) from now on; resolving one that does
+        not exist yet raises :class:`~pyfly.container.exceptions.BeanCreationNotAllowedError` with *reason*.
 
-        The instances that exist are still handed out. This is Spring's "singletons currently in
-        destruction" state; :meth:`allow_creation` ends it.
+        The instances that exist are still handed out. ``scopes=(Scope.SINGLETON,)`` is Spring's
+        "singletons currently in destruction" state: a transient or scoped bean can still be built,
+        so a ``@pre_destroy`` that writes through a ``Provider[AsyncSession]`` works.
+        :meth:`allow_creation` ends it.
         """
         self._creation_refused = reason
+        self._refused_scopes = None if scopes is None else frozenset(scopes)
 
     def allow_creation(self) -> None:
         """Build beans again (see :meth:`refuse_creation`)."""
         self._creation_refused = None
+        self._refused_scopes = None
 
     @property
     def creation_refused(self) -> bool:
-        """Whether the container currently refuses to build beans."""
+        """Whether the container currently refuses to build beans (of one scope at least)."""
         return self._creation_refused is not None
 
     def register_scope(self, name: str, handler: ScopeHandler) -> None:
@@ -597,8 +604,9 @@ class Container:
 
     def _create_initialized(self, reg: Registration) -> Any:
         """Create an instance of *reg* and run the post-create hook on it (the init pipeline)."""
-        if self._creation_refused is not None:
-            raise BeanCreationNotAllowedError(bean=reg.display_name, reason=self._creation_refused)
+        refused = self._creation_refused
+        if refused is not None and (self._refused_scopes is None or reg.scope in self._refused_scopes):
+            raise BeanCreationNotAllowedError(bean=reg.display_name, reason=refused)
         instance = self._create_instance(reg)
         hook = self._post_create_hook
         return instance if hook is None else hook(instance, reg)

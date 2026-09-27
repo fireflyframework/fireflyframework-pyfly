@@ -53,6 +53,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+#: Why the container builds no singleton while :meth:`ApplicationContext.stop` destroys the beans.
+_STOPPING = "the application context is stopping"
+#: Why it builds no bean at all once the stop released them.
+_STOPPED = "the application context is stopped; start it again to use its beans"
+
 
 @dataclasses.dataclass(frozen=True)
 class _DeferredBeanMethod:
@@ -473,16 +478,20 @@ class ApplicationContext:
         2. the drain: background tasks are cancelled, the ``TaskScheduler`` stops (it waits for the
            jobs in flight), and the consumer-phase lifecycle beans stop (event buses, message
            brokers: :data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE`), so no new work arrives;
-        3. from here on the container builds no bean (:class:`BeanCreationNotAllowedError`); the
-           refresh-scoped beans, then every singleton, get their ``@pre_destroy``, each bean before
-           the beans it depends on;
+        3. from here on the container builds no singleton (:class:`BeanCreationNotAllowedError`), but
+           still builds transient and scoped beans; every singleton gets its ``@pre_destroy``, each
+           bean before the beans it depends on, so a ``@pre_destroy`` can still write through a
+           ``Provider[AsyncSession]`` or a proxied refresh-scoped datasource; then the instances the
+           custom scopes hold (refresh-scoped beans) are destroyed;
         4. the other lifecycle beans stop, highest phase first and in reverse start order within a
-           phase: they own what the destroyed beans used (clients, ``create-drop`` schema);
+           phase: they own what the destroyed beans used (clients, ``create-drop`` schema). A scoped
+           instance one of them built while stopping is destroyed after them, and from then on no
+           scoped instance is built either;
         5. every :class:`~pyfly.kernel.lifecycle.ResourceRegistry` bean is disposed: the datasource
            registry closes every engine, last;
         6. the singletons this run built are released, and everything the run added (lifecycle
            beans, discovered post-processors, event listeners, the post-create hook) is reset, so a
-           restart is a cold start.
+           restart is a cold start. From here on the container builds no bean of any scope.
 
         Until 26.09.07 the adapters stopped first, in reverse registration order: the primary engine
         was disposed before the consumers, the user lifecycle beans and every ``@pre_destroy``, and
@@ -558,16 +567,11 @@ class ApplicationContext:
                 stopped.add(id(bean))
                 await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
-        # 3. Destroy. From here on nothing is created: a singleton resolved now would outlive the stop.
-        # The instances the custom scopes hold (refresh-scoped datasources) go first: nothing a
-        # singleton holds depends on them except through a proxy or a Provider.
-        self._container.refuse_creation("the application context is stopping")
-        for handler in list(self._container._custom_scopes.values()):
-            evict_all = getattr(handler, "evict_all", None)
-            if not callable(evict_all):
-                continue
-            for scoped in list(evict_all().values()):
-                await self._destroy_scoped_instance(scoped, timeout=shutdown_timeout)
+        # 3. Destroy the singletons, each before the beans it depends on. From here on no SINGLETON is
+        # created: one resolved now would outlive the stop. A transient or scoped bean still is (Spring
+        # refuses only singletons while they are destroyed), so a @pre_destroy can still write through
+        # a Provider[AsyncSession] or a proxied refresh-scoped datasource.
+        self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON,))
         live = self._live_instances_in_destroy_order()
         for instance in live:
             try:
@@ -578,12 +582,34 @@ class ApplicationContext:
                     extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
                 )
 
+        # 3b. The instances the custom scopes hold (refresh-scoped datasources), now that the singletons
+        # that used them through a proxy or a Provider are done with them.
+        await self._destroy_scoped_instances(shutdown_timeout)
+
         # 4. The lifecycle beans that own what the destroyed beans used.
         for bean in stop_order:
             if id(bean) not in stopped:
                 stopped.add(id(bean))
                 await self._stop_lifecycle_bean(bean, shutdown_timeout)
+
+        # 4b. A scoped instance a lifecycle bean built while it stopped is destroyed as well. After this
+        # no scoped instance is created either: nothing would destroy it.
+        await self._destroy_scoped_instances(shutdown_timeout)
+        self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON, *self._container._custom_scopes))
         return live
+
+    async def _destroy_scoped_instances(self, timeout: float) -> None:
+        """Evict every instance the custom scopes hold and destroy each, the most recently created first.
+
+        A scoped bean is cached after the scoped beans it depends on, so the reverse cache order destroys
+        each before its dependencies. Only a scope whose handler offers ``evict_all()`` can be emptied.
+        """
+        for handler in list(self._container._custom_scopes.values()):
+            evict_all = getattr(handler, "evict_all", None)
+            if not callable(evict_all):
+                continue
+            for scoped in reversed(list(evict_all().values())):
+                await self._destroy_scoped_instance(scoped, timeout=timeout)
 
     def _release_run(self, live: list[Any]) -> None:
         """Step 6 of :meth:`stop`: release the destroyed singletons and forget what the run added."""
@@ -622,7 +648,7 @@ class ApplicationContext:
         self._task_scheduler = None
         self._creation_order.clear()
         self._wiring_counts = {}
-        self._container.refuse_creation("the application context is stopped; start it again to use its beans")
+        self._container.refuse_creation(_STOPPED)
         self._started = False
 
     async def _destroy_scoped_instance(self, instance: Any, *, timeout: float | None = None) -> None:

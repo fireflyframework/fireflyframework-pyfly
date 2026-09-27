@@ -41,8 +41,9 @@ from sqlalchemy import Integer, String, event, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.orm import Mapped, mapped_column  # noqa: E402
 
-from pyfly.container import bean, component, configuration, service  # noqa: E402
+from pyfly.container import Provider, bean, component, configuration, service  # noqa: E402
 from pyfly.container.exceptions import BeanCreationNotAllowedError  # noqa: E402
+from pyfly.container.refresh_scope import refresh_scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.context.events import ContextClosedEvent, app_event_listener  # noqa: E402
 from pyfly.context.lifecycle import post_construct, pre_destroy  # noqa: E402
@@ -225,6 +226,163 @@ async def test_nothing_rebuilds_the_database_after_stop(tmp_path: Path) -> None:
         assert await _write(ctx.get_bean(async_sessionmaker), "restarted") == "ok"
     finally:
         await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# A @pre_destroy can still use transient and scoped beans: only SINGLETON creation stops while the
+# singletons are destroyed, and the scoped instances are destroyed after the singletons that use them.
+# ---------------------------------------------------------------------------
+
+
+@service
+class _SessionAuditor:
+    """Writes its last rows through a ``Provider`` of the transient ``AsyncSession`` bean."""
+
+    def __init__(self, sessions: Provider[AsyncSession]) -> None:
+        self.sessions = sessions
+
+    @pre_destroy
+    async def flush(self) -> None:
+        try:
+            async with self.sessions.get() as session, session.begin():
+                session.add(_LifecycleNote(body="provider-pre_destroy"))
+        except Exception as exc:  # noqa: BLE001 — the test reports the failure instead of raising it
+            EVENTS.append(f"auditor.pre_destroy:{type(exc).__name__}")
+            return
+        EVENTS.append("auditor.pre_destroy:ok")
+
+
+async def test_a_pre_destroy_writes_through_a_provider_of_transient_sessions(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    ctx = ApplicationContext(_config(url))
+    ctx.register_bean(_SessionAuditor)
+    await ctx.start()
+    auditor = ctx.get_bean(_SessionAuditor)
+
+    await ctx.stop()
+
+    assert EVENTS == ["auditor.pre_destroy:ok"]
+    assert await _bodies(url) == ["provider-pre_destroy"]
+    with pytest.raises(BeanCreationNotAllowedError):  # a stopped context builds nothing, of any scope
+        auditor.sessions.get()
+
+
+_REPORTING_URL: list[str] = []
+
+
+@refresh_scope(proxy=True)
+class _ReportingSource:
+    """A refresh-scoped datasource that owns its engine and disposes it when it is destroyed."""
+
+    built = 0
+
+    def __init__(self) -> None:
+        type(self).built += 1
+        self.seq = type(self).built
+        self.engine = create_async_engine(_REPORTING_URL[0])
+
+    async def write(self, body: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE IF NOT EXISTS report (body TEXT NOT NULL)"))
+            await conn.execute(text("INSERT INTO report (body) VALUES (:body)"), {"body": body})
+
+    @pre_destroy
+    async def close(self) -> None:
+        EVENTS.append(f"reporting#{self.seq}.pre_destroy")
+        await self.engine.dispose()
+
+
+@service
+class _ReportLedger:
+    def __init__(self, reporting: _ReportingSource) -> None:
+        self.reporting = reporting  # a scoped proxy
+
+    @pre_destroy
+    async def flush(self) -> None:
+        try:
+            await self.reporting.write("ledger-pre_destroy")
+        except Exception as exc:  # noqa: BLE001 — the test reports the failure instead of raising it
+            EVENTS.append(f"ledger.pre_destroy:{type(exc).__name__}")
+            return
+        EVENTS.append("ledger.pre_destroy:ok")
+
+
+class _ReportRelay:
+    """A lifecycle bean that writes its checkpoint through the proxied datasource when it stops."""
+
+    def __init__(self, reporting: _ReportingSource) -> None:
+        self.reporting = reporting
+
+    async def start(self) -> None:
+        EVENTS.append("relay.start")
+
+    async def stop(self) -> None:
+        try:
+            await self.reporting.write("relay-stop")
+        except Exception as exc:  # noqa: BLE001 — the test reports the failure instead of raising it
+            EVENTS.append(f"relay.stop:{type(exc).__name__}")
+            return
+        EVENTS.append("relay.stop:ok")
+
+
+@configuration
+class _RelayOverReporting:
+    @bean
+    def report_relay(self, reporting: _ReportingSource) -> _ReportRelay:
+        return _ReportRelay(reporting)
+
+
+async def _report_bodies(url: str) -> list[str]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            return list((await conn.execute(text("SELECT body FROM report ORDER BY rowid"))).scalars())
+    finally:
+        await engine.dispose()
+
+
+async def test_a_pre_destroy_writes_through_a_proxied_refresh_scoped_datasource(tmp_path: Path) -> None:
+    _REPORTING_URL[:] = [f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"]
+    _ReportingSource.built = 0
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_ReportingSource)
+    ctx.register_bean(_ReportLedger)
+    await ctx.start()
+    ledger = ctx.get_bean(_ReportLedger)
+    await ledger.reporting.write("running")
+    engine = ledger.reporting.engine
+
+    await ctx.stop()
+
+    # The singleton writes first, then the scoped instance it used is destroyed.
+    assert EVENTS == ["ledger.pre_destroy:ok", "reporting#1.pre_destroy"]
+    assert await _report_bodies(_REPORTING_URL[0]) == ["running", "ledger-pre_destroy"]
+    assert engine.pool.checkedin() == 0
+
+
+async def test_a_scoped_instance_a_lifecycle_bean_builds_while_it_stops_is_destroyed_too(tmp_path: Path) -> None:
+    """The lifecycle beans stop after the scoped instances were destroyed; one that uses a proxied
+    datasource on stop gets a new instance, and the stop destroys that one as well instead of leaking
+    its pool."""
+    _REPORTING_URL[:] = [f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"]
+    _ReportingSource.built = 0
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_ReportingSource)
+    ctx.register_bean(_ReportLedger)
+    ctx.register_bean(_RelayOverReporting)
+    await ctx.start()
+    await ctx.get_bean(_ReportLedger).reporting.write("running")
+
+    await ctx.stop()
+
+    assert EVENTS == [
+        "relay.start",
+        "ledger.pre_destroy:ok",
+        "reporting#1.pre_destroy",
+        "relay.stop:ok",
+        "reporting#2.pre_destroy",
+    ]
+    assert await _report_bodies(_REPORTING_URL[0]) == ["running", "ledger-pre_destroy", "relay-stop"]
 
 
 # ---------------------------------------------------------------------------
