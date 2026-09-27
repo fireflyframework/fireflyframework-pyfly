@@ -31,6 +31,7 @@ from pyfly.container.autowired import Autowired
 from pyfly.container.bean import Qualifier
 from pyfly.container.exceptions import (
     BeanCreationException,
+    BeanCreationNotAllowedError,
     BeanCurrentlyInCreationError,
     NoSuchBeanError,
     NoUniqueBeanError,
@@ -192,6 +193,10 @@ class Container:
         # singleton first resolved while the context starts, get the BeanPostProcessors and
         # @post_construct like any eager singleton. None for a bare container.
         self._post_create_hook: Callable[[Any, Registration], Any] | None = None
+        # Why the container builds no bean at the moment, or None while it may. ApplicationContext
+        # sets it when stop() starts destroying beans and clears it when start() begins, so a
+        # stopped context never rebuilds a singleton it released (an engine nobody would dispose).
+        self._creation_refused: str | None = None
 
     @property
     def _resolving(self) -> dict[type, None]:
@@ -201,6 +206,24 @@ class Container:
             stack = {}
             self._resolving_local.stack = stack
         return stack
+
+    def refuse_creation(self, reason: str) -> None:
+        """Build no bean from now on; resolving one that does not exist yet raises
+        :class:`~pyfly.container.exceptions.BeanCreationNotAllowedError` with *reason*.
+
+        The instances that exist are still handed out. This is Spring's "singletons currently in
+        destruction" state; :meth:`allow_creation` ends it.
+        """
+        self._creation_refused = reason
+
+    def allow_creation(self) -> None:
+        """Build beans again (see :meth:`refuse_creation`)."""
+        self._creation_refused = None
+
+    @property
+    def creation_refused(self) -> bool:
+        """Whether the container currently refuses to build beans."""
+        return self._creation_refused is not None
 
     def register_scope(self, name: str, handler: ScopeHandler) -> None:
         """Register a custom bean scope (Spring's ``ConfigurableBeanFactory.registerScope``).
@@ -456,6 +479,8 @@ class Container:
 
     def _create_initialized(self, reg: Registration) -> Any:
         """Create an instance of *reg* and run the post-create hook on it (the init pipeline)."""
+        if self._creation_refused is not None:
+            raise BeanCreationNotAllowedError(bean=reg.display_name, reason=self._creation_refused)
         instance = self._create_instance(reg)
         hook = self._post_create_hook
         return instance if hook is None else hook(instance, reg)

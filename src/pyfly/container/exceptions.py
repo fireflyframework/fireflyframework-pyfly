@@ -171,3 +171,23 @@ class BeanCurrentlyInCreationError(BeanCreationException):
 
     def __str__(self) -> str:
         return str(self.args[0]) if self.args else ""
+
+
+class BeanCreationNotAllowedError(BeanCreationException):
+    """A bean would have to be created while the context is being destroyed, or after it stopped.
+
+    Analogous to Spring's ``BeanCreationNotAllowedException``. Once ``ApplicationContext.stop()``
+    starts destroying beans, the container hands out the instances that still exist but builds none:
+    a singleton the stop released, or one that was never created, would otherwise come back as a new
+    object that nobody destroys (an engine built after the datasource registry closed opens a pool
+    that outlives the process's shutdown). Start the context again to use it.
+    """
+
+    def __init__(self, *, bean: str, reason: str) -> None:
+        self.bean = bean
+        BeanCreationException.__init__(
+            self,
+            subsystem="resolution",
+            provider=bean,
+            reason=f"cannot create bean {bean!r}: {reason}",
+        )

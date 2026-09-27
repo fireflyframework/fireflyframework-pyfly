@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, TypeVar
 
 from pyfly.container.ordering import get_order
@@ -63,9 +63,10 @@ class ApplicationEventBus:
     """Simple in-process event bus for application lifecycle events."""
 
     def __init__(self) -> None:
+        # Per event type: (listener, owner class for @order, owning bean or None).
         self._listeners: dict[
             type,
-            list[tuple[Callable[..., Awaitable[None]], type | None]],
+            list[tuple[Callable[..., Awaitable[None]], type | None, object | None]],
         ] = {}
 
     def subscribe(
@@ -74,13 +75,41 @@ class ApplicationEventBus:
         listener: Callable[..., Awaitable[None]],
         *,
         owner_cls: type | None = None,
+        owner: object | None = None,
     ) -> None:
-        """Register a listener for a specific event type (any type, not only ApplicationEvent)."""
+        """Register a listener for a specific event type (any type, not only ApplicationEvent).
+
+        *owner* is the bean the listener belongs to; :meth:`unsubscribe_owners` removes its listeners
+        when the bean is destroyed.
+        """
         if event_type not in self._listeners:
             self._listeners[event_type] = []
-        self._listeners[event_type].append((listener, owner_cls))
+        self._listeners[event_type].append((listener, owner_cls, owner))
         # Pre-sort so publish() doesn't need to sort per invocation
         self._listeners[event_type].sort(key=lambda e: get_order(e[1]) if e[1] else 0)
+
+    def unsubscribe_owners(self, owners: Iterable[object]) -> int:
+        """Remove every listener subscribed on behalf of one of *owners* (by identity); returns how many.
+
+        The context calls it on stop() for the beans it destroyed, so a restarted context does not
+        deliver events to the previous run's instances as well as to the new ones.
+        """
+        owned = {id(owner) for owner in owners}
+        removed = 0
+        for event_type, entries in list(self._listeners.items()):
+            kept = [entry for entry in entries if entry[2] is None or id(entry[2]) not in owned]
+            removed += len(entries) - len(kept)
+            if kept:
+                self._listeners[event_type] = kept
+            else:
+                del self._listeners[event_type]
+        return removed
+
+    def listener_count(self, event_type: type | None = None) -> int:
+        """How many listeners are subscribed to *event_type* (to every type when ``None``)."""
+        if event_type is not None:
+            return len(self._listeners.get(event_type, ()))
+        return sum(len(entries) for entries in self._listeners.values())
 
     async def publish(self, event: object) -> None:
         """Publish an event to all matching listeners (pre-sorted by @order).
@@ -92,7 +121,7 @@ class ApplicationEventBus:
         """
         for event_type, entries in self._listeners.items():
             if isinstance(event, event_type):
-                for listener, _owner in entries:
+                for listener, _owner_cls, _owner in entries:
                     result = listener(event)
                     if inspect.isawaitable(result):
                         await result
