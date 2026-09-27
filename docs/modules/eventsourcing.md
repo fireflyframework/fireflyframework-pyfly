@@ -178,7 +178,8 @@ failure.
 Every replica may run the same runner. With a lease, only the runner that holds the projection's lease
 (`pyfly.projection.<name>`) applies events; the others poll the lease and take over when the holder stops or its
 lease runs out. By default the runner takes the lease the checkpoint store offers: `SqlAlchemyCheckpointStore`
-gives a `LeaseLock` on the portable lease table `pyfly_locks` of its datasource. Pass `lease=` to use another
+gives a `LeaseLock` on the portable lease table `pyfly_locks` of its datasource (it creates or checks that table
+when it starts, with its own). Pass `lease=` to use another
 (anything with `try_acquire`, `extend` and `release`), or `lease=False` for none. A lease lasts `lease_ttl_s`
 (30 s) and the runner renews it after a third of that; a runner that loses it stops applying events and reloads
 the checkpoint when it takes it again. The checkpoint is fenced on its own too: a batch whose starting position
