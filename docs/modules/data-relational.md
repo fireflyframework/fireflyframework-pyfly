@@ -577,6 +577,7 @@ A derived method is checked against its entity when the repository is built, as 
 - **The name is read against those properties**, so a property whose name ends in an operator word or holds a connector is read whole: `find_by_logged_in` is `logged_in = ?` (not `logged IN ?`), and `find_by_terms_and_conditions_accepted` is one property. When two readings are possible, the longest property wins.
 - **The parameters match the name**: `find_by_age_between(low, high)` takes two values, `find_by_email_is_null()` none. A parameter annotated `Pageable` or `Sort` binds no value (see below). A forgotten `_and_id` no longer drops an argument silently (which widened a `delete_by_`).
 - **The return annotation is one the prefix returns** (the next section), `_ignore_case` applies to a string property, and `_true`/`_false` to a boolean one.
+- **The annotations resolve at runtime**: they decide the result's shape and which parameter is a `Pageable` or a `Sort`, so a derived method whose annotation names a type imported only under `TYPE_CHECKING` fails, naming the annotation (the entity's own name always resolves). Import the type at runtime. Before 26.09.08 the annotations of a derived method were never read. A `@query` method, whose annotations only shape its result, logs the one that does not resolve at WARNING and reads it as absent.
 
 ### Results Follow the Return Annotation
 
