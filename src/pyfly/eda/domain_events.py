@@ -33,9 +33,9 @@ Which events it collects:
 - the pending events of an aggregate a relational unit of work saves (``session.add``: ``Repository.save``
   of a new or detached aggregate), such as those an aggregate raises in its factory before any unit exists.
 
-A unit that rolls back publishes nothing, and its aggregates' events are dropped with it. Code that wants to
-publish by hand calls :meth:`DomainEventPublisher.publish` inside the unit of work (it drains the aggregates it
-is given).
+A unit that rolls back publishes nothing: the events stay pending on the aggregate, and a unit that saves it
+again publishes them. Code that wants to publish by hand calls :meth:`DomainEventPublisher.publish` inside the
+unit of work (it drains the aggregates it is given).
 """
 
 from __future__ import annotations
@@ -57,6 +57,9 @@ _logger = logging.getLogger(__name__)
 
 _UNIT_KEY = "pyfly.domain_events"
 """``UnitOfWork.attributes`` key of the unit's collector."""
+
+MAX_PUBLICATION_ROUNDS = 16
+"""How many times a unit's collector publishes the events raised while it publishes, before it gives up."""
 
 EVENT_ID_HEADER = "x-pyfly-event-id"
 AGGREGATE_TYPE_HEADER = "x-pyfly-aggregate-type"
@@ -200,9 +203,18 @@ class _UnitEvents:
             return
         synchronizations = self._unit.synchronizations
         start = len(synchronizations)
-        # A listener may make an aggregate raise more: publish until they are all drained.
-        while pending := [aggregate for aggregate in self._aggregates.values() if aggregate.pending_events()]:
+        # A listener may make an aggregate raise more: publish until they are all drained (a bounded number of
+        # rounds: listeners that keep raising events for each other would never let the unit commit).
+        for _round in range(MAX_PUBLICATION_ROUNDS):
+            pending = [aggregate for aggregate in self._aggregates.values() if aggregate.pending_events()]
+            if not pending:
+                break
             await publisher.publish(*pending)
+        else:
+            raise RuntimeError(
+                f"The domain event listeners of {self._unit.describe()} kept raising events after "
+                f"{MAX_PUBLICATION_ROUNDS} rounds of publication; the unit rolls back"
+            )
         # Synchronizations registered while publishing (the BEFORE_COMMIT listeners of these events) came after
         # the unit's list of synchronizations was taken for this phase: run their before-commit part here, once.
         while start < len(synchronizations):
