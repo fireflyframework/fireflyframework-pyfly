@@ -273,6 +273,38 @@ class TestAsyncMethodWiring:
 
         assert finished == ["recorded"]
 
+    @pytest.mark.asyncio
+    async def test_a_declared_uncaught_exception_handler_that_cannot_be_created_fails_the_start(self):
+        """Not silently replaced by the logging default: the start fails, naming what the handler lacks."""
+        from pyfly.container.exceptions import NoSuchBeanError
+        from pyfly.container.stereotypes import component
+        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
+        from pyfly.scheduling.decorators import async_method
+
+        class AlertingClient:
+            """Never registered."""
+
+        @component
+        class AlertingHandler:
+            def __init__(self, client: AlertingClient) -> None:
+                self.client = client
+
+            def handle_uncaught_exception(self, error, method, args, kwargs) -> None:
+                raise AssertionError("never created")
+
+        @service
+        class Worker:
+            @async_method
+            async def work(self):
+                raise RuntimeError("boom")
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(AlertingHandler)
+        ctx.container.bind(AsyncUncaughtExceptionHandler, AlertingHandler)  # type: ignore[type-abstract]
+        ctx.register_bean(Worker)
+        with pytest.raises(NoSuchBeanError, match="AlertingClient"):
+            await ctx.start()
+
 
 # --- Test: Registry stats ---
 

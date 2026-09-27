@@ -1763,7 +1763,10 @@ class ApplicationContext:
                     handler: Any = None
                     try:
                         handler = self._container.resolve(AsyncUncaughtExceptionHandler)  # type: ignore[type-abstract]
-                    except BeanCreationException:
+                    except NoSuchBeanError as missing:
+                        if missing.bean_type is not AsyncUncaughtExceptionHandler:
+                            raise  # a declared handler that cannot be created fails the start
+                        # Not bound to the protocol type: a bean that implements it (a @component subclass).
                         handler = next(
                             (
                                 live.instance
