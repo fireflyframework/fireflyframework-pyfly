@@ -62,8 +62,8 @@ Completion rules:
   statement's failure keeps its type in the cancelled unit's own cleanup too (its guarded operation judged
   it), and so does an exception raised from it (``raise DomainError() from error``: the judgment follows
   ``__cause__``); any other exception raised there, one raised while merely handling that failure
-  included (``except IntegrityError: raise DomainError()``), ends the unit as cancelled and is logged at
-  WARNING.
+  included (``except DataIntegrityException: raise DomainError()`` around a repository call, which raises
+  the translated kernel exception), ends the unit as cancelled and is logged at WARNING.
 """
 
 from __future__ import annotations

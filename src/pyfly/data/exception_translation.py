@@ -216,8 +216,16 @@ def _describe(driver_error: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+_MYSQL_DRIVER_MODULES = frozenset({"asyncmy", "aiomysql", "pymysql", "MySQLdb", "mysql", "mariadb"})
+"""The top-level packages of the MySQL/MariaDB drivers whose errors carry ``(errno, message)`` args. Another
+driver's error may carry an int first too (pymssql's), with numbers that mean something else."""
+
+
 def _mysql_error(driver_error: Any) -> tuple[int, str] | None:
-    """The error number and message of a MySQL/MariaDB driver error (asyncmy, aiomysql, PyMySQL: ``args``)."""
+    """The error number and message of a MySQL/MariaDB driver error (asyncmy, aiomysql, PyMySQL,
+    mysqlclient, MySQL Connector, MariaDB Connector: ``args``), or ``None`` for another driver's."""
+    if type(driver_error).__module__.split(".", 1)[0] not in _MYSQL_DRIVER_MODULES:
+        return None
     args: tuple[Any, ...] = tuple(getattr(driver_error, "args", ()))
     if len(args) >= 2 and isinstance(args[0], int):
         return args[0], str(args[1])
@@ -307,20 +315,33 @@ def unregister_exception_translator(translator: PersistenceExceptionTranslator) 
             _TRANSLATORS.remove(translator)
 
 
-def translate_exception(error: BaseException) -> BaseException:
-    """*error* translated to a kernel persistence exception, chained from it (``__cause__``), or *error*
-    itself when no translator knows it (a kernel exception already, a connection failure, anything else)."""
+def _translation_of(error: BaseException) -> PyFlyException | None:
     if isinstance(error, PyFlyException) or not isinstance(error, Exception):
-        return error
+        return None
     for translator in tuple(_TRANSLATORS):
         translated = translator.translate_exception_if_possible(error)
         if translated is not None:
-            translated.__cause__ = error  # as ``raise translated from error`` would
-            translated.__suppress_context__ = True
-            logger.debug(
-                "persistence_exception_translated",
-                extra={"translated": type(translated).__name__, "context": translated.context},
-                exc_info=(type(error), error, error.__traceback__),
-            )
             return translated
-    return error
+    return None
+
+
+def is_translatable(error: BaseException) -> bool:
+    """Whether :func:`translate_exception` translates *error* (without translating it, or logging)."""
+    return _translation_of(error) is not None
+
+
+def translate_exception(error: BaseException) -> BaseException:
+    """*error* translated to a kernel persistence exception, chained from it (``__cause__``), or *error*
+    itself when no translator knows it (a kernel exception already, a connection failure, anything else).
+    The driver's full message is logged at ``DEBUG``, once per translation."""
+    translated = _translation_of(error)
+    if translated is None:
+        return error
+    translated.__cause__ = error  # as ``raise translated from error`` would
+    translated.__suppress_context__ = True
+    logger.debug(
+        "persistence_exception_translated",
+        extra={"translated": type(translated).__name__, "context": translated.context},
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    return translated

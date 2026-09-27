@@ -20,6 +20,7 @@ statement or its bound values in the response (C158, C159): the IntegrityError c
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -27,7 +28,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import String, insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
@@ -36,6 +37,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.kernel.exceptions import (
@@ -162,6 +164,48 @@ class TestPersistenceExceptionConverter:
 
     def test_in_the_default_chain(self) -> None:
         assert PersistenceExceptionConverter in [type(c) for c in default_exception_converters()]
+
+    def test_a_conversion_is_logged_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``can_handle`` asks whether a translation exists without translating; ``convert`` translates and
+        logs the driver's message once."""
+        converter = PersistenceExceptionConverter()
+        stale = StaleDataError("UPDATE statement on table 'sp8_users' expected to update 1 row(s); 0 were matched.")
+        with caplog.at_level(logging.DEBUG, logger="pyfly.data.exception_translation"):
+            assert converter.can_handle(stale)
+            converter.convert(stale)
+        assert [record.getMessage() for record in caplog.records] == ["persistence_exception_translated"]
+
+
+class _PyMssqlIntegrityError(Exception):
+    """What pymssql raises: ``args[0]`` is an int error number too, and not a MySQL one."""
+
+
+_PyMssqlIntegrityError.__module__ = "pymssql._pymssql"
+
+
+class _AsyncmyOperationalError(Exception):
+    """What asyncmy raises for a MySQL CHECK violation."""
+
+
+_AsyncmyOperationalError.__module__ = "asyncmy.errors"
+
+
+class TestMysqlErrorNumbersNeedAMysqlDriver:
+    def test_another_driver_s_error_number_is_not_read_as_mysql(self) -> None:
+        # 1062 is MySQL's ER_DUP_ENTRY; for SQL Server it is something else entirely.
+        orig = _PyMssqlIntegrityError(1062, b"Some SQL Server error")
+        translated = translate_exception(IntegrityError("INSERT ...", {}, orig))
+        assert type(translated) is DataIntegrityException
+        assert translated.context == {}
+
+        operational = OperationalError("UPDATE ...", {}, _PyMssqlIntegrityError(1020, b"Some other error"))
+        assert translate_exception(operational) is operational
+
+    def test_a_mysql_driver_s_error_number_is(self) -> None:
+        orig = _AsyncmyOperationalError(3819, "Check constraint 'ck_accounts_balance' is violated.")
+        translated = translate_exception(OperationalError("UPDATE ...", {}, orig))
+        assert isinstance(translated, DataIntegrityException)
+        assert translated.context == {"violation": "check", "constraint": "ck_accounts_balance"}
 
 
 @pytest.fixture

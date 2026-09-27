@@ -148,20 +148,17 @@ class PersistenceExceptionConverter:
     one that reached the web layer untranslated (code that used a session directly)."""
 
     def can_handle(self, exc: Exception) -> bool:
-        return self._translated(exc) is not None
+        from pyfly.data.exception_translation import is_translatable  # noqa: PLC0415
+
+        return is_translatable(exc)
 
     def convert(self, exc: Exception) -> PyFlyException:
-        translated = self._translated(exc)
-        if translated is None:
-            raise TypeError(f"{type(exc).__name__} is not a persistence exception")
-        return translated
-
-    @staticmethod
-    def _translated(exc: Exception) -> PyFlyException | None:
         from pyfly.data.exception_translation import translate_exception  # noqa: PLC0415
 
         translated = translate_exception(exc)
-        return translated if translated is not exc and isinstance(translated, PyFlyException) else None
+        if translated is exc or not isinstance(translated, PyFlyException):
+            raise TypeError(f"{type(exc).__name__} is not a persistence exception")
+        return translated
 
 
 class HttpxExceptionConverter:
