@@ -159,7 +159,16 @@ id, without checkpoints or a lease (a `projection_store_without_positions` WARNI
 A `CheckpointStore` keeps the position each projection (by its `name`) has applied the stream up to. The runner
 loads it when it starts and moves it with every batch, so a restart or a deploy resumes where the last batch
 ended instead of replaying the whole store. Without `checkpoints`, the runner keeps its position in memory and a
-new runner starts from the beginning.
+new runner starts from the beginning, on every replica; over a durable store (`SqlAlchemyEventStore`) its start
+logs a `projection_checkpoints_in_memory` WARNING.
+
+The `projection_checkpoint_store` bean follows the event store's provider unless
+`pyfly.eventsourcing.projection.checkpoint.provider` is set. It runs on
+`pyfly.eventsourcing.projection.checkpoint.datasource` (or `.url`), else on the primary datasource, else (an
+application whose only database is the event store's `url` or `datasource`) on the event store's datasource.
+Following the event store's provider, it creates or checks its tables on first use, so an application with no
+projection needs neither `pyfly_projection_checkpoints` nor `pyfly_locks`; with the provider set, it does so at
+start.
 
 With `SqlAlchemyCheckpointStore` (the table `pyfly_projection_checkpoints`) each batch is one unit of work on
 the checkpoints' datasource:
@@ -182,7 +191,7 @@ Every replica may run the same runner. With a lease, only the runner that holds 
 (`pyfly.projection.<name>`) applies events; the others poll the lease and take over when the holder stops or its
 lease runs out. By default the runner takes the lease the checkpoint store offers: `SqlAlchemyCheckpointStore`
 gives a `LeaseLock` on the portable lease table `pyfly_locks` of its datasource (it creates or checks that table
-when it starts, with its own). Pass `lease=` to use another
+with its own). Pass `lease=` to use another
 (anything with `try_acquire`, `extend` and `release`), or `lease=False` for none. A lease lasts `lease_ttl_s`
 (30 s) and the runner renews it after a third of that; a runner that loses it stops applying events and reloads
 the checkpoint when it takes it again. The checkpoint is fenced on its own too: a batch whose starting position
@@ -349,10 +358,11 @@ ALTER TABLE pyfly_event_store ADD COLUMN global_position BIGINT;
 ```
 
 With migrations owning the schema (`ddl-auto: none`), also create the head table `pyfly_event_store_head` and the
-index (`CREATE UNIQUE INDEX ix_pyfly_event_store_global_position ON pyfly_event_store (global_position)`), and the
-tables of the `projection_checkpoint_store` bean, which follows the event store's provider by default:
+index (`CREATE UNIQUE INDEX ix_pyfly_event_store_global_position ON pyfly_event_store (global_position)`), and,
+for projections with checkpoints, the tables of the `projection_checkpoint_store` bean:
 `pyfly_projection_checkpoints` and the lease table `pyfly_locks`. Alembic autogenerates all four from
-`framework_metadata`; otherwise the stores create them when they start. Starting then places the events already
+`framework_metadata`; otherwise the stores create them when they start (the checkpoint store, when it only
+follows the event store's provider, on first use). Starting then places the events already
 stored on the stream, oldest `occurred_at` first, before any event appended since. Projections built by the earlier runner replayed the store at every start: give them
 `start_from="latest"` (or reset their checkpoint to `last_position()`) on the first start with checkpoints, so
 they do not replay it once more.
@@ -435,8 +445,9 @@ await publisher.publish_all(envelopes)
 | `projection_checkpoint_store` | `CheckpointStore` | Adapter selected by `pyfly.eventsourcing.projection.checkpoint.provider`; pass it to `ProjectionRunner(checkpoints=...)`. |
 | `event_sourcing_publisher` | `EventSourcingPublisher \| None` | EDA bridge; `None` when no `EventPublisher` bean is present. |
 
-The SQL stores are lifecycle beans: the context starts them (creating or checking their tables) before the
-consumers, and every store resolves its datasource in the context's `DataSourceRegistry` bean.
+The SQL stores are lifecycle beans: the context starts them (creating or checking their tables; the checkpoint
+store that only follows the event store's provider leaves that to its first use) before the consumers, and every
+store resolves its datasource in the context's `DataSourceRegistry` bean.
 
 ## Configuration reference
 
@@ -450,8 +461,8 @@ consumers, and every store resolves its datasource in the context's `DataSourceR
 | `pyfly.eventsourcing.snapshot.provider` | `memory` | Snapshot store backend: `memory` or `sqlalchemy`. |
 | `pyfly.eventsourcing.snapshot.datasource` | *(none)* | The datasource the snapshot store runs on. Not with `url`. |
 | `pyfly.eventsourcing.snapshot.url` | *(none)* | Async SQLAlchemy URL for the snapshot store. None (and no `datasource`): the primary datasource (no primary is a startup error). The same URL as a registered datasource reuses its engine; another URL registers the `snapshot-store` datasource. |
-| `pyfly.eventsourcing.projection.checkpoint.provider` | the event store's | Checkpoint store backend: `memory` or `sqlalchemy`. |
-| `pyfly.eventsourcing.projection.checkpoint.datasource` | *(none)* | The datasource of the checkpoints: the read models' datasource. Not with `url`. |
+| `pyfly.eventsourcing.projection.checkpoint.provider` | the event store's | Checkpoint store backend: `memory` or `sqlalchemy`. Set, the SQL store checks its tables at start; following the event store's, on first use. |
+| `pyfly.eventsourcing.projection.checkpoint.datasource` | *(none)* | The datasource of the checkpoints: the read models' datasource. Not with `url`. None (and no `url`): the primary, or the event store's datasource when there is no primary. |
 | `pyfly.eventsourcing.projection.checkpoint.url` | *(none)* | Async SQLAlchemy URL for the checkpoints, resolved like the others (another URL registers the `projection-checkpoints` datasource). |
 | `pyfly.eventsourcing.eda.destination` | `pyfly.events` | EDA routing destination for `EventSourcingPublisher`. |
 
