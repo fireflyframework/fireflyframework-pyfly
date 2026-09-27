@@ -14,9 +14,11 @@
 """``SqlAlchemyEventStore`` and ``SqlAlchemySnapshotStore`` on PostgreSQL only.
 
 What every backend does is in ``test_event_store_matrix.py``, ``test_snapshot_store_matrix.py`` and
-``test_projection_matrix.py``. Here: the ``xid8`` strategy's trade-off (a transaction left open on the server
-holds the stream back, and nothing is skipped when it ends), and upgrading the tables an earlier release created
-(``TIMESTAMP WITHOUT TIME ZONE`` columns, no global position) with the migration the event-sourcing guide gives.
+``test_projection_matrix.py`` (PostgreSQL runs their scenarios with both position strategies). Here: the opt-in
+``xid8`` strategy's trade-off (a transaction left open on the server holds the stream back, and nothing is skipped
+when it ends), the WARNING about events a writer of an earlier release left without a position on an ``xid8``
+table, and upgrading the tables an earlier release created (``TIMESTAMP WITHOUT TIME ZONE`` columns, no global
+position) with the migration the event-sourcing guide gives.
 
 Run via:
     PYFLY_INTEGRATION_REQUIRE_DOCKER=1 uv run pytest -m integration \\
@@ -25,12 +27,13 @@ Run via:
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
-from pyfly.data.relational.framework_schema import FrameworkSchemaError
+from pyfly.data.relational.framework_schema import FrameworkSchemaError, event_store
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.snapshot import Snapshot, SqlAlchemySnapshotStore
 from pyfly.eventsourcing.store import SqlAlchemyEventStore
@@ -81,7 +84,7 @@ def _envelope(event_type: str) -> StoredEventEnvelope:
 async def test_a_transaction_left_open_holds_the_xid8_stream_back_and_nothing_is_skipped(
     relational_backend: RelationalBackend,
 ) -> None:
-    store = SqlAlchemyEventStore(relational_backend.create_engine())
+    store = SqlAlchemyEventStore(relational_backend.create_engine(), position_strategy="xid8")
     await store.start()
     assert store.position_strategy == "xid8"
     await store.append("before", "Order", [_envelope("Before")], expected_version=0)
@@ -97,6 +100,41 @@ async def test_a_transaction_left_open_holds_the_xid8_stream_back_and_nothing_is
 
     later = await store.stream_all(after_position=seen[-1].global_position)
     assert [event.event_type for event in later] == ["During"]
+
+
+async def test_events_left_without_a_position_on_an_xid8_table_are_placed_below_its_readers_with_a_warning(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A writer of an earlier release that keeps running after the upgrade inserts events without a position. On
+    an ``xid8`` table the next start numbers them from the head row, below every ``xid8`` position a projection
+    may have passed already: the guide says to stop those writers first, and the start says what it found."""
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyEventStore(engine, position_strategy="xid8")
+    await store.start()
+    await store.append("current", "Order", [_envelope("Current")], expected_version=0)
+    straggler = StoredEventEnvelope(event_type="Straggler", aggregate_id="old-writer", aggregate_type="Order")
+    straggler.sequence = 1
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(event_store).values(
+                event_id=straggler.event_id,
+                aggregate_id="old-writer",
+                aggregate_type="Order",
+                sequence=1,
+                event_type="Straggler",
+                payload=straggler.to_json(),
+                metadata="{}",
+                occurred_at=straggler.occurred_at,
+                version=1,
+            )
+        )
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.eventsourcing.store"):
+        await SqlAlchemyEventStore(engine, position_strategy="xid8").start()
+
+    warnings = [record for record in caplog.records if record.getMessage() == "event_store_positions_below_readers"]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert [event.event_type for event in await store.stream_all()] == ["Straggler", "Current"]
 
 
 async def test_the_tables_of_an_earlier_release_are_refused_until_migrated_then_their_events_are_placed(

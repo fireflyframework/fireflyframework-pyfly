@@ -374,10 +374,10 @@ def event_store_table(name: str = EVENT_STORE) -> Table:
 
     ``payload`` is the envelope's JSON (what the store reads back) and ``metadata`` its metadata's JSON; the
     other columns are what the queries filter on. ``recorded_at`` is when the database recorded the event, by
-    its own clock. ``global_position`` places the event on the global stream in commit order: with the
-    ``head-row`` strategy the store gives it to the event once the event has committed (it is ``NULL`` until
-    then), with ``xid8`` as the event is inserted; projections page by it, through its unique index. On SQL
-    Server the index skips ``NULL``, which it would otherwise count as a duplicate.
+    its own clock. ``global_position`` places the event on the global stream (``SqlAlchemyEventStore`` documents
+    the order each strategy gives): with the ``head-row`` strategy the store gives it to the event once the event
+    has committed (it is ``NULL`` until then), with ``xid8`` as the event is inserted; projections page by it,
+    through its unique index. On SQL Server the index skips ``NULL``, which it would otherwise count as a duplicate.
     """
 
     def build(table_name: str) -> Table:

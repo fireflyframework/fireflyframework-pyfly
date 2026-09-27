@@ -24,6 +24,7 @@ late-committing writer, and a catch-up of a thousand events with the default set
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from collections.abc import Awaitable, Callable
 
@@ -38,6 +39,7 @@ from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
 from pyfly.eventsourcing.store import SqlAlchemyEventStore
 from pyfly.scheduling.adapters.lease_lock import LeaseLock
+from tests.integration.test_event_store_matrix import _append_after_another_unit_committed
 from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
 
 read_model = MetaData()
@@ -54,6 +56,8 @@ ledger = Table(
     Column("event_id", String(64), nullable=False),
     Column("applied_by", String(32), nullable=False),
 )
+# The position strategy of the event stores the scenarios build; the xid8 reruns at the end set it for PostgreSQL.
+_STRATEGY = "auto"
 
 
 def _deposit(amount: int = 1) -> StoredEventEnvelope:
@@ -66,7 +70,7 @@ class Setup:
     def __init__(self, backend: RelationalBackend) -> None:
         self.backend = backend
         self.engine: AsyncEngine = backend.create_engine()
-        self.store = SqlAlchemyEventStore(self.engine)
+        self.store = SqlAlchemyEventStore(self.engine, position_strategy=_STRATEGY)
 
     async def start(self) -> Setup:
         await self.store.start()
@@ -334,6 +338,38 @@ async def test_a_late_committing_event_reaches_the_projection(relational_backend
     assert await setup.read_model() == (105, 6, 6)
 
 
+@pytest.mark.backends(PG, MYSQL, MARIADB)
+async def test_a_projection_gets_an_aggregate_s_events_in_sequence_order_across_units(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Review of WP08: under ``xid8`` a deposit appended by a unit that took its transaction id before the
+    account's opening committed streamed before the opening, and a projection that needs the account open
+    retried the deposit for good (its checkpoint never passed it)."""
+    setup = await _setup(relational_backend)
+    await _append_after_another_unit_committed(setup.store)
+    opened: set[str] = set()
+    applied: list[tuple[str, str]] = []
+
+    async def balances(event: StoredEventEnvelope) -> None:
+        if event.event_type == "Opened":
+            opened.add(event.aggregate_id)
+        elif event.event_type == "Deposited" and event.aggregate_id not in opened:
+            raise LookupError(f"a deposit to {event.aggregate_id}, which is not open")
+        applied.append((event.aggregate_id, event.event_type))
+
+    checkpoints = setup.checkpoints()
+    runner = ProjectionRunner(
+        FunctionProjection("deposits", balances), setup.store, checkpoints=checkpoints, poll_interval_s=0.05
+    )
+    await runner.start()
+    try:
+        await setup.caught_up(checkpoints, timeout=10.0)
+    finally:
+        await runner.stop()
+
+    assert [kind for aggregate, kind in applied if aggregate == "account-x"] == ["Opened", "Deposited"]
+
+
 async def test_catch_up_runs_at_full_speed_with_the_default_settings(relational_backend: RelationalBackend) -> None:
     """C068: the runner slept a poll interval after every page, 100 events a second at the defaults."""
     setup = await _setup(relational_backend)
@@ -382,3 +418,33 @@ async def test_a_rebuild_is_an_explicit_reset_and_a_new_projection_can_start_at_
     await setup.caught_up(checkpoints)
     await rebuild.stop()
     assert await setup.read_model() == (6, 6, 6)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# PostgreSQL's xid8 accelerator
+# ---------------------------------------------------------------------------------------------------------
+
+_XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
+    test_a_restarted_runner_resumes_from_its_checkpoint_without_replaying,
+    test_two_replicas_on_one_read_model_apply_each_event_once,
+    test_without_a_lease_the_checkpoint_still_fences_two_runners,
+    test_a_standby_replica_takes_over_from_the_checkpoint_when_the_lease_holder_stops,
+    test_a_handler_failing_between_its_two_writes_leaves_neither_and_is_retried,
+    test_a_late_committing_event_reaches_the_projection,
+    test_a_projection_gets_an_aggregate_s_events_in_sequence_order_across_units,
+    test_catch_up_runs_at_full_speed_with_the_default_settings,
+    test_a_rebuild_is_an_explicit_reset_and_a_new_projection_can_start_at_the_head,
+)
+
+
+@pytest.mark.backends(PG)
+@pytest.mark.parametrize("scenario", _XID8_SCENARIOS, ids=lambda scenario: scenario.__name__.removeprefix("test_"))
+async def test_the_runner_over_the_xid8_strategy_on_postgresql(
+    relational_backend: RelationalBackend,
+    scenario: Callable[[RelationalBackend], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenarios above run every lane over the default strategy (head-row, PostgreSQL's too); PostgreSQL runs
+    them again over the event store's opt-in ``xid8`` accelerator."""
+    monkeypatch.setattr(sys.modules[__name__], "_STRATEGY", "xid8")
+    await scenario(relational_backend)

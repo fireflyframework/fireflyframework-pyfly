@@ -15,29 +15,34 @@
 
 Every event an :class:`EventStore` holds has two places: its aggregate's ``sequence`` (1, 2, 3... per
 aggregate, the optimistic-locking version) and a **global position** on the store's global stream, which
-:meth:`EventStore.stream_all` pages by (``after_position``). Global positions follow commit order: a reader that
-has seen position *p* never sees a new event at a position below *p* later. A projection can therefore keep one
-number as its checkpoint and never skip an event that committed late, never get an event twice from paging, and
-never stall on events that share a timestamp. ``occurred_at`` is the event's data, not a cursor.
+:meth:`EventStore.stream_all` pages by (``after_position``). Positions only move forward for a reader: once it has
+seen position *p*, no event appears below *p* later, and an aggregate's events are on the stream in sequence
+order. A projection can therefore keep one number as its checkpoint and never skip an event that committed late,
+never get an event twice from paging, and never stall on events that share a timestamp. ``occurred_at`` is the
+event's data, not a cursor.
 
 :class:`SqlAlchemyEventStore` keeps the events in the framework table ``pyfly_event_store`` and gives out the
 positions with one of two strategies, recorded per table in ``pyfly_event_store_head`` by the first store that
 starts on it:
 
-- ``head-row`` (every backend): an event is inserted without a position, so it is not on the global stream
-  yet. Reading the stream first gives the events that have committed since the last read their positions, in a
-  short ``READ COMMITTED`` unit of its own that locks the table's head row (the last position given out): a
-  position only ever goes to a committed event, and always above every position given before. An append
-  never touches the head row, so business transactions do not wait for one another there, and none of them
-  fails on it under snapshot isolation (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round
-  are ordered by the database's clock when it recorded them (``recorded_at``), then by aggregate and sequence:
-  an aggregate's events keep their order, and an event appended after another committed comes after it.
-- ``xid8`` (PostgreSQL 13 or later, the default there): an event's position is its writer's transaction id
-  times 2**20 plus its place among that transaction's events, set as it is inserted, and a reader only sees the
-  positions below its snapshot's horizon (``pg_snapshot_xmin(pg_current_snapshot())``): every transaction below
-  it has ended, so no event can ever commit below what a reader has seen. Nothing is written when the stream
-  is read. A transaction left open anywhere on the server holds the stream back until it ends (delivery
-  waits; nothing is skipped).
+- ``head-row`` (every backend; the default): an event is inserted without a position, so it is not on the global
+  stream yet. Reading the stream first gives the events that have committed since the last read their positions,
+  in a short ``READ COMMITTED`` unit of its own that locks the table's head row (the last position given out): a
+  position only ever goes to a committed event, and always above every position given before. An append never
+  touches the head row, so business transactions do not wait for one another there, and none of them fails on
+  it under snapshot isolation (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round are ordered
+  by the database's clock when it recorded them (``recorded_at``), then by aggregate and sequence: an aggregate's
+  events keep their order, and an event appended after another one committed comes after it.
+- ``xid8`` (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing): an event's position is
+  its writer's transaction id times 2**20 plus its place among that transaction's events, set as it is inserted,
+  and a reader only sees the positions below its snapshot's horizon (``pg_snapshot_xmin(pg_current_snapshot())``):
+  every transaction below it has ended, so no event can ever appear below what a reader has seen. The stream
+  follows the order the writers took their transaction ids in, not the order they committed in. An aggregate's
+  order is kept by a guard: an append whose transaction id is below the id of an event the aggregate already has
+  is refused with a :class:`ConcurrencyError`, and the command runs again in a new unit (with a new id). The order
+  across aggregates is not kept: an event appended after reading another aggregate's committed event can stream
+  before that event. A transaction left open anywhere on the server holds the stream back until it ends
+  (delivery waits; nothing is skipped).
 
 Appends and reads run through :func:`~pyfly.data.transaction.infrastructure_unit`: inside a unit of work on the
 store's datasource an aggregate's events are written in that unit and commit or roll back with the rest of the
@@ -79,14 +84,16 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 POSITION_AUTO = "auto"
-"""Choose the position strategy: ``xid8`` on a PostgreSQL server that has it, ``head-row`` elsewhere (or what the
-event table recorded, when a store started on it before)."""
+"""Follow the position strategy the event table recorded, when a store started on it before; ``head-row`` for a
+new table, on every backend."""
 
 POSITION_HEAD_ROW = "head-row"
-"""Positions from the head row, given to the committed events when the stream is read (every backend)."""
+"""Positions from the head row, given to the committed events when the stream is read (every backend; the
+default)."""
 
 POSITION_XID8 = "xid8"
-"""Positions from the writer's PostgreSQL transaction id, read below the snapshot horizon (PostgreSQL 13+)."""
+"""Positions from the writer's PostgreSQL transaction id, read below the snapshot horizon (PostgreSQL 13+;
+opt-in): reads write nothing, and the stream keeps each aggregate's order but not the order across aggregates."""
 
 POSITION_STRATEGIES = (POSITION_AUTO, POSITION_HEAD_ROW, POSITION_XID8)
 
@@ -242,8 +249,9 @@ class SqlAlchemyEventStore:
     *table_name* and *head_table_name* rename the framework tables (declared on the framework metadata under
     those names). With *create_table* false the store never creates its tables and only checks them at
     :meth:`start`. *position_strategy* is ``auto`` (the default), ``head-row`` or ``xid8``; the strategy an event
-    table's positions follow is recorded by the first store that starts on it, ``auto`` follows it, and an
-    explicit strategy that differs from it is refused at start (two strategies on one table would skip events).
+    table's positions follow is recorded by the first store that starts on it (``head-row`` when it is left to
+    ``auto``), ``auto`` follows it, and an explicit strategy that differs from it is refused at start (two
+    strategies on one table would skip events).
 
     The application context starts the store; one built by hand starts on first use, or with :meth:`start`.
     Events a table got before it had global positions (rows an earlier release wrote, after a migration added
@@ -301,7 +309,7 @@ class SqlAlchemyEventStore:
             await ensure_tables(self._target, self._events, self._head, create=create)
             self._backend = backend_name(self.engine)
             strategy = await self._settle_strategy()
-            await self._number_unnumbered(resolve_manager(self._target))
+            await self._number_unnumbered(resolve_manager(self._target), strategy)
         self._strategy = strategy
 
     async def _ready(self) -> str:
@@ -354,7 +362,9 @@ class SqlAlchemyEventStore:
         expected_version: int,
     ) -> None:
         """Append *events* to the aggregate, whose stored version must be *expected_version*; raises
-        :class:`ConcurrencyError` otherwise, and when a concurrent writer appended the same sequence first.
+        :class:`ConcurrencyError` otherwise, and when a concurrent writer appended the same sequence first. With
+        the ``xid8`` strategy it also raises it when the aggregate has an event of a transaction whose id is
+        above this unit's: run the command again in a new unit, whose id is above it.
 
         The events are sent in one ``INSERT`` (a multi-row statement or a driver batch)."""
         from sqlalchemy import func, insert, select
@@ -363,21 +373,30 @@ class SqlAlchemyEventStore:
         strategy = await self._ready()
         table = self._events
         manager = resolve_manager(self._target)
+        guarded = strategy == POSITION_XID8 and bool(events)
+        checked: list[ColumnElement[Any]] = [func.coalesce(func.max(table.c.sequence), 0)]
+        if guarded:
+            checked += [func.max(table.c.global_position), _xid8_base()]
         async with infrastructure_unit(manager) as session:
             # Read the current version INSIDE the write unit, so the check and the insert are one transaction;
             # the UNIQUE (aggregate_id, sequence) constraint is the backstop against a concurrent writer.
-            latest = (
-                await session.execute(
-                    select(func.coalesce(func.max(table.c.sequence), 0)).where(table.c.aggregate_id == aggregate_id)
-                )
-            ).scalar_one()
-            if int(latest) != expected_version:
+            found = (await session.execute(select(*checked).where(table.c.aggregate_id == aggregate_id))).one()
+            latest = int(found[0])
+            if latest != expected_version:
                 raise ConcurrencyError(
-                    f"expected version {expected_version}, found {int(latest)}",
+                    f"expected version {expected_version}, found {latest}",
                     context={"aggregate_id": aggregate_id, "expected_version": expected_version},
                 )
             if not events:
                 return
+            if guarded and found[1] is not None and int(found[1]) >= int(found[2]) + _XID8_SCALE:
+                # The aggregate's last event belongs to a transaction whose id is above this unit's: an event
+                # appended now would be placed before it on the global stream.
+                raise ConcurrencyError(
+                    f"aggregate {aggregate_id!r} has an event of a transaction with a later id than this unit's "
+                    "(xid8 positions): run the command again in a new unit of work",
+                    context={"aggregate_id": aggregate_id, "expected_version": expected_version},
+                )
             rows = []
             for index, evt in enumerate(events, start=1):
                 evt.aggregate_id = aggregate_id
@@ -534,13 +553,41 @@ class SqlAlchemyEventStore:
         probe = select(table.c.event_id).where(table.c.global_position.is_(None)).limit(1)
         return (await session.execute(probe)).first() is not None
 
-    async def _number_unnumbered(self, manager: TransactionManager) -> None:
+    async def _number_unnumbered(self, manager: TransactionManager, strategy: str) -> None:
         """At start, whatever the strategy: give the committed events without a position (an earlier release's
-        rows) theirs."""
+        rows) theirs.
+
+        On an ``xid8`` table that has ``xid8`` positions already (above the head row's), those events (a writer
+        of an earlier release still running after the upgrade) get positions below them, which a projection may
+        have passed: a WARNING says so."""
+        from sqlalchemy import func, select
+
+        head, table = self._head, self._events
+        highest: Any = None
         async with infrastructure_unit(manager, read_only=True) as session:
             pending = await self._unnumbered(session)
-        if pending:
-            await self._number_committed(manager)
+            if pending and strategy == POSITION_XID8:
+                highest = (
+                    await session.execute(
+                        select(
+                            func.max(table.c.global_position),
+                            select(head.c.position).where(head.c.store == self._table_name).scalar_subquery(),
+                        )
+                    )
+                ).one()
+        if not pending:
+            return
+        if highest is not None and highest[0] is not None and int(highest[0]) > int(highest[1] or 0):
+            _logger.warning(
+                "event_store_positions_below_readers",
+                extra={
+                    "table": self._table_name,
+                    "hint": "events without a global position get theirs from the head row, below the xid8 "
+                    "positions projections may have passed already, which then skip them: stop the writers of "
+                    "an earlier release before starting this one",
+                },
+            )
+        await self._number_committed(manager)
 
     async def _number_committed(self, manager: TransactionManager, *, all_rounds: bool = True) -> None:
         """Give the committed events that have no global position theirs, in units of their own, one
@@ -609,14 +656,12 @@ class SqlAlchemyEventStore:
         from pyfly.data.relational.upsert import insert_if_absent
 
         backend = self._backend
-        available = backend == "postgresql" and await self._xid8_available()
-        if self._configured == POSITION_XID8 and not available:
+        if self._configured == POSITION_XID8 and not await self._xid8_ready():
             raise ValueError(
                 f"The xid8 position strategy needs PostgreSQL 13 or later; the event store's datasource is {backend}. "
                 f"Use position_strategy={POSITION_HEAD_ROW!r} (or {POSITION_AUTO!r})."
             )
-        automatic = POSITION_XID8 if available else POSITION_HEAD_ROW
-        wanted = automatic if self._configured == POSITION_AUTO else self._configured
+        wanted = POSITION_HEAD_ROW if self._configured == POSITION_AUTO else self._configured
         head, table = self._head, self._events
         async with infrastructure_unit(self._target) as session:
             recorded = (await session.execute(select(head.c.strategy).where(head.c.store == self._table_name))).scalar()
@@ -647,16 +692,17 @@ class SqlAlchemyEventStore:
                 f"one table would let readers skip events. Leave position_strategy at {POSITION_AUTO!r} "
                 "(pyfly.eventsourcing.store.position-strategy), or migrate the table with every writer stopped."
             )
-        if recorded == POSITION_XID8 and not available:
+        if recorded == POSITION_XID8 and not await self._xid8_ready():
             raise FrameworkSchemaError(
                 f"The events of {self._table_name} take their global positions with the xid8 strategy (recorded in "
                 f"{head.name}), which needs PostgreSQL 13 or later; this datasource is {backend} without it."
             )
-        _logger.info(
-            "event_store_position_strategy_recorded",
-            extra={"table": self._table_name, "strategy": recorded, "automatic": automatic},
-        )
+        _logger.info("event_store_position_strategy_recorded", extra={"table": self._table_name, "strategy": recorded})
         return recorded
+
+    async def _xid8_ready(self) -> bool:
+        """Whether the store's datasource can give ``xid8`` positions (PostgreSQL 13 or later)."""
+        return self._backend == "postgresql" and await self._xid8_available()
 
     async def _xid8_available(self) -> bool:
         """Whether the server has the ``xid8`` snapshot functions (PostgreSQL 13 or later; not every server that
@@ -698,13 +744,20 @@ def _database_now(backend: str) -> ColumnElement[datetime] | datetime:
     return datetime.now(UTC)
 
 
-def _xid8_position() -> ColumnElement[int]:
-    """The position of an event inserted now (``xid8``): the transaction's id times 2**20 plus the row's ordinal
-    (the ``pyfly_ordinal`` parameter)."""
-    from sqlalchemy import BigInteger, Text, bindparam, cast, func
+def _xid8_base() -> ColumnElement[int]:
+    """The first position of the current transaction (``xid8``): its id (assigned now when it has none yet; the
+    top-level transaction's inside a savepoint) times 2**20."""
+    from sqlalchemy import BigInteger, Text, cast, func
 
-    xid = cast(cast(func.pg_current_xact_id(), Text), BigInteger)
-    return xid * _XID8_SCALE + bindparam("pyfly_ordinal", type_=BigInteger)
+    return cast(cast(func.pg_current_xact_id(), Text), BigInteger) * _XID8_SCALE
+
+
+def _xid8_position() -> ColumnElement[int]:
+    """The position of an event inserted now (``xid8``): the transaction's first position plus the row's ordinal
+    (the ``pyfly_ordinal`` parameter)."""
+    from sqlalchemy import BigInteger, bindparam
+
+    return _xid8_base() + bindparam("pyfly_ordinal", type_=BigInteger)
 
 
 def _xid8_horizon() -> ColumnElement[int]:

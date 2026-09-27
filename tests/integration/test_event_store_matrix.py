@@ -16,19 +16,21 @@
 The global stream paged by ``occurred_at``, a clock value stamped when the envelope was built: an event built
 first and committed second was skipped for good, events with one timestamp were delivered again at every poll
 (and more than a page of them stalled the stream), and each poll sorted the whole table. The store now gives
-every event a global position that follows commit order (a head-row counter that numbers the committed events
-when the stream is read, or on PostgreSQL the writer's ``xid8`` below the readers' snapshot horizon), pages by
-it, and joins the ambient unit of work, so an aggregate's events commit or roll back with the rest of the
-business transaction.
+every event a global position no reader can see an event committed below later (by default a head-row counter
+that numbers the committed events when the stream is read; on PostgreSQL, opt-in, the writer's ``xid8`` below
+the readers' snapshot horizon), pages by it, and joins the ambient unit of work, so an aggregate's events commit
+or roll back with the rest of the business transaction.
 
-The sqlite-file lane runs in the fast suite; PostgreSQL (both position strategies), MySQL and MariaDB run with
-``-m integration``.
+The sqlite-file lane runs in the fast suite; PostgreSQL, MySQL and MariaDB run with ``-m integration``, and
+PostgreSQL runs the scenarios a second time with the ``xid8`` strategy (at the end of the module).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -65,8 +67,13 @@ def _envelope(event_type: str, *, occurred_at: datetime | None = None, **payload
     return envelope
 
 
-async def _store(backend: RelationalBackend, strategy: str = "auto", **options: object) -> SqlAlchemyEventStore:
-    store = SqlAlchemyEventStore(backend.create_engine(), position_strategy=strategy, **options)  # type: ignore[arg-type]
+# The position strategy of the stores the scenarios build; the xid8 reruns at the end set it for PostgreSQL.
+_STRATEGY = "auto"
+
+
+async def _store(backend: RelationalBackend, strategy: str | None = None, **options: object) -> SqlAlchemyEventStore:
+    engine = backend.create_engine()
+    store = SqlAlchemyEventStore(engine, position_strategy=strategy or _STRATEGY, **options)  # type: ignore[arg-type]
     await store.start()
     return store
 
@@ -204,15 +211,6 @@ async def test_an_append_waits_for_no_other_unit_and_a_late_commit_is_not_skippe
     await _late_commit_scenario(await _store(relational_backend))
 
 
-@pytest.mark.backends(PG)
-async def test_the_head_row_strategy_does_not_skip_a_late_commit_on_postgresql(
-    relational_backend: RelationalBackend,
-) -> None:
-    store = await _store(relational_backend, "head-row")
-    assert store.position_strategy == "head-row"
-    await _late_commit_scenario(store)
-
-
 async def _late_commit_scenario(store: SqlAlchemyEventStore) -> None:
     template = _template(store)
     appended = asyncio.Event()
@@ -279,6 +277,58 @@ async def test_concurrent_appends_to_one_aggregate_let_one_win(relational_backen
     assert await store.latest_version("acc-1") == 2
     with pytest.raises(ConcurrencyError, match="expected version 5"):
         await store.append("acc-1", "Account", [_envelope("Closed")], expected_version=5)
+
+
+@pytest.mark.backends(PG, MYSQL, MARIADB)
+async def test_an_aggregate_s_events_stream_in_sequence_order_across_units(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A unit that writes first, then appends to an aggregate after another unit appended to it and committed:
+    under ``xid8`` its event got its transaction's (lower) id as its position and streamed before the event it
+    follows, and a projection that needs the account opened before a deposit stalled on it for good. The guard
+    refuses such an append (a ``ConcurrencyError``: the command runs again in a new unit); the head row numbers
+    the events when they have committed."""
+    store = await _store(relational_backend)
+    attempts = await _append_after_another_unit_committed(store)
+
+    events = await _drain(store)
+    in_account = [(event.event_type, event.sequence) for event in events if event.aggregate_id == "account-x"]
+    assert in_account == [("Opened", 1), ("Deposited", 2)]
+    assert _types(events).count("OrderPlaced") == 1
+    if store.position_strategy == "xid8":
+        assert attempts == 2  # the guard refused the first attempt: its transaction id is below Opened's
+
+
+async def _append_after_another_unit_committed(store: SqlAlchemyEventStore) -> int:
+    """The command's unit writes first; another unit opens account-x and commits; the command then reads the
+    account's version and deposits. A ``ConcurrencyError`` runs the command again in a new unit, as a command
+    handler does. Returns the command's attempts."""
+    template = _template(store)
+    wrote, opened = asyncio.Event(), asyncio.Event()
+    attempts = 0
+
+    async def command() -> None:
+        nonlocal attempts
+        while True:
+            attempts += 1
+            try:
+                async with template.transaction():
+                    await store.append("order-y", "Order", [_envelope("OrderPlaced")], expected_version=0)
+                    wrote.set()
+                    await opened.wait()
+                    version = await store.latest_version("account-x")
+                    await store.append("account-x", "Account", [_envelope("Deposited")], expected_version=version)
+                return
+            except ConcurrencyError:
+                if attempts == 3:
+                    raise
+
+    unit = detached(command())
+    await asyncio.wait_for(wrote.wait(), 10)
+    await store.append("account-x", "Account", [_envelope("Opened")], expected_version=0)
+    opened.set()
+    await asyncio.wait_for(unit, 20)
+    return attempts
 
 
 async def test_after_event_id_still_pages_and_an_unknown_id_is_refused(relational_backend: RelationalBackend) -> None:
@@ -355,10 +405,6 @@ async def test_business_units_that_append_do_not_wait_for_or_fail_on_one_another
     locks a row another unit changed since it started reading) each read, then append, and commit in another
     order than they started: every one of them commits."""
     await _overlapping_units_commit(await _store(relational_backend))
-    if relational_backend.dialect == "postgresql":
-        await _overlapping_units_commit(
-            await _store(relational_backend, "head-row", table_name="wp08_rr_events", head_table_name="wp08_rr_head")
-        )
 
 
 async def _overlapping_units_commit(store: SqlAlchemyEventStore, units: int = 4) -> None:
@@ -488,27 +534,26 @@ async def test_events_stored_by_an_earlier_release_get_positions_in_their_order_
 
 
 @pytest.mark.backends(PG)
-async def test_postgresql_uses_the_xid8_guard_and_the_strategy_is_the_table_s(
+async def test_xid8_is_opt_in_on_postgresql_and_the_strategy_is_the_table_s(
     relational_backend: RelationalBackend,
 ) -> None:
-    store = await _store(relational_backend)
+    store = await _store(relational_backend, "xid8")
     assert store.position_strategy == "xid8"
 
-    # A store configured for the head row on the same table follows what the table recorded when it is
-    # left to choose, and refuses to start when told otherwise: two strategies on one table would skip events.
-    follower = await _store(relational_backend)
+    # A store left to choose follows what the table recorded, and one configured for the head row refuses to
+    # start on it: two strategies on one table would skip events.
+    follower = await _store(relational_backend, "auto")
     assert follower.position_strategy == "xid8"
     mismatched = SqlAlchemyEventStore(store.engine, position_strategy="head-row")
     with pytest.raises(FrameworkSchemaError, match="xid8"):
         await mismatched.start()
 
 
-async def test_a_head_row_strategy_is_the_default_where_postgresql_s_guard_is_missing(
-    relational_backend: RelationalBackend,
-) -> None:
-    store = await _store(relational_backend)
-    expected = "xid8" if relational_backend.dialect == "postgresql" else "head-row"
-    assert store.position_strategy == expected
+async def test_the_head_row_strategy_is_the_default_on_every_backend(relational_backend: RelationalBackend) -> None:
+    """Review of WP08: ``auto`` chose ``xid8`` on PostgreSQL, whose positions follow the order the writers took
+    their transaction ids in, not the order they committed in."""
+    store = await _store(relational_backend, "auto")
+    assert store.position_strategy == "head-row"
     if relational_backend.dialect != "postgresql":
         with pytest.raises(ValueError, match="xid8"):
             await SqlAlchemyEventStore(store.engine, position_strategy="xid8").start()
@@ -663,3 +708,43 @@ async def test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order(
     assert [event.sequence for event in events if event.aggregate_id == "big-b"] == list(range(1, 1301))
     if store.position_strategy == "head-row":
         assert [event.global_position for event in events] == list(range(1, 2601))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# PostgreSQL's xid8 accelerator
+# ---------------------------------------------------------------------------------------------------------
+
+_XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
+    test_events_round_trip_with_their_sequence_metadata_and_global_position,
+    test_an_envelope_equals_itself_read_back_whatever_its_global_position,
+    test_the_global_stream_follows_commit_order_not_the_envelope_clock,
+    test_events_that_share_a_timestamp_are_each_streamed_once,
+    test_an_append_waits_for_no_other_unit_and_a_late_commit_is_not_skipped_on_the_stream,
+    test_concurrent_appends_get_distinct_increasing_positions,
+    test_concurrent_appends_to_one_aggregate_let_one_win,
+    test_an_aggregate_s_events_stream_in_sequence_order_across_units,
+    test_after_event_id_still_pages_and_an_unknown_id_is_refused,
+    test_events_commit_and_roll_back_with_the_business_unit,
+    test_an_append_rolled_back_to_a_savepoint_leaves_the_rest_of_the_unit_on_the_stream,
+    test_business_units_that_append_do_not_wait_for_or_fail_on_one_another,
+    test_an_append_from_a_later_before_commit_callback_still_gets_a_position,
+    test_an_append_sends_its_events_in_one_insert,
+    test_the_tables_are_created_at_start_and_only_checked_without_ddl,
+    test_events_stored_by_an_earlier_release_get_positions_in_their_order_at_start,
+    test_a_page_of_the_stream_is_read_through_the_global_position_index,
+    test_skewed_clocks_do_not_reorder_the_stream,
+    test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order,
+)
+
+
+@pytest.mark.backends(PG)
+@pytest.mark.parametrize("scenario", _XID8_SCENARIOS, ids=lambda scenario: scenario.__name__.removeprefix("test_"))
+async def test_the_xid8_strategy_on_postgresql(
+    relational_backend: RelationalBackend,
+    scenario: Callable[[RelationalBackend], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenarios above run every lane with the default strategy (head-row, PostgreSQL's too); PostgreSQL runs
+    them again with its opt-in ``xid8`` accelerator."""
+    monkeypatch.setattr(sys.modules[__name__], "_STRATEGY", "xid8")
+    await scenario(relational_backend)
