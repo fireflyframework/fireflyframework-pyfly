@@ -313,7 +313,14 @@ Spring AMQP:
   failover longer than about 15 s dead-letters every delivery consumed during it (on
   RabbitMQ, every prefetched message runs through its attempts): size
   `pyfly.messaging.listener.retry.max-attempts` and `retry.max-delay` to outlast the
-  failover you expect. A message the adapter cannot read is dead-lettered at once.
+  failover you expect. A message the adapter cannot read is dead-lettered at once, and
+  so is a failure whose type the container's `RetryPolicy` lists in `not_retryable`;
+  a transient one only when the entry names its kind or a narrower type
+  (`OptimisticLockingFailureException` or `ConcurrencyException` for an
+  optimistic-locking conflict, `ConnectionError` for a lost connection), while a
+  broader entry (`Exception`, `ConflictException`) leaves it its attempts. A failure
+  is transient when the exception, or one it was raised `from`, is: an exception
+  raised while handling an optimistic-locking conflict is not.
 * **After the last attempt, the message is dead-lettered, then acknowledged.** When
   the dead-letter publish fails, nothing is acknowledged: the offset stays where it
   was, the AMQP message is requeued, and the dead letter is published again later.

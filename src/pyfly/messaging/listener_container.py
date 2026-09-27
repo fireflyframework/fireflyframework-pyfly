@@ -34,7 +34,8 @@ gives the same guarantees (at-least-once, Spring Kafka and Spring AMQP semantics
   (:func:`is_transient_failure`: a lost connection, a timeout, a lock, serialization or optimistic-locking
   conflict) included: a database outage longer than the back-off dead-letters what is consumed meanwhile. A message
   the adapter cannot read (:class:`PoisonMessageError`), and an exception type the policy lists as not
-  retryable (unless the failure is transient), skip the remaining attempts.
+  retryable, skip the remaining attempts (a transient failure only when the entry names its kind or a
+  narrower type: see :class:`RetryPolicy`).
 - **After the last attempt the delivery is dead-lettered** (``<topic>.DLT`` on Kafka, an exchange the
   adapter declares on RabbitMQ) and only then acknowledged. When the dead-letter publish fails, nothing
   is acknowledged: the delivery comes back and is dead-lettered again. Switching dead-lettering off
@@ -174,8 +175,13 @@ class RetryPolicy:
     *max_attempts* counts every delivery, the first included (``1`` dead-letters at the first failure),
     whatever the failure: a transient one uses up the same attempts. *not_retryable* names exception types
     that are dead-lettered at the first failure, because another attempt cannot succeed (a validation
-    error, a missing reference); a transient failure (:func:`is_transient_failure`) keeps its remaining
-    attempts even when its type is listed.
+    error, a missing reference). An entry is explicit, and wins over the transient classification
+    (:func:`is_transient_failure`), when it names the failure's transient kind or a narrower type:
+    listing ``OptimisticLockingFailureException`` (or ``ConcurrencyException``) dead-letters an
+    optimistic-locking conflict at once, and listing ``ConnectionError`` a lost connection. A broader entry
+    (``Exception``, ``ConflictException``, ``OSError``) leaves a transient failure its remaining attempts, and
+    so does any entry when what makes the failure transient is the exception it was raised from or a
+    driver's error code.
     """
 
     max_attempts: int = 5
@@ -191,9 +197,20 @@ class RetryPolicy:
         ``None`` when it goes to the dead letter now."""
         if isinstance(error, PoisonMessageError) or attempt >= self.max_attempts:
             return None
-        if self.not_retryable and isinstance(error, self.not_retryable) and not is_transient_failure(error):
+        if self._listed_as_not_retryable(error):
             return None
         return max(0.0, self.backoff.delay_after(attempt))
+
+    def _listed_as_not_retryable(self, error: BaseException) -> bool:
+        """Whether an entry of *not_retryable* dead-letters *error* now: it matches, and the failure is not
+        transient, or the entry names the transient kind *error* is (or a narrower type)."""
+        entries = [entry for entry in self.not_retryable if isinstance(error, entry)]
+        if not entries:
+            return False
+        if not is_transient_failure(error):
+            return True
+        kinds = [kind for kind in _TRANSIENT_TYPES if isinstance(error, kind)]
+        return any(issubclass(entry, kind) for entry in entries for kind in kinds)
 
     def with_options(self, options: ListenerOptions | None) -> RetryPolicy:
         """This policy with a listener's own attempts and back-off, where it declares them."""
@@ -240,14 +257,28 @@ _TRANSIENT_MONGO_ERRORS = frozenset(
 )
 
 
-def is_transient_failure(error: BaseException) -> bool:
-    """Whether *error* (or an exception it wraps) is a failure of the moment, which another attempt can
-    get past: a lost or refused connection, a pool or statement timeout, a lock, deadlock or serialization
-    conflict, an optimistic-locking conflict, a transaction that timed out or whose commit outcome is unknown.
+_TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
+    TransactionTimedOutError,
+    CommitOutcomeUnknownError,
+    TimeoutError,
+    ConnectionError,
+    ConcurrencyException,
+)
+"""The exception types that are transient by type (:func:`is_transient_failure` also reads error codes). A
+:class:`RetryPolicy` entry that names one of them, or a narrower type, is explicit about that kind."""
 
-    The check reads the exception chain (``__cause__``, ``__context__`` and a driver error's ``orig``),
-    the SQLSTATE of PostgreSQL drivers, the error number of MySQL drivers, the error labels of pymongo and
-    SQLite's busy messages, without importing any driver. Repositories and the unit of work raise the
+
+def is_transient_failure(error: BaseException) -> bool:
+    """Whether *error* (or an exception it was raised from) is a failure of the moment, which another attempt
+    can get past: a lost or refused connection, a pool or statement timeout, a lock, deadlock or
+    serialization conflict, an optimistic-locking conflict, a transaction that timed out or whose commit
+    outcome is unknown.
+
+    The check reads *error* and what it was raised from (``__cause__``, and a driver error's ``orig``), the
+    SQLSTATE of PostgreSQL drivers, the error number of MySQL drivers, the error labels of pymongo and
+    SQLite's busy messages, without importing any driver. It does not read ``__context__``: an exception
+    raised while another was being handled (a business error raised in the ``except`` block of an
+    optimistic-locking conflict) is not the failure it handled. Repositories and the unit of work raise the
     kernel's exceptions, translated from the driver's and raised from them
     (:mod:`pyfly.data.exception_translation`): a translated failure is transient when its cause is, and a
     :class:`~pyfly.kernel.exceptions.ConcurrencyException` (``OptimisticLockingFailureException``) is
@@ -263,7 +294,7 @@ def is_transient_failure(error: BaseException) -> bool:
         seen.add(id(current))
         if _transient(current):
             return True
-        for attribute in ("orig", "__cause__", "__context__"):
+        for attribute in ("orig", "__cause__"):
             linked = getattr(current, attribute, None)
             if isinstance(linked, BaseException):
                 stack.append(linked)
@@ -271,10 +302,7 @@ def is_transient_failure(error: BaseException) -> bool:
 
 
 def _transient(error: BaseException) -> bool:
-    if isinstance(
-        error,
-        (TransactionTimedOutError, CommitOutcomeUnknownError, TimeoutError, ConnectionError, ConcurrencyException),
-    ):
+    if isinstance(error, _TRANSIENT_TYPES):
         return True
     kind = type(error)
     module = kind.__module__ or ""

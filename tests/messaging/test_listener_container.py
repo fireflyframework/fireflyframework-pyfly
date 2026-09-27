@@ -36,7 +36,12 @@ from pyfly.data.transaction import (
     current_unit_of_work,
     is_transaction_active,
 )
-from pyfly.kernel.exceptions import ConflictException, DuplicateKeyException, OptimisticLockingFailureException
+from pyfly.kernel.exceptions import (
+    ConcurrencyException,
+    ConflictException,
+    DuplicateKeyException,
+    OptimisticLockingFailureException,
+)
 from pyfly.messaging.listener_container import (
     ATTEMPT_HEADER,
     ConcurrencyLimit,
@@ -77,11 +82,23 @@ def test_a_message_that_cannot_be_read_is_never_retried() -> None:
     assert RetryPolicy().retry_delay(PoisonMessageError(ValueError("not json")), 1) is None
 
 
-def test_not_retryable_types_skip_the_remaining_attempts_unless_the_failure_is_transient() -> None:
+def test_not_retryable_types_skip_the_remaining_attempts() -> None:
+    """An entry names what the application will not attempt again, a transient failure included when the
+    entry names its kind (``ConnectionError`` here) or a narrower type."""
     policy = RetryPolicy(not_retryable=(ValueError, ConnectionError))
     assert policy.retry_delay(ValueError("invalid order"), 1) is None
-    assert policy.retry_delay(ConnectionResetError("db restarting"), 1) == 1.0
+    assert policy.retry_delay(ConnectionResetError("db restarting"), 1) is None
     assert policy.retry_delay(KeyError("x"), 1) == 1.0
+
+
+def test_a_broad_not_retryable_type_leaves_a_transient_failure_its_attempts() -> None:
+    """An entry broader than a transient failure's kind (``OSError`` for a lost connection, ``Exception``)
+    does not dead-letter it at once: another attempt can get past it."""
+    for broad in (OSError, Exception):
+        policy = RetryPolicy(not_retryable=(broad,))
+        assert policy.retry_delay(ConnectionResetError("db restarting"), 1) == 1.0
+        assert policy.retry_delay(TimeoutError(), 1) == 1.0
+    assert RetryPolicy(not_retryable=(Exception,)).retry_delay(ValueError("invalid order"), 1) is None
 
 
 def test_a_transient_failure_uses_up_the_same_attempts() -> None:
@@ -201,6 +218,33 @@ async def test_the_kernel_exceptions_of_the_persistence_translation_are_classifi
         raise ConflictException("the listener's own conflict") from locked
     except ConflictException as wrapped:
         assert policy.retry_delay(wrapped, 1) is not None  # its cause is transient
+
+    # An application that lists the optimistic-locking conflict itself (or ConcurrencyException) as not
+    # retryable dead-letters it at once: its entry is explicit.
+    for explicit in (OptimisticLockingFailureException, ConcurrencyException):
+        assert RetryPolicy(max_attempts=3, not_retryable=(explicit,)).retry_delay(stale, 1) is None
+
+
+def test_an_exception_raised_while_handling_a_transient_one_is_not_transient() -> None:
+    """Only what an exception was raised from (``__cause__``, a driver error's ``orig``) makes it transient: a
+    business error raised in an ``except`` block that handled an optimistic-locking conflict or a lost
+    connection is that business error, and a policy that lists it dead-letters it at once."""
+    policy = RetryPolicy(max_attempts=3, not_retryable=(ValueError,))
+    for handled in (OptimisticLockingFailureException("stale"), ConnectionResetError("db restarting")):
+        business = _raised_while_handling(handled, ValueError("the order cannot be placed"))
+        assert business.__context__ is handled and business.__cause__ is None
+        assert not is_transient_failure(business)
+        assert policy.retry_delay(business, 1) is None
+
+
+def _raised_while_handling(handled: Exception, raised: Exception) -> Exception:
+    try:
+        try:
+            raise handled
+        except type(handled):
+            raise raised  # noqa: B904 — raised while handling it, deliberately not from it
+    except type(raised) as caught:
+        return caught
 
 
 def test_timeouts_and_lost_connections_are_transient() -> None:
