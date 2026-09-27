@@ -186,10 +186,11 @@ class Container:
         # one bean would silently vanish from type/list resolution.
         self._all: dict[tuple[type, str], Registration] = {}
         self._lock = threading.RLock()
-        # Installed by ApplicationContext AFTER startup so SINGLETON beans created
-        # lazily (post-startup) still run the full init pipeline (BeanPostProcessors,
-        # @post_construct, AOP weaving). None during startup — the batched startup
-        # passes handle eager beans then (avoids double-initialization).
+        # Called with every instance the container creates, of every scope, before it is cached or
+        # handed out; it returns the instance to use. ApplicationContext installs it for the whole
+        # start() and after it, so a TRANSIENT, REQUEST, SESSION or custom-scoped bean, and a @lazy
+        # singleton first resolved while the context starts, get the BeanPostProcessors and
+        # @post_construct like any eager singleton. None for a bare container.
         self._post_create_hook: Callable[[Any, Registration], Any] | None = None
 
     @property
@@ -429,10 +430,7 @@ class Container:
                 if reg.instance is not None:
                     self._ensure_metrics(reg.impl_type).resolution_count += 1
                     return reg.instance
-                instance = self._create_instance(reg)
-                if self._post_create_hook is not None:
-                    # Lazily-created singleton (post-startup): run the full init pipeline.
-                    instance = self._post_create_hook(instance, reg)
+                instance = self._create_initialized(reg)
                 reg.instance = instance
                 self._ensure_metrics(reg.impl_type).resolution_count += 1
                 return instance
@@ -452,9 +450,15 @@ class Container:
             self._ensure_metrics(reg.impl_type).resolution_count += 1
             return instance
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         self._ensure_metrics(reg.impl_type).resolution_count += 1
         return instance
+
+    def _create_initialized(self, reg: Registration) -> Any:
+        """Create an instance of *reg* and run the post-create hook on it (the init pipeline)."""
+        instance = self._create_instance(reg)
+        hook = self._post_create_hook
+        return instance if hook is None else hook(instance, reg)
 
     def _resolve_request_scoped(self, reg: Registration) -> Any:
         """Resolve a REQUEST-scoped bean from the active RequestContext."""
@@ -473,7 +477,7 @@ class Container:
         if existing is not None:
             return existing
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         ctx.set(cache_key, instance)
         return instance
 
@@ -507,7 +511,7 @@ class Container:
         if existing is not None:
             return existing
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         session.set_attribute(cache_key, instance)
         return instance
 
@@ -545,7 +549,7 @@ class Container:
                 f"{reg.display_name}. Available: {sorted(self._custom_scopes)}. "
                 f"Call container.register_scope({reg.scope!r}, handler) first."
             )
-        return handler.get(scope_key(reg), lambda: self._create_instance(reg))
+        return handler.get(scope_key(reg), lambda: self._create_initialized(reg))
 
     def _create_instance(self, reg: Registration) -> Any:
         """Create an instance, resolving constructor and field dependencies."""

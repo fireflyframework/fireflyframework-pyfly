@@ -22,6 +22,7 @@ import inspect
 import logging
 import types
 import typing
+import weakref
 from collections import deque
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -70,6 +71,50 @@ class _DeferredBeanMethod:
         return dataclasses.replace(self, cause=cause)
 
 
+# The names of each class's methods marked with a lifecycle marker (``__pyfly_post_construct__``,
+# ``__pyfly_pre_destroy__``), found once per class. Every bean the container creates is scanned, so
+# a transient bean resolved per call must not pay a full ``dir()`` walk each time.
+_MARKED_NAMES: weakref.WeakKeyDictionary[type, dict[str, tuple[str, ...]]] = weakref.WeakKeyDictionary()
+
+
+def _marked_names(cls: type, marker: str) -> tuple[str, ...]:
+    """The attribute names of *cls* whose function carries *marker* (properties are never evaluated)."""
+    try:
+        per_class = _MARKED_NAMES.setdefault(cls, {})
+    except TypeError:  # a class that cannot be weakly referenced is scanned every time
+        per_class = {}
+    names = per_class.get(marker)
+    if names is None:
+        found: list[str] = []
+        for attr_name in dir(cls):
+            static_attr = inspect.getattr_static(cls, attr_name, None)
+            if isinstance(static_attr, (property, functools.cached_property)):
+                continue
+            if isinstance(static_attr, (staticmethod, classmethod)):
+                static_attr = static_attr.__func__
+            if getattr(static_attr, marker, False):
+                found.append(attr_name)
+        names = per_class[marker] = tuple(found)
+    return names
+
+
+def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
+    """``(name, bound member)`` for the methods of *instance* marked with *marker*.
+
+    The member is read from the instance, so a method a BeanPostProcessor replaced on it (an
+    AOP-woven wrapper) is the one called.
+    """
+    members: list[tuple[str, Any]] = []
+    for attr_name in _marked_names(type(instance), marker):
+        try:
+            member = getattr(instance, attr_name)
+        except Exception:  # noqa: BLE001 — a failing attribute is not a lifecycle method
+            continue
+        if getattr(member, marker, False):
+            members.append((attr_name, member))
+    return members
+
+
 class ApplicationContext:
     """Central bean registry, lifecycle manager, and event publisher.
 
@@ -102,6 +147,9 @@ class ApplicationContext:
         self._deferred_bean_methods: list[_DeferredBeanMethod] = []
         self._background_tasks: list[asyncio.Task[Any]] = []
         self._wiring_counts: dict[str, int] = {}
+        #: Non-singleton instances the container created during start() before the batched
+        #: post-processing passes (step 5), which process them; ``None`` outside that window.
+        self._startup_created: list[tuple[Any, Registration]] | None = None
 
         # Register config and container as singleton beans (injectable like Spring's ApplicationContext)
         self._container.register_instance(Config, config)
@@ -213,8 +261,10 @@ class ApplicationContext:
         try:
             await self._do_start()
         except BeanCreationException:
+            self._startup_created = None
             raise
         except Exception as exc:
+            self._startup_created = None
             raise BeanCreationException(
                 subsystem="startup",
                 provider=type(exc).__qualname__,
@@ -238,6 +288,12 @@ class ApplicationContext:
             self._container._registrations.pop(key, None)
 
         registrations_before = set(self._container._registrations.keys())
+
+        # Every instance the container creates from now on goes through the init pipeline. Until
+        # the batched passes of step 5 run, the hook only collects the non-singleton ones (the
+        # singletons are on their registrations) so that step 5 processes each once.
+        self._startup_created = []
+        self._container._post_create_hook = self._on_bean_created
 
         # Whatever already carries an instance was HANDED to the container, not built by it — the
         # container's self-registration, the context's own, anything an embedder registered as a
@@ -302,13 +358,22 @@ class ApplicationContext:
         # lazily creates another bean.
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
 
+        # The non-singleton instances created so far (a TRANSIENT repository injected into a
+        # singleton, the transient session a @bean received) join the batch. From here on the
+        # post-create hook runs the pipeline itself, so a bean first created from now on (a @lazy
+        # singleton resolved by a @post_construct, an event listener or a runner, or any scoped
+        # bean) is post-processed when it is created.
+        scoped_instances = self._startup_created or []
+        self._startup_created = None
+
         # An interface-typed @bean is registered under both its concrete and
         # return type, so the same instance appears in two Registration entries.
         # Group registrations by instance identity and process each unique
         # instance exactly once, propagating the (possibly AOP-wrapped) result
         # back to every alias — otherwise @post_construct/BeanPostProcessors run
-        # twice and one alias keeps the un-woven object (audit #113).
-        instance_groups: list[list[Registration]] = []
+        # twice and one alias keeps the un-woven object (audit #113). A scoped
+        # instance has no alias: nothing caches it on a registration.
+        units: list[tuple[str, Any, list[Registration]]] = []
         groups_by_id: dict[int, list[Registration]] = {}
         for reg in self._container._registrations.values():
             if reg.instance is None:
@@ -317,28 +382,27 @@ class ApplicationContext:
             if grp is None:
                 grp = []
                 groups_by_id[id(reg.instance)] = grp
-                instance_groups.append(grp)
+                units.append((reg.display_name, reg.instance, grp))
             grp.append(reg)
+        for instance, reg in scoped_instances:
+            if id(instance) not in groups_by_id:
+                groups_by_id[id(instance)] = []
+                units.append((reg.display_name, instance, []))
 
         # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
-        for group in instance_groups:
-            rep = group[0]
-            bean_name = rep.display_name
-            inst = rep.instance
+        for index, (bean_name, inst, aliases) in enumerate(units):
             for pp in sorted_pps:
                 inst = pp.before_init(inst, bean_name)
-            for member in group:
+            for member in aliases:
                 member.instance = inst
+            units[index] = (bean_name, inst, aliases)
 
         # Pass 2: @post_construct then after_init (weaving now sees every aspect)
-        for group in instance_groups:
-            rep = group[0]
-            bean_name = rep.display_name
-            await self._call_post_construct(rep.instance)
-            inst = rep.instance
+        for bean_name, inst, aliases in units:
+            await self._call_post_construct(inst)
             for pp in sorted_pps:
                 inst = pp.after_init(inst, bean_name)
-            for member in group:
+            for member in aliases:
                 member.instance = inst
 
         # 6. Wire decorator-based beans to their targets
@@ -359,10 +423,6 @@ class ApplicationContext:
         self._pipeline_registrations = frozenset(self._container._registrations.keys()) - registrations_before
 
         self._started = True
-        # Lazily-created singletons (built post-startup on first resolve) must still
-        # run the full init pipeline. Installed now so the batched startup passes
-        # above handled the eager beans without double-initialization.
-        self._container._post_create_hook = self._post_init_lazy_bean
 
     async def stop(self) -> None:
         """Stop the context: call @pre_destroy, publish ContextClosedEvent.
@@ -1305,6 +1365,18 @@ class ApplicationContext:
             counts[stereotype] = counts.get(stereotype, 0) + 1
         return counts
 
+    def _on_bean_created(self, instance: Any, reg: Registration) -> Any:
+        """The container's post-create hook: every instance it creates, of every scope, lands here.
+
+        Before the batched passes of step 5 a non-singleton instance is only recorded (they process
+        it with the eager singletons); from step 5 on each instance runs the whole pipeline at once.
+        """
+        if self._startup_created is not None:
+            if reg.scope != Scope.SINGLETON:
+                self._startup_created.append((instance, reg))
+            return instance
+        return self._post_init_lazy_bean(instance, reg)
+
     def _post_init_lazy_bean(self, instance: Any, reg: Registration) -> Any:
         """Run the full init pipeline on a lazily-created singleton (post-startup):
         BeanPostProcessors (incl. AOP weaving) then @post_construct, mirroring the
@@ -1324,9 +1396,7 @@ class ApplicationContext:
         """Synchronous @post_construct for lazily-created beans. Async @post_construct
         cannot be awaited in the sync resolution path, so it is skipped with a warning
         (use an eager bean if you need an async @post_construct)."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if not getattr(method, "__pyfly_post_construct__", False):
-                continue
+        for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
             if inspect.iscoroutinefunction(method):
                 logger.warning(
                     "async_post_construct_skipped_on_lazy_bean",
@@ -1349,33 +1419,31 @@ class ApplicationContext:
 
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if getattr(method, "__pyfly_post_construct__", False):
-                try:
-                    result = method()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    raise BeanCreationException(
-                        subsystem="lifecycle",
-                        provider=type(instance).__qualname__,
-                        reason=f"@post_construct method '{attr_name}' failed: {exc}",
-                    ) from exc
+        for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                raise BeanCreationException(
+                    subsystem="lifecycle",
+                    provider=type(instance).__qualname__,
+                    reason=f"@post_construct method '{attr_name}' failed: {exc}",
+                ) from exc
 
     async def _call_pre_destroy(self, instance: Any) -> None:
         """Call all @pre_destroy methods on an instance."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if getattr(method, "__pyfly_pre_destroy__", False):
-                try:
-                    result = method()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    logger.warning(
-                        "pre_destroy_failed",
-                        extra={
-                            "bean": type(instance).__qualname__,
-                            "method": attr_name,
-                            "error": str(exc),
-                        },
-                    )
+        for attr_name, method in _marked_members(instance, "__pyfly_pre_destroy__"):
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.warning(
+                    "pre_destroy_failed",
+                    extra={
+                        "bean": type(instance).__qualname__,
+                        "method": attr_name,
+                        "error": str(exc),
+                    },
+                )
