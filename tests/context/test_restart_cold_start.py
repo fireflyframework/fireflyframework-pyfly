@@ -31,8 +31,8 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker  # noqa: E402
+from sqlalchemy import event, text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 
 from pyfly.aop.decorators import around, aspect  # noqa: E402
 from pyfly.container import bean, component, configuration, service  # noqa: E402
@@ -237,3 +237,27 @@ async def test_restarts_do_not_grow_the_container_indexes(tmp_path: Path) -> Non
     assert container._names_by_type[_Named] == {"first_named", "second_named"}
     assert _Named in container._shared_types
     assert _FilteredOut not in container._shared_types
+
+
+async def test_an_engine_handed_to_the_container_pools_again_after_a_restart(tmp_path: Path) -> None:
+    """The engine lifecycle disposes an application's engine at stop, and makes a connection in use then
+    close when it is returned. That hook used to stop the engine from pooling for good, so after a restart
+    every query opened a new connection."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'handed.db'}")
+    connects: list[object] = []
+    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(object()))
+    ctx = ApplicationContext(Config({"pyfly": {"data": {"relational": {"enabled": "true", "ddl-auto": "none"}}}}))
+    ctx.container.register_instance(AsyncEngine, engine)
+    try:
+        await ctx.start()
+        await ctx.stop()
+        await ctx.start()
+        assert ctx.get_bean(AsyncEngine) is engine
+        connects.clear()
+        for _ in range(5):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        assert len(connects) == 1
+    finally:
+        await ctx.stop()
+        await engine.dispose()

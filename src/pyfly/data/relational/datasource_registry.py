@@ -421,26 +421,66 @@ def _refuse_new_connections(datasource: DataSource) -> None:
     event.listen(datasource.engine.sync_engine, "do_connect", _refuse, insert=True)
 
 
+#: ``record.info`` key: the pool generation a connection was opened in (see :func:`close_connections_on_return`).
+_POOL_GENERATION = "pyfly_pool_generation"
+
+
+class _PoolGenerations:
+    """The current pool generation of one engine; a connection of an older one is closed when returned."""
+
+    __slots__ = ("current",)
+
+    def __init__(self) -> None:
+        self.current = object()
+
+
+# The engines with the hook, weakly: the listeners hold the generation, never the engine.
+_GENERATIONS: weakref.WeakKeyDictionary[Any, _PoolGenerations] = weakref.WeakKeyDictionary()
+_GENERATIONS_LOCK = threading.Lock()
+
+
 def close_connections_on_return(engine: AsyncEngine) -> None:
-    """Close every connection returned to *engine* from now on, instead of pooling it.
+    """Close each connection in use when *engine* is disposed as soon as it is returned.
 
-    Call it before disposing an engine that may be in use. ``dispose()`` closes the connections idle
-    in the pool and replaces the pool; a connection checked out at that moment is left alone, and
-    when it is returned it goes back into the disposed pool, where it stays open until the garbage
-    collector finds that pool (on PostgreSQL its backend stays in ``pg_stat_activity``). With this
-    hook the connection finishes its work and is closed as soon as it is returned. The hook follows
-    the engine into the pool ``dispose()`` creates, so the engine pools nothing any more: use it only
-    for an engine you are done with. :meth:`DataSourceRegistry.close`, the ``ApplicationContext``
-    (before the ``dispose()`` destroy method of an engine bean) and the engine lifecycle (before it
-    disposes an application's engine) install it.
+    Call it before disposing an engine that may be in use. ``dispose()`` closes the connections idle in
+    the pool and replaces the pool; a connection checked out at that moment is left alone, and when it is
+    returned it goes back into the disposed pool, where it stays open until the garbage collector finds
+    that pool (on PostgreSQL its backend stays in ``pg_stat_activity``). With the hook, that connection
+    finishes its work and is closed when it is returned.
+
+    Only those connections are closed: the engine pools again afterwards, so an engine that outlives the
+    dispose (handed to a restarted context, shared by a second one, an in-memory SQLite database on a
+    ``StaticPool``) keeps working as before. Each connection is stamped with the pool generation it was
+    opened in; this call and every later ``dispose()`` of the engine start a new generation, and a
+    connection of an older one is closed when it is returned (as the credentials rotation does for an
+    evicted pool). Calling it again is cheap. :meth:`DataSourceRegistry.close`, the
+    ``ApplicationContext`` (before the ``dispose()`` destroy method of an engine bean) and the engine
+    lifecycle (before it disposes an application's engine) call it.
     """
+    sync_engine = engine.sync_engine
+    with _GENERATIONS_LOCK:
+        generations = _GENERATIONS.get(sync_engine)
+        if generations is None:
+            generations = _GENERATIONS[sync_engine] = _PoolGenerations()
+            _install_generation_hooks(sync_engine, generations)
+        generations.current = object()
 
-    def _close_returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
-        # The credentials rotation closes a connection of an evicted pool the same way (_returned).
-        if dbapi_connection is not None:
+
+def _install_generation_hooks(sync_engine: Any, generations: _PoolGenerations) -> None:
+    def _opened(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
+        record.info[_POOL_GENERATION] = generations.current
+
+    def _disposed(_engine: Any) -> None:
+        # A connection opened in the old pool while it was disposed is of the old generation too.
+        generations.current = object()
+
+    def _returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
+        if dbapi_connection is not None and record.info.get(_POOL_GENERATION) is not generations.current:
             record.invalidate()
 
-    event.listen(engine.sync_engine, "checkin", _close_returned)
+    event.listen(sync_engine, "connect", _opened)
+    event.listen(sync_engine, "engine_disposed", _disposed)
+    event.listen(sync_engine, "checkin", _returned)
 
 
 def _terminate_idle_connections(pool: Any) -> int:

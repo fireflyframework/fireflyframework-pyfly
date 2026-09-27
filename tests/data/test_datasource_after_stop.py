@@ -36,6 +36,7 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import event, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
@@ -137,9 +138,13 @@ async def test_a_connection_in_use_while_the_context_stops_is_closed_when_return
 
 
 async def test_an_engine_disposed_by_its_owner_closes_the_connections_returned_after(tmp_path: Path) -> None:
-    """``close_connections_on_return`` is what an owner calls before disposing an engine of its own."""
+    """``close_connections_on_return`` is what an owner calls before disposing an engine of its own. It
+    closes the connections in use at the dispose when they are returned, and only those: the engine pools
+    again afterwards (it used to pool nothing any more)."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'own.db'}")
     closed = _closed_connections(engine)
+    connects: list[object] = []
+    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(object()))
     async with engine.connect() as conn:
         in_use = await _dbapi_connection(conn)
         close_connections_on_return(engine)
@@ -148,7 +153,38 @@ async def test_an_engine_disposed_by_its_owner_closes_the_connections_returned_a
         assert in_use not in closed
 
     assert in_use in closed
-    async with engine.connect() as conn:  # the engine still works, and pools nothing any more
-        later = await _dbapi_connection(conn)
-    assert later in closed
+    connects.clear()
+    later: list[Any] = []
+    for _ in range(5):
+        async with engine.connect() as conn:
+            later.append(await _dbapi_connection(conn))
+    assert len(connects) == 1  # one pooled connection served all five
+    assert later[0] not in closed
+    await engine.dispose()
+
+
+async def test_a_second_dispose_closes_the_connections_in_use_then_too(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'own.db'}")
+    closed = _closed_connections(engine)
+    close_connections_on_return(engine)
+    await engine.dispose()
+    async with engine.connect() as conn:
+        in_use = await _dbapi_connection(conn)
+        close_connections_on_return(engine)
+        await engine.dispose()
+        assert in_use not in closed
+
+    assert in_use in closed
+    await engine.dispose()
+
+
+async def test_an_in_memory_database_keeps_its_data_after_the_hook() -> None:
+    """On a StaticPool the one connection is the database: closing it on return lost every table."""
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    close_connections_on_return(engine)
+    await engine.dispose()
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE wp07_memory (x INTEGER)"))
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM wp07_memory"))).scalar_one() == 0
     await engine.dispose()

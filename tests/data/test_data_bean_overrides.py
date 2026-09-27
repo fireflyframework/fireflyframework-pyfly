@@ -35,6 +35,7 @@ pytest.importorskip("sqlalchemy")
 from sqlalchemy import Integer, String, event, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.orm import Mapped, ORMExecuteState, Session, mapped_column  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from pyfly.container import NoUniqueBeanError, Qualifier, bean, configuration, repository  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy  # noqa: E402
@@ -632,3 +633,64 @@ async def test_a_deferred_user_mongo_client_with_a_parametrized_hint_replaces_th
         assert ctx.get_bean(BeanieInitializer)._motor_client is client
     finally:
         await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# An engine the context disposes pools again afterwards. The hook that closes a connection in use at the
+# dispose used to stop the engine from pooling for good: an engine the application shares with a second
+# context opened a connection per query there, and an in-memory SQLite database on a StaticPool lost its
+# data between two connections.
+# ---------------------------------------------------------------------------
+
+_SHARED: dict[str, AsyncEngine] = {}
+
+
+@configuration
+class _SharedEngine:
+    @bean
+    def shared_engine(self) -> AsyncEngine:
+        return _SHARED["engine"]
+
+
+def _unconfigured() -> Config:
+    return Config({"pyfly": {"data": {"relational": {"enabled": "true", "ddl-auto": "none"}}}})
+
+
+async def test_an_engine_shared_by_two_contexts_pools_in_the_second(tmp_path: Path) -> None:
+    engine = _SHARED["engine"] = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'shared.db'}")
+    connects: list[object] = []
+    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(object()))
+    try:
+        for _context in range(2):
+            ctx = ApplicationContext(_unconfigured())
+            ctx.register_bean(_SharedEngine)
+            await ctx.start()
+            try:
+                connects.clear()
+                for _ in range(5):
+                    async with engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                assert len(connects) == 1
+            finally:
+                await ctx.stop()
+    finally:
+        await engine.dispose()
+
+
+async def test_an_in_memory_database_shared_by_two_contexts_keeps_its_data_in_the_second() -> None:
+    engine = _SHARED["engine"] = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    try:
+        for context in range(2):
+            ctx = ApplicationContext(_unconfigured())
+            ctx.register_bean(_SharedEngine)
+            await ctx.start()
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text("CREATE TABLE IF NOT EXISTS wp07_memory (x INTEGER)"))
+                    await conn.execute(text("INSERT INTO wp07_memory VALUES (:x)"), {"x": context})
+                async with engine.connect() as conn:  # the next connection is the same in-memory database
+                    assert (await conn.execute(text("SELECT count(*) FROM wp07_memory"))).scalar_one() == 1
+            finally:
+                await ctx.stop()  # disposes the engine: the in-memory database goes with its connection
+    finally:
+        await engine.dispose()
