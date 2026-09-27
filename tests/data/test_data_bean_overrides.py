@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, ORMExecuteState, Session, mapped_column  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from pyfly.container import NoUniqueBeanError, Qualifier, bean, configuration, repository  # noqa: E402
+from pyfly.container import NoUniqueBeanError, Qualifier, bean, configuration, repository, service  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy  # noqa: E402
 from pyfly.container.types import Scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
@@ -46,12 +46,16 @@ from pyfly.context.conditions import auto_configuration  # noqa: E402
 from pyfly.context.refresh import ContextRefresher  # noqa: E402
 from pyfly.context.request_context import RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
+from pyfly.data import transactional  # noqa: E402
 from pyfly.data.relational.auto_configuration import EngineLifecycle  # noqa: E402
-from pyfly.data.relational.datasource_registry import DataSourceRegistry, datasource_of  # noqa: E402
+from pyfly.data.relational.datasource_registry import DataSourceRegistry  # noqa: E402
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator  # noqa: E402
 from pyfly.data.relational.routing import RoutingSessionFactory  # noqa: E402
+from pyfly.data.relational.sqlalchemy import reactive_transactional  # noqa: E402
 from pyfly.data.relational.sqlalchemy.entity import Base  # noqa: E402
 from pyfly.data.relational.sqlalchemy.repository import Repository  # noqa: E402
+from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager  # noqa: E402
+from pyfly.data.transaction import TransactionManagerRegistry  # noqa: E402
 
 try:
     from pymongo import AsyncMongoClient
@@ -274,25 +278,30 @@ class _UserRegistryConfiguration:
 
 
 async def test_a_user_datasource_registry_replaces_the_auto_configured_one(tmp_path: Path) -> None:
-    ctx = ApplicationContext(_config(tmp_path))
+    config = _config(tmp_path)
+    ctx = ApplicationContext(config)
     ctx.register_bean(_UserRegistryConfiguration)
     await ctx.start()
     registry = ctx.get_bean(DataSourceRegistry)
-    # The relational beans still take their engine from the configuration's own registry.
+    # The relational beans take their engine from the application's registry too (they used to keep the
+    # configuration's, a second primary beside the one @transactional and the repositories use).
     engine = ctx.get_bean(AsyncEngine)
+    # A module that looks the registry up by configuration still builds its engines in the configuration's.
+    module_registry = DataSourceRegistry.for_config(config)
+    module_engine = module_registry.primary.engine
     try:
         assert isinstance(registry, _UserRegistry)
+        assert engine is registry.primary.engine
+        assert ctx.get_bean(async_sessionmaker) is registry.primary.sessionmaker
         async with registry.primary.engine.connect() as conn:
             assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
-        async with engine.connect() as conn:
+        async with module_engine.connect() as conn:
             assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
     finally:
         await ctx.stop()
 
     assert registry.closed  # the context disposed the application's registry
-    shared = datasource_of(engine)
-    assert shared is not None and shared.registry is not None
-    assert shared.registry.closed  # and the configuration's, which nothing else would close
+    assert module_registry.closed  # and the configuration's, which nothing else would close
 
 
 @configuration
@@ -885,3 +894,159 @@ async def test_a_restarted_context_reports_the_split_primary_again(
     finally:
         await ctx.stop()
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The application's primary session factory is the primary of every unit of work. The transaction managers
+# were built from the registry's primary whatever the application declared: the AsyncSession bean ran on
+# the application's factory while @transactional, the repositories and SessionProvider did not. The
+# manager of the primary is now built on the primary session factory bean (the backend matrix covers each
+# path on SQLite and PostgreSQL in tests/integration/test_primary_data_bean_override_matrix.py).
+# ---------------------------------------------------------------------------
+
+
+class _RecordingCustomizer:
+    """An after-begin customizer that records the datasource and whether the session was the user's."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    async def after_begin(self, connection: Any, datasource: Any) -> None:
+        self.calls.append((datasource.qualified_name, isinstance(connection.sync_session, _UserSyncSession)))
+
+
+_CUSTOMIZER = _RecordingCustomizer()
+
+
+@configuration
+class _CustomizerConfiguration:
+    @bean
+    def recording_customizer(self) -> _RecordingCustomizer:
+        return _CUSTOMIZER
+
+
+@service
+class _OwnerReader:
+    def __init__(self, owners: _DatabaseOwnerRepository) -> None:
+        self.owners = owners
+
+    @transactional(read_only=True)
+    async def names(self) -> list[str]:
+        return [owner.name for owner in await self.owners.find_all()]
+
+
+async def test_a_deferred_user_session_factory_keeps_the_primarys_replica_and_customizers(tmp_path: Path) -> None:
+    """Other session options over the registry's primary engine: the units get the user's sessions and the
+    primary datasource's treatment, a read-only unit on the replica included."""
+    _USER_FACTORIES.clear()
+    _CUSTOMIZER.calls.clear()
+    await _relational_app(tmp_path, "replica")
+    config = Config(
+        {
+            "pyfly": {
+                "data": {
+                    "relational": {
+                        "enabled": "true",
+                        "url": _URLS["auto"],
+                        "ddl-auto": "none",
+                        "read-replica": {"url": _URLS["replica"]},
+                    }
+                }
+            }
+        }
+    )
+    ctx = ApplicationContext(config)
+    for candidate in (_DeferredSessionFactory, _CustomizerConfiguration, _DatabaseOwnerRepository, _OwnerReader):
+        ctx.register_bean(candidate)
+    await ctx.start()
+    try:
+        _USER_STATEMENTS.clear()
+        assert await ctx.get_bean(_OwnerReader).names() == ["replica"]  # read-only: the replica
+        assert len(_USER_STATEMENTS) == 1  # on a session of the user's factory
+        assert _CUSTOMIZER.calls == [("primary.replica", True)]
+
+        _CUSTOMIZER.calls.clear()
+        await ctx.get_bean(_DatabaseOwnerRepository).save(_DatabaseOwner(id=2, name="second"))
+        assert _CUSTOMIZER.calls == [("primary", True)]
+        assert await _engine_owner_count(ctx.get_bean(DataSourceRegistry).primary.engine) == 2
+    finally:
+        await ctx.stop()
+
+
+async def _engine_owner_count(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        return int((await conn.execute(text("SELECT count(*) FROM wp07_database_owner"))).scalar_one())
+
+
+class _LegacyService:
+    """A service of the pre-26.09.08 shape: its transactions run on ``self._session_factory``."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], owners: _DatabaseOwnerRepository) -> None:
+        self._session_factory = factory
+        self.owners = owners
+
+    @transactional
+    async def names(self) -> list[str]:
+        return [owner.name for owner in await self.owners.find_all()]
+
+
+async def test_a_user_session_factory_is_the_one_manager_of_the_primary(tmp_path: Path) -> None:
+    """``for_sessionmaker``, ``reactive_transactional`` and a legacy ``_session_factory`` attribute all map
+    the user's factory to the primary's manager, so their units join the repositories' and vice versa. It
+    used to get an ad-hoc manager of its own, bound under another name than the repositories' primary."""
+    _DISPOSED.clear()
+    await _relational_app(tmp_path, "user")
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserSessionFactory)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    factory = ctx.get_bean(async_sessionmaker)
+    try:
+        primary = ctx.get_bean(TransactionManagerRegistry).get()
+        assert primary.sessionmaker is factory  # type: ignore[attr-defined]
+        assert SqlAlchemyTransactionManager.for_sessionmaker(factory) is primary
+        assert ctx.get_bean(SqlAlchemyTransactionManager) is primary
+
+        owners = ctx.get_bean(_DatabaseOwnerRepository)
+        assert await _LegacyService(factory, owners).names() == ["user"]
+
+        @reactive_transactional(factory)
+        async def owner_names(_session: AsyncSession) -> list[str]:
+            return [owner.name for owner in await owners.find_all()]  # joins the unit
+
+        assert await owner_names() == ["user"]
+    finally:
+        await ctx.stop()
+        await factory.kw["bind"].dispose()
+    assert _DISPOSED == ["user"]  # by the test: the application's session factory engine stays the application's
+
+
+async def test_a_user_engine_without_a_configured_url_runs_every_unit_of_work(tmp_path: Path) -> None:
+    """The application's engine is the only primary: the units of work need no ``pyfly.data.relational.url``
+    (they used to fail with "No transaction manager for datasource 'primary'")."""
+    await _relational_app(tmp_path, "user")
+    ctx = ApplicationContext(Config({"pyfly": {"data": {"relational": {"enabled": "true", "ddl-auto": "none"}}}}))
+    ctx.register_bean(_UserEngine)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        owners = ctx.get_bean(_DatabaseOwnerRepository)
+        assert [owner.name for owner in await owners.find_all()] == ["user"]
+        await owners.save(_DatabaseOwner(id=2, name="second"))
+        assert await _engine_owner_count(ctx.get_bean(AsyncEngine)) == 2
+    finally:
+        await ctx.stop()
+
+
+async def test_a_manager_refuses_a_session_factory_over_another_engine_than_its_datasource(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    registry = DataSourceRegistry(config)
+    other = create_async_engine(_URLS["other"])
+    try:
+        with pytest.raises(ValueError, match="not bound to the engine of datasource 'primary'"):
+            SqlAlchemyTransactionManager(registry.primary, sessionmaker=async_sessionmaker(other))
+        own = async_sessionmaker(registry.primary.engine, expire_on_commit=True)
+        assert SqlAlchemyTransactionManager(registry.primary, sessionmaker=own).sessionmaker is own
+    finally:
+        await other.dispose()
+        await registry.close()

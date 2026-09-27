@@ -27,8 +27,12 @@ Two auto-configurations live here:
 - :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled=true``) keeps the beans an
   application injects (``async_engine``, ``async_session_factory``, ``routing_session_factory``,
   ``named_data_sources``, ``async_session``, ``engine_lifecycle``, ``db_health_indicator``,
-  ``query_metrics``) with their names and types. Each is now a view over the registry. It adds the
-  ``session_provider`` bean.
+  ``query_metrics``) with their names and types. Each is now a view over the registry (the
+  ``DataSourceRegistry`` bean). It adds the ``session_provider`` bean, and the
+  ``primary_transaction_manager`` bean, which serves the ``primary`` datasource's units on the primary
+  ``async_sessionmaker`` bean: an application's singleton session factory, engine or registry bean replaces
+  the primary for ``@transactional``, repositories, ``SessionProvider``, the ``AsyncSession`` bean and
+  ``infrastructure_unit()`` alike.
 """
 
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
@@ -47,14 +51,19 @@ try:
         async_sessionmaker,
     )
 
-    from pyfly.data.relational.datasource_registry import DataSourceRegistry, datasource_of
+    from pyfly.data.relational.datasource_registry import PRIMARY, DataSourceRegistry, datasource_of
     from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
-    from pyfly.data.relational.sqlalchemy.transaction_manager import transaction_managers_for
+    from pyfly.data.relational.sqlalchemy.transaction_manager import (
+        SqlAlchemyTransactionManager,
+        bind_primary_session_factory,
+        transaction_managers_for,
+    )
 except ImportError:
     AsyncEngine = object  # type: ignore[misc,assignment]
     AsyncSession = object  # type: ignore[misc,assignment]
     DataSourceRegistry = object  # type: ignore[misc,assignment]
     SessionProvider = object  # type: ignore[misc,assignment]
+    SqlAlchemyTransactionManager = object  # type: ignore[misc,assignment]
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
@@ -78,6 +87,7 @@ from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.post_processor import (
     RepositoryBeanPostProcessor,
 )
+from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.registry import TransactionManagerRegistry, install_registry, uninstall_registry
 
 try:
@@ -95,40 +105,73 @@ except ImportError:  # without SQLAlchemy there is no engine, and nothing calls 
 
 _logger = logging.getLogger(__name__)
 
-# The engines a split primary was reported for, per registry of a configuration: an engine bean and the
-# session factory over it warn once, and a restarted context (it builds a new registry) warns again.
+# The engines a split primary was reported for, per registry: a restarted context (it builds a new registry)
+# warns again.
 _SPLIT_REPORTED: weakref.WeakKeyDictionary[Any, weakref.WeakSet[Any]] = weakref.WeakKeyDictionary()
 
-_SPLIT_HINT = (
-    "an AsyncEngine bean, or an async_sessionmaker bean over an engine that is not the registry's primary, "
-    "replaces the primary of the session factory, the AsyncSession bean and the repositories, while "
-    "DataSourceRegistry.primary keeps pyfly.data.relational.url; configure the primary under "
-    "pyfly.data.relational (url, connect-args, pool) and a second database under "
-    "pyfly.data.relational.datasources.<name> instead of declaring an engine or session factory bean"
+_ENGINE_SPLIT_HINT = (
+    "@transactional, repositories, SessionProvider, infrastructure_unit() and the AsyncSession bean run on "
+    "this engine, the application's primary, while DataSourceRegistry.primary keeps pyfly.data.relational.url "
+    "for the modules that look the registry up (event store, snapshots, saga persistence, the PostgreSQL cache) "
+    "and for health and pool metrics; configure the primary under pyfly.data.relational (url, connect-args, "
+    "pool) and a second database under pyfly.data.relational.datasources.<name> instead of declaring an engine "
+    "or session factory bean, or leave pyfly.data.relational.url unset when this engine is the only primary"
+)
+
+_NAMED_SPLIT_HINT = (
+    "the primary session factory is bound to another datasource of the registry: @transactional, repositories, "
+    "SessionProvider, infrastructure_unit() and the AsyncSession bean run their primary units on its database, "
+    "apart from the units that name that datasource, and DataSourceRegistry.primary keeps "
+    "pyfly.data.relational.url; configure that database as the primary under pyfly.data.relational, or name "
+    "the datasource where it is used (@transactional(datasource=...), __datasource__, "
+    "registry.session_factory(name)) instead of declaring a session factory bean over it"
 )
 
 
-def _warn_if_split_primary(engine: Any, config: Config | None, *, datasource: str | None = None) -> None:
-    """WARNING when the primary sessions use another engine than the registry's primary, URL configured.
+def _datasources(datasource_registry: DataSourceRegistry | None, config: Config) -> DataSourceRegistry:
+    """The context's ``DataSourceRegistry`` bean (an application's singleton one replaces the configuration's).
 
-    The session factory, the ``AsyncSession`` bean and the repositories then use *engine*, while
-    :attr:`DataSourceRegistry.primary` (every module that looks the registry up) uses
-    ``pyfly.data.relational.url``: two primaries. *datasource* names the registry datasource *engine*
-    belongs to when it is one (a named datasource), and ``None`` for an engine no registry owns.
-    Reported once per engine and registry.
+    This auto-configuration can be processed before ``DataSourceAutoConfiguration``; without an application
+    registry the bean is not registered yet then, and it will be the configuration's registry, returned here.
     """
-    if config is None or not str(config.get("pyfly.data.relational.url", "") or "").strip():
+    return datasource_registry if datasource_registry is not None else DataSourceRegistry.for_config(config)
+
+
+def _warn_if_split_primary(manager: Any, registry: DataSourceRegistry) -> None:
+    """WARNING when the primary's units (on *manager*, the primary session factory's) still split from a
+    datasource of *registry*; once per engine and registry.
+
+    - An engine the registry did not build (an ``AsyncEngine`` bean, a session factory bean over an engine of
+      its own), while ``pyfly.data.relational.url`` is configured: ``relational_engine_not_in_registry``.
+      Every unit of work runs on that engine, and ``DataSourceRegistry.primary``, for the modules that look
+      the registry up, on the URL.
+    - A session factory over a named datasource or a replica of the registry:
+      ``relational_primary_on_named_datasource``. The ``primary`` units and that datasource's own units are
+      two units on one database.
+
+    A session factory over the registry's primary engine (other session options) is no split.
+    """
+    owner = manager.data_source
+    if owner is not None and owner.name == PRIMARY and not owner.is_replica:
         return
-    reported = _SPLIT_REPORTED.setdefault(DataSourceRegistry.for_config(config), weakref.WeakSet())
+    if owner is None and not str(registry.properties.url or "").strip():
+        return  # the application's engine is the only primary
+    try:
+        engine = manager.engine
+    except IllegalTransactionStateError:
+        return  # a session factory bound to no engine: nothing to compare
+    reported = _SPLIT_REPORTED.setdefault(registry, weakref.WeakSet())
     if engine in reported:
         return
     reported.add(engine)
-    if datasource is None:
-        _logger.warning("relational_engine_not_in_registry", extra={"engine": str(engine.url), "hint": _SPLIT_HINT})
+    if owner is None:
+        _logger.warning(
+            "relational_engine_not_in_registry", extra={"engine": str(engine.url), "hint": _ENGINE_SPLIT_HINT}
+        )
     else:
         _logger.warning(
             "relational_primary_on_named_datasource",
-            extra={"engine": str(engine.url), "datasource": datasource, "hint": _SPLIT_HINT},
+            extra={"engine": str(engine.url), "datasource": owner.qualified_name, "hint": _NAMED_SPLIT_HINT},
         )
 
 
@@ -417,7 +460,9 @@ class DataSourceAutoConfiguration:
     @bean
     def transaction_manager_registry(self, datasource_registry: DataSourceRegistry) -> TransactionManagerRegistry:
         """One ``SqlAlchemyTransactionManager`` per datasource of the registry, by datasource name (the
-        default is the primary); datasources registered later get theirs on first use."""
+        default is the primary); datasources registered later get theirs on first use. With the relational
+        beans enabled, the primary's is ``primary_transaction_manager``, on the primary session factory
+        bean (an application's session factory, engine or registry bean included)."""
         return transaction_managers_for(datasource_registry)
 
     @bean
@@ -433,89 +478,104 @@ class DataSourceAutoConfiguration:
 @conditional_on_property("pyfly.data.relational.enabled", having_value="true")
 class RelationalAutoConfiguration:
     """Auto-configures the SQLAlchemy engine, sessions and repository post-processor as views over the
-    :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry`."""
+    :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry` bean."""
 
     # The primary data beans back off for a SINGLETON of their type only, and are the @primary
-    # candidates of their type. A singleton AsyncEngine or async_sessionmaker bean replaces the
-    # application's primary; a request- or refresh-scoped one is a second database beside it.
-    # Counting a scoped one switched the primary off: start() failed (a request-scoped factory has
-    # no request at startup, two scoped factories are ambiguous) or every session, the routing
-    # factory and each repository moved to the scoped database.
+    # candidates of their type. A singleton AsyncEngine, async_sessionmaker or DataSourceRegistry bean
+    # replaces the application's primary everywhere (primary_transaction_manager binds the units of
+    # work to it); a request- or refresh-scoped one is a second database beside it. Counting a scoped
+    # one switched the primary off: start() failed (a request-scoped factory has no request at startup,
+    # two scoped factories are ambiguous) or every session, the routing factory and each repository
+    # moved to the scoped database.
 
     @bean(primary=True)
     @conditional_on_missing_bean(AsyncEngine, singletons_only=True)
-    def async_engine(self, config: Config) -> AsyncEngine:
-        """The primary datasource's engine.
+    def async_engine(self, config: Config, datasource_registry: DataSourceRegistry | None = None) -> AsyncEngine:
+        """The primary datasource's engine (of the ``DataSourceRegistry`` bean, an application's included).
 
         Fails at startup when ``pyfly.data.relational.url`` is not configured (outside the ``dev``
         profile), instead of silently opening ``./app.db`` in the working directory.
         """
-        return DataSourceRegistry.for_config(config).primary.engine
+        return _datasources(datasource_registry, config).primary.engine
 
     @bean(primary=True)
     @conditional_on_missing_bean(async_sessionmaker, singletons_only=True)
-    def async_session_factory(
-        self, async_engine: AsyncEngine, config: Config | None = None
-    ) -> async_sessionmaker[AsyncSession]:
+    def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
         """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``).
 
         An ``AsyncEngine`` bean of the application that the registry does not own gets a session
-        factory of its own. While ``pyfly.data.relational.url`` is configured too, that splits the
-        primary in two: the session factory, the ``AsyncSession`` bean and the repositories use the
-        application's engine, and :attr:`DataSourceRegistry.primary` (every module that looks the
-        registry up) the configured URL. A WARNING says so.
+        factory of its own; the units of work run on it too (``primary_transaction_manager``).
         """
         datasource = datasource_of(async_engine)
         if datasource is not None:
             return datasource.sessionmaker
-        _warn_if_split_primary(async_engine, config)
         return async_sessionmaker(async_engine, expire_on_commit=False)
 
     @bean
-    def named_data_sources(self, config: Config) -> NamedDataSources:
+    def named_data_sources(
+        self, config: Config, datasource_registry: DataSourceRegistry | None = None
+    ) -> NamedDataSources:
         """Secondary datasources from ``pyfly.data.relational.datasources.<name>``.
 
         Inject and call ``.get("<name>")`` for that datasource's ``async_sessionmaker``. A live view
         over the registry: it also lists the datasources a module registers.
         """
-        return NamedDataSources.of_registry(DataSourceRegistry.for_config(config))
+        return NamedDataSources.of_registry(_datasources(datasource_registry, config))
 
     @bean(primary=True)
     @conditional_on_missing_bean(RoutingSessionFactory, singletons_only=True)
     def routing_session_factory(
-        self, async_session_factory: async_sessionmaker[AsyncSession], config: Config
+        self,
+        async_session_factory: async_sessionmaker[AsyncSession],
+        config: Config,
+        datasource_registry: DataSourceRegistry | None = None,
     ) -> RoutingSessionFactory:
         """Read/write routing session factory — the ``AbstractRoutingDataSource`` equivalent.
 
         Routes to the primary's read replica inside a :func:`~pyfly.data.relational.routing.read_only`
         block when ``pyfly.data.relational.read-replica.url`` is configured; otherwise it always uses
         the primary (no behavior change).
-
-        A session factory the application declared over an engine of its own, or over an engine of the
-        registry that is not its primary (a named datasource), splits the primary while
-        ``pyfly.data.relational.url`` is configured, as an engine bean does, and a WARNING says so.
         """
         datasource = datasource_of(async_session_factory)
         if datasource is not None:
             replica = datasource.replica
         else:
-            bind = getattr(async_session_factory, "kw", {}).get("bind")
-            if isinstance(bind, AsyncEngine):
-                bound = datasource_of(bind)
-                owner = bound.registry if bound is not None else None
-                if bound is None:
-                    _warn_if_split_primary(bind, config)
-                elif owner is None or not owner.has_primary or bound is not owner.primary:
-                    # A named datasource or a replica: the registry's primary is another database.
-                    _warn_if_split_primary(bind, config, datasource=bound.qualified_name)
             # A session factory the application declared itself still routes to the configured replica.
-            registry = DataSourceRegistry.for_config(config)
+            registry = _datasources(datasource_registry, config)
             replica = registry.primary.replica if registry.has_primary else None
         return RoutingSessionFactory(async_session_factory, replica.sessionmaker if replica is not None else None)
 
+    @bean(primary=True)
+    def primary_transaction_manager(
+        self,
+        async_session_factory: async_sessionmaker[AsyncSession],
+        config: Config,
+        datasource_registry: DataSourceRegistry | None = None,
+    ) -> SqlAlchemyTransactionManager:
+        """The ``primary`` datasource's transaction manager, on the primary ``async_sessionmaker`` bean.
+
+        The ``transaction_manager_registry`` serves the ``primary`` datasource with it
+        (:func:`~pyfly.data.relational.sqlalchemy.transaction_manager.bind_primary_session_factory`), so
+        ``@transactional``, repository calls outside a transaction, ``SessionProvider``,
+        ``infrastructure_unit()`` and the ``AsyncSession`` bean run on one primary: the registry's, or the
+        application's singleton ``async_sessionmaker``, ``AsyncEngine`` or ``DataSourceRegistry`` bean that
+        replaced it. A primary that still splits from a datasource of the registry logs a WARNING
+        (``relational_engine_not_in_registry``, ``relational_primary_on_named_datasource``).
+
+        Replace the session factory, the engine or the registry to change the primary, not this bean.
+        """
+        registry = _datasources(datasource_registry, config)
+        manager = bind_primary_session_factory(registry, async_session_factory)
+        _warn_if_split_primary(manager, registry)
+        return manager
+
     @bean(scope=Scope.TRANSIENT)
-    def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:
-        """A ``ScopedAsyncSession`` for the factory's datasource — a NEW one for every injection.
+    def async_session(
+        self,
+        async_session_factory: async_sessionmaker[AsyncSession],
+        primary_transaction_manager: SqlAlchemyTransactionManager,
+    ) -> AsyncSession:
+        """A ``ScopedAsyncSession`` for the primary datasource — a NEW one for every injection.
 
         This bean was a singleton until 26.09.06, so every repository, every user bean and the
         engine lifecycle shared one SQLAlchemy session: one transaction, one identity map and one
@@ -531,7 +591,9 @@ class RelationalAutoConfiguration:
 
         The one session ``engine_lifecycle`` receives is the one it closes at shutdown.
         """
-        session: AsyncSession = ScopedAsyncSession.of(async_session_factory)
+        session: AsyncSession = ScopedAsyncSession.of(
+            async_session_factory, datasource=primary_transaction_manager.datasource
+        )
         return session
 
     @bean

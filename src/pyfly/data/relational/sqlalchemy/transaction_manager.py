@@ -14,8 +14,11 @@
 """The SQLAlchemy transaction manager: units of work on one datasource of the ``DataSourceRegistry``.
 
 One :class:`SqlAlchemyTransactionManager` serves one datasource (``for_datasource``); a session factory
-that no registry owns gets an ad-hoc manager of its own (``for_sessionmaker``). Every unit it opens gets a
-fresh :class:`~pyfly.data.relational.sqlalchemy.session.UnitSession` and, before its first statement:
+that no registry owns gets an ad-hoc manager of its own (``for_sessionmaker``). The relational
+auto-configuration serves the ``primary`` datasource on the application's primary session factory bean
+(:func:`bind_primary_session_factory`): the registry's own, or the ``async_sessionmaker``, ``AsyncEngine``
+or ``DataSourceRegistry`` bean that replaced it. Every unit it opens gets a fresh
+:class:`~pyfly.data.relational.sqlalchemy.session.UnitSession` and, before its first statement:
 
 - the datasource's begin options (``BEGIN IMMEDIATE`` for a SQLite unit that will write);
 - the isolation level, through ``session.connection(execution_options={"isolation_level": ...})``,
@@ -106,7 +109,7 @@ from pyfly.data.transaction.registry import (
 from pyfly.data.transaction.template import run_shielded, shield_scope
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
-__all__ = ["SqlAlchemyTransactionManager", "transaction_managers_for"]
+__all__ = ["SqlAlchemyTransactionManager", "bind_primary_session_factory", "transaction_managers_for"]
 
 _logger = logging.getLogger(__name__)
 
@@ -144,7 +147,16 @@ _UNNAMED = object()
 
 
 class SqlAlchemyTransactionManager:
-    """Runs units of work on one relational datasource (see the module documentation)."""
+    """Runs units of work on one relational datasource (see the module documentation).
+
+    *datasource* gives the units their engine, replica, begin options, capabilities and after-begin
+    customizers; *sessionmaker* gives them their sessions (by default the datasource's own). Pass both for
+    a session factory the application built over a registry engine: its session options (a session class,
+    ``expire_on_commit``) with the datasource's treatment, and a read-only unit on the replica gets a
+    session with those options bound to the replica's engine. A session factory alone is a datasource the
+    registry does not know: the capabilities and begin options come from its engine's dialect, and there
+    are no customizers. *name* is the datasource name units are bound under (by default the datasource's).
+    """
 
     def __init__(
         self,
@@ -155,9 +167,14 @@ class SqlAlchemyTransactionManager:
     ) -> None:
         if datasource is None and sessionmaker is None:
             raise TypeError("SqlAlchemyTransactionManager needs a DataSource or an async_sessionmaker")
+        if datasource is not None and sessionmaker is not None and sessionmaker.kw.get("bind") is not datasource.engine:
+            raise ValueError(
+                f"The session factory is not bound to the engine of datasource '{datasource.name}' "
+                f"({datasource.masked_url}); pass the session factory alone"
+            )
         self._datasource = datasource
         self._sessionmaker: async_sessionmaker[AsyncSession] = (
-            datasource.sessionmaker if datasource is not None else sessionmaker  # type: ignore[assignment]
+            sessionmaker if sessionmaker is not None else datasource.sessionmaker  # type: ignore[union-attr]
         )
         self._name = name or (datasource.name if datasource is not None else PRIMARY)
         # An ad-hoc manager named by for_sessionmaker() follows the installed registry (see datasource).
@@ -223,7 +240,7 @@ class SqlAlchemyTransactionManager:
 
     @property
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
-        """The session factory of the datasource (units get sessions configured like its sessions)."""
+        """The session factory units get sessions configured like (the datasource's, unless another was given)."""
         return self._sessionmaker
 
     @property
@@ -262,10 +279,16 @@ class SqlAlchemyTransactionManager:
         return capabilities
 
     def owns(self, resource: object) -> bool:
-        """Whether *resource* is this datasource's session factory or engine."""
+        """Whether *resource* is this manager's session factory, or its datasource (or that datasource's
+        engine) when the manager serves it under its own name."""
         if resource is self._sessionmaker:
             return True
-        return self._datasource is not None and resource is self._datasource.engine
+        datasource = self._datasource
+        return (
+            datasource is not None
+            and (resource is datasource.engine or resource is datasource)
+            and self._name == datasource.name
+        )
 
     # -- opening units --------------------------------------------------------------------------------------
 
@@ -273,9 +296,14 @@ class SqlAlchemyTransactionManager:
         """Open a transaction for *definition* (see the module documentation)."""
         read_only = definition.read_only
         target = self._datasource
+        factory = self._sessionmaker
+        bind: AsyncEngine | None = None
         if read_only and target is not None and target.replica is not None:
+            if factory is target.sessionmaker:
+                factory = target.replica.sessionmaker
+            else:
+                bind = target.replica.engine  # the application's session options, on the replica
             target = target.replica
-        factory = target.sessionmaker if target is not None else self._sessionmaker
         engine = target.engine if target is not None else self.engine
         dialect = _backend(engine)
         isolation = definition.isolation
@@ -293,7 +321,7 @@ class SqlAlchemyTransactionManager:
         if read_only and dialect == "postgresql":
             options["postgresql_readonly"] = True
         self._refuse_sharing_the_connection(engine)
-        session = self._new_session(factory)
+        session = self._new_session(factory, bind=bind)
         unit = UnitOfWork(self, self.datasource, session, definition=definition)
         _claim_the_connection(engine, unit)
         await self._start(unit, session, options, target, read_only=read_only, dialect=dialect)
@@ -332,9 +360,11 @@ class SqlAlchemyTransactionManager:
         await self._start(unit, session, options, None if autocommit else target, read_only=read_only, dialect=dialect)
         return unit
 
-    def _new_session(self, factory: async_sessionmaker[AsyncSession]) -> UnitSession:
+    def _new_session(
+        self, factory: async_sessionmaker[AsyncSession], *, bind: AsyncEngine | None = None
+    ) -> UnitSession:
         session_class = unit_session_class(factory.class_)
-        session = session_class(**factory.kw)
+        session = session_class(**(factory.kw if bind is None else {**factory.kw, "bind": bind}))
         assert isinstance(session, UnitSession)
         return session
 
@@ -806,7 +836,8 @@ def transaction_managers_for(datasources: DataSourceRegistry) -> TransactionMana
     managers are the SQLAlchemy managers of the registry's datasources, built on first use (datasources a
     module registers later included), and its default datasource is the primary. One per
     ``DataSourceRegistry``, whichever auto-configuration asks first (the ``transaction_manager_registry``
-    bean is that object); it lives as long as the ``DataSourceRegistry`` does."""
+    bean is that object); it lives as long as the ``DataSourceRegistry`` does. The primary's manager is the
+    one :func:`bind_primary_session_factory` registered, when it was called."""
     existing = getattr(datasources, _MANAGERS, None)
     if isinstance(existing, TransactionManagerRegistry):
         return existing
@@ -830,3 +861,48 @@ def transaction_managers_for(datasources: DataSourceRegistry) -> TransactionMana
             return existing
         setattr(datasources, _MANAGERS, registry)
         return registry
+
+
+def bind_primary_session_factory(
+    datasources: DataSourceRegistry, factory: async_sessionmaker[AsyncSession]
+) -> SqlAlchemyTransactionManager:
+    """Serve the ``primary`` datasource of :func:`transaction_managers_for` *datasources* on *factory*, the
+    application's primary session factory, and return that manager.
+
+    The relational auto-configuration calls it with the ``async_sessionmaker`` bean it resolved: the registry
+    primary's own, or what replaced it (the application's singleton session factory bean, or the factory over
+    its ``AsyncEngine`` bean). ``@transactional``, repository calls outside a transaction, ``SessionProvider``
+    and ``infrastructure_unit()`` then run their ``primary`` units on that factory, and so does everything
+    that maps the factory to its manager (``for_sessionmaker``: the ``AsyncSession`` bean,
+    ``reactive_transactional``, a legacy ``_session_factory`` attribute). There is one primary, never one per
+    path:
+
+    - the registry primary's own factory: the primary's manager, as before;
+    - a factory over an engine of *datasources* (the primary's, with other session options; a named
+      datasource's): the factory's sessions with that datasource's replica, begin options and after-begin
+      customizers, bound under ``primary``;
+    - a factory over an engine the registry did not build: the factory's sessions, with the capabilities and
+      begin options of its engine's dialect and no customizers. The registry never disposes that engine.
+    """
+    owned = datasource_of(factory)
+    if owned is not None and owned.registry is datasources and owned.name == PRIMARY and not owned.is_replica:
+        manager = SqlAlchemyTransactionManager.for_datasource(owned)
+    else:
+        bind = factory.kw.get("bind")
+        owner = datasources.find_by_engine(bind) if isinstance(bind, AsyncEngine) else None
+        with _LOOKUP_LOCK:
+            attached = getattr(factory, _MANAGER, None)
+            if (
+                isinstance(attached, SqlAlchemyTransactionManager)
+                and attached.data_source is owner
+                and not attached._follows_registry
+                and attached._name == PRIMARY
+            ):
+                manager = attached
+            else:
+                manager = SqlAlchemyTransactionManager(owner, sessionmaker=factory, name=PRIMARY)
+                if owned is None:
+                    # for_sessionmaker(factory) answers this manager from now on, not an ad-hoc one.
+                    setattr(factory, _MANAGER, manager)
+    transaction_managers_for(datasources).register(manager)
+    return manager

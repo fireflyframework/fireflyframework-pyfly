@@ -292,7 +292,8 @@ class TestAutoConfigurationClasses:
         instance = RelationalAutoConfiguration()
         engine = instance.async_engine(config)
         factory = instance.async_session_factory(engine)
-        session = instance.async_session(factory)
+        manager = instance.primary_transaction_manager(factory, config)
+        session = instance.async_session(factory, manager)
         assert isinstance(session, AsyncSession)
 
     def test_relational_auto_config_produces_post_processor(self):
