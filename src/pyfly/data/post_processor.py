@@ -211,21 +211,27 @@ class QueryMethod:
         return values
 
 
-def describe_method(owner: type, name: str, method: Any, entity: type | None = None) -> QueryMethod:
+def describe_method(
+    owner: type, name: str, method: Any, entity: type | None = None, *, resolve: bool = True
+) -> QueryMethod:
     """The :class:`QueryMethod` of *owner*'s method *name* (*method* is the class attribute): its unwrapped
     stub and its signature with the annotations resolved (the entity's name resolves too, for a module that
     imports it only for type checking). An annotation that does not resolve raises
-    :class:`~pyfly.data.query_parser.InvalidQueryMethodError`."""
+    :class:`~pyfly.data.query_parser.InvalidQueryMethodError`; with *resolve* false, the signature keeps the
+    annotations as written instead (for a caller that needs only the parameters)."""
     function = method.__func__ if isinstance(method, (staticmethod, classmethod)) else method
     function = inspect.unwrap(function)
     localns = {entity.__name__: entity} if entity is not None else None
     try:
         hints = get_type_hints(function, localns=localns)
     except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation is a declaration error
-        raise InvalidQueryMethodError(
-            f"{owner.__name__}.{name}: its annotations do not resolve ({type(error).__name__}: {error}); import the "
-            "types they name at runtime"
-        ) from error
+        if not resolve:
+            hints = {}
+        else:
+            raise InvalidQueryMethodError(
+                f"{owner.__name__}.{name}: its annotations do not resolve ({type(error).__name__}: {error}); import "
+                "the types they name at runtime"
+            ) from error
     signature = inspect.signature(function)
     parameters = list(signature.parameters.values())
     if not isinstance(method, staticmethod) and parameters:

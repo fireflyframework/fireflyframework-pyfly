@@ -30,6 +30,7 @@ from pyfly.data.pageable import Pageable
 from pyfly.data.query import modifying
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
+from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, transpile_jpql
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from tests.support.backend_matrix import enable_sqlite_foreign_keys
@@ -329,6 +330,10 @@ class TestAnUnresolvedAnnotation:
             compiled = executor.compile_query_method(_Unresolved.by_role, Item)
         assert "query_method_annotations_unresolved" in caplog.text
         assert sorted(item.name for item in await compiled(seeded_session, role="admin")) == ["Alice", "Carol"]
+
+    async def test_the_repository_builds(self, seeded_session: AsyncSession):
+        repo = RepositoryBeanPostProcessor().after_init(_Unresolved(Item, seeded_session), "unresolved")
+        assert sorted(item.name for item in await repo.by_role("user")) == ["Bob", "Dave"]
 
 
 class TestQueryMethodsAreCheckedAtStartup:

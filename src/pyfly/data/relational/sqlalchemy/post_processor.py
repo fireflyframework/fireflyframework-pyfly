@@ -165,7 +165,7 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         query, a write for a ``@modifying`` statement."""
         if not hasattr(attr, "__pyfly_query__"):
             return False
-        method = describe_method(cls, attr_name, attr, entity)
+        method = describe_method(cls, attr_name, attr, entity, resolve=False)  # the query reads its annotations
         compiled = self._query_executor.compile_query_method(attr, entity, name=method.qualified_name)
 
         async def queried(self_arg: Any, *args: Any, **kwargs: Any) -> Any:
