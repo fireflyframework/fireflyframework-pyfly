@@ -23,6 +23,7 @@ from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from pyfly.data.relational.sqlalchemy.statements import LockMode
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.relational.sqlalchemy.transactional import (
     Isolation,
@@ -39,6 +40,7 @@ __all__ = [
     "FilterOperator",
     "FilterUtils",
     "Isolation",
+    "LockMode",
     "Propagation",
     "QueryExecutor",
     "QueryMethodCompiler",
