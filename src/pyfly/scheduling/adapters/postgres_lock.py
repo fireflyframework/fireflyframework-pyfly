@@ -11,35 +11,59 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Postgres advisory-lock :class:`~pyfly.scheduling.lock.DistributedLock` adapter.
+"""Postgres advisory-lock :class:`~pyfly.scheduling.lock.DistributedLock` adapter: an opt-in accelerator.
 
-Cluster-safe ``@scheduled`` coordination with **no extra infrastructure** for apps already on
-Postgres — uses ``pg_try_advisory_lock`` / ``pg_advisory_unlock``. Hexagonal: the SQLAlchemy
-``AsyncEngine`` is injected (lazily, via a factory) by the composition root; this module imports
-no SQLAlchemy at module scope.
+The default database lock is the portable lease table
+(:class:`~pyfly.scheduling.adapters.lease_lock.LeaseLock`). This adapter is for PostgreSQL applications that
+want a lock the server releases the moment its holder's connection goes away
+(``pyfly.scheduling.lock.provider=postgres`` with ``pyfly.scheduling.lock.postgres.advisory=true``). It uses
+``pg_try_advisory_lock`` / ``pg_advisory_unlock``; this module imports no SQLAlchemy at module scope.
 
-Session-level advisory locks are tied to the holding connection, so the connection acquired in
-``try_acquire`` is **held** until ``release`` (or until the process dies — Postgres then drops
-the connection and auto-releases the lock, which is the crash-safety mechanism in lieu of a TTL).
+A session-level advisory lock lives with the connection that took it, so that connection is held until
+:meth:`~PostgresAdvisoryLock.release`, and:
+
+- it runs in ``AUTOCOMMIT``: the connection is *idle* while the job runs, never *idle in transaction*, so a
+  server's ``idle_in_transaction_session_timeout`` cannot drop it (and the lock) mid-job;
+- a watchdog ends the lock at its TTL: a hung job's lock is released (the connection closed) and a WARNING
+  logged, so the job runs elsewhere after ``lock_ttl`` instead of never;
+- an unlock that fails, whatever the error, discards the connection instead of returning it to the pool:
+  the pool's reset (a ``ROLLBACK``) keeps a session lock, which would stay taken for good.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import logging
 from collections.abc import Callable
 from typing import Any
 
+_logger = logging.getLogger(__name__)
+
+
+class _Hold:
+    """A held lock: its connection, and the watchdog that ends it at the TTL."""
+
+    __slots__ = ("connection", "watchdog")
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+        self.watchdog: asyncio.TimerHandle | None = None
+
 
 class PostgresAdvisoryLock:
-    """Distributed lock backed by Postgres session-level advisory locks."""
+    """Distributed lock backed by Postgres session-level advisory locks (see the module documentation).
 
-    def __init__(self, engine_factory: Callable[[], Any]) -> None:
-        # A zero-arg callable returning a SQLAlchemy AsyncEngine — resolved lazily (and once)
-        # so the lock works regardless of bean-registration order.
+    *engine_factory* is the ``AsyncEngine`` (or a ``DataSource``), or a zero-argument callable returning it,
+    resolved once, at the first acquisition.
+    """
+
+    def __init__(self, engine_factory: Callable[[], Any] | Any) -> None:
         self._engine_factory = engine_factory
         self._engine: Any = None
-        self._held: dict[str, Any] = {}  # name -> held AsyncConnection
+        self._held: dict[str, _Hold] = {}
+        self._expiring: set[asyncio.Task[None]] = set()
         self._guard = asyncio.Lock()
 
     @staticmethod
@@ -51,8 +75,30 @@ class PostgresAdvisoryLock:
 
     def _engine_or_resolve(self) -> Any:
         if self._engine is None:
-            self._engine = self._engine_factory()
+            from pyfly.data.relational.framework_schema import framework_engine
+
+            target = self._engine_factory() if callable(self._engine_factory) else self._engine_factory
+            self._engine = framework_engine(target).execution_options(isolation_level="AUTOCOMMIT")
         return self._engine
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Nothing to prepare: advisory locks need no table."""
+
+    async def stop(self) -> None:
+        """Release every lock still held and stop the watchdogs (the jobs have drained by now). Idempotent."""
+        for name in list(self._held):
+            with contextlib.suppress(Exception):  # the unlock failure is logged; the connection is gone
+                await self.release(name)
+        if self._expiring:
+            await asyncio.gather(*self._expiring, return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # DistributedLock
+    # ------------------------------------------------------------------
 
     async def try_acquire(self, name: str, ttl: float) -> bool:
         from sqlalchemy import text
@@ -68,18 +114,62 @@ class PostgresAdvisoryLock:
         if not acquired:
             await conn.close()  # don't leak the connection when the lock is held elsewhere
             return False
+        hold = _Hold(conn)
         async with self._guard:
-            self._held[name] = conn  # keep the connection — the lock lives with it
+            self._held[name] = hold  # keep the connection — the lock lives with it
+        hold.watchdog = asyncio.get_running_loop().call_later(max(ttl, 0.0), self._expire, name, hold)
         return True
 
     async def release(self, name: str) -> None:
+        """Unlock *name* and return its connection; on any unlock failure the connection is discarded (the
+        server ends the session and its locks) and the failure is raised."""
+        async with self._guard:
+            hold = self._held.pop(name, None)
+        if hold is None:
+            return
+        if hold.watchdog is not None:
+            hold.watchdog.cancel()
+        await self._unlock(name, hold)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    async def _unlock(self, name: str, hold: _Hold) -> None:
         from sqlalchemy import text
 
-        async with self._guard:
-            conn = self._held.pop(name, None)
-        if conn is None:
-            return
+        conn = hold.connection
         try:
-            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": self._key(name)})
+            result = await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": self._key(name)})
+            if not result.scalar():
+                _logger.warning("scheduler_advisory_lock_not_held", extra={"lock": name})
+        except BaseException:
+            # Discard, never return: a pooled session keeps the lock through the pool's ROLLBACK.
+            with contextlib.suppress(Exception):
+                await conn.invalidate()
+            raise
         finally:
             await conn.close()
+
+    def _expire(self, name: str, hold: _Hold) -> None:
+        task = asyncio.get_running_loop().create_task(self._end_expired(name, hold))
+        self._expiring.add(task)
+        task.add_done_callback(self._expiring.discard)
+
+    async def _end_expired(self, name: str, hold: _Hold) -> None:
+        async with self._guard:
+            if self._held.get(name) is not hold:
+                return  # released meanwhile
+            del self._held[name]
+        _logger.warning(
+            "scheduler_advisory_lock_expired",
+            extra={
+                "lock": name,
+                "hint": "the job ran longer than its lock ttl: the lock is released so the job can run elsewhere; "
+                "raise lock_ttl above the job's longest run",
+            },
+        )
+        try:
+            await self._unlock(name, hold)
+        except Exception:  # noqa: BLE001 — the connection was discarded; the server released the lock
+            _logger.warning("scheduler_advisory_unlock_failed", extra={"lock": name}, exc_info=True)

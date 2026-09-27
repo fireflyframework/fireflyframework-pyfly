@@ -16,8 +16,6 @@
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
 # must resolve return types at runtime for @bean method registration.
 
-from typing import Any
-
 try:
     from pyfly.scheduling.task_scheduler import TaskScheduler
 except ImportError:
@@ -46,10 +44,17 @@ class SchedulingAutoConfiguration:
         - ``none`` (default) — no coordination (LocalLock);
         - ``memory`` — single-process mutual exclusion;
         - ``redis`` — cross-process via Redis SET NX PX;
-        - ``postgres`` — cross-process via Postgres advisory locks (no extra infra for apps
-          already on Postgres).
+        - ``database`` — cross-process via the portable lease table ``pyfly_locks``
+          (:class:`LeaseLock`), on any relational backend: it honors ``lock_ttl`` and holds no
+          connection while the job runs;
+        - ``postgres`` — the same lease table; with ``pyfly.scheduling.lock.postgres.advisory=true``,
+          Postgres session-level advisory locks instead (:class:`PostgresAdvisoryLock`, an opt-in
+          accelerator: the server releases the lock the moment its holder disconnects).
 
-        The Redis client / SQLAlchemy engine are obtained here (the composition root) and injected;
+        A database lock runs on the datasource named by ``pyfly.scheduling.lock.datasource`` (or given by
+        ``pyfly.scheduling.lock.url``), by default the primary, looked up in the context's datasource
+        registry; the lease table is created at start unless ``pyfly.data.relational.ddl-auto`` is
+        ``none``. The Redis client / datasource are obtained here (the composition root) and injected;
         the adapters never import their driver at module scope.
         """
         provider = str(config.get("pyfly.scheduling.lock.provider", "none")).lower()
@@ -60,16 +65,30 @@ class SchedulingAutoConfiguration:
 
             url = str(config.get("pyfly.scheduling.lock.redis.url", "redis://localhost:6379/0"))
             return RedisDistributedLock(aioredis.from_url(url))  # type: ignore[no-untyped-call,unused-ignore]
-        if provider == "postgres":
-            from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
+        if provider in ("database", "postgres"):
+            from pyfly.data.relational.datasource_registry import DataSourceConfigurationError
+            from pyfly.data.relational.framework_schema import (
+                context_datasource_registry,
+                creates_tables,
+                module_datasource,
+            )
 
-            # The AsyncEngine is resolved lazily (first acquire) to avoid bean-ordering issues.
-            def _engine() -> Any:
-                from sqlalchemy.ext.asyncio import AsyncEngine
+            registry = context_datasource_registry(config, container)
+            datasource = module_datasource(registry, config, "pyfly.scheduling.lock", name="scheduling-lock")
+            advisory = str(config.get("pyfly.scheduling.lock.postgres.advisory", "false")).strip().lower() == "true"
+            if provider == "postgres" and advisory:
+                from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
 
-                return container.resolve(AsyncEngine)
+                if datasource.capabilities.dialect != "postgresql":
+                    raise DataSourceConfigurationError(
+                        "pyfly.scheduling.lock.postgres.advisory=true needs a PostgreSQL datasource, but "
+                        f"'{datasource.name}' is {datasource.capabilities.dialect}; use "
+                        "pyfly.scheduling.lock.provider=database for the portable lease table"
+                    )
+                return PostgresAdvisoryLock(datasource)
+            from pyfly.scheduling.adapters.lease_lock import LeaseLock
 
-            return PostgresAdvisoryLock(_engine)
+            return LeaseLock(datasource, create_table=creates_tables(registry.properties.ddl_auto))
         if provider == "memory":
             return InProcessDistributedLock()
         return LocalLock()

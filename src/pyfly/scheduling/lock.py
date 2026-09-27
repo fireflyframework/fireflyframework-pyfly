@@ -16,8 +16,16 @@
 When a scheduled job declares ``lock="name"``, the scheduler acquires the lock before each
 run and skips the tick if it is held elsewhere — so in a cluster only one instance runs the
 job at a time. The default :class:`LocalLock` always acquires (single-instance behavior is
-unchanged); register a :class:`DistributedLock` bean (e.g. Redis-backed) to coordinate across
-instances.
+unchanged); register a :class:`DistributedLock` bean to coordinate across instances:
+
+- ``pyfly.scheduling.lock.provider=database`` (or ``postgres``): the portable lease table
+  (:class:`~pyfly.scheduling.adapters.lease_lock.LeaseLock`) on the application's datasource;
+- ``redis``: ``SET NX PX`` on Redis;
+- ``postgres`` with ``pyfly.scheduling.lock.postgres.advisory=true``: PostgreSQL advisory locks, an
+  opt-in accelerator (:class:`~pyfly.scheduling.adapters.postgres_lock.PostgresAdvisoryLock`).
+
+Every adapter honors the TTL: a lock taken for *ttl* seconds ends by then even if its holder hangs, so
+a job that hangs blocks its schedule for at most ``lock_ttl``.
 """
 
 from __future__ import annotations
@@ -29,7 +37,11 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class DistributedLock(Protocol):
-    """A best-effort, TTL-bounded named lock."""
+    """A best-effort, TTL-bounded named lock.
+
+    An implementation must end the lock after *ttl* seconds when its holder has not released it (a hung
+    job), and a release by a holder whose lock already ended must not end a lock another holder took since.
+    """
 
     async def try_acquire(self, name: str, ttl: float) -> bool:
         """Attempt to acquire *name* for up to *ttl* seconds. Returns whether acquired."""
