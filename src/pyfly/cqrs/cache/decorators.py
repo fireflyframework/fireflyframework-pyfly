@@ -42,8 +42,8 @@ def cacheable(
             group of entries an event-tag eviction removes; declare it when the query overrides
             ``get_cache_key()`` and the handler is tagged with :func:`cache_evict`.
         scope: Whose results an entry holds: ``QueryCacheScope.USER`` (the default: tenant, organization and
-            user), ``TENANT`` (tenant and organization) or ``GLOBAL`` (shared with every caller; only for
-            data that is the same for everyone).
+            user), ``TENANT`` (tenant and organization; the user too when neither is visible) or ``GLOBAL``
+            (shared with every caller; only for data that is the same for everyone).
         cache_none: Cache a ``None`` result too (negative caching), so a lookup for a missing row stops
             reaching the database. Off by default.
 

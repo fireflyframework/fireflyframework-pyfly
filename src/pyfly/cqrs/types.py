@@ -48,7 +48,9 @@ class QueryCacheScope(enum.Enum):
     """Keyed by tenant, organization and user (the default): nobody is served another user's result."""
 
     TENANT = "tenant"
-    """Keyed by tenant and organization: the users of one tenant share entries."""
+    """Keyed by tenant and organization: the users of one tenant share entries. Keyed by the user too when
+    neither a tenant nor an organization is visible to the cache (the tenant may come from somewhere it
+    cannot see, such as a claim of the principal)."""
 
     GLOBAL = "global"
     """Not keyed by caller: every caller shares the entry. Only for data that is the same for everyone."""
