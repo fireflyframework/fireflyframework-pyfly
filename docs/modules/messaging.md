@@ -306,7 +306,9 @@ Spring AMQP:
   republishes it to its own queue with the attempt count in the
   `x-pyfly-delivery-attempt` header and acks the original. Every failure counts against
   the same `retry.max-attempts`, a transient one (a lost connection, a pool or statement
-  timeout, a deadlock, a lock or serialization conflict) included. With the defaults (5
+  timeout, a deadlock, a lock, serialization or optimistic-locking conflict, which a
+  repository raises as `OptimisticLockingFailureException`) included; a duplicate key
+  (`DuplicateKeyException`) is not transient. With the defaults (5
   attempts, with 1 + 2 + 4 + 8 = 15 s of back-off between them), a database outage or
   failover longer than about 15 s dead-letters every delivery consumed during it (on
   RabbitMQ, every prefetched message runs through its attempts): size

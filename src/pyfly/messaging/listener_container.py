@@ -31,8 +31,8 @@ gives the same guarantees (at-least-once, Spring Kafka and Spring AMQP semantics
   delay, so the record is fetched again and the partition keeps its order; RabbitMQ holds the message for
   the delay and republishes it to its queue with the attempt count in the ``x-pyfly-delivery-attempt``
   header, then acks the original. Every failure counts against the same attempts, a transient one
-  (:func:`is_transient_failure`: a lost connection, a timeout, a lock or serialization conflict)
-  included: a database outage longer than the back-off dead-letters what is consumed meanwhile. A message
+  (:func:`is_transient_failure`: a lost connection, a timeout, a lock, serialization or optimistic-locking
+  conflict) included: a database outage longer than the back-off dead-letters what is consumed meanwhile. A message
   the adapter cannot read (:class:`PoisonMessageError`), and an exception type the policy lists as not
   retryable (unless the failure is transient), skip the remaining attempts.
 - **After the last attempt the delivery is dead-lettered** (``<topic>.DLT`` on Kafka, an exchange the
@@ -82,6 +82,7 @@ from pyfly.data.transaction import (
     detached,
 )
 from pyfly.data.transaction.template import TransactionBoundary
+from pyfly.kernel.exceptions import ConcurrencyException
 
 if TYPE_CHECKING:
     from pyfly.core.config import Config
@@ -242,11 +243,16 @@ _TRANSIENT_MONGO_ERRORS = frozenset(
 def is_transient_failure(error: BaseException) -> bool:
     """Whether *error* (or an exception it wraps) is a failure of the moment, which another attempt can
     get past: a lost or refused connection, a pool or statement timeout, a lock, deadlock or serialization
-    conflict, a transaction that timed out or whose commit outcome is unknown.
+    conflict, an optimistic-locking conflict, a transaction that timed out or whose commit outcome is unknown.
 
     The check reads the exception chain (``__cause__``, ``__context__`` and a driver error's ``orig``),
     the SQLSTATE of PostgreSQL drivers, the error number of MySQL drivers, the error labels of pymongo and
-    SQLite's busy messages, without importing any driver.
+    SQLite's busy messages, without importing any driver. Repositories and the unit of work raise the
+    kernel's exceptions, translated from the driver's and raised from them
+    (:mod:`pyfly.data.exception_translation`): a translated failure is transient when its cause is, and a
+    :class:`~pyfly.kernel.exceptions.ConcurrencyException` (``OptimisticLockingFailureException``) is
+    transient itself, as Spring's ``ConcurrencyFailureException`` is: another attempt reads the current
+    version. A ``DataIntegrityException`` (a duplicate key, a foreign key) is not.
     """
     seen: set[int] = set()
     stack: list[BaseException] = [error]
@@ -265,7 +271,10 @@ def is_transient_failure(error: BaseException) -> bool:
 
 
 def _transient(error: BaseException) -> bool:
-    if isinstance(error, (TransactionTimedOutError, CommitOutcomeUnknownError, TimeoutError, ConnectionError)):
+    if isinstance(
+        error,
+        (TransactionTimedOutError, CommitOutcomeUnknownError, TimeoutError, ConnectionError, ConcurrencyException),
+    ):
         return True
     kind = type(error)
     module = kind.__module__ or ""

@@ -25,8 +25,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.core.config import Config
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.transaction import (
     CommitOutcomeUnknownError,
     IllegalTransactionStateError,
@@ -34,6 +36,7 @@ from pyfly.data.transaction import (
     current_unit_of_work,
     is_transaction_active,
 )
+from pyfly.kernel.exceptions import ConflictException, DuplicateKeyException, OptimisticLockingFailureException
 from pyfly.messaging.listener_container import (
     ATTEMPT_HEADER,
     ConcurrencyLimit,
@@ -161,6 +164,43 @@ async def test_a_constraint_violation_is_not_transient(tmp_path: Path) -> None:
         await engine.dispose()
     assert not is_transient_failure(caught.value)
     assert not is_transient_failure(ValueError("invalid"))
+
+
+async def test_the_kernel_exceptions_of_the_persistence_translation_are_classified(tmp_path: Path) -> None:
+    """Repositories and the unit of work raise the kernel's exceptions, translated from the driver's and raised
+    from them (WP05): a duplicate key is still not transient, so a policy that lists conflicts as not retryable
+    dead-letters it at once; an optimistic-locking conflict is transient (another attempt reads the current
+    version), and so is a translated failure whose cause is."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'translated.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE t (x INTEGER PRIMARY KEY)"))
+            await conn.execute(text("INSERT INTO t VALUES (1)"))
+        with pytest.raises(IntegrityError) as caught:
+            async with engine.begin() as conn:
+                await conn.execute(text("INSERT INTO t VALUES (1)"))
+    finally:
+        await engine.dispose()
+
+    def raised_from(error: BaseException) -> BaseException:
+        try:
+            raise translate_exception(error) from error
+        except BaseException as translated:  # noqa: BLE001 — the translated exception is the point
+            return translated
+
+    duplicate = raised_from(caught.value)
+    stale = raised_from(StaleDataError("UPDATE expected to update 1 row(s); 0 were matched."))
+    assert isinstance(duplicate, DuplicateKeyException) and not is_transient_failure(duplicate)
+    assert isinstance(stale, OptimisticLockingFailureException) and is_transient_failure(stale)
+
+    policy = RetryPolicy(max_attempts=3, not_retryable=(ConflictException,))
+    assert policy.retry_delay(duplicate, 1) is None  # dead-lettered at the first failure
+    assert policy.retry_delay(stale, 1) is not None  # keeps its remaining attempts
+    locked = await _locked_error(tmp_path)
+    try:
+        raise ConflictException("the listener's own conflict") from locked
+    except ConflictException as wrapped:
+        assert policy.retry_delay(wrapped, 1) is not None  # its cause is transient
 
 
 def test_timeouts_and_lost_connections_are_transient() -> None:
