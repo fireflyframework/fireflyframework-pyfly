@@ -616,6 +616,12 @@ TTL, which costs one extra miss and never serves a stale value.
 * **Writes wait for the commit.** A query run inside a unit of work stores its
   result after the commit, and not at all on rollback: it may have read a row
   that never commits.
+* **Lookups run outside the unit.** The lookup of a query run inside a unit of
+  work (its reads, and the `put_if_absent` that starts a key's generation) runs
+  at once in short units of its own, never inside the business transaction: on
+  a database-backed cache no other request waits for that transaction's locks,
+  and it cannot deadlock another one (see
+  [Caching and Transactions](caching.md#caching-and-transactions)).
 * **A hit has the declared type.** The bus rebuilds a hit as the handler's result
   type `R`, so a Redis or PostgreSQL cache returns the DTO, not a `dict`: models
   with aliases or computed fields included (see

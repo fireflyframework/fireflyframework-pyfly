@@ -501,6 +501,29 @@ immediate `evict_if_present(key)` and `invalidate()` always run at once. A
 deferred `put` stores a copy of the value taken when it was registered, so a
 value the cache refuses is refused right there, before the commit.
 
+**What runs at once runs outside the caller's unit.** A cache on a database
+that joins the unit bound for its datasource (an adapter that runs through
+`infrastructure_unit()`) would otherwise run a read, a `put_if_absent` or an
+`evict_if_present` inside the business transaction: the caller's rollback
+would undo it, a plain query of another request would wait for that unit's row
+locks on the cache table, and two business units reading two keys in opposite
+orders could deadlock and roll back. `TransactionAwareCache` runs every
+immediate operation, and the writes of a task that outlived its unit, inside
+[`outside_transaction()`](data-relational.md#work-outside-the-callers-unit):
+each statement gets a short unit of its own, in the calling task.
+
+* **One more pooled connection.** During a business unit, each statement on a
+  database-backed cache checks out another connection of the cache's
+  datasource while the unit keeps its own. Size the pool for it, or put the
+  cache on a datasource of its own. Redis and in-memory caches are not
+  affected.
+* **SQLite has one writer.** A write unit holds the database's write lock from
+  its `BEGIN IMMEDIATE`, so an immediate write to a cache on that same database
+  cannot run beside it: it is refused at once with
+  `IllegalTransactionStateError` instead of waiting `busy_timeout` for a lock
+  its own task holds. The declarative decorators and the CQRS query cache log
+  it (the query is answered uncached); reads still run.
+
 **Cancellation.** A client disconnect cancels the request's anyio scope, which
 cancels every await that follows, and it often lands just as a `@transactional`
 body returns. The unit still commits (the commit is shielded), and so do the
@@ -517,9 +540,12 @@ holds the request, its timeouts and shutdown until it returns.
 await) has no commit left to wait for. Its `put` runs at once when the unit
 committed, and is dropped, with a `cache_put_skipped` log line, otherwise. Its
 eviction or clear runs at once unless the unit rolled back, also while the unit
-is still completing or when its outcome is unknown: evicting is always safe, and
-dropping it would leave the old value cached if the commit succeeds. The call
-itself never fails for it.
+is still completing or when its outcome is unknown: dropping it would leave the
+old value cached for its TTL if the commit succeeds. An eviction that runs while
+the unit is still completing runs before the commit, though, and a concurrent
+reader can then re-cache the old value until its TTL expires: await such work
+inside the unit, or evict again once it has committed. The call itself never
+fails for it, and its writes run outside the unit it outlived.
 
 `apply(operation, key, write)` makes several writes on the delegate one
 deferred step: they run after the commit together, or are dropped together (the

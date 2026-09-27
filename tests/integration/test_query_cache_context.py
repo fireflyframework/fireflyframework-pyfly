@@ -363,4 +363,4 @@ async def test_evicting_a_key_never_scans_the_cache(setup: Setup) -> None:
     for tenant in ("acme", "globex", "initech"):
         await bus.query_with_context(ListDocsQuery(), _ctx(tenant, "admin"))
     await bus.clear_cache(ListDocsQuery().get_cache_key())
-    assert scans == []  # one write moves the key to a new generation, whatever the number of scopes
+    assert scans == []  # deleting the key's generation evicts every scope with no write, whatever their number

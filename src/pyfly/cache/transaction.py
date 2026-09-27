@@ -30,6 +30,16 @@ Outside a unit they run at once. Reads (``get``, ``exists``) always run at once,
 ``put_if_absent`` and the explicitly immediate :meth:`TransactionAwareCache.evict_if_present` and
 :meth:`TransactionAwareCache.invalidate`.
 
+Whatever runs at once runs outside the caller's unit (:func:`pyfly.data.transaction.outside_transaction`),
+in the calling task: a cache on a database that joins the unit bound for its datasource (a framework adapter
+running through ``infrastructure_unit()``) then gives each statement a short unit of its own. The caller's
+rollback does not undo an immediate write, and no other request waits for the row locks of the caller's unit
+or deadlocks with it on the cache's rows. The cost: during a business unit, each cache statement on a
+database-backed cache checks out one more pooled connection of the cache's datasource. On SQLite, whose
+database has one writer, an immediate write to a cache on the database of the caller's write unit is refused
+at once (``IllegalTransactionStateError``; logged with ``on_write_error="log"``) instead of waiting
+``busy_timeout`` for the lock the caller holds; reads still run.
+
 A deferred ``put`` stores a copy of the value taken when it was registered
 (:func:`~pyfly.cache.serialization.copy_value`): changes made to the value before the commit are not
 cached, and a value the cache refuses (a live ORM object) is refused right there, before the commit.
@@ -43,9 +53,11 @@ and an eviction lost there would leave the old value cached for its whole TTL.
 A deferred write registered from a task that outlived its unit (a task the unit's body started and did not
 await) cannot wait for the commit any more. A put runs at once when the unit committed, and is dropped (and
 logged) otherwise: its value may be a row that never commits. An eviction or a clear runs at once unless the
-unit rolled back, also while the unit is still completing or when its outcome is unknown: evicting is
-always safe (it costs a miss), and dropping it would leave the old value cached for its TTL if the commit
-succeeds.
+unit rolled back, also while the unit is still completing or when its outcome is unknown: dropping it would
+leave the old value cached for its TTL if the commit succeeds. An eviction that runs while the unit is still
+completing runs before its commit, though, so a concurrent reader can re-cache the old value until the TTL
+expires: await the work inside the unit, or evict again after it. Either write runs outside the completed
+unit, which the task can no longer use.
 """
 
 from __future__ import annotations
@@ -59,6 +71,7 @@ from typing import Any, Literal, TypeVar
 from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import copy_value
+from pyfly.data.transaction.context import outside_transaction
 
 _logger = logging.getLogger("pyfly.cache")
 
@@ -96,13 +109,15 @@ class TransactionAwareCache:
         """The cache the writes go to."""
         return self._delegate
 
-    # -- reads (immediate) ----------------------------------------------------------------------------------
+    # -- reads (immediate, outside the caller's unit) -------------------------------------------------------
 
     async def get(self, key: str) -> Any | None:
-        return await self._delegate.get(key)
+        with outside_transaction():
+            return await self._delegate.get(key)
 
     async def exists(self, key: str) -> bool:
-        return await self._delegate.exists(key)
+        with outside_transaction():
+            return await self._delegate.exists(key)
 
     # -- writes (after commit) ------------------------------------------------------------------------------
 
@@ -142,19 +157,25 @@ class TransactionAwareCache:
             return None
         return await self._shielded(operation, key, write)
 
-    # -- immediate writes -----------------------------------------------------------------------------------
+    # -- immediate writes (outside the caller's unit) -------------------------------------------------------
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
-        """Store *value* at once when *key* is absent: its answer cannot wait for a commit."""
-        return await self._delegate.put_if_absent(key, value, ttl=ttl)
+        """Store *value* at once when *key* is absent: its answer cannot wait for a commit. It runs outside the
+        caller's unit, so the caller's rollback does not undo it."""
+        with outside_transaction():
+            return await self._delegate.put_if_absent(key, value, ttl=ttl)
 
     async def evict_if_present(self, key: str) -> bool:
-        """Evict *key* at once, even inside a unit of work (Spring's ``evictIfPresent``)."""
-        return await self._delegate.evict(key)
+        """Evict *key* at once, even inside a unit of work (Spring's ``evictIfPresent``), and outside that
+        unit: the caller's rollback does not undo it."""
+        with outside_transaction():
+            return await self._delegate.evict(key)
 
     async def invalidate(self) -> None:
-        """Clear the cache at once, even inside a unit of work (Spring's ``invalidate``)."""
-        await self._delegate.clear()
+        """Clear the cache at once, even inside a unit of work (Spring's ``invalidate``), and outside that
+        unit: the caller's rollback does not undo it."""
+        with outside_transaction():
+            await self._delegate.clear()
 
     # -- lifecycle and namespaces ---------------------------------------------------------------------------
 
@@ -181,11 +202,12 @@ class TransactionAwareCache:
             return None
 
     async def _shielded(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | None:
-        """Run *write* now, to completion even when the calling task is cancelled meanwhile; the cancellation
-        is re-raised once it is done."""
+        """Run *write* now, outside the caller's unit, to completion even when the calling task is cancelled
+        meanwhile; the cancellation is re-raised once it is done."""
         from pyfly.data.transaction.template import run_shielded
 
-        result, error, cancelled = await run_shielded(self._attempt(operation, key, write))
+        with outside_transaction():  # the shielded task copies the context: it starts outside the unit too
+            result, error, cancelled = await run_shielded(self._attempt(operation, key, write))
         if error is not None:
             raise error
         if cancelled:
@@ -208,7 +230,8 @@ class TransactionAwareCache:
             status = unit.status if unit is not None else None
             if operation == "put":
                 if status is UnitStatus.COMMITTED:
-                    await deferred()
+                    with outside_transaction():  # the task can no longer use the unit it outlived
+                        await deferred()
                 else:
                     self._failed(operation, key, refusal)
             elif status is UnitStatus.ROLLED_BACK:

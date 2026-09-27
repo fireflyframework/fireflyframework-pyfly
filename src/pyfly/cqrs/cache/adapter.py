@@ -20,7 +20,9 @@ The query cache is the ``:cqrs:`` region of the application's cache
 nothing else, so resetting the query cache never drops the orchestration state, idempotency records or
 ``@cacheable`` entries that share the cache bean. It is transaction-aware
 (:class:`~pyfly.cache.transaction.TransactionAwareCache`): inside a unit of work, puts and evictions wait
-for the commit and are dropped on rollback. A cache failure is logged and never fails the query or the
+for the commit and are dropped on rollback, and a lookup (its reads, and the ``put_if_absent`` that starts a
+key's generation) runs at once outside the unit, so a database-backed cache never holds a lock of the
+business transaction on the cache's rows. A cache failure is logged and never fails the query or the
 command that caused it.
 
 An entry is keyed by the caller's scope too (:func:`scope_of`, :func:`scope_digest`): a result cached for
