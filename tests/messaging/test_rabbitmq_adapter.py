@@ -55,3 +55,41 @@ class TestRabbitMQAdapter:
         adapter._exchange = mock_exchange
         await adapter.publish("t", b"data", headers={"type": "test"})
         mock_exchange.publish.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_publish_is_persistent_with_a_message_id(self) -> None:
+        """A durable queue keeps a message across a broker restart only if it is persistent, and the id
+        lets an at-least-once consumer drop a redelivery it already applied."""
+        import aio_pika
+
+        adapter = RabbitMQAdapter(url="amqp://localhost/")
+        mock_exchange = AsyncMock()
+        adapter._exchange = mock_exchange
+        await adapter.publish("orders", b"data")
+        message = mock_exchange.publish.call_args.args[0]
+        assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
+        assert message.message_id
+
+    @pytest.mark.asyncio
+    async def test_each_consumer_has_its_channel_prefetch_and_dead_letter_queue(self) -> None:
+        from tests.messaging.brokers import FakeAmqpBroker
+
+        broker = FakeAmqpBroker()
+        adapter = RabbitMQAdapter(url="amqp://fake/", connection_factory=broker.connect)
+
+        async def handler(msg):
+            pass
+
+        await adapter.subscribe("orders", handler, group="order-service")
+        await adapter.subscribe("audit", handler)
+        await adapter.start()
+        try:
+            consumers = [channel for channel in broker.channels if channel.qos_calls]
+            assert [channel.qos_calls for channel in consumers] == [[20], [20]]
+            assert broker.route("pyfly", "orders") == {"order-service"}
+            assert broker.route("pyfly", "audit") == {"pyfly.audit"}
+            assert broker.route("pyfly.dlx", "order-service") == {"order-service.dlq"}
+            assert broker.route("pyfly.dlx", "pyfly.audit") == {"pyfly.audit.dlq"}
+        finally:
+            await adapter.stop()
+        assert broker.connections[0].closed

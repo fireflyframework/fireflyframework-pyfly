@@ -1577,7 +1577,7 @@ class ShoppingCart: ...
 
 | Spring (Spring Kafka) | PyFly | Notes |
 |-----------------------|-------|-------|
-| `@RetryableTopic` / `DefaultErrorHandler` DLT | `@message_listener(..., retries=, retry_delay=, dead_letter_topic=)` | Adapter-agnostic linear-backoff retry; on exhaustion the message is re-published to the DLQ with `x-original-topic` / `x-exception` headers. See [Messaging Guide](modules/messaging.md#retry-and-dead-letter-routing). |
+| `DefaultErrorHandler` (seek back, back-off, DLT) / AMQP requeue and DLX | `@message_listener(..., retries=, retry_delay=, dead_letter_topic=)` | On Kafka and RabbitMQ the listener container attempts a failed delivery again after a back-off (5 attempts, 1 s doubling, by default), outside its unit of work and acknowledging only what committed, then dead-letters it (`<topic>.DLT`, `<queue>.dlq`) with `x-original-topic` / `x-exception` headers. See [Messaging Guide](modules/messaging.md#retry-and-dead-letter-routing) and [Delivery Guarantees](modules/messaging.md#delivery-guarantees). |
 
 ### Multiple named datasources
 

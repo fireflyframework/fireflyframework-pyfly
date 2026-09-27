@@ -61,3 +61,8 @@ class TestMessage:
         )
         assert msg.key == b"key-1"
         assert msg.headers == {"trace-id": "abc123"}
+
+    def test_message_delivery_metadata_defaults(self) -> None:
+        """Where a message came from (for idempotent handlers) defaults to unknown, attempt 1."""
+        msg = Message(topic="orders", value=b"hello")
+        assert (msg.partition, msg.offset, msg.message_id, msg.delivery_attempt) == (None, None, None, 1)

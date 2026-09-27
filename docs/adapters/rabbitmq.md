@@ -59,8 +59,8 @@ Implements `MessageBrokerPort` using `aio_pika.connect_robust()`.
 
 - **Exchange:** Uses a single direct exchange (default name: `"pyfly"`) with topics as routing keys
 - **Queues:** Declares durable queues per consumer group
-- **Publishing:** Serializes messages to JSON and publishes with optional headers
-- **Subscribing:** Creates async consumers with acknowledgment support
+- **Publishing:** Publishes persistent messages with a `message_id` and optional headers
+- **Subscribing:** Consumes each queue on a channel of its own with a bounded prefetch and manual acknowledgement: a message is acked after the listener's unit of work commits, republished with a delay after a failure, and dead-lettered to `<queue>.dlq` (behind `pyfly.dlx`) after its last attempt. See [Delivery Guarantees](../modules/messaging.md#delivery-guarantees).
 
 ### Consumer Groups
 
@@ -69,7 +69,7 @@ Consumer groups are mapped to RabbitMQ queues. Multiple instances with the same 
 ### Lifecycle
 
 - `start()` — Establishes a robust connection, declares exchange and queues, starts consumers
-- `stop()` — Closes the connection gracefully
+- `stop()` — Stops the consumers, waits for the deliveries in flight (requeuing the ones it has to cancel), then closes the connection
 
 ---
 

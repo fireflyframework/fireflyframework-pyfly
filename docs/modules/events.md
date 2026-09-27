@@ -248,7 +248,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `firefly-json`, `avro`, or `protobuf`. `firefly-json` writes the LaraFly (PHP) envelope shape for topics shared with a PHP service; both JSON serializers read both shapes. |
 | `pyfly.eda.kafka.bootstrap-servers` | `str` | `localhost:9092` | Kafka bootstrap server list. |
 | `pyfly.eda.kafka.partition-key-header` | `str` | `partition_key` | Envelope header consulted first for the record key; then `x-correlation-id`, then the event type (the rule every Firefly Kafka publisher applies). |
-| `pyfly.eda.kafka.dlt.enabled` | `bool` | `true` | Dead-letter a record the serializer cannot read to `<topic><suffix>`, verbatim, before the consume loop moves on. `false` restores log-and-skip. |
+| `pyfly.eda.kafka.dlt.enabled` | `bool` | `true` | Dead-letter a record to `<topic><suffix>`, verbatim, when the serializer cannot read it or its handlers failed on every attempt, and only then commit its offset. `false` logs it and skips it. |
 | `pyfly.eda.kafka.dlt.suffix` | `str` | `.DLT` | Suffix of the dead-letter topic. |
 | `pyfly.eda.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL. |
 | `pyfly.eda.postgres.dsn` | `str` | *(required)* | PostgreSQL DSN for the producer connection pool. |
@@ -257,6 +257,10 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.postgres.auto-create-tables` | `bool` | `true` | Create `pyfly_eda_outbox` / `pyfly_eda_offsets` when they are missing. The DDL is skipped when they already exist, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all. |
 | `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
 | `pyfly.eda.rabbitmq.exchange-name` | `str` | `pyfly` | Name of the durable DIRECT exchange to declare. |
+| `pyfly.eda.rabbitmq.prefetch` | `int` | `20` | `basic.qos` prefetch of each consumer channel. |
+| `pyfly.eda.rabbitmq.dead-letter-exchange` | `str` | `<exchange-name>.dlx` | The exchange an event goes to after its last attempt, into the queue `<group>.<destination>.dlq`. |
+| `pyfly.eda.kafka.max-poll-records` | `int` | `100` | The most records one poll of the Kafka bus returns; their offsets are committed when they are all done. |
+| `pyfly.eda.listener.*` | | | The Kafka and RabbitMQ listener container, with the keys and defaults of `pyfly.messaging.listener.*`: `transactional`, `datasource`, `shutdown-timeout`, `concurrency`, `retry.max-attempts` (5), `retry.initial-delay` (1.0), `retry.multiplier` (2.0), `retry.max-delay` (30.0). See [Delivery Guarantees](messaging.md#delivery-guarantees). |
 
 ### Example configuration
 
@@ -281,15 +285,43 @@ so a topic written from both runtimes is keyed the same way. Pass `key=` to over
 call, or `partition_key_header` (`pyfly.eda.kafka.partition-key-header`) to consult a different
 header first.
 
-A record whose body the serializer cannot read is **dead-lettered**: republished verbatim (bytes,
-key and headers) to `<topic>.DLT` with `x-dlt-reason`, `x-dlt-source-topic` and
-`x-dlt-source-offset` headers, and only then does the loop move on. With auto-commit on, the
-offset advances whether or not anyone read the record, so this is the one place the message can
-still be saved. The publish is retried three times; after that the loss is logged `CRITICAL` and
-counted on `bus.dlt_publish_failures` — scrape `bus.dlt_published` too, because a silent
-dead-letter topic is the same failure as a lost message, only later. A handler that raises is
-*not* dead-lettered here: the envelope was readable, and what to do about a failing handler is
-the listener's error strategy.
+The bus consumes through the listener container it shares with `pyfly.messaging` (see
+[Delivery Guarantees](messaging.md#delivery-guarantees)): auto-commit is off, the handlers that
+match one record run in one unit of work the container opens with their `@transactional` settings
+(see [Listener Transactions](messaging.md#listener-transactions)), and the record's offset is
+committed only after that unit committed. A handler failure seeks the
+partition back and attempts the record again after a back-off (`pyfly.eda.listener.retry.*`);
+after the last attempt the record is **dead-lettered**. So is, at once, a record whose body the
+serializer cannot read. Dead-lettering republishes the record verbatim (bytes, key and headers) to
+`<topic>.DLT` with `x-dlt-reason`, `x-dlt-source-topic`, `x-dlt-source-partition`,
+`x-dlt-source-offset` and `x-dlt-attempts` headers, and only then commits its offset. The publish
+is retried three times; when it still fails, the round is counted on `bus.dlt_publish_failures`
+and the record stays uncommitted, to be dead-lettered again. Scrape `bus.dlt_published` too: a
+silent dead-letter topic is a failure of its own. An `EdaDeadLetterStore` bean, when the
+application defines one, also records every event whose handlers failed on every attempt. Once
+the record is in the dead-letter topic, the store is best effort: a failure to record it there is
+logged and counted on `bus.dead_letter_store_failures`, not retried (that would only publish more
+copies). With `pyfly.eda.kafka.dlt.enabled: false` the store is the only copy, and the record
+stays uncommitted until the store takes it. `stop()` waits for the record in flight
+(`pyfly.eda.listener.shutdown-timeout`) and never commits the offset of one it had to cancel.
+Before 26.09.08 a failing handler was logged and skipped while auto-commit committed past it, and
+a stop committed the offset of the handler it had just cancelled.
+
+The RabbitMQ bus consumes each destination's queue through the same container: a channel of
+its own with a prefetch of 20, a concurrency limit sized from the datasource pool, a bounded
+number of attempts republished with a delay, and then the dead-letter queue
+`<group>.<destination>.dlq` behind `<exchange-name>.dlx`. A message the serializer cannot read
+goes there at once. The event is in the dead-letter queue before an `EdaDeadLetterStore` records
+it, so a store that fails is logged and counted on `bus.dead_letter_store_failures`, and the
+message is acked all the same. Before 26.09.08 the bus requeued a failing message at once and
+forever, and ran a whole backlog at the same time.
+
+Both buses start consuming only once a handler has subscribed. The application context starts
+the bus before it subscribes the `@event_listener` methods; before 26.09.08 an event delivered in
+between matched no handler and was acknowledged, lost. The Kafka consumer joins its group when
+the bus starts, and the RabbitMQ queues are declared then, so events published meanwhile wait for
+the handlers. After `stop()`, a `publish()` (from a `@pre_destroy`) opens a producer or connection of
+its own and closes it again; it never restarts the consumers.
 
 The JSON serializer **reads both envelope shapes** of the Firefly family — PyFly's snake_case
 (`event_id`, `event_type`) and LaraFly's camelCase (`eventId`, `eventType`, with PHP's `[]` for an
@@ -666,7 +698,7 @@ PyFly provides both an EDA module (`pyfly.eda`) and a messaging module
 | **Transport** | `InMemoryEventBus` (direct calls) or a broker-backed bus: Kafka, Redis Streams, Postgres, RabbitMQ. | Kafka, RabbitMQ, or other external brokers. |
 | **Payload** | `EventEnvelope` with typed `dict` payload. | Raw `bytes` -- you choose the serialization format. |
 | **Pattern** | Glob-matched event types (`"order.*"`). | Topic-based with consumer groups. |
-| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Postgres outbox, Redis Streams, RabbitMQ). | Broker-dependent (Kafka retains messages, RabbitMQ can persist). |
+| **Durability** | In-memory bus: none (events lost if the process dies). Broker buses: durable + at-least-once (Postgres outbox, Redis Streams, RabbitMQ, Kafka with a consumer group). | At-least-once on Kafka and RabbitMQ: acknowledged after the listener's unit of work commits (see [Delivery Guarantees](messaging.md#delivery-guarantees)). |
 | **Use case** | Decoupling domain services within a monolith. | Decoupling microservices across network boundaries. |
 
 **Rule of thumb**: If the producer and consumer live in the same process, use
