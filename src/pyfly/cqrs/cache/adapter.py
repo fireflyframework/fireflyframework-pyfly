@@ -225,12 +225,20 @@ class QueryCacheAdapter:
 
     async def evict(self, cache_key: str) -> bool:
         """Evict *cache_key* for every caller's scope: its unscoped entry, and its scoped entries by moving it
-        to a new generation. After the commit inside a unit of work, where it returns ``False``."""
-        if self._region is None:
+        to a new generation. After the commit inside a unit of work, where it returns ``False``. Both writes
+        are one step: they run together, to completion even when the calling task is cancelled meanwhile."""
+        region = self._region
+        if region is None:
             return False
-        evicted = await self._region.evict(cache_key)
-        await self._region.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12], ttl=self._new_generation_ttl())
-        return evicted
+        store = region.delegate
+        generation_ttl = self._new_generation_ttl()
+
+        async def evict_every_scope() -> bool:
+            evicted = await store.evict(cache_key)
+            await store.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12], ttl=generation_ttl)
+            return evicted
+
+        return bool(await region.apply("evict", cache_key, evict_every_scope))
 
     async def evict_prefix(self, prefix: str) -> int:
         """Evict every entry whose key starts with *prefix* (a query handler's group), for every scope. This

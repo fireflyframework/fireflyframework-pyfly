@@ -45,6 +45,7 @@ from pyfly.cqrs.exceptions import CommandProcessingException
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Command
 from pyfly.cqrs.validation.exceptions import CqrsValidationException
+from pyfly.data.transaction.template import shielded
 
 R = TypeVar("R")
 
@@ -157,9 +158,10 @@ class DefaultCommandBus:
             if self._event_publisher:
                 await self._try_publish_events(command, result)
 
-            # 6. Query-cache invalidation (after the commit inside a unit of work)
+            # 6. Query-cache invalidation (after the commit inside a unit of work). It runs to completion even
+            # when the task is cancelled meanwhile: the handler may have committed already.
             if self._query_cache is not None and self._query_cache.is_available:
-                await self._invalidate_queries(command, result, handler)
+                await shielded(self._invalidate_queries(command, result, handler))
 
             # 7. Metrics
             duration = self._metrics.now() - start

@@ -29,20 +29,33 @@ Outside a unit they run at once. Reads (``get``, ``exists``) always run at once,
 A deferred ``put`` stores a copy of the value taken when it was registered
 (:func:`~pyfly.cache.serialization.copy_value`): changes made to the value before the commit are not
 cached, and a value the cache refuses (a live ORM object) is refused right there, before the commit.
+
+Evictions and clears run to completion even when the calling task is cancelled meanwhile (a client
+disconnect cancels the request's anyio scope, which cancels every await that follows): after the commit
+the unit of work runs its callbacks shielded, and outside a unit the eviction runs in a shielded task of
+its own, the cancellation re-raised once it is done. The method before it has run and may have committed,
+and an eviction lost there would leave the old value cached for its whole TTL.
+
+A deferred write registered from a task that outlived its unit (a task the unit's body started and did not
+await) cannot wait for the commit any more: it runs at once when the unit committed, and is dropped (and
+logged) when it rolled back.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import copy_value
 
 _logger = logging.getLogger("pyfly.cache")
+
+T = TypeVar("T")
 
 WriteErrors = Literal["raise", "log"]
 """What a failing write does: propagate (``"raise"``), or get logged and skipped (``"log"``)."""
@@ -89,7 +102,7 @@ class TransactionAwareCache:
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
         """Store *value* after the commit (at once outside a unit)."""
         if not in_unit_of_work():
-            await self._write("put", key, lambda: self._delegate.put(key, value, ttl=ttl))
+            await self._attempt("put", key, lambda: self._delegate.put(key, value, ttl=ttl))
             return
         try:
             snapshot = copy_value(value)
@@ -101,27 +114,26 @@ class TransactionAwareCache:
     async def evict(self, key: str) -> bool:
         """Evict *key* after the commit (at once outside a unit). Inside a unit nothing is evicted yet, so it
         returns ``False``."""
-        if not in_unit_of_work():
-            evicted = await self._write("evict", key, lambda: self._delegate.evict(key))
-            return bool(evicted)
-        await self._defer("evict", key, lambda: self._delegate.evict(key))
-        return False
+        return bool(await self.apply("evict", key, lambda: self._delegate.evict(key)))
 
     async def evict_by_prefix(self, prefix: str) -> int:
         """Evict every key starting with *prefix* after the commit (at once outside a unit). Inside a unit
         nothing is evicted yet, so it returns ``0``."""
-        if not in_unit_of_work():
-            removed = await self._write("evict_by_prefix", prefix, lambda: self._delegate.evict_by_prefix(prefix))
-            return int(removed or 0)
-        await self._defer("evict_by_prefix", prefix, lambda: self._delegate.evict_by_prefix(prefix))
-        return 0
+        return int(await self.apply("evict_by_prefix", prefix, lambda: self._delegate.evict_by_prefix(prefix)) or 0)
 
     async def clear(self) -> None:
         """Clear the cache after the commit (at once outside a unit)."""
-        if not in_unit_of_work():
-            await self._write("clear", "*", self._delegate.clear)
-            return
-        await self._defer("clear", "*", self._delegate.clear)
+        await self.apply("clear", "*", self._delegate.clear)
+
+    async def apply(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | None:
+        """Run *write*, a write on :attr:`delegate`, as this cache runs its evictions: after the commit inside
+        a unit of work (``None`` is returned then), at once outside one, and to completion either way, even
+        when the calling task is cancelled meanwhile. Use it to make several writes one deferred step (they
+        then run, or are dropped, together). *operation* and *key* name the write in the log when it fails."""
+        if in_unit_of_work():
+            await self._defer(operation, key, write)
+            return None
+        return await self._shielded(operation, key, write)
 
     # -- immediate writes -----------------------------------------------------------------------------------
 
@@ -152,7 +164,7 @@ class TransactionAwareCache:
 
     # -- internals ------------------------------------------------------------------------------------------
 
-    async def _write(self, operation: str, key: str, write: Callable[[], Awaitable[Any]]) -> Any:
+    async def _attempt(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | None:
         if self._on_write_error == "raise":
             return await write()
         try:
@@ -161,13 +173,36 @@ class TransactionAwareCache:
             self._failed(operation, key, error)
             return None
 
+    async def _shielded(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | None:
+        """Run *write* now, to completion even when the calling task is cancelled meanwhile; the cancellation
+        is re-raised once it is done."""
+        from pyfly.data.transaction.template import run_shielded
+
+        result, error, cancelled = await run_shielded(self._attempt(operation, key, write))
+        if error is not None:
+            raise error
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
     async def _defer(self, operation: str, key: str, write: Callable[[], Awaitable[Any]]) -> None:
-        from pyfly.data.transaction import after_commit
+        from pyfly.data.transaction import IllegalTransactionStateError, UnitStatus, after_commit, current_unit_of_work
 
         async def deferred() -> None:
-            await self._write(operation, key, write)
+            await self._attempt(operation, key, write)
 
-        await after_commit(deferred)
+        try:
+            await after_commit(deferred)
+        except IllegalTransactionStateError as refusal:
+            # The calling task outlived its unit (the unit's body started it and did not await it): there is
+            # no commit left to wait for. A committed unit's write runs now; a rolled-back one's is dropped.
+            unit = current_unit_of_work()
+            if unit is None or unit.status is not UnitStatus.COMMITTED:
+                self._failed(operation, key, refusal)
+            elif operation == "put":
+                await deferred()
+            else:
+                await self._shielded(operation, key, write)
 
     def _failed(self, operation: str, key: str, error: Exception) -> None:
         if self._on_write_error == "raise":

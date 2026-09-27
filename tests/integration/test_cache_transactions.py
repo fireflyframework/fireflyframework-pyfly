@@ -23,10 +23,13 @@ database committed is read through an engine of its own.
 - C022: a live entity is never cached, so a rollback cannot leave a broken entry behind.
 - C025: a value the cache refuses at run time never changes the outcome of the call (no retry, no
   duplicate row). The decoration-time checks are in ``tests/cache/test_cache.py``.
+- A task a unit's body started and did not await, which outlives the unit, still gets its result: the
+  write it makes is applied at once when the unit committed, and dropped (logged) when it rolled back.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -114,12 +117,18 @@ class Catalog:
     async def create(self, name: str):  # unannotated on purpose: refused at run time (C025)
         return await self.items.save(CacheTxItem(name=name))
 
+    @cacheable(CACHE, key="rate:{currency}")
+    async def rate(self, currency: str, answered: asyncio.Event) -> float:
+        await answered.wait()  # a call to a rates API, which answers after the caller's unit completed
+        return 1.1
+
 
 @service
 class Flow:
     def __init__(self, catalog: Catalog) -> None:
         self.catalog = catalog
         self.seen_inside: list[Any] = []
+        self.background: list[asyncio.Task[float]] = []
 
     @transactional
     async def rename_then(self, item_id: int, name: str, *, fail: bool) -> None:
@@ -144,6 +153,14 @@ class Flow:
         await self.catalog.touch(item_id, name)
         # A reader outside this transaction still gets the committed value until the commit.
         self.seen_inside.append(await detached(self.catalog.get_name(item_id)))
+        if fail:
+            raise RuntimeError("a later step fails")
+
+    @transactional
+    async def look_up_rate_in_the_background(self, currency: str, answered: asyncio.Event, *, fail: bool) -> None:
+        # Started and not awaited: the task outlives this unit.
+        self.background.append(asyncio.create_task(self.catalog.rate(currency, answered)))
+        await asyncio.sleep(0)
         if fail:
             raise RuntimeError("a later step fails")
 
@@ -333,5 +350,41 @@ async def test_a_refused_value_never_fails_a_committed_write(
         assert await _rows(relational_backend, "wp14_cache_tx_item", "name") == ["order-1"]
         assert await CACHE.exists("created:order-1") is False
         assert any("cache_put_skipped" in record.getMessage() for record in caplog.records)
+    finally:
+        await ctx.stop()
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A task that outlived its unit
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def test_a_task_that_outlived_its_committed_unit_caches_its_result(relational_backend: RelationalBackend) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        flow = ctx.get_bean(Flow)
+        answered = asyncio.Event()
+        await flow.look_up_rate_in_the_background("USD", answered, fail=False)
+        answered.set()
+        assert await flow.background[-1] == 1.1  # no IllegalTransactionStateError after the method ran
+        assert await CACHE.get("rate:USD") == 1.1
+    finally:
+        await ctx.stop()
+
+
+async def test_a_task_that_outlived_its_rolled_back_unit_caches_nothing_and_never_fails(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        flow = ctx.get_bean(Flow)
+        answered = asyncio.Event()
+        with pytest.raises(RuntimeError, match="later step"):
+            await flow.look_up_rate_in_the_background("GBP", answered, fail=True)
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        answered.set()
+        assert await flow.background[-1] == 1.1
+        assert await CACHE.exists("rate:GBP") is False
+        assert any(record.getMessage().startswith("cache_put_skipped") for record in caplog.records)
     finally:
         await ctx.stop()

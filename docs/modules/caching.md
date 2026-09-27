@@ -462,6 +462,24 @@ immediate `evict_if_present(key)` and `invalidate()` always run at once. A
 deferred `put` stores a copy of the value taken when it was registered, so a
 value the cache refuses is refused right there, before the commit.
 
+**Cancellation.** A client disconnect cancels the request's anyio scope, which
+cancels every await that follows, and it often lands just as a `@transactional`
+body returns. The unit still commits (the commit is shielded), and so do the
+writes that waited for it: the unit runs every after-commit callback to
+completion, and the cancellation is re-raised once they all ran. Outside a unit,
+an eviction or a clear runs to completion in a shielded task of its own. An
+eviction lost there would leave the old value cached for its whole TTL although
+the database committed the new one.
+
+**A task that outlived its unit** (one the unit's body started and did not
+await) has no commit left to wait for: its write runs at once when the unit
+committed, and is dropped, with a `cache_<operation>_skipped` log line, when it
+rolled back. The call itself never fails for it.
+
+`apply(operation, key, write)` makes several writes on the delegate one
+deferred step: they run after the commit together, or are dropped together (the
+CQRS query cache evicts a key and replaces its generation this way).
+
 The [decorators](#declarative-caching-decorators) and the CQRS query cache are
 transaction-aware. Wrap an adapter yourself to get the same behavior from direct
 calls:
