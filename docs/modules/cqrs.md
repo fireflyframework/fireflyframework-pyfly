@@ -512,7 +512,10 @@ A cache failure is logged and never fails the query or the command that caused
 it.
 
 Enable caching on a handler: `@query_handler(cacheable=True, cache_ttl=600)`.
-The query must also have `is_cacheable()` return `True` (the default). Invalidate
+The query must also have `is_cacheable()` return `True` (the default), and the
+cache must see who the caller is, unless the handler declares
+`QueryCacheScope.GLOBAL` (see [Whose results an entry holds](#whose-results-an-entry-holds)):
+an anonymous call to a `USER`-scoped handler is not cached. Invalidate
 programmatically via `await query_bus.clear_cache(query.get_cache_key())` (the
 key for every caller, and under every handler's `cache_key_prefix`) or
 `await query_bus.clear_all_cache()` (the query cache only: orchestration state,
@@ -528,7 +531,7 @@ query cache off.
 
 A cached result is never served to another tenant or user. The bus keys an
 entry by the query's `get_cache_key()` and by the caller, as far as the cache
-can trust it:
+can trust it (an empty identifier counts as none):
 
 * the tenant, organization and user of the `ExecutionContext` passed to
   `query_with_context()` (your application built it);
