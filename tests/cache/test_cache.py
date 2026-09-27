@@ -349,6 +349,26 @@ _ALIASED_VALUES = [
 ]
 
 
+class TestRedisNamespaces:
+    """A dedicated cache never lives inside the namespace its source's ``clear()`` deletes (C034)."""
+
+    @pytest.mark.parametrize("namespace", ["myapp", "myapp:", "myapp."])
+    async def test_clearing_a_custom_namespace_keeps_its_dedicated_caches(self, namespace: str) -> None:
+        client = RedisBytesStub()
+        root = RedisCacheAdapter(client, namespace=namespace)
+        idempotency = root.with_namespace("idempotency")
+        other_app = RedisCacheAdapter(client, namespace="myapp2")  # another application's cache
+        await root.put("product:1", {"id": 1})
+        await idempotency.put("idem:k1", {"status": 201})
+        await other_app.put("product:1", {"id": 2})
+
+        await root.clear()
+        assert await root.exists("product:1") is False
+        assert await idempotency.get("idem:k1") == {"status": 201}
+        assert await other_app.get("product:1") == {"id": 2}
+        assert root.namespace.endswith(":")
+
+
 class TestJsonHits:
     """A JSON cache (Redis, PostgreSQL) stores what the encoder writes; every hit must come back (C025)."""
 

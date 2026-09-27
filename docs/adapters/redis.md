@@ -73,8 +73,8 @@ Implements `CacheAdapter` using `redis.asyncio.Redis`.
 
 - **Serialization:** Values are JSON-serialized before storage and deserialized on retrieval; a live ORM
   object is refused with `CacheValueError`
-- **Namespace:** Entries live under `pyfly:cache:` (the `namespace` argument), so the cache can share a
-  database with sessions, locks and other data
+- **Namespace:** Entries live under `pyfly:cache:` (the `namespace` argument, which always ends with
+  `:`), so the cache can share a database with sessions, locks and other data
 - **TTL:** Supports per-key TTL via `timedelta` or the global default
 - **Connection validation:** Calls `ping()` on `start()` to verify connectivity
 

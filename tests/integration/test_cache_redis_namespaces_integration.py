@@ -92,6 +92,16 @@ async def test_clear_deletes_the_cache_namespace_only(redis: Any, redis_url: str
     assert await idempotency.get("idem:POST:/payments:k1") == {"status": 201}
 
 
+async def test_clearing_a_custom_namespace_keeps_the_ones_that_start_like_it(redis: Any) -> None:
+    cache = RedisCacheAdapter(redis, namespace="myapp")
+    await cache.put("product:1", {"id": 1})
+    await cache.with_namespace("idempotency").put("idem:k1", {"status": 201})
+    await RedisCacheAdapter(redis, namespace="myapp2").put("product:1", {"id": 2})
+
+    await cache.clear()
+    assert await _keys(redis) == ["myapp.idempotency:idem:k1", "myapp2:product:1"]
+
+
 async def test_prefix_eviction_treats_glob_characters_literally(redis: Any) -> None:
     cache = RedisCacheAdapter(redis)
     await cache.put("a*b", 1)

@@ -52,6 +52,10 @@ class RedisCacheAdapter:
     :meth:`clear` deletes the namespace only: the cache never runs ``FLUSHDB``. An empty namespace
     declares that the cache owns the whole database; :meth:`clear` then deletes every key in it.
 
+    A namespace always ends with ``:`` (``myapp`` becomes ``myapp:``): otherwise :meth:`clear` would also
+    delete the keys of any namespace that merely starts with it (``myapp2``, or the ``myapp.idempotency``
+    cache of :meth:`with_namespace`).
+
     Args:
         client: The Redis client.
         namespace: The key prefix of this cache's entries.
@@ -59,7 +63,7 @@ class RedisCacheAdapter:
 
     def __init__(self, client: Any, *, namespace: str = DEFAULT_NAMESPACE) -> None:
         self._client = client
-        self._namespace = namespace
+        self._namespace = namespace if not namespace or namespace.endswith(":") else f"{namespace}:"
         self._hits = 0
         self._misses = 0
         self._evictions = 0
