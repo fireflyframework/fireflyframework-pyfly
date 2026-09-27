@@ -742,7 +742,10 @@ pool and stayed open (on PostgreSQL, in `pg_stat_activity`) until the garbage co
 pool. An engine you dispose yourself gets the same treatment when you call
 `close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
 `dispose()`; the context does it for an `AsyncEngine` bean it disposes (a declared or inferred
-`dispose()` destroy method), and the engine lifecycle for an application's engine.
+`dispose()` destroy method), and the engine lifecycle for an application's engine. Only the
+connections in use at the dispose are closed: the engine pools again afterwards, so an engine that
+outlives the dispose (handed to a restarted context, shared with a second one, an in-memory SQLite
+database on a `StaticPool`) keeps working as before.
 
 The registry belongs to the **configuration object** (`DataSourceRegistry.for_config(config)`): two
 contexts built on one `Config` share it, and stopping one closes it for both, so the other's engines

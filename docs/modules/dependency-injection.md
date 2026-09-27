@@ -657,7 +657,9 @@ order:
    method), so a refresh-scoped `AsyncEngine` bean is disposed. Before an `AsyncEngine`'s
    `dispose()`, the context makes a connection still in use close when it is returned
    (`dispose()` alone closes the idle ones, and a connection returned later stayed open in the
-   disposed pool until the garbage collector found it);
+   disposed pool until the garbage collector found it); the engine pools again afterwards. Nothing
+   is inferred for an engine a datasource registry owns (a scoped `@bean` that hands out
+   `registry.engine("reporting")`): the registry disposes it, last;
 3. `stop()`, when it defines `start()` and `stop()`. The context does not start a scoped lifecycle
    bean (the scope builds it on demand, in a synchronous resolution), but `stop()` is how it
    releases what it holds.
