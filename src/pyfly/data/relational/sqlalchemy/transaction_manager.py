@@ -45,6 +45,12 @@ SQLite has one writer. A new write unit that would wait for the write lock of a 
 open (it suspended it with ``REQUIRES_NEW`` or ``NOT_SUPPORTED``) fails at once with
 :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead of waiting ``busy_timeout``
 for itself.
+
+An in-memory SQLite database lives on one connection (``StaticPool``) that every session shares, so two
+units cannot overlap on it: a unit that begins while another one holds the connection (a concurrent
+request, ``REQUIRES_NEW``, a repository call while ``stream_all`` iterates outside a transaction) fails at
+once with ``IllegalTransactionStateError`` instead of sharing, or breaking, the other's transaction. A
+poisoned unit there rolls back instead of discarding the connection, which would drop the database.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.pool import SingletonThreadPool, StaticPool
 
 from pyfly.data.relational.datasource_registry import (
     DataSource,
@@ -108,6 +115,12 @@ _TEMPLATE_SAVEPOINTS = "pyfly_template_savepoints"
 _SAVEPOINT_FAILURES = "pyfly_savepoint_failures"
 """``UnitOfWork.attributes`` key: statements that failed inside savepoints the application opened, until those
 savepoints roll back (see ``marks_rollback_only``)."""
+
+_SHARED_CONNECTION = "pyfly_shared_connection"
+"""``UnitOfWork.attributes`` key: the pool whose single connection the unit holds (in-memory SQLite)."""
+
+_HOLDER = "_pyfly_unit_holder"
+"""The attribute of a single-connection pool that references (weakly) the unit holding its connection."""
 
 _READ_ONLY_DIALECT_STATEMENT = {"mysql": "SET TRANSACTION READ ONLY", "mariadb": "SET TRANSACTION READ ONLY"}
 
@@ -272,8 +285,10 @@ class SqlAlchemyTransactionManager:
             options["isolation_level"] = isolation.value
         if read_only and dialect == "postgresql":
             options["postgresql_readonly"] = True
+        self._refuse_sharing_the_connection(engine)
         session = self._new_session(factory)
         unit = UnitOfWork(self, self.datasource, session, definition=definition)
+        _claim_the_connection(engine, unit)
         await self._start(unit, session, options, target, read_only=read_only, dialect=dialect)
         if definition.timeout is not None and dialect == "postgresql":
             milliseconds = max(1, int(definition.timeout * 1000))
@@ -302,9 +317,11 @@ class SqlAlchemyTransactionManager:
             if autocommit
             else self._begin_options(target, dialect, read_only=read_only)
         )
+        self._refuse_sharing_the_connection(engine)
         session = self._new_session(self._sessionmaker)
         unit = UnitOfWork(self, self.datasource, session, auto=True, read_only=read_only)
         unit.attributes[_AUTOCOMMIT] = autocommit
+        _claim_the_connection(engine, unit)
         await self._start(unit, session, options, None if autocommit else target, read_only=read_only, dialect=dialect)
         return unit
 
@@ -370,6 +387,21 @@ class SqlAlchemyTransactionManager:
         if error is not None:
             _logger.debug("unit_of_work_discard_failed", exc_info=(type(error), error, error.__traceback__))
 
+    def _refuse_sharing_the_connection(self, engine: AsyncEngine) -> None:
+        pool = engine.sync_engine.pool
+        if not isinstance(pool, (StaticPool, SingletonThreadPool)):
+            return
+        reference = getattr(pool, _HOLDER, None)
+        holder = reference() if reference is not None else None
+        if holder is not None:
+            raise IllegalTransactionStateError(
+                f"Datasource '{self.datasource}' is an in-memory SQLite database: it lives on one connection that "
+                f"every session shares, and {holder.describe()} holds it, so another unit of work cannot start "
+                "until that one ends (a concurrent call, REQUIRES_NEW, or a repository call while stream_all "
+                "iterates). Use a file database (sqlite+aiosqlite:///path/to/app.db) for concurrent work.",
+                datasource=self.datasource,
+            )
+
     def _refuse_waiting_for_own_lock(self, engine: AsyncEngine, what: str) -> None:
         if engine.dialect.name != "sqlite" or not is_file_database(engine.url):
             return
@@ -414,7 +446,7 @@ class SqlAlchemyTransactionManager:
         its loaded state (a rollback would expire it).
         """
         session = unit.resource
-        if unit.poisoned:
+        if unit.poisoned and _SHARED_CONNECTION not in unit.attributes:
             await _discard_connections(unit)
             return
         if unit.auto and unit.read_only:
@@ -427,13 +459,17 @@ class SqlAlchemyTransactionManager:
             raise
 
     async def release(self, unit: UnitOfWork) -> None:
-        """Close the session and return (or, when poisoned, discard) its connection."""
-        await self._close(unit, invalidate=unit.poisoned)
+        """Close the session and return (or, when poisoned, discard) its connection. The single connection
+        of an in-memory database is never discarded: that would drop the database."""
+        await self._close(unit, invalidate=unit.poisoned and _SHARED_CONNECTION not in unit.attributes)
 
     async def _close(self, unit: UnitOfWork, *, invalidate: bool) -> None:
-        if invalidate:
-            await _discard_connections(unit)
-        await AsyncSession.close(unit.resource)
+        try:
+            if invalidate:
+                await _discard_connections(unit)
+            await AsyncSession.close(unit.resource)
+        finally:
+            _release_the_connection(unit)
 
     async def create_savepoint(self, unit: UnitOfWork) -> AsyncSessionTransaction:
         """``SAVEPOINT`` through ``session.begin_nested()``."""
@@ -554,6 +590,23 @@ async def _discard_connections(unit: UnitOfWork) -> None:
     driver = unit.attributes.get(_DRIVER_CONNECTION)
     if driver is not None:
         await sqlite_discard.wait_released(driver)
+
+
+def _claim_the_connection(engine: AsyncEngine, unit: UnitOfWork) -> None:
+    """Record that *unit* holds the single connection of *engine*'s pool (in-memory SQLite)."""
+    pool = engine.sync_engine.pool
+    if isinstance(pool, (StaticPool, SingletonThreadPool)):
+        setattr(pool, _HOLDER, weakref.ref(unit))
+        unit.attributes[_SHARED_CONNECTION] = pool
+
+
+def _release_the_connection(unit: UnitOfWork) -> None:
+    pool = unit.attributes.get(_SHARED_CONNECTION)
+    if pool is None:
+        return
+    reference = getattr(pool, _HOLDER, None)
+    if reference is not None and reference() is unit:
+        setattr(pool, _HOLDER, None)
 
 
 def _transaction_active(unit: UnitOfWork) -> bool:

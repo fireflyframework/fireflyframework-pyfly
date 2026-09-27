@@ -854,9 +854,13 @@ registry builds therefore gets the following setup:
   rejected and `ON DELETE CASCADE` runs, as on PostgreSQL and MySQL.
 - **File databases run in WAL mode with `synchronous=NORMAL`.** Readers run beside a writer. In-memory
   databases keep `StaticPool` and are never recycled. Every session shares that one connection, so
-  sessions are not isolated from each other: a session that begins while another one's transaction is
-  open joins it, and once that transaction ends, the joined session's later statements run in
-  autocommit until it begins again. Test transactional behavior on a file database.
+  sessions are not isolated from each other: a plain session that begins while another one's
+  transaction is open joins it, and once that transaction ends, the joined session's later statements
+  run in autocommit until it begins again. Units of work do not share it: a unit that begins while
+  another unit holds the connection (a concurrent call, `REQUIRES_NEW`, a repository call while
+  `stream_all` iterates outside a transaction) fails at once with `IllegalTransactionStateError`, and a
+  cancelled unit rolls back instead of discarding the connection (which would drop the database). Test
+  transactional and concurrent behavior on a file database.
 - **The engine emits `BEGIN` itself.** This is SQLAlchemy's documented pysqlite/aiosqlite recipe.
   The driver otherwise defers `BEGIN` until the first write, so the reads of a read-modify-write run
   outside the transaction and a concurrent update is lost. Now two such transactions serialize: one of
