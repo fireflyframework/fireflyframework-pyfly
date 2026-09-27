@@ -60,7 +60,14 @@ from pyfly.cqrs.types import Command, Query
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import TransactionPhase, after_commit, on_phase, transactional
+from pyfly.data.transaction import (
+    TransactionPhase,
+    TransactionSynchronizationAdapter,
+    after_commit,
+    on_phase,
+    register_synchronization,
+    transactional,
+)
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
@@ -96,6 +103,13 @@ class CancelPrice(Base):
 @repository
 class CancelPriceRepository(Repository[CancelPrice, int]):
     pass
+
+
+class _BrokenListener(TransactionSynchronizationAdapter):
+    """Its after_commit raises when called, before it returns anything to await."""
+
+    def after_commit(self) -> Any:
+        raise RuntimeError("the listener is broken")
 
 
 @service
@@ -135,6 +149,12 @@ class PriceBook:
         await after_commit(lambda: notify("second"))
         await on_phase(TransactionPhase.AFTER_COMPLETION, lambda: notify("completed"))
         self.on_return()
+
+    @transactional
+    async def reprice_with_a_broken_listener(self, amount: int, notify: Callable[[str], Awaitable[None]]) -> None:
+        await self.prices._session.execute(update(CancelPrice).where(CancelPrice.id == 1).values(amount=amount))
+        register_synchronization(_BrokenListener())
+        await after_commit(lambda: notify("after the broken one"))
 
     @cache_evict(CACHE, key="price:{price_id}")
     async def reprice_in_its_own_unit(self, price_id: int, amount: int) -> None:
@@ -271,6 +291,24 @@ async def test_every_synchronization_callback_runs_when_a_cancellation_lands_at_
 
         assert await _committed(relational_backend, "amount") == [15, 10]
         assert notified == ["first", "second", "completed"]
+    finally:
+        await ctx.stop()
+
+
+async def test_a_callback_that_fails_when_called_stops_none_of_the_others(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        notified: list[str] = []
+
+        async def notify(what: str) -> None:
+            notified.append(what)
+
+        await ctx.get_bean(PriceBook).reprice_with_a_broken_listener(20, notify)
+        assert await _committed(relational_backend, "amount") == [20, 10]
+        assert notified == ["after the broken one"]
+        assert any(record.getMessage() == "transaction_synchronization_failed" for record in caplog.records)
     finally:
         await ctx.stop()
 
