@@ -278,10 +278,15 @@ def joins_rows(statement: Select[Any], entity: type) -> bool:
     or another FROM a specification added), so one entity can come back on several rows.
 
     A ``LIMIT`` on such a statement counts rows, not entities: page it with :func:`distinct_entity_page` and
-    count it with :func:`distinct_entity_count`.
+    count it with :func:`distinct_entity_count`. A subquery (``EXISTS``, ``IN (SELECT ...)``) adds no FROM.
     """
-    own = set(select(entity).get_final_froms())
-    return any(source not in own for source in statement.get_final_froms())
+    if statement._setup_joins:
+        return True
+    mapper: Mapper[Any] = sa_inspect(entity)
+    own: set[Any] = set(mapper.tables)
+    where = statement.whereclause
+    sources = [*statement._from_obj, *(where._from_objects if where is not None else ())]
+    return any(source._deannotate() not in own for source in sources)
 
 
 def distinct_entity_page(
