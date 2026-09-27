@@ -29,14 +29,18 @@ metadata and this one (``target_metadata = [Base.metadata, framework_metadata]``
 
 The tables, and who uses them:
 
-=============================  ====================================================================
-Table                          Used by
-=============================  ====================================================================
-``pyfly_orchestration_state``  ``SqlAlchemyPersistenceProvider`` (saga, TCC and workflow state)
-``pyfly_cache_entries``        ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
-``pyfly_locks``                ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
-``pyfly_users``                ``SqlUserDetailsService``
-=============================  ====================================================================
+================================  ==================================================================
+Table                             Used by
+================================  ==================================================================
+``pyfly_orchestration_state``     ``SqlAlchemyPersistenceProvider`` (saga, TCC and workflow state)
+``pyfly_cache_entries``           ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
+``pyfly_locks``                   ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
+``pyfly_users``                   ``SqlUserDetailsService``
+``pyfly_event_store``             ``SqlAlchemyEventStore`` (the event log, paged by global position)
+``pyfly_event_store_head``        ``SqlAlchemyEventStore`` (the last global position given out)
+``pyfly_snapshots``               ``SqlAlchemySnapshotStore``
+``pyfly_projection_checkpoints``  ``SqlAlchemyCheckpointStore`` (the position of each projection)
+================================  ==================================================================
 
 A store that is configured with another table name declares that table here too, through the table's
 factory function (:func:`orchestration_state_table` and the others), so a migration environment that
@@ -71,6 +75,7 @@ from sqlalchemy import (
     Table,
     Text,
     Unicode,
+    UniqueConstraint,
     inspect,
     text,
 )
@@ -89,10 +94,14 @@ if TYPE_CHECKING:
 __all__ = [
     "CACHE_ENTRIES",
     "CREATE_ATTEMPTS",
+    "EVENT_STORE",
+    "EVENT_STORE_HEAD",
     "FRAMEWORK_TABLE_PREFIX",
     "LOCKS",
     "NAMING_CONVENTION",
     "ORCHESTRATION_STATE",
+    "PROJECTION_CHECKPOINTS",
+    "SNAPSHOTS",
     "USERS",
     "FrameworkSchemaError",
     "KeyString",
@@ -102,6 +111,10 @@ __all__ = [
     "context_datasource_registry",
     "creates_tables",
     "ensure_tables",
+    "event_store",
+    "event_store_head",
+    "event_store_head_table",
+    "event_store_table",
     "framework_engine",
     "framework_metadata",
     "locks",
@@ -112,6 +125,10 @@ __all__ = [
     "module_datasource",
     "orchestration_state",
     "orchestration_state_table",
+    "projection_checkpoints",
+    "projection_checkpoints_table",
+    "snapshots",
+    "snapshots_table",
     "users",
     "users_table",
 ]
@@ -139,6 +156,10 @@ ORCHESTRATION_STATE = "pyfly_orchestration_state"
 CACHE_ENTRIES = "pyfly_cache_entries"
 LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
+EVENT_STORE = "pyfly_event_store"
+EVENT_STORE_HEAD = "pyfly_event_store_head"
+SNAPSHOTS = "pyfly_snapshots"
+PROJECTION_CHECKPOINTS = "pyfly_projection_checkpoints"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -348,6 +369,92 @@ def users_table(name: str = USERS) -> Table:
     return _declare("users", name, build)
 
 
+def event_store_table(name: str = EVENT_STORE) -> Table:
+    """The event log of ``SqlAlchemyEventStore``: one row per event, unique per ``(aggregate_id, sequence)``.
+
+    ``payload`` is the envelope's JSON (what the store reads back) and ``metadata`` its metadata's JSON; the
+    other columns are what the queries filter on. ``recorded_at`` is when the database recorded the event, by
+    its own clock. ``global_position`` places the event on the global stream in commit order: with the
+    ``head-row`` strategy the store gives it to the event once the event has committed (it is ``NULL`` until
+    then), with ``xid8`` as the event is inserted; projections page by it, through its unique index. On SQL
+    Server the index skips ``NULL``, which it would otherwise count as a duplicate.
+    """
+
+    def build(table_name: str) -> Table:
+        table = Table(
+            table_name,
+            framework_metadata,
+            Column("event_id", key_string(64), primary_key=True),
+            Column("aggregate_id", key_string(), nullable=False),
+            Column("aggregate_type", key_string(), nullable=False),
+            Column("sequence", Integer(), nullable=False),
+            Column("event_type", key_string(), nullable=False),
+            Column("payload", long_text(), nullable=False),
+            Column("metadata", long_text(), nullable=False),
+            Column("occurred_at", UtcTimestamp(), nullable=False),
+            Column("version", Integer(), nullable=False),
+            Column("tenant_id", key_string(64), nullable=True),
+            Column("recorded_at", UtcTimestamp(), nullable=True),
+            Column("global_position", BigInteger(), nullable=True),
+            UniqueConstraint("aggregate_id", "sequence"),
+        )
+        position = table.c.global_position
+        Index(None, position, unique=True, mssql_where=position.is_not(None))
+        return table
+
+    return _declare("event_store", name, build)
+
+
+def event_store_head_table(name: str = EVENT_STORE_HEAD) -> Table:
+    """The last global position given out, one row per event table (``store``), and the strategy that event
+    table's positions follow (``head-row`` or ``xid8``, recorded by the first store that started on it). The
+    stores that give out positions lock the row while they do, so they give them out one at a time."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("store", key_string(), primary_key=True),
+            Column("position", BigInteger(), nullable=False),
+            Column("strategy", key_string(32), nullable=False),
+        )
+
+    return _declare("event_store_head", name, build)
+
+
+def snapshots_table(name: str = SNAPSHOTS) -> Table:
+    """The latest snapshot of each aggregate: its state (``payload``, JSON) as of event ``sequence``."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("aggregate_id", key_string(), primary_key=True),
+            Column("aggregate_type", key_string(), nullable=False),
+            Column("sequence", Integer(), nullable=False),
+            Column("payload", long_text(), nullable=False),
+            Column("created_at", UtcTimestamp(), nullable=False),
+        )
+
+    return _declare("snapshots", name, build)
+
+
+def projection_checkpoints_table(name: str = PROJECTION_CHECKPOINTS) -> Table:
+    """The global position each projection has applied up to, written in the unit of work of the batch that
+    reached it."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("projection", key_string(), primary_key=True),
+            Column("position", BigInteger(), nullable=False),
+            Column("updated_at", UtcTimestamp(), nullable=False),
+        )
+
+    return _declare("projection_checkpoints", name, build)
+
+
 orchestration_state = orchestration_state_table()
 """``pyfly_orchestration_state`` (:func:`orchestration_state_table`)."""
 
@@ -359,6 +466,18 @@ locks = locks_table()
 
 users = users_table()
 """``pyfly_users`` (:func:`users_table`)."""
+
+event_store = event_store_table()
+"""``pyfly_event_store`` (:func:`event_store_table`)."""
+
+event_store_head = event_store_head_table()
+"""``pyfly_event_store_head`` (:func:`event_store_head_table`)."""
+
+snapshots = snapshots_table()
+"""``pyfly_snapshots`` (:func:`snapshots_table`)."""
+
+projection_checkpoints = projection_checkpoints_table()
+"""``pyfly_projection_checkpoints`` (:func:`projection_checkpoints_table`)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
