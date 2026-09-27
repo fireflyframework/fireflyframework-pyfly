@@ -43,9 +43,11 @@ def test_the_stores_are_atomic_token_stores() -> None:
     assert isinstance(InMemoryTokenStore(), AtomicTokenStore)
 
 
-def test_token_store_provider_selection(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_token_store_provider_selection(tmp_path: Path) -> None:
     from pyfly.container.container import Container
     from pyfly.core.config import Config
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
     from pyfly.security.auto_configuration import OAuth2AuthorizationServerAutoConfiguration
 
     ac = OAuth2AuthorizationServerAutoConfiguration()
@@ -58,7 +60,11 @@ def test_token_store_provider_selection(tmp_path: Path) -> None:
             }
         }
     )
-    assert isinstance(ac._build_token_store(pg_cfg, Container(), 86400), PostgresTokenStore)
+    try:
+        assert isinstance(ac._build_token_store(pg_cfg, Container(), 86400), PostgresTokenStore)
+    finally:
+        # Without a context, the store resolves its datasource in the configuration's DataSourceRegistry.
+        await DataSourceRegistry.for_config(pg_cfg).close()
 
 
 @pytest.mark.asyncio

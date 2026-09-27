@@ -67,7 +67,8 @@ async def test_store_postgres_is_the_sql_session_store_on_the_primary(tmp_path: 
         await ctx.stop()
 
 
-def test_a_cross_process_registry_beside_a_process_local_store_is_reported(
+@pytest.mark.asyncio
+async def test_a_cross_process_registry_beside_a_process_local_store_is_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """C154: the registry is shared, the sessions are not: evicting a session another instance holds leaves it
@@ -77,8 +78,14 @@ def test_a_cross_process_registry_beside_a_process_local_store_is_reported(
 
     config = _config(tmp_path, concurrency={"registry": "postgres"})
     store = InMemorySessionStore()
-    with caplog.at_level(logging.WARNING, logger="pyfly.session.auto_configuration"):
-        controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(config, store, Container())
+    try:
+        with caplog.at_level(logging.WARNING, logger="pyfly.session.auto_configuration"):
+            controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+                config, store, Container()
+            )
+    finally:
+        # Without a context, the registry resolves its datasource in the configuration's DataSourceRegistry.
+        await DataSourceRegistry.for_config(config).close()
 
     warnings = [record.getMessage() for record in caplog.records]
     [warning] = [message for message in warnings if message.startswith("session_registry_not_shared")]
