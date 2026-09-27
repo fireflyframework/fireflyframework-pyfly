@@ -74,6 +74,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MIGRATION_PHASE",
+    "PYFLY_CONFIG_ATTRIBUTE",
+    "URL_ATTRIBUTE",
     "MigrationError",
     "MigrationRunner",
     "TargetMetadata",
@@ -188,11 +190,13 @@ class MigrationRunner:
         from alembic.config import Config as AlembicConfig
 
         cfg = AlembicConfig(self._config_path)
-        # Read the file now (Alembic keeps the parsed options), then hide its name: an env.py that calls
-        # logging.config.fileConfig(config.config_file_name) when there is one would otherwise replace the
-        # application's logging: disable every existing logger, drop PyFly's handlers, set root to WARNING.
+        # Read the file now (Alembic keeps the parsed options), then hide its name from an env.py that does not
+        # honor configure_logger: one that calls logging.config.fileConfig(config.config_file_name) when there
+        # is one would otherwise replace the application's logging (disable every existing logger, drop
+        # PyFly's handlers, set root to WARNING). An env.py that honors it keeps the name for its own paths.
         cfg.get_main_option("script_location")
-        cfg.config_file_name = None
+        if not _honors_configure_logger(cfg):
+            cfg.config_file_name = None
         cfg.attributes["configure_logger"] = False
         if self._config is not None:
             cfg.attributes[PYFLY_CONFIG_ATTRIBUTE] = self._config
@@ -208,6 +212,18 @@ class MigrationRunner:
             # Alembic's configuration parser interpolates '%': a percent-encoded password (p%40ss) would abort.
             cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
         await asyncio.to_thread(command.upgrade, cfg, self._revision)
+
+
+def _honors_configure_logger(cfg: AlembicConfig) -> bool:
+    """Whether the ``env.py`` of *cfg* reads the ``configure_logger`` attribute before it loads a logging
+    configuration (the ``env.py`` of ``pyfly db init`` since 26.09.08 does, as Alembic's cookbook advises)."""
+    from alembic.script import ScriptDirectory
+
+    try:
+        env_py = Path(ScriptDirectory.from_config(cfg).env_py_location)
+        return "configure_logger" in env_py.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — unreadable: hide the name, as from an env.py that does not honor it
+        return False
 
 
 def _upgrade(connection: Connection, cfg: AlembicConfig, revision: str) -> None:
@@ -379,38 +395,61 @@ def migration_config(alembic_config: AlembicConfig) -> Config:
 
 def import_models(modules: Iterable[str], *, skip: Iterable[str] = (), search_path: Path | None = None) -> None:
     """Import *modules*, and every module under the ones that are packages, so their entities are declared on
-    ``Base.metadata``. Modules named in *skip* (and ``__main__`` modules) are left out; *search_path*'s
-    ``src`` directory is put on ``sys.path`` first (a src-layout project run without installing it).
+    ``Base.metadata``. Modules named in *skip* (and ``__main__`` modules) are left out, with every module under
+    them: a skipped package is never imported. When a module's top-level package cannot be imported,
+    *search_path*'s ``src`` directory is put on ``sys.path`` and the import retried (a src-layout project run
+    without installing it).
 
     A module that fails to import raises :class:`MigrationError`: autogenerate without its models would
     propose dropping their tables.
     """
-    if search_path is not None:
-        source = (search_path / "src").resolve()
-        if source.is_dir() and str(source) not in sys.path:
-            sys.path.insert(0, str(source))
     skipped = set(skip)
     for name in modules:
-        module = _import(name)
+        module = _import_first(name, search_path)
         path = getattr(module, "__path__", None)
-        if path is None:
+        if path is not None:
+            _import_package(name, path, skipped)
+
+
+def _import_package(name: str, path: Iterable[str], skipped: set[str]) -> None:
+    """Import the modules of package *name*, and of its subpackages, never entering a skipped one (walking
+    into a package imports it)."""
+    for info in pkgutil.iter_modules(path, prefix=f"{name}."):
+        if info.name in skipped or info.name.rsplit(".", 1)[-1] == "__main__":
             continue
-        for info in pkgutil.walk_packages(path, prefix=f"{name}."):
-            if info.name in skipped or info.name.rsplit(".", 1)[-1] == "__main__":
-                continue
-            if any(info.name.startswith(f"{excluded}.") for excluded in skipped):
-                continue
-            _import(info.name)
+        module = _import(info.name)
+        subpath = getattr(module, "__path__", None) if info.ispkg else None
+        if subpath is not None:
+            _import_package(info.name, subpath, skipped)
+
+
+def _import_first(name: str, search_path: Path | None) -> Any:
+    """Import *name*; when its top-level package is not importable, retry with *search_path*'s ``src``
+    directory on ``sys.path`` (only then: an installed or running application keeps its path)."""
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        source = (search_path / "src").resolve() if search_path is not None else None
+        if source is None or error.name != name.split(".", 1)[0] or not source.is_dir() or str(source) in sys.path:
+            raise _import_error(name, error) from error
+        sys.path.insert(0, str(source))
+    except Exception as error:
+        raise _import_error(name, error) from error
+    return _import(name)
 
 
 def _import(name: str) -> Any:
     try:
         return importlib.import_module(name)
     except Exception as error:
-        raise MigrationError(
-            f"Cannot import {name!r} for the migrations ({type(error).__name__}: {error}). List the modules that "
-            "declare your entities in pyfly.data.relational.migrations.models."
-        ) from error
+        raise _import_error(name, error) from error
+
+
+def _import_error(name: str, error: Exception) -> MigrationError:
+    return MigrationError(
+        f"Cannot import {name!r} for the migrations ({type(error).__name__}: {error}). List the modules that "
+        "declare your entities in pyfly.data.relational.migrations.models."
+    )
 
 
 class TargetMetadata(list["MetaData"]):

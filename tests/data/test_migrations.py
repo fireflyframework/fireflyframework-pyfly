@@ -276,6 +276,78 @@ async def test_an_env_py_generated_before_keeps_the_application_logging_too(
     _assert_logging_intact(application_logging)
 
 
+@pytest.mark.asyncio
+async def test_an_env_py_that_honors_configure_logger_keeps_the_file_name(
+    tmp_path: Path, application_logging: _Recorder
+) -> None:
+    """The file name is hidden only from an env.py that would load its logging from it at startup: one that
+    honors configure_logger (the env.py of today) still derives paths from it."""
+    from pyfly.cli.db import _ENV_PY_TEMPLATE
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    seen = tmp_path / "config_file_name.txt"
+    env_py = _ENV_PY_TEMPLATE.replace(
+        "config = context.config\n",
+        f"config = context.config\nopen({str(seen)!r}, 'w').write(str(config.config_file_name))\n",
+    )
+    ini = environment(tmp_path, [_CREATE_ITEMS], env_py=env_py)
+    await MigrationRunner(url=url, config_path=str(ini)).start()
+    assert seen.read_text() == str(ini)
+    assert "wp11_mig_item" in await _tables(url)
+    _assert_logging_intact(application_logging)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The application's models
+# ---------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def model_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A src-layout project with a ``wp11_app`` package: entities under ``domain``, and an entry point package
+    ``cli`` whose import (and the import of anything under it) fails."""
+    import sys
+
+    package = tmp_path / "src" / "wp11_app"
+    (package / "domain").mkdir(parents=True)
+    (package / "cli").mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "domain" / "__init__.py").write_text("")
+    (package / "domain" / "entities.py").write_text("LOADED = True\n")
+    (package / "cli" / "__init__.py").write_text("raise RuntimeError('the entry point must not be imported')\n")
+    (package / "cli" / "commands.py").write_text("raise RuntimeError('nor anything under it')\n")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    try:
+        yield tmp_path
+    finally:
+        for name in [name for name in sys.modules if name == "wp11_app" or name.startswith("wp11_app.")]:
+            del sys.modules[name]
+
+
+def test_a_skipped_package_is_never_imported(model_package: Path) -> None:
+    """The entry point is left out with everything under it: walking into it used to import it anyway."""
+    import sys
+
+    from pyfly.data.relational.migrations import import_models
+
+    import_models(["wp11_app"], skip=["wp11_app.cli"], search_path=model_package)
+    assert "wp11_app.domain.entities" in sys.modules
+    assert "wp11_app.cli" not in sys.modules
+
+
+def test_the_src_directory_joins_the_path_only_when_the_package_needs_it(model_package: Path) -> None:
+    import sys
+
+    from pyfly.data.relational.migrations import import_models
+
+    before = list(sys.path)
+    import_models(["json"], search_path=model_package)  # importable as it is: the path is left alone
+    assert sys.path == before
+    import_models(["wp11_app.domain"], search_path=model_package)
+    assert sys.path[0] == str((model_package / "src").resolve())
+    assert "wp11_app.domain.entities" in sys.modules
+
+
 # ---------------------------------------------------------------------------------------------------------
 # A '%' in the URL (C119, C120)
 # ---------------------------------------------------------------------------------------------------------

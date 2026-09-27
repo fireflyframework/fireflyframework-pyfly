@@ -814,7 +814,8 @@ pyfly db init
 3. **Overwrites `alembic/env.py`** with a PyFly-customized template that:
    - imports the modules that declare your entities: `pyfly.data.relational.migrations.models` from
      `pyfly.yaml`, or else the project's package, which `init` detects and writes into `MODEL_PACKAGES` (every
-     module under it except the application's entry point)
+     module under it except the application's entry point, which is never imported); a src-layout project that
+     is not installed gets its `src` directory on `sys.path` only when the package cannot be imported otherwise
    - lists `Base.metadata` and the framework's own tables (`framework_metadata`: `pyfly_locks`,
      `pyfly_orchestration_state`, ...) as `target_metadata`, so autogenerate never proposes dropping either
    - runs on the application's primary datasource: `pyfly.data.relational.url` from `pyfly.yaml`, with the
