@@ -286,3 +286,41 @@ entities a delete needs are loaded once for all of them, the unit's own included
 unit read without their children went from one lazy `SELECT` per parent to two statements. A specification
 that joins a many-to-one pages with a plain `LIMIT` and `COUNT` (after the first review it paid the distinct
 keys and a `DISTINCT` count).
+
+## SQLAlchemy 2.1.1 against 2.0.54
+
+The lock moved to SQLAlchemy 2.1.1; the 2.0 line (2.0.50 or later) stays supported. The same code ran on both
+lines: the 2.0.54 runs used a copy of the environment with SQLAlchemy alone replaced.
+
+- **Date:** 2026-09-27, 12:35 to 12:55 PDT, same machine as the baseline (the VM shared with other running
+  containers).
+- **Code:** branch `fix/orm-unit-of-work` at `9ef3ecd`.
+- **Commands:** every scenario, five runs per line on `sqlite-file` and three on `pg`, the two lines taking
+  turns. Each `pg` series used one PostgreSQL 17.11 container for both lines (`--server-url`). The two `pg`
+  measures that moved by more than 10 % were then re-run: `--scenario p6 tx read save exists` six times per
+  line, and `--scenario exists derived` eight times per line in ABBA order. The table gives the median of the
+  runs' medians.
+
+| Measure | SQLite file, 2.0.54 | SQLite file, 2.1.1 | PostgreSQL, 2.0.54 | PostgreSQL, 2.1.1 |
+| --- | ---: | ---: | ---: | ---: |
+| p6 pooled, median | 0.400 ms | 0.412 ms | 1.562 ms | 1.465 ms |
+| tx median | 0.471 ms | 0.479 ms | 1.272 ms | 1.410 ms |
+| tx median, re-run (six runs per line) | | | 1.307 ms | 1.216 ms |
+| read median | 0.473 ms | 0.482 ms | 0.604 ms | 0.601 ms |
+| `save(1)` in `@transactional`, median | 0.483 ms | 0.493 ms | 1.512 ms | 1.531 ms |
+| `save_all(100)` in `@transactional`, median | 13.41 ms | 7.85 ms | 3.50 ms | 3.71 ms |
+| `exists_by_id`, median | 0.486 ms | 0.492 ms | 1.513 ms | 1.553 ms |
+| derived `exists_by_name`, median | 0.568 ms | 0.573 ms | 1.704 ms | 1.864 ms |
+| derived `exists_by_name`, re-runs (six, then eight in ABBA order) | | | 1.434 / 2.209 ms | 1.831 / 1.952 ms |
+| derived `find_by_name`, CPU | 117.8 µs | 119.2 µs | 231.4 µs | 215.2 µs |
+| same statement built once, CPU | 89.4 µs | 94.0 µs | 154.5 µs | 150.8 µs |
+| `stream_all()` over 5,000 rows, median | 8.21 ms | 8.17 ms | 16.27 ms | 15.93 ms |
+| `find_all()` over 5,000 rows, median | 6.42 ms | 6.03 ms | 7.96 ms | 7.31 ms |
+
+No measure is more than 10 % slower on 2.1.1. On the SQLite file no latency is more than 3 % slower, the
+prebuilt statement costs about 5 % more CPU (89.0 to 89.8 µs against 93.0 to 94.9 µs over five runs each), and
+`save_all(100)` takes 7.9 ms instead of 13.4 ms for the same 100 `INSERT`s. On PostgreSQL the two measures
+that crossed 10 % in the first series did not hold: the `tx` median came out 7 % faster on 2.1.1 over six
+runs, and `exists_by_name`, 28 % slower over six runs in which 2.1.1 always ran second, came out 12 % faster
+over eight runs in ABBA order; each line's own runs spread by 50 % or more there. Statement counts, the SQL
+of both `exists` probes and the number of distinct IN-list texts are the same on both lines.
