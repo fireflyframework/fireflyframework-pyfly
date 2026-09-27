@@ -722,7 +722,9 @@ class DataSourceRegistry:
         default) is waiting for a database that stopped answering (a partition, a middlebox that forgot
         the flow), which the driver would wait on until the kernel gives up on the socket. It is
         cancelled, and the connections still idle in its pool are terminated: their sockets are closed
-        without a word to the server. ``ctx.stop()`` therefore ends on time.
+        without a word to the server. ``ctx.stop()`` therefore ends on time. When the caller cancels the
+        close first (a ``pyfly.context.shutdown-timeout`` shorter than *timeout*), the idle connections
+        of the disposes still running are terminated the same way before the cancellation propagates.
 
         From the moment it is called the engines refuse to connect: using one after close raises
         :class:`DataSourceConfigurationError` instead of silently opening a pool that nobody would ever
@@ -760,8 +762,13 @@ class DataSourceRegistry:
         try:
             done, pending = await asyncio.wait(disposals, timeout=limit)
         except asyncio.CancelledError:
+            # The caller gave up first (a stop whose shutdown timeout is shorter than *limit*): the
+            # connections still idle in the pools being disposed are terminated on the way out, or a
+            # silent database keeps them open.
             for task in disposals:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
+                    _terminate_idle_connections(pools[id(disposals[task])])
             raise
         for task in done:
             error = None if task.cancelled() else task.exception()

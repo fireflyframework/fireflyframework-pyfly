@@ -51,7 +51,7 @@ from pyfly.context.lifecycle import pre_destroy
 from pyfly.core.config import Config
 from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
 from tests.support.partition_proxy import PartitionProxy
 
 
@@ -257,7 +257,7 @@ async def _touch(engine: AsyncEngine, connections: int) -> None:
             await conn.close()
 
 
-@pytest.mark.backends(PG)
+@pytest.mark.backends(PG, MYSQL, MARIADB)
 async def test_close_is_bounded_when_the_database_black_holes_the_pool(relational_backend: RelationalBackend) -> None:
     app_name = f"pyfly-blackhole-{uuid.uuid4().hex[:8]}"
     proxy, port = await _proxy(relational_backend)
@@ -288,21 +288,23 @@ async def test_close_is_bounded_when_the_database_black_holes_the_pool(relationa
         await proxy.close()
 
 
-@pytest.mark.backends(PG)
+@pytest.mark.backends(PG, MYSQL, MARIADB)
+@pytest.mark.parametrize("shutdown_timeout", [None, "1"], ids=["default-shutdown-timeout", "short-shutdown-timeout"])
 async def test_ctx_stop_ends_on_time_when_the_database_black_holes_the_pool(
-    relational_backend: RelationalBackend,
+    relational_backend: RelationalBackend, shutdown_timeout: str | None
 ) -> None:
+    """A shutdown timeout shorter than the registry's own close bound cancels the close: the stuck
+    connections are terminated on the way out all the same."""
     app_name = f"pyfly-ctxstop-{uuid.uuid4().hex[:8]}"
     proxy, port = await _proxy(relational_backend)
-    context = ApplicationContext(
-        relational_backend.config(
-            {"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)}
-        )
-    )
+    overrides = {"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)}
+    if shutdown_timeout is not None:
+        overrides["pyfly.context.shutdown-timeout"] = shutdown_timeout
+    context = ApplicationContext(relational_backend.config(overrides))
     await context.start()
     try:
-        await _touch(context.get_bean(AsyncEngine), 1)
-        assert await _server_connections(relational_backend, app_name) == 1
+        await _touch(context.get_bean(AsyncEngine), 2)
+        assert await _server_connections(relational_backend, app_name) == 2
 
         proxy.black_hole_established()
         started = time.monotonic()
