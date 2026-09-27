@@ -681,10 +681,10 @@ from pyfly.data.relational.datasource_registry import close_connections_on_retur
 class ReportingDataSource:
     def __init__(self, config: Config) -> None:
         self.engine = create_async_engine(str(config.get("reporting.url")))
+        close_connections_on_return(self.engine)   # at creation (see Scoped proxies below)
 
     @pre_destroy
     async def close(self) -> None:      # runs when a refresh evicts this instance
-        close_connections_on_return(self.engine)   # a connection still in use closes when returned
         await self.engine.dispose()
 
 
@@ -726,10 +726,10 @@ class ReportingDatabase:
 
     def __init__(self, url: str) -> None:
         self.engine = create_async_engine(url)
+        close_connections_on_return(self.engine)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def dispose(self) -> None:
-        close_connections_on_return(self.engine)
         await self.engine.dispose()
 
 
@@ -742,11 +742,13 @@ class ReportingConfiguration:
 ```
 
 Each refresh destroys the evicted holder through its inferred destroy method (`dispose()`), and so
-does `ApplicationContext.stop()` for the live one. An engine a bean disposes itself needs
-`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
-`dispose()`: without it, a connection in use during the refresh goes back into the disposed pool
-when it is returned and stays open until the garbage collector finds that pool. The context does it
-for an `AsyncEngine` bean it disposes, and the datasource registry for its own engines.
+does `ApplicationContext.stop()` for the live one. An engine a bean creates and disposes itself
+needs `close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`)
+**when it is created**: without it, a connection in use during the refresh goes back into the
+disposed pool when it is returned and stays open until the garbage collector finds that pool.
+Calling it later, next to `dispose()`, adds pool listeners while a connection may be connecting,
+which breaks that connect. The context hooks every `AsyncEngine` a `@bean` method returns, and the
+datasource registry every engine it builds.
 
 The holder type keeps the reporting engine apart from the application's primary. A refresh-scoped
 `AsyncEngine` bean does not replace the primary either (only a singleton does), but an injection by

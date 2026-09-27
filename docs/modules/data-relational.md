@@ -738,16 +738,18 @@ the db health indicator of a closed registry answers `OUT_OF_SERVICE` without to
 restarted context builds a new registry.
 
 A connection that is **in use** while the registry closes (a request or a readiness probe in flight
-during `ctx.stop()`) finishes its work and is **closed when it is returned**. `AsyncEngine.dispose()`
-alone closes the idle connections only: a connection returned later went back into the disposed
-pool and stayed open (on PostgreSQL, in `pg_stat_activity`) until the garbage collector found that
-pool. An engine you dispose yourself gets the same treatment when you call
-`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
-`dispose()`; the context does it for an `AsyncEngine` bean it disposes (a declared or inferred
-`dispose()` destroy method), and the engine lifecycle for an application's engine. Only the
-connections in use at the dispose are closed: the engine pools again afterwards, so an engine that
-outlives the dispose (handed to a restarted context, shared with a second one, an in-memory SQLite
-database on a `StaticPool`) keeps working as before.
+during `ctx.stop()`), or that a connect in flight opens in the old pool just after, finishes its
+work and is **closed when it is returned**. `AsyncEngine.dispose()` alone closes the idle
+connections only: a connection returned later went back into the disposed pool and stayed open (on
+PostgreSQL, in `pg_stat_activity`) until the garbage collector found that pool. The hook,
+`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`), closes a
+connection returned to a pool the engine no longer uses, and leaves the current pool alone: the
+engine pools as before after any number of disposes (an engine handed to a restarted context,
+shared with a second one, an in-memory SQLite database on a `StaticPool`). The registry installs it
+on every engine it builds, the context on every `AsyncEngine` a `@bean` method returns, and the
+engine lifecycle on the application's engine it disposes. For an engine you create and dispose
+yourself, call it **when you create the engine**: it adds pool listeners, and adding them while a
+connection is connecting (asyncpg awaits inside the connect event) breaks that connect.
 
 The registry belongs to the **configuration object** (`DataSourceRegistry.for_config(config)`): two
 contexts built on one `Config` share it, and stopping one closes it for both, so the other's engines

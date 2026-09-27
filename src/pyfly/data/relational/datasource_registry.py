@@ -421,12 +421,12 @@ def _refuse_new_connections(datasource: DataSource) -> None:
     event.listen(datasource.engine.sync_engine, "do_connect", _refuse, insert=True)
 
 
-#: ``record.info`` key: the pool generation a connection was opened in (see :func:`close_connections_on_return`).
+#: ``record.info`` key: the pool generation a connection was checked out in (the fallback of the hook).
 _POOL_GENERATION = "pyfly_pool_generation"
 
 
 class _PoolGenerations:
-    """The current pool generation of one engine; a connection of an older one is closed when returned."""
+    """The current pool generation of one engine: every ``dispose()`` starts a new one."""
 
     __slots__ = ("current",)
 
@@ -434,51 +434,69 @@ class _PoolGenerations:
         self.current = object()
 
 
-# The engines with the hook, weakly: the listeners hold the generation, never the engine.
-_GENERATIONS: weakref.WeakKeyDictionary[Any, _PoolGenerations] = weakref.WeakKeyDictionary()
-_GENERATIONS_LOCK = threading.Lock()
+# The engines with the hook, weakly: the listeners hold a weak reference to the engine, never the engine.
+_HOOKED: weakref.WeakKeyDictionary[Any, _PoolGenerations] = weakref.WeakKeyDictionary()
+_HOOKED_LOCK = threading.Lock()
+
+
+def _record_pool(record: Any) -> Any | None:
+    """The pool *record* belongs to, or ``None`` when it cannot be read.
+
+    SQLAlchemy has no public accessor for it: this reads the name-mangled attribute of its
+    ``_ConnectionRecord``, and a test pins it, so an upgrade that renames it fails there.
+    """
+    return getattr(record, "_ConnectionRecord__pool", None)
 
 
 def close_connections_on_return(engine: AsyncEngine) -> None:
-    """Close each connection in use when *engine* is disposed as soon as it is returned.
+    """Close a connection returned to a pool *engine* no longer uses, instead of keeping it there.
 
-    Call it before disposing an engine that may be in use. ``dispose()`` closes the connections idle in
-    the pool and replaces the pool; a connection checked out at that moment is left alone, and when it is
-    returned it goes back into the disposed pool, where it stays open until the garbage collector finds
-    that pool (on PostgreSQL its backend stays in ``pg_stat_activity``). With the hook, that connection
-    finishes its work and is closed when it is returned.
+    ``dispose()`` closes the connections idle in the pool and replaces the pool. A connection in use at
+    that moment is left alone, and so is one that a connect in flight opens in the old pool afterwards;
+    when either is returned it goes back into the disposed pool, where it stays open until the garbage
+    collector finds that pool (on PostgreSQL its backend stays in ``pg_stat_activity``). With the hook,
+    each finishes its work and is closed when it is returned. The engine's current pool is never
+    touched: the engine pools as before, after any number of disposes (an engine handed to a restarted
+    context, one shared by a second context, an in-memory SQLite database on a ``StaticPool``).
 
-    Only those connections are closed: the engine pools again afterwards, so an engine that outlives the
-    dispose (handed to a restarted context, shared by a second one, an in-memory SQLite database on a
-    ``StaticPool``) keeps working as before. Each connection is stamped with the pool generation it was
-    opened in; this call and every later ``dispose()`` of the engine start a new generation, and a
-    connection of an older one is closed when it is returned (as the credentials rotation does for an
-    evicted pool). Calling it again is cheap. :meth:`DataSourceRegistry.close`, the
-    ``ApplicationContext`` (before the ``dispose()`` destroy method of an engine bean) and the engine
-    lifecycle (before it disposes an application's engine) call it.
+    Install it when you **create** the engine, before any connection is made; calling it again does
+    nothing. It adds pool listeners, and a listener added while SQLAlchemy is dispatching that event
+    (a connect suspended in an awaiting listener, as asyncpg's codec setup is) breaks that dispatch.
+    The registry installs it on every engine it builds, the ``ApplicationContext`` on every
+    ``AsyncEngine`` a ``@bean`` method returns, and the engine lifecycle on the application's engine it
+    disposes.
+
+    The hook compares the pool a returned connection belongs to with the engine's current pool. When
+    SQLAlchemy does not expose the former, it falls back to a generation stamped at each checkout and
+    renewed by each ``dispose()``, which misses a connect in flight across the dispose.
     """
     sync_engine = engine.sync_engine
-    with _GENERATIONS_LOCK:
-        generations = _GENERATIONS.get(sync_engine)
-        if generations is None:
-            generations = _GENERATIONS[sync_engine] = _PoolGenerations()
-            _install_generation_hooks(sync_engine, generations)
-        generations.current = object()
+    with _HOOKED_LOCK:
+        if sync_engine in _HOOKED:
+            return
+        generations = _HOOKED[sync_engine] = _PoolGenerations()
+    engine_ref = weakref.ref(sync_engine)
 
-
-def _install_generation_hooks(sync_engine: Any, generations: _PoolGenerations) -> None:
-    def _opened(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
+    def _checked_out(dbapi_connection: Any, record: ConnectionPoolEntry, proxy: Any) -> None:
         record.info[_POOL_GENERATION] = generations.current
 
     def _disposed(_engine: Any) -> None:
-        # A connection opened in the old pool while it was disposed is of the old generation too.
         generations.current = object()
 
     def _returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
-        if dbapi_connection is not None and record.info.get(_POOL_GENERATION) is not generations.current:
+        current = engine_ref()
+        if dbapi_connection is None or current is None:
+            return
+        pool = _record_pool(record)
+        if pool is not None:
+            stale = pool is not current.pool
+        else:
+            stale = record.info.get(_POOL_GENERATION, generations.current) is not generations.current
+        if stale:
+            # The credentials rotation closes a connection of an evicted pool the same way (_returned).
             record.invalidate()
 
-    event.listen(sync_engine, "connect", _opened)
+    event.listen(sync_engine, "checkout", _checked_out)
     event.listen(sync_engine, "engine_disposed", _disposed)
     event.listen(sync_engine, "checkin", _returned)
 
@@ -816,7 +834,8 @@ class DataSourceRegistry:
         targets = list(unique.values())
         for datasource in targets:
             _refuse_new_connections(datasource)
-            # dispose() closes the idle connections only: one in use now is closed when it is returned.
+            # Installed when the engine was built (a no-op here): a connection in use now is closed when it
+            # is returned, since dispose() closes the idle ones only.
             close_connections_on_return(datasource.engine)
         # The pool each dispose works on: a cancelled dispose never replaces it, and its idle
         # connections are terminated from here.
@@ -1024,6 +1043,8 @@ class DataSourceRegistry:
                     extra={"url": url.render_as_string(hide_password=True), "pool": pool_class.__name__},
                 )
         engine = create_async_engine(url, **kwargs)
+        # Before any connection: a connection in use when the registry closes is closed when it is returned.
+        close_connections_on_return(engine)
         if backend == "sqlite":
             explicit_timeout = "timeout" in connect_args or "timeout" in url.query
             install_sqlite_customizer(engine, settings.sqlite, explicit_timeout=explicit_timeout)

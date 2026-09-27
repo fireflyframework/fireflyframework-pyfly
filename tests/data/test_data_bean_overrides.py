@@ -24,6 +24,7 @@ two beans share picks the ``@primary`` one or fails instead of returning the las
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated, Any
@@ -793,3 +794,32 @@ async def test_a_plain_deferred_override_beside_a_scoped_factory_is_ambiguous(
     with pytest.raises(NoUniqueBeanError) as raised:
         await ctx.start()
     assert sorted(raised.value.candidate_names) == ["app_sessions", "reporting_sessions"]
+
+
+async def test_a_connect_suspended_in_its_connect_event_survives_the_stop_that_disposes_the_user_engine(
+    tmp_path: Path,
+) -> None:
+    """The engine lifecycle installs its connection hook when it is built, not when it disposes the engine:
+    installed at stop, it added pool listeners while this connect was suspended in one, which broke it."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserEngine)
+    await ctx.start()
+    engine = ctx.get_bean(AsyncEngine)
+    inside = asyncio.Event()
+
+    def _slow_setup(dbapi_connection: Any, _record: Any) -> None:
+        inside.set()
+        dbapi_connection.await_(asyncio.sleep(0.1))
+
+    event.listen(engine.sync_engine, "connect", _slow_setup)
+
+    async def probe() -> int:
+        async with engine.connect() as conn:
+            return int((await conn.execute(text("SELECT 1"))).scalar_one())
+
+    request = asyncio.create_task(probe())
+    await inside.wait()
+    await ctx.stop()
+
+    assert await request == 1
+    await engine.dispose()

@@ -35,6 +35,7 @@ environment variable that the tests switch between two files.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -685,6 +686,43 @@ async def test_a_connection_in_use_while_the_stop_disposes_a_singleton_engine_is
         assert in_use not in closed
 
     assert in_use in closed
+
+
+async def test_a_connect_suspended_in_its_connect_event_survives_a_refresh_that_disposes_the_engine(
+    urls: dict[str, str],
+) -> None:
+    """The context hooks an engine a ``@bean`` method returns when it is created: hooked at the dispose, pool
+    listeners were added while this connect was suspended in one, which broke it."""
+    _ENGINES.clear()
+    ctx = ApplicationContext(_config())
+    ctx.register_bean(_DocumentedScopedEngine)
+    await ctx.start()
+    engine = ctx.get_bean(AsyncEngine)  # the proxy
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        evicted = _ENGINES[-1]
+        inside = asyncio.Event()
+
+        def _slow_setup(dbapi_connection: Any, _record: Any) -> None:
+            inside.set()
+            dbapi_connection.await_(asyncio.sleep(0.1))
+
+        event.listen(evicted.sync_engine, "connect", _slow_setup)
+
+        async def probe() -> int:
+            async with evicted.connect() as conn:
+                return int((await conn.execute(text("SELECT 1"))).scalar_one())
+
+        holder = await evicted.connect()  # the pooled connection is busy: the probe opens a new one
+        request = asyncio.create_task(probe())
+        await inside.wait()
+        await ctx.get_bean(ContextRefresher).refresh()
+
+        assert await request == 1
+        await holder.close()
+    finally:
+        await ctx.stop()
 
 
 @configuration

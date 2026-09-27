@@ -43,7 +43,7 @@ from collections.abc import Iterator
 from typing import Annotated, Any
 
 import pytest
-from sqlalchemy import Integer, String, select, text
+from sqlalchemy import Integer, String, event, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,7 +55,11 @@ from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, refresh_scope, sco
 from pyfly.context.application_context import ApplicationContext
 from pyfly.context.lifecycle import pre_destroy
 from pyfly.core.config import Config
-from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
+from pyfly.data.relational.datasource_registry import (
+    DataSourceConfigurationError,
+    DataSourceRegistry,
+    close_connections_on_return,
+)
 from pyfly.data.relational.sqlalchemy.entity import Base
 from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
 from tests.support.partition_proxy import PartitionProxy
@@ -637,3 +641,72 @@ async def test_a_connection_in_use_across_an_actuator_refresh_is_closed_when_ret
     finally:
         await context.stop()
     assert await _settles_at_zero(relational_backend, app_name) == 0
+
+
+@pytest.mark.backends(PG)
+async def test_a_readiness_probe_connecting_while_the_registry_closes_gets_its_answer(
+    relational_backend: RelationalBackend,
+) -> None:
+    """asyncpg's connect event awaits (it sets up the type codecs). The registry used to install its pool
+    listeners when it closed, and a connect suspended there failed with "deque mutated during iteration"."""
+    app_name = f"pyfly-probeclose-{uuid.uuid4().hex[:8]}"
+    registry = DataSourceRegistry(relational_backend.config({"pyfly.app.name": app_name}))
+    engine = registry.primary.engine
+    connecting = asyncio.Event()
+    event.listen(engine.sync_engine, "connect", lambda *_: connecting.set(), insert=True)
+
+    async def probe() -> int:
+        async with engine.connect() as conn:
+            return int((await conn.execute(text("SELECT 1"))).scalar_one())
+
+    request = asyncio.create_task(probe())
+    await connecting.wait()
+    await asyncio.sleep(0)  # inside asyncpg's codec setup now
+    close = asyncio.create_task(registry.close())
+    try:
+        assert await request == 1
+    finally:
+        await close
+    assert await _settles_at_zero(relational_backend, app_name) == 0
+
+
+@pytest.mark.backends(PG)
+async def test_a_connect_in_flight_across_a_dispose_is_closed_when_returned(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The connection opens in the pool being disposed after the dispose, and goes back there when it is
+    returned: it is closed, without a garbage collection."""
+    import asyncpg
+
+    app_name = f"pyfly-inflight-{uuid.uuid4().hex[:8]}"
+    gate = asyncio.Event()
+    gate.set()
+    dsn = make_url(relational_backend.url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+    async def gated_connect() -> Any:
+        await gate.wait()
+        return await asyncpg.connect(dsn, server_settings={"application_name": app_name})
+
+    engine = create_async_engine(relational_backend.url, async_creator=gated_connect)
+    close_connections_on_return(engine)
+    try:
+        with _no_garbage_collection():
+            holder = await engine.connect()  # the only pooled connection is busy
+            await holder.execute(text("SELECT 1"))
+            gate.clear()
+
+            async def request() -> None:
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+
+            in_flight = asyncio.create_task(request())
+            await asyncio.sleep(0.1)
+            assert not in_flight.done()
+            await engine.dispose()
+            gate.set()
+            await in_flight
+            await holder.close()
+
+            assert await _settles_at_zero(relational_backend, app_name, within=2.0) == 0
+    finally:
+        await engine.dispose()

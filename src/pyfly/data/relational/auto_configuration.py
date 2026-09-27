@@ -157,8 +157,9 @@ class EngineLifecycle:
     * ``none`` — skip DDL (for Alembic-managed databases)
 
     ``stop()`` closes the session it was given and, when *dispose_engine* is true (a standalone
-    engine), disposes the engine; a connection still in use is closed when it is returned. A registry
-    engine is left to the registry, which disposes every engine once when the context stops.
+    engine), disposes the engine; a connection still in use is closed when it is returned (the hook is
+    installed when the lifecycle is built). A registry engine is left to the registry, which disposes
+    every engine once when the context stops.
     """
 
     _VALID_DDL_MODES = {"none", "create", "create-drop"}
@@ -175,6 +176,9 @@ class EngineLifecycle:
         self._session = session
         self._ddl_auto = ddl_auto if ddl_auto in self._VALID_DDL_MODES else "create"
         self._dispose_engine = dispose_engine
+        if dispose_engine:
+            # Now, not at stop: installed then, it added pool listeners while a connect could be running.
+            close_connections_on_return(engine)
 
     async def start(self) -> None:
         """Apply DDL strategy — create tables from Base.metadata when configured."""
@@ -200,8 +204,8 @@ class EngineLifecycle:
         except Exception:
             _logger.debug("session_close_failed", exc_info=True)
         if self._dispose_engine:
-            # A connection still in use (a probe in flight) is closed when it is returned, not pooled.
-            close_connections_on_return(self._engine)
+            # A connection still in use (a probe in flight) is closed when it is returned: the hook was
+            # installed when this lifecycle was built.
             await self._engine.dispose()
 
 

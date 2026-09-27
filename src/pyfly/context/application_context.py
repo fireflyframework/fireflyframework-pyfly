@@ -119,12 +119,16 @@ def _registry_engine(instance: Any) -> bool:
 
 
 def _close_connections_on_return(instance: Any) -> None:
-    """Before an ``AsyncEngine`` bean's ``dispose()``: close each connection in use when it is returned.
+    """Hook an ``AsyncEngine`` a ``@bean`` method returned: a connection returned to a pool it no longer
+    uses is closed.
 
-    ``dispose()`` closes the idle connections only, and one checked out at that moment (a request, a
-    health probe) went back into the disposed pool and stayed open until the garbage collector found
-    it. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`. Anything
-    that is not a SQLAlchemy ``AsyncEngine`` is left alone, and the data layer is imported only for one.
+    ``dispose()`` closes the idle connections only, and one in use at that moment (a request, a health
+    probe) went back into the disposed pool and stayed open until the garbage collector found it. The
+    context installs the hook when the product is created, before any connection: installed at the
+    dispose, it added pool listeners while a connect could be suspended in one, which broke that
+    connect. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`.
+    Anything that is not a SQLAlchemy ``AsyncEngine`` is left alone, and the data layer is imported
+    only for one.
     """
     if not _async_engine(instance):
         return
@@ -750,8 +754,9 @@ class ApplicationContext:
     async def _call_destroy_method(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
         """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*.
 
-        Before an ``AsyncEngine``'s ``dispose()``, a connection still in use is made to close when it is
-        returned (``dispose()`` closes the idle connections only).
+        A connection of an ``AsyncEngine`` still in use at its ``dispose()`` is closed when it is returned
+        (``dispose()`` closes the idle connections only): the hook was installed when the product was
+        created.
         """
         name = type(instance).__qualname__
         method_name = self._destroy_method_name(instance, declared, infer=infer)
@@ -759,7 +764,7 @@ class ApplicationContext:
             return
         try:
             if method_name == "dispose":
-                _close_connections_on_return(instance)
+                _close_connections_on_return(instance)  # installed at creation already: a safety net
             result = getattr(instance, method_name)()
             if inspect.isawaitable(result):
                 await asyncio.wait_for(result, timeout=timeout)
@@ -1159,6 +1164,8 @@ class ApplicationContext:
         # returning the same interface type don't overwrite each other.
         # A factory closure is stored so TRANSIENT beans rebuild through
         # the @bean method (not __init__) on each resolution.
+        # An engine gets its connection hook now, before any connection (see _close_connections_on_return).
+        _close_connections_on_return(result)
         impl_type = type(result)
         # The provisional registration of a deferred call (found by class and name before the product's
         # own registration, of the same class and name, replaces it).
@@ -1386,7 +1393,9 @@ class ApplicationContext:
 
     def _call_bean_method(self, config_instance: Any, method: Any) -> Any:
         """Call a @bean method, injecting its parameters from the container."""
-        return method(**self._bean_method_kwargs(config_instance, method))
+        result = method(**self._bean_method_kwargs(config_instance, method))
+        _close_connections_on_return(result)
+        return result
 
     def _bean_method_kwargs(self, config_instance: Any, method: Any) -> dict[str, Any]:
         """Resolve a @bean method's parameters from the container without calling it.
