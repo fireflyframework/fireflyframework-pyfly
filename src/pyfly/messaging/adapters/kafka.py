@@ -119,6 +119,7 @@ class KafkaAdapter:
         self._producer: Any = None
         self._handlers: list[tuple[str, MessageHandler, str | None]] = []
         self._containers: dict[tuple[str, str | None], KafkaListenerContainer[Message]] = {}
+        self._container_options: dict[tuple[str, str | None], ListenerOptions | None] = {}
         self._dispatch: dict[tuple[str, str | None], list[MessageHandler]] = {}
         self._started = False
 
@@ -149,8 +150,14 @@ class KafkaAdapter:
         self._handlers.append((topic, handler, group))
         key = (topic, group)
         self._dispatch.setdefault(key, []).append(handler)
-        if self._started and key not in self._containers:
+        if not self._started:
+            return
+        if key not in self._containers:
             await self._start_container(topic, group)
+            return
+        options = listener_options(handler)
+        if options is not None and options != self._container_options.get(key):
+            self._warn_options_differ(key)
 
     async def start(self) -> None:
         if self._started:
@@ -194,16 +201,21 @@ class KafkaAdapter:
     def _options(self, key: tuple[str, str | None]) -> ListenerOptions | None:
         declared = [options for options in map(listener_options, self._dispatch[key]) if options is not None]
         if len(set(declared)) > 1:
-            logger.warning(
-                "kafka_listener_options_differ topic=%s group=%s: the listeners of one (topic, group) share a "
-                "consumer; the first one's retries and dead-letter topic apply",
-                *key,
-            )
+            self._warn_options_differ(key)
         return declared[0] if declared else None
+
+    @staticmethod
+    def _warn_options_differ(key: tuple[str, str | None]) -> None:
+        logger.warning(
+            "kafka_listener_options_differ topic=%s group=%s: the listeners of one (topic, group) share a "
+            "consumer; the first one's retries and dead-letter topic apply",
+            *key,
+        )
 
     async def _start_container(self, topic: str, group: str | None) -> None:
         key = (topic, group)
         options = self._options(key)
+        self._container_options[key] = options
         dead_letter_topic = (options.dead_letter if options is not None else None) or (
             f"{topic}{self._dead_letter_suffix}" if self._dead_letter_suffix is not None else None
         )

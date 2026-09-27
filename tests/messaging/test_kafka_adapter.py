@@ -120,3 +120,33 @@ class TestKafkaAdapter:
         finally:
             await adapter.stop()
         assert len(cluster.consumers) == 1  # one consumer: two would split the partitions between them
+
+    @pytest.mark.asyncio
+    async def test_a_late_listener_with_other_retry_options_is_warned_about(self, caplog) -> None:
+        import logging
+
+        from pyfly.messaging.listener_container import ListenerEndpoint, ListenerOptions
+        from tests.messaging.brokers import FakeKafkaCluster
+
+        cluster = FakeKafkaCluster()
+        adapter = KafkaAdapter(
+            bootstrap_servers="fake:9092", consumer_factory=cluster.consumer, producer_factory=cluster.producer
+        )
+
+        async def handler(msg):
+            pass
+
+        await adapter.subscribe("orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=2)), group="g1")
+        await adapter.start()
+        try:
+            with caplog.at_level(logging.WARNING, logger="pyfly.messaging.adapters.kafka"):
+                await adapter.subscribe(
+                    "orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=2)), group="g1"
+                )
+                assert not caplog.records
+                await adapter.subscribe(
+                    "orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=9)), group="g1"
+                )
+        finally:
+            await adapter.stop()
+        assert any("kafka_listener_options_differ" in record.getMessage() for record in caplog.records)
