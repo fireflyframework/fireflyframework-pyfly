@@ -54,7 +54,8 @@ current operation scope.
 Spring Data semantics, at the minimum statement count:
 
 - ``save`` persists a new entity (one ``INSERT``; server-generated values come back through ``RETURNING``,
-  or one targeted ``SELECT`` of just those columns on a backend without it) and merges any other: a DTO with
+  or one targeted ``SELECT`` of just those columns on a backend without it; the relationships the mapping
+  loads eagerly are loaded on what it returns, as a read loads them) and merges any other: a DTO with
   an existing id updates its row, a detached entity is re-attached (one ``UPDATE`` of what changed), an
   entity of another session is copied in. An entity is new when its ``is_new()`` hook says so
   (:class:`~pyfly.data.ports.outbound.Persistable`), else when its version is ``None``, else when its
@@ -94,7 +95,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstanceState, Mapper, selectinload
+from sqlalchemy.orm import InstanceState, Mapper, load_only, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -631,6 +632,8 @@ class Repository(Generic[T, ID]):
         """Persist a new entity or merge an existing one (Spring ``save``), and return the managed instance.
 
         Use the returned instance: for an entity that was not new and not attached it is the unit's own copy.
+        Its generated values are set, and the relationships its mapping loads eagerly are loaded; any other
+        relationship it was not saved with needs a read with a fetch plan (``find_by_id(id, load=...)``).
         """
         session = self._session
         managed = await self._attach(session, entity)
@@ -695,20 +698,44 @@ class Repository(Generic[T, ID]):
         return managed
 
     async def _load_generated(self, session: AsyncSession, entities: Sequence[Any]) -> None:
-        """Load the column values the database generated in the flush and did not return (a server default on a
-        backend without ``RETURNING``, a server-side ``onupdate``): one ``SELECT`` of just those columns per key
-        chunk, and nothing at all when every value came back, which is the usual case."""
+        """Load what the flush left unloaded on the saved *entities*, which the refresh it replaces loaded: the
+        column values the database generated and did not return (a server default on a backend without
+        ``RETURNING``, a server-side ``onupdate``), and the relationships the mapping loads eagerly
+        (``lazy="selectin"``, ``"joined"``...) that an entity was not saved with.
+
+        Nothing at all when every value came back and the mapping loads nothing eagerly, which is the usual
+        case. Generated columns alone cost one ``SELECT`` of just those columns per key chunk; an eager
+        relationship costs one ``SELECT`` of the keys (and those columns) per chunk, with the eager loads a
+        read of the entities runs (one more statement per ``selectin`` relationship), for every entity at once.
+        """
         mapper = self._mapper
         columns = {attribute.key for attribute in mapper.column_attrs}
+        eager = [
+            relationship.key
+            for relationship in mapper.relationships
+            if relationship.lazy is False or relationship.lazy in _EAGER_LOADS
+        ]
         stale: dict[tuple[Any, ...], tuple[Any, set[str]]] = {}
+        unloaded = False
         for entity in entities:
             state = _state(entity)
+            if state.identity is None:
+                continue
             expired = set(state.expired_attributes) & columns
-            if expired and state.identity is not None:
+            missing = any(key not in state.dict for key in eager)
+            if expired or missing:
                 stale[tuple(state.identity)] = (entity, expired)
+                unloaded = unloaded or missing
         if not stale:
             return
         keys = sorted(set().union(*(expired for _entity, expired in stale.values())))
+        if unloaded:
+            # The entities are in the unit's identity map: the rows fill in only what they lack, and the
+            # mapping's eager loaders run for the relationships they lack, as for any read.
+            only = load_only(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
+            for criterion in self._in_ids(session, list(stale)):
+                unique_entities(await session.execute(select(self._model).where(criterion).options(only)))
+            return
         width = len(self._pk_keys)
         for criterion in self._in_ids(session, list(stale)):
             statement = select(*self._pk_attributes, *(getattr(self._model, key) for key in keys)).where(criterion)

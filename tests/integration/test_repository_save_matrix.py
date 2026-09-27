@@ -30,8 +30,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import Integer, String, select, text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import ForeignKey, Integer, String, select, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data.relational.sqlalchemy.entity import Base
@@ -63,6 +63,44 @@ class RsTicket(Base):
         return self.title.startswith("new:")
 
 
+class RsHousehold(Base):
+    """A parent whose members its mapping loads with ``selectin`` and whose pets it loads with a join."""
+
+    __tablename__ = "rs_household"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(40))
+    members: Mapped[list[RsMember]] = relationship(
+        back_populates="household", lazy="selectin", cascade="all, delete-orphan", order_by="RsMember.id"
+    )
+    pets: Mapped[list[RsPet]] = relationship(lazy="joined", cascade="all, delete-orphan", order_by="RsPet.id")
+
+
+class RsMember(Base):
+    __tablename__ = "rs_member"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    household_id: Mapped[int] = mapped_column(ForeignKey("rs_household.id"))
+    name: Mapped[str] = mapped_column(String(40))
+    household: Mapped[RsHousehold] = relationship(back_populates="members", lazy="selectin")
+
+
+class RsPet(Base):
+    __tablename__ = "rs_pet"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    household_id: Mapped[int] = mapped_column(ForeignKey("rs_household.id"))
+    name: Mapped[str] = mapped_column(String(40))
+
+
+class HouseholdRepository(Repository[RsHousehold, int]):
+    pass
+
+
+class MemberRepository(Repository[RsMember, int]):
+    pass
+
+
 class ParentRepository(Repository[ContractParent, uuid.UUID]):
     pass
 
@@ -83,7 +121,7 @@ class TicketRepository(Repository[RsTicket, str]):
     pass
 
 
-MODELS = (*CONTRACT_MODELS, RsStamped, RsTicket)
+MODELS = (*CONTRACT_MODELS, RsStamped, RsTicket, RsHousehold, RsMember, RsPet)
 
 
 async def _names(datasources: Datasources, model: type) -> list[str]:
@@ -132,6 +170,33 @@ async def test_server_generated_values_come_back_with_the_insert(relational_back
             assert counts.get("SELECT") == 2
         else:
             assert "SELECT" not in counts
+
+
+async def test_what_save_returns_has_the_relationships_its_mapping_loads_eagerly(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The refresh save() dropped also loaded the relationships the mapping declares eager (``selectin``,
+    ``joined``...): without it they raised DetachedInstanceError on the entity save() returns. They are loaded
+    for every saved entity at once, as a read would load them; a mapping without them stays at one INSERT."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        households = HouseholdRepository()
+        with datasources.counter() as counter:
+            saved = await households.save(RsHousehold(name="h"))
+        assert saved.members == [] and saved.pets == []
+        assert dml(counter) == {"INSERT": 1, "SELECT": 2}  # the keys with the joined pets, then the members
+
+        member = await MemberRepository().save(RsMember(household_id=saved.id, name="m"))
+        assert member.household.name == "h" and member.household.pets == []
+
+        with datasources.counter() as counter:
+            many = await households.save_all([RsHousehold(name=f"h{n}") for n in range(5)])
+        assert all(household.members == [] and household.pets == [] for household in many)
+        assert dml(counter)["SELECT"] == 2  # for the five at once
+
+        with datasources.counter() as counter:
+            full = await households.save(RsHousehold(name="f", members=[RsMember(name="a")], pets=[RsPet(name="p")]))
+        assert ([m.name for m in full.members], [p.name for p in full.pets]) == (["a"], ["p"])
+        assert "SELECT" not in dml(counter)  # collections the entity was saved with are loaded already
 
 
 # ---------------------------------------------------------------------------------------------------------
