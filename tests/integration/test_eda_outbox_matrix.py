@@ -363,6 +363,8 @@ async def test_a_claim_whose_lease_ended_is_taken_again_and_the_late_settle_is_r
     assert second[0].attempts == 2
 
     assert await outbox.settle(first[0]) is False  # the dead node's claim is gone
+    assert await outbox.complete(first) == 0
+    assert await outbox.extend(first, until=outbox.now() + timedelta(minutes=5)) == []
     assert await outbox.settle(second[0]) is True
     assert await outbox.pending("g") == []
 
@@ -473,3 +475,173 @@ async def test_retry_keeps_attempting_and_an_unregistered_group_is_owed_nothing(
     assert await bus.outbox.unregister("stubborn") == 1  # its undelivered delivery goes with it
     await bus.publish("d", "later", {"n": 2})
     assert await bus.outbox.pending("stubborn") == []
+
+
+async def _wait_until(condition: Any, *, timeout: float = 15.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not condition():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.02)
+
+
+async def test_an_event_with_many_subscriptions_neither_stalls_nor_holds_back_the_group(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Six subscriptions of one event type, under the default timeouts: the delivery's worst case (6 x 60 s)
+    outlasted the 300 s lease, so each round gave the whole claim back unattempted, the same delivery came first
+    again, and the event (and every event claimed behind it) was never delivered, dead-lettered or logged."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="wide", poll_interval=0.05)  # handler_timeout 60 s, claim_timeout 300 s
+    wide = [Recorder() for _ in range(6)]
+    for recorder in wide:
+        bus.subscribe("order.placed", recorder)
+    other = Recorder()
+    bus.subscribe("invoice.sent", other)
+    await bus.start()
+    try:
+        await bus.publish("d", "order.placed", {"n": "order"})
+        for number in range(5):
+            await bus.publish("d", "invoice.sent", {"n": number})
+        await _wait_until(lambda: len(other.seen) == 5 and all(recorder.seen for recorder in wide))
+    finally:
+        await bus.stop()
+
+    assert [recorder.ids() for recorder in wide] == [["order"]] * 6
+    assert other.ids() == [0, 1, 2, 3, 4]
+    assert await bus.outbox.pending("wide") == []
+
+
+async def test_a_delivery_that_outlasts_the_lease_has_it_extended_so_no_other_relay_takes_it(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A delivery whose handlers may take longer than the lease runs, first extending its lease: another relay of
+    the group, polling meanwhile, never takes it (which would run its handlers twice at once)."""
+    engine = relational_backend.create_engine()
+    options: dict[str, Any] = {"group": "slow", "claim_timeout": 1.2, "handler_timeout": 1.0}
+    first, second = await _bus(engine, **options), await _bus(engine, **options)
+    calls: list[tuple[str, int]] = []
+
+    def handler(relay: str, number: int) -> Any:
+        async def handle(envelope: EventEnvelope) -> None:
+            del envelope
+            calls.append((relay, number))
+            await asyncio.sleep(0.5)  # three of them: 1.5 s, past the 1.2 s lease
+
+        handle.__qualname__ = f"slow_handler_{number}"  # the same subscription on both relays
+        return handle
+
+    for number in range(3):
+        first.subscribe("slow", handler("first", number))
+        second.subscribe("slow", handler("second", number))
+    await first.relay.run_once()  # registers the group
+    await first.publish("d", "slow", {"n": 1})
+
+    round_of_first = asyncio.create_task(first.relay.run_once())
+    await _wait_until(lambda: bool(calls))  # the first relay claimed the delivery and runs it
+    while not round_of_first.done():
+        await second.relay.run_once()
+        await asyncio.sleep(0.05)
+    assert await round_of_first == 1
+    await asyncio.sleep(1.3)  # past the lease the claim had before it was extended
+    await asyncio.gather(_drain(first.relay), _drain(second.relay))
+
+    assert sorted(calls) == [("first", 0), ("first", 1), ("first", 2)]
+    assert await first.outbox.pending("slow") == []
+
+
+async def test_a_round_settles_the_deliveries_it_handled_in_one_statement(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Every handled delivery was settled in a unit of its own: one round trip (and commit) per event, which
+    cut the throughput of the base's cursor about 24 times. A round now sends the same statements for 1
+    delivery as for 40: one claim, one settling DELETE."""
+    from pyfly.messaging.listener_container import ListenerContainerSettings
+    from pyfly.testing import StatementCounter
+
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="bulk", settings=ListenerContainerSettings(transactional=False))
+    received = Recorder()
+    bus.subscribe("*", received)
+    await bus.relay.run_once()  # registers the group
+
+    async def one_round(events: int) -> list[str]:
+        for number in range(events):
+            await bus.publish("d", "e", {"n": number})
+        with StatementCounter(engine) as counter:
+            assert await bus.relay.run_once() == events
+        return counter.verbs()
+
+    single = await one_round(1)
+    many = await one_round(40)
+    assert many == single
+    assert many.count("DELETE") == 1
+    assert len(received.seen) == 41
+    assert bus.relay.counters.delivered == 41
+    assert await bus.outbox.pending("bulk") == []
+
+
+async def test_a_released_delivery_keeps_its_place(relational_backend: RelationalBackend) -> None:
+    """A delivery given back unattempted is due again when it was before its claim: it is not moved behind the
+    deliveries that came due meanwhile (nor tied with every other released one)."""
+    engine = relational_backend.create_engine()
+    outbox = Outbox(engine)
+    await outbox.start()
+    await outbox.register("g", None)
+    for name in ("first", "second"):
+        await outbox.append(EventEnvelope(name, {}, "d"))
+    (claimed,) = await outbox.claim("g", limit=1, lease=timedelta(minutes=5), owner="node")
+    assert claimed.envelope.event_type == "first"
+    await outbox.append(EventEnvelope("third", {}, "d"))
+
+    assert await outbox.release([claimed]) == 1
+    order = []
+    for _ in range(3):
+        (next_one,) = await outbox.claim("g", limit=1, lease=timedelta(minutes=5), owner="node")
+        order.append((next_one.envelope.event_type, next_one.attempts))
+    assert order == [("first", 1), ("second", 1), ("third", 1)]
+
+
+async def test_a_round_whose_settling_fails_gives_back_what_it_did_not_start(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The settling of a failed delivery raised (its dead-letter table is gone): the round failed and kept the
+    rest of its claim for the whole lease. Now the deliveries it handled are settled and the ones it did not
+    start are given back at once; the one whose settling failed is attempted again when its lease ends."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="broken", retry=_retry(1))
+    received = Recorder(fail_on={"poison"})
+    bus.subscribe("*", received)
+    await bus.relay.run_once()
+    for name in ("before", "poison", "after"):
+        await bus.publish("d", name, {"n": name})
+    async with engine.begin() as conn:
+        await conn.execute(text(f"DROP TABLE {TABLES.dead_letters.name}"))
+
+    with pytest.raises(Exception):  # noqa: B017, PT011 — the backend's own error for the missing table
+        await bus.relay.run_once()
+
+    assert received.ids() == ["before"]
+    now = bus.outbox.now()
+    pending = {p.envelope.event_type: (p.attempts, p.available_at <= now) for p in await bus.outbox.pending("broken")}
+    assert pending == {"poison": (1, False), "after": (0, True)}
+    assert bus.relay.counters.delivered == 1
+
+
+async def test_a_group_of_every_destination_starting_early_is_not_given_the_event_sourcing_outboxes(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The event-sourcing ``TransactionalOutbox`` shares the tables and addresses its events to its own group: a
+    group registered for every destination that starts at the earliest event must not be given them."""
+    from pyfly.eda.outbox import ADDRESSED_DESTINATION_PREFIX
+
+    engine = relational_backend.create_engine()
+    outbox = Outbox(engine)
+    await outbox.start()
+    private = f"{ADDRESSED_DESTINATION_PREFIX}orders"
+    await outbox.append(EventEnvelope("stored", {}, private), groups=[private])
+    await outbox.append(EventEnvelope("order.placed", {}, "orders"))
+
+    assert await outbox.register("everything", None, start="earliest") is True
+    assert [p.envelope.event_type for p in await outbox.pending("everything")] == ["order.placed"]
+    assert [p.envelope.event_type for p in await outbox.pending(private)] == ["stored"]

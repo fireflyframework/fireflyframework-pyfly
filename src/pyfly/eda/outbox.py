@@ -37,13 +37,28 @@ dies leaves its rows to be claimed again once the lease ends. An id cursor, and 
 (PostgreSQL's ``xid8``) that such a cursor needs to be safe, have no part in it: a transaction that commits
 behind a later one cannot be skipped.
 
+**The lease covers what a delivery may take.** A relay handles the deliveries it claimed one after the
+other, and a delivery runs every matching subscription, each for at most ``handler_timeout``: its worst case is
+``handler_timeout`` times those subscriptions. The first delivery of a round always runs: when its worst case
+outlasts the lease, the relay first extends the lease of the whole claim to ``claim_timeout`` past that worst
+case (one statement, fenced by the claim). A later delivery whose worst case outlasts what is left of the lease
+is given back with the rest of the claim, where each was, for a fresh claim (this relay's next round, or
+another relay's) to take; one that no lease of ``claim_timeout`` could cover gets the extension instead. So no
+delivery runs past its lease while its relay lives, and none is held back for good.
+
 **Each subscription of a group is settled on its own.** A delivery runs every subscription of the group whose
 pattern matches the event type; the ones that succeed are recorded in the delivery row, so a later attempt
 runs only the ones that failed, and the other deliveries of the group go on meanwhile. A failure is
 attempted again after a back-off (:class:`~pyfly.messaging.listener_container.RetryPolicy`), and after the
 last attempt the event is copied into the dead-letter table for that subscription
 (:class:`~pyfly.eda.types.ErrorStrategy` chooses otherwise). A handler that hangs is cancelled after
-``handler_timeout``, and that counts as a failure.
+``handler_timeout``, and that counts as a failure. The deliveries every subscription handled are settled
+together, in one statement at the end of the round (or before the round gives the rest back, extends its lease
+or fails): a relay that dies in the middle of a round has them handled again, at least once.
+
+**Order.** A relay handles the deliveries of a claim in publication order, but a group gives no order
+guarantee: a failure is attempted again after later events, and the relays of a group on several nodes claim
+side by side.
 
 **Retention.** A relay deletes, in batches, the events every group has handled (and that are older than
 :attr:`Retention.delivered`), and, when :attr:`Retention.max_age` is set, every event older than that with
@@ -92,10 +107,18 @@ _logger = logging.getLogger(__name__)
 EVERY_DESTINATION = "*"
 """The destination a consumer group registers to receive the events of every destination."""
 
+ADDRESSED_DESTINATION_PREFIX = "eventsourcing.outbox:"
+"""The destinations of the events owed only to the groups their append names (the event-sourcing
+:class:`~pyfly.eventsourcing.outbox.TransactionalOutbox` appends to ``eventsourcing.outbox:<name>``): a group
+registered for every destination is not owed them, nor given them when it starts at the earliest event."""
+
 DEFAULT_PREFIX = "pyfly_outbox"
 """The prefix of the default outbox tables (``pyfly_outbox_events`` and the others)."""
 
 _MAX_ERROR_LENGTH = 4000
+
+_IN_LIST_CHUNK = 500
+"""The most outbox ids one ``IN`` list of a settling or releasing statement holds (bind-parameter limits)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -281,7 +304,8 @@ class OutboxTables:
 @dataclass(frozen=True)
 class Delivery:
     """A delivery a relay claimed: the event, which attempt this is, and the subscriptions that handled it
-    already. *token* identifies the claim; settling the delivery needs it."""
+    already. *token* identifies the claim; settling the delivery needs it. *leased_until* is when the claim's
+    lease ends, and *due_at* when the delivery was due before it was claimed (a release gives it back there)."""
 
     outbox_id: int
     group: str
@@ -290,6 +314,8 @@ class Delivery:
     done: frozenset[str]
     token: str
     last_error: str | None = None
+    leased_until: datetime | None = None
+    due_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +342,28 @@ def _truncated(text: str) -> str:
 def describe_error(error: BaseException) -> str:
     """``Type: message`` of *error*, bounded, for ``last_error``."""
     return _truncated(f"{type(error).__name__}: {error}")
+
+
+def _utc(value: Any) -> datetime | None:
+    """An instant a raw (untyped) read returned, as an aware UTC ``datetime``."""
+    if isinstance(value, str):  # a raw text() read on a backend without a native timestamp
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _chunks(ids: Sequence[int]) -> Iterable[list[int]]:
+    for start in range(0, len(ids), _IN_LIST_CHUNK):
+        yield list(ids[start : start + _IN_LIST_CHUNK])
+
+
+def _by_claim(deliveries: Iterable[Delivery]) -> dict[tuple[str, str], list[Delivery]]:
+    """*deliveries* by the claim (group and token) they belong to, in their order."""
+    claims: dict[tuple[str, str], list[Delivery]] = {}
+    for delivery in deliveries:
+        claims.setdefault((delivery.group, delivery.token), []).append(delivery)
+    return claims
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -597,6 +645,9 @@ class Outbox:
         ).where(~exists().where(deliveries.c.consumer_group == group, deliveries.c.outbox_id == events.c.id))
         if EVERY_DESTINATION not in destinations:
             source = source.where(events.c.destination.in_(list(destinations)))
+        else:
+            # Every destination, but not the events owed only to the groups that were named (event sourcing's).
+            source = source.where(~events.c.destination.startswith(ADDRESSED_DESTINATION_PREFIX, autoescape=True))
         async with self._relay_unit() as session:
             await session.execute(
                 insert(deliveries).from_select(["consumer_group", "outbox_id", "available_at", "attempts"], source)
@@ -620,28 +671,32 @@ class Outbox:
         of their own (see the module documentation); returns them in publication order."""
 
         now = self._clock()
+        until = now + lease
         token = f"{owner}/{uuid.uuid4().hex[:12]}"
         postgresql = self.dialect() == "postgresql"
         async with self._relay_unit(single_statement=postgresql) as session:
             if postgresql:
-                rows = await self._claim_on_postgresql(session, group, limit, now + lease, now, token)
+                rows, due = await self._claim_on_postgresql(session, group, limit, until, now, token)
             else:
-                rows = await self._claim(session, group, limit, now + lease, now, token)
+                rows, due = await self._claim(session, group, limit, until, now, token)
         claimed: list[Delivery] = []
         orphans: list[int] = []
         for row in rows:
             if row.event_id is None:
                 orphans.append(int(row.outbox_id))  # the event was pruned under a backfilled delivery
                 continue
+            outbox_id = int(row.outbox_id)
             claimed.append(
                 Delivery(
-                    outbox_id=int(row.outbox_id),
+                    outbox_id=outbox_id,
                     group=group,
                     envelope=self._envelope(row),
                     attempts=int(row.attempts),
                     done=frozenset(json.loads(row.done)) if row.done else frozenset(),
                     token=token,
                     last_error=row.last_error,
+                    leased_until=until,
+                    due_at=due.get(outbox_id),
                 )
             )
         if orphans:
@@ -650,21 +705,26 @@ class Outbox:
 
     async def _claim(
         self, session: AsyncSession, group: str, limit: int, until: datetime, now: datetime, token: str
-    ) -> Sequence[Any]:
+    ) -> tuple[Sequence[Any], dict[int, datetime]]:
         from sqlalchemy import select, update
 
         deliveries, events = self.tables.deliveries, self.tables.events
         candidates = (
-            select(deliveries.c.outbox_id)
+            select(deliveries.c.outbox_id, deliveries.c.available_at)
             .where(deliveries.c.consumer_group == group, deliveries.c.available_at <= now)
             .order_by(deliveries.c.available_at, deliveries.c.outbox_id)
             .limit(limit)
         )
         if await self._skips_locked_rows(session):
             candidates = candidates.with_for_update(skip_locked=True)
-        ids: list[int] = list((await session.execute(candidates)).scalars())
-        if not ids:
-            return []
+        due: dict[int, datetime] = {}
+        for row in (await session.execute(candidates)).all():
+            instant = _utc(row.available_at)
+            if instant is not None:
+                due[int(row.outbox_id)] = instant
+        if not due:
+            return [], due
+        ids = list(due)
         await session.execute(
             update(deliveries)
             .where(
@@ -688,14 +748,18 @@ class Outbox:
                 events.c.created_at,
             )
             .select_from(deliveries.outerjoin(events, events.c.id == deliveries.c.outbox_id))
-            .where(deliveries.c.consumer_group == group, deliveries.c.claimed_by == token)
+            .where(
+                deliveries.c.consumer_group == group,
+                deliveries.c.outbox_id.in_(ids),  # the primary key: not a scan of the group's rows
+                deliveries.c.claimed_by == token,
+            )
             .order_by(deliveries.c.outbox_id)
         )
-        return (await session.execute(claimed)).all()
+        return (await session.execute(claimed)).all(), due
 
     async def _claim_on_postgresql(
         self, session: AsyncSession, group: str, limit: int, until: datetime, now: datetime, token: str
-    ) -> Sequence[Any]:
+    ) -> tuple[Sequence[Any], dict[int, datetime]]:
         from sqlalchemy import bindparam, text
 
         from pyfly.data.relational.framework_schema import UtcTimestamp
@@ -705,14 +769,14 @@ class Outbox:
         deliveries = preparer.format_table(tables.deliveries)
         events = preparer.format_table(tables.events)
         statement = text(
-            f"WITH c AS (SELECT consumer_group, outbox_id FROM {deliveries} "
+            f"WITH c AS (SELECT consumer_group, outbox_id, available_at FROM {deliveries} "
             "WHERE consumer_group = :group AND available_at <= :now "
             "ORDER BY available_at, outbox_id LIMIT :limit FOR UPDATE SKIP LOCKED), "
             f"u AS (UPDATE {deliveries} AS d SET available_at = :until, attempts = d.attempts + 1, "
             "claimed_by = :token FROM c WHERE d.consumer_group = c.consumer_group AND d.outbox_id = c.outbox_id "
-            "RETURNING d.outbox_id, d.attempts, d.done, d.last_error) "
-            "SELECT u.outbox_id, u.attempts, u.done, u.last_error, e.event_id, e.destination, e.event_type, "
-            f"e.payload, e.headers, e.created_at FROM u LEFT JOIN {events} e ON e.id = u.outbox_id "
+            "RETURNING d.outbox_id, d.attempts, d.done, d.last_error, c.available_at AS due_at) "
+            "SELECT u.outbox_id, u.attempts, u.done, u.last_error, u.due_at, e.event_id, e.destination, "
+            f"e.event_type, e.payload, e.headers, e.created_at FROM u LEFT JOIN {events} e ON e.id = u.outbox_id "
             "ORDER BY u.outbox_id"
         ).bindparams(
             bindparam("now", type_=UtcTimestamp()),
@@ -721,7 +785,13 @@ class Outbox:
         result = await session.execute(
             statement, {"group": group, "now": now, "until": until, "limit": limit, "token": token}
         )
-        return result.all()
+        rows = result.all()
+        due: dict[int, datetime] = {}
+        for row in rows:
+            instant = _utc(row.due_at)
+            if instant is not None:
+                due[int(row.outbox_id)] = instant
+        return rows, due
 
     async def _skips_locked_rows(self, session: AsyncSession) -> bool:
         """Whether the backend has ``FOR UPDATE SKIP LOCKED``: PostgreSQL, MySQL 8.0.1+, MariaDB 10.6+."""
@@ -739,11 +809,7 @@ class Outbox:
         return self._skip_locked
 
     def _envelope(self, row: Any) -> EventEnvelope:
-        created = row.created_at
-        if isinstance(created, str):  # a raw text() read on a backend without a native timestamp
-            created = datetime.fromisoformat(created)
-        if isinstance(created, datetime) and created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
+        created = _utc(row.created_at) or row.created_at
         return EventEnvelope(
             event_type=row.event_type,
             payload=json.loads(row.payload),
@@ -831,24 +897,85 @@ class Outbox:
             "failed_at": failed_at,
         }
 
-    async def release(self, deliveries: Sequence[Delivery]) -> int:
-        """Give claimed deliveries back unattempted (a relay that stops): they may be claimed again at once, and
-        the claim does not count as an attempt. Returns how many were given back."""
-        if not deliveries:
-            return 0
-        from sqlalchemy import update
+    async def complete(self, deliveries: Sequence[Delivery]) -> int:
+        """Settle claimed deliveries every subscription handled: their rows go, in one statement per claim (in
+        chunks, for the backends' limits on bound parameters), each in a unit of its own. Returns how many were
+        settled; the others had been claimed again by another relay since (their lease had ended), which
+        handles them again."""
+        from sqlalchemy import delete
 
         table = self.tables.deliveries
+        settled = 0
+        for (group, token), claimed in _by_claim(deliveries).items():
+            for ids in _chunks([delivery.outbox_id for delivery in claimed]):
+                async with self._relay_unit(single_statement=True) as session:
+                    result = await session.execute(
+                        delete(table).where(
+                            table.c.consumer_group == group, table.c.outbox_id.in_(ids), table.c.claimed_by == token
+                        )
+                    )
+                count = int(getattr(result, "rowcount", 0) or 0)
+                settled += count
+                if count < len(ids):
+                    _logger.warning(
+                        "outbox_deliveries_claimed_again",
+                        extra={"group": group, "deliveries": len(ids) - count, "claim": token},
+                    )
+        return settled
+
+    async def extend(self, deliveries: Sequence[Delivery], *, until: datetime) -> list[Delivery]:
+        """Extend the lease of claimed deliveries to *until*, in one statement per claim (fenced by the claim:
+        a delivery another relay claimed since is left alone). Returns the deliveries the relay still holds, in
+        their order, with their new lease."""
+        from dataclasses import replace
+
+        from sqlalchemy import select, update
+
+        table = self.tables.deliveries
+        held: set[tuple[str, str, int]] = set()
+        for (group, token), claimed in _by_claim(deliveries).items():
+            for ids in _chunks([delivery.outbox_id for delivery in claimed]):
+                mine = (table.c.consumer_group == group, table.c.outbox_id.in_(ids), table.c.claimed_by == token)
+                async with self._relay_unit() as session:
+                    result = await session.execute(update(table).where(*mine).values(available_at=until))
+                    kept = ids
+                    if int(getattr(result, "rowcount", 0) or 0) < len(ids):
+                        kept = list((await session.execute(select(table.c.outbox_id).where(*mine))).scalars())
+                held.update((group, token, int(outbox_id)) for outbox_id in kept)
+        return [
+            replace(delivery, leased_until=until)
+            for delivery in deliveries
+            if (delivery.group, delivery.token, delivery.outbox_id) in held
+        ]
+
+    async def release(self, deliveries: Sequence[Delivery]) -> int:
+        """Give claimed deliveries back unattempted (a relay that stops, or a round whose lease ran short): each
+        is due again when it was before the claim, so it keeps its place, and the claim does not count as an
+        attempt. Returns how many were given back."""
+        if not deliveries:
+            return 0
+        from sqlalchemy import case, literal, update
+
+        from pyfly.data.relational.framework_schema import UtcTimestamp
+
+        table = self.tables.deliveries
+        now = self._clock()
         released = 0
-        for group, token in {(delivery.group, delivery.token) for delivery in deliveries}:
-            ids = [d.outbox_id for d in deliveries if d.group == group and d.token == token]
-            async with self._relay_unit(single_statement=True) as session:
-                result = await session.execute(
-                    update(table)
-                    .where(table.c.consumer_group == group, table.c.outbox_id.in_(ids), table.c.claimed_by == token)
-                    .values(available_at=self._clock(), claimed_by=None, attempts=table.c.attempts - 1)
+        for (group, token), claimed in _by_claim(deliveries).items():
+            due = {delivery.outbox_id: delivery.due_at or now for delivery in claimed}
+            for ids in _chunks(list(due)):
+                available_at = case(
+                    {outbox_id: literal(due[outbox_id], UtcTimestamp()) for outbox_id in ids},
+                    value=table.c.outbox_id,
+                    else_=literal(now, UtcTimestamp()),
                 )
-            released += int(getattr(result, "rowcount", 0) or 0)
+                async with self._relay_unit(single_statement=True) as session:
+                    result = await session.execute(
+                        update(table)
+                        .where(table.c.consumer_group == group, table.c.outbox_id.in_(ids), table.c.claimed_by == token)
+                        .values(available_at=available_at, claimed_by=None, attempts=table.c.attempts - 1)
+                    )
+                released += int(getattr(result, "rowcount", 0) or 0)
         return released
 
     async def _drop(self, group: str, ids: Sequence[int], token: str) -> None:
@@ -1306,27 +1433,73 @@ class OutboxRelay:
         self._registered = True
 
     async def _round(self, *, in_loop: bool) -> int:
+        """Claim a batch and deliver it (see the module documentation): the deliveries every subscription handled
+        are settled together, and what the round does not get to is given back."""
         claimed = await self._outbox.claim(
             self._group, limit=self._batch_size, lease=self._claim_timeout, owner=self._owner
         )
-        deadline = self._outbox.now() + self._claim_timeout
-        for index, delivery in enumerate(claimed):
-            if (in_loop and self._stopping()) or self._outbox.now() + self._budget(delivery) > deadline:
-                # Stopping, or the lease would end under the next handler: give the rest back unattempted.
-                await self._outbox.release(claimed[index:])
-                break
-            try:
-                await self._deliver(delivery)
-            except asyncio.CancelledError:
-                # Cancelled mid-delivery (a stop that timed out): give this delivery and the rest back, so another
-                # relay takes them at once rather than when the lease ends.
-                from pyfly.data.transaction.template import run_shielded
+        queue = list(claimed)  # claimed, not started yet
+        handled: list[Delivery] = []  # handled by every subscription, not settled yet
+        in_flight: Delivery | None = None
+        started = False
+        try:
+            while queue:
+                delivery = queue[0]
+                if in_loop and self._stopping():
+                    break  # the rest is given back below
+                now = self._outbox.now()
+                budget = self._budget(delivery)
+                if delivery.leased_until is not None and now + budget > delivery.leased_until:
+                    # The lease would end under this delivery's handlers, and under the handled ones' settling.
+                    await self._complete(handled)
+                    if started and budget <= self._claim_timeout:
+                        break  # the round took its lease: a fresh claim (of this relay or another) takes the rest
+                    # The first delivery of the round, or one no fresh claim covers: extend the claim's lease.
+                    queue = await self._outbox.extend(queue, until=now + budget + self._claim_timeout)
+                    continue
+                queue.pop(0)
+                started = True
+                in_flight = delivery
+                if await self._deliver(delivery):
+                    handled.append(delivery)
+                in_flight = None
+            await self._complete(handled)
+            await self._outbox.release(queue)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError) and in_flight is not None:
+                # Cancelled mid-delivery (a stop that timed out): give it back as well, so another relay takes it at
+                # once rather than when its lease ends. A delivery whose settling failed stays claimed instead: it is
+                # attempted again when its lease ends.
+                queue.insert(0, in_flight)
+            from pyfly.data.transaction.template import run_shielded
 
-                await run_shielded(self._outbox.release(claimed[index:]))
-                raise
+            _result, _error, cancelled = await run_shielded(self._give_back(handled, queue))
+            if cancelled and not isinstance(error, asyncio.CancelledError):
+                raise asyncio.CancelledError from error  # cancelled while it gave back: keep the cancellation
+            raise
         return len(claimed)
 
+    async def _complete(self, handled: list[Delivery]) -> None:
+        """Settle the deliveries every subscription handled (one statement), and forget them."""
+        if not handled:
+            return
+        settled = await self._outbox.complete(handled)
+        handled.clear()
+        self.counters.delivered += settled
+
+    async def _give_back(self, handled: list[Delivery], rest: list[Delivery]) -> None:
+        """After a failed or cancelled round: settle what was handled, and give back what was not started."""
+        try:
+            await self._complete(handled)
+        except Exception:  # noqa: BLE001 — they are handled again once their lease ends
+            _logger.warning("outbox_settle_failed", extra={"group": self._group}, exc_info=True)
+        try:
+            await self._outbox.release(rest)
+        except Exception:  # noqa: BLE001 — they are claimed again once their lease ends
+            _logger.warning("outbox_release_failed", extra={"group": self._group}, exc_info=True)
+
     def _budget(self, delivery: Delivery) -> timedelta:
+        """The longest *delivery* may take: the handler timeout for each subscription it runs."""
         if self._handler_timeout is None:
             return timedelta(0)
         pending = sum(1 for subscription in self._matching(delivery))
@@ -1340,7 +1513,9 @@ class OutboxRelay:
             if subscription.key not in delivery.done and fnmatch.fnmatch(event_type, subscription.pattern)
         ]
 
-    async def _deliver(self, delivery: Delivery) -> None:
+    async def _deliver(self, delivery: Delivery) -> bool:
+        """Run the subscriptions *delivery* still owes; returns whether it is complete (to be settled with the
+        round's others), after settling a failed one on its own."""
         done = set(delivery.done)
         failures: list[tuple[Subscription, BaseException]] = []
         for subscription in self._matching(delivery):
@@ -1353,11 +1528,9 @@ class OutboxRelay:
             else:
                 done.add(subscription.key)
         if not failures:
-            if await self._outbox.settle(delivery):
-                self.counters.delivered += 1
-            return
+            return True
         self.counters.failures += len(failures)
-        await self._handle_failures(delivery, done, failures)
+        return await self._handle_failures(delivery, done, failures)
 
     async def _invoke(self, subscription: Subscription, envelope: EventEnvelope) -> None:
         from pyfly.messaging.listener_container import DeliveryState
@@ -1375,9 +1548,10 @@ class OutboxRelay:
 
     async def _handle_failures(
         self, delivery: Delivery, done: set[str], failures: list[tuple[Subscription, BaseException]]
-    ) -> None:
+    ) -> bool:
         """Settle a delivery some subscriptions failed: under the error strategy, each failure is attempted
-        again after its back-off, goes to the dead letters, or is let go."""
+        again after its back-off, goes to the dead letters, or is let go (then the delivery is complete: returns
+        ``True``, and the round settles it with the others)."""
         strategy = self._error_strategy
         for subscription, error in failures:
             level = logging.DEBUG if strategy is ErrorStrategy.IGNORE else logging.WARNING
@@ -1395,9 +1569,7 @@ class OutboxRelay:
                 exc_info=(type(error), error, error.__traceback__) if level > logging.DEBUG else None,
             )
         if strategy in (ErrorStrategy.IGNORE, ErrorStrategy.LOG_AND_CONTINUE):
-            if await self._outbox.settle(delivery):
-                self.counters.delivered += 1
-            return
+            return True
         dead: list[tuple[Subscription, BaseException]] = []
         delays: list[float] = []
         for subscription, error in failures:
@@ -1422,6 +1594,7 @@ class OutboxRelay:
             self.counters.dead_lettered += len(dead)
         if retry_at is not None and (self._next_due is None or retry_at < self._next_due):
             self._next_due = retry_at
+        return False
 
     def _retry_delay(self, subscription: Subscription, error: BaseException, attempt: int) -> float | None:
         """The delay before the next attempt of *subscription*'s failed *attempt*, or ``None`` for the dead

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pyfly.eda.outbox import Outbox, OutboxRelay, OutboxTables, Retention
+from pyfly.eda.outbox import ADDRESSED_DESTINATION_PREFIX, Outbox, OutboxRelay, OutboxTables, Retention
 from pyfly.eda.types import EventEnvelope
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
@@ -42,8 +42,9 @@ from pyfly.kernel.lifecycle import CONSUMER_PHASE
 if TYPE_CHECKING:
     from pyfly.messaging.listener_container import BackOff
 
-GROUP_PREFIX = "eventsourcing.outbox:"
-"""The consumer group of an outbox named *name* is ``eventsourcing.outbox:<name>``."""
+GROUP_PREFIX = ADDRESSED_DESTINATION_PREFIX
+"""The consumer group of an outbox named *name* is ``eventsourcing.outbox:<name>``, and so is the destination of
+its events: they are owed to that group alone (an EDA group registered for every destination never gets them)."""
 
 
 @dataclass
