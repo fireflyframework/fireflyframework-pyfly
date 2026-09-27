@@ -42,6 +42,7 @@ from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
 from pyfly.cqrs.context.execution_context import ExecutionContext
 from pyfly.cqrs.exceptions import CommandProcessingException
+from pyfly.cqrs.query.handler import QueryHandler
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Command, Query
 from pyfly.cqrs.validation.exceptions import CqrsValidationException
@@ -163,7 +164,9 @@ class DefaultCommandBus:
             # 5. Query-cache invalidation (after the commit inside a unit of work). It runs to completion even
             # when the task is cancelled meanwhile: the handler may have committed already.
             if self._query_cache is not None and self._query_cache.is_available:
-                await shielded(self._invalidate_queries(command, result, handler))
+                stale = self._stale_queries(command, result, handler)
+                if stale is not None:
+                    await shielded(self._invalidate_queries(command, *stale))
 
             # 6. Publish events
             if self._event_publisher:
@@ -197,24 +200,41 @@ class DefaultCommandBus:
             else:
                 CorrelationContext.set_correlation_id(previous_cid)
 
-    async def _invalidate_queries(self, command: Command[Any], result: Any, handler: CommandHandler[Any, Any]) -> None:
-        """Evict what *command* made stale (see the module docs). The query cache defers the evictions to
-        the commit of the current unit of work; a failing eviction is logged, never raised."""
+    def _stale_queries(
+        self, command: Command[Any], result: Any, handler: CommandHandler[Any, Any]
+    ) -> tuple[str | None, list[QueryHandler[Any, Any]]] | None:
+        """What *command* made stale (see the module docs): its query cache key, and the cacheable query
+        handlers tagged with an event it produced; ``None`` when that is nothing (no eviction to run)."""
+        try:
+            key = command.get_cache_key() or None
+            produced = self._produced_event_types(command, result, handler)
+            tagged: list[QueryHandler[Any, Any]] = []
+            if produced:
+                for query_type in sorted(self._registry.get_registered_query_types(), key=lambda t: t.__qualname__):
+                    query_handler = self._registry.find_query_handler(query_type)
+                    tags = query_handler.get_cache_evict_events()
+                    if query_handler.supports_caching() and any(issubclass(p, t) for p in produced for t in tags):
+                        tagged.append(query_handler)
+        except Exception as exc:  # noqa: BLE001 — the command has run; a stale cache must not fail it
+            _logger.error("Query-cache invalidation failed for %s: %s", type(command).__name__, exc, exc_info=True)
+            return None
+        if key is None and not tagged:
+            return None
+        return key, tagged
+
+    async def _invalidate_queries(
+        self, command: Command[Any], key: str | None, tagged: list[QueryHandler[Any, Any]]
+    ) -> None:
+        """Evict *key* for every caller and the groups of the *tagged* query handlers. The query cache defers
+        the evictions to the commit of the current unit of work; a failing eviction is logged, never raised."""
         cache = self._query_cache
         assert cache is not None
         try:
-            key = command.get_cache_key()
-            if key:
+            if key is not None:
                 await evict_query_key(cache, self._registry, key)
-            produced = self._produced_event_types(command, result, handler)
-            if not produced:
-                return
-            for query_type in sorted(self._registry.get_registered_query_types(), key=lambda t: t.__qualname__):
-                query_handler = self._registry.find_query_handler(query_type)
-                tags = query_handler.get_cache_evict_events()
-                if query_handler.supports_caching() and any(issubclass(p, t) for p in produced for t in tags):
-                    self._warn_if_unreachable(query_handler)
-                    await cache.evict_prefix(query_cache_group(query_handler))
+            for query_handler in tagged:
+                self._warn_if_unreachable(query_handler)
+                await cache.evict_prefix(query_cache_group(query_handler))
         except Exception as exc:  # noqa: BLE001 — the command has run; a stale cache must not fail it
             _logger.error("Query-cache invalidation failed for %s: %s", type(command).__name__, exc, exc_info=True)
 
