@@ -2156,6 +2156,25 @@ commit whose connection fails while `COMMIT` is in flight raises `CommitOutcomeU
 have committed. Never retry it blindly; `@retry` does not (see
 [Resilience](resilience.md#retries-and-transactions)).
 
+Because the commit is shielded, a call that raised `CancelledError` or a timeout may still have committed.
+Code that runs work it does not control and must know (the saga, TCC and workflow engines do, to compensate
+and never retry a step that committed before it failed) wraps it in `track_commits()`: every write unit of
+work that begins in the block (a new transaction, a repository call's write auto unit, an adapter's
+`infrastructure_unit()`), in the calling task or a task it starts, reports how it ended before the call
+returns or raises. Read-only units, participants of an enclosing unit and `detached()` work report nothing:
+
+```python
+from pyfly.data.transaction import track_commits
+
+with track_commits() as commits:
+    try:
+        await step()
+    except BaseException:
+        if commits.may_have_committed:   # commits.committed / .rolled_back / .unknown
+            await compensate()
+        raise
+```
+
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises
 `ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. When a cancel

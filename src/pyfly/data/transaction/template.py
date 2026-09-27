@@ -104,6 +104,7 @@ from pyfly.data.transaction.errors import (
     UnexpectedRollbackError,
 )
 from pyfly.data.transaction.manager import TransactionManager
+from pyfly.data.transaction.observation import observe
 from pyfly.data.transaction.registry import installed_registry, resolve_manager
 from pyfly.data.transaction.synchronization import CompletionStatus
 from pyfly.data.transaction.unit_of_work import (
@@ -598,6 +599,7 @@ class TransactionBoundary:
                 datasource=manager.datasource,
             )
         unit = await manager.begin(definition)
+        observe(unit)  # a track_commits() block open here learns how the unit ends
         unit.suspended = suspended
         self._mode = _Mode.NEW
         self._unit = unit
@@ -841,6 +843,7 @@ class AutoUnit:
     async def __aenter__(self) -> UnitOfWork:
         self._since = cancel_requests()
         unit = await self._manager.open_auto_unit(read_only=self._read_only, autocommit=self._autocommit)
+        observe(unit)
         self._unit = unit
         self._token = bind_state(current_state().with_scope(self._manager.datasource, unit))
         return unit
