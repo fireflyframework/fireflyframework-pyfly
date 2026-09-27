@@ -497,3 +497,76 @@ async def test_a_record_that_fails_while_its_partition_is_revoked_does_not_stop_
         assert cluster.committed_offset(GROUP, TOPIC) is None
     finally:
         await container.stop()
+
+
+async def test_a_revoked_partition_s_next_record_is_not_started_while_the_rebalance_waits() -> None:
+    """The rebalance waits for m1; m2, fetched in the same poll, must not start on this member meanwhile: its
+    new owner gets it from the committed offset, and two members would run it at once."""
+    cluster = FakeKafkaCluster()
+    cluster.append(TOPIC, b"m1")
+    cluster.append(TOPIC, b"m2")
+    gate = asyncio.Event()
+    handled: list[str] = []
+
+    async def handler(message: Message) -> None:
+        handled.append(message.value.decode())
+        if message.value == b"m1":
+            await gate.wait()
+
+    container: KafkaListenerContainer[Message] = KafkaListenerContainer(
+        topics=[TOPIC],
+        group=GROUP,
+        consumer_factory=cluster.consumer,
+        convert=kafka_adapter.message_of,
+        handler=handler,
+        dead_letter=None,
+        settings=fast(transactional=False),
+        auto_offset_reset="earliest",
+    )
+    await container.start()
+    try:
+        await eventually(lambda: handled == ["m1"], what="m1 in flight")
+        [consumer] = cluster.consumers
+        revoking = asyncio.create_task(consumer.revoke())
+        await asyncio.sleep(0.05)
+        gate.set()
+        await revoking
+        await asyncio.sleep(0.05)
+    finally:
+        await container.stop()
+    assert handled == ["m1"]
+    assert cluster.committed_offset(GROUP, TOPIC) == 1  # m2 is left to the partition's new owner
+
+
+async def test_a_cancelled_error_the_handler_raises_itself_is_a_failed_delivery() -> None:
+    """A handler that awaits a task someone cancelled gets ``CancelledError`` without being stopped: the
+    record is attempted again, and the consumer keeps consuming."""
+    cluster = FakeKafkaCluster()
+    cluster.append(TOPIC, b"m1")
+    cluster.append(TOPIC, b"m2")
+    attempts: list[tuple[str, int]] = []
+
+    async def handler(message: Message) -> None:
+        attempts.append((message.value.decode(), message.delivery_attempt))
+        if message.value == b"m1" and message.delivery_attempt == 1:
+            side_task = asyncio.create_task(asyncio.sleep(10))
+            side_task.cancel()
+            await side_task  # raises CancelledError into the handler
+
+    container: KafkaListenerContainer[Message] = KafkaListenerContainer(
+        topics=[TOPIC],
+        group=GROUP,
+        consumer_factory=cluster.consumer,
+        convert=kafka_adapter.message_of,
+        handler=handler,
+        dead_letter=None,
+        settings=fast(transactional=False),
+        auto_offset_reset="earliest",
+    )
+    await container.start()
+    try:
+        await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 2, what="both committed")
+        assert container.running
+    finally:
+        await container.stop()
+    assert attempts == [("m1", 1), ("m1", 2), ("m2", 1)]

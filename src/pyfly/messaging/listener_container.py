@@ -738,6 +738,13 @@ def dead_letter_headers(
     return headers
 
 
+def _cancel_requested() -> bool:
+    """Whether the running task was asked to cancel (a stop), as opposed to a ``CancelledError`` a handler
+    raised on its own (awaiting a task that was cancelled), which is the delivery's failure."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 async def _wait_or_cancel(tasks: set[asyncio.Task[Any]], timeout: float, *, container: str) -> None:
     """Wait for *tasks* up to *timeout*, then cancel the ones still running and wait for them to end."""
     if not tasks:
@@ -768,8 +775,9 @@ async def _wait_or_cancel(tasks: set[asyncio.Task[Any]], timeout: float, *, cont
 # Kafka
 # ---------------------------------------------------------------------------------------------------------
 
-KafkaDeadLetter = Callable[[Any, BaseException, int], Awaitable[None]]
-"""Publishes a record to its dead-letter topic: ``(record, error, attempts)``; raising keeps it unacknowledged."""
+KafkaDeadLetter = Callable[[Any, BaseException, int], Awaitable[bool | None]]
+"""Publishes a record to its dead-letter topic: ``(record, error, attempts)``; raising keeps it unacknowledged,
+and returning ``False`` says it kept no copy (the record is logged as skipped)."""
 
 ListenerLookup = Callable[[Any], Sequence[object]]
 """The listeners a delivery's payload reaches, whose ``@transactional`` settings shape its unit of work."""
@@ -829,6 +837,8 @@ class KafkaListenerContainer(Generic[T]):
         self._idle.set()
         #: Partitions this member owns (``None`` without a group: everything it fetches).
         self._assigned: set[Any] | None = None
+        #: Partitions a rebalance is taking away: their records are not started any more.
+        self._revoking: set[Any] = set()
         #: The next offset to commit, by partition: one past the last record that is done.
         self._pending: dict[Any, int] = {}
         #: Failed attempts of the record a partition was sought back to.
@@ -960,37 +970,42 @@ class KafkaListenerContainer(Generic[T]):
         attempt = self._failures.get(key, 0) + 1
         try:
             payload = self._convert(record, attempt)
-        except Exception as error:
-            return await self._recover(consumer, tp, record, PoisonMessageError(error), attempt)
+        except Exception as unreadable:
+            return await self._recover(consumer, tp, record, PoisonMessageError(unreadable), attempt)
         state = DeliveryState()
+        error: BaseException
         try:
             await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
-        except asyncio.CancelledError:
-            if state.committed:
-                self._completed(tp, record.offset)
-            raise
-        except Exception as error:
-            delay = self._policy.retry_delay(error, attempt)
-            if delay is None:
-                return await self._recover(consumer, tp, record, error, attempt)
-            self._failures[key] = attempt
-            logger.warning(
-                "listener_delivery_failed container=%s topic=%s partition=%s offset=%s attempt=%d/%d "
-                "retry_in_s=%.3f transient=%s: %s",
-                self.name,
-                record.topic,
-                record.partition,
-                record.offset,
-                attempt,
-                self._policy.max_attempts,
-                delay,
-                is_transient_failure(error),
-                error,
-            )
-            self._back_off(consumer, tp, record.offset, delay)
-            return False
-        self._completed(tp, record.offset)
-        return True
+        except asyncio.CancelledError as cancelled:
+            if _cancel_requested():
+                if state.committed:
+                    self._completed(tp, record.offset)
+                raise
+            error = cancelled  # the handler's own, not a stop: the delivery failed
+        except Exception as failed:
+            error = failed
+        else:
+            self._completed(tp, record.offset)
+            return True
+        delay = self._policy.retry_delay(error, attempt)
+        if delay is None:
+            return await self._recover(consumer, tp, record, error, attempt)
+        self._failures[key] = attempt
+        logger.warning(
+            "listener_delivery_failed container=%s topic=%s partition=%s offset=%s attempt=%d/%d "
+            "retry_in_s=%.3f transient=%s: %r",
+            self.name,
+            record.topic,
+            record.partition,
+            record.offset,
+            attempt,
+            self._policy.max_attempts,
+            delay,
+            is_transient_failure(error),
+            error,
+        )
+        self._back_off(consumer, tp, record.offset, delay)
+        return False
 
     def _targets(self, payload: T) -> Sequence[object]:
         return self._listeners(payload) if self._listeners is not None else (self._handler,)
@@ -1012,18 +1027,24 @@ class KafkaListenerContainer(Generic[T]):
             )
             self._completed(tp, record.offset)
             return True
+        failure: BaseException | None = None
+        kept: bool | None = None
         try:
-            await self._dead_letter(record, error, attempts)
-        except asyncio.CancelledError:
-            self._recovering[key] = (error, attempts)
-            raise
-        except Exception as failure:
+            kept = await self._dead_letter(record, error, attempts)
+        except asyncio.CancelledError as cancelled:
+            if _cancel_requested():
+                self._recovering[key] = (error, attempts)
+                raise
+            failure = cancelled
+        except Exception as failed:
+            failure = failed
+        if failure is not None:
             self._recovering[key] = (error, attempts)
             rounds = self._recover_rounds.get(key, 0) + 1
             self._recover_rounds[key] = rounds
             delay = max(DEAD_LETTER_RETRY_DELAY, self._policy.backoff.delay_after(rounds))
             logger.error(
-                "listener_dead_letter_failed container=%s topic=%s partition=%s offset=%s: %s; the record stays "
+                "listener_dead_letter_failed container=%s topic=%s partition=%s offset=%s: %r; the record stays "
                 "uncommitted and is dead-lettered again in %.1f s",
                 self.name,
                 record.topic,
@@ -1034,15 +1055,27 @@ class KafkaListenerContainer(Generic[T]):
             )
             self._back_off(consumer, tp, record.offset, delay)
             return False
-        logger.warning(
-            "listener_delivery_dead_lettered container=%s topic=%s partition=%s offset=%s attempts=%d reason=%s",
-            self.name,
-            record.topic,
-            record.partition,
-            record.offset,
-            attempts,
-            type(failure_cause(error)).__name__,
-        )
+        if kept is False:
+            logger.error(
+                "listener_delivery_skipped container=%s topic=%s partition=%s offset=%s attempts=%d: no "
+                "dead-letter destination kept a copy, the record is skipped",
+                self.name,
+                record.topic,
+                record.partition,
+                record.offset,
+                attempts,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        else:
+            logger.warning(
+                "listener_delivery_dead_lettered container=%s topic=%s partition=%s offset=%s attempts=%d reason=%s",
+                self.name,
+                record.topic,
+                record.partition,
+                record.offset,
+                attempts,
+                type(failure_cause(error)).__name__,
+            )
         self._completed(tp, record.offset)
         return True
 
@@ -1080,7 +1113,7 @@ class KafkaListenerContainer(Generic[T]):
     def _resume_due(self, consumer: Any, now: float) -> None:
         for tp in [tp for tp, until in self._paused_until.items() if until <= now]:
             del self._paused_until[tp]
-            if self._owns(tp):
+            if self._assigned_here(tp):
                 with contextlib.suppress(Exception):
                     consumer.resume(tp)
 
@@ -1091,6 +1124,12 @@ class KafkaListenerContainer(Generic[T]):
         return int(timeout * 1000)
 
     def _owns(self, tp: Any) -> bool:
+        """Whether a record of *tp* may be started: the partition is this member's and no rebalance is
+        taking it away."""
+        return tp not in self._revoking and self._assigned_here(tp)
+
+    def _assigned_here(self, tp: Any) -> bool:
+        """Whether *tp* is still assigned to this member (its done offsets may be committed)."""
         return self._assigned is None or tp in self._assigned
 
     async def _commit_pending(self, consumer: Any) -> None:
@@ -1100,7 +1139,7 @@ class KafkaListenerContainer(Generic[T]):
         if self._group is None:
             self._pending.clear()
             return
-        for tp in [tp for tp in self._pending if not self._owns(tp)]:
+        for tp in [tp for tp in self._pending if not self._assigned_here(tp)]:
             del self._pending[tp]
         offsets = dict(self._pending)
         if not offsets:
@@ -1125,26 +1164,30 @@ class KafkaListenerContainer(Generic[T]):
     # -- rebalancing -----------------------------------------------------------------------------------
 
     async def _on_revoked(self, revoked: set[Any]) -> None:
-        """Before the group takes partitions away: let the record in flight finish (bounded), commit what
-        is done on them, and forget their retry state."""
-        if not self._idle.is_set():
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._idle.wait(), timeout=self._settings.shutdown_timeout)
-        consumer = self._consumer
-        offsets = {tp: offset for tp, offset in self._pending.items() if tp in revoked}
-        if offsets and consumer is not None:
-            try:
-                await consumer.commit(offsets)
-            except Exception as error:  # noqa: BLE001 — the new owner delivers those records again
-                logger.warning("listener_commit_on_revoke_failed container=%s: %s", self.name, error)
-        for tp in revoked:
-            self._pending.pop(tp, None)
-            self._paused_until.pop(tp, None)
-        for stale in (self._failures, self._recovering, self._recover_rounds):
-            for key in [key for key in stale if key[0] in revoked]:
-                del stale[key]
-        if self._assigned is not None:
-            self._assigned -= revoked
+        """Before the group takes partitions away: start none of their records any more, let the record in
+        flight finish (bounded), commit what is done on them, and forget their retry state."""
+        self._revoking |= revoked
+        try:
+            if not self._idle.is_set():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._idle.wait(), timeout=self._settings.shutdown_timeout)
+            consumer = self._consumer
+            offsets = {tp: offset for tp, offset in self._pending.items() if tp in revoked}
+            if offsets and consumer is not None:
+                try:
+                    await consumer.commit(offsets)
+                except Exception as error:  # noqa: BLE001 — the new owner delivers those records again
+                    logger.warning("listener_commit_on_revoke_failed container=%s: %s", self.name, error)
+            for tp in revoked:
+                self._pending.pop(tp, None)
+                self._paused_until.pop(tp, None)
+            for stale in (self._failures, self._recovering, self._recover_rounds):
+                for key in [key for key in stale if key[0] in revoked]:
+                    del stale[key]
+            if self._assigned is not None:
+                self._assigned -= revoked
+        finally:
+            self._revoking -= revoked
 
     def _on_assigned(self, assigned: set[Any]) -> None:
         self._assigned = set(assigned)
@@ -1207,6 +1250,8 @@ class RabbitListenerContainer(Generic[T]):
       exception there makes it a :class:`PoisonMessageError`;
     - *dead_letters* are tried in order for a delivery that ran out of attempts: the first publish the
       broker routes wins; with none, the message is logged and rejected without requeue;
+    - *after_dead_letter* runs once the copy is in a dead-letter queue (a store that records it); its
+      failure is logged and the message acked all the same, since the copy is safe;
     - *limit* is the adapter's :class:`ConcurrencyLimit`, shared by its consumers;
     - *listeners* returns the listeners a payload reaches (``None``: *handler* itself), whose
       ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`).
@@ -1342,7 +1387,7 @@ class RabbitListenerContainer(Generic[T]):
         except Exception as error:
             await self._dead_letter(message, PoisonMessageError(error), attempt)
             return
-        failure: Exception | None = None
+        failure: BaseException | None = None
         async with self._limit:
             if self._stopping:
                 await self._release(message)
@@ -1350,20 +1395,23 @@ class RabbitListenerContainer(Generic[T]):
             state = DeliveryState()
             try:
                 await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
-            except asyncio.CancelledError:
-                await _shielded(self._ack(message) if state.committed else self._release(message))
-                raise
+            except asyncio.CancelledError as cancelled:
+                if _cancel_requested():
+                    await _shielded(self._ack(message) if state.committed else self._release(message))
+                    raise
+                failure = cancelled  # the handler's own, not a stop: the delivery failed
             except Exception as error:
                 failure = error
             else:
                 await self._ack(message)
                 return
+        assert failure is not None
         delay = self._policy.retry_delay(failure, attempt)
         if delay is None:
             await self._dead_letter(message, failure, attempt)
             return
         logger.warning(
-            "listener_delivery_failed container=%s queue=%s attempt=%d/%d retry_in_s=%.3f transient=%s: %s",
+            "listener_delivery_failed container=%s queue=%s attempt=%d/%d retry_in_s=%.3f transient=%s: %r",
             self.name,
             self._queue_name,
             attempt,
@@ -1435,9 +1483,15 @@ class RabbitListenerContainer(Generic[T]):
                 except asyncio.CancelledError:
                     await _shielded(self._release(message))
                     raise
-                except Exception as failure:
-                    last = failure
-                    break
+                except Exception:  # noqa: BLE001 — the copy is in the dead-letter queue: ack all the same
+                    logger.exception(
+                        "listener_after_dead_letter_failed container=%s queue=%s exchange=%s routing_key=%s: the "
+                        "message is dead-lettered and acked all the same",
+                        self.name,
+                        self._queue_name,
+                        route.exchange,
+                        route.routing_key,
+                    )
             logger.warning(
                 "listener_delivery_dead_lettered container=%s queue=%s exchange=%s routing_key=%s attempts=%d "
                 "reason=%s",

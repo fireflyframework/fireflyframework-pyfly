@@ -344,3 +344,81 @@ async def test_a_datasource_the_settings_name_must_exist_when_the_consumer_start
         await adapter.stop()
     finally:
         await ctx.stop()
+
+
+def _container(broker_connection: Any, handler: Any, **kwargs: Any) -> Any:
+    from pyfly.messaging.listener_container import ConcurrencyLimit, RabbitDeadLetter, RabbitListenerContainer
+
+    container: RabbitListenerContainer[Any] = RabbitListenerContainer(
+        connection=broker_connection,
+        queue=QUEUE,
+        bindings=[("pyfly", TOPIC)],
+        convert=lambda message, attempt: message,
+        handler=handler,
+        dead_letters=[RabbitDeadLetter("pyfly.dlx", QUEUE, f"{QUEUE}.dlq")],
+        settings=kwargs.pop("settings", fast(transactional=False)),
+        limit=ConcurrencyLimit(lambda: 4),
+        **kwargs,
+    )
+    return container
+
+
+async def test_a_cancelled_error_the_handler_raises_itself_is_retried_through_the_policy() -> None:
+    """Not a stop: the delivery failed. It is republished with its next attempt after the back-off, not
+    requeued at once with the same attempt."""
+    broker = FakeAmqpBroker()
+    attempts: list[int] = []
+
+    async def handler(message: Any) -> None:
+        attempts.append(int(message.headers.get(ATTEMPT_HEADER, 1)))
+        if len(attempts) == 1:
+            side_task = asyncio.create_task(asyncio.sleep(10))
+            side_task.cancel()
+            await side_task
+
+    container = _container(await broker.connect("amqp://fake/"), handler)
+    await container.start()
+    try:
+        broker.publish_to("pyfly", TOPIC, b"m")
+        await eventually(lambda: len(outcomes(broker, b"m")) == 2, what="the retry acked")
+    finally:
+        await container.stop()
+    assert attempts == [1, 2]
+    assert outcomes(broker, b"m") == [("ack", None), ("ack", 2)]
+
+
+async def test_a_failing_after_dead_letter_hook_does_not_dead_letter_the_message_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The copy is in the dead-letter queue: a hook that fails (a store during a database outage) is logged,
+    and the message is acked, not run and dead-lettered again round after round."""
+    broker = FakeAmqpBroker()
+    runs: list[int] = []
+    hook_calls: list[int] = []
+
+    async def handler(message: Any) -> None:
+        runs.append(1)
+        raise ValueError("bad event")
+
+    async def failing_hook(message: Any, error: BaseException, attempts: int) -> None:
+        hook_calls.append(attempts)
+        raise RuntimeError("the dead-letter table is unreachable")
+
+    container = _container(
+        await broker.connect("amqp://fake/"),
+        handler,
+        settings=fast(max_attempts=1, transactional=False),
+        after_dead_letter=failing_hook,
+    )
+    await container.start()
+    try:
+        with caplog.at_level(logging.ERROR, logger="pyfly.messaging.listener_container"):
+            broker.publish_to("pyfly", TOPIC, b"m")
+            await eventually(lambda: broker.bodies(f"{QUEUE}.dlq") == [b"m"], what="the dead letter")
+            await asyncio.sleep(0.2)
+    finally:
+        await container.stop()
+    assert (runs, hook_calls) == ([1], [1])
+    assert broker.bodies(f"{QUEUE}.dlq") == [b"m"]
+    assert outcomes(broker, b"m") == [("ack", None)]
+    assert any("listener_after_dead_letter_failed" in record.getMessage() for record in caplog.records)
