@@ -101,6 +101,7 @@ class NoUniqueBeanError(BeanCreationException):
         candidates: list[type],
         required_by: str | None = None,
         parameter: str | None = None,
+        candidate_names: list[str] | None = None,
     ) -> None:
         self.bean_type = bean_type
         self.candidates = candidates
@@ -108,7 +109,8 @@ class NoUniqueBeanError(BeanCreationException):
         self.parameter = parameter
 
         type_name = getattr(bean_type, "__name__", repr(bean_type))
-        candidate_names = [getattr(c, "__name__", repr(c)) for c in candidates]
+        # Several beans of ONE class are told apart by their bean names.
+        candidate_names = candidate_names or [getattr(c, "__name__", repr(c)) for c in candidates]
         headline = f"Multiple beans of type '{type_name}' found but none is marked @primary"
 
         lines = [f"NoUniqueBeanError: {headline}"]

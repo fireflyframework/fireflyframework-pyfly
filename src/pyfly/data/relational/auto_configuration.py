@@ -53,6 +53,7 @@ from pyfly.container.types import Scope
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
+    conditional_on_missing_bean,
     conditional_on_property,
 )
 from pyfly.context.events import RefreshScopeRefreshedEvent, app_event_listener
@@ -256,6 +257,7 @@ class DataSourceAutoConfiguration:
     """The application's datasource registry, its lifecycle, and its SPI registrar."""
 
     @bean
+    @conditional_on_missing_bean(DataSourceRegistry)
     def datasource_registry(self, config: Config) -> DataSourceRegistry:
         """The registry of this configuration (:meth:`DataSourceRegistry.for_config`).
 
@@ -283,6 +285,7 @@ class RelationalAutoConfiguration:
     :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry`."""
 
     @bean
+    @conditional_on_missing_bean(AsyncEngine)
     def async_engine(self, config: Config) -> AsyncEngine:
         """The primary datasource's engine.
 
@@ -292,6 +295,7 @@ class RelationalAutoConfiguration:
         return DataSourceRegistry.for_config(config).primary.engine
 
     @bean
+    @conditional_on_missing_bean(async_sessionmaker)
     def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
         """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``)."""
         datasource = datasource_of(async_engine)
@@ -309,6 +313,7 @@ class RelationalAutoConfiguration:
         return NamedDataSources.of_registry(DataSourceRegistry.for_config(config))
 
     @bean
+    @conditional_on_missing_bean(RoutingSessionFactory)
     def routing_session_factory(
         self, async_session_factory: async_sessionmaker[AsyncSession], config: Config
     ) -> RoutingSessionFactory:

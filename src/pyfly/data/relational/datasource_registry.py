@@ -779,9 +779,18 @@ class DataSourceRegistry:
             )
 
     async def dispose_all(self, *, timeout: float | None = None) -> None:
-        """Alias of :meth:`close`; the context calls it last when it stops (a
-        :class:`~pyfly.kernel.lifecycle.ResourceRegistry`)."""
+        """Close this registry and every other registry of its configuration.
+
+        The context calls it last when it stops (a :class:`~pyfly.kernel.lifecycle.ResourceRegistry`).
+        When the application declares its own ``DataSourceRegistry`` bean, the modules that look the
+        registry up with :meth:`for_config` still build their engines in the configuration's registry;
+        nothing else would close that one, so it is closed here too.
+        """
         await self.close(timeout=timeout)
+        with DataSourceRegistry._instances_lock:
+            shared = DataSourceRegistry._instances.get(self._config)
+        if shared is not None and shared is not self:
+            await shared.close(timeout=timeout)
 
     # -- building -------------------------------------------------------------------------------------
 

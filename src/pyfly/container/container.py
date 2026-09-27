@@ -319,7 +319,7 @@ class Container:
         """Resolve an instance of the given type."""
         # Direct registration
         if cls in self._registrations:
-            return cast(T, self._resolve_registration(self._registrations[cls]))
+            return cast(T, self._resolve_registration(self._registration_for(cls)))
 
         # Follow binding(s)
         impls = self._bindings.get(cls, [])
@@ -332,16 +332,54 @@ class Container:
             )
 
         if len(impls) == 1:
-            return cast(T, self._resolve_registration(self._registrations[impls[0]]))
+            return cast(T, self._resolve_registration(self._registration_for(impls[0])))
 
         # Multiple impls: pick @primary — a class-level marker OR an @bean-level
         # primary recorded on the registration (the @Bean @Primary equivalent).
         for impl in impls:
             reg = self._registrations.get(impl)
             if getattr(impl, "__pyfly_primary__", False) or (reg is not None and reg.primary):
-                return cast(T, self._resolve_registration(self._registrations[impl]))
+                return cast(T, self._resolve_registration(self._registration_for(impl)))
 
         raise NoUniqueBeanError(bean_type=cls, candidates=impls)
+
+    def _registration_for(self, cls: type) -> Registration:
+        """The registration that answers a lookup of exactly *cls*.
+
+        The by-type slot holds the LAST registration of a class, but two named beans can share a
+        class (two ``@bean`` methods returning ``AsyncEngine``). The slot used to answer anyway, so the
+        bean registered last silently shadowed the others, ``@bean(primary=True)`` included. When
+        several distinct beans share *cls*, the ``@primary`` one answers; without exactly one primary
+        the lookup is ambiguous and raises :class:`NoUniqueBeanError` (Spring's behavior). Resolve
+        one of them by name or ``Qualifier``, or all of them with ``list[T]``.
+        """
+        slot = self._registrations[cls]
+        siblings = self._same_type_registrations(cls)
+        if len(siblings) < 2:
+            return slot
+        primaries = [reg for reg in siblings if reg.primary or getattr(reg.impl_type, "__pyfly_primary__", False)]
+        if len(primaries) == 1:
+            return primaries[0]
+        raise NoUniqueBeanError(
+            bean_type=cls,
+            candidates=[cls for _ in siblings],
+            candidate_names=[reg.display_name for reg in siblings],
+        )
+
+    def _same_type_registrations(self, cls: type) -> list[Registration]:
+        """The distinct beans registered under exactly *cls* (one per registration, or one per shared
+        factory/instance: an ``@bean``'s aliases are one bean)."""
+        found: list[Registration] = []
+        seen: set[int] = set()
+        for (registered, _name), reg in self._all.items():
+            if registered is not cls:
+                continue
+            identity = id(reg.instance) if reg.instance is not None else id(reg.factory) if reg.factory else id(reg)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            found.append(reg)
+        return found
 
     def resolve_by_name(self, name: str, expected_type: type | None = None) -> Any:
         """Resolve a bean by its registered name.
