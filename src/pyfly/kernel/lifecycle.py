@@ -58,8 +58,10 @@ from typing import Any, Protocol, runtime_checkable
 #: The phase of a lifecycle bean that declares none.
 DEFAULT_PHASE = 0
 
-#: The phase of message consumers, pollers and schedulers: they start after every other lifecycle
-#: bean and stop first, before ``@pre_destroy``, draining the work in flight. A lifecycle bean that
+#: The phase of message consumers, pollers and schedulers: they start after the other lifecycle beans
+#: started in the same pass (the context starts the ``@bean`` products first, then the beans created
+#: later, such as scanned stereotypes) and stop first, before ``@pre_destroy``, draining the work in
+#: flight. A lifecycle bean that
 #: takes subscriptions (it defines ``subscribe``: an event bus, a message broker) is in this phase
 #: unless it declares another; a poller or scheduler declares it (the framework's
 #: ``OrchestrationScheduler``, ``RecoveryService``, ``TransactionalOutbox`` and ``ProjectionRunner`` do).

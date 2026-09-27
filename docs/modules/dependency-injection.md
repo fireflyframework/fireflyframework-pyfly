@@ -1406,7 +1406,10 @@ A lifecycle bean's phase is its `phase` attribute or property when it declares a
 (Spring's `SmartLifecycle.getPhase()`, see `pyfly.kernel.lifecycle`). Otherwise a bean that takes
 subscriptions (its class defines `subscribe`: an event bus, a message broker) is in
 `CONSUMER_PHASE` and every other bean in `DEFAULT_PHASE` (0). Lower phases start earlier and stop
-later. The framework's schedulers and pollers declare `CONSUMER_PHASE`: `OrchestrationScheduler`,
+later. The start order holds within one start pass: the lifecycle beans the `@bean` methods produced
+start at step 2e and the ones created later (a scanned `@component`) at step 5b, so a consumer
+`@bean` starts before a scanned default-phase lifecycle bean. The stop order covers every started
+bean. The framework's schedulers and pollers declare `CONSUMER_PHASE`: `OrchestrationScheduler`,
 `RecoveryService`, `TransactionalOutbox` and `ProjectionRunner` stop before any `@pre_destroy`, and
 the outbox relay stops before the publisher it relays through (a consumer created before it). A
 poller of your own that dispatches work into other beans should declare it too.
@@ -1415,7 +1418,7 @@ poller of your own that dispatches work into other beans should declare it too.
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
 class OutboxRelay:
-    phase = CONSUMER_PHASE    # starts last, stops first (with the consumers)
+    phase = CONSUMER_PHASE    # starts last in its start pass, stops first (with the consumers)
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
