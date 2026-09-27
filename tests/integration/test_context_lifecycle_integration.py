@@ -341,9 +341,10 @@ class _AppRegistryConfiguration:
 async def test_a_cancelled_dispose_closes_the_configurations_registry_too(
     relational_backend: RelationalBackend,
 ) -> None:
-    """With its own registry bean, the application has two: the bean and the configuration's, which the
-    auto-configured engine comes from. A shutdown timeout that cancelled the bean's close used to leave
-    the configuration's registry open, its connections stuck on the silent database."""
+    """With its own registry bean, the application has two: the bean, which the relational beans and the
+    units of work use, and the configuration's, which the modules that look the registry up build their
+    engines in. A shutdown timeout that cancelled the bean's close used to leave the configuration's
+    registry open, its connections stuck on the silent database."""
     app_name = f"pyfly-tworeg-{uuid.uuid4().hex[:8]}"
     proxy, port = await _proxy(relational_backend)
     context = ApplicationContext(
@@ -361,8 +362,9 @@ async def test_a_cancelled_dispose_closes_the_configurations_registry_too(
         registry = context.get_bean(DataSourceRegistry)
         shared = DataSourceRegistry.for_config(context.config)
         assert isinstance(registry, _AppRegistry) and shared is not registry
+        assert context.get_bean(AsyncEngine) is registry.primary.engine
         await _touch(registry.primary.engine, 2)
-        await _touch(context.get_bean(AsyncEngine), 2)
+        await _touch(shared.primary.engine, 2)  # as a module would (event store, snapshots, saga, cache)
         assert await _server_connections(relational_backend, app_name) == 4
 
         proxy.black_hole_established()
