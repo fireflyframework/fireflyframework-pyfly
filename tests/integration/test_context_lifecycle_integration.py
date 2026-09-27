@@ -19,6 +19,9 @@
 - A database that went silent at shutdown (a middlebox black-holes the pooled connections) used to
   keep ``ctx.stop()`` waiting in the driver's close until the kernel gave up on the socket; the close
   is now bounded and the stuck connections are terminated.
+- C030/C031/C099: two refresh-scoped datasources of one type, injected into a singleton through a
+  scoped proxy, keep their own database across ``POST /actuator/refresh`` cycles, and every refresh
+  destroys the evicted datasources, so no pool piles up.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from sqlalchemy import Integer, String, select, text
@@ -35,8 +38,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
-from pyfly.container import bean, configuration, service
+from pyfly.container import Qualifier, bean, configuration, service
 from pyfly.container.exceptions import BeanCreationNotAllowedError
+from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy
 from pyfly.context.application_context import ApplicationContext
 from pyfly.context.lifecycle import pre_destroy
 from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
@@ -230,3 +234,111 @@ async def test_ctx_stop_ends_on_time_when_the_database_black_holes_the_pool(
         assert await _settles_at_zero(relational_backend, app_name) == 0
     finally:
         await proxy.close()
+
+
+# ---------------------------------------------------------------------------
+# Refresh: each POST /actuator/refresh destroys the evicted datasource (C099), two refresh-scoped
+# datasources of one type keep their own database (C030), and a proxied one follows the refresh (C031).
+# ---------------------------------------------------------------------------
+
+_REFRESH_URLS: dict[str, str] = {}
+
+
+class _ScopedDataSource:
+    """A refresh-scoped datasource bean that owns its engine."""
+
+    def __init__(self, url: str, app_name: str) -> None:
+        self.engine = create_async_engine(url, connect_args={"server_settings": {"application_name": app_name}})
+
+    async def write(self, body: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("INSERT INTO wp07_shutdown_note (body) VALUES (:body)"), {"body": body})
+
+    @pre_destroy
+    async def close(self) -> None:
+        await self.engine.dispose()
+
+
+@configuration
+class _RefreshScopedDataSources:
+    @scoped_proxy
+    @bean(name="orders_source", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def orders_source(self) -> _ScopedDataSource:
+        return _ScopedDataSource(_REFRESH_URLS["orders"], _REFRESH_URLS["app"])
+
+    @scoped_proxy
+    @bean(name="audit_source", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def audit_source(self) -> _ScopedDataSource:
+        return _ScopedDataSource(_REFRESH_URLS["audit"], _REFRESH_URLS["app"])
+
+
+@service
+class _Ledger:
+    def __init__(
+        self,
+        orders: Annotated[_ScopedDataSource, Qualifier("orders_source")],
+        audit: Annotated[_ScopedDataSource, Qualifier("audit_source")],
+    ) -> None:
+        self.orders = orders
+        self.audit = audit
+
+
+@pytest.mark.backends(PG)
+async def test_refreshing_scoped_datasources_leaks_no_pool(relational_backend: RelationalBackend) -> None:
+    from httpx import ASGITransport, AsyncClient
+    from starlette.applications import Starlette
+
+    from pyfly.actuator.adapters.starlette import make_starlette_actuator_routes
+    from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
+    from pyfly.actuator.registry import ActuatorRegistry
+
+    app_name = f"pyfly-refresh-{uuid.uuid4().hex[:8]}"
+    server = make_url(relational_backend.url)
+    audit_name = f"{server.database}_audit"
+    audit_url = server.set(database=audit_name).render_as_string(hide_password=False)
+    admin = create_async_engine(server.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    async with admin.connect() as conn:
+        await conn.execute(text(f'CREATE DATABASE "{audit_name}"'))
+    try:
+        await relational_backend.create_tables(_ShutdownNote)
+        await RelationalBackend(relational_backend.lane, audit_url).create_tables(_ShutdownNote)
+        _REFRESH_URLS.update({"orders": relational_backend.url, "audit": audit_url, "app": app_name})
+
+        context = ApplicationContext(relational_backend.config({"pyfly.app.name": f"{app_name}-app"}))
+        context.register_bean(_RefreshScopedDataSources)
+        context.register_bean(_Ledger)
+        await context.start()
+        registry = ActuatorRegistry()
+        registry.register(RefreshEndpoint(context))
+        app = Starlette(routes=make_starlette_actuator_routes(registry))
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://app") as client:
+                ledger = context.get_bean(_Ledger)
+                for cycle in range(5):
+                    await ledger.orders.write(f"order-{cycle}")
+                    await ledger.audit.write(f"audit-{cycle}")
+                    assert await _server_connections(relational_backend, app_name) == 2
+                    response = await client.post("/actuator/refresh")
+                    assert response.status_code == 200
+                    assert len(response.json()["refreshed"]) == 2
+                    # The evicted datasources were destroyed: their pools closed, none piles up.
+                    assert await _settles_at_zero(relational_backend, app_name) == 0
+        finally:
+            await context.stop()
+
+        assert await _server_connections(relational_backend, app_name) == 0
+        assert await _bodies(relational_backend.url) == [f"order-{cycle}" for cycle in range(5)]
+        assert await _bodies(audit_url) == [f"audit-{cycle}" for cycle in range(5)]
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{audit_name}" WITH (FORCE)'))
+        await admin.dispose()
+
+
+async def _bodies(url: str) -> list[str]:
+    engine = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            return list((await conn.execute(select(_ShutdownNote.body).order_by(_ShutdownNote.id))).scalars())
+    finally:
+        await engine.dispose()
