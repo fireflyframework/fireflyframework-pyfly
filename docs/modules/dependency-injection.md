@@ -744,10 +744,11 @@ does `ApplicationContext.stop()` for the live one. An engine a bean disposes its
 `close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
 `dispose()`: without it, a connection in use during the refresh goes back into the disposed pool
 when it is returned and stays open until the garbage collector finds that pool. The context does it
-for an `AsyncEngine` bean it disposes, and the datasource registry for its own engines. The holder type keeps the reporting engine apart
-from the application's primary: a refresh-scoped `AsyncEngine` bean does not replace the primary
-either (only a singleton does), but an injection by type (`AsyncEngine`) receives the primary, so
-it has to be injected by name.
+for an `AsyncEngine` bean it disposes, and the datasource registry for its own engines.
+
+The holder type keeps the reporting engine apart from the application's primary. A refresh-scoped
+`AsyncEngine` bean does not replace the primary either (only a singleton does), but an injection by
+type (`AsyncEngine`) receives the primary, so it has to be injected by name.
 
 #### Triggering a refresh — ContextRefresher
 
