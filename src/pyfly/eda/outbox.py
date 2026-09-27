@@ -1315,7 +1315,15 @@ class OutboxRelay:
                 # Stopping, or the lease would end under the next handler: give the rest back unattempted.
                 await self._outbox.release(claimed[index:])
                 break
-            await self._deliver(delivery)
+            try:
+                await self._deliver(delivery)
+            except asyncio.CancelledError:
+                # Cancelled mid-delivery (a stop that timed out): give this delivery and the rest back, so another
+                # relay takes them at once rather than when the lease ends.
+                from pyfly.data.transaction.template import run_shielded
+
+                await run_shielded(self._outbox.release(claimed[index:]))
+                raise
         return len(claimed)
 
     def _budget(self, delivery: Delivery) -> timedelta:

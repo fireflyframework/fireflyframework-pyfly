@@ -365,3 +365,56 @@ async def test_a_claim_whose_lease_ended_is_taken_again_and_the_late_settle_is_r
     assert await outbox.settle(first[0]) is False  # the dead node's claim is gone
     assert await outbox.settle(second[0]) is True
     assert await outbox.pending("g") == []
+
+
+async def test_a_hung_handler_is_cancelled_after_its_timeout_and_counts_as_a_failure(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A stalled handler neither stalls its group nor keeps its delivery: it fails after handler_timeout."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="stalls", handler_timeout=0.2, retry=_retry(2))
+    seen: list[Any] = []
+
+    async def handler(envelope: EventEnvelope) -> None:
+        if envelope.event_type == "hang":
+            await asyncio.Event().wait()  # never returns
+        seen.append(envelope.payload["n"])
+
+    bus.subscribe("*", handler)
+    await bus.relay.run_once()
+    await bus.publish("d", "hang", {"n": "hang"})
+    await bus.publish("d", "fine", {"n": "fine"})
+    await _drain(bus.relay)
+
+    assert seen == ["fine"]
+    letters = await bus.outbox.dead_letters("stalls")
+    assert [(letter.event.event_type, letter.error_type, letter.attempts) for letter in letters] == [
+        ("hang", "TimeoutError", 2)
+    ]
+
+
+async def test_a_stop_that_cancels_a_delivery_gives_it_back(relational_backend: RelationalBackend) -> None:
+    """A relay stopped past its shutdown timeout cancels the delivery in flight; the delivery is given back
+    at once (unattempted), instead of waiting for its lease to end."""
+    from pyfly.messaging.listener_container import ListenerContainerSettings
+
+    engine = relational_backend.create_engine()
+    settings = ListenerContainerSettings(shutdown_timeout=0.1)
+    bus = await _bus(engine, group="slow", settings=settings, handler_timeout=None)
+    started = asyncio.Event()
+
+    async def slow(envelope: EventEnvelope) -> None:
+        del envelope
+        started.set()
+        await asyncio.sleep(30)
+
+    bus.subscribe("*", slow)
+    await bus.start()
+    try:
+        await bus.publish("d", "e", {"n": 1})
+        await asyncio.wait_for(started.wait(), timeout=10)
+    finally:
+        await bus.stop()
+
+    pending = await bus.outbox.pending("slow")
+    assert [(p.attempts, p.available_at <= bus.outbox.now()) for p in pending] == [(0, True)]
