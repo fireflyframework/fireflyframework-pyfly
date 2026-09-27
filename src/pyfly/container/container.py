@@ -575,8 +575,12 @@ class Container:
                 # injecting the wrong object. Leave it unset (None).
                 if non_none[0] is Any:
                     return None
+                # The inner type goes through this same resolver, not resolve(): a parametrized
+                # generic (async_sessionmaker[AsyncSession], Provider[X], Repository[U, ID]),
+                # list[X] or Annotated[X, Qualifier(...)] is never a registration key, so a raw
+                # lookup always failed and the parameter silently received None.
                 try:
-                    return self.resolve(non_none[0])
+                    return self._resolve_param(non_none[0])
                 except (NoSuchBeanError, NoUniqueBeanError):
                     return None
 
