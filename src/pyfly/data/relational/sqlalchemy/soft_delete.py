@@ -101,6 +101,8 @@ class SoftDeleteRepository(Repository[T, ID]):
         return state.dict["deleted_at"] is None
 
     def _active_select(self, **filters: Any) -> Any:
+        """A ``SELECT`` of the active (not deleted) entities with equality *filters*, for a subclass's own
+        queries: the same statement every read method starts from (``_filtered_select``)."""
         return self._filtered_select(**filters)
 
     # ------------------------------------------------------------------

@@ -535,11 +535,6 @@ class Repository(Generic[T, ID]):
         """The primary-key attributes of the model, in key order."""
         return tuple(getattr(self._model, key) for key in self._pk_keys)
 
-    @property
-    def _pk_column(self) -> Any:
-        """The first primary-key attribute (the whole key of a single-column key)."""
-        return self._pk_attributes[0]
-
     def _identity(self, id: Any) -> tuple[Any, ...]:
         """The primary-key tuple of *id*: a scalar for a single-column key; a tuple, list or mapping of key
         attribute names for a composite key (a scalar for a composite key raises ``TypeError``)."""
@@ -611,8 +606,16 @@ class Repository(Generic[T, ID]):
         return True
 
     def _filter_resolver(self) -> PropertyResolver:
+        """The filter names: the entity's properties, and its relationships to one entity, which compare with an
+        instance (``find_all(owner=user)`` is ``owner_id = :id``)."""
         if self._filter_names is None:
-            self._filter_names = PropertyResolver.for_entity(self._model, allowed=type(self).__filterable__)
+            properties = dict(PropertyResolver.for_entity(self._model).properties)
+            properties.update(
+                (relationship.key, relationship.key)
+                for relationship in self._mapper.relationships
+                if not relationship.uselist and not relationship.key.startswith("_")
+            )
+            self._filter_names = PropertyResolver(self._model, properties, allowed=type(self).__filterable__)
         return self._filter_names
 
     def _sort_resolver(self) -> PropertyResolver:
@@ -633,12 +636,10 @@ class Repository(Generic[T, ID]):
         return order_expressions(self._model, sort, dialect_of(session), resolver=self._sort_resolver())
 
     def _apply_orders(self, stmt: Select[Any], sort: Sort) -> Select[Any]:
-        """Apply a :class:`Sort`'s orders to a ``SELECT`` statement (names validated; native NULL placement)."""
-        resolver = self._sort_resolver()
-        for order in sort.orders:
-            col = getattr(self._model, resolver.resolve(order.property, usage="sort"))
-            stmt = stmt.order_by(col.asc() if order.direction == "asc" else col.desc())
-        return stmt
+        """*stmt* ordered by *sort* as the repository's paging paths order: names validated, NULL placement and
+        case folding rendered for the dialect, and the primary key as the tie-break. For a subclass's own
+        queries; it needs the call's session (inside a repository method, or inside a unit of work)."""
+        return stmt.order_by(*self._orders(self._session, sort), *primary_key_orders(self._model, sort))
 
     def _load_options(self, load: FetchPlan | None) -> list[Any]:
         return loader_options(self._model, type(self).__load__ if load is None else load)

@@ -38,7 +38,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import ForeignKey, Integer, String, event, insert
+from sqlalchemy import ForeignKey, Integer, String, event, insert, select
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload, with_loader_criteria
@@ -547,6 +547,26 @@ async def test_ignore_case_orders_by_the_folded_value(relational_backend: Relati
         assert _ids(numbers) == [7, 6, 5, 4, 3, 2, 1]
 
 
+class OrderedScoreRepository(Repository[RqScore, int]):
+    """A custom query that orders with the repository's own helper."""
+
+    async def find_ordered(self, sort: Sort) -> list[RqScore]:
+        return list((await self._session.execute(self._apply_orders(select(RqScore), sort))).scalars())
+
+
+async def test_a_custom_query_orders_as_the_repository_does(relational_backend: RelationalBackend) -> None:
+    """``_apply_orders``, which a subclass's own query calls, validates the names and renders NULL placement,
+    case folding and the primary-key tie-break as every paging path does: it used to order by the bare
+    columns, so NULLS LAST was ignored on SQLite, MySQL and MariaDB."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _scores(datasources)
+        scores = OrderedScoreRepository()
+        assert _ids(await scores.find_ordered(Sort.by(Order.asc("score").nulls_last()))) == [7, 6, 3, 5, 1, 2, 4]
+        assert _ids(await scores.find_ordered(Sort.by(Order.desc("name")))) == [1, 2, 3, 4, 5, 6, 7]  # ties by key
+        with pytest.raises(InvalidPropertyError):
+            await scores.find_ordered(Sort.by("display_name"))
+
+
 # ---------------------------------------------------------------------------------------------------------
 # WP03-15: joined collections
 # ---------------------------------------------------------------------------------------------------------
@@ -665,6 +685,36 @@ async def test_a_nowait_lock_fails_at_once_on_a_row_another_unit_holds(relationa
 # ---------------------------------------------------------------------------------------------------------
 # WP03-16: validated names
 # ---------------------------------------------------------------------------------------------------------
+
+
+class OwnerRepository(Repository[RqOwner, int]):
+    pass
+
+
+class OwnerFilteredShopRepository(Repository[RqShop, int]):
+    __filterable__ = ("owner",)
+
+
+async def test_a_many_to_one_filters_by_the_entity_it_refers_to(relational_backend: RelationalBackend) -> None:
+    """``find_all(owner=owner)`` compares a many-to-one with an entity (``owner_id = :id``), as it did before names
+    were validated; a collection cannot be compared that way, and a relationship still cannot be sorted by."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        spanish = await OwnerRepository().find_by_id(1)
+        shops = ShopRepository()
+        assert _names(await shops.find_all(Sort.by("name"), owner=spanish)) == ["s1", "s3", "s5"]
+        assert _names((await shops.find_all(Pageable.of(1, 2, Sort.by("name")), owner=spanish)).items) == ["s1", "s3"]
+        assert _names([shop async for shop in shops.stream_all(Sort.by("name"), owner=spanish)]) == ["s1", "s3", "s5"]
+        assert await shops.find_all(owner=None) == []
+        with pytest.raises(InvalidPropertyError):
+            await shops.find_all(items=[])
+        with pytest.raises(InvalidPropertyError):
+            await shops.find_all(Sort.by("owner"))
+        guarded = OwnerFilteredShopRepository()  # a many-to-one may be allow-listed for filters
+        assert len(await guarded.find_all(owner=spanish)) == 3
+        with pytest.raises(InvalidPropertyError):
+            await guarded.find_all(name="s1")
+        assert datasources.checked_out() == 0
 
 
 @pytest.mark.backends("sqlite-file")
