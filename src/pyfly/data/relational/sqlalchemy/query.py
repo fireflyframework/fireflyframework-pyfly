@@ -41,7 +41,8 @@ Usage::
         @query("UPDATE User u SET u.active = false WHERE u.last_login < :cutoff")
         async def deactivate_idle(self, cutoff: datetime) -> int: ...
 
-**Results** follow the method's return annotation, never the SQL's text:
+**Results** follow the method's return annotation, never the SQL's text (an annotation that does not resolve at
+runtime, a name imported only for type checking, is logged at WARNING and read as no annotation):
 
 - the entity (``list[User]``, ``User | None``): the query runs as ``select(User).from_statement(text(sql))``,
   so its rows are the unit of work's own entities (identity-mapped: a change to one is flushed with the unit,
@@ -85,6 +86,7 @@ subquery, ``schema.table``) is left as it is. The query's colons inside string l
 from __future__ import annotations
 
 import inspect
+import logging
 import re
 import threading
 import uuid
@@ -116,6 +118,8 @@ from pyfly.data.relational.sqlalchemy.statements import unique_entities
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
 T = TypeVar("T")
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["CompiledQuery", "QueryExecutor", "TranspiledQuery", "query", "tokenize", "transpile_jpql"]
 
@@ -812,8 +816,14 @@ class QueryExecutor:
         described: str = name or str(getattr(function, "__qualname__", repr(function)))
         try:
             hints = get_type_hints(function, localns={entity.__name__: entity})
-        except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation is a declaration error
-            raise InvalidQueryMethodError(f"{described}: its annotations do not resolve ({error})") from error
+        except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation
+            # A name imported only for type checking: the query runs as an unannotated one (as it did before its
+            # result followed the annotation), and the log says why.
+            _logger.warning(
+                "query_method_annotations_unresolved",
+                extra={"method": described, "error": f"{type(error).__name__}: {error}"},
+            )
+            hints = {}
         signature = inspect.signature(function)
         parameters = list(signature.parameters.values())[1:]  # after self
         for parameter in parameters:

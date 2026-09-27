@@ -316,6 +316,21 @@ class _Repo(Repository[Item, UUID]):
     async def nothing(self) -> None: ...
 
 
+class _Unresolved(Repository[Item, UUID]):
+    @query("SELECT i FROM Item i WHERE i.role = :role")
+    async def by_role(self, role: str) -> list[OnlyForTypeChecking]: ...  # type: ignore[name-defined]  # noqa: F821
+
+
+class TestAnUnresolvedAnnotation:
+    async def test_the_query_runs_as_an_unannotated_one(
+        self, executor: QueryExecutor, seeded_session: AsyncSession, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level("WARNING", logger="pyfly.data.relational.sqlalchemy.query"):
+            compiled = executor.compile_query_method(_Unresolved.by_role, Item)
+        assert "query_method_annotations_unresolved" in caplog.text
+        assert sorted(item.name for item in await compiled(seeded_session, role="admin")) == ["Alice", "Carol"]
+
+
 class TestQueryMethodsAreCheckedAtStartup:
     @pytest.mark.parametrize(
         ("method", "message"),
