@@ -368,7 +368,14 @@ class PrimaryTransactionManagerBinding:
     ``primary`` units (:func:`~pyfly.data.relational.sqlalchemy.transaction_manager.unbind_primary_session_factory`,
     a no-op when another context bound its own since). The binding itself is made when the
     ``primary_transaction_manager`` bean is built, at every start.
+
+    It is in the lowest phase, so it stops after every other lifecycle bean: one an application's
+    ``@configuration`` produces starts before the auto-configured beans and stops after them, and what it
+    writes in its ``stop()`` (an outbox relay, a buffered writer) must still reach the application's primary.
     """
+
+    #: The lowest phase: started first (``start()`` does nothing) and stopped last.
+    phase = -(1 << 30)
 
     def __init__(self, registry: DataSourceRegistry, manager: SqlAlchemyTransactionManager) -> None:
         self._registry = registry

@@ -1179,3 +1179,63 @@ async def test_a_stopped_context_leaves_the_primary_another_context_bound_since(
         await second.stop()
         await first_factory.kw["bind"].dispose()
         await second_factory.kw["bind"].dispose()
+
+
+class _FlushOnStop:
+    """A lifecycle object an application's ``@configuration`` produces (an outbox relay, a buffered writer). It
+    starts before the auto-configured lifecycle beans, so it stops after them, and it writes in ``stop()``."""
+
+    def __init__(self, owners: _DatabaseOwnerRepository) -> None:
+        self.owners = owners
+        self.outcome: object = None
+
+    async def start(self) -> None:
+        """Nothing to start."""
+
+    async def stop(self) -> None:
+        try:
+            await self.owners.save(_DatabaseOwner(id=3, name="flushed-at-stop"))
+            self.outcome = "saved"
+        except Exception as error:  # noqa: BLE001 — the outcome is what the test checks
+            self.outcome = error
+
+
+_FLUSHERS: list[_FlushOnStop] = []
+
+
+@configuration
+class _FlushOnStopConfiguration:
+    @bean
+    def flush_on_stop(self, owners: _DatabaseOwnerRepository) -> _FlushOnStop:
+        _FLUSHERS.append(_FlushOnStop(owners))
+        return _FLUSHERS[-1]
+
+
+async def _owner_names(name: str) -> list[str]:
+    engine = create_async_engine(_URLS[name])
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("SELECT name FROM wp07_database_owner ORDER BY id"))
+            return [str(row[0]) for row in rows]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("with_url", [True, False], ids=["beside-a-configured-url", "the-only-primary"])
+async def test_a_lifecycle_bean_that_writes_as_it_stops_writes_on_the_applications_primary(
+    tmp_path: Path, with_url: bool
+) -> None:
+    """The primary stays bound until every lifecycle bean has stopped: the binding stops last (it used to be
+    undone first, and such a write landed in the configuration's database, or failed without one)."""
+    _FLUSHERS.clear()
+    config = await _relational_app(tmp_path, "user")
+    if not with_url:
+        config = Config({"pyfly": {"data": {"relational": {"enabled": "true", "ddl-auto": "none"}}}})
+    ctx = ApplicationContext(config)
+    for candidate in (_UserEngine, _DatabaseOwnerRepository, _FlushOnStopConfiguration):
+        ctx.register_bean(candidate)
+    await ctx.start()
+    await ctx.stop()
+    assert _FLUSHERS[-1].outcome == "saved", _FLUSHERS[-1].outcome
+    assert await _owner_names("user") == ["user", "flushed-at-stop"]
+    assert await _owner_names("auto") == ["primary"]
