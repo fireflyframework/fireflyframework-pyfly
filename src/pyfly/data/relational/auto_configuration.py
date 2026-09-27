@@ -32,6 +32,7 @@ Two auto-configurations live here:
 
 import inspect
 import logging
+import weakref
 from typing import Any
 
 try:
@@ -41,7 +42,7 @@ try:
         async_sessionmaker,
     )
 
-    from pyfly.data.relational.datasource_registry import DataSourceRegistry, datasource_of
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry, close_connections_on_return, datasource_of
 except ImportError:
     AsyncEngine = object  # type: ignore[misc,assignment]
     AsyncSession = object  # type: ignore[misc,assignment]
@@ -74,6 +75,34 @@ except ImportError:
     MetricsRegistry = object  # type: ignore[misc,assignment]
 
 _logger = logging.getLogger(__name__)
+
+# The engines a split primary was reported for, so an engine bean and the session factory over it warn once.
+_SPLIT_REPORTED: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def _warn_if_split_primary(engine: Any, config: Config | None) -> None:
+    """WARNING when the primary sessions use an engine no registry owns while the URL is configured too.
+
+    The session factory, the ``AsyncSession`` bean and the repositories then use *engine*, while
+    :attr:`DataSourceRegistry.primary` (every module that looks the registry up) uses
+    ``pyfly.data.relational.url``: two primaries. Reported once per engine.
+    """
+    if config is None or not str(config.get("pyfly.data.relational.url", "") or "").strip():
+        return
+    if engine in _SPLIT_REPORTED:
+        return
+    _SPLIT_REPORTED.add(engine)
+    _logger.warning(
+        "relational_engine_not_in_registry",
+        extra={
+            "engine": str(engine.url),
+            "hint": "an AsyncEngine bean, or an async_sessionmaker bean over an engine of its own, replaces the "
+            "primary of the session factory, the AsyncSession bean and the repositories, while "
+            "DataSourceRegistry.primary keeps pyfly.data.relational.url; configure the primary under "
+            "pyfly.data.relational (url, connect-args, pool) and a second database under "
+            "pyfly.data.relational.datasources.<name> instead of declaring an engine or session factory bean",
+        },
+    )
 
 
 class QueryMetricsLifecycle:
@@ -171,8 +200,6 @@ class EngineLifecycle:
         except Exception:
             _logger.debug("session_close_failed", exc_info=True)
         if self._dispose_engine:
-            from pyfly.data.relational.datasource_registry import close_connections_on_return
-
             # A connection still in use (a probe in flight) is closed when it is returned, not pooled.
             close_connections_on_return(self._engine)
             await self._engine.dispose()
@@ -351,18 +378,7 @@ class RelationalAutoConfiguration:
         datasource = datasource_of(async_engine)
         if datasource is not None:
             return datasource.sessionmaker
-        if config is not None and str(config.get("pyfly.data.relational.url", "") or "").strip():
-            _logger.warning(
-                "relational_engine_not_in_registry",
-                extra={
-                    "engine": str(async_engine.url),
-                    "hint": "an AsyncEngine bean replaces the primary of the session factory, the AsyncSession "
-                    "bean and the repositories, while DataSourceRegistry.primary keeps "
-                    "pyfly.data.relational.url; configure the primary under pyfly.data.relational (url, "
-                    "connect-args, pool) and a second database under pyfly.data.relational.datasources.<name> "
-                    "instead of declaring an engine bean",
-                },
-            )
+        _warn_if_split_primary(async_engine, config)
         return async_sessionmaker(async_engine, expire_on_commit=False)
 
     @bean
@@ -384,11 +400,17 @@ class RelationalAutoConfiguration:
         Routes to the primary's read replica inside a :func:`~pyfly.data.relational.routing.read_only`
         block when ``pyfly.data.relational.read-replica.url`` is configured; otherwise it always uses
         the primary (no behavior change).
+
+        A session factory the application declared over an engine of its own splits the primary while
+        ``pyfly.data.relational.url`` is configured, as an engine bean does, and a WARNING says so.
         """
         datasource = datasource_of(async_session_factory)
         if datasource is not None:
             replica = datasource.replica
         else:
+            bind = getattr(async_session_factory, "kw", {}).get("bind")
+            if isinstance(bind, AsyncEngine) and datasource_of(bind) is None:
+                _warn_if_split_primary(bind, config)
             # A session factory the application declared itself still routes to the configured replica.
             registry = DataSourceRegistry.for_config(config)
             replica = registry.primary.replica if registry.has_primary else None

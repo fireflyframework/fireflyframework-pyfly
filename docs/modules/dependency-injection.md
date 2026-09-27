@@ -860,7 +860,8 @@ class PartnerApiConfiguration:
 **A second database is not an `AsyncEngine` bean.** A singleton `AsyncEngine` or
 `async_sessionmaker` bean **replaces the application's primary**: the relational auto-configuration
 backs off, and the session factory, the `AsyncSession` bean and every repository use it, while
-`DataSourceRegistry.primary` keeps `pyfly.data.relational.url` (a WARNING says so when both exist).
+`DataSourceRegistry.primary` keeps `pyfly.data.relational.url` (a WARNING says so when both exist,
+and for a session factory bean over an engine of its own).
 Declare a second database under `pyfly.data.relational.datasources.<name>` and inject
 `DataSourceRegistry` (`registry.engine("archive")`, `registry.session_factory("archive")`) or
 `NamedDataSources`: the registry builds it with the same pool and dialect setup and disposes it last

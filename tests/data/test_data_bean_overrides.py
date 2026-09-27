@@ -694,3 +694,35 @@ async def test_an_in_memory_database_shared_by_two_contexts_keeps_its_data_in_th
                 await ctx.stop()  # disposes the engine: the in-memory database goes with its connection
     finally:
         await engine.dispose()
+
+
+async def test_a_user_session_factory_over_its_own_engine_beside_a_configured_url_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same split as an engine bean: the sessions, the routing factory and the repositories use the
+    factory's own engine, and ``DataSourceRegistry.primary`` the configured URL."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserSessionFactory)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    factory = ctx.get_bean(async_sessionmaker)
+    try:
+        warnings = _split_warnings(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].engine == _URLS["user"]  # type: ignore[attr-defined]
+    finally:
+        await ctx.stop()
+        await factory.kw["bind"].dispose()
+
+
+async def test_a_user_session_factory_over_the_registry_engine_is_no_split(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = ApplicationContext(await _relational_app(tmp_path))
+    ctx.register_bean(_DeferredSessionFactory)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        assert _split_warnings(caplog) == []
+    finally:
+        await ctx.stop()
