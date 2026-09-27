@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -867,3 +868,94 @@ class TestTccEngineCorrelationId:
 
         assert result.correlation_id is not None
         assert len(result.correlation_id) > 0
+
+
+# ── Cancellation ─────────────────────────────────────────────
+
+
+class TestCancellation:
+    """A caller that cancels a TCC gets ``CancelledError`` once the participants that tried are cancelled."""
+
+    @staticmethod
+    def _registry(log: list[str], hang_in: str) -> TccRegistry:
+        from pyfly.transactional.tcc.annotations import tcc
+
+        async def hang_if(phase: str) -> None:
+            if phase == hang_in:
+                await asyncio.sleep(30)
+
+        @tcc(name="cancel-me")
+        class CancelMe:
+            @tcc_participant(id="first", order=1)
+            class First:
+                @try_method()
+                async def do_try(self) -> None:
+                    log.append("first:try")
+
+                @confirm_method()
+                async def do_confirm(self) -> None:
+                    log.append("first:confirm")
+                    await hang_if("first:confirm")
+
+                @cancel_method()
+                async def do_cancel(self) -> None:
+                    await asyncio.sleep(0)  # the CANCEL phase awaits and still runs to completion
+                    log.append("first:cancel")
+
+            @tcc_participant(id="second", order=2)
+            class Second:
+                @try_method()
+                async def do_try(self) -> None:
+                    log.append("second:try")
+                    await hang_if("second:try")
+
+                @confirm_method()
+                async def do_confirm(self) -> None:
+                    log.append("second:confirm")
+
+                @cancel_method()
+                async def do_cancel(self) -> None:
+                    log.append("second:cancel")
+
+        registry = TccRegistry()
+        registry.register_from_bean(CancelMe())
+        return registry
+
+    @staticmethod
+    def _engine(registry: TccRegistry, persistence: Any = None) -> TccEngine:
+        invoker = TccParticipantInvoker(TccArgumentResolver())
+        return TccEngine(
+            registry=registry,
+            participant_invoker=invoker,
+            orchestrator=TccExecutionOrchestrator(invoker),
+            persistence_port=persistence,
+        )
+
+    @staticmethod
+    async def _cancel_when(log: list[str], entry: str, task: asyncio.Task[Any]) -> None:
+        while entry not in log:
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.anyio
+    async def test_cancelled_during_try_cancels_the_participants_that_tried(self) -> None:
+        log: list[str] = []
+        persistence = AsyncMock()
+        engine = self._engine(self._registry(log, hang_in="second:try"), persistence)
+        task = asyncio.create_task(engine.execute("cancel-me"))
+        await self._cancel_when(log, "second:try", task)
+
+        assert log == ["first:try", "second:try", "first:cancel"]
+        persistence.mark_completed.assert_awaited_once()
+        assert persistence.mark_completed.await_args.args[1] is False
+
+    @pytest.mark.anyio
+    async def test_cancelled_during_confirm_cancels_every_participant_that_tried(self) -> None:
+        log: list[str] = []
+        engine = self._engine(self._registry(log, hang_in="first:confirm"))
+        task = asyncio.create_task(engine.execute("cancel-me"))
+        await self._cancel_when(log, "first:confirm", task)
+
+        assert log[-2:] == ["second:cancel", "first:cancel"]
