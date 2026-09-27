@@ -23,9 +23,13 @@ from uuid import UUID
 import pytest
 from sqlalchemy import ForeignKey, String, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from pyfly.data.page import Page
+from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.post_processor import is_stub
+from pyfly.data.query_parser import InvalidQueryMethodError
+from pyfly.data.relational.sqlalchemy import post_processor as post_processor_module
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 from pyfly.data.relational.sqlalchemy.query import query
@@ -672,3 +676,153 @@ class TestIsStub:
 
         assert is_stub(wrapper)
         assert not is_stub(len)
+
+
+# ===========================================================================
+# 9. Derived methods are checked against their entity when the repository is built (C128)
+# ===========================================================================
+
+
+class CheckedItem(Base):
+    __tablename__ = "pp_checked_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(40))
+    tag: Mapped[str] = mapped_column(String(20))
+    balance: Mapped[int] = mapped_column(default=0)
+    active: Mapped[bool] = mapped_column(default=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("pp_stub_owner.id"), nullable=True)
+    owner: Mapped[StubOwner | None] = relationship()
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}/{self.tag}"
+
+
+class _Typo(Repository[CheckedItem, int]):
+    async def find_by_nmae(self, name: str) -> list[CheckedItem]: ...
+
+
+class _NotAProperty(Repository[CheckedItem, int]):
+    async def find_by_label(self, label: str) -> list[CheckedItem]: ...
+
+
+class _MissingArgument(Repository[CheckedItem, int]):
+    async def delete_by_tag(self, tag: str, item_id: int) -> int: ...
+
+
+class _MissingParameter(Repository[CheckedItem, int]):
+    async def find_by_balance_between(self, low: int) -> list[CheckedItem]: ...
+
+
+class _PageWithoutPageable(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> Page[CheckedItem]: ...
+
+
+class _PageableOnASingleResult(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str, pageable: Pageable) -> CheckedItem | None: ...
+
+
+class _FoldedNumber(Repository[CheckedItem, int]):
+    async def find_by_balance_ignore_case(self, balance: int) -> list[CheckedItem]: ...
+
+
+class _TrueOnAString(Repository[CheckedItem, int]):
+    async def find_by_name_true(self) -> list[CheckedItem]: ...
+
+
+class _RelationshipIn(Repository[CheckedItem, int]):
+    async def find_by_owner_in(self, owners: list[StubOwner]) -> list[CheckedItem]: ...
+
+
+class _CountAsList(Repository[CheckedItem, int]):
+    async def count_by_tag(self, tag: str) -> list[CheckedItem]: ...
+
+
+class _ExistsAsInt(Repository[CheckedItem, int]):
+    async def exists_by_tag(self, tag: str) -> int: ...
+
+
+class _DeleteAsString(Repository[CheckedItem, int]):
+    async def delete_by_tag(self, tag: str) -> str: ...
+
+
+class _FindScalars(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> list[int]: ...
+
+
+class _TwoResultTypes(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> int | str: ...
+
+
+class _UnresolvedAnnotation(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> list[Missing]: ...  # type: ignore[name-defined]  # noqa: F821
+
+
+class _OrderByUnknown(Repository[CheckedItem, int]):
+    async def find_by_tag_order_by_label(self, tag: str) -> list[CheckedItem]: ...
+
+
+class _Valid(Repository[CheckedItem, int]):
+    """Everything that is checked, done right."""
+
+    async def find_by_tag_and_balance_between(self, tag: str, low: int, high: int) -> list[CheckedItem]: ...
+
+    async def find_by_name_ignore_case(self, name: str) -> CheckedItem | None: ...
+
+    async def find_by_active_true_order_by_balance_desc(self, pageable: Pageable) -> Page[CheckedItem]: ...
+
+    async def find_by_owner(self, owner: StubOwner | None) -> list[CheckedItem]: ...
+
+    async def find_by_tag_in(self, tags: list[str], sort: Sort) -> list[CheckedItem]: ...
+
+    async def count_by_tag(self, tag: str) -> int: ...
+
+    async def exists_by_tag(self, tag: str) -> bool: ...
+
+    async def delete_by_tag(self, tag: str) -> None: ...
+
+
+class TestDerivedMethodsAreCheckedAtStartup:
+    """A derived method that cannot work fails when the post-processor builds the repository, not on its first
+    call (Spring rejects such a method at bootstrap)."""
+
+    @pytest.mark.parametrize(
+        ("repository_type", "message"),
+        [
+            (_Typo, "'nmae' names no property"),
+            (_NotAProperty, "'label' names no property"),
+            (_MissingArgument, "takes 1 argument .* declares 2 value parameters"),
+            (_MissingParameter, "takes 2 arguments .* declares 1 value parameter"),
+            (_PageWithoutPageable, "needs a Pageable"),
+            (_PageableOnASingleResult, "several entities takes a Pageable"),
+            (_FoldedNumber, "cannot ignore case"),
+            (_TrueOnAString, "not a boolean property"),
+            (_RelationshipIn, "is a relationship"),
+            (_CountAsList, "count_by method returns int"),
+            (_ExistsAsInt, "exists_by method returns bool"),
+            (_DeleteAsString, "delete_by method returns int"),
+            (_FindScalars, "find_by method returns CheckedItem entities"),
+            (_TwoResultTypes, "one type"),
+            (_UnresolvedAnnotation, "annotations do not resolve"),
+            (_OrderByUnknown, "order_by_label"),
+        ],
+    )
+    def test_the_repository_fails_to_build(
+        self, processor: RepositoryBeanPostProcessor, repository_type: type[Repository[CheckedItem, int]], message: str
+    ):
+        with pytest.raises(InvalidQueryMethodError, match=message) as raised:
+            processor.after_init(repository_type(CheckedItem), repository_type.__name__)
+        assert repository_type.__name__ in str(raised.value)
+
+    def test_a_valid_repository_builds(self, processor: RepositoryBeanPostProcessor):
+        repository = processor.after_init(_Valid(CheckedItem), "valid")
+        compiled = {name for name in vars(repository) if not name.startswith("_")}
+        assert compiled == {name for name in vars(_Valid) if not name.startswith("_")}
+
+    def test_a_transient_repository_compiles_its_methods_once(self, processor: RepositoryBeanPostProcessor):
+        first = processor.after_init(_Valid(CheckedItem), "first")
+        second = RepositoryBeanPostProcessor().after_init(_Valid(CheckedItem), "second")
+        assert first.count_by_tag is not second.count_by_tag
+        query_of = post_processor_module._COMPILED[_Valid]
+        assert (CheckedItem, "count_by_tag") in query_of
