@@ -140,6 +140,76 @@ def _drivername(url: str | None) -> str | None:
     return url.split("://", 1)[0].lower()
 
 
+def _string_list(value: Any, key: str) -> list[str]:
+    """A list of names: a YAML list, or one comma-separated string (an environment variable)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items: list[Any] = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValueError(f"{key} must be a list of names, got {value!r}")
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+# ---------------------------------------------------------------------------
+# Schema strategy (ddl-auto)
+# ---------------------------------------------------------------------------
+
+DDL_AUTO_STRATEGIES: tuple[str, ...] = ("none", "validate", "create", "create-drop")
+"""The values ``pyfly.data.relational.ddl-auto`` accepts (see :func:`ddl_auto_strategy`)."""
+
+
+def is_embedded_url(url: str | None) -> bool:
+    """Whether *url* names a database that runs in the application's process (SQLite).
+
+    No URL counts as one: the only primary a missing URL gets is the ``dev`` profile's SQLite file.
+    """
+    driver = _drivername(url)
+    if driver is None:
+        return not (url or "").strip()
+    return driver.split("+", 1)[0] == "sqlite"
+
+
+def ddl_auto_strategy(value: Any, *, url: str | None, migrations: bool = False) -> str:
+    """The effective schema strategy of the primary datasource, from ``pyfly.data.relational.ddl-auto``.
+
+    - Unset: ``none`` when startup migrations are enabled (they own the schema); otherwise ``create`` for an
+      embedded database (SQLite, or no URL at all) and ``none`` for a database server, as Spring Boot does.
+    - ``none``, ``validate``, ``create`` or ``create-drop``, in any case. ``false``, ``off`` and ``no`` (YAML
+      turns the first two into a boolean) mean ``none``.
+    - Anything else raises ``ValueError``. ``update`` does too: PyFly never alters an existing table at
+      startup, so a missing column needs a migration.
+    - ``create`` or ``create-drop`` beside ``pyfly.data.relational.migrations.enabled=true`` raises
+      ``ValueError``: two schema managers would hide a missing migration until the deploy that adds it fails.
+    """
+    key = f"{PREFIX}.ddl-auto"
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if migrations:
+            return "none"
+        return "create" if is_embedded_url(url) else "none"
+    if value is False or (isinstance(value, str) and value.strip().lower() in _FALSE):
+        return "none"
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be one of {', '.join(DDL_AUTO_STRATEGIES)}, got {value!r}")
+    strategy = str(value).strip().lower()
+    if strategy == "update":
+        raise ValueError(
+            f"{key}=update is not supported: PyFly never alters an existing table at startup. Generate a "
+            "migration for the change (pyfly db migrate), or use create, which creates the missing tables only"
+        )
+    if strategy not in DDL_AUTO_STRATEGIES:
+        raise ValueError(f"{key} must be one of {', '.join(DDL_AUTO_STRATEGIES)}, got {value!r}")
+    if migrations and strategy in ("create", "create-drop"):
+        raise ValueError(
+            f"{key}={strategy} beside {PREFIX}.migrations.enabled=true: the tables create_all() adds hide a "
+            "migration that is missing until the deploy that adds it fails. Let the migrations own the schema "
+            f"(remove {key}: it is none then) or check it after them ({key}=validate)"
+        )
+    return strategy
+
+
 # ---------------------------------------------------------------------------
 # Property classes
 # ---------------------------------------------------------------------------
@@ -216,6 +286,46 @@ class HealthProperties:
 
 
 @dataclass
+class MigrationsProperties:
+    """``migrations.*`` — the Alembic migrations of the primary datasource.
+
+    With ``enabled``, the context applies them when it starts (``alembic upgrade <revision>`` with the
+    environment ``config`` names, ``alembic.ini`` by default), before the schema strategy runs. ``models``
+    lists the modules that declare the application's entities: the ``env.py`` of ``pyfly db init`` imports
+    them (a package with every module under it), so autogenerate compares the database with every model.
+    """
+
+    enabled: bool = False
+    config: str = "alembic.ini"
+    revision: str = "head"
+    models: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.enabled = parse_bool(self.enabled, f"{PREFIX}.migrations.enabled")
+        self.models = _string_list(self.models, f"{PREFIX}.migrations.models")
+
+
+@dataclass
+class SchemaProperties:
+    """``schema.*`` — how the schema strategy and the migrations run.
+
+    ``lock_timeout`` (seconds) bounds the wait for another instance that is changing the schema: instances
+    that start together apply the migrations and ``ddl-auto`` one at a time. ``drop_timeout`` (seconds)
+    bounds the ``create-drop`` teardown, including the wait for the database locks the drop needs.
+    """
+
+    lock_timeout: float = 300.0
+    drop_timeout: float = 10.0
+
+    def __post_init__(self) -> None:
+        self.lock_timeout = parse_float(self.lock_timeout, f"{PREFIX}.schema.lock-timeout")
+        self.drop_timeout = parse_float(self.drop_timeout, f"{PREFIX}.schema.drop-timeout")
+        for name, value in (("lock-timeout", self.lock_timeout), ("drop-timeout", self.drop_timeout)):
+            if value <= 0:
+                raise ValueError(f"{PREFIX}.schema.{name} must be positive, got {value!r}")
+
+
+@dataclass
 class DataSourceProperties:
     """The effective settings of one datasource: its URL plus everything the engine is built with."""
 
@@ -248,18 +358,23 @@ class RelationalProperties:
     Build it with :meth:`from_config`; ``Config.bind`` (used by ``/actuator/configprops``) gives the same
     values for every ordinary spelling. :meth:`primary` and :meth:`derived` return the effective settings
     of the primary datasource and of an extra datasource a module registers.
+
+    ``ddl_auto`` is the effective schema strategy (:func:`ddl_auto_strategy`): unset, it is ``create`` for an
+    embedded database and ``none`` for a database server or when the migrations are enabled.
     """
 
     enabled: bool = False
     url: str | None = None
     echo: EchoSetting = False
-    ddl_auto: str = "create"
+    ddl_auto: str | None = None
     pool: PoolProperties = field(default_factory=PoolProperties)
     connect_args: dict[str, Any] = field(default_factory=dict)
     sqlite: SqliteProperties = field(default_factory=SqliteProperties)
     read_replica: ReadReplicaProperties = field(default_factory=ReadReplicaProperties)
     datasources: dict[str, DataSourceProperties] = field(default_factory=dict)
     health: HealthProperties = field(default_factory=HealthProperties)
+    migrations: MigrationsProperties = field(default_factory=MigrationsProperties)
+    schema: SchemaProperties = field(default_factory=SchemaProperties)
     #: Deprecated: ``pyfly.data.relational.pool-size`` was never read; it now aliases ``pool.size``.
     pool_size: int | None = None
 
@@ -268,6 +383,11 @@ class RelationalProperties:
         # bound object holds the same typed values as from_config().
         self.enabled = parse_bool(self.enabled, f"{PREFIX}.enabled")
         self.echo = parse_echo(self.echo, f"{PREFIX}.echo")
+        if isinstance(self.migrations, Mapping):
+            self.migrations = MigrationsProperties(**_fields_of(MigrationsProperties, self.migrations))
+        if isinstance(self.schema, Mapping):
+            self.schema = SchemaProperties(**_fields_of(SchemaProperties, self.schema))
+        self.ddl_auto = ddl_auto_strategy(self.ddl_auto, url=self.url, migrations=self.migrations.enabled)
         self.datasources = {
             str(name): settings if isinstance(settings, DataSourceProperties) else _bound_datasource(settings)
             for name, settings in (self.datasources or {}).items()
@@ -329,11 +449,22 @@ class RelationalProperties:
         connect_args = reader.tree(f"{PREFIX}.connect-args")
         sqlite = reader.sqlite(f"{PREFIX}.sqlite", SqliteProperties())
 
+        migrations = MigrationsProperties(
+            enabled=parse_bool(reader.raw(f"{PREFIX}.migrations.enabled", False), f"{PREFIX}.migrations.enabled"),
+            config=reader.string(f"{PREFIX}.migrations.config") or "alembic.ini",
+            revision=reader.string(f"{PREFIX}.migrations.revision") or "head",
+            models=_string_list(reader.raw(f"{PREFIX}.migrations.models"), f"{PREFIX}.migrations.models"),
+        )
+        schema = SchemaProperties(
+            lock_timeout=reader.raw(f"{PREFIX}.schema.lock-timeout", 300.0),
+            drop_timeout=reader.raw(f"{PREFIX}.schema.drop-timeout", 10.0),
+        )
+
         props = cls(
             enabled=parse_bool(reader.raw(f"{PREFIX}.enabled", False), f"{PREFIX}.enabled"),
             url=url,
             echo=echo,
-            ddl_auto=str(reader.raw(f"{PREFIX}.ddl-auto", "create")).strip().lower(),
+            ddl_auto=ddl_auto_strategy(reader.raw(f"{PREFIX}.ddl-auto"), url=url, migrations=migrations.enabled),
             pool=pool,
             connect_args=connect_args,
             sqlite=sqlite,
@@ -341,6 +472,8 @@ class RelationalProperties:
             health=HealthProperties(
                 timeout=parse_float(reader.raw(f"{PREFIX}.health.timeout", 2.0), f"{PREFIX}.health.timeout")
             ),
+            migrations=migrations,
+            schema=schema,
         )
         props.datasources = reader.datasources(props)
         return props
