@@ -90,7 +90,7 @@ from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstanceState, Mapper
+from sqlalchemy.orm import InstanceState, Mapper, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -806,7 +806,7 @@ class Repository(Generic[T, ID]):
         if bulk_delete_safe(self._model, session):
             await self._bulk_delete(session, self._in_ids(session, identities))
             return
-        for entity in await self._load_identities(session, identities):
+        for entity in await self._load_identities(session, identities, deleting=True):
             await session.delete(entity)
         await session.flush()
 
@@ -825,7 +825,7 @@ class Repository(Generic[T, ID]):
         if bulk_delete_safe(self._model, session):
             await self._bulk_delete(session, [None])
             return
-        for entity in unique_entities(await session.execute(select(self._model))):
+        for entity in unique_entities(await session.execute(select(self._model).options(*self._delete_loads()))):
             await session.delete(entity)
         await session.flush()
 
@@ -861,8 +861,20 @@ class Repository(Generic[T, ID]):
     def _holds_entities(self, session: AsyncSession) -> bool:
         return any(isinstance(entity, self._model) for entity in session.sync_session.identity_map.values())
 
-    async def _load_identities(self, session: AsyncSession, identities: Sequence[tuple[Any, ...]]) -> list[Any]:
-        """The entities with these keys: the unit's own, then one ``SELECT`` per chunk for the rest."""
+    def _delete_loads(self) -> list[Any]:
+        """``selectin`` loads of the collections deleting an entity cascades to or nulls out, so the flush does
+        not load them one entity at a time."""
+        return [
+            selectinload(getattr(self._model, relationship.key))
+            for relationship in self._mapper.relationships
+            if relationship.uselist and not relationship.viewonly and not relationship.passive_deletes
+        ]
+
+    async def _load_identities(
+        self, session: AsyncSession, identities: Sequence[tuple[Any, ...]], *, deleting: bool = False
+    ) -> list[Any]:
+        """The entities with these keys: the unit's own, then one ``SELECT`` per chunk for the rest (with the
+        collections a delete needs, when *deleting*)."""
         sync_session = session.sync_session
         mapper = self._mapper
         entities: list[Any] = []
@@ -873,8 +885,10 @@ class Repository(Generic[T, ID]):
                 entities.append(held)
             else:
                 missing.append(identity)
+        options = self._delete_loads() if deleting else []
         for criterion in self._in_ids(session, missing):
-            entities.extend(unique_entities(await session.execute(select(self._model).where(criterion))))
+            stmt = select(self._model).where(criterion).options(*options)
+            entities.extend(unique_entities(await session.execute(stmt)))
         return entities
 
     async def _delete_entities(self, session: AsyncSession, entities: list[Any]) -> None:
@@ -899,7 +913,7 @@ class Repository(Generic[T, ID]):
             return
         current = {
             _identity_key(held): held
-            for held in await self._load_identities(session, [identity for _entity, identity in others])
+            for held in await self._load_identities(session, [identity for _entity, identity in others], deleting=True)
         }
         version = mapper.version_id_col
         version_key = mapper.get_property_by_column(version).key if version is not None else None

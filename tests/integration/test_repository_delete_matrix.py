@@ -124,6 +124,18 @@ async def test_delete_all_by_id_cascades_to_the_children(relational_backend: Rel
         assert await parents.find_by_id(third.id) is not None
 
 
+async def test_a_cascading_delete_loads_the_children_once_for_all_parents(
+    relational_backend: RelationalBackend,
+) -> None:
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        parents = ParentRepository()
+        families = await _family(parents, 5)
+        with datasources.counter() as counter:
+            await parents.delete_all_by_id([parent.id for parent in families])
+        assert dml(counter)["SELECT"] == 2  # the parents, then their children: not one SELECT per parent
+        assert await _count(datasources, ContractChild) == 0
+
+
 async def test_delete_all_cascades_to_every_child(relational_backend: RelationalBackend) -> None:
     async with repository_datasources(relational_backend, *MODELS) as datasources:
         parents = ParentRepository()
