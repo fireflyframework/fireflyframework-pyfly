@@ -231,6 +231,8 @@ class FakeKafkaConsumer:
             self.cluster.committed[(self.group_id, tp)] = offset
 
     def seek(self, tp: TopicPartition, offset: int) -> None:
+        if tp not in self.positions:
+            raise IllegalStateError(f"No current assignment for partition {tp}")
         self.seeks.append((tp, offset))
         self.positions[tp] = offset
 

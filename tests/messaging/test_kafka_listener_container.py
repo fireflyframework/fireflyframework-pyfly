@@ -454,3 +454,46 @@ async def test_revoked_partitions_commit_what_is_done_after_the_record_in_flight
     finally:
         await container.stop()
     assert behavior.attempts == {}
+
+
+async def test_a_record_that_fails_while_its_partition_is_revoked_does_not_stop_the_consumer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The seek back to a failed record raises once the partition is gone; the loop logs it and goes on,
+    and the new owner gets the record from the committed offset."""
+    cluster = FakeKafkaCluster()
+    gate = asyncio.Event()
+    handled: list[str] = []
+
+    async def handler(message: Message) -> None:
+        handled.append(message.value.decode())
+        if message.value == b"m1":
+            await gate.wait()
+            raise RuntimeError("fails after the rebalance began")
+
+    container: KafkaListenerContainer[Message] = KafkaListenerContainer(
+        topics=[TOPIC],
+        group=GROUP,
+        consumer_factory=cluster.consumer,
+        convert=kafka_adapter.message_of,
+        handler=handler,
+        dead_letter=None,
+        settings=fast(transactional=False, shutdown_timeout=0.05),
+        auto_offset_reset="earliest",
+    )
+    await container.start()
+    try:
+        cluster.append(TOPIC, b"m1")
+        await eventually(lambda: handled == ["m1"], what="m1 in flight")
+        [consumer] = cluster.consumers
+        with caplog.at_level(logging.WARNING, logger="pyfly.messaging.listener_container"):
+            await consumer.revoke()  # waits 0.05 s for m1, then takes the partition away
+            gate.set()
+            await eventually(
+                lambda: any("listener_back_off_failed" in r.getMessage() for r in caplog.records), what="the log"
+            )
+        await asyncio.sleep(0.1)
+        assert container.running
+        assert cluster.committed_offset(GROUP, TOPIC) is None
+    finally:
+        await container.stop()

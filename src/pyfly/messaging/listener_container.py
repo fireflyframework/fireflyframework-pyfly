@@ -453,6 +453,11 @@ class ListenerInvoker:
                 raise
             return None
 
+    def validate(self) -> None:
+        """Fail now, not at every delivery, when the settings name a datasource no manager serves."""
+        if self._transactional and self._datasource is not None:
+            self.manager()
+
     def _boundary(self) -> TransactionBoundary | None:
         manager = self.manager()
         if manager is None:
@@ -671,6 +676,7 @@ class KafkaListenerContainer(Generic[T]):
         """Create, subscribe and start the consumer, then the consume loop (in a detached task)."""
         if self._task is not None:
             return
+        self._invoker.validate()
         consumer = self._consumer_factory(
             group_id=self._group, enable_auto_commit=False, auto_offset_reset=self._auto_offset_reset
         )
@@ -740,6 +746,18 @@ class KafkaListenerContainer(Generic[T]):
                     self._idle.clear()
                     try:
                         keep_going = await self._deliver(consumer, tp, record)
+                    except Exception:
+                        # Not the handler's failure (the container handles those): its own. Log it, and
+                        # leave the record uncommitted, to be fetched again, rather than stop consuming.
+                        logger.exception(
+                            "listener_delivery_error container=%s topic=%s partition=%s offset=%s",
+                            self.name,
+                            record.topic,
+                            record.partition,
+                            record.offset,
+                        )
+                        self._back_off(consumer, tp, record.offset, DEAD_LETTER_RETRY_DELAY)
+                        keep_going = False
                     finally:
                         self._idle.set()
                     if not keep_going:
@@ -847,10 +865,26 @@ class KafkaListenerContainer(Generic[T]):
 
     def _back_off(self, consumer: Any, tp: Any, offset: int, delay: float) -> None:
         """Seek *tp* back to *offset* and pause it for *delay* seconds: the record is fetched again then,
-        and the records after it keep their order."""
-        consumer.seek(tp, offset)
+        and the records after it keep their order.
+
+        A partition a rebalance took away meanwhile cannot be sought: the record stays uncommitted, and the
+        partition's new owner gets it from the committed offset.
+        """
+        try:
+            consumer.seek(tp, offset)
+            if delay > 0:
+                consumer.pause(tp)
+        except Exception as error:  # noqa: BLE001 — the partition is no longer this member's
+            logger.warning(
+                "listener_back_off_failed container=%s partition=%s offset=%s: %s; its new owner delivers the "
+                "record again from the committed offset",
+                self.name,
+                tp,
+                offset,
+                error,
+            )
+            return
         if delay > 0:
-            consumer.pause(tp)
             self._paused_until[tp] = asyncio.get_running_loop().time() + delay
 
     def _resume_due(self, consumer: Any, now: float) -> None:
@@ -1036,6 +1070,7 @@ class RabbitListenerContainer(Generic[T]):
             return
         import aio_pika
 
+        self._invoker.validate()
         self._stopping = False
         self._stopped.clear()
         channel = await self._connection.channel(publisher_confirms=True, on_return_raises=True)
@@ -1090,9 +1125,21 @@ class RabbitListenerContainer(Generic[T]):
         if self._stopping:
             await self._release(message)
             return
-        task = detached(self._deliver(message), name=f"pyfly-rabbit-listener[{self.name}]")
+        task = detached(self._deliver_safely(message), name=f"pyfly-rabbit-listener[{self.name}]")
         self._in_flight.add(task)
         task.add_done_callback(self._in_flight.discard)
+
+    async def _deliver_safely(self, message: Any) -> None:
+        """:meth:`_deliver`, with the container's own failures logged and the message requeued, so a
+        delivery never stays unacknowledged until its channel closes."""
+        try:
+            await self._deliver(message)
+        except Exception:
+            logger.exception("listener_delivery_error container=%s queue=%s", self.name, self._queue_name)
+            if not self._stopping:  # not at once: a failure of the container's own must not spin
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stopped.wait(), timeout=DEAD_LETTER_RETRY_DELAY)
+            await self._release(message)
 
     async def _deliver(self, message: Any) -> None:
         attempt = delivery_attempt(message)

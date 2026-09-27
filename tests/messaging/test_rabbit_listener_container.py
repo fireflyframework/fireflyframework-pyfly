@@ -26,6 +26,7 @@ the unacknowledged deliveries of each channel (``brokers.FakeAmqpBroker``).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -279,3 +280,67 @@ def test_the_adapter_is_a_consumer_phase_bean() -> None:
     adapter = RabbitMQAdapter("amqp://fake/")
     assert lifecycle_phase(adapter) == CONSUMER_PHASE
     assert adapter.manages_listener_errors is True
+
+
+async def test_an_unexpected_error_in_a_delivery_requeues_the_message(caplog: pytest.LogCaptureFixture) -> None:
+    from pyfly.messaging.listener_container import ConcurrencyLimit, RabbitDeadLetter, RabbitListenerContainer
+
+    broker = FakeAmqpBroker()
+    connection = await broker.connect("amqp://fake/")
+
+    def broken_size() -> int:
+        raise RuntimeError("cannot size the limit")
+
+    async def handler(message: Any) -> None:
+        pass
+
+    container: RabbitListenerContainer[Any] = RabbitListenerContainer(
+        connection=connection,
+        queue=QUEUE,
+        bindings=[("pyfly", TOPIC)],
+        convert=lambda message, attempt: message.body,
+        handler=handler,
+        dead_letters=[RabbitDeadLetter("pyfly.dlx", QUEUE, f"{QUEUE}.dlq")],
+        settings=fast(transactional=False),
+        limit=ConcurrencyLimit(broken_size),
+    )
+    await container.start()
+    try:
+        with caplog.at_level(logging.ERROR, logger="pyfly.messaging.listener_container"):
+            broker.publish_to("pyfly", TOPIC, b"m")
+            await eventually(lambda: ("requeue", QUEUE, b"m", None) in broker.outcomes, what="the requeue")
+    finally:
+        await container.stop()
+    assert any("listener_delivery_error" in record.getMessage() for record in caplog.records)
+    assert broker.bodies(QUEUE) == [b"m"]  # back in its queue, not stuck unacknowledged
+
+
+@pytest.mark.parametrize("transport", ["kafka", "rabbitmq"])
+async def test_a_datasource_the_settings_name_must_exist_when_the_consumer_starts(
+    relational_backend: RelationalBackend, transport: str
+) -> None:
+    from pyfly.data.transaction import IllegalTransactionStateError
+    from pyfly.messaging.adapters.kafka import KafkaAdapter
+    from tests.messaging.brokers import FakeKafkaCluster
+
+    ctx = await boot(relational_backend)
+    try:
+        settings = fast(datasource="reporting")
+        cluster = FakeKafkaCluster()
+        adapter: Any = (
+            KafkaAdapter(
+                "fake:9092", settings=settings, consumer_factory=cluster.consumer, producer_factory=cluster.producer
+            )
+            if transport == "kafka"
+            else adapter_on(FakeAmqpBroker(), settings)
+        )
+
+        async def handler(message: Message) -> None:
+            pass
+
+        await adapter.subscribe(TOPIC, handler, group=QUEUE)
+        with pytest.raises(IllegalTransactionStateError, match="reporting"):
+            await adapter.start()
+        await adapter.stop()
+    finally:
+        await ctx.stop()
