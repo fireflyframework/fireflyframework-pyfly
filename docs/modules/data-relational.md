@@ -58,10 +58,10 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
 - [Multiple Named Datasources](#multiple-named-datasources)
   - [NamedDataSources](#nameddatasources)
 - [Data Auditing](#data-auditing)
-  - [AuditingEntityListener](#auditingentitylistener)
   - [How Auditing Works](#how-auditing-works)
-  - [Resolving the Current User](#resolving-the-current-user)
-  - [Registering the Listener](#registering-the-listener)
+  - [Who Is the Current User](#who-is-the-current-user)
+  - [Your Own Auditor or Clock](#your-own-auditor-or-clock)
+  - [AuditingEntityListener](#auditingentitylistener)
 - [RepositoryBeanPostProcessor](#repositorybeanpostprocessor)
   - [How It Works](#how-it-works)
   - [Stub Detection](#stub-detection)
@@ -1399,95 +1399,128 @@ The primary datasource keeps its own `async_session_factory` / `async_session` b
 
 ## Data Auditing
 
-PyFly provides automatic entity auditing through the `AuditingEntityListener`. It auto-populates the `created_at`, `updated_at`, `created_by`, and `updated_by` fields on `BaseEntity` subclasses via SQLAlchemy ORM events, so you never need to set these fields manually.
+PyFly audits entities automatically, as Spring Data's `@EnableJpaAuditing` does: it populates the
+`created_at`, `updated_at`, `created_by` and `updated_by` fields of `BaseEntity` subclasses from SQLAlchemy
+ORM events, so you never set them by hand. Two ports, in `pyfly.data.auditing`, decide the values:
 
-### AuditingEntityListener
+| Port | Answers | Default bean |
+|---|---|---|
+| `AuditorAware.get_current_auditor()` | who is writing (`created_by`/`updated_by`) | `SecurityContextAuditorAware`: the authenticated user of the `SecurityContextHolder` |
+| `DateTimeProvider.get_now()` | when (`created_at`/`updated_at`) | `CurrentDateTimeProvider`: `datetime.now(UTC)` |
 
-```python
-from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
-```
-
-The `AuditingEntityListener` registers SQLAlchemy `before_insert` and `before_update` event listeners on `BaseEntity`. Because the listeners use `propagate=True`, they automatically apply to all subclasses of `BaseEntity`.
+Auditing is on by default; `pyfly.data.auditing.enabled: false` switches it off.
 
 ### How Auditing Works
 
-| Event | Fields Set | Behavior |
+| Event | Fields set | Behavior |
 |---|---|---|
-| `before_insert` | `created_at`, `updated_at`, `created_by`, `updated_by` | Sets both timestamps to `datetime.now(UTC)`. Sets both user fields to the current authenticated user (if available). |
-| `before_update` | `updated_at`, `updated_by` | Sets `updated_at` to `datetime.now(UTC)`. Sets `updated_by` to the current authenticated user (if available). |
+| insert | `created_at`, `updated_at`, `created_by`, `updated_by` | Both timestamps from the `DateTimeProvider`; both user fields from the `AuditorAware`, unless you set them yourself. |
+| update | `updated_at`, `updated_by` | Only for an entity with a changed column. `updated_at` from the `DateTimeProvider`; `updated_by` is always the current auditor, `None` when there is none, unless you set it in the same flush. |
 
-**Example:**
+Two consequences:
+
+- **A change to a collection alone does not update the parent.** Adding a comment to `post.comments` inserts
+  the comment; it does not issue an `UPDATE` of the post, take its row lock or bump its `version`, so two
+  users adding comments to the same versioned post at the same time both succeed.
+- **An update with no principal does not keep the last user.** A job with no principal that changes a row
+  records `updated_by = None` next to its `updated_at`, instead of the name of the last person who edited
+  it. Give the job a principal with `run_as` (below) or an `AuditorAware` that returns one.
 
 ```python
-from pyfly.data.relational.sqlalchemy import BaseEntity
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
-
-
 class Order(BaseEntity):
     __tablename__ = "orders"
     customer_id: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(50))
 
-# When you save a new Order, the audit fields are populated automatically:
-order = Order(customer_id="abc", status="PENDING")
-saved = await repo.save(order)
-# saved.created_at = 2026-02-20T10:30:00+00:00
-# saved.updated_at = 2026-02-20T10:30:00+00:00
-# saved.created_by = "user-123"  (from SecurityContext)
-# saved.updated_by = "user-123"
+saved = await repo.save(Order(customer_id="abc", status="PENDING"))
+# saved.created_at == saved.updated_at == 2026-02-20T10:30:00.123456+00:00
+# saved.created_by == saved.updated_by == "user-123"   (the request's user)
 
-# On subsequent updates, only updated_at and updated_by change:
 saved.status = "SHIPPED"
-updated = await repo.save(saved)
-# updated.created_at = 2026-02-20T10:30:00+00:00  (unchanged)
-# updated.updated_at = 2026-02-20T10:35:00+00:00  (new timestamp)
-# updated.created_by = "user-123"                  (unchanged)
-# updated.updated_by = "admin-456"                 (new user)
+updated = await repo.save(saved)                        # later, in admin-456's request
+# updated.updated_at == 2026-02-20T10:35:00.654321+00:00, updated.updated_by == "admin-456"
+# created_at and created_by are unchanged
 ```
 
-### Resolving the Current User
+### Who Is the Current User
 
-The `AuditingEntityListener` resolves the current authenticated user from the `RequestContext`:
+`SecurityContextAuditorAware` asks `pyfly.security.SecurityContextHolder.get_context()`, which returns, in
+this order:
 
-1. Calls `RequestContext.current()` to get the current request context.
-2. If a `RequestContext` is available, reads the `security_context` attribute.
-3. If the `SecurityContext` is authenticated (`is_authenticated` is `True`), uses `user_id` as the value for `created_by` / `updated_by`.
-4. If there is no `RequestContext` or the user is not authenticated, the user fields are left unchanged (they remain `None` for new entities).
+1. a context set on the holder for the running task: `run_as(...)`, `SecurityContextHolder.using(...)`;
+2. inside an HTTP request, the context the security filters established for it
+   (`request.state.security_context`), whichever filter did: a bearer token, HTTP Basic, X.509, or a
+   session (form login, OAuth2 login, switch-user impersonation);
+3. `RequestContext.current().security_context`.
 
-This means auditing works transparently in HTTP request handlers (where the `SecurityMiddleware` or `SecurityFilter` populates the `SecurityContext`) and degrades gracefully in background tasks or CLI scripts where no request context is available.
-
-### Registering the Listener
-
-The `AuditingEntityListener` must be registered once at application startup. Call `register()` to attach the ORM event listeners:
+Scheduled jobs, message listeners and shell commands have no request. Declare who they act as with
+`run_as`, as a decorator or a block:
 
 ```python
-from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
+from pyfly.data.auditing import run_as
 
-listener = AuditingEntityListener()
-listener.register()
+
+@service
+class RetentionJob:
+    @scheduled(cron="0 3 * * *")
+    @run_as("system:retention")
+    async def purge(self) -> None:
+        ...                                   # created_by/updated_by = "system:retention"
+
+
+with run_as("system:import"):
+    await importer.load(rows)
 ```
 
-When using auto-configuration, the listener is registered automatically by `RelationalAutoConfiguration` when `pyfly.data.relational.enabled` is `true`. No manual registration is needed in that case.
+### Your Own Auditor or Clock
 
-You can also register it in a custom `@configuration` class:
+Declare a bean of either port to replace the default, with the port as the declared return type (or a
+class that subclasses the port), so it is injected by that type. `get_current_auditor` may be an
+`async def`; it runs while the entity is flushed, so it must not use the session being flushed.
 
 ```python
-from pyfly.container import configuration, bean
-from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
+from pyfly.data.auditing import AuditorAware, DateTimeProvider
+from pyfly.security import SecurityContextHolder
+
+
+class SystemFallbackAuditor(AuditorAware):
+    def get_current_auditor(self) -> str | None:
+        return SecurityContextHolder.get_authenticated_user_id() or "system"
 
 
 @configuration
-class DataConfig:
+class AuditingConfig:
+    @bean
+    def auditor_aware(self) -> AuditorAware:
+        return SystemFallbackAuditor()
 
     @bean
-    def auditing_listener(self) -> AuditingEntityListener:
-        listener = AuditingEntityListener()
+    def date_time_provider(self) -> DateTimeProvider:
+        return FixedClock()                    # a test clock
+```
+
+### AuditingEntityListener
+
+`pyfly.data.relational.sqlalchemy.auditing.AuditingEntityListener` is the relational side: the
+`RelationalAutoConfiguration` registers one, built on the two port beans. Its ORM hooks are installed once
+per process however many application contexts start, and removed when the last context stops; registering
+again changes nothing. An `AuditingEntityListener` bean of your own replaces the auto-configured one:
+
+```python
+@configuration
+class DataConfig:
+    @bean
+    def auditing_listener(self, auditor_aware: AuditorAware) -> AuditingEntityListener:
+        listener = AuditingEntityListener(auditor_aware)
         listener.register()
         return listener
 ```
 
-**Source:** `src/pyfly/data/relational/sqlalchemy/auditing.py`
+Bulk `UPDATE` statements (`update(Order).values(...)`) bypass the ORM events, as JPQL bulk updates bypass
+Spring Data's auditing; stamp `updated_by` in them with `await pyfly.data.auditing.current_auditor()`.
+
+**Source:** `src/pyfly/data/auditing.py`, `src/pyfly/data/relational/sqlalchemy/auditing.py`,
+`src/pyfly/security/context_holder.py`
 
 ---
 
