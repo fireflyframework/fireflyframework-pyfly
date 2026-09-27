@@ -43,7 +43,7 @@ from __future__ import annotations
 import functools
 import inspect
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
@@ -146,18 +146,18 @@ class AuditingHandler:
 
     def register(self) -> None:
         """Make this the active handler (idempotent)."""
+        global _HANDLERS
         with _LOCK:
-            if self in _HANDLERS:
-                _HANDLERS.remove(self)
-            _HANDLERS.append(self)
+            _HANDLERS = (*(handler for handler in _HANDLERS if handler is not self), self)
             self._activated()
 
     def unregister(self) -> None:
         """Stop being a registered handler; the one registered before it is active again (idempotent)."""
+        global _HANDLERS
         with _LOCK:
             if self not in _HANDLERS:
                 return
-            _HANDLERS.remove(self)
+            _HANDLERS = tuple(handler for handler in _HANDLERS if handler is not self)
             self._deactivated(remaining=len(_HANDLERS))
 
     @property
@@ -182,7 +182,9 @@ class AuditingHandler:
 
 
 _LOCK = threading.RLock()
-_HANDLERS: list[AuditingHandler] = []
+_HANDLERS: tuple[AuditingHandler, ...] = ()
+"""The registered handlers, the active one last. Replaced (never mutated) under ``_LOCK``, so a reader in
+any thread (a sync ``Session`` flushing in a worker thread) takes a consistent snapshot without the lock."""
 
 
 def active_auditing_handler() -> AuditingHandler | None:
@@ -193,7 +195,7 @@ def active_auditing_handler() -> AuditingHandler | None:
 
 def registered_auditing_handlers() -> tuple[AuditingHandler, ...]:
     """Every registered handler, the active one last."""
-    return tuple(_HANDLERS)
+    return _HANDLERS
 
 
 async def current_auditor() -> str | None:
@@ -248,8 +250,67 @@ class RunAs:
         SecurityContextHolder.reset_context(entered[-1][1])
 
     def __call__(self, function: F) -> F:
-        """Decorate *function* (``async def`` or not) so that every call runs as the principal."""
+        """Decorate *function* so that every call runs as the principal.
+
+        A coroutine or plain function runs as the principal for the whole call. A generator or async
+        generator function does for each of its steps (``next``/``send``, ``throw`` and ``close``, and their
+        async forms), as its body only runs then; its consumer does not run as the principal between them.
+        """
         context = self._context
+        if inspect.isasyncgenfunction(function):
+
+            @functools.wraps(function)
+            async def run_async_generator(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, Any]:
+                generator: AsyncGenerator[Any, Any] = function(*args, **kwargs)
+                try:
+                    with _using(context):
+                        item = await generator.asend(None)
+                    while True:
+                        try:
+                            sent = yield item
+                        except GeneratorExit:
+                            raise
+                        except BaseException as error:
+                            with _using(context):
+                                item = await generator.athrow(error)
+                        else:
+                            with _using(context):
+                                item = await generator.asend(sent)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    with _using(context):
+                        await generator.aclose()
+
+            return cast(F, run_async_generator)
+
+        if inspect.isgeneratorfunction(function):
+
+            @functools.wraps(function)
+            def run_generator(*args: Any, **kwargs: Any) -> Generator[Any, Any, Any]:
+                generator: Generator[Any, Any, Any] = function(*args, **kwargs)
+                try:
+                    with _using(context):
+                        item = generator.send(None)
+                    while True:
+                        try:
+                            sent = yield item
+                        except GeneratorExit:
+                            raise
+                        except BaseException as error:
+                            with _using(context):
+                                item = generator.throw(error)
+                        else:
+                            with _using(context):
+                                item = generator.send(sent)
+                except StopIteration as stop:
+                    return stop.value
+                finally:
+                    with _using(context):
+                        generator.close()
+
+            return cast(F, run_generator)
+
         if inspect.iscoroutinefunction(function):
 
             @functools.wraps(function)

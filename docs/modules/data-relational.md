@@ -1518,7 +1518,10 @@ this order:
 
 Scheduled jobs, message listeners and shell commands have no request. Declare who they act as with
 `run_as`, as a decorator or a block. One `run_as(...)` object can be shared (a module-level
-`SYSTEM = run_as("system")` entered by concurrent jobs): each task restores its own previous context.
+`SYSTEM = run_as("system")` entered by concurrent jobs): each task restores its own previous context. On a
+generator or async generator function the decorator applies to each step (`next`/`send`, `throw`, `close`
+and their async forms), since the body only runs then; the code consuming it does not run as the principal
+between the steps.
 
 ```python
 from pyfly.data.auditing import run_as

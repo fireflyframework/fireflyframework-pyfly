@@ -33,6 +33,7 @@ import contextlib
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from inspect import isasyncgenfunction, isgeneratorfunction
 from pathlib import Path
 from typing import Any
 
@@ -500,6 +501,94 @@ async def test_run_as_names_the_auditor_of_a_block_and_of_a_function(tmp_path: P
         "cleaned": "system:cleanup",
         "nobody": None,
     }
+
+
+async def test_run_as_decorates_an_async_generator_step_by_step(tmp_path: Path) -> None:
+    """Every step of a decorated async generator (``asend``, ``athrow``, ``aclose`` included) runs as the
+    principal, and its consumer does not, between the steps or after. Before, the call only created the
+    generator, so its body ran without the principal."""
+    closed_as: list[str | None] = []
+
+    @run_as("system:stream")
+    async def principals() -> AsyncIterator[str | None]:
+        try:
+            received = yield SecurityContextHolder.get_authenticated_user_id()
+            assert received == "sent"
+            try:
+                yield SecurityContextHolder.get_authenticated_user_id()
+            except LookupError:
+                yield SecurityContextHolder.get_authenticated_user_id()
+            yield SecurityContextHolder.get_authenticated_user_id()
+        finally:
+            closed_as.append(SecurityContextHolder.get_authenticated_user_id())
+
+    assert isasyncgenfunction(principals)
+    stream = principals()
+    assert await anext(stream) == "system:stream"
+    assert SecurityContextHolder.get_context() is None
+    assert await stream.asend("sent") == "system:stream"
+    assert SecurityContextHolder.get_context() is None
+    assert await stream.athrow(LookupError()) == "system:stream"
+    assert SecurityContextHolder.get_context() is None
+    await stream.aclose()
+    assert closed_as == ["system:stream"]
+    assert SecurityContextHolder.get_context() is None
+
+    async with _context(tmp_path) as (ctx, url):
+        service_ = ctx.get_bean(AuditedDocService)
+
+        @run_as("system:feed")
+        async def feed(titles: list[str]) -> AsyncIterator[str]:
+            for title in titles:
+                await service_.create(title)
+                yield title
+
+        async with contextlib.aclosing(feed(["one", "two"])) as created:
+            async for title in created:
+                await service_.create(f"after {title}")  # the consumer, between two steps
+
+    rows = await _rows(url, AuditedDoc)
+    assert {title: row[0] for title, row in rows.items()} == {
+        "one": "system:feed",
+        "after one": None,
+        "two": "system:feed",
+        "after two": None,
+    }
+
+
+def test_run_as_decorates_a_generator_step_by_step() -> None:
+    closed_as: list[str | None] = []
+
+    @run_as("system:batch")
+    def principals() -> Iterator[str | None]:
+        try:
+            received = yield SecurityContextHolder.get_authenticated_user_id()
+            assert received == "sent"
+            try:
+                yield SecurityContextHolder.get_authenticated_user_id()
+            except LookupError:
+                yield SecurityContextHolder.get_authenticated_user_id()
+            yield SecurityContextHolder.get_authenticated_user_id()
+        finally:
+            closed_as.append(SecurityContextHolder.get_authenticated_user_id())
+
+    assert isgeneratorfunction(principals)
+    steps = principals()
+    assert next(steps) == "system:batch"
+    assert SecurityContextHolder.get_context() is None
+    assert steps.send("sent") == "system:batch"
+    assert steps.throw(LookupError()) == "system:batch"
+    assert SecurityContextHolder.get_context() is None
+    steps.close()
+    assert closed_as == ["system:batch"]
+    assert list(run_as("system:batch")(lambda: iter(()))()) == []  # a plain function returning an iterator
+    assert [*run_as("system:batch")(_numbered)(2)] == [(0, "system:batch"), (1, "system:batch")]
+    assert SecurityContextHolder.get_context() is None
+
+
+def _numbered(count: int) -> Iterator[tuple[int, str | None]]:
+    for number in range(count):
+        yield number, SecurityContextHolder.get_authenticated_user_id()
 
 
 SYSTEM_IMPORTER = run_as("system:importer")
