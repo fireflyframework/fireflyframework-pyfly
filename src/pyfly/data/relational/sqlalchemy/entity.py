@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,7 +31,16 @@ def _utc_now() -> datetime:
 
 
 class Base(DeclarativeBase):
-    """SQLAlchemy declarative base for all PyFly entities."""
+    """SQLAlchemy declarative base for all PyFly entities.
+
+    A :class:`VersionedMixin` entity that declares its own ``__mapper_args__`` (``polymorphic_on`` on an
+    inheritance root, ``eager_defaults``) keeps its optimistic locking: the mixin's ``version_id_col`` is
+    merged into the entity's arguments.
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        _keep_version_id_col(cls)
+        super().__init_subclass__(**kwargs)
 
 
 class SoftDeleteMixin:
@@ -57,6 +67,10 @@ class VersionedMixin:
     SQLAlchemy will automatically increment the version on every flush
     and raise :class:`sqlalchemy.orm.exc.StaleDataError` when a
     concurrent modification is detected.
+
+    The entity may declare its own ``__mapper_args__`` (a dict, or a ``declared_attr``): ``version_id_col``
+    is merged into them. Declaring ``version_id_col`` there as well is a conflict, and mapping the class
+    raises ``TypeError``. Subclasses in an inheritance hierarchy share the root's version column.
     """
 
     __abstract__ = True
@@ -66,6 +80,41 @@ class VersionedMixin:
     @declared_attr  # type: ignore[arg-type]
     def __mapper_args__(cls) -> dict[str, Any]:  # noqa: N805
         return {"version_id_col": cls.version}
+
+
+def _keep_version_id_col(cls: type[Base]) -> None:
+    """Merge :class:`VersionedMixin`'s ``version_id_col`` into the entity's own ``__mapper_args__``.
+
+    The entity's own attribute shadows the mixin's, so without this the mapper got no version column and
+    optimistic locking was silently off (C123). A class whose mapped ancestor is versioned already is left
+    alone: its mapper inherits the ancestor's version column.
+    """
+    if not issubclass(cls, VersionedMixin) or "__mapper_args__" not in vars(cls):
+        return
+    if any(issubclass(base, VersionedMixin) and "__mapper__" in vars(base) for base in cls.__mro__[1:]):
+        return
+    own = vars(cls)["__mapper_args__"]
+    produce = getattr(own, "fget", None)
+    if produce is None:
+        if not isinstance(own, Mapping):
+            raise TypeError(f"{cls.__name__}.__mapper_args__ must be a dict or a declared_attr, got {own!r}")
+        _refuse_own_version_id_col(cls.__name__, own)
+
+    def mapper_args(entity: type[Base]) -> dict[str, Any]:
+        args = dict(produce(entity) if produce is not None else own)
+        _refuse_own_version_id_col(entity.__name__, args)
+        args["version_id_col"] = entity.version  # type: ignore[attr-defined]
+        return args
+
+    cls.__mapper_args__ = declared_attr.directive(mapper_args)
+
+
+def _refuse_own_version_id_col(name: str, args: Mapping[str, Any]) -> None:
+    if "version_id_col" in args:
+        raise TypeError(
+            f"{name} uses VersionedMixin, which supplies version_id_col, and declares version_id_col in its "
+            "own __mapper_args__ too: remove one of them"
+        )
 
 
 class BaseEntity(Base):

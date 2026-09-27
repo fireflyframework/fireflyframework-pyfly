@@ -1741,6 +1741,22 @@ class Order(BaseEntity, VersionedMixin):
 
 This adds a `version` column. SQLAlchemy automatically appends `WHERE version = :old` to every UPDATE and raises `StaleDataError` on concurrent modification — the equivalent of JPA's `@Version`.
 
+The entity may declare its own `__mapper_args__`, as the root of an inheritance hierarchy must
+(`polymorphic_on`): the mixin merges `version_id_col` into them, and subclasses share the root's version
+column. Declaring `version_id_col` in the entity's own arguments as well is a conflict that fails when the
+class is mapped.
+
+```python
+class Payment(BaseEntity, VersionedMixin):
+    __tablename__ = "payments"
+    __mapper_args__ = {"polymorphic_on": "kind", "polymorphic_identity": "payment"}  # still versioned
+    kind: Mapped[str] = mapped_column(String(20))
+
+
+class CardPayment(Payment):
+    __mapper_args__ = {"polymorphic_identity": "card"}  # versioned through payments.version
+```
+
 ---
 
 ## RepositoryBeanPostProcessor

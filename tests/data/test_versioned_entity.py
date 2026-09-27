@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import String
+from sqlalchemy import ForeignKey, String, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, VersionedMixin
@@ -31,6 +33,55 @@ class VersionedOrder(BaseEntity, VersionedMixin):
     __tablename__ = "versioned_orders"
 
     name: Mapped[str] = mapped_column(String(255))
+
+
+# An entity's own __mapper_args__ used to replace the mixin's, which switched optimistic locking off
+# silently (C123): no version check, no increment, lost updates.
+
+
+class VersionedWithOwnArgs(VersionedMixin, BaseEntity):
+    __tablename__ = "versioned_own_args"
+    __mapper_args__ = {"eager_defaults": True}
+
+    name: Mapped[str] = mapped_column(String(255))
+
+
+class VersionedMixinLast(BaseEntity, VersionedMixin):
+    __tablename__ = "versioned_mixin_last"
+    __mapper_args__ = {"eager_defaults": True}
+
+    name: Mapped[str] = mapped_column(String(255))
+
+
+class VersionedPayment(BaseEntity, VersionedMixin):
+    """A polymorphic root: ``polymorphic_on`` has to be declared in the entity's own mapper args."""
+
+    __tablename__ = "versioned_payments"
+    __mapper_args__ = {"polymorphic_on": "kind", "polymorphic_identity": "payment"}
+
+    kind: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[int] = mapped_column(default=0)
+
+
+class VersionedCardPayment(VersionedPayment):
+    __mapper_args__ = {"polymorphic_identity": "card"}
+
+
+class VersionedDocument(BaseEntity, VersionedMixin):
+    __tablename__ = "versioned_documents"
+
+    kind: Mapped[str] = mapped_column(String(20))
+
+    @declared_attr.directive
+    def __mapper_args__(cls) -> dict[str, Any]:  # noqa: N805
+        return {"polymorphic_on": cls.kind, "polymorphic_identity": "document"}
+
+
+class VersionedAttachment(VersionedDocument):
+    __tablename__ = "versioned_attachments"
+    __mapper_args__ = {"polymorphic_identity": "attachment"}
+
+    id: Mapped[UUID] = mapped_column(ForeignKey("versioned_documents.id"), primary_key=True)
 
 
 @pytest.fixture
@@ -130,3 +181,63 @@ class TestVersionedMixin:
         await session.flush()
         assert hasattr(order, "version")
         assert isinstance(order.version, int)
+
+
+class TestVersionedMixinWithOwnMapperArgs:
+    @pytest.mark.parametrize(
+        ("model", "table"),
+        [
+            (VersionedWithOwnArgs, "versioned_own_args"),
+            (VersionedMixinLast, "versioned_mixin_last"),
+            (VersionedPayment, "versioned_payments"),
+            (VersionedCardPayment, "versioned_payments"),
+            (VersionedDocument, "versioned_documents"),
+            (VersionedAttachment, "versioned_documents"),
+        ],
+        ids=["own-args", "mixin-last", "polymorphic-root", "single-table-subclass", "directive", "joined-subclass"],
+    )
+    def test_version_column_is_the_version_id(self, model: type, table: str) -> None:
+        mapper = inspect(model)
+        assert mapper.version_id_col is not None
+        assert (mapper.version_id_col.table.name, mapper.version_id_col.name) == (table, "version")
+
+    def test_the_entity_s_own_mapper_args_are_kept(self) -> None:
+        assert inspect(VersionedWithOwnArgs).eager_defaults is True
+        assert inspect(VersionedMixinLast).eager_defaults is True
+        assert inspect(VersionedCardPayment).polymorphic_identity == "card"
+        assert inspect(VersionedAttachment).polymorphic_identity == "attachment"
+
+    def test_a_conflicting_version_id_col_fails_at_mapping(self) -> None:
+        with pytest.raises(TypeError, match="VersionedMixin"):
+
+            class _Conflicting(BaseEntity, VersionedMixin):
+                __tablename__ = "versioned_conflicting"
+                other: Mapped[int] = mapped_column(default=0)
+                __mapper_args__ = {"version_id_col": other}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", [VersionedWithOwnArgs, VersionedCardPayment], ids=["own-args", "polymorphic"])
+    async def test_a_stale_write_is_rejected(self, model: type, tmp_path: Path) -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'versioned.db'}")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all, tables=[model.__table__])  # type: ignore[attr-defined]
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            fields = {"name": "v1"} if model is VersionedWithOwnArgs else {"amount": 1}
+            async with factory() as session, session.begin():
+                entity = model(**fields)
+                session.add(entity)
+            assert entity.version == 1
+
+            async with factory() as first, factory() as second:
+                stale = await first.get(model, entity.id)
+                fresh = await second.get(model, entity.id)
+                assert stale is not None and fresh is not None
+                attribute = next(iter(fields))
+                setattr(fresh, attribute, "v2" if attribute == "name" else 2)
+                await second.commit()
+                setattr(stale, attribute, "v3" if attribute == "name" else 3)
+                with pytest.raises(StaleDataError):
+                    await first.commit()
+        finally:
+            await engine.dispose()
