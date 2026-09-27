@@ -252,3 +252,14 @@ within the run-to-run noise of the shared VM (the same MySQL `@transactional cou
 ms in two runs a minute apart). `exists_by_id` in `@transactional` costs what the unit of work's own
 `count()` costs (1.26 / 1.34 ms against 1.30 / 1.22 ms on PostgreSQL). The derived `exists_by_name` still
 counts every match: the query compiler adopts the probe in WP04.
+
+### After the first review of WP03
+
+- **Date:** 2026-09-27, same machine (the VM shared with other running lanes).
+- **Command:** the reviewer's PostgreSQL probe (`find_all()` over 5,000 rows, 15 runs, median), twice.
+
+`unique()` now runs only when a result needs it (a joined collection, or a specification's join).
+`find_all()` over 5,000 rows measured 28.1 to 29.5 ms on PostgreSQL, back in the base's range (27.4 to 29.0
+ms); with `unique()` on every list it measured 30.6 to 33.3 ms. A `save()` of an entity whose mapping loads a
+collection with `selectin` and another with a join costs `{'INSERT': 1, 'SELECT': 2}`, what the base's
+`refresh()` cost; a mapping without eager relationships stays at `{'INSERT': 1}`.
