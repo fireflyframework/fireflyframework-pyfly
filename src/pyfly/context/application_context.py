@@ -82,6 +82,11 @@ class _DeferredBeanMethod:
 #: ``AsyncEngine`` releases its pool, ``aclose()`` how an async client closes).
 _INFERRED_DESTROY_METHODS: tuple[str, ...] = ("dispose", "aclose", "close")
 
+#: The modules whose generic classes a parametrized ``@bean`` hint never registers under: a builtin
+#: container (``list[X]``, ``type[X]``) or an abstract collection (``Callable[[str], str]``) names what
+#: the product is, not which bean it is.
+_NOT_BEAN_KEY_MODULES = frozenset({"builtins", "collections.abc", "typing"})
+
 
 def _takes_no_arguments(member: Any) -> bool:
     """Whether *member* can be called without arguments (a callable without a signature is assumed to)."""
@@ -1003,7 +1008,7 @@ class ApplicationContext:
                 return None
             hint = members[0]
         origin = typing.get_origin(hint)
-        if isinstance(origin, type) and origin not in (list, dict, set, frozenset, tuple, type):
+        if isinstance(origin, type) and origin.__module__ not in _NOT_BEAN_KEY_MODULES:
             return origin
         return None
 
@@ -1145,11 +1150,9 @@ class ApplicationContext:
             # registered — least of all ``NoneType``, which is what ``type(result)`` would have
             # keyed — and a provisional claim a deferred factory made must go with it, or a
             # later resolve of ``Port`` would run the factory again and hand out ``None``.
-            declared = self._declared_registration_type(return_type)
-            if declared is not None:
-                reg = self._container._registrations.get(declared)
-                if reg is not None and reg.factory is factory and reg.instance is None:
-                    self._remove_registration(declared)
+            claim = self._deferred_claim(method, attr_name, return_type, factory)
+            if claim is not None and claim.instance is None:
+                self._remove_claim(claim)
             return
 
         # Register bean: use the concrete type so multiple beans
@@ -1157,6 +1160,9 @@ class ApplicationContext:
         # A factory closure is stored so TRANSIENT beans rebuild through
         # the @bean method (not __init__) on each resolution.
         impl_type = type(result)
+        # The provisional registration of a deferred call (found by class and name before the product's
+        # own registration, of the same class and name, replaces it).
+        claim = self._deferred_claim(method, attr_name, return_type, factory)
         if factory is None:
             factory = self._bean_factory(config_instance, method)
         self._container.register(impl_type, scope=bean_scope, name=bean_name)
@@ -1189,6 +1195,18 @@ class ApplicationContext:
         if declared is not None and declared is not impl_type:
             self._container.bind(declared, impl_type)
 
+        if claim is not None and claim.impl_type is not impl_type:
+            # A deferred call claimed the declared (or, for a parametrized hint, the origin) class, and
+            # the product is of a subclass: the claim is completed, so resolving the class hands out this
+            # product instead of running the factory a second time.
+            self._container.bind(claim.impl_type, impl_type)
+            claim.destroy_method = self._declared_destroy_method(method)
+            if getattr(method, "__pyfly_bean_primary__", False):
+                claim.primary = True
+            if bean_scope == Scope.SINGLETON:
+                claim.instance = result
+            return
+
         # Also keep a direct registration for the declared type
         # (for single-bean resolution) unless it already exists. It
         # shares the same instance/factory; the startup lifecycle, wiring
@@ -1209,9 +1227,6 @@ class ApplicationContext:
             # A later @bean(primary=True) for the same return type must win the
             # single-bean direct resolution (the @Bean @Primary semantics) —
             # otherwise resolve() returns whichever @bean was processed first.
-            # The same completion applies to a deferred bean's own provisional
-            # registration (recognised by its factory), which is now given the
-            # instance it was standing in for.
             return_reg = self._container._registrations[declared]
             return_reg.factory = factory
             return_reg.destroy_method = self._declared_destroy_method(method)
@@ -1219,18 +1234,6 @@ class ApplicationContext:
                 return_reg.primary = True
             if bean_scope == Scope.SINGLETON:
                 return_reg.instance = result
-
-        # A deferred factory with a parametrized hint (``-> Pool[str]``) claimed the origin class. A
-        # product of exactly that class replaced the claim above (same class, same name); a product of
-        # a subclass leaves the claim to be completed here, or resolving the origin would run the
-        # factory a second time.
-        claimed = self._declared_registration_type(return_type)
-        if claimed is not None and claimed is not declared and claimed is not impl_type:
-            claim = self._container._registrations.get(claimed)
-            if claim is not None and claim.factory is factory:
-                self._container.bind(claimed, impl_type)
-                if bean_scope == Scope.SINGLETON:
-                    claim.instance = result
 
     def _defer_bean_method(
         self,
@@ -1255,11 +1258,15 @@ class ApplicationContext:
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         factory = self._bean_factory(config_instance, method)
         # A parametrized hint (``-> async_sessionmaker[AsyncSession]``) claims its origin class: it
-        # used to claim nothing, so the auto-configured bean it replaces was registered beside it.
+        # used to claim nothing, so the auto-configured bean it replaces was registered beside it. The
+        # claim is made unless a SINGLETON of the class is registered (that one already makes the
+        # auto-configured bean back off): a request- or refresh-scoped bean of the class is another bean,
+        # and whichever came first, the override must still be seen. The claim is found by its class and
+        # bean name, never by the by-type slot, which a later scoped registration takes over.
         declared = self._declared_registration_type(return_type)
-        if declared is not None and declared not in self._container._registrations:
+        if declared is not None and not self._singleton_registered(declared):
             self._container.register(declared, scope=bean_scope, name=bean_name)
-            provisional = self._container._registrations[declared]
+            provisional = self._container._all[(declared, bean_name)]
             provisional.factory = factory
             provisional.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
@@ -1276,6 +1283,48 @@ class ApplicationContext:
             },
         )
 
+    def _singleton_registered(self, cls: type) -> bool:
+        """Whether a SINGLETON bean is registered under exactly *cls* (under any name)."""
+        container = self._container
+        slot = container._registrations.get(cls)
+        if slot is not None and slot.scope == Scope.SINGLETON:
+            return True
+        return any(
+            reg.scope == Scope.SINGLETON for (registered, _name), reg in container._all.items() if registered is cls
+        )
+
+    def _deferred_claim(
+        self, method: Any, attr_name: str, return_type: Any, factory: Callable[[], Any] | None
+    ) -> Registration | None:
+        """The provisional registration a deferred ``@bean`` method made, or ``None`` when it made none.
+
+        It is found by its class and bean name (see :meth:`_defer_bean_method`) and recognized by the
+        factory closure the deferral created; a call that was not deferred passes no factory.
+        """
+        claimed = self._declared_registration_type(return_type)
+        if claimed is None or factory is None:
+            return None
+        bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
+        claim = self._container._all.get((claimed, bean_name))
+        return claim if claim is not None and claim.factory is factory else None
+
+    def _remove_claim(self, claim: Registration) -> None:
+        """Drop a provisional registration from every index; the by-type slot falls back to another bean
+        of the class (a scoped one the claim had taken the slot from), if there is one."""
+        container = self._container
+        cls, name = claim.impl_type, claim.name
+        if container._all.get((cls, name)) is claim:
+            del container._all[(cls, name)]
+            container._unindex_name(cls, name)
+        if name and container._named.get(name) is claim:
+            del container._named[name]
+        if container._registrations.get(cls) is claim:
+            remaining = [reg for (registered, _name), reg in container._all.items() if registered is cls]
+            if remaining:
+                container._registrations[cls] = remaining[-1]
+            else:
+                del container._registrations[cls]
+
     def _process_deferred_bean_methods(self) -> None:
         """Step 2d: complete the user @bean methods deferred in step 2.
 
@@ -1289,8 +1338,7 @@ class ApplicationContext:
         while pending:
             still_pending: list[_DeferredBeanMethod] = []
             for entry in pending:
-                declared = self._declared_registration_type(entry.return_type)
-                provisional = self._container._registrations.get(declared) if declared is not None else None
+                provisional = self._deferred_claim(entry.method, entry.attr_name, entry.return_type, entry.factory)
                 if (
                     provisional is not None
                     and provisional.factory is entry.factory
@@ -1317,13 +1365,11 @@ class ApplicationContext:
                 )
             if len(still_pending) == len(pending):
                 first = still_pending[0]
-                first_declared = self._declared_registration_type(first.return_type)
-                if first_declared is not None:
-                    reg = self._container._registrations.get(first_declared)
-                    if reg is not None and reg.factory is first.factory and reg.instance is None:
-                        # Leave no provisional registration behind that would answer a resolve
-                        # with the same failure later.
-                        self._remove_registration(first_declared)
+                claim = self._deferred_claim(first.method, first.attr_name, first.return_type, first.factory)
+                if claim is not None and claim.instance is None:
+                    # Leave no provisional registration behind that would answer a resolve with the
+                    # same failure later.
+                    self._remove_claim(claim)
                 raise first.cause
             pending = still_pending
 

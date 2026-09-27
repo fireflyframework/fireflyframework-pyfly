@@ -726,3 +726,70 @@ async def test_a_user_session_factory_over_the_registry_engine_is_no_split(
         assert _split_warnings(caplog) == []
     finally:
         await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# A deferred override beside a scoped bean of the same class. The claim was made only when the class had
+# no registration at all, and the deferred pass looked for it in the by-type slot, which the scoped
+# registration takes over. Whichever configuration came first (a scanned application has any order), the
+# override was ignored, raised two primaries, or ran twice with the routing factory holding the other one.
+# ---------------------------------------------------------------------------
+
+
+@configuration
+class _ScopedReportingSessions:
+    @bean(name="reporting_sessions", scope=REFRESH_SCOPE_NAME)
+    def reporting_sessions(self) -> async_sessionmaker[AsyncSession]:
+        return _scoped_sessions("reporting")
+
+
+@pytest.mark.parametrize("scoped_first", [True, False], ids=["scoped-first", "override-first"])
+async def test_a_primary_deferred_override_beside_a_scoped_factory_is_the_primary(
+    tmp_path: Path, scoped_first: bool
+) -> None:
+    _USER_FACTORIES.clear()
+    _SCOPED_ENGINES.clear()
+    ctx = ApplicationContext(await _relational_app(tmp_path, "reporting"))
+    for configuration_class in (
+        (_ScopedReportingSessions, _DeferredPrimarySessionFactory)
+        if scoped_first
+        else (_DeferredPrimarySessionFactory, _ScopedReportingSessions)
+    ):
+        ctx.register_bean(configuration_class)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        factory = ctx.get_bean(async_sessionmaker)
+        assert [factory] == _USER_FACTORIES  # the override, built once
+        routed = ctx.get_bean(RoutingSessionFactory).primary()
+        assert isinstance(routed.sync_session, _UserSyncSession)
+        await routed.close()
+        session = ctx.get_bean(AsyncSession)
+        assert isinstance(session.sync_session, _UserSyncSession)
+        await session.close()
+        _USER_STATEMENTS.clear()
+        assert [owner.name for owner in await ctx.get_bean(_DatabaseOwnerRepository).find_all()] == ["primary"]
+        assert len(_USER_STATEMENTS) == 1
+        assert await _owner_of(ctx.get_bean_by_name("reporting_sessions")) == "reporting"
+    finally:
+        await ctx.stop()
+        for engine in _SCOPED_ENGINES:
+            await engine.dispose()
+
+
+@pytest.mark.parametrize("scoped_first", [True, False], ids=["scoped-first", "override-first"])
+async def test_a_plain_deferred_override_beside_a_scoped_factory_is_ambiguous(
+    tmp_path: Path, scoped_first: bool
+) -> None:
+    """Two session factories and no primary: the auto-configured one backs off, and the routing factory
+    cannot choose. It used to take the auto-configured factory when the scoped one came first."""
+    ctx = ApplicationContext(await _relational_app(tmp_path, "reporting"))
+    for configuration_class in (
+        (_ScopedReportingSessions, _DeferredSessionFactory)
+        if scoped_first
+        else (_DeferredSessionFactory, _ScopedReportingSessions)
+    ):
+        ctx.register_bean(configuration_class)
+    with pytest.raises(NoUniqueBeanError) as raised:
+        await ctx.start()
+    assert sorted(raised.value.candidate_names) == ["app_sessions", "reporting_sessions"]

@@ -1363,13 +1363,19 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
 2. **Process user `@configuration` classes** -- resolves configuration beans and registers
    their `@bean` factory method outputs. A user `@bean` whose parameters are not registered
    yet (typically a type an auto-configuration provides: `async_sessionmaker`, `EventPublisher`,
-   a client pool) is **deferred** rather than failed: its declared return type is registered now,
+   a client pool) is **deferred** rather than failed: its declared return type is claimed now,
    so `@conditional_on_missing_bean` in step 2b still sees it, and the factory runs in step 2d.
-   Parameters are resolved before the factory runs, so a deferred factory never starts twice.
+   Parameters are resolved before the factory runs, so a deferred factory never starts a body it
+   cannot finish. It runs once: a bean that resolves the claim in the meantime builds the product
+   through it, and step 2d reuses that product (the claim is found by its class and bean name).
    The declared type is the class the hint names: `-> Port | None` claims `Port`, a parametrized
    hint claims its origin class (`-> async_sessionmaker[AsyncSession]` claims `async_sessionmaker`,
-   so the auto-configured session factory backs off), a two-class union claims nothing, and a
-   factory that answers `None` registers nothing.
+   so the auto-configured session factory backs off), a builtin or abstract collection
+   (`list[X]`, `Callable[[str], str]`) or a two-class union claims nothing, and a factory that
+   answers `None` registers nothing. The claim is made unless a **singleton** of the class is
+   registered already: beside a request- or refresh-scoped bean of the class, whichever was
+   registered first, the override is still seen (and with two such beans, mark the one to inject
+   by type `primary=True`).
 2b. **Evaluate conditions (pass 2)** -- removes beans that fail bean-dependent conditions
     (`@conditional_on_bean`, `@conditional_on_missing_bean`).
 2c. **Process `@auto_configuration` classes** -- resolves auto-configuration `@bean` methods

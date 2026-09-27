@@ -28,6 +28,7 @@ registers is reported with the same ``NoSuchBeanError`` as before.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Generic, TypeVar
 
 import pytest
@@ -446,3 +447,41 @@ class TestDeferredBeanWithAParametrizedHint:
         assert isinstance(pool, TenantPool)
         assert ctx.get_bean(TenantPool) is pool
         assert calls == ["user_pool"]  # the claim was completed, not built a second time
+
+    async def test_an_abstract_collection_hint_claims_nothing(self) -> None:
+        """``-> Callable[[str], str]`` names what the product is, not which bean it is: registering it under
+        ``collections.abc.Callable`` would hand it to every ``Callable`` parameter."""
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def formatter(self, factory: SessionFactory) -> Callable[[str], str]:
+                return lambda text: f"{factory.url}:{text}"
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        await ctx.start()
+
+        assert not ctx.container.contains_type(Callable)  # type: ignore[arg-type]
+        assert ctx.get_bean_by_name("formatter")("x") == "postgresql://framework:x"
+
+    async def test_a_failed_claim_gives_the_class_back_to_the_scoped_bean_it_displaced(self) -> None:
+        @configuration
+        class UserConfiguration:
+            @bean(name="request_pool", scope=Scope.REQUEST)
+            def request_pool(self) -> Pool[str]:
+                return Pool("request")
+
+            @bean
+            def user_pool(self, missing: NeverRegistered) -> Pool[str]:
+                return Pool("never")
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        with pytest.raises(NoSuchBeanError):
+            await ctx.start()
+
+        registration = ctx.container.get_registration(Pool)
+        assert registration is not None and registration.name == "request_pool"
+        assert not ctx.container.contains("user_pool")
