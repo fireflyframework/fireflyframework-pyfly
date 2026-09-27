@@ -23,9 +23,11 @@ check: a write unit the block would open beside a write unit this task holds is 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -42,6 +44,7 @@ from pyfly.data.transaction import (
     after_commit,
     current_unit_of_work,
     infrastructure_unit,
+    is_current_transaction_read_only,
     is_transaction_active,
     outside_transaction,
 )
@@ -169,3 +172,33 @@ async def test_on_sqlite_a_write_beside_the_callers_write_unit_is_refused_at_onc
             async with infrastructure_unit("primary", read_only=True) as session:
                 assert (await session.execute(text("SELECT count(*) FROM outside_item"))).scalar_one() == 0
     assert await app.names() == ["caller"]
+
+
+@pytest.mark.parametrize("propagation", [None, Propagation.SUPPORTS, Propagation.NOT_SUPPORTED])
+async def test_on_sqlite_a_write_beside_a_write_scope_of_the_task_is_refused_at_once(
+    app: App, propagation: Propagation | None
+) -> None:
+    # A repository call's write auto unit holds the write lock too. Under SUPPORTS or NOT_SUPPORTED with no unit
+    # (a suspension marker without a unit is bound for the datasource) the block must still see it.
+    boundary: contextlib.AbstractAsyncContextManager[Any] = (
+        contextlib.nullcontext() if propagation is None else TransactionTemplate(propagation=propagation).transaction()
+    )
+    async with boundary, infrastructure_unit("primary") as session:
+        await session.execute(text("INSERT INTO outside_item (name) VALUES ('scope')"))
+        started = time.perf_counter()
+        with pytest.raises(IllegalTransactionStateError, match="write lock"), outside_transaction():
+            await _insert("refused")
+        assert time.perf_counter() - started < 1.0
+    assert await app.names() == ["scope"]
+
+
+async def test_the_block_is_never_read_only(app: App) -> None:
+    async with TransactionTemplate(read_only=True).transaction():
+        with outside_transaction():
+            assert is_current_transaction_read_only() is False
+    # Only a suspension marker is bound here, and the boundary is read-only: the block is not.
+    async with TransactionTemplate(propagation=Propagation.NOT_SUPPORTED, read_only=True).transaction():
+        assert is_current_transaction_read_only() is True
+        with outside_transaction():
+            assert is_current_transaction_read_only() is False
+        assert is_current_transaction_read_only() is True

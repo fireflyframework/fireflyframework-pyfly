@@ -232,8 +232,10 @@ def outside_transaction() -> Iterator[None]:
     Every unit bound to the task, and every repository operation scope open in it, is suspended for the
     block, as ``Propagation.NOT_SUPPORTED`` suspends one: :func:`~pyfly.data.transaction.infrastructure_unit`
     and repository calls in the block open short units of their own instead of joining the caller's,
-    ``after_commit`` callbacks run at once, and :func:`is_transaction_active` is false. The binding comes back
-    when the block exits, after an exception or a cancellation too. Outside every unit it changes nothing.
+    ``after_commit`` callbacks run at once, and :func:`is_transaction_active` and
+    :func:`is_current_transaction_read_only` are false (the block is outside every boundary, a read-only one
+    included). The binding comes back when the block exits, after an exception or a cancellation too. Outside
+    every unit and boundary it changes nothing.
 
     Unlike :func:`detached`, it starts no task: it is for work the caller waits for but that must not be
     part of the caller's transaction, such as an immediate write to a database-backed cache, which the
@@ -252,7 +254,7 @@ def outside_transaction() -> Iterator[None]:
       ``busy_timeout`` for the task's own lock): the suspended units stay visible to that check.
     """
     state = _STATE.get()
-    if not state.scopes and all(isinstance(bound, Suspended) for _name, bound in state.units):
+    if not state.scopes and not state.read_only and all(isinstance(bound, Suspended) for _name, bound in state.units):
         yield
         return
     token = _STATE.set(_suspended(state))
@@ -263,15 +265,30 @@ def outside_transaction() -> Iterator[None]:
 
 
 def _suspended(state: TransactionState) -> TransactionState:
-    """*state* with every unit and repository operation scope suspended (see :func:`outside_transaction`).
+    """*state* with every unit and repository operation scope suspended, and not read-only (see
+    :func:`outside_transaction`).
 
     Each datasource keeps what this task holds open on it in its suspension marker, as a ``NOT_SUPPORTED``
-    boundary does: the bound unit (its own suspended units chain from it), or the operation scope's unit
-    when no unit is bound.
+    boundary does: the bound unit (its own suspended units chain from it), or else the unit of the operation
+    scope open for it. A scope whose unit the marker does not already hold (a repository call's write auto
+    unit inside ``SUPPORTS`` or ``NOT_SUPPORTED``, where the marker holds no unit or a suspended one) replaces
+    it: that unit may hold SQLite's write lock, which the one-writer check must see.
     """
-    held: dict[str, UnitOfWork | Suspended] = {}
+    held: dict[str, Suspended] = {}
     for name, bound in state.units:
         held[name] = bound if isinstance(bound, Suspended) else Suspended(bound)
     for name, unit in state.scopes:
-        held.setdefault(name, Suspended(unit))
+        marker = held.get(name)
+        if marker is None or not _holds(marker, unit):
+            held[name] = Suspended(unit)
     return TransactionState(tuple(held.items()))
+
+
+def _holds(marker: Suspended, unit: UnitOfWork) -> bool:
+    """Whether *unit* is the unit *marker* keeps, or one that unit suspended."""
+    current = marker.unit
+    while current is not None:
+        if current is unit:
+            return True
+        current = current.suspended
+    return False
