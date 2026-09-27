@@ -1370,11 +1370,30 @@ blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transacti
 
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises
-`ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. While the task
-is being cancelled, such an error ends the operation, and the unit, as the cancellation it stood in for:
-the unit's connection is discarded, `CancelledError` is raised (chained from the driver's error), and the
-cancel scope that fired catches it, `wait_for` times out, or the unit's own `timeout` raises
-`TransactionTimedOutError`.
+`ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. When a cancel
+request arrived while the operation (or the unit) ran, such an error ends the operation, and the unit, as
+the cancellation it stood in for: the unit's connection is discarded, `CancelledError` is raised (chained
+from the driver's error), and the cancel scope that fired catches it, `wait_for` times out, or the unit's
+own `timeout` raises `TransactionTimedOutError`.
+
+Cleanup code is not affected: a task stays "being cancelled" (`Task.cancelling() > 0`) throughout
+`except CancelledError:`, `finally:` and anyio's `with CancelScope(shield=True):` cleanup, and the data
+access done there only counts cancel requests that arrive after it started. A duplicate saved in a
+compensation handler raises `IntegrityError`, a `@transactional` audit call that raises a business
+exception in shielded cleanup raises that exception, and the rest of the cleanup runs:
+
+```python
+async def handle(self, request: Request) -> None:
+    try:
+        await self.process(request)
+    finally:
+        with anyio.CancelScope(shield=True):   # runs even when the client disconnected
+            try:
+                await self.ledger.release_hold(request.id)   # @transactional
+            except HoldAlreadyReleasedError:
+                pass
+            await self.audit.record(request.id)
+```
 
 On SQLite a discarded connection rolls back on aiosqlite's worker thread before its handle closes, and a
 statement still running there is interrupted, so a cancelled unit never leaves `BEGIN IMMEDIATE`'s write

@@ -64,7 +64,7 @@ from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.manager import TransactionManager
 from pyfly.data.transaction.registry import PRIMARY, TransactionManagerRegistry, installed_registry
 from pyfly.data.transaction.template import AutoUnit, complete_auto_unit
-from pyfly.data.transaction.unit_of_work import UnitOfWork
+from pyfly.data.transaction.unit_of_work import UnitOfWork, cancel_requests
 
 T = TypeVar("T")
 ID = TypeVar("ID")
@@ -302,6 +302,7 @@ class Repository(Generic[T, ID]):
         state = current_state()
         unit = state.scope(datasource) or state.unit(datasource)
         owned = unit is None
+        since = cancel_requests()
         if unit is None:
             unit = await self._transaction_manager().open_auto_unit(read_only=True, autocommit=False)
         else:
@@ -335,7 +336,7 @@ class Repository(Generic[T, ID]):
             finally:
                 reset_state(token)
             if owned:
-                await complete_auto_unit(unit, error)
+                await complete_auto_unit(unit, error, since=since)
 
     @property
     def _pk_column(self) -> Any:

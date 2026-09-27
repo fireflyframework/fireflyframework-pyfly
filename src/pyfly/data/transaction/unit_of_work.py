@@ -37,6 +37,9 @@ child task may use its parent's unit. That is made safe here:
   takes the place of the cancellation (aiosqlite's ``ValueError('Connection closed')`` once an anyio scope
   re-cancelled SQLAlchemy's own cleanup, asyncmy's ``InterfaceError('Cancelled during execution')``) is
   turned back into the cancellation (:func:`cancellation_replaced_by`), so a cancel scope still catches it.
+  Only a cancel request that arrived while the operation ran counts: cleanup code that runs while its task
+  is still being cancelled (``except CancelledError:``, ``finally:``, anyio's shielded cleanup) sees its
+  own failures as themselves.
 """
 
 from __future__ import annotations
@@ -57,15 +60,31 @@ if TYPE_CHECKING:
 _IDS = itertools.count(1)
 
 
-def cancellation_replaced_by(error: BaseException | None) -> bool:
-    """Whether *error* stands in for a cancellation of the running task.
+def cancel_requests() -> int:
+    """The cancel requests pending on the running task (``Task.cancelling()``; ``0`` outside a task).
 
-    While a task is being cancelled (``Task.cancelling() > 0``: a cancel scope expired, ``wait_for`` timed
-    out, a client disconnected), a driver can raise its own error instead of the ``CancelledError``: anyio
+    Recorded when an operation, a boundary or an auto unit starts, it is the baseline
+    :func:`cancellation_replaced_by` compares against.
+    """
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
+def cancellation_replaced_by(error: BaseException | None, *, since: int) -> bool:
+    """Whether *error* stands in for a cancellation of the running task requested after *since*.
+
+    When a task is cancelled (a cancel scope expired, ``wait_for`` timed out, a client disconnected) while a
+    statement is in flight, a driver can raise its own error instead of the ``CancelledError``: anyio
     re-cancels SQLAlchemy's cleanup of the interrupted statement, aiosqlite then refuses the rollback with
     ``ValueError('Connection closed')``, and asyncmy reports ``InterfaceError('Cancelled during
-    execution')``. Such an error must end the task as cancelled, or the cancel scope cannot catch it. The
-    unit of work's own errors, and the end of a streamed result, never stand in for a cancellation.
+    execution')``. Such an error must end the task as cancelled, or the cancel scope cannot catch it.
+
+    *since* is :func:`cancel_requests` when the operation (or the unit) started: only a cancel request that
+    arrived after it counts. Cleanup code runs while its task is still being cancelled (``Task.cancelling()``
+    stays above zero in ``except CancelledError:``, in ``finally:`` and in anyio's
+    ``with CancelScope(shield=True):`` until the cancel scope exits), and an ordinary failure of the data
+    access done there, or a business exception it raises, is its own outcome. The unit of work's own errors,
+    and the end of a streamed result, never stand in for a cancellation.
     """
     if (
         error is None
@@ -73,8 +92,7 @@ def cancellation_replaced_by(error: BaseException | None) -> bool:
         or isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
     ):
         return False
-    task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
+    return cancel_requests() > since
 
 
 def _cancellation_behind(error: BaseException) -> asyncio.CancelledError | None:
@@ -173,13 +191,15 @@ class OperationGuard:
 class _Operation:
     """One guarded operation on a unit's resource (see :meth:`UnitOfWork.operation`)."""
 
-    __slots__ = ("_unit",)
+    __slots__ = ("_since", "_unit")
 
     def __init__(self, unit: UnitOfWork) -> None:
         self._unit = unit
+        self._since = 0
 
     async def __aenter__(self) -> UnitOfWork:
         unit = self._unit
+        self._since = cancel_requests()
         unit.check_usable()
         await unit.guard.acquire()
         try:
@@ -196,9 +216,9 @@ class _Operation:
         unit.guard.release()
         if exc is None:
             return
-        if cancellation_replaced_by(exc):
-            # The driver raised its own error in place of this task's cancellation: the connection is in an
-            # unknown state, and the caller must see the cancellation.
+        if cancellation_replaced_by(exc, since=self._since):
+            # The driver raised its own error in place of a cancellation that arrived while the operation ran:
+            # the connection is in an unknown state, and the caller must see the cancellation.
             unit.poisoned = True
             await raise_cancellation(exc)
         unit.operation_failed(exc)
