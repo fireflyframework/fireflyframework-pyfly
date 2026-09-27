@@ -66,6 +66,33 @@ class QaBook(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     author_id: Mapped[int] = mapped_column(ForeignKey("qa_author.id"))
     title: Mapped[str] = mapped_column(String(40))
+    author: Mapped[QaAuthor] = relationship(lazy="joined", overlaps="books")
+
+
+class QaShelf(Base):
+    """A shelf whose books load eagerly with a join (a ``lazy="joined"`` collection)."""
+
+    __tablename__ = "qa_shelf"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    books: Mapped[list[QaShelfBook]] = relationship(lazy="joined", order_by="QaShelfBook.id")
+
+
+class QaShelfBook(Base):
+    __tablename__ = "qa_shelf_book"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    shelf_id: Mapped[int] = mapped_column(ForeignKey("qa_shelf.id"))
+
+
+class BookRepository(Repository[QaBook, int]):
+    @query("SELECT b FROM QaBook b WHERE b.title LIKE :prefix ORDER BY b.id")
+    async def titled(self, prefix: str) -> list[QaBook]: ...
+
+
+class ShelfRepository(Repository[QaShelf, int]):
+    @query("SELECT * FROM qa_shelf ORDER BY id", native=True)
+    async def every(self) -> list[QaShelf]: ...
 
 
 @projection
@@ -225,6 +252,23 @@ async def test_entity_results_are_typed_mapped_by_attribute_and_loaded(relationa
             (3, "Cid", False),
             (4, "Dee", True),
         ]
+
+
+async def test_relationships_loaded_with_a_join_are_loaded_for_query_results(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A text statement cannot be joined to the relationships a mapping loads with a join: they are loaded with
+    one more statement each instead, so they are there on the detached results."""
+    async with repository_datasources(relational_backend, QaAuthor, QaBook, QaShelf, QaShelfBook) as datasources:
+        await _authors(datasources)
+        async with datasources.engine.begin() as conn:
+            await conn.execute(insert(QaShelf), [{"id": 1}, {"id": 2}])
+            await conn.execute(insert(QaShelfBook), [{"id": 5, "shelf_id": 1}, {"id": 6, "shelf_id": 1}])
+        books = RepositoryBeanPostProcessor().after_init(BookRepository(), "books")
+        found = await books.titled("t%")
+        assert [(book.id, book.author.display_name) for book in found] == [(10, "Ana"), (11, "Ana"), (30, "Cid")]
+        shelves = RepositoryBeanPostProcessor().after_init(ShelfRepository(), "shelves")
+        assert [[book.id for book in shelf.books] for shelf in await shelves.every()] == [[5, 6], []]
 
 
 async def test_a_query_sees_the_units_pending_changes(relational_backend: RelationalBackend) -> None:

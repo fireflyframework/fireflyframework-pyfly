@@ -46,7 +46,8 @@ Usage::
 - the entity (``list[User]``, ``User | None``): the query runs as ``select(User).from_statement(text(sql))``,
   so its rows are the unit of work's own entities (identity-mapped: a change to one is flushed with the unit,
   ``save()`` updates it), typed and mapped by attribute through the entity's columns, their relationships
-  loaded as any read loads them, and the unit's pending changes are flushed before it runs;
+  loaded as any read loads them (one loaded with a join, ``lazy="joined"``, by one more statement instead, since
+  a text statement cannot be joined), and the unit's pending changes are flushed before it runs;
 - a scalar (``int``, ``bool``, ``str``, ``list[str]``...), a row (``tuple``), a row by column name (``dict``),
   a :func:`~pyfly.data.projection.projection` or any other class built from the row's columns by name: the
   statement runs as it is, after the unit's pending changes are flushed;
@@ -97,7 +98,7 @@ from sqlalchemy import Uuid, bindparam, column, select, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import ColumnProperty, Mapper
+from sqlalchemy.orm import ColumnProperty, Mapper, selectinload
 from sqlalchemy.types import NullType
 
 from pyfly.data.projection import projection_fields
@@ -682,8 +683,8 @@ class CompiledQuery:
             return await self._modify(session, bound)
         if self._shape.element is ElementKind.ENTITY:
             entity = self._shape.type or self._entity
-            result = await session.execute(select(entity).from_statement(bound))
-            return self._shaped(unique_entities(result))
+            statement = select(entity).from_statement(bound).options(*_joined_as_selectin(entity))
+            return self._shaped(unique_entities(await session.execute(statement)))
         await _flush_pending(session)
         result = await session.execute(bound)
         return self._shaped(self._rows(result))
@@ -753,6 +754,18 @@ async def _flush_pending(session: AsyncSession) -> None:
     """Flush the session's pending changes before a statement the ORM does not flush for (a raw one)."""
     if session.sync_session.autoflush and (session.new or session.deleted or session.dirty):
         await session.flush()
+
+
+def _joined_as_selectin(entity: type) -> list[Any]:
+    """``selectin`` loads of the relationships *entity*'s mapping loads with a join (``lazy="joined"``): a text
+    statement cannot be joined to them, so each is loaded with one more statement instead, and is there on the
+    results as a read of the entity has it."""
+    mapper: Mapper[Any] = sa_inspect(entity)
+    return [
+        selectinload(getattr(entity, relationship.key))
+        for relationship in mapper.relationships
+        if relationship.lazy in ("joined", False)
+    ]
 
 
 def _is_mapped(candidate: Any) -> bool:
