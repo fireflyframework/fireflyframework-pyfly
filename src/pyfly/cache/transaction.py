@@ -41,8 +41,11 @@ its own, the cancellation re-raised once it is done. The method before it has ru
 and an eviction lost there would leave the old value cached for its whole TTL.
 
 A deferred write registered from a task that outlived its unit (a task the unit's body started and did not
-await) cannot wait for the commit any more: it runs at once when the unit committed, and is dropped (and
-logged) when it rolled back.
+await) cannot wait for the commit any more. A put runs at once when the unit committed, and is dropped (and
+logged) otherwise: its value may be a row that never commits. An eviction or a clear runs at once unless the
+unit rolled back, also while the unit is still completing or when its outcome is unknown: evicting is
+always safe (it costs a miss), and dropping it would leave the old value cached for its TTL if the commit
+succeeds.
 """
 
 from __future__ import annotations
@@ -199,12 +202,17 @@ class TransactionAwareCache:
             await after_commit(deferred)
         except IllegalTransactionStateError as refusal:
             # The calling task outlived its unit (the unit's body started it and did not await it): there is
-            # no commit left to wait for. A committed unit's write runs now; a rolled-back one's is dropped.
+            # no commit left to wait for. A put runs now only when the unit committed; an eviction runs now
+            # unless it rolled back (still completing, or an unknown outcome, it may commit).
             unit = current_unit_of_work()
-            if unit is None or unit.status is not UnitStatus.COMMITTED:
+            status = unit.status if unit is not None else None
+            if operation == "put":
+                if status is UnitStatus.COMMITTED:
+                    await deferred()
+                else:
+                    self._failed(operation, key, refusal)
+            elif status is UnitStatus.ROLLED_BACK:
                 self._failed(operation, key, refusal)
-            elif operation == "put":
-                await deferred()
             else:
                 await self._shielded(operation, key, write)
 

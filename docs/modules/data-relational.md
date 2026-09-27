@@ -1587,9 +1587,13 @@ afterwards, so a client that disconnects mid-transaction (Starlette cancels the 
 scope) never returns a poisoned or leaked connection to the pool. The `after_commit` and
 `after_completion` callbacks run shielded too, each in a task of its own: a cancellation that lands as the
 unit commits interrupts none of them (a cache eviction or an event publication of a committed unit is
-never lost to a client disconnect), and it is re-raised once they all ran. A commit whose connection fails
-while `COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
-blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transactions)).
+never lost to a client disconnect), and it is re-raised once they all ran. The flip side: a shielded
+callback cannot be cancelled either. One that hangs (a cache eviction on a Redis client without
+`socket_timeout` during a network partition) holds the request, its `asyncio.timeout`, client-disconnect
+cancellation and shutdown until it returns, so give the clients your callbacks use timeouts of their own. A
+commit whose connection fails while `COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may
+have committed. Never retry it blindly; `@retry` does not (see
+[Resilience](resilience.md#retries-and-transactions)).
 
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises

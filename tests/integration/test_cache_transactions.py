@@ -24,7 +24,9 @@ database committed is read through an engine of its own.
 - C025: a value the cache refuses at run time never changes the outcome of the call (no retry, no
   duplicate row). The decoration-time checks are in ``tests/cache/test_cache.py``.
 - A task a unit's body started and did not await, which outlives the unit, still gets its result: the
-  write it makes is applied at once when the unit committed, and dropped (logged) when it rolled back.
+  write it makes is applied at once when the unit committed, and dropped (logged) when it rolled back. An
+  eviction it makes runs at once unless the unit rolled back (while the unit is still completing too):
+  evicting is always safe, and dropping it would leave the old value cached for its TTL.
 """
 
 from __future__ import annotations
@@ -46,7 +48,15 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import Propagation, detached, transactional
+from pyfly.data.transaction import (
+    Propagation,
+    TransactionSynchronizationAdapter,
+    UnitStatus,
+    current_unit_of_work,
+    detached,
+    register_synchronization,
+    transactional,
+)
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
@@ -133,6 +143,7 @@ class Flow:
         self.catalog = catalog
         self.seen_inside: list[Any] = []
         self.background: list[asyncio.Task[float]] = []
+        self.statuses: list[asyncio.Task[str]] = []
 
     @transactional
     async def rename_then(self, item_id: int, name: str, *, fail: bool) -> None:
@@ -183,10 +194,43 @@ class Flow:
             raise RuntimeError("a later step fails")
 
     @transactional
+    async def rename_and_evict_in_the_background(self, item_id: int, name: str) -> None:
+        await self.catalog.items._session.execute(
+            update(CacheTxItem).where(CacheTxItem.id == item_id).values(name=name)
+        )
+        completing, evicted = asyncio.Event(), asyncio.Event()
+        register_synchronization(_HoldCompletion(completing, evicted))
+
+        async def evict_once_the_unit_completes() -> str:
+            await completing.wait()
+            unit = current_unit_of_work()
+            status = unit.status.value if unit is not None else "none"
+            try:
+                await self.catalog.touch_nothing(item_id)  # a @cache_evict method on the completing unit
+            finally:
+                evicted.set()
+            return status
+
+        # Started and not awaited: the task outlives this unit, and evicts while it is completing.
+        self.statuses.append(asyncio.create_task(evict_once_the_unit_completes()))
+
+    @transactional
     async def read_entity_then_fail(self, item_id: int) -> None:
         item = await self.catalog.get_entity(item_id)
         assert item is not None
         raise RuntimeError(f"out of stock: {item.name}")
+
+
+class _HoldCompletion(TransactionSynchronizationAdapter):
+    """Holds the unit in COMPLETING (right before its commit) until a background task has evicted."""
+
+    def __init__(self, completing: asyncio.Event, evicted: asyncio.Event) -> None:
+        self._completing = completing
+        self._evicted = evicted
+
+    async def before_completion(self) -> None:
+        self._completing.set()
+        await asyncio.wait_for(self._evicted.wait(), timeout=10)
 
 
 _BEANS = (RelationalAutoConfiguration, CacheTxItemRepository, CacheTxChildRepository, Catalog, Flow)
@@ -418,5 +462,26 @@ async def test_a_task_that_outlived_its_rolled_back_unit_caches_nothing_and_neve
         assert await flow.background[-1] == 1.1
         assert await CACHE.exists("rate:GBP") is False
         assert any(record.getMessage().startswith("cache_put_skipped") for record in caplog.records)
+    finally:
+        await ctx.stop()
+
+
+async def test_an_eviction_from_a_task_that_outlived_a_completing_unit_is_not_lost(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        await _seed(relational_backend, "old name")
+        flow = ctx.get_bean(Flow)
+        catalog = ctx.get_bean(Catalog)
+        assert await catalog.get_name(1) == "old name"  # cached
+
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        await flow.rename_and_evict_in_the_background(1, "new name")
+        assert await flow.statuses[-1] == UnitStatus.COMPLETING.value
+        assert await _rows(relational_backend, "wp14_cache_tx_item", "name") == ["new name"]
+        assert await CACHE.exists("name:1") is False  # the eviction ran: the old name is not served
+        assert await catalog.get_name(1) == "new name"
+        assert not any("cache_evict_skipped" in record.getMessage() for record in caplog.records)
     finally:
         await ctx.stop()
