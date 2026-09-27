@@ -1,0 +1,185 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""A cache whose writes wait for the unit of work to commit (Spring's ``TransactionAwareCacheDecorator``).
+
+Inside a unit of work (``@transactional``, a ``TransactionTemplate`` block, a repository call's auto
+unit), :class:`TransactionAwareCache` registers ``put``, ``evict``, ``evict_by_prefix`` and ``clear`` as
+after-commit synchronizations (:func:`pyfly.data.transaction.after_commit`):
+
+- they run once the unit has committed, so no other request is served a value that was never committed,
+  and no concurrent reader re-caches the old value after an eviction that ran before the commit;
+- they are dropped when the unit rolls back (or its commit fails), which leaves the cache exactly as it
+  was, consistent with the database.
+
+Outside a unit they run at once. Reads (``get``, ``exists``) always run at once, and so do
+``put_if_absent`` and the explicitly immediate :meth:`TransactionAwareCache.evict_if_present` and
+:meth:`TransactionAwareCache.invalidate`.
+
+A deferred ``put`` stores a copy of the value taken when it was registered
+(:func:`~pyfly.cache.serialization.copy_value`): changes made to the value before the commit are not
+cached, and a value the cache refuses (a live ORM object) is refused right there, before the commit.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from typing import Any, Literal
+
+from pyfly.cache.namespaces import dedicated_cache
+from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.serialization import copy_value
+
+_logger = logging.getLogger("pyfly.cache")
+
+WriteErrors = Literal["raise", "log"]
+"""What a failing write does: propagate (``"raise"``), or get logged and skipped (``"log"``)."""
+
+
+def in_unit_of_work() -> bool:
+    """Whether a unit of work is bound to the running task, so a cache write would wait for its commit."""
+    from pyfly.data.transaction import current_unit_of_work
+
+    return current_unit_of_work() is not None
+
+
+class TransactionAwareCache:
+    """Defers the writes of *delegate* to the commit of the current unit of work (see the module docs).
+
+    Args:
+        delegate: The cache to write to.
+        on_write_error: ``"raise"`` (the default) propagates a failing write made outside a unit (a
+            deferred write that fails is logged and counted by the unit, never raised). ``"log"`` logs every
+            failing write at WARNING (an eviction at ERROR: stale data may be served) and carries on: the
+            outcome of the business call never depends on the cache. The declarative decorators and the CQRS
+            query cache use ``"log"``.
+    """
+
+    def __init__(self, delegate: CacheAdapter, *, on_write_error: WriteErrors = "raise") -> None:
+        self._delegate = delegate
+        self._on_write_error = on_write_error
+
+    @property
+    def delegate(self) -> CacheAdapter:
+        """The cache the writes go to."""
+        return self._delegate
+
+    # -- reads (immediate) ----------------------------------------------------------------------------------
+
+    async def get(self, key: str) -> Any | None:
+        return await self._delegate.get(key)
+
+    async def exists(self, key: str) -> bool:
+        return await self._delegate.exists(key)
+
+    # -- writes (after commit) ------------------------------------------------------------------------------
+
+    async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
+        """Store *value* after the commit (at once outside a unit)."""
+        if not in_unit_of_work():
+            await self._write("put", key, lambda: self._delegate.put(key, value, ttl=ttl))
+            return
+        try:
+            snapshot = copy_value(value)
+        except Exception as error:
+            self._failed("put", key, error)
+            return
+        await self._defer("put", key, lambda: self._delegate.put(key, snapshot, ttl=ttl))
+
+    async def evict(self, key: str) -> bool:
+        """Evict *key* after the commit (at once outside a unit). Inside a unit nothing is evicted yet, so it
+        returns ``False``."""
+        if not in_unit_of_work():
+            evicted = await self._write("evict", key, lambda: self._delegate.evict(key))
+            return bool(evicted)
+        await self._defer("evict", key, lambda: self._delegate.evict(key))
+        return False
+
+    async def evict_by_prefix(self, prefix: str) -> int:
+        """Evict every key starting with *prefix* after the commit (at once outside a unit). Inside a unit
+        nothing is evicted yet, so it returns ``0``."""
+        if not in_unit_of_work():
+            removed = await self._write("evict_by_prefix", prefix, lambda: self._delegate.evict_by_prefix(prefix))
+            return int(removed or 0)
+        await self._defer("evict_by_prefix", prefix, lambda: self._delegate.evict_by_prefix(prefix))
+        return 0
+
+    async def clear(self) -> None:
+        """Clear the cache after the commit (at once outside a unit)."""
+        if not in_unit_of_work():
+            await self._write("clear", "*", self._delegate.clear)
+            return
+        await self._defer("clear", "*", self._delegate.clear)
+
+    # -- immediate writes -----------------------------------------------------------------------------------
+
+    async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
+        """Store *value* at once when *key* is absent: its answer cannot wait for a commit."""
+        return await self._delegate.put_if_absent(key, value, ttl=ttl)
+
+    async def evict_if_present(self, key: str) -> bool:
+        """Evict *key* at once, even inside a unit of work (Spring's ``evictIfPresent``)."""
+        return await self._delegate.evict(key)
+
+    async def invalidate(self) -> None:
+        """Clear the cache at once, even inside a unit of work (Spring's ``invalidate``)."""
+        await self._delegate.clear()
+
+    # -- lifecycle and namespaces ---------------------------------------------------------------------------
+
+    async def start(self) -> None:
+        await self._delegate.start()
+
+    async def stop(self) -> None:
+        await self._delegate.stop()
+
+    def with_namespace(self, name: str) -> TransactionAwareCache:
+        """A transaction-aware cache over the cache dedicated to *name* (see
+        :func:`~pyfly.cache.namespaces.dedicated_cache`)."""
+        return TransactionAwareCache(dedicated_cache(self._delegate, name), on_write_error=self._on_write_error)
+
+    # -- internals ------------------------------------------------------------------------------------------
+
+    async def _write(self, operation: str, key: str, write: Callable[[], Awaitable[Any]]) -> Any:
+        if self._on_write_error == "raise":
+            return await write()
+        try:
+            return await write()
+        except Exception as error:  # noqa: BLE001 — a cache failure never changes the business outcome
+            self._failed(operation, key, error)
+            return None
+
+    async def _defer(self, operation: str, key: str, write: Callable[[], Awaitable[Any]]) -> None:
+        from pyfly.data.transaction import after_commit
+
+        async def deferred() -> None:
+            await self._write(operation, key, write)
+
+        await after_commit(deferred)
+
+    def _failed(self, operation: str, key: str, error: Exception) -> None:
+        if self._on_write_error == "raise":
+            raise error
+        level = logging.WARNING if operation == "put" else logging.ERROR
+        _logger.log(
+            level,
+            "cache_%s_skipped key=%r cache=%s: %s: %s",
+            operation,
+            key,
+            type(self._delegate).__qualname__,
+            type(error).__name__,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )

@@ -17,17 +17,29 @@ Import concrete adapter types from the adapter package::
 
     from pyfly.cache.adapters.memory import InMemoryCache
     from pyfly.cache.adapters.redis import RedisCacheAdapter
+
+Caches hold copies, never live ORM objects (:class:`CacheValueError`); the decorators and
+:class:`TransactionAwareCache` write after the unit of work commits; :func:`cache_region` and
+:func:`dedicated_cache` give consumers named caches that clear independently.
 """
 
 from pyfly.cache.decorators import cache, cache_evict, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
+from pyfly.cache.namespaces import PrefixedCache, cache_region, dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.serialization import CacheValueError
+from pyfly.cache.transaction import TransactionAwareCache
 
 __all__ = [
     "CacheAdapter",
     "CacheManager",
+    "CacheValueError",
+    "PrefixedCache",
+    "TransactionAwareCache",
     "cache",
     "cache_evict",
     "cache_put",
+    "cache_region",
     "cacheable",
+    "dedicated_cache",
 ]
