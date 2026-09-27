@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import Integer, String
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable
@@ -259,6 +259,31 @@ class TestJpqlTranspiler:
             _sql("SELECT i FROM Item i WHERE i.nmae = :name")
         with pytest.raises(InvalidQueryMethodError, match="Unterminated"):
             _sql("SELECT i FROM Item i WHERE i.name = 'x")
+
+    def test_a_class_name_two_modules_share_resolves_in_the_entitys_module(self):
+        class Isolated(DeclarativeBase):
+            """A registry of its own, so the twin classes never reach Base's."""
+
+        def mapped(name: str, module: str, table: str) -> type:
+            namespace = {
+                "__module__": module,
+                "__tablename__": table,
+                "__annotations__": {"id": Mapped[int]},
+                "id": mapped_column(Integer, primary_key=True, autoincrement=False),
+            }
+            return type(name, (Isolated,), namespace)
+
+        holder = mapped("Holder", "app.models", "holder")
+        tags = [mapped("Tag", "app.models", "app_tag"), mapped("Tag", "vendor.models", "vendor_tag")]
+        assert [tag.__module__ for tag in tags] == ["app.models", "vendor.models"]  # both alive: the registry is weak
+        assert _sql("SELECT h.id FROM Holder h JOIN Tag t ON t.id = h.id", holder) == (
+            "SELECT h.id FROM holder h JOIN app_tag t ON t.id = h.id"
+        )
+        stranger = mapped("Stranger", "third.models", "stranger")
+        # Neither Tag is in the stranger's module: the name stays as written.
+        assert _sql("SELECT s.id FROM Stranger s JOIN Tag t ON t.id = s.id", stranger) == (
+            "SELECT s.id FROM stranger s JOIN Tag t ON t.id = s.id"
+        )
 
     def test_the_legacy_static_method_still_transpiles(self):
         assert QueryExecutor._transpile_jpql("SELECT i FROM Item i", Item) == f"SELECT {ITEM_COLUMNS} FROM q_items i"
