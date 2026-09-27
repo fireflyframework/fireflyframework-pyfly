@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from sqlalchemy import String, inspect, select, text
+from sqlalchemy import Column, Integer, MetaData, String, Table, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
@@ -251,3 +251,33 @@ async def test_mariadb_through_a_mysql_url_keeps_microseconds(relational_backend
         assert reloaded.due_at == written and _is_utc(reloaded.due_at)
     finally:
         await backend.dispose()
+
+
+@pytest.mark.backends("pg")
+async def test_a_legacy_naive_postgresql_column_is_migrated_before_it_adopts_the_type(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``UtcDateTime`` expects ``timestamptz`` on PostgreSQL. A ``timestamp without time zone`` column that
+    adopts it (``update_type_annotation_map`` makes every ``Mapped[datetime]`` one) reads back naive on
+    asyncpg, and the server converts its writes with the session's ``TimeZone``. The documented migration
+    reads the old values as the UTC wall times they are."""
+    table = Table("wp05_legacy_naive", MetaData(), Column("id", Integer, primary_key=True), Column("at", UtcDateTime()))
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE wp05_legacy_naive (id integer PRIMARY KEY, at timestamp)"))
+        await connection.execute(text("INSERT INTO wp05_legacy_naive VALUES (1, '2026-09-24 10:00:00.123456')"))
+    async with engine.connect() as connection:
+        before = (await connection.execute(select(table.c.at))).scalar_one()
+    assert before.tzinfo is None  # the hazard the documentation warns about
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("ALTER TABLE wp05_legacy_naive ALTER COLUMN at TYPE timestamptz USING at AT TIME ZONE 'UTC'")
+        )
+        await connection.execute(text("SET LOCAL TimeZone = 'Asia/Tokyo'"))
+        written = datetime(2026, 9, 24, 12, 0, 0, 5, tzinfo=PLUS_TWO)
+        await connection.execute(table.insert().values(id=2, at=written))
+    async with engine.connect() as connection:
+        rows = dict((await connection.execute(select(table.c.id, table.c.at).order_by(table.c.id))).tuples().all())
+    assert rows == {1: datetime(2026, 9, 24, 10, 0, 0, 123456, tzinfo=UTC), 2: written}
+    assert all(_is_utc(value) for value in rows.values())

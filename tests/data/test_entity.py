@@ -235,6 +235,34 @@ class TestUtcDateTime:
         reloaded = await session.get(StrictReading, 2)
         assert reloaded is not None and reloaded.taken_at == taken and reloaded.taken_at.tzinfo is UTC
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            ("2026-09-24 10:00:00.000005", datetime(2026, 9, 24, 10, 0, 0, 5, tzinfo=UTC)),
+            ("2026-09-24 10:00:00", datetime(2026, 9, 24, 10, 0, tzinfo=UTC)),
+            ("2026-09-24T10:00:00", datetime(2026, 9, 24, 10, 0, tzinfo=UTC)),
+            ("2026-09-24 12:00:00+02:00", datetime(2026, 9, 24, 10, 0, tzinfo=UTC)),
+        ],
+        ids=["as-bound", "whole-seconds", "iso-t", "own-offset"],
+    )
+    async def test_sqlite_text_reads_as_aware_utc(self, tmp_path: Path, stored: str, expected: datetime) -> None:
+        """What a bind stored (the UTC wall time) and what another writer may have stored (an ISO ``T``, an
+        offset of its own) all read back as the aware UTC instant."""
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'readings.db'}")
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all, tables=[StrictReading.__table__])
+                await connection.exec_driver_sql(
+                    "INSERT INTO entity_strict_readings (id, taken_at) VALUES (1, ?)", (stored,)
+                )
+            async with AsyncSession(engine) as session:
+                reading = await session.get(StrictReading, 1)
+            assert reading is not None
+            assert reading.taken_at == expected and reading.taken_at.tzinfo is UTC
+        finally:
+            await engine.dispose()
+
     def test_repr_renders_for_migrations(self) -> None:
         assert repr(UtcDateTime()) == "UtcDateTime()"
         assert repr(UtcDateTime(strict=True)) == "UtcDateTime(strict=True)"

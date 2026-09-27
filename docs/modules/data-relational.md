@@ -193,8 +193,8 @@ from pyfly.data.relational.sqlalchemy import BaseEntity
 | `id`         | `Mapped[UUID]`    | Primary key        | Auto-generated UUID v4               |
 | `created_at` | `Mapped[datetime]`| `UtcDateTime`      | Set automatically on insert          |
 | `updated_at` | `Mapped[datetime]`| `UtcDateTime`      | Set on insert, updated on every save |
-| `created_by` | `Mapped[str\|None]`| `String(255)`     | Creator identifier (default `None`)  |
-| `updated_by` | `Mapped[str\|None]`| `String(255)`     | Updater identifier (default `None`)  |
+| `created_by` | `Mapped[str\|None]`| `Unicode(255)`    | Creator identifier (default `None`)  |
+| `updated_by` | `Mapped[str\|None]`| `Unicode(255)`    | Updater identifier (default `None`)  |
 
 `BaseEntity` is declared with `__abstract__ = True`, so it does not create its own database table.
 
@@ -240,6 +240,18 @@ class Shipment(BaseEntity):
 **Existing MySQL/MariaDB tables** keep `DATETIME` (whole seconds) until you migrate them:
 `ALTER TABLE orders MODIFY created_at DATETIME(6) NOT NULL` (and `updated_at`, `deleted_at`). The values
 the framework stamped there are already UTC wall times, so they read back correctly as they are.
+
+**PostgreSQL `timestamp without time zone` columns** are not `UtcDateTime`'s type (it expects
+`timestamptz`, which `BaseEntity` has always created). One that adopts it, for example through the
+`update_type_annotation_map` line above, reads back naive on asyncpg, and PostgreSQL converts the aware
+values written to it, and compared with it, in the session's `TimeZone`. Migrate it first:
+`ALTER TABLE shipments ALTER COLUMN due_at TYPE timestamptz USING due_at AT TIME ZONE 'UTC'` reads the
+stored values as the UTC wall times they are.
+
+**Read cost.** Values read on SQLite, MySQL and MariaDB get their `UTC` zone attached in Python. A
+200-row `find_all()` of a `BaseEntity` (two timestamps a row) over a SQLite file measured 2 to 5% slower
+than with a naive `DateTime` (SQLite text is parsed straight to an aware value). asyncpg returns aware
+values itself, so PostgreSQL reads pay nothing.
 
 ### Defining Your Own Entities
 
