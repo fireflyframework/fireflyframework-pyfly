@@ -62,9 +62,9 @@ without a delete cascade has its foreign key set to ``NULL``, or the parent's ``
 foreign key. The repositories' hard deletes (``Repository.delete``, ``delete_by_id``, ``delete_all_by_id``
 and ``delete_all`` through the ORM, ``SoftDeleteRepository.hard_delete``) do that through :func:`hard_delete`,
 which loads what the cascades reach with the deleted rows, even for a root and collections loaded (filtered)
-earlier in the session. A ``session.delete()`` of your own needs the same: call :func:`hard_delete`, or let
-the database do it (``passive_deletes=True`` on the relationship and ``ON DELETE CASCADE`` on the foreign
-key).
+earlier in the session, level by level and once for all the objects of a level. A ``session.delete()`` of
+your own needs the same: call :func:`hard_delete`, or let the database do it (``passive_deletes=True`` on the
+relationship and ``ON DELETE CASCADE`` on the foreign key).
 """
 
 from __future__ import annotations
@@ -74,11 +74,22 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, cast
 
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstanceState, ORMExecuteState, Session, with_loader_criteria
+from sqlalchemy.orm import (
+    InstanceState,
+    Mapper,
+    ORMExecuteState,
+    RelationshipProperty,
+    Session,
+    load_only,
+    selectinload,
+    with_loader_criteria,
+)
+from sqlalchemy.orm.interfaces import MANYTOONE
 
 from pyfly.data.relational.sqlalchemy.entity import SoftDeleteMixin
+from pyfly.data.relational.sqlalchemy.statements import in_criteria
 
 INCLUDE_DELETED = "include_deleted"
 """The execution option that lets one statement see soft-deleted rows (``execution_options(include_deleted=True)``)."""
@@ -152,9 +163,12 @@ async def hard_delete(session: AsyncSession, *instances: object) -> None:
     and flush.
 
     The soft-deleted children a cascade deletes, and the ones whose foreign key a delete sets to ``NULL``,
-    are loaded with the deleted rows: the collections the session loaded before (without them) are expired
-    and loaded again, inside :func:`including_deleted`. The flush runs inside the block too, since that is
-    where the relationships without a delete cascade are loaded. Pending changes are flushed first.
+    are loaded with the deleted rows, inside :func:`including_deleted`: level by level (the instances, then
+    the objects their cascades reach, and so on), the relationships the delete needs are loaded once for all
+    the objects of a level, a ``SELECT`` of their keys and one per relationship (a lone object loads each
+    relationship itself, as its flush would). A relationship to a soft-delete entity that the session loaded
+    before (without the deleted rows) is loaded again. The flush runs inside the block too. Pending changes
+    are flushed first.
     """
     await session.flush()
     with including_deleted():
@@ -165,30 +179,128 @@ async def hard_delete(session: AsyncSession, *instances: object) -> None:
         await session.flush()
 
 
+def reaches_soft_deleted_rows(relationship: RelationshipProperty[Any]) -> bool:
+    """Whether *relationship* loads a soft-delete entity (its target, or a subclass of it), whose deleted rows
+    its loads hide."""
+    return any(issubclass(mapper.class_, SoftDeleteMixin) for mapper in relationship.mapper.self_and_descendants)
+
+
+_NOT_LOADED_BY_THE_WALK = (None, "noload", "dynamic", "write_only")
+"""Relationship loading strategies whose values the reveal leaves to the delete's own cascade: nothing to load
+(``noload``), or a query rather than a loaded collection (``dynamic``, ``write_only``)."""
+
+_RAISES_ON_ACCESS = ("raise", "raise_on_sql")
+
+
+def _delete_needs(mapper: Mapper[Any]) -> list[RelationshipProperty[Any]]:
+    """The relationships the flush of a delete of *mapper*'s objects loads: those it cascades to, and the
+    collections whose foreign keys it sets to ``NULL`` (unless ``passive_deletes`` leaves them to the
+    database)."""
+    return [
+        relationship
+        for relationship in mapper.relationships
+        if not relationship.viewonly
+        and not relationship.passive_deletes
+        and (relationship.direction is not MANYTOONE or relationship.cascade.delete)
+        and relationship.lazy not in _NOT_LOADED_BY_THE_WALK
+    ]
+
+
 def _reveal_soft_deleted_dependents(session: Session, instances: tuple[object, ...]) -> None:
-    """Expire the loaded relationships to soft-delete entities of *instances* and of everything their delete
-    cascades reach, loading those cascades on the way (with the deleted rows, the caller being inside
-    :func:`including_deleted`), so that the delete and its flush see every dependent row."""
-    for instance in instances:
-        state = cast("InstanceState[Any]", inspect(instance))
-        if state.session_id != session.hash_key:
+    """Load what deleting *instances* needs, with the deleted rows (the caller is inside
+    :func:`including_deleted`), level by level: the relationships the delete of each level's objects needs
+    (:func:`_delete_needs`) for all of them at once, then the same for the objects their delete cascades
+    reach. The loaded relationships to soft-delete entities are expired first: they may hold only the live
+    rows.
+
+    What the walk leaves out (a ``dynamic`` or ``write_only`` relationship), the delete's own cascade loads
+    object by object, each object it reaches expired before its own collections are loaded."""
+    seen: set[InstanceState[Any]] = set()
+    level = [state for state in map(_state_of, instances) if _persistent_here(session, state)]
+    while level:
+        seen.update(level)
+        by_mapper: dict[Mapper[Any], list[InstanceState[Any]]] = {}
+        for state in level:
+            by_mapper.setdefault(state.mapper, []).append(state)
+        reached: dict[InstanceState[Any], None] = {}
+        for mapper, states in by_mapper.items():
+            needs = _delete_needs(mapper)
+            _load_level(session, mapper, states, needs)
+            for state in states:
+                for relationship in needs:
+                    if relationship.cascade.delete:
+                        for child in _related_states(state, relationship):
+                            if child not in seen and _persistent_here(session, child):
+                                reached[child] = None
+        level = list(reached)
+    for state in map(_state_of, instances):
+        if not _persistent_here(session, state):
             continue  # detached: session.delete() attaches it and loads its cascades, inside the block too
-        _expire_soft_delete_relationships(session, state)
         # The iterator loads a relationship's value only when it gets to it, after it has yielded the
         # object that holds it: each object is expired before its own collections are loaded.
         for _child, _mapper, child_state, _dict in state.mapper.cascade_iterator("delete", state):
-            _expire_soft_delete_relationships(session, child_state)
+            if child_state not in seen:
+                _expire_soft_delete_relationships(session, child_state)
+
+
+def _load_level(
+    session: Session, mapper: Mapper[Any], states: list[InstanceState[Any]], needs: list[RelationshipProperty[Any]]
+) -> None:
+    """Load *needs* on the objects of *states* (one mapper's objects of a level) that lack them, with one
+    ``SELECT`` of their keys per chunk and one per relationship; the relationships to soft-delete entities are
+    expired first. A lone object loads each relationship itself, one statement each, as its flush would."""
+    soft = [relationship.key for relationship in needs if reaches_soft_deleted_rows(relationship)]
+    for state in states:
+        stale = [key for key in soft if key in state.dict]
+        instance = state.obj()
+        if stale and instance is not None:
+            session.expire(instance, stale)
+    lacking = [relationship for relationship in needs if any(relationship.key not in state.dict for state in states)]
+    if not lacking:
+        return
+    if len(states) == 1 and all(relationship.lazy not in _RAISES_ON_ACCESS for relationship in lacking):
+        instance = states[0].obj()
+        if instance is not None:
+            for relationship in lacking:
+                getattr(instance, relationship.key)  # its lazy load
+        return
+    entity = mapper.class_
+    keys = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
+    values = [identity[0] if len(identity) == 1 else identity for identity in (tuple(s.identity or ()) for s in states)]
+    # The objects are in the session's identity map: the rows fill in only the relationships they lack.
+    options = [load_only(*keys), *(selectinload(getattr(entity, relationship.key)) for relationship in lacking)]
+    for criterion in in_criteria(keys, values, session.get_bind(mapper).dialect):
+        session.execute(select(entity).where(criterion).options(*options)).scalars().all()
+
+
+def _related_states(state: InstanceState[Any], relationship: RelationshipProperty[Any]) -> list[InstanceState[Any]]:
+    """The states of the objects *state* holds in *relationship* (loaded), none when it is not loaded."""
+    value = state.dict.get(relationship.key)
+    if value is None:
+        return []
+    if not relationship.uselist:
+        return [_state_of(value)]
+    items = value.values() if isinstance(value, dict) else value
+    return [_state_of(item) for item in items]
+
+
+def _state_of(instance: object) -> InstanceState[Any]:
+    return cast("InstanceState[Any]", inspect(instance))
+
+
+def _persistent_here(session: Session, state: InstanceState[Any]) -> bool:
+    """Whether *state* is persistent in *session* (so its relationships were loaded through the criteria): not
+    pending, and not deleted either (a child deleted earlier in the unit stays in its parent's collection)."""
+    return state.persistent and state.session_id == session.hash_key
 
 
 def _expire_soft_delete_relationships(session: Session, state: InstanceState[Any]) -> None:
-    if state.key is None or state.session_id != session.hash_key:
+    if not _persistent_here(session, state):
         return  # pending, or not this session's: nothing was loaded through the criteria
     stale = [
         relationship.key
         for relationship in state.mapper.relationships
-        if not relationship.viewonly
-        and relationship.key in state.dict
-        and any(issubclass(mapper.class_, SoftDeleteMixin) for mapper in relationship.mapper.self_and_descendants)
+        if not relationship.viewonly and relationship.key in state.dict and reaches_soft_deleted_rows(relationship)
     ]
     if stale:
         session.expire(state.obj(), stale)

@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import ForeignKey, String, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SAWarning
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, Session, joinedload, lazyload, mapped_column, relationship, selectinload
 
@@ -46,6 +47,7 @@ from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.transaction import Propagation
+from pyfly.testing import StatementCounter
 from tests.integration._repository_harness import repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 
@@ -503,7 +505,33 @@ class SoftThreadPost(SoftDeleteMixin, BaseEntity):
     thread_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sd_soft_thread.id"))
 
 
+class Shelf(BaseEntity):
+    """A plain aggregate root whose plain boxes hold soft-delete items."""
+
+    __tablename__ = "sd_shelf"
+
+    name: Mapped[str] = mapped_column(String(50))
+    boxes: Mapped[list[ShelfBox]] = relationship(cascade="all, delete-orphan")
+
+
+class ShelfBox(BaseEntity):
+    __tablename__ = "sd_shelf_box"
+
+    shelf_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sd_shelf.id"))
+    items: Mapped[list[ShelfItem]] = relationship(cascade="all, delete-orphan")
+
+
+class ShelfItem(SoftDeleteMixin, BaseEntity):
+    __tablename__ = "sd_shelf_item"
+
+    box_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sd_shelf_box.id"))
+
+
 class ThreadRepository(Repository[Thread, uuid.UUID]):
+    pass
+
+
+class ShelfRepository(Repository[Shelf, uuid.UUID]):
     pass
 
 
@@ -606,9 +634,8 @@ async def test_deleting_a_loaded_root_deletes_its_soft_deleted_children(
 async def test_deleting_several_roots_through_the_orm_deletes_their_soft_deleted_children(
     relational_backend: RelationalBackend, how: str
 ) -> None:
-    """The repository deletes that load several roots at once (their collections with one ``SELECT`` per
-    relationship) reach the soft-deleted children too, whether the roots were loaded before or by the
-    delete itself."""
+    """The repository deletes of several roots at once reach the soft-deleted children too, whether the roots
+    were loaded before or by the delete itself."""
     factory = await _thread_factory(relational_backend)
     thread_ids = [await _thread(factory), await _thread(factory)]
     async with factory() as session:
@@ -624,6 +651,67 @@ async def test_deleting_several_roots_through_the_orm_deletes_their_soft_deleted
 
     assert [await _every_row(factory, model) for model in (Thread, ThreadPost, ThreadReaction)] == [0, 0, 0]
     assert await _unlinked_notes(factory) == [("dead", True), ("dead", True), ("live", True), ("live", True)]
+
+
+@pytest.mark.parametrize("how", ["delete_all_by_id", "delete_all", "delete_every_row"])
+async def test_deleting_several_roots_loads_what_their_cascades_reach_once_for_all(
+    relational_backend: RelationalBackend, how: str
+) -> None:
+    """The hard delete loads each level of what the delete reaches with the deleted rows once for all the
+    objects of that level, not one object at a time: a ``SELECT`` of their keys and one per relationship
+    (the threads' posts and notes, then the posts' reactions), however many roots are deleted. The
+    repository's own load of the roots leaves those relationships to it."""
+    factory = await _thread_factory(relational_backend)
+    engine = factory.kw["bind"]
+    selects: dict[int, int] = {}
+    for roots in (2, 6):
+        thread_ids = [await _thread(factory) for _ in range(roots)]
+        async with factory() as session:
+            threads = ThreadRepository(session=session)
+            loaded = [await threads.find_by_id(thread_id) for thread_id in thread_ids] if how == "delete_all" else []
+            with StatementCounter(engine) as counter:
+                if how == "delete_all_by_id":
+                    await threads.delete_all_by_id(thread_ids)
+                elif how == "delete_all":
+                    await threads.delete_all([thread for thread in loaded if thread is not None])
+                else:
+                    await threads.delete_all()
+            await session.commit()
+        selects[roots] = counter.counts().get("SELECT", 0)
+        assert [await _every_row(factory, model) for model in (Thread, ThreadPost, ThreadReaction)] == [0, 0, 0]
+    # The threads (unless the unit holds them), the keys and the two collections of the threads, the keys and
+    # the reactions of the posts.
+    expected = 5 if how == "delete_all" else 6
+    assert selects == {2: expected, 6: expected}
+
+
+async def test_deleting_a_root_after_one_of_its_children_in_the_same_unit(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A child deleted for good earlier in the unit stays in its parent's loaded collection (the ORM does not
+    take it out): the hard delete of the parent passes over it, where expiring its collections failed on an
+    object that is no longer persistent."""
+    await relational_backend.create_tables(Shelf, ShelfBox, ShelfItem)
+    factory = async_sessionmaker(relational_backend.create_engine(), expire_on_commit=False)
+    async with factory() as session, session.begin():
+        shelf = Shelf(name="s")
+        session.add(shelf)
+        await session.flush()
+        for _ in range(2):
+            box = ShelfBox(shelf_id=shelf.id)
+            session.add(box)
+            await session.flush()
+            session.add_all([ShelfItem(box_id=box.id), ShelfItem(box_id=box.id, deleted_at=datetime.now(UTC))])
+        shelf_id = shelf.id
+    async with factory() as session:
+        stmt = select(Shelf).where(Shelf.id == shelf_id).options(selectinload(Shelf.boxes).selectinload(ShelfBox.items))
+        shelf = (await session.execute(stmt)).scalar_one()
+        await hard_delete(session, shelf.boxes[0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SAWarning)  # the ORM's cascade deletes that box again, and warns
+            await ShelfRepository(session=session).delete(shelf)
+        await session.commit()
+    assert [await _every_row(factory, model) for model in (Shelf, ShelfBox, ShelfItem)] == [0, 0, 0]
 
 
 async def test_deleting_a_root_whose_collections_were_loaded_filtered(relational_backend: RelationalBackend) -> None:

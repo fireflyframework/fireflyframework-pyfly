@@ -460,8 +460,9 @@ The delete family follows Spring Data: `delete(entity)`, `delete_by_id(id)`, `de
 cascades (`cascade="all, delete-orphan"`), version checks and `before_delete`/`after_delete` listeners run,
 the same on every backend. They load the entities first (one `SELECT` per id chunk; the unit's own
 entities need none), with the collections the flush cascades to or nulls out (one `SELECT` per collection
-for all of them, also for the unit's own entities that have not loaded them), and send the `DELETE`s in one
-flush. When the mapper has no cascade, no version column, no inheritance and no delete listener, a bulk
+for all of them, also for the unit's own entities that have not loaded them; a collection of soft-delete
+entities is left to the [hard delete](#softdeletemixin), which loads it with the deleted rows), and send the
+`DELETE`s in one flush. When the mapper has no cascade, no version column, no inheritance and no delete listener, a bulk
 `DELETE` does the same work, and that is what `delete_all_by_id(ids)` (one `DELETE ... WHERE id IN (...)` per
 id chunk) and `delete_all()` (one for every row) send; `delete(entity)`, `delete_by_id(id)` and
 `delete_all(entities)` always go through the ORM.
@@ -2330,10 +2331,12 @@ children its `cascade="all, delete-orphan"` relationships hold, and set the fore
 relationship without a delete cascade points at to `NULL`, or the parent's `DELETE` violates the foreign
 key. The repositories' hard deletes (`Repository.delete`, `delete_by_id`, `delete_all_by_id` and
 `delete_all` through the ORM, `SoftDeleteRepository.hard_delete`) load what those relationships reach with
-the deleted rows, even when
-the root and its collections were loaded (without them) earlier in the session. A `session.delete()` of
-your own needs the same treatment: call `hard_delete`, or let the database cascade
-(`passive_deletes=True` on the relationship and `ON DELETE CASCADE` on the foreign key).
+the deleted rows, even when the root and its collections were loaded (without them) earlier in the session.
+They load it level by level (the roots, then what their cascades reach, and so on), once for all the objects
+of a level: a `SELECT` of their keys per chunk and one per relationship, however many roots are deleted (a
+lone object loads each relationship with one statement, as its flush would). A `session.delete()` of your
+own needs the same treatment: call `hard_delete`, or let the database cascade (`passive_deletes=True` on the
+relationship and `ON DELETE CASCADE` on the foreign key).
 
 ```python
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete

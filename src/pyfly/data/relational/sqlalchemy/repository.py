@@ -116,7 +116,12 @@ from pyfly.data.pageable import KeysetPosition, NullHandling, Order, Pageable, S
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
 from pyfly.data.relational.sqlalchemy.entity import SoftDeleteMixin
-from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import (
+    INCLUDE_DELETED,
+    hard_delete,
+    including_deleted,
+    reaches_soft_deleted_rows,
+)
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.statements import (
     RESERVED_BINDS,
@@ -1036,13 +1041,15 @@ class Repository(Generic[T, ID]):
     def _delete_relationships(self) -> list[str]:
         """The relationships the flush of a delete loads when an entity has not loaded them: those it cascades
         to, and the collections whose foreign keys it nulls out (unless ``passive_deletes`` leaves them to the
-        database)."""
+        database). Not those to a soft-delete entity: ``soft_delete_criteria.hard_delete`` loads them again,
+        with the deleted rows, for all the entities at once."""
         return [
             relationship.key
             for relationship in self._mapper.relationships
             if not relationship.viewonly
             and not relationship.passive_deletes
             and (relationship.direction is not MANYTOONE or relationship.cascade.delete)
+            and not reaches_soft_deleted_rows(relationship)
         ]
 
     def _delete_loads(self) -> list[Any]:
