@@ -295,6 +295,11 @@ class TestOrdering:
     def test_ignore_case_orders_by_the_lower_cased_value(self) -> None:
         assert "lower(st_shelf.name) DESC" in _ordered(Sort.by(Order.desc("name").ignoring_case()), "postgresql")
 
+    def test_ignore_case_folds_only_strings(self) -> None:
+        assert _ordered(Sort.by(Order.desc("id").ignoring_case()), "postgresql").endswith("ORDER BY st_shelf.id DESC")
+        folded = _ordered(Sort.by(Order.asc("id").ignoring_case()), "postgresql", model=ContractParent)
+        assert "lower(" not in folded  # a UUID (a type decorator over a string type on some backends) is not text
+
     def test_native_orders_are_plain(self) -> None:
         assert _ordered(Sort.by("name"), "mysql").endswith("ORDER BY st_shelf.name ASC")
 

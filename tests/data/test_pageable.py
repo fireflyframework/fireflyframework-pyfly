@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import sys
 
 import pytest
@@ -217,6 +219,17 @@ class TestKeysetPosition:
         position = KeysetPosition.of(name="m", id=42)
         assert dict(position.keys) == {"name": "m", "id": 42}
         assert KeysetPosition().keys == {}
+
+    def test_a_position_is_a_value_that_can_be_a_cache_key(self) -> None:
+        keys = {"name": "m", "id": 42}
+        position = KeysetPosition(keys)
+        keys["id"] = 43  # the position keeps its own copy
+        assert position == KeysetPosition.of(id=42, name="m")
+        assert hash(position) == hash(KeysetPosition.of(id=42, name="m"))
+        assert {position: "cursor"}[KeysetPosition.of(name="m", id=42)] == "cursor"
+        # Still a plain dataclass value for the JSON writer (dataclasses.asdict) and for copies.
+        assert dataclasses.asdict(position) == {"keys": {"name": "m", "id": 42}}
+        assert copy.deepcopy(position) == position
 
 
 # ---------------------------------------------------------------------------

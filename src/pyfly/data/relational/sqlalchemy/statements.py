@@ -32,8 +32,12 @@ not broken, and a PostgreSQL feature is only ever an accelerator.
   streamed result instead, since a streamed result cannot be made unique.
 - **Ordering.** :func:`order_expressions` renders a :class:`~pyfly.data.pageable.Sort` with its NULL
   placement (native ``NULLS FIRST``/``NULLS LAST`` on PostgreSQL, SQLite and Oracle, an ``IS NULL`` key first
-  on MySQL, MariaDB and SQL Server) and case folding; :func:`primary_key_orders` is the tie-breaker every
-  paging path appends, which makes pages deterministic and is what SQL Server requires for ``OFFSET``.
+  on MySQL, MariaDB and SQL Server) and the case folding of string columns; :func:`primary_key_orders` is the
+  tie-breaker every paging path appends, which makes pages deterministic and is what SQL Server requires for
+  ``OFFSET``.
+- **Entities a join repeats.** :func:`joins_rows` tells whether a specification's join can repeat an entity;
+  :func:`distinct_entity_page` then cuts a page from the distinct primary keys, and
+  :func:`distinct_entity_count` counts them, so pages count entities rather than joined rows.
 - **Delete strategy.** :func:`bulk_delete_safe` says whether a bulk ``DELETE`` does what deleting entity by
   entity does: no ORM cascade, version column, inheritance or delete listener.
 - **Fetch plans and locks.** :func:`loader_options` turns a repository's ``load=`` argument into loader
@@ -72,6 +76,7 @@ from sqlalchemy.orm.interfaces import MANYTOONE
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.sql.elements import ColumnElement, UnaryExpression
+from sqlalchemy.types import Enum, String, TypeDecorator
 
 from pyfly.data.pageable import NullHandling, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
@@ -375,7 +380,7 @@ def order_expressions(
     for order in sort.orders:
         name = resolver.resolve(order.property, usage="sort") if resolver is not None else order.property
         column = getattr(entity, name)
-        key = func.lower(column) if order.ignore_case else column
+        key = func.lower(column) if order.ignore_case and _folds(column) else column
         directed = key.desc() if order.direction == "desc" else key.asc()
         if order.null_handling is NullHandling.NATIVE:
             expressions.append(directed)
@@ -389,6 +394,15 @@ def order_expressions(
         expressions.append(null_key.asc())
         expressions.append(directed)
     return expressions
+
+
+def _folds(column: Any) -> bool:
+    """Whether ``ignore_case`` folds *column*: a string column, as Spring folds only ``String`` expressions (an
+    enum is a string type in SQLAlchemy, but a native type without ``lower()`` on PostgreSQL)."""
+    sqltype = getattr(column, "type", None)
+    while isinstance(sqltype, TypeDecorator):
+        sqltype = sqltype.impl_instance
+    return isinstance(sqltype, String) and not isinstance(sqltype, Enum)
 
 
 def primary_key_orders(entity: type, sort: Sort) -> list[ColumnElement[Any]]:

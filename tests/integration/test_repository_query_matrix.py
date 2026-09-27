@@ -368,6 +368,9 @@ async def test_ignore_case_orders_by_the_folded_value(relational_backend: Relati
         await _scores(datasources, names={1: "Bob", 2: "alice", 3: "Carl", 4: "dave", 5: "Eve", 6: "frank", 7: "Gus"})
         ordered = await ScoreRepository().find_all(Sort.by(Order.asc("name").ignoring_case()))
         assert [row.name for row in ordered] == ["alice", "Bob", "Carl", "dave", "Eve", "frank", "Gus"]
+        # Only strings fold (as Spring's QueryUtils): lower() of an integer does not exist on PostgreSQL.
+        numbers = await ScoreRepository().find_all(Sort.by(Order.desc("id").ignoring_case()))
+        assert _ids(numbers) == [7, 6, 5, 4, 3, 2, 1]
 
 
 # ---------------------------------------------------------------------------------------------------------

@@ -17,9 +17,9 @@ An :class:`Order` is a property, a direction, a :class:`NullHandling` and an ``i
 ``Pageable`` returns the same page on every backend: NULL placement differs by database (PostgreSQL and
 Oracle put NULLs last in ascending order, SQLite, MySQL, MariaDB, SQL Server and MongoDB first), so an order
 that pages over a nullable property should name it (``Order.asc("score").nulls_last()``). ``ignore_case``
-compares lower-cased values. Collation (accents, the order of upper and lower case) and the order of enum
-values still follow the database: PostgreSQL, MySQL and MariaDB order a native enum by its declaration,
-SQLite and MongoDB by its text.
+compares lower-cased values of a string property (any other property is compared as it is). Collation
+(accents, the order of upper and lower case) and the order of enum values still follow the database:
+PostgreSQL, MySQL and MariaDB order a native enum by its declaration, SQLite and MongoDB by its text.
 
 :class:`KeysetPosition` is where a keyset scroll resumes (``Repository.scroll``): the values of the sort
 properties (and the primary key) of the last row read.
@@ -82,7 +82,7 @@ class Order:
         return self.with_null_handling(NullHandling.NATIVE)
 
     def ignoring_case(self) -> Order:
-        """This order comparing lower-cased values."""
+        """This order comparing lower-cased values (of a string property; others compare as they are)."""
         return dataclasses.replace(self, ignore_case=True)
 
 
@@ -173,10 +173,18 @@ class KeysetPosition:
 
     A :class:`~pyfly.data.page.Window` gives the position after its last item (``window.next_position``);
     pass it back to continue. ``keys`` maps property names to values, so a web API can serialize it into a
-    cursor token and build it again with :meth:`of`.
+    cursor token and build it again with :meth:`of`. A position is a value: it holds its own copy of the keys
+    (a plain ``dict``, so ``dataclasses.asdict`` and JSON serialization see a mapping), and equal positions hash
+    alike, so one can be a cache key; do not change its keys.
     """
 
     keys: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "keys", dict(self.keys))
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self.keys.items()))
 
     @staticmethod
     def of(**keys: Any) -> KeysetPosition:
