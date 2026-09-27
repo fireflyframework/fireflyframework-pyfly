@@ -183,6 +183,7 @@ async def test_a_file_database_keeps_nothing_a_rolled_back_slice_wrote(tmp_path:
 
 import asyncio  # noqa: E402
 import contextlib  # noqa: E402
+import logging  # noqa: E402
 import sqlite3  # noqa: E402
 
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
@@ -338,3 +339,27 @@ async def test_code_that_runs_in_another_context_takes_part_through_taking_part(
             assert await members.count() == 2
             assert _rows(path) == 1
     assert _rows(path) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stop_failure_does_not_hide_why_the_slice_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The slice raises the error of its check; a failure of the stop that follows is logged, not raised."""
+    from pyfly.context.application_context import ApplicationContext
+
+    stop = ApplicationContext.stop
+
+    async def stop_then_fail(context: ApplicationContext) -> None:
+        await stop(context)
+        raise RuntimeError("the stop failed too")
+
+    monkeypatch.setattr(ApplicationContext, "stop", stop_then_fail)
+    config = Config({"pyfly": {"data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"}}}})
+    with (
+        caplog.at_level(logging.WARNING, logger="pyfly.testing.slice_context"),
+        pytest.raises(BeanCreationException, match=r"pyfly\.data\.relational\.enabled"),
+    ):
+        await data_slice(SliceMemberRepository, config=config)
+    stopped = [record for record in caplog.records if record.getMessage() == "slice_stop_failed"]
+    assert len(stopped) == 1 and stopped[0].exc_info is not None

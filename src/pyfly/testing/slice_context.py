@@ -39,6 +39,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -49,6 +50,8 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.testing.rollback import RollbackTransaction
 
+_logger = logging.getLogger(__name__)
+
 
 async def _build_slice(
     beans: tuple[type, ...],
@@ -58,7 +61,8 @@ async def _build_slice(
 ) -> ApplicationContext:
     """Register *beans* (+ ``overrides``) into a fresh context and start it.
 
-    The context is stopped again when its start fails, a bean cannot be resolved or a repository is not wired.
+    The context is stopped again when its start fails, a bean cannot be resolved or a repository is not wired
+    (a failure of that stop is logged as ``slice_stop_failed``; the first failure is the one raised).
     """
     context = ApplicationContext(config or Config({}))
     for cls in beans:
@@ -81,7 +85,10 @@ async def _build_slice(
             context.get_bean(cls)
         _check_repositories(context, beans)
     except BaseException:
-        await context.stop()
+        try:
+            await context.stop()
+        except Exception:  # noqa: BLE001 — the failure that ended the slice is the one to raise
+            _logger.warning("slice_stop_failed", exc_info=True)
         raise
     return context
 
