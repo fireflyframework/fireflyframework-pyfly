@@ -25,7 +25,8 @@
 - Read methods take a fetch plan, so relationships are usable on the detached entities they return, and
   ``find_by_id`` takes a pessimistic lock that needs a read-write transaction (C137).
 - Sort and filter names are validated, with allow-lists for hidden columns (C141).
-- ``stream_all`` reads in batches (C136), optionally of a fixed size.
+- ``stream_all`` reads in batches (C136), optionally of a fixed size; a fetch plan that joins a collection
+  streams whole entities.
 """
 
 from __future__ import annotations
@@ -707,6 +708,27 @@ async def test_stream_all_reads_fixed_size_batches_when_asked(relational_backend
             async with contextlib.aclosing(scores.stream_all(chunk_size=0)) as rows:
                 async for _row in rows:
                     pass
+        assert datasources.checked_out() == 0
+
+
+async def test_a_stream_whose_fetch_plan_joins_a_collection_yields_whole_entities(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A joined eager load of a collection spreads one entity over several rows, which only make it whole read
+    together: such a stream reads its result in full, on every backend, instead of failing on the first batch
+    (PostgreSQL and SQLite raised 'unique() must be invoked')."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        parents = ParentRepository()
+        await _families(parents, 3)
+        plan = joinedload(ContractParent.children)
+        for chunk_size in (None, 1):
+            streamed = [
+                parent async for parent in parents.stream_all(Sort.by("name"), load=plan, chunk_size=chunk_size)
+            ]
+            assert [(parent.name, len(parent.children)) for parent in streamed] == [("p0", 2), ("p1", 2), ("p2", 2)]
+        async with contextlib.aclosing(parents.stream_all(Sort.by("name"), load=plan)) as rows:
+            first = await anext(rows)
+        assert [child.label for child in first.children] == ["c0.0", "c0.1"]
         assert datasources.checked_out() == 0
 
 

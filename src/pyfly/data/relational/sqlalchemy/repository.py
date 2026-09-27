@@ -1118,8 +1118,11 @@ class Repository(Generic[T, ID]):
 
         Rows are fetched in batches: *chunk_size* rows at a time when given, otherwise growing batches
         (:data:`STREAM_FIRST_BATCH` rows first, up to :data:`STREAM_BATCH_SIZE`): one fetch, and one pass of the
-        unit's operation guard, per batch. A collection the entity loads eagerly with a join is loaded with
-        ``selectin`` per batch instead (a streamed result cannot be made unique). On MySQL and MariaDB, where
+        unit's operation guard, per batch. A collection the entity's mapping loads eagerly with a join is loaded
+        with ``selectin`` per batch instead (a streamed result cannot be made unique). A fetch plan that itself
+        joins a collection (``load=joinedload(Parent.children)``) spreads each entity over several rows, which
+        make it whole only when they are read together: that stream reads its result in full first, on every
+        backend (name the relationship, ``load="children"``, to load it per batch). On MySQL and MariaDB, where
         nothing else runs on a connection while its cursor is open, a stream that loads relationships with
         statements of their own per batch (a fetch plan, ``selectin``, a joined collection:
         ``statements.loads_per_batch``) is read in full first; a joined many-to-one comes with its row and is
@@ -1142,6 +1145,12 @@ class Repository(Generic[T, ID]):
             return
         result = await session.stream_scalars(streamed)
         try:
+            if result._unique_filter_state is not None:
+                # The fetch plan joins a collection: an entity spreads over several rows, which make it whole
+                # only when they are read together (the ORM refuses to hand out such rows batch by batch).
+                for entity in await result.unique().all():
+                    yield entity
+                return
             size = chunk_size or STREAM_FIRST_BATCH
             while batch := await result.fetchmany(size):
                 for row in batch:
