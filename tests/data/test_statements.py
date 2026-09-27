@@ -35,7 +35,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import ForeignKey, Integer, String, create_engine, event, select
+from sqlalchemy import ForeignKey, Integer, String, create_engine, event, func, select
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -43,6 +43,7 @@ from sqlalchemy.orm import (
     Mapped,
     Session,
     aliased,
+    contains_eager,
     joinedload,
     mapped_column,
     relationship,
@@ -424,10 +425,58 @@ class TestDistinctEntities:
         sql = _sql(distinct_entity_page(ordered, ContractParent, offset=4, limit=2), dialect)
         assert "JOIN (SELECT DISTINCT contract_parent.id AS pyfly_k0, " in sql
         assert "lower(contract_parent.name) AS pyfly_o" in sql  # the order keys the DISTINCT selects
+        # The entities are read through the statement's own join and criteria, joined to the page's keys.
+        joined = "FROM contract_parent (INNER )?JOIN contract_child ON contract_parent.id = contract_child.parent_id "
+        assert re.search(joined + r"(INNER )?JOIN \(SELECT DISTINCT", sql)  # MySQL says INNER JOIN
+        assert "ON contract_parent.id = pyfly_page.pyfly_k0 WHERE contract_child.label = " in sql
         # The outer query orders by the same keys, read from the page: the name descending, then the key.
-        outer = sql.split("ON contract_parent.id = pyfly_page.pyfly_k0 ORDER BY ")[1]
+        outer = sql.rsplit(" ORDER BY ", 1)[1]
         last = len(outer.split(", ")) - 1
         assert re.search(r"pyfly_page\.pyfly_o\d DESC", outer) and outer.endswith(f"pyfly_page.pyfly_o{last} ASC")
+
+    def test_the_entities_are_read_through_the_statements_own_froms(self) -> None:
+        """The statement that reads the page's entities is the statement itself joined to the page's keys, so the
+        rows a ``contains_eager`` loads come from its own join and criteria. Read by a bare ``SELECT`` of the
+        entity, the collection's table was a FROM of its own there: a cartesian product that gave each entity
+        every row of that table."""
+        dialect = DIALECTS["postgresql"]
+        eager = _joined_parents().options(contains_eager(ContractParent.children)).order_by(ContractParent.name)
+        sql = _sql(distinct_entity_page(eager, ContractParent, limit=2), dialect)
+        entities = sql.split(" (SELECT DISTINCT ")[0]
+        assert "contract_child.label" in entities.split(" FROM ")[0]  # the collection's rows come with the page
+        joined = "FROM contract_parent JOIN contract_child ON contract_parent.id = contract_child.parent_id JOIN"
+        assert entities.endswith(joined)
+        assert sql.endswith("WHERE contract_child.label = %(label_1)s ORDER BY pyfly_page.pyfly_o0")
+        # A FROM that starts with another table: the page's keys join the entity, which that table does not name.
+        correlated = (
+            select(ContractParent)
+            .select_from(ContractChild)
+            .where(ContractChild.parent_id == ContractParent.id)
+            .order_by(ContractParent.name)
+        )
+        sql = _sql(distinct_entity_page(correlated, ContractParent, limit=2), dialect)
+        assert sql.split(" (SELECT DISTINCT ")[0].endswith("FROM contract_child, contract_parent JOIN")
+
+    def test_the_statements_own_distinct_grouping_and_limit_shape_only_the_keys(self) -> None:
+        """A statement's ``DISTINCT``, ``GROUP BY``, ``HAVING``, ``LIMIT`` and ``OFFSET`` decide which entities the
+        page's keys hold; the statement that reads the entities by those keys leaves them out (a ``DISTINCT`` or a
+        ``GROUP BY`` there could not order by the page's keys, and a ``LIMIT`` would count joined rows)."""
+        grouped = (
+            _joined_parents()
+            .group_by(ContractParent.id)
+            .having(func.count(ContractChild.id) > 1)
+            .distinct()
+            .limit(9)
+            .offset(3)
+            .order_by(ContractParent.name)
+        )
+        sql = _sql(distinct_entity_page(grouped, ContractParent, offset=2, limit=2), DIALECTS["postgresql"])
+        keys, entities = sql.split(") AS pyfly_page ")
+        assert "GROUP BY contract_parent.id HAVING count(contract_child.id) > " in keys
+        assert keys.endswith("LIMIT %(param_1)s OFFSET %(param_2)s")  # the page's cut, not the statement's
+        assert sql.startswith("SELECT contract_parent.")  # no DISTINCT on the entities
+        assert not any(clause in entities for clause in ("DISTINCT", "GROUP BY", "HAVING", "LIMIT", "OFFSET"))
+        assert grouped._distinct and grouped._having_criteria and grouped._limit_clause is not None  # unchanged
 
     def test_sql_server_orders_the_derived_table_only_when_it_is_cut(self) -> None:
         server = mssql.dialect()
@@ -475,7 +524,8 @@ class TestDistinctEntities:
     )
     def test_a_lock_moves_off_the_distinct_keys_onto_the_entities(self, name: str, clause: str) -> None:
         """PostgreSQL and Oracle refuse FOR UPDATE on a DISTINCT: the keys are read unlocked, and the lock takes
-        the rows of the entities the page reads (their table, unless the statement named what to lock)."""
+        the rows of the entities the page reads (their table, unless the statement named what to lock, which may
+        be a table it joins: the statement that reads the entities has its joins)."""
         dialect = DIALECTS[name]
         locked = _joined_parents().order_by(ContractParent.name).with_for_update(nowait=True)
         sql = _sql(distinct_entity_page(locked, ContractParent, offset=2, limit=2), dialect)
@@ -484,7 +534,8 @@ class TestDistinctEntities:
         assert entities.endswith(clause)
         shared = _joined_parents().order_by(ContractParent.name).with_for_update(read=True, of=ContractChild)
         sql = _sql(distinct_entity_page(shared, ContractParent, limit=2), DIALECTS["postgresql"])
-        assert sql.endswith("FOR SHARE OF contract_child")  # what the statement named
+        assert sql.endswith("FOR SHARE OF contract_child")  # what the statement named, a table it joins
+        assert "FROM contract_parent JOIN contract_child ON contract_parent.id = contract_child.parent_id JOIN (" in sql
         assert "FOR UPDATE" not in _sql(distinct_entity_count(locked, ContractParent), dialect)
         assert locked._for_update_arg is not None  # the statement itself is unchanged
 
@@ -655,6 +706,10 @@ class TestSqlAlchemyInternals:
         copy = statement._generate()  # _unlocked
         assert copy is not statement and copy._for_update_arg is lock
         assert select(ContractChild)._for_update_arg is None
+        plain = select(ContractChild)  # _entity_rows
+        assert (plain._distinct, plain._distinct_on, plain._having_criteria) == (False, (), ())
+        shaped = plain.group_by(ContractChild.parent_id).having(named).distinct()
+        assert (shaped._distinct, shaped._distinct_on, len(shaped._having_criteria)) == (True, (), 1)
 
     def test_an_orm_result_says_when_it_must_be_made_unique(self) -> None:
         """unique_entities and stream_all read ``_unique_filter_state``: set on a result whose joined eager load

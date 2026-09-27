@@ -38,8 +38,9 @@ not broken, and a PostgreSQL feature is only ever an accelerator.
 - **Entities a join repeats.** :func:`joins_rows` tells whether a specification's join can repeat an entity;
   :func:`distinct_entity_page` then cuts a page from the distinct primary keys, and
   :func:`distinct_entity_count` counts them, so pages count entities rather than joined rows;
-  :func:`row_count` counts the rows of any other statement. What a statement asks of the entities it reads
-  (its fetch plan, loader criteria, execution options and lock) goes on the statement that reads them.
+  :func:`row_count` counts the rows of any other statement. The page's entities are read by the statement
+  itself joined to its keys, so what it asks of them (its fetch plan, a ``contains_eager`` of its own join,
+  loader criteria, execution options, and a lock of any table it reads) applies to them.
 - **Delete strategy.** :func:`bulk_delete_safe` says whether a bulk ``DELETE`` does what deleting entity by
   entity does: no ORM cascade, version column, inheritance or delete listener.
 - **Fetch plans and locks.** :func:`loader_options` turns a repository's ``load=`` argument into loader
@@ -327,17 +328,21 @@ def distinct_entity_page(
     """The entities *statement* selects, each once, in its ORDER BY, with *offset* and *limit* counting entities.
 
     The page is cut from the distinct primary keys of the matching rows (with the ORDER BY keys beside them,
-    since a ``DISTINCT`` may only order by what it selects), and the entities are selected by joining those
-    keys, in the same order: ``SELECT e.* FROM e JOIN (SELECT DISTINCT e.pk, <keys> ... ORDER BY ... LIMIT
-    ...) AS page ON e.pk = page.pk ORDER BY page.<keys>``. Portable (SQL Server 2012 and later included), and one
-    statement. Order *statement* by the entity's own properties: ordering by a joined row's column repeats an
-    entity once per distinct value.
+    since a ``DISTINCT`` may only order by what it selects), and the entities are read by *statement* itself
+    joined to those keys, in the same order: ``SELECT e.* FROM e <its joins> JOIN (SELECT DISTINCT e.pk, <keys>
+    ... ORDER BY ... LIMIT ...) AS page ON e.pk = page.pk WHERE <its criteria> ORDER BY page.<keys>``. Portable
+    (SQL Server 2012 and later included), and one statement. Order *statement* by the entity's own properties:
+    ordering by a joined row's column repeats an entity once per distinct value.
 
-    What *statement* asks of the entities it reads goes on the returned statement, which reads them: its loader
-    options (a fetch plan, ``with_loader_criteria``), its execution options, and its lock (``with_for_update``),
-    which PostgreSQL and Oracle refuse on a ``DISTINCT``. The lock takes the entity's rows (``FOR UPDATE OF``
-    its table where the dialect names tables) unless it names what to lock itself; the rows of the tables it
-    joined are read by the key subquery and are not locked. More loader options go on the returned statement.
+    Read through its own FROMs, joins and criteria, the entities get what *statement* asks of them: a
+    ``contains_eager`` load gets the rows its join matched, and its loader options (a fetch plan,
+    ``with_loader_criteria``) and execution options apply. Its joins repeat an entity on that read too: consume
+    the result with :func:`unique_entities` (``distinct=True``). Its ``DISTINCT``, ``GROUP BY``, ``HAVING``,
+    ``LIMIT`` and ``OFFSET`` shape the keys alone, which then hold only the entities they admit (on the entities'
+    rows, a ``DISTINCT`` or a ``GROUP BY`` could not order by the page's keys). Its lock (``with_for_update``),
+    which PostgreSQL and Oracle refuse on a ``DISTINCT``, leaves the keys and takes the rows the entities are read
+    from: the entity's own (``FOR UPDATE OF`` its table where the dialect names tables) unless it names what to
+    lock itself, a table it joins included. More loader options go on the returned statement.
     """
     mapper: Mapper[Any] = sa_inspect(entity)
     key_columns = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
@@ -357,18 +362,12 @@ def distinct_entity_page(
             inner = inner.limit(limit)
     page = inner.subquery("pyfly_page")
     matched = and_(*(column == page.c[f"pyfly_k{index}"] for index, column in enumerate(key_columns)))
+    # Joined from the entity, since the statement's FROM may start with another table (select_from).
     outer: Select[Any] = (
-        select(entity)
-        .join(page, matched)
+        _entity_rows(statement)
+        .join_from(entity, page, matched)
         .order_by(*(_directed(page.c[f"pyfly_o{index}"], modifiers) for index, (_key, modifiers) in enumerate(orders)))
     )
-    # A subquery's loader options are never applied (only the top-level statement's are), so a fetch plan
-    # left on the key subquery alone would be silently dropped.
-    if statement._with_options:
-        outer = outer.options(*statement._with_options)
-    execution_options = statement.get_execution_options()
-    if execution_options:
-        outer = outer.execution_options(**execution_options)
     lock = statement._for_update_arg
     if lock is not None:
         # A column names its table on every dialect (Oracle renders OF with columns only).
@@ -418,6 +417,16 @@ def _unlocked(statement: Select[Any]) -> Select[Any]:
     copy = statement._generate()
     copy._for_update_arg = None
     return copy
+
+
+def _entity_rows(statement: Select[Any]) -> Select[Any]:
+    """*statement* reading every row it matches: without the ``DISTINCT``, ``GROUP BY``, ``HAVING``, ``ORDER BY``,
+    ``LIMIT``, ``OFFSET`` and lock that shape, cut or lock them (there is no public way to take a ``DISTINCT``, a
+    ``HAVING`` or a lock off a ``SELECT``)."""
+    rows = _unlocked(statement).order_by(None).group_by(None).limit(None).offset(None)
+    # The generative calls returned a copy of its own: what is reset here is shared with no other statement.
+    rows._distinct, rows._distinct_on, rows._having_criteria = False, (), ()
+    return rows
 
 
 def _split_order(clause: Any) -> tuple[Any, list[Any]]:

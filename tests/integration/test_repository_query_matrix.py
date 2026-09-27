@@ -19,7 +19,9 @@
   (``LIMIT size + 1``); ``scroll`` pages by keyset (C135).
 - A specification whose join repeats entities (a collection) is paged over the distinct keys, and one that
   joins a many-to-one with a plain ``LIMIT``; either way its own fetch plan, loader criteria, execution
-  options and lock apply to the entities it reads and to its count.
+  options and lock apply to the entities it reads and to its count. The page's entities are read through the
+  specification's own joins, so a ``contains_eager`` of the rows it filtered on loads just those, a lock may
+  name a table it joins, and its own ``DISTINCT`` or ``GROUP BY`` shapes the keys.
 - NULL placement and case folding come out the same on every backend when an order names them (C112).
 - A ``lazy="joined"`` collection works in every list method and in ``stream_all`` (C140).
 - Read methods take a fetch plan, so relationships are usable on the detached entities they return, and
@@ -35,13 +37,23 @@ import asyncio
 import contextlib
 import re
 import uuid
+import warnings
 from typing import Any
 
 import pytest
-from sqlalchemy import ForeignKey, Integer, String, event, insert, select
+from sqlalchemy import ForeignKey, Integer, String, event, func, insert, select
 from sqlalchemy.dialects import mssql, oracle
-from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload, with_loader_criteria
+from sqlalchemy.exc import DBAPIError, SAWarning
+from sqlalchemy.orm import (
+    Mapped,
+    Session,
+    contains_eager,
+    joinedload,
+    mapped_column,
+    relationship,
+    selectinload,
+    with_loader_criteria,
+)
 
 from pyfly.data import transactional
 from pyfly.data.page import Page
@@ -510,6 +522,129 @@ async def test_a_locking_specification_pages_over_distinct_entities(
         assert not any("FOR UPDATE" in sql for sql in statements if "count(" in sql.lower())  # a COUNT locks nothing
         if row_locks:
             assert re.search(r"FOR UPDATE( OF [`\"]?rq_shop[`\"]?)?\s*$", read), read
+
+
+def _matched_items(shape: str) -> Specification[RqShop]:
+    """The Spanish shops, each with only its 'hit' items: the specification filters through the collection and
+    loads the rows it matched into it (``contains_eager``, SQLAlchemy's custom-filtered collection load), from a
+    join, from a second FROM that the WHERE correlates, or from a FROM of the items' table."""
+
+    def predicate(root: Any, query: Any) -> Any:
+        hit = (RqItem.label == "hit", RqShop.owner_id == 1)
+        if shape == "join":
+            query = query.join(RqShop.items).where(*hit)
+        elif shape == "from":
+            query = query.where(RqItem.shop_id == RqShop.id, *hit)
+        else:
+            query = query.select_from(RqItem).where(RqItem.shop_id == RqShop.id, *hit)
+        return query.options(contains_eager(RqShop.items))
+
+    return Specification[RqShop](predicate)
+
+
+@pytest.mark.parametrize("shape", ["join", "from", "select-from"])
+async def test_a_specification_that_loads_the_rows_it_filters_on_pages_each_entity_with_its_own(
+    relational_backend: RelationalBackend, shape: str
+) -> None:
+    """A specification that loads the collection rows it filtered on (``contains_eager``) gets each entity once on
+    every paging path, holding only its own matched rows. The page's entities were read by a statement without
+    the specification's FROMs, so every row of the items table joined every shop of the page (a cartesian
+    product: eighteen items per shop here), silently."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops = ShopRepository()
+        spec = _matched_items(shape)
+        by_name = Sort.by("name")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            page = await shops.find_all_by_spec_paged(spec, Pageable.of(1, 2, by_name))
+            tail = await shops.find_slice_by_spec(spec, Pageable.of(2, 2, by_name))
+            window = await shops.scroll(by_name, size=2, spec=spec)
+            listed = await shops.find_all_by_spec(spec)
+        assert (_names(page.items), page.total) == (["s1", "s3"], 3)
+        assert (_names(tail.items), tail.has_next) == (["s5"], False)
+        assert (_names(window.items), window.has_next) == (["s1", "s3"], True)
+        assert sorted(_names(listed)) == ["s1", "s3", "s5"]
+        for shop in [*page.items, *tail.items, *window.items, *listed]:
+            assert sorted(item.id for item in shop.items) == [shop.id * 10, shop.id * 10 + 1], shop.name
+        assert [str(warning.message) for warning in caught if issubclass(warning.category, SAWarning)] == []
+
+
+class ItemRepository(Repository[RqItem, int]):
+    pass
+
+
+async def test_a_specification_that_locks_the_rows_it_joins_pages_over_distinct_entities(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A specification may lock the rows of a table it joins (``with_for_update(of=RqItem)``): the statement that
+    reads the page's entities carries the specification's joins, so the table the lock names is in its FROM.
+    That statement read the entities alone: PostgreSQL ('relation "rq_item" in FOR UPDATE clause not found in
+    FROM clause') and MySQL (3568, 'Unresolved table name in locking clause') refused it, and MariaDB, which has
+    no ``FOR UPDATE OF`` and locks what a statement reads, locked no item."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops, items = ShopRepository(), ItemRepository()
+        locking = Specification[RqShop](
+            lambda root, q: (
+                q.join(RqShop.items).where(RqItem.label == "hit", RqShop.owner_id == 1).with_for_update(of=RqItem)
+            )
+        )
+        row_locks = datasources.dialect != "sqlite"  # SQLite has no row locks: its writer holds the database
+        names_tables = datasources.dialect in ("postgresql", "mysql")  # FOR UPDATE OF (MariaDB has none)
+
+        @transactional(propagation=Propagation.REQUIRES_NEW)
+        async def try_nowait(repository: Repository[Any, int], id: int) -> None:
+            await repository.find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE_NOWAIT)
+
+        @transactional
+        async def lock_page() -> tuple[list[str], list[str]]:
+            with datasources.counter() as counter:
+                page = await shops.find_all_by_spec_paged(locking, Pageable.of(1, 2, Sort.by("name")))
+            if row_locks:
+                with pytest.raises(DBAPIError):  # another transaction cannot take a matched item of the page
+                    await try_nowait(items, 10)
+            if names_tables:
+                await try_nowait(shops, 1)  # the lock names the items: the shop's own row is free
+            return _names(page.items), sql_of(counter, "SELECT")
+
+        names, statements = await lock_page()
+        assert names == ["s1", "s3"]
+        (read,) = [sql for sql in statements if "pyfly_page" in sql]
+        assert "FOR UPDATE" not in read.split("pyfly_page ON ")[0]  # the distinct keys are read unlocked
+        if names_tables:
+            assert re.search(r"FOR UPDATE OF [`\"]?rq_item[`\"]?\s*$", read), read
+        elif row_locks:
+            assert read.rstrip().endswith("FOR UPDATE"), read
+
+
+@pytest.mark.parametrize("shaping", ["distinct", "grouped"])
+async def test_a_specification_that_shapes_its_own_rows_pages_over_distinct_entities(
+    relational_backend: RelationalBackend, shaping: str
+) -> None:
+    """A specification may de-duplicate its join itself (``distinct()``) or group it (``group_by`` and
+    ``HAVING``). The page's keys apply that shaping; the statement that reads the entities by those keys leaves
+    it out, since a ``DISTINCT`` or a ``GROUP BY`` there cannot order by the page's keys (PostgreSQL and MySQL
+    refuse it) and the keys already hold only the entities it admits."""
+
+    def predicate(root: Any, query: Any) -> Any:
+        query = query.join(RqShop.items).where(RqItem.label == "hit", RqShop.owner_id == 1)
+        if shaping == "distinct":
+            return query.distinct()
+        return query.group_by(RqShop.id).having(func.count(RqItem.id) >= 2)
+
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops = ShopRepository()
+        spec = Specification[RqShop](predicate)
+        by_name = Sort.by("name")
+        page = await shops.find_all_by_spec_paged(spec, Pageable.of(1, 2, by_name))
+        assert (_names(page.items), page.total) == (["s1", "s3"], 3)
+        tail = await shops.find_slice_by_spec(spec, Pageable.of(2, 2, by_name))
+        assert (_names(tail.items), tail.has_next) == (["s5"], False)
+        window = await shops.scroll(by_name, size=2, spec=spec)
+        assert (_names(window.items), window.has_next) == (["s1", "s3"], True)
 
 
 # ---------------------------------------------------------------------------------------------------------
