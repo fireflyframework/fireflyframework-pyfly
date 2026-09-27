@@ -85,7 +85,7 @@ from pyfly.data.relational.sqlalchemy import (
     transactional, reactive_transactional,  # Declarative transaction management
 )
 from pyfly.data.transaction import (     # The backend-neutral unit of work
-    TransactionTemplate, after_commit, detached, infrastructure_unit,
+    TransactionTemplate, after_commit, detached, infrastructure_unit, outside_transaction,
 )
 ```
 
@@ -689,6 +689,35 @@ failure inside a savepoint the application rolls back does not count; see
 unit whose task is cancelled (a client disconnect, a timeout) discards its connection instead of
 returning it to the pool, and commit, rollback and release run shielded (their own task, under `asyncio`
 and `anyio` shields) before the cancellation is re-raised.
+
+#### Work outside the caller's unit
+
+`outside_transaction()` runs a block of the calling task with its units suspended, as `NOT_SUPPORTED`
+suspends one, and starts no task: it is for work the caller waits for that must not be part of its
+transaction. Inside the block `infrastructure_unit()`, repository calls and `REQUIRED` boundaries open short
+units of their own, `after_commit` callbacks run at once, and `is_transaction_active()` is false; the binding
+comes back when the block exits, after an exception or a cancellation too. `TransactionAwareCache` runs its
+immediate operations this way (see [Caching and Transactions](caching.md#caching-and-transactions)).
+
+```python
+from pyfly.data.transaction import outside_transaction
+
+@transactional
+async def import_batch(self, batch_id: str, rows: list[Row]) -> None:
+    with outside_transaction():   # markers: a cache on the database, whose statements join the bound unit
+        first = await self.markers.put_if_absent(f"import:{batch_id}", True)   # committed at once, kept on rollback
+    if first:
+        await self.rows.save_all(rows)
+```
+
+In your own code a boundary is usually what you want (`Propagation.REQUIRES_NEW` on one datasource);
+`outside_transaction()` is for code that joins whatever unit is bound, on any datasource, such as a
+framework adapter that runs through `infrastructure_unit()`.
+
+The caller's units stay open meanwhile, and the task still holds their connections and locks. Each statement
+in the block checks out another pooled connection of its datasource, and the block must not wait for a lock
+the caller holds: on SQLite a write unit the block would open beside a write unit this task holds is refused
+at once with `IllegalTransactionStateError`, instead of waiting `busy_timeout` for its own lock.
 
 ### Programmatic Transactions
 
