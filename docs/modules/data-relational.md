@@ -41,6 +41,9 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Queries](#paginated-queries)
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
+  - [Unit of Work](#unit-of-work)
+  - [Programmatic Transactions](#programmatic-transactions)
+  - [reactive_transactional](#reactive_transactional)
 - [Run Migrations on Startup (Flyway-Style)](#run-migrations-on-startup-flyway-style)
 - [Datasource Registry](#datasource-registry)
   - [Configuration Reference](#configuration-reference)
@@ -79,7 +82,10 @@ from pyfly.data.relational.sqlalchemy import (
     QueryExecutor, query,               # Custom @query decorator
     QueryMethodCompiler,                # Derived query → SQLAlchemy compiler
     RepositoryBeanPostProcessor,        # Auto-wires query methods
-    reactive_transactional,             # Declarative transaction management
+    transactional, reactive_transactional,  # Declarative transaction management
+)
+from pyfly.data.transaction import (     # The backend-neutral unit of work
+    TransactionTemplate, after_commit, detached, infrastructure_unit,
 )
 ```
 
@@ -151,7 +157,7 @@ The `Repository[T, ID]` class provides generic async CRUD operations for any SQL
 - **T** — The entity type (any SQLAlchemy model, including `BaseEntity` subclasses or plain `Base` subclasses)
 - **ID** — The primary key type (e.g. `UUID`, `int`, `str`)
 
-When you subclass `Repository[T, ID]` with concrete type parameters, the framework automatically extracts the entity type and ID type via `__init_subclass__`. The `AsyncSession` is injected by the DI container from the auto-configured `async_sessionmaker`. No explicit `__init__` is needed:
+When you subclass `Repository[T, ID]` with concrete type parameters, the framework automatically extracts the entity type and ID type via `__init_subclass__`. A repository holds no session: it resolves one on every call through the [unit of work](#unit-of-work). No explicit `__init__` is needed:
 
 ```python
 from uuid import UUID
@@ -163,7 +169,7 @@ from pyfly.container import repository as repo_stereotype
 class OrderRepository(Repository[Order, UUID]):
     pass
 
-# Usage (session is injected by the container):
+# Outside a transaction, each call runs in a short unit of its own and commits:
 order = await repo.save(Order(customer_id="abc", status="PENDING"))
 found = await repo.find_by_id(order.id)
 ```
@@ -195,9 +201,12 @@ class ProductRepository(Repository[Product, int]):
 
 **How it works:**
 
-1. `__init_subclass__` inspects `__orig_bases__` to extract the entity type (`Order`) and ID type (`UUID`) from the generic parameters at class definition time.
-2. The `AsyncSession` is provided as an auto-configured bean by `RelationalAutoConfiguration` and injected by the container into the repository's constructor. The bean is **transient** (since v26.09.06): every injection receives its own session, so two repositories never share a transaction, an identity map or a connection's local state by accident. A bean that needs a session per request or per tenant injects `async_sessionmaker[AsyncSession]` and calls it — and a user `@bean` may take that factory as a parameter, because user factories whose dependencies are auto-configured are deferred until the auto-configuration has run (see [The start() Lifecycle](dependency-injection.md#the-start-lifecycle)).
+1. `__init_subclass__` inspects `__orig_bases__` to extract the entity type (`Order`) and ID type (`UUID`) from the generic parameters at class definition time. It works for a subclass of `SoftDeleteRepository[T, ID]` too.
+2. The container never injects a session into a repository: the `session` parameter is `Annotated[AsyncSession | None, NoAutowire]`. A DI-built repository is therefore in **managed mode** and resolves its session per call (see [Unit of Work](#unit-of-work)). `Repository(Order, session)` with an explicit session is **manual mode**: the caller owns that session, and the repository uses it as is.
 3. The entity type is used internally for all query operations — no need to pass it manually.
+4. `__datasource__ = "reporting"` on the class (or `Repository(Order, datasource="reporting")`) gives the repository its datasource; the default is the primary.
+
+Custom methods keep working: `self._session` and `self._require_session()` return the session of the current call. Every public `async def` of a subclass is wrapped like the inherited methods, so a custom method is one operation: inside a unit it joins, outside one it runs in an auto unit (a read unit when its name starts with `find`, `count`, `exists`, `stream` or `get`; a write unit that commits otherwise).
 
 ### CRUD Methods Reference
 
@@ -551,7 +560,113 @@ The implementation:
 
 ## Transaction Management
 
-The `@reactive_transactional` decorator provides declarative async transaction management:
+PyFly binds every transaction to the running task as a **unit of work** and never mutates a bean: two
+concurrent requests through the same singleton service each get their own unit, and a repository call
+reaches the unit wherever the repository lives (a nested service, a list, a `Provider`, `get_bean`). The
+backend-neutral package is `pyfly.data.transaction`; `@transactional` (below, in
+[Transaction Management with @transactional](#transaction-management-with-transactional)) is its
+declarative face, and one `SqlAlchemyTransactionManager` per datasource of the
+[registry](#datasource-registry) runs the units.
+
+### Unit of Work
+
+A repository call resolves its session when it runs:
+
+- **Inside a unit for its datasource** (`@transactional`, a `TransactionTemplate` block, a
+  `reactive_transactional` function), it joins that unit and uses its session.
+- **Outside a transaction**, the outermost repository call opens a short **auto unit** of its own, and
+  nested repository calls inside it share it (`exists_by_id` calling `find_by_id` is one unit):
+  - a **read** method (`find*`, `count*`, `exists*`, `stream*`, `get*`) gets a read unit. On
+    PostgreSQL it runs on an `AUTOCOMMIT` connection, one round trip instead of three, unless the
+    datasource has [after-begin customizers](#after-begin-customizers) (their transaction-local settings
+    need a transaction). Elsewhere it is a short transaction that ends without writing. A read unit whose
+    connection turns out to be dead (a failover, a server-side idle timeout) is retried once on a fresh
+    connection, so pool pre-ping is not needed. An ORM write inside a read unit is refused.
+  - any **other** method gets a write unit that commits (on SQLite, it starts with `BEGIN IMMEDIATE`).
+
+  Either way the connection goes back to the pool when the call returns. Entities returned from an auto
+  unit are detached with their loaded state intact (`expire_on_commit=False`); lazy relationships need an
+  explicit fetch.
+- `stream_all` captures the unit at its first step, or opens its own read unit (always a transaction:
+  server-side cursors need one), and owns that connection until the iterator is exhausted or
+  `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`.
+
+Every `asyncio` task created inside a transaction inherits its unit. That is made safe:
+
+- Operations on a unit's session run under the unit's **operation guard**, a lock that is reentrant per
+  task. `asyncio.gather()` fan-out inside `@transactional` is serialized, and the framework's repository
+  methods are atomic (`save` is add, flush and refresh as one step).
+- A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
+  instead of writing into a transaction nobody will commit.
+- Work that must outlive its caller's unit runs through `detached()`, with the transaction state cleared:
+
+```python
+from pyfly.data.transaction import detached
+
+@transactional
+async def place(self, order: Order) -> None:
+    await self.orders.save(order)
+    detached(self.notifier.send_receipt(order.id))   # its own transactions, outside place()'s unit
+
+
+@detached                                            # every call schedules a task with its own state
+async def rebuild_projection(order_id: str) -> None: ...
+```
+
+A statement that fails inside a unit marks it **rollback-only**: on PostgreSQL the transaction is dead
+after any failed statement, and the same rule on every backend gives the same code the same outcome. A
+unit whose task is cancelled (a client disconnect, a timeout) discards its connection instead of
+returning it to the pool, and commit, rollback and release run shielded (their own task, under `asyncio`
+and `anyio` shields) before the cancellation is re-raised.
+
+### Programmatic Transactions
+
+`TransactionTemplate` has the same semantics as `@transactional`:
+
+```python
+from pyfly.data.transaction import Propagation, TransactionTemplate
+
+template = TransactionTemplate("reporting", timeout=5)          # a datasource name, a manager or None
+
+async with template.transaction() as unit:                      # unit.resource is the AsyncSession
+    await ledger.save(entry)
+
+total = await template.execute(ledger.recompute)                # a coroutine function inside a unit
+
+async with template.transaction(propagation=Propagation.REQUIRES_NEW):
+    ...
+```
+
+For custom data access code, inject `SessionProvider`: `current()` is the session of the current unit
+(or `None`), and `async with provider.unit(read_only=...)` joins the bound unit or opens a short one.
+Framework adapters use `infrastructure_unit(datasource)` from `pyfly.data.transaction`, the same
+join-or-own helper: inside a business transaction their writes are part of it, outside one they get a
+unit that commits. `single_statement=True` runs one statement on an `AUTOCOMMIT` connection where the
+backend makes that cheaper (PostgreSQL).
+
+```python
+from pyfly.data.relational.sqlalchemy.session import SessionProvider
+
+@service
+class ReportDao:
+    def __init__(self, sessions: SessionProvider) -> None:
+        self._sessions = sessions
+
+    async def totals(self) -> list[Row]:
+        async with self._sessions.unit(read_only=True) as session:
+            return (await session.execute(text("SELECT ..."))).all()
+```
+
+The transient `async_session` bean is a `ScopedAsyncSession`: each injection is a distinct object, and
+inside a unit for its datasource its unit-of-work API (`execute`, `scalar`, `scalars`, `get`, `get_one`,
+`add`, `add_all`, `delete`, `merge`, `flush`, `refresh`, `stream`, `stream_scalars`, `begin_nested`,
+`in_transaction`) delegates to the unit's session, so a DAO that injects `AsyncSession` joins
+`@transactional`. There its `commit()` and `rollback()` raise `IllegalTransactionStateError`, as Spring's
+shared `EntityManager` does. Outside a unit it is an ordinary session its owner commits and closes.
+
+### reactive_transactional
+
+`@reactive_transactional(session_factory)` passes the unit's `AsyncSession` as the first argument:
 
 ```python
 from pyfly.data.relational.sqlalchemy import reactive_transactional
@@ -565,26 +680,18 @@ async def create_order(session: AsyncSession, customer_id: str) -> Order:
     order = Order(customer_id=customer_id, status="PENDING")
     session.add(order)
     return order
-    # Transaction is automatically committed on success
-    # Transaction is automatically rolled back on exception
+    # Committed on success, rolled back on an exception
 ```
 
-**How it works:**
-1. Opens a new `AsyncSession` from the `session_factory`.
-2. Begins a transaction with `session.begin()`.
-3. Calls the wrapped function with the session as the first argument.
-4. On success: the transaction is committed (via the `async with` context manager).
-5. On exception: the transaction is rolled back and the exception is re-raised.
-
-The decorated function's original arguments are passed after the injected `session`:
+It is a `REQUIRED` boundary built on the `TransactionTemplate`, so it binds its unit: inside a unit on
+the same datasource it joins (and receives that unit's session), `@transactional` methods called inside
+it join it, and `MANDATORY`/`NEVER` see it. The decorated function's own arguments follow the session:
 
 ```python
 @reactive_transactional(session_factory)
 async def transfer_funds(session: AsyncSession, from_id: str, to_id: str, amount: float):
-    # session is injected; from_id, to_id, amount are passed through
     ...
 
-# Call it without the session argument:
 await transfer_funds("acc-1", "acc-2", 100.0)
 ```
 
@@ -747,9 +854,12 @@ registry builds therefore gets the following setup:
   waits `busy-timeout` for it, instead of failing on the lock upgrade later. Ask for it before the first
   statement with `session.connection(execution_options=datasource.begin_options(read_only=False))`;
   `begin_options` returns `{"pyfly_sqlite_begin": "IMMEDIATE"}` on SQLite and `{}` elsewhere. A
-  transaction that does not ask starts with a plain `BEGIN`. The transaction manager of the
-  unit-of-work redesign asks for it on every write unit; until it lands, `@transactional` methods and
-  repositories start with a plain `BEGIN`.
+  transaction that does not ask starts with a plain `BEGIN`. The transaction manager asks for it on every
+  write unit (`@transactional` and a repository's write auto unit); read-only units start with `BEGIN`.
+- **SQLite has one writer.** A write unit holds the write lock from its `BEGIN IMMEDIATE`. A new write
+  unit that would wait for the lock of a unit the same task keeps open (it suspended it with
+  `REQUIRES_NEW`, or a write under `NOT_SUPPORTED`) fails at once with `IllegalTransactionStateError`
+  instead of waiting `busy-timeout` for itself. A read under a suspended write unit works (WAL).
 - **An explicit `BEGIN IMMEDIATE` statement no longer works.** `session.execute(text("BEGIN IMMEDIATE"))`
   inside `session.begin()` was the way to take the write lock under pysqlite's deferred `BEGIN`. On a
   registry engine the transaction's `BEGIN` has already run, so SQLite answers "cannot start a
@@ -810,11 +920,11 @@ class TenantGuc:
             )
 ```
 
-The customizers run when `await datasource.run_after_begin(session)` (or
-`run_after_begin(datasource, session)`) is called right after `BEGIN`. The transaction manager of the
-unit-of-work redesign calls it for every unit it opens, auto units included. Until it lands, nothing
-calls it on its own: `@transactional` methods and repositories do not run customizers yet, and a
-transaction you open yourself runs them with that call.
+The transaction manager runs the customizers right after `BEGIN` in every unit it opens:
+`@transactional` units, repository auto units, `SessionProvider` and `infrastructure_unit()` units. A
+datasource with customizers gets transactional read auto units on PostgreSQL instead of `AUTOCOMMIT`
+ones, so a transaction-local setting applies to the read. A transaction you open yourself runs them with
+`await datasource.run_after_begin(session)` (or `run_after_begin(datasource, session)`).
 
 ### Credential Rotation
 
@@ -1087,49 +1197,130 @@ class DataConfig:
 
 ---
 
-### Transaction Management
+### Transaction Management with @transactional
 
-The `@transactional` decorator provides Spring-style declarative transaction management with propagation and isolation support.
+`@transactional` gives Spring's `@Transactional` semantics on every backend. It works bare or
+parametrized, on an `async def` method or function, or on a class (every public `async def` defined on
+it; a method's own settings win over the class's).
 
 #### Basic Usage
 
 ```python
-from pyfly.data.relational.sqlalchemy import transactional, Propagation, Isolation
+from pyfly.container import service
+from pyfly.data.relational.sqlalchemy import Isolation, Propagation, transactional
+
 
 @service
 class OrderService:
-    _session_factory: async_sessionmaker  # injected by DI
+    def __init__(self, repo: OrderRepository, audit: AuditService) -> None:
+        self.repo = repo
+        self.audit = audit
 
-    @transactional()
+    @transactional
     async def create_order(self, order: Order) -> Order:
-        return await self.repo.save(order)
-
-    @transactional(propagation=Propagation.REQUIRES_NEW)
-    async def audit_log(self, message: str) -> None:
-        # Always opens a new transaction, even if called from within another
-        ...
+        saved = await self.repo.save(order)
+        await self.audit.log(f"order {saved.id} created")   # REQUIRES_NEW: commits on its own
+        return saved
 
     @transactional(isolation=Isolation.SERIALIZABLE, read_only=True)
     async def generate_report(self) -> Report:
         ...
+
+
+@transactional(datasource="reporting")            # class level: every public async method
+class ReportingService:
+    async def record(self, row: ReportRow) -> None: ...
+
+    @transactional(propagation=Propagation.MANDATORY)   # keeps datasource="reporting"
+    async def record_inside(self, row: ReportRow) -> None: ...
 ```
+
+At decoration time it raises `TypeError` for a sync function and for an async generator (a transaction
+cannot safely span iteration; use `TransactionTemplate` around the loop).
+
+#### Which transaction manager runs a call
+
+Resolved per call, in this order:
+
+1. `manager=` (a `TransactionManager` or a datasource name) or `datasource="name"`, on the method or on
+   a class-level `@transactional`;
+2. the legacy attributes: `self._session_factory` (an `async_sessionmaker`, mapped to its registry
+   datasource; a factory you built yourself gets a manager of its own) and `self._motor_client`. A
+   service that exposes **both** raises `IllegalTransactionStateError` unless a datasource is named:
+   one arm would commit while the other rolled back;
+3. the running application context's default datasource (`primary`). A service with no factory
+   attribute works, and so does a plain function.
+
+A unit on one datasource never satisfies a join on another: a `REQUIRED` call on `reporting` inside a
+unit on `primary` begins `reporting`'s own unit (there is no two-phase commit between them).
 
 #### Propagation Types
 
-| Propagation | Behavior |
-|------------|----------|
-| `REQUIRED` (default) | Join existing transaction or start new |
-| `REQUIRES_NEW` | Always start a new transaction, suspending existing |
-| `SUPPORTS` | Run within transaction if one exists, or without |
-| `NOT_SUPPORTED` | Suspend any existing transaction |
-| `MANDATORY` | Require existing transaction, raise if none |
-| `NEVER` | Raise if a transaction exists |
+| Propagation | A unit is bound for the datasource | None is bound |
+|------------|------------------------------------|---------------|
+| `REQUIRED` (default) | join it | begin a new unit |
+| `REQUIRES_NEW` | suspend it, begin a new unit, resume on exit | begin a new unit |
+| `NESTED` | savepoint in it (`begin_nested`) | begin a new unit |
+| `SUPPORTS` | join it | run without one (repository calls get auto units) |
+| `NOT_SUPPORTED` | suspend it, run without one | run without one |
+| `MANDATORY` | join it | `IllegalTransactionStateError` |
+| `NEVER` | `IllegalTransactionStateError` | run without one |
 
-#### Isolation Levels
+#### Rollback rules and rollback-only
 
-`DEFAULT`, `READ_UNCOMMITTED`, `READ_COMMITTED`, `REPEATABLE_READ`, `SERIALIZABLE`
+- Any `Exception` rolls back by default; a `BaseException` that is not an `Exception` (cancellation)
+  always rolls back.
+- `rollback_for` **adds** rollback rules and `no_rollback_for` adds commit rules; the most specific
+  rule wins (the class closest to the exception in its MRO), and a tie rolls back. Narrowing
+  `rollback_for=(PaymentError,)` does not make a `KeyError` commit.
+- A participant (a joined call) that exits with an exception its rules roll back marks the unit
+  **rollback-only**, and so does any failed statement. When the outermost boundary then completes
+  normally, it rolls back and raises `UnexpectedRollbackError`. To try a step and carry on after it
+  fails, use `NESTED`: its failure rolls back to the savepoint only.
+- A `no_rollback_for` exception on a unit whose transaction is already dead rolls back and re-raises the
+  original exception (never `PendingRollbackError`).
 
-The decorator resolves `async_sessionmaker` from `self._session_factory` and automatically patches Repository instances on the service with the transaction-scoped session.
+#### Isolation, read-only and timeout
+
+- **Isolation** is applied with `session.connection(execution_options={"isolation_level": ...})` before
+  the first statement of a new unit, and validated against the dialect: an unsupported level (asyncpg
+  has no `READ UNCOMMITTED`; SQLite has only `SERIALIZABLE` and `READ UNCOMMITTED`) raises
+  `IllegalTransactionStateError` at begin. A joining call's isolation is ignored.
+- **`read_only=True`** routes a new unit to the datasource's replica when one is configured, sets
+  `session.info["read_only"]`, keeps `is_read_only()` true inside the call, refuses every ORM write
+  (`IllegalTransactionStateError` from a `before_flush` guard), and adds the dialect hint: `BEGIN READ
+  ONLY` on PostgreSQL, `SET TRANSACTION READ ONLY` on MySQL and MariaDB.
+- **`timeout=`** (seconds) bounds a new unit's body with `asyncio.timeout`: on expiry the unit rolls
+  back and `TransactionTimedOutError` (a `TimeoutError`) is raised. On PostgreSQL the unit also gets
+  `SET LOCAL statement_timeout`, so a stuck statement is cancelled on the server. A participant cannot
+  extend its unit's deadline.
+
+#### Synchronizations
+
+```python
+from pyfly.data.transaction import after_commit, register_synchronization
+
+@transactional
+async def place(self, order: Order) -> None:
+    await self.orders.save(order)
+    await after_commit(lambda: self.events.publish(OrderPlaced(order.id)))
+```
+
+`register_synchronization(sync)` takes a `TransactionSynchronization` (`before_commit(read_only)`,
+`before_completion()`, `after_commit()`, `after_completion(status)`; subclass
+`TransactionSynchronizationAdapter`). `before_commit` runs inside the unit and a failure there rolls it
+back. `after_commit` and `after_completion` run once the connection is released, outside any transaction
+(repository calls there get auto units); a failure there is logged and counted in
+`pyfly.tx.synchronization.failures`, and never turns a committed unit into a failure. Outside a
+transaction `after_commit(callback)` runs the callback at once.
+
+#### Cancellation and commit outcome
+
+Commit, rollback and session close run shielded, and a cancellation that arrived meanwhile is re-raised
+afterwards, so a client that disconnects mid-transaction (Starlette cancels the request through an anyio
+scope) never returns a poisoned or leaked connection to the pool. A commit whose connection fails while
+`COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
+blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transactions)).
 
 ---
 
@@ -1196,8 +1387,10 @@ The `after_init(bean, bean_name)` method:
 1. Checks if the bean is an instance of `Repository`. If not, it is returned unchanged.
 2. Gets the entity type from `bean._model`.
 3. Iterates over all attributes defined on the bean's class (not inherited from `Repository`).
-4. For `@query`-decorated methods: compiles them via `QueryExecutor.compile_query_method()` and replaces the stub with a wrapper that injects `bean._session`.
+4. For `@query`-decorated methods: compiles them via `QueryExecutor.compile_query_method()` and replaces the stub with a wrapper that runs on `bean._session`. Call them with keyword arguments.
 5. For derived query methods (`find_by_*`, `count_by_*`, `exists_by_*`, `delete_by_*`): checks if the method is a stub, parses the method name via `QueryMethodParser.parse()`, compiles it via `QueryMethodCompiler.compile()`, and replaces the stub with a wrapper.
+6. Every compiled wrapper is a repository operation like the inherited methods: it joins the current unit of work or runs in an auto unit (a read unit for `find_by_`, `count_by_`, `exists_by_` and `SELECT` queries, a write unit otherwise).
+7. Binds the repository to the application context's transaction managers, so two contexts in one process never share units.
 
 ### Stub Detection
 

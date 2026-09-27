@@ -12,6 +12,7 @@ fallback strategies using the PyFly resilience module.
    - [@retry Decorator](#retry-decorator)
    - [Backoff, Cap, and Jitter](#backoff-cap-and-jitter)
    - [Filtering Exception Types](#filtering-which-exceptions-retry)
+   - [Retries and Transactions](#retries-and-transactions)
 3. [Circuit Breaker](#circuit-breaker)
    - [CircuitBreaker Class](#circuitbreaker-class)
    - [Count-Based vs Rate-Based Tripping](#count-based-vs-rate-based-tripping)
@@ -150,6 +151,36 @@ async def load_config() -> dict:
 
 Here a `ValueError` would surface immediately, while `ConnectionError` or
 `OperationTimeoutException` are retried up to four total attempts.
+
+### Retries and Transactions
+
+A retry must run **outside** the unit of work it retries: every attempt then gets a fresh transaction,
+and a failed attempt's writes roll back with it. In Spring the order of `@Retryable` and `@Transactional`
+on a method does not matter, because the retry advice always runs outside the transaction interceptor.
+PyFly keeps that rule whichever order you write the decorators in: `@transactional` applied over
+`@retry` moves the retry outside the transaction.
+
+```python
+@retry(max_attempts=3, delay=0.1, exceptions=(ConnectionError,))   # retry outside...
+@transactional
+async def import_batch(self, batch: Batch) -> None: ...
+
+@transactional                                                      # ...or written the Spring way:
+@retry(max_attempts=3, delay=0.1, exceptions=(ConnectionError,))   # the retry still runs outside
+async def import_batch_too(self, batch: Batch) -> None: ...
+```
+
+Three more rules keep a retry from doing harm:
+
+- **An unknown commit outcome is never retried.** `CommitOutcomeUnknownError` means the connection
+  failed while `COMMIT` was in flight, so the unit may have committed; a retry would write twice. Its
+  class declares `retryable = False`, and `@retry` never retries an exception that does. Reconcile
+  instead (an idempotency key, a read of the rows) or write through the transactional outbox.
+- **A retry inside a unit of work stops once that unit is rollback-only.** A retried method called from
+  a transactional caller runs inside the caller's unit; after a failed statement (or a failed
+  participant) that unit can only roll back, so no later attempt could commit.
+- **Retry transient failures only.** When the call writes, list the transient errors in `exceptions`
+  (a connection error, a serialization failure, a deadlock) rather than `Exception`.
 
 ---
 
