@@ -182,17 +182,25 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     async def _soft_delete_entities(self, session: AsyncSession, entities: Sequence[Any]) -> None:
         """Soft-delete each entity by key, checking the version it carries (all at once when unversioned)."""
+        sync_session = session.sync_session
+        stored: list[Any] = []
+        for entity in entities:
+            if _state(entity).key is None and _state(entity).session is sync_session:
+                session.expunge(entity)  # pending here: it is simply not inserted
+            else:
+                stored.append(entity)
         await session.flush()  # the unit's pending changes first: they may bump the versions compared below
         mapper = self._mapper
         version_key = (
             mapper.get_property_by_column(mapper.version_id_col).key if mapper.version_id_col is not None else None
         )
         plain: list[tuple[Any, ...]] = []
-        for entity in entities:
+        for entity in stored:
+            state = _state(entity)
             identity = self._identity_of(entity)
-            if identity is None or (_state(entity).key is None and self._is_new(entity)):
+            if identity is None or (state.key is None and self._is_new(entity)):
                 continue  # a new entity: nothing to delete
-            carried = _state(entity).dict.get(version_key) if version_key is not None else None
+            carried = state.dict.get(version_key) if version_key is not None else None
             if carried is None:
                 plain.append(identity)
                 continue
@@ -203,7 +211,7 @@ class SoftDeleteRepository(Repository[T, ID]):
                     f"{carried!r}: the row was changed or deleted since the entity was read"
                 )
         if plain:
-            unversioned = [entity for entity in entities if self._identity_of(entity) in plain]
+            unversioned = [entity for entity in stored if self._identity_of(entity) in plain]
             await self._soft_delete_identities(session, plain, unversioned)
 
     async def _soft_delete_identities(

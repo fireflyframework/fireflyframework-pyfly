@@ -149,6 +149,15 @@ async def test_a_new_entity_is_ignored(relational_backend: RelationalBackend) ->
             await items.delete(ContractSoftItem(label="never saved"))
         assert dml(counter) == {}
 
+        @transactional
+        async def add_then_delete() -> None:
+            pending = ContractSoftItem(label="pending")
+            items._session.add(pending)  # pending in the unit, never flushed
+            await items.delete(pending)
+
+        await add_then_delete()
+        assert await _deleted(datasources) == {}  # deleting a pending entity means not inserting it
+
 
 # ---------------------------------------------------------------------------------------------------------
 # WP03-07: versions, audit stamps, already deleted rows

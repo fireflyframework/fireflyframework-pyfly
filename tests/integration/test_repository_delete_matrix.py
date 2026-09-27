@@ -148,6 +148,20 @@ async def test_delete_of_detached_entities_cascades(relational_backend: Relation
         assert third.id is not None
 
 
+async def test_deleting_a_pending_entity_means_not_inserting_it(relational_backend: RelationalBackend) -> None:
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        parents = ParentRepository()
+
+        @transactional
+        async def add_then_delete() -> None:
+            pending = ContractParent(name="pending")
+            parents._session.add(pending)  # pending in the unit, never flushed
+            await parents.delete(pending)
+
+        await add_then_delete()
+        assert await _count(datasources, ContractParent) == 0
+
+
 async def test_the_batch_deletes_are_bulk_and_bypass_the_cascade(relational_backend: RelationalBackend) -> None:
     async with repository_datasources(relational_backend, *MODELS) as datasources:
         parents = ParentRepository()
