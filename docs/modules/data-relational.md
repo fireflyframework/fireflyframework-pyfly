@@ -2205,8 +2205,8 @@ primary key, so it works for any entity: one the unit holds, a detached one, or 
 bumps the version of a `VersionedMixin` entity (a stale copy can no longer be saved over the deleted row),
 checks the version the entity carries (`OptimisticLockingFailureException`, from `StaleDataError`, when it is
 stale), stamps `updated_at` and `updated_by` where the entity has them as the auditing listener stamps an
-update (the `DateTimeProvider`'s time and the `AuditorAware`'s auditor, `None` when there is none), and leaves a row that is already deleted alone (its `deleted_at`
-keeps the time it was first deleted). The entity passed in, and the unit's own copies, are kept in step:
+update (the `DateTimeProvider`'s time and the `AuditorAware`'s auditor, `None` when there is none), and
+leaves a row that is already deleted alone (its `deleted_at` keeps the time it was first deleted). The entity passed in, and the unit's own copies, are kept in step:
 where the database has `UPDATE ... RETURNING` (PostgreSQL, SQLite) exactly the copies of the rows the
 `UPDATE` changed; on MySQL and MariaDB the copies of the requested keys that are active in memory, which is
 wrong only for a copy whose row another transaction deleted after it was read. An id list goes one `UPDATE`
