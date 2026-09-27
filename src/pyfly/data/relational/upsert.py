@@ -57,9 +57,11 @@ from sqlalchemy import update as sql_update
 from sqlalchemy.engine import Connection, Dialect, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
+from sqlalchemy.sql.dml import Update
 from sqlalchemy.sql.elements import ColumnElement
 
 __all__ = [
+    "Executor",
     "Where",
     "backend_name",
     "insert_if_absent",
@@ -230,7 +232,7 @@ def update_statement(
     key: Sequence[str],
     update: Sequence[str] | None = None,
     where: Where | None = None,
-) -> Any:
+) -> Update:
     """The ``UPDATE`` of the row whose *key* columns match *values*: it sets the *update* columns (by
     default every non-key column of *values*), only where ``where(existing, incoming)`` holds. A plain
     statement every backend runs; the portable forms and the MySQL conditional upsert send it."""
