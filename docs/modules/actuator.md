@@ -1018,8 +1018,10 @@ The refresh endpoint mirrors Spring Cloud's `POST /actuator/refresh`. It first c
 `from_sources` performed), then triggers a context refresh — evicting all refresh-scoped beans and
 resetting `@config_properties` beans so they re-bind against the freshly-reloaded `Config` (which
 also re-reads environment variables and `${...}` placeholders) on next resolution. The evicted
-refresh-scoped instances are destroyed (their `@pre_destroy` runs, so one that owns an engine
-disposes its pool). A `RefreshScopeRefreshedEvent` is published, and the response lists the scope
+refresh-scoped instances are destroyed (their `@pre_destroy` runs, then the destroy method of a
+`@bean` product, inferred as `dispose()`/`aclose()`/`close()` when none is declared, then `stop()`
+of a lifecycle bean, so one that owns an engine disposes its pool). A `RefreshScopeRefreshedEvent`
+is published, and the response lists the scope
 keys of the refresh-scoped beans that were evicted (`__pyfly_bean_<module>.<class>`, followed by
 `#<bean name>` for a named bean):
 

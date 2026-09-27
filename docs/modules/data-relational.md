@@ -695,7 +695,9 @@ guide). `close()` disposes the engines concurrently and waits for them at most
 `close(timeout=...)`): a dispose that
 is still waiting is on a database that stopped answering, and it is cancelled while the connections
 left idle in its pool are terminated (their sockets closed, nothing sent), so `ctx.stop()` ends on
-time. From the moment it is closed, the registry's engines **refuse to connect**: using one raises
+time. When `pyfly.context.shutdown-timeout` is shorter and the stop cancels the close first, those
+connections are terminated all the same. From the moment it is closed, the registry's engines
+**refuse to connect**: using one raises
 `DataSourceConfigurationError` instead of silently opening a pool that nobody would dispose, and
 the db health indicator of a closed registry answers `OUT_OF_SERVICE` without touching them. A
 restarted context builds a new registry.

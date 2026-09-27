@@ -290,8 +290,10 @@ performs the following steps in order (`src/pyfly/context/refresh.py`):
 3. **Resets `@config_properties` singletons.** Their backing instances are cleared so they
    re-`bind()` from the live `Config` (which now reflects the re-read files, env-var
    overrides, and resolved `${...}` placeholders) on next resolution.
-4. **Destroys the evicted refresh-scoped instances**: their `@pre_destroy` methods run, after the
-   swap, so a refresh-scoped bean that owns an engine or a client closes it instead of leaking it.
+4. **Destroys the evicted refresh-scoped instances**, after the swap: their `@pre_destroy` methods
+   run, then the destroy method of a `@bean` product (`@bean(destroy_method=...)`, or the inferred
+   `dispose()`, `aclose()` or `close()`), then `stop()` of a lifecycle bean, so a refresh-scoped bean
+   that owns an engine or a client closes it instead of leaking it.
 5. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
 
 The response is `{"refreshed": [...]}`, listing the scope keys of the evicted
