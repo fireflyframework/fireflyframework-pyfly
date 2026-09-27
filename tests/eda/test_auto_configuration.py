@@ -180,3 +180,32 @@ def test_detect_provider_parametrized(
     with patch("pyfly.config.auto.AutoConfiguration.is_available") as is_avail:
         is_avail.side_effect = lambda mod: mod in available_modules
         assert EdaAutoConfiguration.detect_provider() == expected_provider
+
+
+from pyfly.container import bean, configuration  # noqa: E402 — kept near the test that uses them
+from pyfly.eda.domain_events import DomainEventPublisher, active_domain_event_publisher  # noqa: E402
+
+_OWN_PUBLISHER = DomainEventPublisher()
+
+
+@configuration
+class _OwnDomainEventPublisher:
+    @bean
+    def domain_event_publisher(self) -> DomainEventPublisher:
+        return _OWN_PUBLISHER
+
+
+async def test_an_application_s_own_domain_event_publisher_replaces_the_auto_configured_one() -> None:
+    """Both were started, and whichever started last silently collected every domain event."""
+    from pyfly.context.application_context import ApplicationContext
+
+    context = ApplicationContext(pyfly_config(base={"pyfly.eda.provider": "memory"}))
+    context.register_bean(_OwnDomainEventPublisher)
+    context.register_bean(EdaAutoConfiguration)
+    await context.start()
+    try:
+        assert context.get_beans_of_type(DomainEventPublisher) == [_OWN_PUBLISHER]
+        assert active_domain_event_publisher() is _OWN_PUBLISHER
+    finally:
+        await context.stop()
+    assert active_domain_event_publisher() is None

@@ -23,8 +23,9 @@ aggregate, and publishes them as that unit commits, from a ``before_commit`` syn
   that phase (``AFTER_COMMIT``: once the unit committed, and not at all when it rolls back);
 - and, with a *destination* (``pyfly.eda.domain-events.destination``), through the EDA event publisher,
   as ``publish(destination, event.event_type, event.to_payload(), headers)``. An outbox bus (the ``postgres``
-  and ``database`` providers) writes them in the committing unit itself: they are published exactly when the
-  aggregate's changes are. A broker bus (Kafka, RabbitMQ) gets them after the commit.
+  and ``database`` providers) on the aggregate's datasource writes them in the committing unit itself: they are
+  published exactly when the aggregate's changes are (an outbox on another datasource commits them in a unit
+  of its own, just before). A broker bus (Kafka, RabbitMQ) gets them after the commit.
 
 Which events it collects:
 
@@ -182,9 +183,17 @@ def _event_raised(aggregate: AggregateRoot[Any], event: DomainEvent) -> None:
     if publisher is None:
         return
     try:
-        publisher.collect(aggregate)
+        collected = publisher.collect(aggregate)
     except Exception:  # noqa: BLE001 — raising an event must never fail the domain code
         _logger.debug("domain_event_collection_failed", exc_info=True)
+        return
+    if not collected:
+        # Published only when a unit of work saves this very instance (session.add): a detached copy that
+        # Repository.save merges into an instance the unit already holds keeps it pending.
+        _logger.debug(
+            "domain_event_pending_outside_unit",
+            extra={"aggregate_type": type(aggregate).__name__, "event_type": getattr(event, "event_type", None)},
+        )
 
 
 class _UnitEvents:

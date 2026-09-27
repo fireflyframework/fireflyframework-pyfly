@@ -20,6 +20,7 @@ collects, what a listener raising more events does, the publishers of two contex
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,10 +118,17 @@ async def test_a_unit_that_rolls_back_publishes_nothing_and_leaves_the_events_pe
     assert account.pending_events() == []
 
 
-async def test_events_raised_outside_a_unit_stay_pending(bus: ApplicationEventBus) -> None:
-    account = Account("a-3")
-    account.open()
+async def test_events_raised_outside_a_unit_stay_pending(
+    bus: ApplicationEventBus, caplog: pytest.LogCaptureFixture
+) -> None:
+    """They are published when a unit saves this instance; a debug record says so (a detached copy merged into
+    an instance the unit holds would keep them pending)."""
+    with caplog.at_level(logging.DEBUG, logger="pyfly.eda.domain_events"):
+        account = Account("a-3")
+        account.open()
     assert [type(event) for event in account.pending_events()] == [Opened]
+    assert [record.message for record in caplog.records] == ["domain_event_pending_outside_unit"]
+    assert caplog.records[0].aggregate_type == "Account"
 
 
 async def test_a_listener_that_raises_more_events_gets_them_published_in_the_same_unit(

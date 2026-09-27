@@ -81,10 +81,14 @@ class DomainEvent:
 
 
 def event_payload(event: object) -> dict[str, Any]:
-    """The JSON payload of any event object: a dataclass's fields, or else its ``__dict__``, as JSON values."""
+    """The JSON payload of any event object, as JSON values: a dataclass's fields, or else the public attributes
+    of its ``__dict__`` (none for an object without one, such as a ``__slots__`` class)."""
     if dataclasses.is_dataclass(event) and not isinstance(event, type):
         return {item.name: _field_value(event, item.name) for item in dataclasses.fields(event)}
-    return {name: _field_value(event, name) for name in vars(event) if not name.startswith("_")}
+    attributes = getattr(event, "__dict__", None)
+    if not isinstance(attributes, dict):
+        return {}
+    return {name: _field_value(event, name) for name in attributes if not name.startswith("_")}
 
 
 def _field_value(event: object, name: str) -> Any:

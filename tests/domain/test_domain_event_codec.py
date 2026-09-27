@@ -142,6 +142,25 @@ def test_event_payload_serves_any_event_object() -> None:
     assert event_payload(OrderShipped(total=Decimal("3")))["total"] == "3"
 
 
+def test_an_event_without_a_dict_has_an_empty_payload_and_private_attributes_stay_out() -> None:
+    """``vars()`` raised TypeError for an event without ``__dict__`` (the CQRS publisher used to send ``{}``);
+    private attributes are not part of the payload."""
+
+    class Slotted:
+        __slots__ = ("order_id",)
+
+        def __init__(self) -> None:
+            self.order_id = "o-1"
+
+    class WithPrivate:
+        def __init__(self) -> None:
+            self.order_id = "o-2"
+            self._cache = object()  # not JSON, and not the event's
+
+    assert event_payload(Slotted()) == {}
+    assert event_payload(WithPrivate()) == {"order_id": "o-2"}
+
+
 def test_the_codec_functions_round_trip_single_values() -> None:
     instant = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
     assert from_json_value(to_json_value(instant), datetime) == instant

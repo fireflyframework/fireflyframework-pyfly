@@ -57,7 +57,9 @@ class EdaCommandEventPublisher:
       (:func:`pyfly.domain.domain_event.event_payload`), so every bus can serialize it.
 
     :attr:`joins_transactions` is the producer's: an outbox bus writes the event in the caller's unit of
-    work, and the command bus then publishes inside that unit instead of after its commit.
+    work, and the command bus then publishes inside that unit instead of after its commit. That unit must still
+    be open, on the outbox's datasource: a handler whose own ``@transactional`` unit committed before the bus
+    publishes has its events written afterwards, in a unit of their own.
     """
 
     def __init__(self, producer: EventPublisher, default_destination: str = "cqrs.events") -> None:

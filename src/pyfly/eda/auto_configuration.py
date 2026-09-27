@@ -190,6 +190,7 @@ class EdaAutoConfiguration:
 
     @bean
     @conditional_on_property("pyfly.eda.domain-events.enabled", having_value="true", match_if_missing=True)
+    @conditional_on_missing_bean(DomainEventPublisher)
     def domain_event_publisher(
         self,
         config: Config,
