@@ -23,7 +23,7 @@ from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.cache.adapters import InMemoryCache
-from pyfly.cache.decorators import cache
+from pyfly.cache.decorators import cache, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import CacheValueError
@@ -202,6 +202,139 @@ class TestInMemoryCacheValueSemantics:
     def test_cache_value_error_is_a_type_error(self) -> None:
         # Code that caught the old serializer's TypeError keeps working.
         assert issubclass(CacheValueError, TypeError)
+
+
+class TestDecoratorTypes:
+    """The declared return type is checked when a method is decorated (C025) and rebuilt on a hit."""
+
+    def test_an_entity_return_type_is_refused_when_decorated(self) -> None:
+        with pytest.raises(TypeError, match="CachedProduct"):
+
+            @cacheable(InMemoryCache(), key="p:{item_id}")
+            async def get_item(item_id: int) -> CachedProduct | None: ...
+
+        with pytest.raises(TypeError, match="CachedProduct"):
+
+            @cache_put(InMemoryCache(), key="all")
+            async def list_items() -> list[CachedProduct]: ...
+
+    async def test_a_forward_referenced_entity_type_is_refused_before_the_first_call_runs(self) -> None:
+        ran: list[str] = []
+
+        @cacheable(InMemoryCache(), key="later:{item_id}")
+        async def get_later(item_id: int) -> "LaterEntity":  # noqa: F821 — resolved after decoration
+            ran.append("body")
+            raise AssertionError("never reached")
+
+        globals()["LaterEntity"] = CachedProduct
+        try:
+            with pytest.raises(TypeError, match="CachedProduct"):
+                await get_later(1)
+            assert ran == []
+        finally:
+            del globals()["LaterEntity"]
+
+    async def test_a_dto_hit_comes_back_as_the_declared_type(self) -> None:
+        backend = InMemoryCache()
+        calls: list[int] = []
+
+        @cacheable(backend, key="dto:{item_id}")
+        async def get_dto(item_id: int) -> ProductDto:
+            calls.append(item_id)
+            return ProductDto(id=item_id, name="gadget")
+
+        first = await get_dto(7)
+        first.name = "changed by the first caller"
+        second = await get_dto(7)
+        assert calls == [7]
+        assert isinstance(second, ProductDto)
+        assert second == ProductDto(id=7, name="gadget")
+
+
+class _EvictionFails(InMemoryCache):
+    async def evict(self, key: str) -> bool:
+        raise ConnectionError("cache server unreachable")
+
+    async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
+        raise ConnectionError("cache server unreachable")
+
+
+class TestDecoratorRegionsAndFailures:
+    async def test_all_entries_clears_only_the_named_region(self) -> None:
+        from pyfly.cache.decorators import cache_evict
+
+        backend = InMemoryCache()
+        await backend.put("idem:POST:/pay:k1", "durable")
+
+        @cacheable(backend, key="u:{user_id}", cache_name="users")
+        async def get_user(user_id: int) -> dict[str, int]:
+            return {"id": user_id}
+
+        @cacheable(backend, key="o:{order_id}", cache_name="orders")
+        async def get_order(order_id: int) -> dict[str, int]:
+            return {"id": order_id}
+
+        @cache_evict(backend, all_entries=True, cache_name="users")
+        async def reset_users() -> None: ...
+
+        await get_user(1)
+        await get_order(2)
+        assert sorted(backend.get_keys()) == ["idem:POST:/pay:k1", "orders::o:2", "users::u:1"]
+        await reset_users()
+        assert sorted(backend.get_keys()) == ["idem:POST:/pay:k1", "orders::o:2"]
+
+    async def test_before_invocation_evicts_before_the_method_runs(self) -> None:
+        from pyfly.cache.decorators import cache_evict
+
+        backend = InMemoryCache()
+        await backend.put("k:1", "old")
+        seen: list[bool] = []
+
+        @cache_evict(backend, key="k:{n}", before_invocation=True)
+        async def change(n: int) -> None:
+            seen.append(await backend.exists(f"k:{n}"))
+
+        await change(1)
+        assert seen == [False]
+
+    async def test_a_failing_put_or_eviction_never_fails_the_call(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        from pyfly.cache.decorators import cache_evict
+
+        backend = _EvictionFails()
+        calls: list[str] = []
+
+        @cache_put(backend, key="k:{n}")
+        async def write(n: int) -> str:
+            calls.append("write")
+            return "value"
+
+        @cache_evict(backend, key="k:{n}")
+        async def delete(n: int) -> str:
+            calls.append("delete")
+            return "deleted"
+
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        assert await write(1) == "value"
+        assert await delete(1) == "deleted"
+        assert calls == ["write", "delete"]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(m.startswith("cache_put_skipped") and "ConnectionError" in m for m in messages)
+        assert any(m.startswith("cache_evict_skipped") for m in messages)
+        assert [r.levelname for r in caplog.records if r.getMessage().startswith("cache_evict")] == ["ERROR"]
+
+    async def test_a_bad_key_template_fails_before_the_method_runs(self) -> None:
+        calls: list[int] = []
+
+        @cache_put(InMemoryCache(), key="x:{missing}")
+        async def write(n: int) -> int:
+            calls.append(n)
+            return n
+
+        with pytest.raises(ValueError, match="unknown parameter"):
+            await write(1)
+        assert calls == []
 
 
 class TestCacheDecorator:
