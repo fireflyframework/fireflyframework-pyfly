@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -35,7 +36,7 @@ from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostPr
 from pyfly.data.relational.sqlalchemy.query import query
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
-from tests.support.backend_matrix import RelationalBackend
+from tests.support.backend_matrix import RelationalBackend, enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -108,8 +109,10 @@ class AllDerivedTypesRepo(Repository[PPItem, UUID]):
 
 
 @pytest.fixture
-async def engine():
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(eng)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng

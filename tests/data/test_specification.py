@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -44,8 +46,10 @@ class User(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine

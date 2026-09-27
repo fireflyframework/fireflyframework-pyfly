@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, transpile_jpql
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -53,8 +55,10 @@ class Item(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(eng)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng
