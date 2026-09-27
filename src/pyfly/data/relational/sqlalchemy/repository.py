@@ -62,20 +62,23 @@ Spring Data semantics, at the minimum statement count:
   (:class:`~pyfly.data.ports.outbound.Persistable`), else when its version is ``None``, else when its
   primary key is. ``save_all`` merges existing DTOs with one ``SELECT`` for all of them.
 - ``delete``, ``delete_by_id``, ``delete_all_by_id`` and ``delete_all`` delete entity by entity through the
-  ORM, so cascades, version checks and delete listeners run; they send one bulk ``DELETE`` instead only
-  when the mapper has none of those. ``delete_all_in_batch`` and ``delete_all_by_id_in_batch`` are always
-  bulk (Spring's ``deleteAllInBatch``): they bypass cascades on purpose.
+  ORM, so cascades, version checks and delete listeners run; ``delete_all_by_id`` and ``delete_all()`` of
+  every row send bulk ``DELETE`` statements instead only when the mapper has none of those.
+  ``delete_all_in_batch`` and ``delete_all_by_id_in_batch`` are always bulk (Spring's
+  ``deleteAllInBatch``): they bypass cascades on purpose.
 - ``exists_by_id`` answers from the unit's identity map, else with ``SELECT 1 ... LIMIT 1``.
 - Every paging path orders by the primary key after the requested orders (deterministic pages, and what
   SQL Server requires for ``OFFSET``); ``find_all(Pageable)`` skips the ``COUNT`` when the page gives the
   total; ``find_slice`` sends no ``COUNT`` at all; ``scroll`` pages by keyset. Pages, slices and windows
   count entities: when a specification joins rows (a collection), the page is cut from the distinct primary
-  keys and the ``COUNT`` counts those, so each entity comes once and every one is reachable.
+  keys and the ``COUNT`` counts those, so each entity comes once and every one is reachable; the entities are
+  read through the specification's own joins, so its fetch plan, ``contains_eager`` and lock apply.
 - Id lists are chunked to the dialect's limit and padded (one ``= ANY`` bind on PostgreSQL), composite keys
   included; entity results are made unique when a ``lazy="joined"`` collection or a specification's join
   repeats their rows, so each list holds each entity once.
 - Sort and filter names are validated against the entity (``InvalidPropertyError``, a 400), optionally
-  narrowed by the class attributes ``__sortable__`` and ``__filterable__``.
+  narrowed by the class attributes ``__sortable__`` and ``__filterable__``; a relationship filter takes an
+  instance of the entity it refers to, or ``None``.
 - Read methods take a fetch plan, ``load=`` (relationship names, attributes or loader options; the class
   attribute ``__load__`` is the default), and ``find_by_id`` a pessimistic ``lock=``
   (:class:`~pyfly.data.relational.sqlalchemy.statements.LockMode`), which needs a read-write transaction.

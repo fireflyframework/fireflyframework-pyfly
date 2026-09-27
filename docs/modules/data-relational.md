@@ -283,8 +283,9 @@ orders = await repo.find_all(status="PENDING", customer_id="abc")
 ```
 
 A relationship to one entity filters by the entity it refers to: `find_all(customer=customer)` is
-`customer_id = :id` (and `customer=None` is `customer_id IS NULL`). A collection cannot be compared that way;
-filter through it with a [Specification](#specifications). A read method's `load` (and `find_by_id`'s `lock`)
+`customer_id = :id` (and `customer=None` is `customer_id IS NULL`); any other value, such as a key straight
+from a request, raises `InvalidPropertyError`. A collection cannot be compared that way; filter through it
+with a [Specification](#specifications). A read method's `load` (and `find_by_id`'s `lock`)
 keyword is never a filter: filter on a column with one of those names through a Specification.
 
 #### Deletes
@@ -296,7 +297,9 @@ the same on every backend. They load the entities first (one `SELECT` per id chu
 entities need none), with the collections the flush cascades to or nulls out (one `SELECT` per collection
 for all of them, also for the unit's own entities that have not loaded them), and send the `DELETE`s in one
 flush. When the mapper has no cascade, no version column, no inheritance and no delete listener, a bulk
-`DELETE ... WHERE id IN (...)` does the same work, and that is what they send.
+`DELETE` does the same work, and that is what `delete_all_by_id(ids)` (one `DELETE ... WHERE id IN (...)` per
+id chunk) and `delete_all()` (one for every row) send; `delete(entity)`, `delete_by_id(id)` and
+`delete_all(entities)` always go through the ORM.
 
 Deleting a detached entity (every entity a call outside a transaction returns) reads its row first, as
 Spring's `delete` finds the entity before it removes it: a `SELECT` (plus one per collection the delete
@@ -687,19 +690,24 @@ Pages, slices and windows count **entities**, not rows. A [Specification](#speci
 collection (`q.join(Order.lines).where(Line.sku == sku)`) repeats an order once per matching line; a
 `LIMIT` on those rows would cut a page short and hide the orders after it. When a specification's
 statement may repeat an entity (a join other than along a many-to-one, or another `FROM`), the page is cut
-from the distinct primary keys instead, in the page's order, and the entities are selected by joining those
-keys (one statement, portable to SQL Server 2012 and later and to Oracle); the `COUNT` counts the distinct
-keys. A join along a many-to-one (`q.join(Order.customer).where(Customer.country == "ES")`) matches one row
-per order, so it pages with a plain `LIMIT` and `COUNT`. Order such a page by the entity's own properties:
-an order on a joined row's column repeats the entity once per value. An `EXISTS` predicate
-(`Order.lines.any(Line.sku == sku)`) needs none of this and is often the cheaper query.
+from the distinct primary keys instead, in the page's order, and the entities are read by the
+specification's own statement joined to those keys (one statement, portable to SQL Server 2012 and later
+and to Oracle); the `COUNT` counts the distinct keys. A join along a many-to-one
+(`q.join(Order.customer).where(Customer.country == "ES")`) matches one row per order, so it pages with a
+plain `LIMIT` and `COUNT`. Order such a page by the entity's own properties: an order on a joined row's
+column repeats the entity once per value. An `EXISTS` predicate (`Order.lines.any(Line.sku == sku)`) needs
+none of this and is often the cheaper query.
 
-What a specification asks of the entities it reads applies on every path: its loader options (a fetch plan,
-`with_loader_criteria`) and execution options go on the statement that reads the entities, and its loader
-criteria and execution options on the `COUNT` too. A lock (`with_for_update`) takes the rows of the entities
-the page reads (`FOR UPDATE OF` their table where the database names tables, unless the specification names
-what to lock); the distinct keys are read unlocked, since PostgreSQL and Oracle refuse `FOR UPDATE` on a
-`DISTINCT`, and a `COUNT` locks nothing.
+What a specification asks of the entities it reads applies on every path. The page's entities are read
+through its own joins and criteria, so its loader options (a fetch plan, `with_loader_criteria`), its
+execution options, and a `contains_eager` of the rows its join matched apply to them:
+`q.join(Order.lines).where(Line.sku == sku).options(contains_eager(Order.lines))` pages the orders with
+just their matching lines. Its loader criteria and execution options apply to the `COUNT` too. Its own
+`distinct()`, `group_by()` and `having()` decide which entities the page's keys hold. A lock
+(`with_for_update`) takes the rows of the entities the page reads, or those of the tables it names
+(`with_for_update(of=Line)` locks the matching lines), with `FOR UPDATE OF` where the database names tables
+(MariaDB does not, and locks every row the statement reads); the distinct keys are read unlocked, since
+PostgreSQL and Oracle refuse `FOR UPDATE` on a `DISTINCT`, and a `COUNT` locks nothing.
 
 ### Slices and keyset scrolling
 
@@ -774,7 +782,8 @@ page = await repo.find_all_by_spec_paged(spec, pageable)
 The implementation:
 1. Applies the specification's predicate to get the filtered query.
 2. Applies sort orders from `Pageable.sort`, then the primary key.
-3. Applies `offset` and `limit` for pagination (to the distinct keys when the specification joins rows).
+3. Applies `offset` and `limit` for pagination (to the distinct keys when the specification joins rows, whose
+   entities are then read through the specification's own joins).
 4. Counts the matching entities via a subquery, when the page does not give the total.
 
 ---
