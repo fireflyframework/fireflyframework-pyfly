@@ -987,16 +987,18 @@ class ApplicationContext:
         return None
 
     @classmethod
-    def _declared_scoped_bean_type(cls, return_type: Any) -> type | None:
-        """The class a non-singleton ``@bean`` is registered under without calling it.
+    def _declared_registration_type(cls, return_type: Any) -> type | None:
+        """The class a ``@bean`` method is registered under before its product exists.
 
-        As :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
+        That is the registration of a non-singleton ``@bean`` (built only when its scope asks) and the
+        provisional claim of a deferred singleton one (completed once its dependencies exist). As
+        :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
         ``-> async_sessionmaker[AsyncSession]`` (the idiomatic hint), and ``... | None``, declare
         ``async_sessionmaker``. That is what an injection of the parametrized type resolves (the
-        container falls back to the origin), so the factory need not run at startup to be found. A
+        container falls back to the origin), and what ``@conditional_on_missing_bean`` asks about. A
         builtin container (``list[X]``, ``dict[K, V]``) or ``type[X]`` declares nothing: those are not
-        bean keys. Singletons keep :meth:`_declared_bean_type`, since their factory runs anyway and
-        registers the concrete class it returns.
+        bean keys. A singleton whose factory runs at once keeps :meth:`_declared_bean_type`: it is
+        registered under the concrete class it returns.
         """
         declared = cls._declared_bean_type(return_type)
         if declared is not None:
@@ -1112,7 +1114,7 @@ class ApplicationContext:
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         if bean_scope == Scope.SINGLETON:
             return False
-        declared = self._declared_scoped_bean_type(return_type)
+        declared = self._declared_registration_type(return_type)
         if declared is None:
             return False
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
@@ -1150,7 +1152,7 @@ class ApplicationContext:
             # registered — least of all ``NoneType``, which is what ``type(result)`` would have
             # keyed — and a provisional claim a deferred factory made must go with it, or a
             # later resolve of ``Port`` would run the factory again and hand out ``None``.
-            declared = self._declared_bean_type(return_type)
+            declared = self._declared_registration_type(return_type)
             if declared is not None:
                 reg = self._container._registrations.get(declared)
                 if reg is not None and reg.factory is factory and reg.instance is None:
@@ -1225,6 +1227,18 @@ class ApplicationContext:
             if bean_scope == Scope.SINGLETON:
                 return_reg.instance = result
 
+        # A deferred factory with a parametrized hint (``-> Pool[str]``) claimed the origin class. A
+        # product of exactly that class replaced the claim above (same class, same name); a product of
+        # a subclass leaves the claim to be completed here, or resolving the origin would run the
+        # factory a second time.
+        claimed = self._declared_registration_type(return_type)
+        if claimed is not None and claimed is not declared and claimed is not impl_type:
+            claim = self._container._registrations.get(claimed)
+            if claim is not None and claim.factory is factory:
+                self._container.bind(claimed, impl_type)
+                if bean_scope == Scope.SINGLETON:
+                    claim.instance = result
+
     def _defer_bean_method(
         self,
         config_instance: Any,
@@ -1247,7 +1261,9 @@ class ApplicationContext:
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         factory = self._bean_factory(config_instance, method)
-        declared = self._declared_bean_type(return_type)
+        # A parametrized hint (``-> async_sessionmaker[AsyncSession]``) claims its origin class: it
+        # used to claim nothing, so the auto-configured bean it replaces was registered beside it.
+        declared = self._declared_registration_type(return_type)
         if declared is not None and declared not in self._container._registrations:
             self._container.register(declared, scope=bean_scope, name=bean_name)
             provisional = self._container._registrations[declared]
@@ -1280,7 +1296,7 @@ class ApplicationContext:
         while pending:
             still_pending: list[_DeferredBeanMethod] = []
             for entry in pending:
-                declared = self._declared_bean_type(entry.return_type)
+                declared = self._declared_registration_type(entry.return_type)
                 provisional = self._container._registrations.get(declared) if declared is not None else None
                 if (
                     provisional is not None
@@ -1308,7 +1324,7 @@ class ApplicationContext:
                 )
             if len(still_pending) == len(pending):
                 first = still_pending[0]
-                first_declared = self._declared_bean_type(first.return_type)
+                first_declared = self._declared_registration_type(first.return_type)
                 if first_declared is not None:
                     reg = self._container._registrations.get(first_declared)
                     if reg is not None and reg.factory is first.factory and reg.instance is None:

@@ -34,12 +34,13 @@ pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import Integer, String, event, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
-from sqlalchemy.orm import Mapped, mapped_column  # noqa: E402
+from sqlalchemy.orm import Mapped, ORMExecuteState, Session, mapped_column  # noqa: E402
 
 from pyfly.container import NoUniqueBeanError, Qualifier, bean, configuration, repository  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy  # noqa: E402
 from pyfly.container.types import Scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
+from pyfly.context.conditions import auto_configuration  # noqa: E402
 from pyfly.context.refresh import ContextRefresher  # noqa: E402
 from pyfly.context.request_context import RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
@@ -514,5 +515,120 @@ async def test_a_proxied_refresh_scoped_engine_leaves_the_primary_in_place(tmp_p
         await ctx.get_bean(ContextRefresher).refresh()
         assert await _engine_owner(reporting) == "reporting"  # the proxy follows the refresh
         await _assert_the_primary_stays(ctx)
+    finally:
+        await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# A user factory that takes an auto-configured bean is DEFERRED until the auto-configurations have run.
+# Its declared type is claimed right away so the auto-configured bean backs off, but a parametrized
+# hint (``-> async_sessionmaker[AsyncSession]``, the idiomatic one) claimed nothing: the auto-configured
+# factory was registered beside the user's. Without primary=True it was silently injected everywhere (the
+# C042 defect), and with primary=True two primaries made every injection of the type fail.
+# ---------------------------------------------------------------------------
+
+
+class _UserSyncSession(Session):
+    """The sessions of the application's own factory."""
+
+
+_USER_STATEMENTS: list[str] = []
+
+
+@event.listens_for(_UserSyncSession, "do_orm_execute")
+def _record_user_statement(state: ORMExecuteState) -> None:
+    _USER_STATEMENTS.append(str(state.statement))
+
+
+_USER_FACTORIES: list[async_sessionmaker[AsyncSession]] = []
+
+
+def _user_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    factory = async_sessionmaker(engine, sync_session_class=_UserSyncSession, expire_on_commit=True)
+    _USER_FACTORIES.append(factory)
+    return factory
+
+
+@configuration
+class _DeferredSessionFactory:
+    """Other session options over the primary engine, which is auto-configured: the method is deferred."""
+
+    @bean
+    def app_sessions(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+        return _user_factory(async_engine)
+
+
+@configuration
+class _DeferredPrimarySessionFactory:
+    @bean(primary=True)
+    def app_sessions(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+        return _user_factory(async_engine)
+
+
+@pytest.mark.parametrize(
+    "configuration_class", [_DeferredSessionFactory, _DeferredPrimarySessionFactory], ids=["plain", "primary"]
+)
+async def test_a_deferred_user_session_factory_replaces_the_auto_configured_one(
+    tmp_path: Path, configuration_class: type
+) -> None:
+    _USER_FACTORIES.clear()
+    ctx = ApplicationContext(await _relational_app(tmp_path))
+    ctx.register_bean(configuration_class)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        factory = ctx.get_bean(async_sessionmaker)
+        assert [factory] == _USER_FACTORIES  # the user's, built once
+        assert ctx.get_beans_of_type(async_sessionmaker) == [factory]  # the auto-configured one backed off
+        session = ctx.get_bean(AsyncSession)
+        assert isinstance(session.sync_session, _UserSyncSession)
+        await session.close()
+        routed = ctx.get_bean(RoutingSessionFactory).primary()
+        assert isinstance(routed.sync_session, _UserSyncSession)
+        await routed.close()
+
+        _USER_STATEMENTS.clear()
+        owners = await ctx.get_bean(_DatabaseOwnerRepository).find_all()
+        assert [owner.name for owner in owners] == ["primary"]
+        assert len(_USER_STATEMENTS) == 1  # the repository's query ran on a session of the user's factory
+    finally:
+        await ctx.stop()
+
+
+class _MongoSettings:
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+
+@auto_configuration
+class _MongoSettingsAutoConfiguration:
+    @bean
+    def mongo_settings(self) -> _MongoSettings:
+        return _MongoSettings("mongodb://deferred-mongo.invalid:27017")
+
+
+@configuration
+class _DeferredMongoClient:
+    """A client built from a bean an auto-configuration provides (deferred), with a parametrized hint."""
+
+    @bean
+    def user_mongo_client(self, settings: _MongoSettings) -> AsyncMongoClient[dict[str, Any]]:
+        return AsyncMongoClient(settings.uri, connect=False)
+
+
+async def test_a_deferred_user_mongo_client_with_a_parametrized_hint_replaces_the_auto_configured_one() -> None:
+    pytest.importorskip("pymongo")
+    pytest.importorskip("beanie")
+    from pyfly.data.document.mongodb.initializer import BeanieInitializer
+
+    ctx = ApplicationContext(Config({"pyfly": {"data": {"document": {"enabled": "true"}}}}))
+    ctx.register_bean(_MongoSettingsAutoConfiguration)
+    ctx.register_bean(_DeferredMongoClient)
+    await ctx.start()
+    try:
+        client = ctx.get_bean(AsyncMongoClient)
+        assert ("deferred-mongo.invalid", 27017) in client.topology_description.server_descriptions()
+        assert ctx.get_beans_of_type(AsyncMongoClient) == [client]
+        assert ctx.get_bean(BeanieInitializer)._motor_client is client
     finally:
         await ctx.stop()

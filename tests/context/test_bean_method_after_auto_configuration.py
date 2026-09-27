@@ -28,6 +28,8 @@ registers is reported with the same ``NoSuchBeanError`` as before.
 
 from __future__ import annotations
 
+from typing import Generic, TypeVar
+
 import pytest
 
 from pyfly.container.bean import bean
@@ -373,3 +375,74 @@ class TestUserBeanDependsOnAutoConfiguredBean:
 
         assert order[0] == "user:greeting"
         assert order.index("auto:answer") < order.index("user:database")
+
+
+T = TypeVar("T")
+
+
+class Pool(Generic[T]):
+    """A generic port: the idiomatic hint of a factory is parametrized (``-> Pool[str]``)."""
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+
+
+class TenantPool(Pool[T]):
+    pass
+
+
+@auto_configuration
+class PoolAutoConfiguration:
+    @bean
+    @conditional_on_missing_bean(Pool)
+    def pool(self) -> Pool[str]:
+        return Pool("framework")
+
+
+class TestDeferredBeanWithAParametrizedHint:
+    """A deferred factory with a parametrized hint claims its origin class, as a plain hint claims itself.
+
+    It used to claim nothing: the auto-configuration's ``@conditional_on_missing_bean(Pool)`` did not see
+    the user's declaration, and the application got both beans.
+    """
+
+    async def test_the_auto_configured_bean_backs_off(self) -> None:
+        calls: list[str] = []
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def user_pool(self, factory: SessionFactory) -> Pool[str]:
+                calls.append("user_pool")
+                return Pool(factory.url)
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        ctx.register_bean(PoolAutoConfiguration)
+        await ctx.start()
+
+        assert ctx.get_bean(Pool).origin == "postgresql://framework"
+        assert [pool.origin for pool in ctx.get_beans_of_type(Pool)] == ["postgresql://framework"]
+        assert calls == ["user_pool"]
+
+    async def test_a_product_of_a_subclass_completes_the_claim(self) -> None:
+        calls: list[str] = []
+
+        @configuration
+        class UserConfiguration:
+            @bean
+            def user_pool(self, factory: SessionFactory) -> Pool[str]:
+                calls.append("user_pool")
+                return TenantPool(factory.url)
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(UserConfiguration)
+        ctx.register_bean(SessionAutoConfiguration)
+        ctx.register_bean(PoolAutoConfiguration)
+        await ctx.start()
+
+        pool = ctx.get_bean(Pool)
+        assert isinstance(pool, TenantPool)
+        assert ctx.get_bean(TenantPool) is pool
+        assert calls == ["user_pool"]  # the claim was completed, not built a second time
