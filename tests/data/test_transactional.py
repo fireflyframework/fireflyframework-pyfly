@@ -1075,10 +1075,10 @@ class TestSynchronizations:
     async def test_current_unit_of_work_inside_and_outside(self, app: App) -> None:
         assert current_unit_of_work() is None
 
-        @transactional(name="labelled")
+        @transactional(name="labeled")
         async def work() -> str:
             unit = current_unit_of_work("primary")
             assert unit is not None
             return unit.describe()
 
-        assert "labelled" in await work()
+        assert "labeled" in await work()
