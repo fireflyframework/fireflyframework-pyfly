@@ -241,6 +241,8 @@ class SessionConcurrencyController:
     PURGE_BATCH = 500
     #: How many registrations a login's own purge checks (a backlog goes to the next logins).
     LOGIN_PURGE_BATCH = 50
+    #: How long :meth:`stop` waits for the deletions of evicted sessions still in flight, in seconds.
+    EVICTION_STOP_TIMEOUT = 30.0
 
     def __init__(
         self,
@@ -278,9 +280,13 @@ class SessionConcurrencyController:
             await start()
 
     async def stop(self) -> None:
-        """Wait for the evicted sessions still being deleted, then stop the registry (idempotent)."""
+        """Wait for the evicted sessions still being deleted, up to :attr:`EVICTION_STOP_TIMEOUT` seconds (a
+        store that stopped answering must not hold the shutdown; what is left is logged as
+        ``session_eviction_unfinished``), then stop the registry (idempotent)."""
         if self._evictions:
-            await asyncio.gather(*self._evictions, return_exceptions=True)
+            _done, pending = await asyncio.wait(set(self._evictions), timeout=self.EVICTION_STOP_TIMEOUT)
+            if pending:
+                logger.warning("session_eviction_unfinished", extra={"pending": len(pending)})
         stop = getattr(self._registry, "stop", None)
         if callable(stop):
             await stop()

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -292,6 +293,39 @@ async def test_a_cancelled_login_still_deletes_the_session_it_evicted() -> None:
 
     assert await store.get("s1") is None
     assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s2"]
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_a_bounded_time_for_the_evictions_in_flight(caplog: pytest.LogCaptureFixture) -> None:
+    """stop() waited for the deletion of evicted sessions with no bound: a session store that stopped
+    answering held the shutdown forever. It waits EVICTION_STOP_TIMEOUT seconds, then reports what is left."""
+    reg = InMemorySessionRegistry()
+    stuck = asyncio.Event()
+
+    async def _delete(session_id: str) -> None:
+        stuck.set()
+        await asyncio.Event().wait()  # a store that never answers
+
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest"), session_deleter=_delete
+    )
+    ctl.EVICTION_STOP_TIMEOUT = 0.05
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    login = asyncio.create_task(ctl.on_login("alice", "s2", 2.0))
+    await stuck.wait()
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.session.concurrency"):
+        await asyncio.wait_for(ctl.stop(), 5)
+
+    assert [record.getMessage() for record in caplog.records] == ["session_eviction_unfinished"]
+    assert caplog.records[0].pending == 1
+    unfinished = list(ctl._evictions)
+    for task in unfinished:
+        task.cancel()
+    await asyncio.gather(*unfinished, return_exceptions=True)
 
 
 @pytest.mark.asyncio

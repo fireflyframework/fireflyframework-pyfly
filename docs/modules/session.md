@@ -251,7 +251,9 @@ pyfly:
   principal are removed from the registry and deleted from the session store.
   The registry commits the eviction first; the deletion then runs outside the
   caller's unit of work and is shielded from the login's cancellation (the
-  controller's `stop()` waits for deletions in flight). A deletion that fails is
+  controller's `stop()` waits for deletions in flight, up to
+  `EVICTION_STOP_TIMEOUT`, 30 seconds, and logs what is left as
+  `session_eviction_unfinished`). A deletion that fails is
   logged as `session_eviction_failed` and the login goes on: that session is no
   longer counted and stays usable until it expires or is invalidated.
 - `reject-new` — the new login is refused. The handler invalidates the
