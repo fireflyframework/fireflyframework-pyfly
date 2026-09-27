@@ -201,8 +201,8 @@ async def test_combined_specifications_grow_the_sql_linearly(relational_backend:
 # ---------------------------------------------------------------------------------------------------------
 
 
-class SpItem(Base):
-    __tablename__ = "sp_item"
+class SpcItem(Base):
+    __tablename__ = "spc_item"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(40))
@@ -215,7 +215,7 @@ class SpItem(Base):
         return self.name.upper()
 
 
-class ItemRepository(Repository[SpItem, int]):
+class ItemRepository(Repository[SpcItem, int]):
     pass
 
 
@@ -228,7 +228,7 @@ async def _items(datasources: Datasources) -> ItemRepository:
         {"id": 4, "name": "axb", "owner_id": 1, "item_code": None},
     ]
     async with datasources.engine.begin() as conn:
-        await conn.execute(insert(SpItem.__table__), rows)
+        await conn.execute(insert(SpcItem.__table__), rows)
     return ItemRepository()
 
 
@@ -237,7 +237,7 @@ def _ids(items: list[Any]) -> list[int]:
 
 
 async def test_filter_contains_matches_the_value_as_it_is(relational_backend: RelationalBackend) -> None:
-    async with repository_datasources(relational_backend, *MODELS, SpItem) as datasources:
+    async with repository_datasources(relational_backend, *MODELS, SpcItem) as datasources:
         items = await _items(datasources)
         assert _ids(await items.find_all_by_spec(FilterOperator.contains("name", "50%"))) == [1]
         assert _ids(await items.find_all_by_spec(FilterOperator.contains("name", "a_b"))) == [3]
@@ -247,11 +247,11 @@ async def test_filter_contains_matches_the_value_as_it_is(relational_backend: Re
 
 
 async def test_query_by_example_with_an_entity(relational_backend: RelationalBackend) -> None:
-    async with repository_datasources(relational_backend, *MODELS, SpItem) as datasources:
+    async with repository_datasources(relational_backend, *MODELS, SpcItem) as datasources:
         items = await _items(datasources)
         # A transient probe: its non-None attributes, by attribute name (code is the item_code column).
-        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpItem(name="a_b")))) == [3]
-        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpItem(code="c1")))) == [1]
+        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpcItem(name="a_b")))) == [3]
+        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpcItem(code="c1")))) == [1]
         # A loaded probe matches its own row (every loaded attribute, the key included).
         loaded = await items.find_by_id(4)
         assert loaded is not None

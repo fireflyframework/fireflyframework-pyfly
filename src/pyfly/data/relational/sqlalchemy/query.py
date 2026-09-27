@@ -519,9 +519,19 @@ def cast_index(index: int | None) -> int:
 
 
 def _entities_of(entity: type) -> dict[str, Mapper[Any]]:
-    """The mapped classes a JPQL query of *entity* may name, by class name (the entity's own name wins)."""
+    """The mapped classes a JPQL query of *entity* may name, by class name: the entity's own name is the entity,
+    and a name several classes share is the one declared in the entity's module (a name that is still ambiguous
+    is left out, and so stays a table name)."""
     mapper: Mapper[Any] = sa_inspect(entity)
-    mappers = {other.class_.__name__: other for other in mapper.registry.mappers}
+    candidates: dict[str, list[Mapper[Any]]] = {}
+    for other in mapper.registry.mappers:
+        candidates.setdefault(other.class_.__name__, []).append(other)
+    mappers: dict[str, Mapper[Any]] = {}
+    for name, found in candidates.items():
+        if len(found) > 1:
+            found = [other for other in found if other.class_.__module__ == entity.__module__]
+        if len(found) == 1:
+            mappers[name] = found[0]
     mappers[entity.__name__] = mapper
     return mappers
 
