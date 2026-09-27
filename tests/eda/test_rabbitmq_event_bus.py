@@ -330,3 +330,39 @@ async def test_a_transactional_event_listener_that_fails_once_commits_once(
         await ctx.stop()
     assert await committed_bodies(relational_backend) == ["e1", "e2", "e3"]
     assert behavior.attempts["e2"] == 2
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_deliveries_do_not_inherit_the_transaction_of_the_publisher(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The bus starts on its first publish, inside a request's ``@transactional``, and the delivery is
+    dispatched from that task: the container runs it detached, in a unit of its own."""
+    from pyfly.data.transaction import current_unit_of_work
+    from pyfly.data.transactional import transactional
+    from tests.messaging.listener_app import DeliveredRepository
+
+    broker = FakeAmqpBroker()
+    behavior = Behavior()
+    bus = _bus(broker, settings=ListenerContainerSettings(retry=FAST.retry))
+    ctx = await boot(relational_backend)
+    request_units: list[int] = []
+    try:
+        repo = ctx.get_bean(DeliveredRepository)
+        bus.subscribe("order.*", lambda envelope: behavior.handle(repo, str(envelope.payload["body"])))
+
+        @transactional
+        async def place_order() -> None:
+            unit = current_unit_of_work()
+            assert unit is not None
+            request_units.append(unit.id)
+            await bus.publish("orders", "order.created", {"body": "late"})
+
+        await place_order()
+        await eventually(lambda: behavior.finished == ["late"] and _settled(broker), what="the event handled")
+    finally:
+        await bus.stop()
+        await ctx.stop()
+    [handler_unit] = behavior.units
+    assert handler_unit is not None and handler_unit != request_units[0]
+    assert await committed_bodies(relational_backend) == ["late"]
