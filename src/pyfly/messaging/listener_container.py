@@ -374,40 +374,37 @@ class ListenerContainerSettings:
         defaults = cls()
         default_backoff = ExponentialBackOff()
 
-        def value(key: str) -> Any:
-            return config.get(f"{base}.{key}")
+        def raw(key: str) -> Any:
+            value = config.get(key)
+            return None if value == "" else value
 
         def number(key: str, default: float) -> float:
-            raw = value(key)
-            return default if raw is None or raw == "" else parse_float(raw, f"{base}.{key}")
+            value = raw(f"{base}.{key}")
+            return default if value is None else parse_float(value, f"{base}.{key}")
 
-        def integer(key: str, default: int | None, full_key: str | None = None) -> int | None:
-            name = full_key or f"{base}.{key}"
-            raw = config.get(name)
-            return default if raw is None or raw == "" else parse_int(raw, name)
+        def integer(key: str, default: int) -> int:
+            value = raw(key)
+            return default if value is None else parse_int(value, key)
 
-        transactional_raw = value("transactional")
-        datasource_raw = value("datasource")
-        retry = RetryPolicy(
-            max_attempts=integer("retry.max-attempts", defaults.retry.max_attempts) or defaults.retry.max_attempts,
-            backoff=ExponentialBackOff(
-                initial=number("retry.initial-delay", default_backoff.initial),
-                multiplier=number("retry.multiplier", default_backoff.multiplier),
-                max_delay=number("retry.max-delay", default_backoff.max_delay),
-            ),
-        )
-        prefetch = integer("", defaults.prefetch, full_key=f"{prefix}.rabbitmq.prefetch")
+        transactional = raw(f"{base}.transactional")
+        datasource = raw(f"{base}.datasource")
+        concurrency = raw(f"{base}.concurrency")
         return cls(
-            retry=retry,
-            transactional=(
-                defaults.transactional
-                if transactional_raw is None
-                else parse_bool(transactional_raw, f"{base}.transactional")
+            retry=RetryPolicy(
+                max_attempts=integer(f"{base}.retry.max-attempts", defaults.retry.max_attempts),
+                backoff=ExponentialBackOff(
+                    initial=number("retry.initial-delay", default_backoff.initial),
+                    multiplier=number("retry.multiplier", default_backoff.multiplier),
+                    max_delay=number("retry.max-delay", default_backoff.max_delay),
+                ),
             ),
-            datasource=str(datasource_raw) if datasource_raw not in (None, "") else None,
+            transactional=(
+                defaults.transactional if transactional is None else parse_bool(transactional, f"{base}.transactional")
+            ),
+            datasource=None if datasource is None else str(datasource),
             shutdown_timeout=number("shutdown-timeout", defaults.shutdown_timeout),
-            concurrency=integer("concurrency", None),
-            prefetch=prefetch if prefetch is not None else defaults.prefetch,
+            concurrency=None if concurrency is None else parse_int(concurrency, f"{base}.concurrency"),
+            prefetch=integer(f"{prefix}.rabbitmq.prefetch", defaults.prefetch),
         )
 
 

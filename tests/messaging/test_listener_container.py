@@ -326,3 +326,19 @@ async def test_a_unit_that_committed_before_a_cancellation_still_counts_as_commi
         assert [row.body for row in await repo.find_all()] == ["committed"]
     finally:
         await ctx.stop()
+
+
+@pytest.mark.parametrize(
+    ("listener", "key"),
+    [
+        ({"retry": {"max-attempts": "0"}}, "max_attempts"),
+        ({"retry": {"max-attempts": "many"}}, "pyfly.messaging.listener.retry.max-attempts"),
+        ({"shutdown-timeout": "soon"}, "pyfly.messaging.listener.shutdown-timeout"),
+        ({"transactional": "maybe"}, "pyfly.messaging.listener.transactional"),
+        ({"concurrency": "0"}, "concurrency"),
+    ],
+)
+def test_a_configured_value_that_is_invalid_is_refused(listener: dict[str, object], key: str) -> None:
+    config = Config({"pyfly": {"messaging": {"listener": listener}}})
+    with pytest.raises(ValueError, match=key):
+        ListenerContainerSettings.from_config(config, "pyfly.messaging")
