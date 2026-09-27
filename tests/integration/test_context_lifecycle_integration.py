@@ -24,7 +24,9 @@
   is now bounded and the stuck connections are terminated.
 - C030/C031/C099: two refresh-scoped datasources of one type, injected into a singleton through a
   scoped proxy, keep their own database across ``POST /actuator/refresh`` cycles, and every refresh
-  destroys the evicted datasources, so no pool piles up.
+  destroys the evicted datasources, so no pool piles up. The same holds for the documented
+  ``@scoped_proxy @bean(scope="refresh") -> AsyncEngine``, which has no ``@pre_destroy``: the
+  evicted engine is disposed through its inferred destroy method.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from pyfly.container.exceptions import BeanCreationNotAllowedError
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, refresh_scope, scoped_proxy
 from pyfly.context.application_context import ApplicationContext
 from pyfly.context.lifecycle import pre_destroy
+from pyfly.core.config import Config
 from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from tests.support.backend_matrix import PG, RelationalBackend
@@ -417,3 +420,57 @@ async def _bodies(url: str) -> list[str]:
             return list((await conn.execute(select(_ShutdownNote.body).order_by(_ShutdownNote.id))).scalars())
     finally:
         await engine.dispose()
+
+
+@configuration
+class _RefreshScopedEngine:
+    """The example of the dependency-injection guide: a proxied refresh-scoped engine bean, nothing else."""
+
+    @scoped_proxy
+    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def reporting_engine(self) -> AsyncEngine:
+        return _app_engine(_REPORTING["url"], _REPORTING["app"])
+
+
+@service
+class _ReportingReader:
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.engine = engine  # a scoped proxy
+
+
+@pytest.mark.backends(PG)
+async def test_refreshing_a_scoped_engine_bean_leaks_no_pool(relational_backend: RelationalBackend) -> None:
+    from httpx import ASGITransport, AsyncClient
+    from starlette.applications import Starlette
+
+    from pyfly.actuator.adapters.starlette import make_starlette_actuator_routes
+    from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
+    from pyfly.actuator.registry import ActuatorRegistry
+
+    app_name = f"pyfly-engine-{uuid.uuid4().hex[:8]}"
+    _REPORTING.update({"url": relational_backend.url, "app": app_name})
+    context = ApplicationContext(Config({}))
+    context.register_bean(_RefreshScopedEngine)
+    context.register_bean(_ReportingReader)
+    await context.start()
+    registry = ActuatorRegistry()
+    registry.register(RefreshEndpoint(context))
+    app = Starlette(routes=make_starlette_actuator_routes(registry))
+    try:
+        reader = context.get_bean(_ReportingReader)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://app") as client:
+            for _cycle in range(5):
+                async with reader.engine.connect() as conn:
+                    assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+                assert await _server_connections(relational_backend, app_name) == 1
+                response = await client.post("/actuator/refresh")
+                assert response.status_code == 200
+                assert len(response.json()["refreshed"]) == 1
+                # The evicted engine was disposed: its pooled connection closed.
+                assert await _settles_at_zero(relational_backend, app_name) == 0
+        async with reader.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    finally:
+        await context.stop()
+
+    assert await _settles_at_zero(relational_backend, app_name) == 0

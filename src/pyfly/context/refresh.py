@@ -16,7 +16,8 @@
 Evicts all refresh-scoped beans and resets ``@config_properties`` beans so the next
 resolution rebuilds them against the live ``Config`` (which re-reads environment variables
 and ``${...}`` placeholders at access time), destroys the evicted instances (their
-``@pre_destroy`` runs, so a refresh-scoped bean that owns an engine disposes it), then publishes a
+``@pre_destroy``, the destroy method of a ``@bean`` product, ``stop()`` of a lifecycle bean, so a
+refresh-scoped bean that owns an engine disposes it), then publishes a
 :class:`~pyfly.context.events.RefreshScopeRefreshedEvent`.
 """
 
@@ -38,8 +39,9 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-async def _run_pre_destroy(instance: Any) -> None:
+async def _run_pre_destroy(key: str, instance: Any) -> None:
     """Call the ``@pre_destroy`` methods of *instance*; a failure is logged, not raised."""
+    del key
     for attr_name in dir(type(instance)):
         member = inspect.getattr_static(type(instance), attr_name, None)
         if not getattr(member, "__pyfly_pre_destroy__", False):
@@ -57,9 +59,9 @@ async def _run_pre_destroy(instance: Any) -> None:
 class ContextRefresher:
     """Triggers a refresh of refresh-scoped and ``@config_properties`` beans.
 
-    *destroy* destroys one evicted instance; the ``ApplicationContext`` passes its own (the
-    ``@pre_destroy`` methods within the shutdown timeout). Without it the ``@pre_destroy`` methods
-    are called directly.
+    *destroy* destroys one evicted instance, given its scope key; the ``ApplicationContext`` passes
+    its own (``@pre_destroy``, the ``@bean``'s destroy method, ``stop()``, each within the shutdown
+    timeout). Without it the ``@pre_destroy`` methods are called directly.
     """
 
     def __init__(
@@ -69,7 +71,7 @@ class ContextRefresher:
         event_bus: ApplicationEventBus,
         config: Config | None = None,
         *,
-        destroy: Callable[[Any], Awaitable[None]] | None = None,
+        destroy: Callable[[str, Any], Awaitable[None]] | None = None,
     ) -> None:
         self._container = container
         self._scope = scope
@@ -87,7 +89,9 @@ class ContextRefresher:
         a new request gets the rebuilt bean while the evicted one is closing. Work that still holds
         the evicted instance finishes on it (``AsyncEngine.dispose()`` lets a checked-out connection
         finish and closes it when it is returned). Until 26.09.07 nothing destroyed them: each
-        refresh of a bean that owned an engine leaked that engine's pool.
+        refresh of a bean that owned an engine leaked that engine's pool. Destroying runs the
+        ``@pre_destroy`` methods, the destroy method of a ``@bean`` product (a refresh-scoped
+        ``AsyncEngine`` bean is disposed) and ``stop()`` of a lifecycle bean.
         """
         # 1. Re-read the config sources so rebuilt beans pick up file/profile changes
         # (no-op for dict-constructed config).
@@ -101,8 +105,9 @@ class ContextRefresher:
             reg = self._container.get_registration(cls)
             if reg is not None and hasattr(cls, "__pyfly_config_prefix__") and reg.factory is not None:
                 self._container.reset_instance(cls)
-        for instance in evicted.values():
-            await self._destroy(instance)
+        # The most recently created first: a scoped bean is cached after the scoped beans it uses.
+        for key, instance in reversed(list(evicted.items())):
+            await self._destroy(key, instance)
         keys = list(evicted)
         await self._event_bus.publish(RefreshScopeRefreshedEvent(keys))
         return keys

@@ -645,11 +645,22 @@ The decorator order no longer matters: `@component` written above `@refresh_scop
 the scope to `SINGLETON`, and the container now keeps the refresh scope either way. You can also
 write the scope inline: `@component(scope="refresh")`.
 
-**Evicted instances are destroyed.** A refresh evicts the cached instances and then runs their
-`@pre_destroy` methods, after the swap: a new resolution already gets the rebuilt bean while the
-evicted one closes. A refresh-scoped bean that owns an engine therefore disposes it in
-`@pre_destroy`, and `ApplicationContext.stop()` destroys the instances still cached. Until 26.09.07
-nothing was destroyed, so each refresh of such a bean leaked a connection pool.
+**Evicted instances are destroyed.** A refresh evicts the cached instances and then destroys them,
+after the swap: a new resolution already gets the rebuilt bean while the evicted one closes.
+`ApplicationContext.stop()` destroys the instances still cached. Destroying an instance runs, in
+order:
+
+1. its `@pre_destroy` methods;
+2. for the product of a `@bean` method, its destroy method: the one `@bean(destroy_method=...)`
+   names, or, when the product declares no `@pre_destroy` and no `stop()`, the first of
+   `dispose()`, `aclose()` and `close()` it has that takes no argument (Spring's inferred destroy
+   method), so a refresh-scoped `AsyncEngine` bean is disposed;
+3. `stop()`, when it defines `start()` and `stop()`. The context does not start a scoped lifecycle
+   bean (the scope builds it on demand, in a synchronous resolution), but `stop()` is how it
+   releases what it holds.
+
+Each step is bounded by `pyfly.context.shutdown-timeout`; a failure is logged. Until 26.09.07 nothing
+was destroyed, so each refresh of a bean that owned an engine leaked a connection pool.
 
 **Injecting a refresh-scoped bean into a singleton.** A singleton receives the instance that exists
 when it is built and keeps it: a refresh does not reach it. Either declare the bean with
@@ -701,12 +712,15 @@ class ReportingConfiguration:
         return create_async_engine(str(config.get("reporting.url")))
 ```
 
+Each refresh disposes the evicted engine through its inferred destroy method (`AsyncEngine.dispose()`),
+and so does `ApplicationContext.stop()` for the live one.
+
 #### Triggering a refresh — ContextRefresher
 
 `ApplicationContext` also registers a singleton `ContextRefresher` (from `pyfly.context`)
 that you can inject. Calling its async `refresh()` evicts all refresh-scoped beans, resets
 `@config_properties` beans (so they re-bind from the live `Config` on next resolution),
-destroys the evicted instances (their `@pre_destroy` methods), and publishes a
+destroys the evicted instances (see above), and publishes a
 `RefreshScopeRefreshedEvent`. It returns the scope keys that were evicted
 (`__pyfly_bean_<module>.<class>` or `...#<bean name>`).
 
@@ -780,6 +794,26 @@ During `ApplicationContext.start()`, the context:
 |---|---|---|---|
 | `name` | `str` | `""` | Bean name. Defaults to the method name if not specified. |
 | `scope` | `Scope` | `Scope.SINGLETON` | Lifecycle scope of the produced bean. |
+| `primary` | `bool` | `False` | The primary candidate among beans of one type (see [@bean(primary=..., profile=...)](#beanprimary-profile)). |
+| `profile` | `str` | `""` | Create the bean only for matching profiles. |
+| `destroy_method` | `str` | `INFER_DESTROY_METHOD` | The method called on the product when the bean is destroyed, after its `@pre_destroy` (a coroutine is awaited). `""` declares none. |
+
+**Destroy methods.** A singleton is destroyed when the context stops (step 3 of
+[the stop() lifecycle](#the-stop-lifecycle)); a refresh- or custom-scoped bean when its scope evicts
+it and when the context stops; a transient bean never. The default, `INFER_DESTROY_METHOD`
+(`pyfly.container.bean`, Spring's `"(inferred)"`), infers the method for a **scoped** bean that declares
+no `@pre_destroy` and no `stop()`: the first of `dispose()`, `aclose()` and `close()` it has that takes no
+argument. A **singleton** infers nothing: its product is usually released by its owner, in order (the
+datasource registry closes every engine last, a lifecycle bean closes its client), and closing it
+earlier would break that order. Name the method to have a singleton's product destroyed:
+
+```python
+@configuration
+class ArchiveConfiguration:
+    @bean(destroy_method="dispose")
+    def archive_engine(self, config: Config) -> AsyncEngine:
+        return create_async_engine(str(config.get("archive.url")))
+```
 
 ### Injecting Dependencies into @bean Methods
 
@@ -1414,8 +1448,10 @@ class DatabasePool:
 `@pre_destroy` marks a method to be called during shutdown. Like `@post_construct`, it
 supports both sync and async methods. Beans are destroyed in reverse creation order, so each bean
 is destroyed before the beans it depends on, and the datasources are still open: a `@pre_destroy`
-that flushes rows to the database succeeds (the registry closes after every `@pre_destroy`).
-The decorator sets `__pyfly_pre_destroy__ = True` on the method.
+that flushes rows to the database succeeds (the registry closes after every `@pre_destroy`), also
+through a `Provider[AsyncSession]` or a proxied refresh-scoped datasource. A refresh-scoped bean's
+`@pre_destroy` also runs when a refresh evicts it. The decorator sets `__pyfly_pre_destroy__ = True`
+on the method.
 
 ---
 

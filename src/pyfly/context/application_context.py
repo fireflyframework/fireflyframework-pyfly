@@ -103,6 +103,23 @@ def _marked_names(cls: type, marker: str) -> tuple[str, ...]:
     return names
 
 
+#: The methods a scoped ``@bean`` product that declares no other destruction is destroyed with, in the
+#: order they are looked for (Spring infers ``close``/``shutdown``; ``dispose()`` is how an
+#: ``AsyncEngine`` releases its pool, ``aclose()`` how an async client closes).
+_INFERRED_DESTROY_METHODS: tuple[str, ...] = ("dispose", "aclose", "close")
+
+
+def _takes_no_arguments(member: Any) -> bool:
+    """Whether *member* can be called without arguments (a callable without a signature is assumed to)."""
+    try:
+        inspect.signature(member).bind()
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
+
+
 def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
     """``(name, bound member)`` for the methods of *instance* marked with *marker*.
 
@@ -573,14 +590,13 @@ class ApplicationContext:
         # a Provider[AsyncSession] or a proxied refresh-scoped datasource.
         self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON,))
         live = self._live_instances_in_destroy_order()
+        declared = {
+            id(reg.instance): reg.destroy_method
+            for reg in self._all_registrations()
+            if reg.instance is not None and reg.destroy_method is not None
+        }
         for instance in live:
-            try:
-                await asyncio.wait_for(self._call_pre_destroy(instance), timeout=shutdown_timeout)
-            except TimeoutError:
-                logger.warning(
-                    "pre_destroy_timeout",
-                    extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
-                )
+            await self._destroy_instance(instance, declared.get(id(instance)), shutdown_timeout, infer=False)
 
         # 3b. The instances the custom scopes hold (refresh-scoped datasources), now that the singletons
         # that used them through a proxy or a Provider are done with them.
@@ -608,8 +624,8 @@ class ApplicationContext:
             evict_all = getattr(handler, "evict_all", None)
             if not callable(evict_all):
                 continue
-            for scoped in reversed(list(evict_all().values())):
-                await self._destroy_scoped_instance(scoped, timeout=timeout)
+            for key, scoped in reversed(list(evict_all().items())):
+                await self._destroy_scoped_instance(key, scoped, timeout=timeout)
 
     def _release_run(self, live: list[Any]) -> None:
         """Step 6 of :meth:`stop`: release the destroyed singletons and forget what the run added."""
@@ -651,13 +667,78 @@ class ApplicationContext:
         self._container.refuse_creation(_STOPPED)
         self._started = False
 
-    async def _destroy_scoped_instance(self, instance: Any, *, timeout: float | None = None) -> None:
-        """Destroy an instance a scope evicted (a refresh) or still held at stop: its ``@pre_destroy``."""
+    async def _destroy_scoped_instance(self, key: str, instance: Any, *, timeout: float | None = None) -> None:
+        """Destroy *instance*, which its scope evicted (a refresh) or still held at stop under *key*.
+
+        It gets the whole destruction contract, each step bounded by the shutdown timeout: its
+        ``@pre_destroy`` methods; then the destroy method of the ``@bean`` that produced it (its
+        ``destroy_method``, or when it declares no other destruction the inferred ``dispose()``,
+        ``aclose()`` or ``close()``: the documented refresh-scoped ``AsyncEngine`` bean disposes its
+        pool this way); then ``stop()`` when it is a lifecycle bean. The context does not start a
+        scoped lifecycle bean (the scope builds it on demand, in a synchronous resolution), but its
+        ``stop()`` is how it releases what it holds.
+        """
         limit = float(self._config.get("pyfly.context.shutdown-timeout", 30)) if timeout is None else timeout
+        registration = self._scoped_registration(key)
+        declared = registration.destroy_method if registration is not None else None
+        await self._destroy_instance(instance, declared, limit, infer=True)
+        if self._has_lifecycle_methods(instance):
+            await self._stop_lifecycle_bean(instance, limit)
+
+    def _scoped_registration(self, key: str) -> Registration | None:
+        """The scoped registration whose instances a scope caches under *key*."""
+        from pyfly.container.container import scope_key
+
+        for reg in self._all_registrations():
+            if reg.scope != Scope.SINGLETON and scope_key(reg) == key:
+                return reg
+        return None
+
+    async def _destroy_instance(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
+        """Run the ``@pre_destroy`` methods of *instance*, then its destroy method (see :func:`~pyfly.container.bean`).
+
+        *declared* is the ``destroy_method`` of the ``@bean`` that produced it (``None`` for any other
+        bean). The inferred one is looked for only when *infer* is true: for a scoped instance, never
+        for a singleton. Each call is bounded by *timeout*; a failure is logged and does not stop the
+        destruction of the others.
+        """
+        name = type(instance).__qualname__
         try:
-            await asyncio.wait_for(self._call_pre_destroy(instance), timeout=limit)
+            await asyncio.wait_for(self._call_pre_destroy(instance), timeout=timeout)
         except TimeoutError:
-            logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": limit})
+            logger.warning("pre_destroy_timeout", extra={"bean": name, "timeout_s": timeout})
+        method_name = self._destroy_method_name(instance, declared, infer=infer)
+        if method_name is None:
+            return
+        try:
+            result = getattr(instance, method_name)()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=timeout)
+        except TimeoutError:
+            logger.warning("destroy_method_timeout", extra={"bean": name, "method": method_name, "timeout_s": timeout})
+        except Exception:
+            logger.warning("destroy_method_failed", extra={"bean": name, "method": method_name}, exc_info=True)
+
+    def _destroy_method_name(self, instance: Any, declared: str | None, *, infer: bool) -> str | None:
+        """The name of the method that destroys *instance*, or ``None`` when it has none."""
+        from pyfly.container.bean import INFER_DESTROY_METHOD
+
+        if not declared:
+            return None
+        if declared != INFER_DESTROY_METHOD:
+            if not callable(getattr(instance, declared, None)):
+                logger.warning(
+                    "destroy_method_missing", extra={"bean": type(instance).__qualname__, "method": declared}
+                )
+                return None
+            return declared
+        if not infer or _marked_names(type(instance), "__pyfly_pre_destroy__") or self._has_lifecycle_methods(instance):
+            return None
+        for candidate in _INFERRED_DESTROY_METHODS:
+            member = getattr(instance, candidate, None)
+            if callable(member) and _takes_no_arguments(member):
+                return candidate
+        return None
 
     async def _stop_lifecycle_bean(self, bean: Any, timeout: float) -> None:
         """Stop one lifecycle bean within *timeout*; a failure is logged and does not stop the others."""
@@ -938,6 +1019,7 @@ class ApplicationContext:
         registration.scope = bean_scope  # the method's scope, even when the class carries a stereotype's
         registration.factory = self._bean_factory(config_instance, method)
         registration.scoped_proxy = bool(getattr(method, "__pyfly_scoped_proxy__", False))
+        registration.destroy_method = self._declared_destroy_method(method)
         if getattr(method, "__pyfly_bean_primary__", False):
             registration.primary = True
         return True
@@ -983,6 +1065,7 @@ class ApplicationContext:
         self._container.register(impl_type, scope=bean_scope, name=bean_name)
         impl_reg = self._container._registrations[impl_type]
         impl_reg.factory = factory
+        impl_reg.destroy_method = self._declared_destroy_method(method)
         if getattr(method, "__pyfly_bean_primary__", False):
             impl_reg.primary = True
         if bean_scope == Scope.SINGLETON:
@@ -1019,6 +1102,7 @@ class ApplicationContext:
             self._container.register(declared, scope=bean_scope)
             return_reg = self._container._registrations[declared]
             return_reg.factory = factory
+            return_reg.destroy_method = self._declared_destroy_method(method)
             if bean_scope == Scope.SINGLETON:
                 return_reg.instance = result
         elif declared is not None and (
@@ -1033,6 +1117,7 @@ class ApplicationContext:
             # instance it was standing in for.
             return_reg = self._container._registrations[declared]
             return_reg.factory = factory
+            return_reg.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
                 return_reg.primary = True
             if bean_scope == Scope.SINGLETON:
@@ -1065,6 +1150,7 @@ class ApplicationContext:
             self._container.register(declared, scope=bean_scope, name=bean_name)
             provisional = self._container._registrations[declared]
             provisional.factory = factory
+            provisional.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
                 provisional.primary = True
         self._deferred_bean_methods.append(
@@ -1129,6 +1215,13 @@ class ApplicationContext:
                         self._remove_registration(first_declared)
                 raise first.cause
             pending = still_pending
+
+    @staticmethod
+    def _declared_destroy_method(method: Any) -> str:
+        """The ``destroy_method`` a ``@bean`` method declares (inferred when it declares none)."""
+        from pyfly.container.bean import INFER_DESTROY_METHOD
+
+        return str(getattr(method, "__pyfly_bean_destroy_method__", INFER_DESTROY_METHOD))
 
     def _bean_factory(self, config_instance: Any, method: Any) -> Callable[[], Any]:
         """Return a zero-arg closure that invokes a @bean method with injection."""
