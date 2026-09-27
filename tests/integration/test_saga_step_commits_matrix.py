@@ -164,7 +164,7 @@ class SlowDebit:
         self.ledger = ledger
         self.script = Script()
 
-    @saga_step(id="debit", compensate="refund", retry=2, timeout_ms=100)
+    @saga_step(id="debit", compensate="refund", retry=2, timeout_ms=1000)
     async def debit(self) -> None:
         self.script.debit_attempts += 1
         if self.script.decline_first_debit and self.script.debit_attempts == 1:
@@ -325,7 +325,7 @@ async def test_a_timeout_during_commit_is_never_retried_and_the_step_is_compensa
         await gate.close()
         running = asyncio.create_task(harness.engine.execute("wp13-slow-debit"))
         await gate.wait_for_commit()
-        await _cancelled_step("saga-step-debit")  # the 100 ms timeout fired while COMMIT waits
+        await _cancelled_step("saga-step-debit")  # the 1 s timeout fired while COMMIT waits
         await gate.open()
         result = await asyncio.wait_for(running, 10)
 

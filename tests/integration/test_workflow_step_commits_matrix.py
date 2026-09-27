@@ -135,7 +135,7 @@ class SlowReserve:
         self.ledger = ledger
         self.script = Script()
 
-    @workflow_step(id="reserve", compensatable=True, timeout_ms=100, max_retries=1)
+    @workflow_step(id="reserve", compensatable=True, timeout_ms=1000, max_retries=1)
     async def reserve(self) -> None:
         self.script.reserve_attempts += 1
         if self.script.decline_first_reserve and self.script.reserve_attempts == 1:

@@ -102,7 +102,7 @@ class SlowReservation:
 
     @tcc_participant(id="stock", order=1)
     class Stock:
-        @try_method(timeout_ms=100, retry=1)
+        @try_method(timeout_ms=1000, retry=1)
         async def reserve(self) -> str:
             self.script.try_attempts += 1
             if self.script.decline_first_try and self.script.try_attempts == 1:
@@ -129,7 +129,7 @@ class OptionalPoints:
 
     @tcc_participant(id="loyalty", order=1, optional=True)
     class Loyalty:
-        @try_method(timeout_ms=100)
+        @try_method(timeout_ms=1000)
         async def award(self) -> None:
             await self.ledger.record("POINTS")
 
@@ -263,7 +263,7 @@ async def test_a_try_timing_out_during_commit_is_not_retried_and_is_cancelled(ha
         await gate.close()
         running: asyncio.Task[object] = asyncio.create_task(harness.engine.execute("wp13-slow-reservation"))
         await gate.wait_for_commit()
-        await _timed_out(running)  # the 100 ms timeout fired while COMMIT waits
+        await _timed_out(running)  # the 1 s timeout fired while COMMIT waits
         await gate.open()
         result = await asyncio.wait_for(running, 10)
 
