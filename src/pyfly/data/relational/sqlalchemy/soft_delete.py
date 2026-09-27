@@ -35,7 +35,14 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     Entities must use :class:`SoftDeleteMixin` to have a ``deleted_at`` column.
     All find methods automatically exclude soft-deleted entities.
+
+    Like :class:`Repository`, it resolves its session per call: every method joins the current unit of
+    work, or runs in an auto unit of its own (a read unit for ``find*``/``count*``/``exists*``/``stream*``,
+    a write unit that commits for the soft-delete writes and ``restore``).
     """
+
+    # Its methods, like Repository's, are framework operations: atomic for a task that shares the unit.
+    _pyfly_framework_repository = True
 
     @property
     def _active(self) -> Any:

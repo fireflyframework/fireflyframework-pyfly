@@ -20,11 +20,15 @@ Two auto-configurations live here:
   installed, disposes it when the context stops, and registers the after-begin customizer and
   credentials provider beans on it. Modules that store data in SQL (event store, snapshots, saga
   persistence, the PostgreSQL cache) take their datasource from it, so it exists even when the
-  relational repositories are disabled.
+  relational repositories are disabled. It also exposes the
+  :class:`~pyfly.data.transaction.registry.TransactionManagerRegistry` (one SQLAlchemy transaction manager
+  per datasource), installed while the context runs, so ``@transactional`` and repositories find their
+  transaction manager by datasource name.
 - :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled=true``) keeps the beans an
   application injects (``async_engine``, ``async_session_factory``, ``routing_session_factory``,
   ``named_data_sources``, ``async_session``, ``engine_lifecycle``, ``db_health_indicator``,
-  ``query_metrics``) with their names and types. Each is now a view over the registry.
+  ``query_metrics``) with their names and types. Each is now a view over the registry. It adds the
+  ``session_provider`` bean.
 """
 
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
@@ -42,10 +46,13 @@ try:
     )
 
     from pyfly.data.relational.datasource_registry import DataSourceRegistry, datasource_of
+    from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
+    from pyfly.data.relational.sqlalchemy.transaction_manager import transaction_managers_for
 except ImportError:
     AsyncEngine = object  # type: ignore[misc,assignment]
     AsyncSession = object  # type: ignore[misc,assignment]
     DataSourceRegistry = object  # type: ignore[misc,assignment]
+    SessionProvider = object  # type: ignore[misc,assignment]
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
@@ -66,6 +73,7 @@ from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.post_processor import (
     RepositoryBeanPostProcessor,
 )
+from pyfly.data.transaction.registry import TransactionManagerRegistry, install_registry, uninstall_registry
 
 try:
     from pyfly.observability.metrics import MetricsRegistry
@@ -199,6 +207,30 @@ class DataSourceRegistryLifecycle:
                 _logger.info("datasource_pools_evicted_on_refresh", extra={"datasources": evicted})
 
 
+class TransactionManagerRegistryLifecycle:
+    """Installs the context's transaction managers while the context runs.
+
+    ``start()`` installs the registry, so a boundary that names no manager (``@transactional`` on a plain
+    function or on a service without a factory attribute) and a repository outside a unit find their
+    datasource's manager; ``stop()`` removes it, only if it is still the installed one (a context started
+    later may have replaced it). *metrics* receives the ``pyfly.tx.synchronization.failures`` counter.
+    """
+
+    def __init__(self, registry: TransactionManagerRegistry, metrics: Any = None) -> None:
+        self._registry = registry
+        self._metrics = metrics
+
+    async def start(self) -> None:
+        """Install the registry (with the metrics recorder, when there is one)."""
+        if self._metrics is not None:
+            self._registry.metrics = self._metrics
+        install_registry(self._registry)
+
+    async def stop(self) -> None:
+        """Remove the registry, if it is still the installed one."""
+        uninstall_registry(self._registry)
+
+
 def _defines_coroutine(bean_instance: object, name: str, arity: int) -> bool:
     """Whether the bean's class (not a ``__getattr__`` proxy or a mock) defines coroutine *name*,
     callable with *arity* positional arguments."""
@@ -274,6 +306,19 @@ class DataSourceAutoConfiguration:
         """Registers ``AfterBeginCustomizer`` and ``DataSourceCredentialsProvider`` beans."""
         return DataSourceSpiRegistrar(datasource_registry)
 
+    @bean
+    def transaction_manager_registry(self, datasource_registry: DataSourceRegistry) -> TransactionManagerRegistry:
+        """One ``SqlAlchemyTransactionManager`` per datasource of the registry, by datasource name (the
+        default is the primary); datasources registered later get theirs on first use."""
+        return transaction_managers_for(datasource_registry)
+
+    @bean
+    def transaction_manager_registry_lifecycle(
+        self, transaction_manager_registry: TransactionManagerRegistry, metrics: MetricsRegistry | None = None
+    ) -> TransactionManagerRegistryLifecycle:
+        """Installs the transaction managers while the context runs (:class:`TransactionManagerRegistryLifecycle`)."""
+        return TransactionManagerRegistryLifecycle(transaction_manager_registry, metrics)
+
 
 @auto_configuration
 @conditional_on_class("sqlalchemy")
@@ -329,21 +374,30 @@ class RelationalAutoConfiguration:
 
     @bean(scope=Scope.TRANSIENT)
     def async_session(self, async_session_factory: async_sessionmaker[AsyncSession]) -> AsyncSession:
-        """Create an ``AsyncSession`` from the factory — a NEW one for every injection.
+        """A ``ScopedAsyncSession`` for the factory's datasource — a NEW one for every injection.
 
         This bean was a singleton until 26.09.06, so every repository, every user bean and the
         engine lifecycle shared one SQLAlchemy session: one transaction, one identity map and one
         connection's local state (``SET LOCAL``, a tenant GUC, a ``search_path``) for the whole
-        process. Anything multi-tenant or concurrent had to refuse the bean and open its own
-        sessions by hand. The factory (``async_session_factory``) is the unit of sharing; the
-        session is the unit of work, so it is transient: a bean that injects ``AsyncSession``
-        owns the one it receives, and a bean that needs a session per request or per tenant
-        injects the factory and calls it.
+        process. It is transient: each injection is a distinct object.
+
+        Inside a unit of work for its datasource (``@transactional``) the session delegates to the
+        unit's session, so a DAO that injects ``AsyncSession`` joins the transaction, and its
+        ``commit``/``rollback`` raise (the unit completes itself). Outside a unit it is an ordinary
+        session its owner commits and closes. Repositories never receive it: their ``session``
+        parameter is ``NoAutowire``, and they resolve their session per call. For custom data access
+        code, prefer the ``session_provider`` bean.
 
         The one session ``engine_lifecycle`` receives is the one it closes at shutdown.
         """
-        session: AsyncSession = async_session_factory()
+        session: AsyncSession = ScopedAsyncSession.of(async_session_factory)
         return session
+
+    @bean
+    def session_provider(self, config: Config) -> SessionProvider:
+        """The session of the current unit of work (``current()``) and programmatic short units
+        (``async with provider.unit(read_only=...)``), for custom data access code."""
+        return SessionProvider(transaction_managers_for(DataSourceRegistry.for_config(config)))
 
     @bean
     def engine_lifecycle(
@@ -363,8 +417,12 @@ class RelationalAutoConfiguration:
         return EngineLifecycle(async_engine, async_session, ddl_auto=ddl_auto, dispose_engine=registry is None)
 
     @bean
-    def repository_post_processor(self) -> RepositoryBeanPostProcessor:
-        return RepositoryBeanPostProcessor()
+    def repository_post_processor(self, config: Config | None = None) -> RepositoryBeanPostProcessor:
+        """Compiles derived and ``@query`` methods, and binds every repository to the context's
+        transaction managers (without a configuration, repositories use the installed ones)."""
+        if config is None:
+            return RepositoryBeanPostProcessor()
+        return RepositoryBeanPostProcessor(transaction_managers_for(DataSourceRegistry.for_config(config)))
 
     @bean
     def db_health_indicator(self, async_engine: AsyncEngine) -> SqlAlchemyHealthIndicator:

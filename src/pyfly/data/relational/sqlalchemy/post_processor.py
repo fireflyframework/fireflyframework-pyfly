@@ -20,7 +20,10 @@ from typing import Any
 from pyfly.data.post_processor import BaseRepositoryPostProcessor
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor
 from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
-from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.repository import Repository, is_read_method, repository_operation
+from pyfly.data.transaction.registry import TransactionManagerRegistry
+
+_READ_FLAG = "__pyfly_read_operation__"
 
 
 class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
@@ -31,12 +34,25 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     starting with ``find_by_``, ``count_by_``, ``exists_by_``, or
     ``delete_by_``), parses the method name and compiles a corresponding
     SQLAlchemy query.
+
+    Every compiled method is a repository operation like the inherited ones: it joins the current unit of
+    work or runs in an auto unit (a read unit for ``find_by_``/``count_by_``/``exists_by_`` and ``SELECT``
+    queries, a write unit for the rest). With *transaction_managers*, every repository bean resolves its
+    transaction manager from that registry (the application context's).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, transaction_managers: TransactionManagerRegistry | None = None) -> None:
         super().__init__()
         self._query_executor = QueryExecutor()
         self._query_compiler = QueryMethodCompiler()
+        self._transaction_managers = transaction_managers
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        """Compile the query methods, and bind the transaction managers of the context."""
+        bean = super().after_init(bean, bean_name)
+        if isinstance(bean, Repository) and self._transaction_managers is not None:
+            bean._bind_transaction_managers(self._transaction_managers)
+        return bean
 
     # ------------------------------------------------------------------
     # Hook implementations
@@ -46,21 +62,24 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         return Repository
 
     def _compile_derived(self, parsed: Any, entity: Any, bean: Any, *, return_type: Any = None) -> Any:
-        return self._query_compiler.compile(parsed, entity, return_type=return_type)
+        compiled = self._query_compiler.compile(parsed, entity, return_type=return_type)
+        setattr(compiled, _READ_FLAG, parsed.prefix != "delete_by")
+        return compiled
 
     def _wrap_derived_method(self, compiled_fn: Any) -> Any:
-        """Wrap a derived-query-compiled function to inject ``bean._session``."""
+        """Wrap a derived-query-compiled function as a repository operation on ``bean._session``."""
 
         async def wrapper(self_arg: Any, *args: Any) -> Any:
             return await compiled_fn(self_arg._session, *args)
 
-        return wrapper
+        return repository_operation(wrapper, read=bool(getattr(compiled_fn, _READ_FLAG, False)), atomic=True)
 
     def _process_query_decorated(self, bean: Any, cls: type, attr_name: str, attr: Any, entity: Any) -> bool:
         """Process ``@query``-decorated methods."""
         if hasattr(attr, "__pyfly_query__"):
             compiled_fn = self._query_executor.compile_query_method(attr, entity)
-            wrapper = self._wrap_query_method(compiled_fn)
+            read = is_read_method(attr_name) or str(attr.__pyfly_query__).lstrip().upper().startswith("SELECT")
+            wrapper = self._wrap_query_method(compiled_fn, read=read)
             setattr(bean, attr_name, wrapper.__get__(bean, cls))
             return True
         return False
@@ -70,10 +89,10 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _wrap_query_method(compiled_fn: Any) -> Any:
-        """Wrap a ``@query``-compiled function to inject ``bean._session``."""
+    def _wrap_query_method(compiled_fn: Any, *, read: bool = False) -> Any:
+        """Wrap a ``@query``-compiled function as a repository operation on ``bean._session``."""
 
         async def wrapper(self_arg: Any, **kwargs: Any) -> Any:
             return await compiled_fn(self_arg._session, **kwargs)
 
-        return wrapper
+        return repository_operation(wrapper, read=read, atomic=True)
