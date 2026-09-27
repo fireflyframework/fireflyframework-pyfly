@@ -189,6 +189,13 @@ class TestInCriteria:
             sql = _sql(select(ContractLine.sku).where(criterion), dialect)
             assert "(contract_line.order_code, contract_line.line_no) IN" in sql, name
 
+    def test_composite_keys_go_a_thousand_per_list(self) -> None:
+        """A long row-value list exhausts PostgreSQL's parser stack; 1000 rows is every dialect's safe size."""
+        keys = [(f"K{n}", n) for n in range(2500)]
+        for name in ("postgresql", "mysql", "sqlite"):
+            criteria = in_criteria([ContractLine.order_code, ContractLine.line_no], keys, DIALECTS[name])
+            assert len(criteria) == 3, name
+
     def test_sql_server_gets_an_or_of_ands_for_composite_keys(self) -> None:
         dialect = DIALECTS["mssql"]
         keys = [(f"K{n}", n) for n in range(1500)]

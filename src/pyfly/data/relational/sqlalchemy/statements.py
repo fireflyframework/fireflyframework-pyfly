@@ -90,6 +90,9 @@ _NO_ROW_VALUE_IN = frozenset({"mssql"})
 
 _IN_LIMITS: dict[str, int] = {}
 
+_ROW_VALUES_PER_LIST = 1000
+"""The most composite keys one IN list holds, whatever the dialect's parameter limit."""
+
 _ONE: ColumnElement[int] = literal_column("1")
 _ZERO: ColumnElement[int] = literal_column("0")
 
@@ -163,7 +166,9 @@ def in_criteria(
         limit = in_list_limit(dialect)
         return [column.in_(padded(chunk, limit)) for chunk in chunked(values, limit)]
     width = len(columns)
-    limit = max(1, in_list_limit(dialect) // width)
+    # A long row-value list is parsed recursively (PostgreSQL runs out of stack depth past a few thousand rows),
+    # so row values go 1000 at a time, the smallest per-list limit of any dialect (Oracle's).
+    limit = max(1, min(_ROW_VALUES_PER_LIST, in_list_limit(dialect) // width))
     rows = [tuple(value) for value in values]
     if any(len(row) != width for row in rows):
         raise ValueError(f"Each key needs {width} values, one per primary-key column")

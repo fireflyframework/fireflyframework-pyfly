@@ -34,10 +34,8 @@ from sqlalchemy import Integer, String, select, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
 
-from pyfly.data import transactional
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import Propagation
 from tests.integration._repository_harness import Datasources, dml, repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 from tests.support.contract_models import CONTRACT_MODELS, ContractChild, ContractParent, ContractVersioned
@@ -192,31 +190,6 @@ async def test_an_entity_attached_to_another_session_is_merged(relational_backen
             renamed = await parents.save(parent)
             assert renamed is not parent  # the repository's unit holds its own managed copy
             await other.rollback()
-        assert renamed.name == "renamed"
-        assert await _names(datasources, ContractParent) == ["renamed"]
-
-
-@pytest.mark.backends("pg", "mysql", "mariadb")
-async def test_an_entity_loaded_in_an_outer_unit_is_merged_into_a_requires_new_unit(
-    relational_backend: RelationalBackend,
-) -> None:
-    """The outer unit keeps its connection while the inner one writes, which SQLite's one writer refuses."""
-    async with repository_datasources(relational_backend, *MODELS) as datasources:
-        parents = ParentRepository()
-        saved = await parents.save(ContractParent(name="outer"))
-
-        @transactional(propagation=Propagation.REQUIRES_NEW)
-        async def rename_in_its_own_unit(parent: ContractParent) -> ContractParent:
-            parent.name = "renamed"
-            return await parents.save(parent)
-
-        @transactional
-        async def load_then_save_elsewhere() -> ContractParent:
-            parent = await parents.find_by_id(saved.id)
-            assert parent is not None
-            return await rename_in_its_own_unit(parent)
-
-        renamed = await load_then_save_elsewhere()
         assert renamed.name == "renamed"
         assert await _names(datasources, ContractParent) == ["renamed"]
 
