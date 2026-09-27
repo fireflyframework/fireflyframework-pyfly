@@ -315,7 +315,8 @@ def translate_exception(error: BaseException) -> BaseException:
     for translator in tuple(_TRANSLATORS):
         translated = translator.translate_exception_if_possible(error)
         if translated is not None:
-            translated.__cause__ = error
+            translated.__cause__ = error  # as ``raise translated from error`` would
+            translated.__suppress_context__ = True
             logger.debug(
                 "persistence_exception_translated",
                 extra={"translated": type(translated).__name__, "context": translated.context},
