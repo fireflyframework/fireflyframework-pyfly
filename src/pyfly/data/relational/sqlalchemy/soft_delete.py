@@ -49,7 +49,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data.auditing import AuditingHandler, active_auditing_handler
-from pyfly.data.relational.sqlalchemy.repository import ID, Repository, _state
+from pyfly.data.relational.sqlalchemy.repository import ID, Repository, _live_in_state, _state
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete as delete_for_good
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import (
     including_deleted,
@@ -94,14 +94,9 @@ class SoftDeleteRepository(Repository[T, ID]):
     def _criteria(self) -> tuple[Any, ...]:
         return (self._active,)
 
-    def _visible(self, entity: Any) -> bool:
-        return getattr(entity, "deleted_at", None) is None
-
     def _held_visible(self, entity: Any) -> bool | None:
-        state = _state(entity)
-        if "deleted_at" not in state.dict:
-            return None  # not loaded: ask the database
-        return state.dict["deleted_at"] is None
+        """Its own reads exclude deleted rows even inside ``including_deleted()``."""
+        return _live_in_state(entity)
 
     def _active_select(self, **filters: Any) -> Any:
         """A ``SELECT`` of the active (not deleted) entities with equality *filters*, for a subclass's own

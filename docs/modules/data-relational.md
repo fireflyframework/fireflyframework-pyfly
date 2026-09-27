@@ -2322,9 +2322,11 @@ A plain `Repository` over a soft-delete entity sees live rows only: its `delete_
 row deletes nothing (as Spring Data's `deleteById` of a row the `@SQLRestriction` hides), and neither does
 `delete_all_by_id` when it deletes through the ORM (a bulk `DELETE` is not filtered), and a retention
 query such as `find_by_deleted_at_less_than(cutoff)` returns nothing unless it runs inside
-`including_deleted()`. An entity named explicitly (`delete(entity)`, `delete_all(entities)`) is deleted
-even when its row is soft-deleted, and `delete_all()` deletes every row, soft-deleted ones included. Use `SoftDeleteRepository.hard_delete(id)` and `find_all_including_deleted()` for
-those, or opt the call out.
+`including_deleted()`. An entity the unit holds answers as its row does: once soft-deleted in the unit,
+`find_by_id` does not find it, `exists_by_id` is false and `delete_by_id` leaves it, as in a unit that does
+not hold it. An entity named explicitly (`delete(entity)`, `delete_all(entities)`) is deleted even when its
+row is soft-deleted, and `delete_all()` deletes every row, soft-deleted ones included. Use
+`SoftDeleteRepository.hard_delete(id)` and `find_all_including_deleted()` for those, or opt the call out.
 
 **Hard deletes reach soft-deleted children.** Deleting a row for good has to delete the soft-deleted
 children its `cascade="all, delete-orphan"` relationships hold, and set the foreign key of the ones a

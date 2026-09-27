@@ -120,6 +120,7 @@ from pyfly.data.relational.sqlalchemy.soft_delete_criteria import (
     INCLUDE_DELETED,
     hard_delete,
     including_deleted,
+    is_including_deleted,
     reaches_soft_deleted_rows,
 )
 from pyfly.data.relational.sqlalchemy.specification import Specification
@@ -303,6 +304,15 @@ def _state(entity: Any) -> InstanceState[Any]:
 def _identity_key(entity: Any) -> tuple[Any, ...]:
     """The primary key of a persistent instance."""
     return tuple(_state(entity).identity or ())
+
+
+def _live_in_state(entity: Any) -> bool | None:
+    """Whether a soft-delete entity is live by the ``deleted_at`` its state holds, or ``None`` when that is not
+    loaded (reading the attribute of an expired entity would load it, outside the unit's greenlet)."""
+    loaded = _state(entity).dict
+    if "deleted_at" not in loaded:
+        return None
+    return loaded["deleted_at"] is None
 
 
 def _persistable_hook(cls: type) -> Callable[[Any], bool] | None:
@@ -634,10 +644,6 @@ class Repository(Generic[T, ID]):
         """Criteria every read applies (``SoftDeleteRepository``: the row is not deleted)."""
         return ()
 
-    def _visible(self, entity: Any) -> bool:
-        """Whether an entity found by key is visible to the read methods."""
-        return True
-
     def _filter_resolver(self) -> PropertyResolver:
         """The filter names: the entity's properties, and its relationships to one entity, which compare with an
         instance (``find_all(owner=user)`` is ``owner_id = :id``)."""
@@ -886,7 +892,12 @@ class Repository(Generic[T, ID]):
             self._check_lock(lock)
         if not options and lock is None:
             entity = await session.get(self._model, self._key_value(identity))
-            return entity if entity is not None and self._visible(entity) else None
+            if entity is None:
+                return None
+            visible = self._held_visible(entity)
+            if visible is not None:
+                return entity if visible else None
+            # Its deleted_at is not loaded: the row answers, and fills in what the entity lacks.
         stmt = select(self._model).where(*self._pk_equals(identity), *self._criteria()).options(*options)
         if lock is not None:
             stmt = lock.apply(stmt).execution_options(populate_existing=True)
@@ -932,8 +943,12 @@ class Repository(Generic[T, ID]):
         return await exists(session, exists_probe(self._model, *self._pk_equals(identity), *self._criteria()))
 
     def _held_visible(self, entity: Any) -> bool | None:
-        """Whether an entity the unit holds is visible, or ``None`` when that needs the database."""
-        return True
+        """Whether an entity the unit holds is visible to the read methods, or ``None`` when that needs the
+        database. A soft-delete entity is read through the soft-delete criteria, so outside
+        ``including_deleted()`` it is visible when its ``deleted_at`` is ``None``, as its row is to SQL."""
+        if not self._soft_deletes or is_including_deleted():
+            return True
+        return _live_in_state(entity)
 
     async def count(self) -> int:
         """Return the total number of entities."""
@@ -953,8 +968,14 @@ class Repository(Generic[T, ID]):
         """Delete an entity by its primary key (Spring ``deleteById``): an id that is not found, or whose row is
         soft-deleted, deletes nothing. Cascades run, and reach soft-deleted dependents."""
         session = self._session
-        entity = await session.get(self._model, self._key_value(self._identity(id)))
-        if entity is not None:
+        identity = self._identity(id)
+        entity = await session.get(self._model, self._key_value(identity))
+        if entity is None:
+            return
+        visible = self._held_visible(entity)
+        if visible is None:
+            visible = await exists(session, exists_probe(self._model, *self._pk_equals(identity), *self._criteria()))
+        if visible:
             await hard_delete(session, entity)
 
     async def delete_all_by_id(self, ids: Iterable[ID]) -> None:
@@ -1079,18 +1100,19 @@ class Repository(Generic[T, ID]):
     async def _load_identities(
         self, session: AsyncSession, identities: Sequence[tuple[Any, ...]], *, deleting: bool = False
     ) -> list[Any]:
-        """The entities with these keys: the unit's own, then one ``SELECT`` per chunk for the rest (with the
-        collections a delete needs, when *deleting*)."""
+        """The entities with these keys: the unit's own that are visible (:meth:`_held_visible`), then one
+        ``SELECT`` per chunk for the rest (with the collections a delete needs, when *deleting*)."""
         sync_session = session.sync_session
         mapper = self._mapper
         entities: list[Any] = []
         missing: list[tuple[Any, ...]] = []
         for identity in identities:
             held = sync_session.identity_map.get(mapper.identity_key_from_primary_key(identity))
-            if held is not None:
+            visible = None if held is None else self._held_visible(held)
+            if visible is None:
+                missing.append(identity)  # the row answers (a held entity's lacking deleted_at is filled in)
+            elif visible:
                 entities.append(held)
-            else:
-                missing.append(identity)
         if deleting:
             await self._load_for_delete(session, entities)
         options = self._delete_loads() if deleting else []

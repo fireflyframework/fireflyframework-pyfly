@@ -29,7 +29,8 @@ application without soft-delete entities pays nothing.
 What it does not filter:
 
 - an object already in the session's identity map (``session.get()`` returns it without SQL), which is why
-  ``SoftDeleteRepository.find_by_id`` still checks ``deleted_at`` itself;
+  the repositories' ``find_by_id``, ``exists_by_id`` and ``delete_by_id`` check the ``deleted_at`` a held
+  entity has themselves (a plain ``Repository`` outside :func:`including_deleted` only);
 - the refresh of an object the session holds (``session.refresh()``, an expired attribute);
 - ``UPDATE`` and ``DELETE`` statements, and raw ``text()`` SQL, as native queries in Spring;
 - the ``EXISTS`` subqueries of ``relationship.any()`` and ``has()``: ``Author.books.any(Book.title == "x")``

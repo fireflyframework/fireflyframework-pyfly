@@ -160,6 +160,51 @@ async def test_every_repository_and_count_skip_deleted_rows(relational_backend: 
         assert (await session.execute(count)).scalar_one() == 2
 
 
+async def test_a_plain_repository_answers_for_a_held_soft_deleted_entity_as_its_sql_does(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A plain ``Repository`` over a soft-delete entity sees live rows only: an entity the unit holds and
+    soft-deleted earlier is not there for it either (``exists_by_id``, ``find_by_id``), and deleting its id
+    deletes nothing, as in a unit that does not hold it. Inside ``including_deleted()`` it is there."""
+    factory, library = await _library(relational_backend)
+    async with factory() as session:
+        authors = SoftAuthorRepository(session=session)
+        alice = await authors.find_by_id(library.alice.id)
+        assert alice is not None
+        await authors.delete(alice)
+        plain = AuthorArchive(session=session)
+        assert not await plain.exists_by_id(library.alice.id)
+        assert await plain.find_by_id(library.alice.id) is None
+        await plain.delete_by_id(library.alice.id)
+        with including_deleted():
+            assert await plain.exists_by_id(library.alice.id)
+            assert await plain.find_by_id(library.alice.id) is alice
+        await session.commit()
+    async with factory() as session:
+        plain = AuthorArchive(session=session)
+        assert not await plain.exists_by_id(library.alice.id)
+        assert await plain.find_by_id(library.alice.id) is None
+        found = await session.get(SoftAuthor, library.alice.id, execution_options={INCLUDE_DELETED: True})
+        assert found is not None and found.is_deleted
+
+
+@pytest.mark.parametrize("repository", [AuthorArchive, SoftAuthorRepository])
+async def test_finding_a_held_entity_whose_deleted_at_expired(
+    relational_backend: RelationalBackend, repository: type[Repository[SoftAuthor, uuid.UUID]]
+) -> None:
+    """Whether an entity the unit holds is visible is read from its state; with ``deleted_at`` expired the
+    row answers (reading the attribute would load it outside the unit's greenlet)."""
+    factory, library = await _library(relational_backend)
+    async with factory() as session:
+        authors = repository(session=session)
+        alice = await authors.find_by_id(library.alice.id)
+        assert alice is not None
+        session.expire(alice, ["deleted_at"])
+        assert await authors.find_by_id(library.alice.id) is alice
+        session.expire(alice, ["deleted_at"])
+        assert await authors.exists_by_id(library.alice.id)
+
+
 async def test_include_deleted_and_including_deleted_opt_out(relational_backend: RelationalBackend) -> None:
     factory, library = await _library(relational_backend)
     async with factory() as session:
