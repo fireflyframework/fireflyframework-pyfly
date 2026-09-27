@@ -95,6 +95,9 @@ class SqlAlchemyHealthIndicator:
 
     async def health(self) -> HealthStatus:
         dialect = _dialect(self._engine)
+        if self._registry is not None and getattr(self._registry, "closed", False):
+            # The context stopped (or is stopping): its engines are disposed and refuse to connect.
+            return HealthStatus(status="OUT_OF_SERVICE", details={"database": dialect, "reason": "datasources closed"})
         targets = self._targets()
         if len(targets) == 1 and targets[0][1] is self._engine:
             return await self._check(self._engine)

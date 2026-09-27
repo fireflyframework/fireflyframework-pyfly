@@ -396,6 +396,53 @@ def _url_identity(url: str | URL) -> tuple[Any, ...]:
     )
 
 
+#: Seconds :meth:`DataSourceRegistry.close` waits for the engines to dispose before it terminates the
+#: idle connections of the ones still waiting (a database that stopped answering).
+CLOSE_TIMEOUT = 5.0
+
+
+def _refuse_new_connections(datasource: DataSource) -> None:
+    """Make *datasource*'s engine raise instead of connecting: its registry is closed.
+
+    ``AsyncEngine.dispose()`` replaces the pool with an empty one, and the next use would silently
+    open connections in it that nobody disposes. The listener runs before every other ``do_connect``
+    hook (the credentials hook included), so no connection is attempted.
+    """
+    name = datasource.qualified_name
+
+    def _refuse(dialect: Any, record: Any, cargs: Any, cparams: Any) -> Any:
+        del dialect, record, cargs, cparams
+        raise DataSourceConfigurationError(
+            f"The datasource {name!r} is closed: its registry was closed when the application context stopped"
+        )
+
+    event.listen(datasource.engine.sync_engine, "do_connect", _refuse, insert=True)
+
+
+def _terminate_idle_connections(pool: Any) -> int:
+    """Close the socket of every connection idle in *pool*, sending nothing; returns how many.
+
+    Invalidating a pool entry outside SQLAlchemy's greenlet takes the dialect's forced path (asyncpg
+    ``Connection.terminate()``, asyncmy/aiomysql ``close()``), which neither writes to nor waits on a
+    database that no longer answers. SQLAlchemy exposes no accessor for the idle entries of a
+    ``QueuePool``; a pool without that queue (``NullPool``, ``StaticPool``) keeps none.
+    """
+    idle = getattr(pool, "_pool", None)
+    if idle is None:
+        return 0
+    terminated = 0
+    while True:
+        try:
+            record = idle.get(False)
+        except Exception:  # noqa: BLE001 — sqlalchemy.util.queue.Empty: nothing left
+            return terminated
+        try:
+            record.invalidate()
+        except Exception:  # noqa: BLE001 — one connection that cannot be terminated must not keep the rest
+            _logger.debug("datasource_terminate_failed", exc_info=True)
+        terminated += 1
+
+
 class DataSourceRegistry:
     """Every datasource of an application, built from configuration through one factory.
 
@@ -663,11 +710,22 @@ class DataSourceRegistry:
 
     # -- closing --------------------------------------------------------------------------------------
 
-    async def close(self) -> None:
+    async def close(self, *, timeout: float | None = None) -> None:
         """Dispose every engine (primary, replicas, named, module datasources) exactly once.
 
         The engines are disposed concurrently, so a pool whose database went silent (its dispose waits
         for the server) keeps no other pool open, and one that fails is logged without stopping the rest.
+
+        The wait is bounded: a dispose still running after *timeout* seconds (:data:`CLOSE_TIMEOUT` by
+        default) is waiting for a database that stopped answering (a partition, a middlebox that forgot
+        the flow), which the driver would wait on until the kernel gives up on the socket. It is
+        cancelled, and the connections still idle in its pool are terminated: their sockets are closed
+        without a word to the server. ``ctx.stop()`` therefore ends on time.
+
+        From the moment it is called the engines refuse to connect: using one after close raises
+        :class:`DataSourceConfigurationError` instead of silently opening a pool that nobody would ever
+        dispose. A connection checked out before the close finishes its work and is closed when it is
+        returned.
         """
         with self._lock:
             if self._closed:
@@ -681,20 +739,49 @@ class DataSourceRegistry:
         for datasource in datasources:
             unique.setdefault(id(datasource.engine), datasource)
         targets = list(unique.values())
-        results = await asyncio.gather(*(ds.engine.dispose() for ds in targets), return_exceptions=True)
-        for datasource, result in zip(targets, results, strict=True):
-            if isinstance(result, Exception):  # one failing pool must not keep the others open
+        for datasource in targets:
+            _refuse_new_connections(datasource)
+        # The pool each dispose works on: a cancelled dispose never replaces it, and its idle
+        # connections are terminated from here.
+        pools = {id(datasource): datasource.engine.sync_engine.pool for datasource in targets}
+        disposals = {asyncio.ensure_future(datasource.engine.dispose()): datasource for datasource in targets}
+        if not disposals:
+            return
+        limit = CLOSE_TIMEOUT if timeout is None else timeout
+        try:
+            done, pending = await asyncio.wait(disposals, timeout=limit)
+        except asyncio.CancelledError:
+            for task in disposals:
+                task.cancel()
+            raise
+        for task in done:
+            error = None if task.cancelled() else task.exception()
+            if isinstance(error, Exception):  # one failing pool must not keep the others open
                 _logger.warning(
                     "datasource_dispose_failed",
-                    extra={"datasource": datasource.qualified_name},
-                    exc_info=(type(result), result, result.__traceback__),
+                    extra={"datasource": disposals[task].qualified_name},
+                    exc_info=(type(error), error, error.__traceback__),
                 )
-            elif isinstance(result, BaseException):
-                raise result
+            elif error is not None:
+                raise error
+        if not pending:
+            return
+        for task in pending:
+            # asyncpg aborts the connection whose close it was waiting on when the wait is cancelled.
+            task.cancel()
+        await asyncio.wait(pending, timeout=min(limit, 1.0))
+        for task in pending:
+            datasource = disposals[task]
+            terminated = _terminate_idle_connections(pools[id(datasource)])
+            _logger.warning(
+                "datasource_dispose_timeout",
+                extra={"datasource": datasource.qualified_name, "timeout_s": limit, "terminated": terminated},
+            )
 
-    async def dispose_all(self) -> None:
-        """Alias of :meth:`close`."""
-        await self.close()
+    async def dispose_all(self, *, timeout: float | None = None) -> None:
+        """Alias of :meth:`close`; the context calls it last when it stops (a
+        :class:`~pyfly.kernel.lifecycle.ResourceRegistry`)."""
+        await self.close(timeout=timeout)
 
     # -- building -------------------------------------------------------------------------------------
 
