@@ -23,6 +23,12 @@ Opt in per bean, with ``@refresh_scope(proxy=True)`` on a class or ``@scoped_pro
 non-singleton ``@bean`` method. ``isinstance(proxy, Target)`` is true; ``type(proxy)`` is
 :class:`ScopedProxy`, and :func:`proxy_target` returns the current instance. ``Provider[T]`` is the
 explicit alternative: ``provider.get()`` resolves the current instance too.
+
+A proxy forwards attribute access, calls, ``bool()``, ``len()``, ``iter()``, ``in``, ``[]``, ``with``
+and ``async with``. It does not forward ``async for``, ``await``, ``==`` or ``hash()``: ``async for``
+and ``await`` on a proxy raise ``TypeError``, and ``==`` and ``hash()`` answer for the proxy itself
+(identity). Use ``proxy_target(proxy)`` for those. (Forwarding ``__await__`` would make every proxy
+look awaitable to ``inspect.isawaitable``.)
 """
 
 from __future__ import annotations

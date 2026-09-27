@@ -710,7 +710,10 @@ scope) and resolves the instance its scope holds on every use: an attribute, a c
   does registering a `@scoped_proxy` class as a singleton or transient bean.
 
 A `with` or `async with` block on a proxy exits on the instance it entered, even when a refresh
-swapped the scope's instance inside the block.
+swapped the scope's instance inside the block. A proxy forwards attribute access, calls, `bool()`,
+`len()`, `iter()`, `in`, `[]`, `with` and `async with`, but not `async for`, `await`, `==` or
+`hash()`: `async for` and `await` on a proxy raise `TypeError`, and `==` and `hash()` answer for the
+proxy itself. Use `proxy_target(proxy)` for those.
 
 ```python
 from pyfly.container.refresh_scope import scoped_proxy
