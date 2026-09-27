@@ -22,7 +22,9 @@ auto-configuration) on a SQLite file database (foreign keys on) and on PostgreSQ
   every tenant and user, and not at all when it rolls back;
 - ``@cache_evict(Event)`` on a query handler evicts all of its entries when a command produces that event,
   and the same tag on a command handler evicts them whenever that command commits;
-- ``cache_key_prefix`` is part of the key, and ``caching_enabled: false`` turns the query cache off.
+- ``cache_key_prefix`` is part of the key, and ``caching_enabled: false`` turns the query cache off;
+- a domain event that fails to publish (``EventFailureStrategy.RAISE``) after the handler committed does
+  not leave the committed change's old results cached.
 """
 
 from __future__ import annotations
@@ -38,9 +40,11 @@ from pyfly.cache.auto_configuration import CacheAutoConfiguration
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.container.stereotypes import repository, service
 from pyfly.context.application_context import ApplicationContext
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter
 from pyfly.cqrs.cache.decorators import cache_evict, cacheable
-from pyfly.cqrs.command.bus import DefaultCommandBus
+from pyfly.cqrs.command.bus import DefaultCommandBus, EventFailureStrategy
 from pyfly.cqrs.command.handler import CommandHandler
+from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.config.auto_configuration import CqrsAutoConfiguration
 from pyfly.cqrs.context.execution_context import ExecutionContext, ExecutionContextBuilder
 from pyfly.cqrs.decorators import command_handler, query_handler
@@ -189,7 +193,7 @@ class ArchiveOrderHandler(CommandHandler[ArchiveOrder, None]):
 
 
 @service
-class Fulfilment:
+class Fulfillment:
     """Sends a command inside a wider unit of work."""
 
     def __init__(self, commands: DefaultCommandBus, cache: CacheAdapter) -> None:
@@ -221,7 +225,7 @@ _BEANS = (
     ShipOrderHandler,
     RenameOrderHandler,
     ArchiveOrderHandler,
-    Fulfilment,
+    Fulfillment,
 )
 
 
@@ -279,15 +283,15 @@ async def test_inside_a_wider_unit_the_eviction_waits_for_its_commit(relational_
     ctx = await _boot(relational_backend)
     try:
         queries = ctx.get_bean(DefaultQueryBus)
-        fulfilment = ctx.get_bean(Fulfilment)
+        fulfillment = ctx.get_bean(Fulfillment)
         assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
 
         with pytest.raises(RuntimeError, match="invoicing failed"):
-            await fulfilment.ship_and_then(1, fail=True)
+            await fulfillment.ship_and_then(1, fail=True)
         assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
 
-        await fulfilment.ship_and_then(1, fail=False)
-        assert fulfilment.seen_inside == [True, True]
+        await fulfillment.ship_and_then(1, fail=False)
+        assert fulfillment.seen_inside == [True, True]
         assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "SHIPPED"}
         assert ctx.get_bean(GetOrderHandler).calls == 2
     finally:
@@ -327,5 +331,31 @@ async def test_the_query_cache_can_be_switched_off(relational_backend: Relationa
             assert await queries.query(GetOrderQuery(order_id=1)) == {"id": 1, "status": "PENDING"}
         assert ctx.get_bean(GetOrderHandler).calls == 3
         assert await _keys(ctx.get_bean(CacheAdapter)) == []
+    finally:
+        await ctx.stop()
+
+
+class _BrokerDown:
+    async def publish(self, event: Any, *, destination: str | None = None) -> None:
+        raise ConnectionError("the broker is unreachable")
+
+
+async def test_a_failed_publication_after_the_commit_still_evicts(relational_backend: RelationalBackend) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        queries = ctx.get_bean(DefaultQueryBus)
+        commands = DefaultCommandBus(
+            registry=ctx.get_bean(HandlerRegistry),
+            event_publisher=_BrokerDown(),
+            event_failure_strategy=EventFailureStrategy.RAISE,
+            query_cache=ctx.get_bean(QueryCacheAdapter),
+        )
+        assert await queries.query(OrderStatusQuery(order_id=1)) == "PENDING"
+
+        # The handler's own unit committed; only the publication of OrderRenamed failed.
+        with pytest.raises(CommandProcessingException, match="failed to publish"):
+            await commands.send(RenameOrder(order_id=1, status="ON_HOLD"))
+        assert await queries.query(OrderStatusQuery(order_id=1)) == "ON_HOLD"
+        assert ctx.get_bean(OrderStatusHandler).calls == 2
     finally:
         await ctx.stop()

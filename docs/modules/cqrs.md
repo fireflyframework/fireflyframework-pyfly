@@ -274,7 +274,8 @@ from pyfly.cqrs.decorators import query_handler
 
 ### DefaultCommandBus
 
-Pipeline: correlate, validate, authorize, execute, publish events, record metrics.
+Pipeline: correlate, validate, authorize, execute, invalidate the query cache (with a query cache, see
+[Command-side invalidation](#command-side-invalidation)), publish events, record metrics.
 
 ```python
 from pyfly.cqrs.command.bus import DefaultCommandBus
@@ -567,7 +568,7 @@ because rewriting it could race an eviction and bring evicted entries back: an
 entry stored late in its generation's life may become unreachable before its own
 TTL, which costs one extra miss and never serves a stale value.
 
-> **Prior behaviour (corrected in 26.09.08):** the key was the query's own key
+> **Prior behavior (corrected in 26.09.08):** the key was the query's own key
 > only, so the first tenant (or user) to run a cacheable query filled the entry
 > every other tenant was served for `cache_ttl`, 900 seconds by default.
 
@@ -622,9 +623,18 @@ class RenameOrderHandler(CommandHandler[RenameOrder, None]): ...
 
 An event-tag eviction removes the handler's group: `<cache_key_prefix>:`, or
 `<QueryClass>:` for the default query keys. Declare a `cache_key_prefix` on a
-tagged handler whose query overrides `get_cache_key()`.
+tagged handler whose query overrides `get_cache_key()`: its keys need not start
+with `<QueryClass>:`, and the first eviction that may miss them logs a
+`query_cache_eviction_may_miss` warning naming the handler.
 
-> **Prior behaviour (corrected in 26.09.08):** `Command.get_cache_key()`,
+The invalidation comes before the publication of the command's domain events,
+and runs to completion even when the task is cancelled meanwhile: a handler whose
+own `@transactional` committed never leaves its old results cached because an
+event then fails to publish (`EventFailureStrategy.RAISE`) or the client
+disconnected. Inside a wider unit of work it waits for that unit's commit, so a
+publication failure that rolls the unit back drops it.
+
+> **Prior behavior (corrected in 26.09.08):** `Command.get_cache_key()`,
 > `@cache_evict(events)`, `cache_key_prefix` and `caching_enabled` were read by
 > nothing, so after a committed update the query kept returning the old result
 > for `cache_ttl`.
@@ -683,10 +693,13 @@ if bridge:
 
 The full prefixed cache key evicted is `:cqrs:<resolved_pattern>` (the
 `QueryCacheAdapter` applies the `:cqrs:` prefix transparently), for every
-caller's scope. A pattern must resolve to a query's cache key: a query that uses
-the default key (`<QueryClass>:<digest>`) needs `get_cache_key()` overridden
-(for example to `order:{order_id}`) for a payload-field rule to match it.
-Inside a unit of work the eviction waits for the commit.
+caller's scope. A pattern must resolve to the key the query bus stores: a query
+that uses the default key (`<QueryClass>:<digest>`) needs `get_cache_key()`
+overridden (for example to `order:{order_id}`) for a payload-field rule to match
+it, and the entries of a handler that declares a `cache_key_prefix` live under
+`<cache_key_prefix>:<query key>`, so its rules include the prefix
+(`orders:order:{order_id}`). Inside a unit of work the eviction waits for the
+commit.
 
 > **Prior behaviour (corrected):** Before SP-8 the `QueryCacheAdapter` never
 > received a real `CacheAdapter` at startup, so `@cacheable` queries were
