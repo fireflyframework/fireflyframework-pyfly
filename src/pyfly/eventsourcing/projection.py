@@ -30,8 +30,8 @@ and hands each event to its :class:`Projection`, in order:
   *poll_interval_s* only on a short page, when it has caught up.
 - **In order, never past a failure.** A handler that raises stops the batch there; the events before it are
   applied (in their own batch when the store rolled the failed one back), and the failed event is retried
-  after *poll_interval_s*, until it succeeds. A batch whose commit fails is retried one event at a time, so the
-  event that breaks it is found and the others go through.
+  after *poll_interval_s*, until it succeeds. The events of a batch whose commit fails are retried one at a
+  time until the runner is past them, so the event that breaks it is found and the others go through.
 
 The runner is a lifecycle bean of :data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE`, and its work runs in a task of
 its own, outside any unit of work of the code that started it.
@@ -138,6 +138,7 @@ class ProjectionRunner:
         self._lease_held = False
         self._renew_at = 0.0
         self._latest = 0  # the last position when the runner started (start_from="latest")
+        self._narrow_until: int | None = None  # the last position of a page that failed at commit
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -235,20 +236,32 @@ class ProjectionRunner:
                 )
                 if failed_at > 0 and now == position:
                     return now, failed_at, False  # the batch rolled back: apply the events before the failure
-                return now, self._batch_size, True
+                return now, self._page_size(now), True
             _logger.error(
                 "projection_batch_failed",
                 extra={"projection": self.name, "events": len(events)},
                 exc_info=(type(error), error, error.__traceback__),
             )
             if len(events) > 1:
-                return now, 1, False  # find the event that breaks the batch, one at a time
+                # Find the event that breaks the batch: its events one at a time, until the runner is past them.
+                self._narrow_until = max(self._narrow_until or 0, target)
+                return now, 1, False
             return now, 1, True
         if not batch.claimed:
             # Another runner moved the checkpoint: this batch applied nothing; go on from where it is now.
             _logger.debug("projection_batch_superseded", extra={"projection": self.name, "expected": position})
-            return await self._checkpoints.load(self.name), self._batch_size, False
-        return target, self._batch_size, len(events) < limit
+            now = await self._checkpoints.load(self.name)
+            return now, self._page_size(now), False
+        return target, self._page_size(target), len(events) < limit
+
+    def _page_size(self, position: int) -> int:
+        """The next page's size from *position*: one event while the runner is inside a page that failed at
+        commit, *batch_size* once it is past it."""
+        if self._narrow_until is not None:
+            if position < self._narrow_until:
+                return 1
+            self._narrow_until = None
+        return self._batch_size
 
     async def _loop_by_event_id(self) -> None:
         """The loop for an event store without global positions (written against the SPI of earlier releases):

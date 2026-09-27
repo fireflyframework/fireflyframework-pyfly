@@ -17,8 +17,10 @@ The runner kept its cursor in memory, so every restart replayed the whole store 
 replica ran its own runner, so a shared read model got each event once per replica; and it slept a full poll
 interval after every page, capping catch-up at 100 events a second. Its only test ran one runner, once, on the
 in-memory store. These tests run a non-idempotent read model (a running total plus a ledger row per event, on
-the checkpoint's datasource) through restarts, two replicas, a handler that fails between its two writes, a
-late-committing writer, and a catch-up of a thousand events with the default settings.
+the checkpoint's datasource) through restarts, two replicas, a handler that fails between its two writes, a batch
+that fails at commit, a late-committing writer, an aggregate appended to across units, and catch-ups with the
+default settings and with pages larger than a numbering round. PostgreSQL runs the scenarios a second time with
+the event store's ``xid8`` strategy (at the end of the module).
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, func, insert, select, update
+from sqlalchemy import Column, ForeignKey, Integer, MetaData, String, Table, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
@@ -40,7 +42,7 @@ from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
 from pyfly.eventsourcing.store import SqlAlchemyEventStore
 from pyfly.scheduling.adapters.lease_lock import LeaseLock
 from tests.integration.test_event_store_matrix import _append_after_another_unit_committed
-from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 read_model = MetaData()
 totals = Table(
@@ -56,6 +58,20 @@ ledger = Table(
     Column("event_id", String(64), nullable=False),
     Column("applied_by", String(32), nullable=False),
 )
+# A read model whose writes can fail at commit: the foreign key is checked when the unit commits.
+parents = Table("wp08_parents", read_model, Column("id", String(64), primary_key=True))
+children = Table(
+    "wp08_children",
+    read_model,
+    Column("event_id", String(64), primary_key=True),
+    Column(
+        "parent_id",
+        String(64),
+        ForeignKey("wp08_parents.id", deferrable=True, initially="DEFERRED"),
+        nullable=False,
+    ),
+)
+
 # The position strategy of the event stores the scenarios build; the xid8 reruns at the end set it for PostgreSQL.
 _STRATEGY = "auto"
 
@@ -306,6 +322,48 @@ async def test_a_handler_failing_between_its_two_writes_leaves_neither_and_is_re
     assert await setup.applied_by() == {"runner": 6}  # the half-applied writes rolled back with their batch
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
+async def test_a_batch_that_fails_at_commit_is_retried_one_event_at_a_time_past_its_last_event(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Review of WP08: after the first event of a batch that failed at commit went through on its own, the runner
+    read a full page again, which held the failing event again: an event k places into a page cost about k
+    full-page retries. The runner now applies the failed page's events one at a time until it is past them."""
+    setup = await _setup(relational_backend)
+    await relational_backend.create_tables(parents, children)
+    await setup.append(60)
+    poisoned = (await setup.store.stream_all(limit=60))[20].event_id
+    handled: dict[str, int] = {}
+
+    async def handle(event: StoredEventEnvelope) -> None:
+        attempts = handled[event.event_id] = handled.get(event.event_id, 0) + 1
+        async with infrastructure_unit(setup.engine) as session:
+            if event.event_id != poisoned or attempts > 4:
+                await session.execute(insert(parents).values(id=event.event_id))
+            # The poisoned event's first four batches fail when they commit: its parent is missing.
+            await session.execute(insert(children).values(event_id=event.event_id, parent_id=event.event_id))
+
+    checkpoints = setup.checkpoints()
+    runner = ProjectionRunner(
+        FunctionProjection("deposits", handle),
+        setup.store,
+        checkpoints=checkpoints,
+        batch_size=30,
+        poll_interval_s=0.05,
+    )
+    await runner.start()
+    try:
+        await setup.caught_up(checkpoints)
+    finally:
+        await runner.stop()
+
+    async with setup.engine.connect() as connection:
+        assert (await connection.execute(select(func.count()).select_from(children))).scalar_one() == 60
+    assert handled.pop(poisoned) == 5
+    # Once in the page that failed and once on its own (the events of that page), or once (the others).
+    assert max(handled.values()) == 2, sorted(handled.values())
+
+
 @pytest.mark.backends(PG, MYSQL, MARIADB)
 async def test_a_late_committing_event_reaches_the_projection(relational_backend: RelationalBackend) -> None:
     """C011 end to end: a writer that stays open while later writers commit is not skipped by the runner."""
@@ -467,6 +525,7 @@ _XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
     test_without_a_lease_the_checkpoint_still_fences_two_runners,
     test_a_standby_replica_takes_over_from_the_checkpoint_when_the_lease_holder_stops,
     test_a_handler_failing_between_its_two_writes_leaves_neither_and_is_retried,
+    test_a_batch_that_fails_at_commit_is_retried_one_event_at_a_time_past_its_last_event,
     test_a_late_committing_event_reaches_the_projection,
     test_a_projection_gets_an_aggregate_s_events_in_sequence_order_across_units,
     test_catch_up_runs_at_full_speed_with_the_default_settings,
