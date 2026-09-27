@@ -284,10 +284,13 @@ async def test_an_env_py_generated_before_keeps_the_application_logging_too(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env_py", ["pyfly", "legacy"])
 async def test_a_percent_sign_in_the_url_is_migrated(tmp_path: Path, env_py: str) -> None:
-    """A percent-encoded character (an '@' in a password, here in a directory name) reaches the database decoded,
-    with the env.py of today and with one generated before."""
-    (tmp_path / "p@ss").mkdir()
+    """A percent-encoded character (an '@' in a password, here in a directory name) reaches the database as the
+    application's engine reads the URL, with the env.py of today and with one generated before."""
+    from sqlalchemy.engine import make_url
+
     url = f"sqlite+aiosqlite:///{tmp_path / 'p%40ss' / 'app.db'}"
+    # The directory the engine opens (SQLAlchemy 2.1 decodes the path, 2.0 keeps it as written).
+    Path(str(make_url(url).database)).parent.mkdir()
     ini = environment(tmp_path, [_CREATE_ITEMS], env_py=LEGACY_ENV_PY if env_py == "legacy" else None)
     await MigrationRunner(url=url, config_path=str(ini)).start()
     assert "wp11_mig_item" in await _tables(url)

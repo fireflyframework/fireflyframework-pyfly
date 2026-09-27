@@ -27,11 +27,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import Boolean, Integer, MetaData, Numeric, String, Unicode, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -159,6 +161,53 @@ async def test_startup_migrations_of_instances_that_start_together_all_apply(
         for context, result in zip(contexts, results, strict=True):
             if not isinstance(result, BaseException):
                 await context.stop()
+
+
+@pytest.mark.backends("pg", "mysql")
+@pytest.mark.parametrize("env_py", ["pyfly", "legacy"])
+async def test_startup_migrations_reach_a_database_whose_password_is_percent_encoded(
+    relational_backend: RelationalBackend, tmp_path: Path, env_py: str
+) -> None:
+    """C119/C120: a password with '@' and '%' is percent-encoded in the URL; Alembic's configuration parser
+    aborted the start on it. With the env.py of today and with one generated before, the migration runs."""
+    from tests.data.test_migrations import LEGACY_ENV_PY
+
+    user = f"wp11_pct_{uuid.uuid4().hex[:8]}"
+    password = "p@ss%w0rd:/#"
+    admin = create_async_engine(relational_backend.url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    database = make_url(relational_backend.url).database
+    async with admin.connect() as connection:
+        if relational_backend.dialect == "postgresql":
+            await connection.execute(text(f"CREATE ROLE {user} LOGIN PASSWORD '{password}'"))
+            await connection.execute(text(f'ALTER DATABASE "{database}" OWNER TO {user}'))
+        else:
+            await connection.execute(text(f"CREATE USER '{user}'@'%' IDENTIFIED BY '{password}'"))
+            await connection.execute(text(f"GRANT ALL PRIVILEGES ON `{database}`.* TO '{user}'@'%'"))
+    url = make_url(relational_backend.url).set(username=user, password=password).render_as_string(hide_password=False)
+    assert "%40" in url and "%25" in url
+    ini = _environment(tmp_path)
+    if env_py == "legacy":
+        (tmp_path / "migrations" / "env.py").write_text(LEGACY_ENV_PY)
+    flat = {
+        "pyfly.data.relational.url": url,
+        "pyfly.data.relational.migrations.enabled": "true",
+        "pyfly.data.relational.migrations.config": str(ini),
+    }
+    context = ApplicationContext(_config(relational_backend, **flat))
+    try:
+        await context.start()
+        await context.stop()
+        assert "wp11_migrated_seed" in await _tables(relational_backend)
+    finally:
+        async with admin.connect() as connection:
+            if relational_backend.dialect == "postgresql":
+                owner = make_url(relational_backend.url).username
+                await connection.execute(text(f'ALTER DATABASE "{database}" OWNER TO {owner}'))
+                await connection.execute(text(f"DROP OWNED BY {user}"))
+                await connection.execute(text(f"DROP ROLE {user}"))
+            else:
+                await connection.execute(text(f"DROP USER '{user}'@'%'"))
+        await admin.dispose()
 
 
 def _environment(root: Path) -> Path:
