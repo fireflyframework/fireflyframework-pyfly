@@ -221,3 +221,34 @@ applies to a streamed result read row by row) with one guarded fetch per batch.
 Rows read by the consumer are still yielded one by one, and the stream still owns its connection until it
 is exhausted or closed. The batching is what makes it faster than the baseline: one greenlet switch per
 batch instead of one per row.
+
+## Re-run after the repository semantics (WP03)
+
+`save` persists without a `refresh()` (server-generated values come back through `RETURNING`, or one
+targeted `SELECT` of those columns on MySQL), `exists_by_id` is a `SELECT 1 ... LIMIT 1` probe, and id lists
+are padded to powers of two (one `= ANY` array bind on PostgreSQL).
+
+- **Date:** 2026-09-27, same machine and servers as the baseline (the VM shared with other running lanes).
+- **Code:** branch `fix/orm-wp03`.
+- **Command:** `--scenario p7 save exists in_padding` once per backend (PostgreSQL also with `stream read
+  tx`, and `tx exists save` twice more; MySQL `tx save` twice more); `--scenario stream` three times on
+  `sqlite-file`.
+
+| Measure | SQLite file | PostgreSQL | MySQL | MariaDB |
+| --- | --- | --- | --- | --- |
+| `save(1)` statements | `['BEGIN', 'INSERT']` | `['INSERT']` | `['INSERT']` | `['INSERT']` |
+| `save_all(100)` statements | `{'BEGIN': 1, 'INSERT': 100}` | `{'INSERT': 1}` | `{'INSERT': 100}` | `{'INSERT': 1}` |
+| `save_all(100)` in `@transactional`, median (baseline) | 12.49 ms (32.54) | 3.65 to 3.97 ms (49.53) | 40.30 to 55.83 ms (70.75) | 4.74 ms (39.76) |
+| `save(1)` in `@transactional`, median (baseline) | 0.499 ms (0.791) | 1.38 to 1.69 ms (1.680) | 1.74 to 2.42 ms (1.814) | 2.011 ms (1.851) |
+| `exists_by_id` SQL | `SELECT 1 ... LIMIT ? OFFSET ?` | `SELECT 1 ... LIMIT $2` | `SELECT 1 ... LIMIT %s` | `SELECT 1 ... LIMIT %s` |
+| `find_all_by_id(1..64)`: distinct SQL texts (baseline 64) | 7 | 1 | 7 | 7 |
+| `stream_all()` over 5,000 rows, median | 7.8 / 8.2 / 8.1 ms | 15.5 ms | | |
+
+Every `save` is one statement and no `save_all` sends a per-entity `SELECT`. SQLite and MySQL still send one
+`INSERT` per row for an autoincrement key (SQLite's `RETURNING` order is not guaranteed and MySQL has no
+`RETURNING`, so SQLAlchemy inserts row by row to learn each key), but without the 100 `SELECT`s. The single-
+row `save` latency moves with the unit of work around it (WP01) more than with the statement it saved: it is
+within the run-to-run noise of the shared VM (the same MySQL `@transactional count()` measured 1.28 and 1.91
+ms in two runs a minute apart). `exists_by_id` in `@transactional` costs what the unit of work's own
+`count()` costs (1.26 / 1.34 ms against 1.30 / 1.22 ms on PostgreSQL). The derived `exists_by_name` still
+counts every match: the query compiler adopts the probe in WP04.
