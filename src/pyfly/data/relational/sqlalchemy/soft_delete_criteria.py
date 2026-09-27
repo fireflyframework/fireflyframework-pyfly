@@ -33,14 +33,22 @@ What it does not filter:
 - the refresh of an object the session holds (``session.refresh()``, an expired attribute);
 - ``UPDATE`` and ``DELETE`` statements, and raw ``text()`` SQL, as native queries in Spring.
 
+``session.merge()`` loads through the criteria: a detached soft-deleted object finds no row, so the merge
+INSERTs a copy that violates the primary key. Merge it inside :func:`including_deleted`.
+
 Opt out for one statement with the ``include_deleted`` execution option, or for a block of code (a
-retention job, an admin view) with :func:`including_deleted`::
+retention job, an admin view) with :func:`including_deleted`; ``archive`` is a plain ``Repository`` over
+the entity::
 
     stmt = select(Order).where(Order.deleted_at < cutoff).execution_options(include_deleted=True)
     order = await session.get(Order, order_id, execution_options={"include_deleted": True})
 
     with including_deleted():
-        deleted = await orders.find_all()
+        expired = await archive.find_by_deleted_at_less_than(cutoff)
+
+The block lifts these criteria only: ``SoftDeleteRepository``'s own reads (``find_by_id``, ``find_all``,
+``count``, ...) add ``deleted_at IS NULL`` themselves and keep excluding deleted rows inside it; its
+``find_all_including_deleted()`` reads them.
 
 **Hard deletes.** Deleting a row for good must reach the soft-deleted rows that depend on it: a
 ``cascade="all, delete-orphan"`` child that was soft-deleted has to be deleted with its parent, and one
@@ -87,6 +95,9 @@ def including_deleted() -> Iterator[None]:
     That includes the lazy loads of objects loaded before the block. What the session holds already is not
     reloaded: a collection loaded (without its deleted rows) before the block keeps its contents until it is
     expired, as an object in the identity map does.
+
+    It lifts the loader criteria only: ``SoftDeleteRepository``'s own reads filter ``deleted_at`` themselves
+    and keep excluding deleted rows here (``find_all_including_deleted()`` is their opt-out).
     """
     token = _including_deleted.set(True)
     try:

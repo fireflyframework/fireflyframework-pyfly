@@ -26,11 +26,12 @@ integration suite.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import ForeignKey, String, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload
 
@@ -38,6 +39,7 @@ from pyfly.container import bean, configuration, repository, service
 from pyfly.context.application_context import ApplicationContext
 from pyfly.data import transactional
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity, SoftDeleteMixin
+from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
@@ -67,6 +69,12 @@ class SoftAuthorRepository(SoftDeleteRepository[SoftAuthor, uuid.UUID]):
 
 class SoftBookRepository(Repository[SoftBook, uuid.UUID]):
     pass
+
+
+class AuthorArchive(Repository[SoftAuthor, uuid.UUID]):
+    """A plain Repository over a soft-delete entity, with a retention query."""
+
+    async def find_by_deleted_at_less_than(self, cutoff: datetime) -> list[SoftAuthor]: ...
 
 
 class _Library:
@@ -160,6 +168,52 @@ async def test_include_deleted_and_including_deleted_opt_out(relational_backend:
         with including_deleted():
             assert await SoftBookRepository(session=session).count() == 3
         assert await SoftBookRepository(session=session).count() == 2
+
+
+async def test_including_deleted_lifts_the_criteria_but_not_soft_delete_repository_reads(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The documented opt-out: inside ``including_deleted()`` a plain Repository (its derived queries too) and
+    ORM statements see deleted rows. ``SoftDeleteRepository``'s own reads add ``deleted_at IS NULL``
+    themselves and keep excluding them there; ``find_all_including_deleted()`` is their opt-out."""
+    factory, _ = await _library(relational_backend)
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    async with factory() as session:
+        archive = AuthorArchive(session=session)
+        RepositoryBeanPostProcessor().after_init(archive, "authorArchive")
+        authors = SoftAuthorRepository(session=session)
+        assert await archive.find_by_deleted_at_less_than(cutoff) == []
+        with including_deleted():
+            assert [a.name for a in await archive.find_by_deleted_at_less_than(cutoff)] == ["dora"]
+            assert sorted(a.name for a in await archive.find_all()) == ["alice", "dora"]
+            every_author = select(SoftAuthor.name).order_by(SoftAuthor.name)
+            assert (await session.scalars(every_author)).all() == ["alice", "dora"]
+
+            assert [a.name for a in await authors.find_all()] == ["alice"]
+            assert await authors.count() == 1
+            assert sorted(a.name for a in await authors.find_all_including_deleted()) == ["alice", "dora"]
+
+
+async def test_merging_a_detached_soft_deleted_object_needs_including_deleted(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``session.merge()`` loads the row it merges into through the criteria: a detached soft-deleted object
+    finds none, so the merge INSERTs a copy and the flush violates the primary key. Inside
+    ``including_deleted()`` it finds the row and updates it."""
+    factory, library = await _library(relational_backend)
+    detached = SoftAuthor(id=library.dora.id, name="dora-renamed", deleted_at=library.dora.deleted_at)
+    async with factory() as session:
+        merged = await session.merge(detached)
+        with pytest.raises(IntegrityError):
+            await session.flush()
+        assert merged is not detached
+    async with factory() as session:
+        with including_deleted():
+            await session.merge(detached)
+            await session.commit()
+    async with factory() as session:
+        found = await session.get(SoftAuthor, library.dora.id, execution_options={INCLUDE_DELETED: True})
+        assert found is not None and found.name == "dora-renamed" and found.is_deleted
 
 
 async def test_soft_delete_repository_still_reaches_deleted_rows_where_it_must(

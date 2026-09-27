@@ -1867,17 +1867,32 @@ session (the registry's, your own `async_sessionmaker`, a session you open by ha
 What stays visible: an object already in the session's identity map, the refresh of an object you hold,
 and raw `text()` SQL (as native queries in Spring). `UPDATE` and `DELETE` statements are not filtered.
 
-Opt out for one statement, or for a block of code (a retention job, an admin screen):
+`session.merge()` loads the row it merges into through the criteria too: merging a detached soft-deleted
+object finds no row, so the merge INSERTs a copy and the flush fails on the primary key. Merge such an
+object inside `including_deleted()`.
+
+Opt out for one statement, or for a block of code (a retention job, an admin screen) that reads through a
+plain `Repository` or ORM statements:
 
 ```python
+from pyfly.data.relational.sqlalchemy import Repository
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
+
+class OrderArchive(Repository[Order, UUID]):  # a plain Repository: only the loader criteria filter it
+    async def find_by_deleted_at_less_than(self, cutoff: datetime) -> list[Order]: ...
 
 stmt = select(Order).where(Order.deleted_at < cutoff).execution_options(include_deleted=True)
 order = await session.get(Order, order_id, execution_options={"include_deleted": True})
 
 with including_deleted():
-    everything = await orders.find_all()
+    expired = await archive.find_by_deleted_at_less_than(cutoff)
+    everything = await archive.find_all()
 ```
+
+`including_deleted()` lifts the loader criteria only. `SoftDeleteRepository`'s own reads (`find_by_id`,
+`exists_by_id`, `find_all`, `find_all_by_id`, `find_all_by_spec`, `find_all_by_spec_paged`, `stream_all`,
+`count`) add `deleted_at IS NULL` themselves and keep excluding deleted rows inside the block: use its
+`find_all_including_deleted()`, or a plain `Repository` or ORM statement as above, to read them.
 
 Inside `including_deleted()` the lazy loads of objects loaded before the block see deleted rows too; what
 the session already holds (a collection loaded before the block, an object in the identity map) is not
