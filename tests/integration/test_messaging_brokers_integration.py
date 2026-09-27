@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
+from pyfly.container import bean, configuration
 from pyfly.container.stereotypes import repository, service
 from pyfly.context.application_context import ApplicationContext
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
@@ -59,6 +60,7 @@ from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transactional import transactional
 from pyfly.eda.decorators import event_listener
+from pyfly.eda.dlq import EdaDeadLetterStore, InMemoryEdaDeadLetterStore
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.types import EventEnvelope
 from pyfly.messaging.decorators import message_listener
@@ -291,6 +293,13 @@ def _event_listener(scenario: Scenario) -> type:
     return OrderEventListener
 
 
+@configuration
+class DeadLetterStoreConfig:
+    @bean
+    def eda_dead_letter_store(self) -> EdaDeadLetterStore:
+        return InMemoryEdaDeadLetterStore()
+
+
 FAST_RETRY = {
     "retry.initial-delay": "0.05",
     "retry.multiplier": "1.0",
@@ -341,10 +350,12 @@ def _rabbit_eda(amqp_url: str, destination: str, group: str, **listener: str) ->
     }
 
 
-async def _boot(backend: RelationalBackend, overrides: dict[str, str], listener: type) -> ApplicationContext:
+async def _boot(
+    backend: RelationalBackend, overrides: dict[str, str], listener: type, *beans: type
+) -> ApplicationContext:
     ctx = ApplicationContext(backend.config(overrides))
-    for bean in (RelationalAutoConfiguration, BrokerOrderRepository, listener):
-        ctx.register_bean(bean)
+    for registered in (RelationalAutoConfiguration, BrokerOrderRepository, listener, *beans):
+        ctx.register_bean(registered)
     await ctx.start()
     return ctx
 
@@ -926,7 +937,10 @@ async def test_eda_rabbitmq_failure_is_retried_with_a_bound_and_dead_lettered(
     destination, group = _names("eda-rabbit")
     queue = f"{group}.{destination}"
     scenario = Scenario(always_fail={"poison"}, fail_first={"e2"})
-    ctx = await _boot(relational_backend, _rabbit_eda(amqp_url, destination, group), _event_listener(scenario))
+    ctx = await _boot(
+        relational_backend, _rabbit_eda(amqp_url, destination, group), _event_listener(scenario), DeadLetterStoreConfig
+    )
+    store = ctx.get_bean(EdaDeadLetterStore)  # type: ignore[type-abstract]
     try:
         send = _event_sender(ctx, destination)
         await _warm_up(scenario, send)
@@ -944,6 +958,9 @@ async def test_eda_rabbitmq_failure_is_retried_with_a_bound_and_dead_lettered(
         assert scenario.attempts["poison"] == 3
         assert scenario.attempts["e2"] == 2
         assert await _rabbit_depth(amqp_url, queue) == 0
+        # The application's EdaDeadLetterStore bean was injected into the auto-configured bus.
+        [entry] = await store.list()
+        assert (entry.event.payload, entry.error_type, entry.attempts) == ({"body": "poison"}, "RuntimeError", 3)
     finally:
         await _rabbit_delete(amqp_url, queue, f"{queue}.dlq")
 
