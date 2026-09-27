@@ -11,7 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Messaging subsystem auto-configuration."""
+"""Messaging subsystem auto-configuration.
+
+Registers the :class:`MessageBrokerPort` bean keyed on ``pyfly.messaging.provider`` (``kafka``,
+``rabbitmq``, ``memory`` or ``auto``). The Kafka and RabbitMQ adapters get their listener container
+settings from ``pyfly.messaging.listener.*`` (see
+:meth:`~pyfly.messaging.listener_container.ListenerContainerSettings.from_config`), plus:
+
+* ``kafka.bootstrap-servers`` (``localhost:9092``), ``kafka.auto-offset-reset`` (``latest``),
+  ``kafka.dlt.enabled`` (``true``) and ``kafka.dlt.suffix`` (``.DLT``);
+* ``rabbitmq.url``, ``rabbitmq.prefetch`` (``20``) and ``rabbitmq.dead-letter-exchange``
+  (``pyfly.dlx``).
+"""
 
 from __future__ import annotations
 
@@ -23,6 +34,7 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+from pyfly.messaging.listener_container import ListenerContainerSettings
 from pyfly.messaging.ports.outbound import MessageBrokerPort
 
 
@@ -47,16 +59,29 @@ class MessagingAutoConfiguration:
         provider = configured if configured != "auto" else self.detect_provider()
 
         if provider == "kafka":
-            from pyfly.messaging.adapters.kafka import KafkaAdapter
+            from pyfly.messaging.adapters.kafka import DEFAULT_DLT_SUFFIX, KafkaAdapter
 
             servers = str(config.get("pyfly.messaging.kafka.bootstrap-servers", "localhost:9092"))
-            return KafkaAdapter(bootstrap_servers=servers)
+            dlt_enabled = str(config.get("pyfly.messaging.kafka.dlt.enabled", "true")).lower() in ("true", "1", "yes")
+            return KafkaAdapter(
+                bootstrap_servers=servers,
+                settings=ListenerContainerSettings.from_config(config, "pyfly.messaging"),
+                auto_offset_reset=str(config.get("pyfly.messaging.kafka.auto-offset-reset", "latest")),
+                dead_letter_suffix=(
+                    str(config.get("pyfly.messaging.kafka.dlt.suffix", DEFAULT_DLT_SUFFIX)) if dlt_enabled else None
+                ),
+            )
 
         if provider == "rabbitmq":
             from pyfly.messaging.adapters.rabbitmq import RabbitMQAdapter
 
             url = str(config.get("pyfly.messaging.rabbitmq.url", "amqp://guest:guest@localhost/"))
-            return RabbitMQAdapter(url=url)
+            dead_letter_exchange = config.get("pyfly.messaging.rabbitmq.dead-letter-exchange")
+            return RabbitMQAdapter(
+                url=url,
+                settings=ListenerContainerSettings.from_config(config, "pyfly.messaging"),
+                dead_letter_exchange=str(dead_letter_exchange) if dead_letter_exchange else None,
+            )
 
         from pyfly.messaging.adapters.memory import InMemoryMessageBroker
 
