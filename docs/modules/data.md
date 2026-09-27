@@ -1180,19 +1180,30 @@ The check is bounded:
   waiting for it at the deadline. This matters when the database goes silent on a connection that is
   already pooled: cancelling the query makes asyncpg open another connection to send a cancel request,
   and it waits for that one without a timeout.
-- The late check does not keep its connection. Its socket is closed on the spot (the dialect's
+- The late check does not keep its connection. The socket of the connection it holds, or is still
+  checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
   `terminate`, which sends nothing and waits for nothing), the check is cancelled, and its pool slot
   is free again at once. This matters when a firewall, NAT or load balancer silently drops an idle
-  flow (a cloud NAT after its idle timeout): one pooled connection is black-holed while the database
-  still accepts new ones. One probe answers `DOWN`, and the next one runs on a fresh connection and
-  answers `UP`; the check no longer sits in the driver's cleanup until the kernel gives up on the
-  socket (about 15 minutes on Linux). On a connection the pool shares with the application
+  flow (a cloud NAT after its idle timeout): a pooled connection is black-holed while the database
+  still accepts new ones. Without it, the check would sit in the driver's cleanup until the kernel
+  gives up on the socket (about 15 minutes on Linux), or for good with `pool.pre-ping` on: a cancelled
+  asyncpg pre-ping waits for the server's answer on that socket with no timeout. With it, each
+  black-holed connection costs one probe, with pre-ping on or off: that probe answers `DOWN`, and the
+  next one runs on another connection and answers `UP`. A check still in its checkout is reached
+  through the pool entry that the registry's pool (`MeteredAsyncQueuePool`) reports, so this holds for
+  every engine the [datasource registry](data-relational.md#datasource-registry) builds. On an engine
+  built outside the registry, a check stuck in the pre-ping cannot be closed and keeps its pool slot;
+  the next point bounds how many can. On a connection the pool shares with the application
   (`StaticPool`, SQLite `:memory:`) the late check is neither closed nor cancelled, since that would
   close the application's connection; it runs after the statement ahead of it.
-- While a check that missed its deadline is still winding down, the next probe of that datasource
-  answers `DOWN` at once (`previous check still running`) and borrows no connection, so stuck checks
-  cannot pile up. Probes that arrive while a check is running within its deadline share its answer,
-  and a probe whose client hangs up stops the check only when no other probe is waiting for it.
+- While a check that missed its deadline is still winding down with its connection, the next probe of
+  that datasource answers `DOWN` at once (`previous check still running`) and borrows no connection.
+  A late check that never got its connection (stuck connecting or pre-pinging) does not hold the next
+  probes back: they start a new check on another connection, as long as fewer than two late checks of
+  that datasource are still running, and answer `previous check still running` beyond that. Stuck
+  checks therefore cannot pile up. Probes that arrive while a check is running within its deadline
+  share its answer, and a probe whose client hangs up stops the check only when no other probe is
+  waiting for it.
 - When the pool has no idle connection and no overflow left, the check does not queue behind the
   application for `pool.timeout`. It answers `UNKNOWN` (validation skipped), which keeps the aggregate
   status `UP`. A pod whose every connection is stuck in application work therefore stays in rotation;
@@ -1219,7 +1230,7 @@ status = await indicator.health()
 | Connection succeeds | `"UP"` | `database` — SQLAlchemy dialect name (e.g. `"postgresql"`, `"sqlite"`) |
 | Connection fails | `"DOWN"` | `database`; `error` — exception class name; `message` — first 200 chars of the error message, password masked |
 | No answer within the timeout | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` |
-| Previous check still running | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` = `"previous check still running after ... s"` |
+| Previous check still running (a late check that holds its connection, or two late checks without one) | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` = `"previous check still running after ... s"` |
 | Pool exhausted | `"UNKNOWN"` | `database`; `validation` = `"skipped: pool exhausted"` |
 | With a registry | aggregate | `database` (the primary's dialect); `datasources` — one entry per datasource (`primary`, `primary.replica`, named...) |
 
