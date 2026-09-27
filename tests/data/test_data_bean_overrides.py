@@ -463,6 +463,37 @@ async def test_a_refresh_scoped_session_factory_leaves_the_primary_in_place(tmp_
 
 
 @configuration
+class _TwoRefreshScopedSessionFactories:
+    """The C030 case: two refresh-scoped factories of one type, beside the relational primary."""
+
+    @bean(name="reporting_sessions", scope=REFRESH_SCOPE_NAME)
+    def reporting_sessions(self) -> async_sessionmaker[AsyncSession]:
+        return _scoped_sessions("reporting")
+
+    @bean(name="analytics_sessions", scope=REFRESH_SCOPE_NAME)
+    def analytics_sessions(self) -> async_sessionmaker[AsyncSession]:
+        return _scoped_sessions("analytics")
+
+
+async def test_two_refresh_scoped_session_factories_leave_the_primary_in_place(tmp_path: Path) -> None:
+    _SCOPED_ENGINES.clear()
+    ctx = ApplicationContext(await _relational_app(tmp_path, "reporting", "analytics"))
+    ctx.register_bean(_TwoRefreshScopedSessionFactories)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        for _refresh in range(2):
+            await _assert_the_primary_stays(ctx)
+            assert await _owner_of(ctx.get_bean_by_name("analytics_sessions")) == "analytics"
+            assert await _owner_of(ctx.get_bean_by_name("reporting_sessions")) == "reporting"
+            await ctx.get_bean(ContextRefresher).refresh()
+    finally:
+        await ctx.stop()
+        for engine in _SCOPED_ENGINES:
+            await engine.dispose()
+
+
+@configuration
 class _ReportingEngine:
     @scoped_proxy
     @bean(scope=REFRESH_SCOPE_NAME)
