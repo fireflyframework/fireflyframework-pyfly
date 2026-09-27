@@ -13,9 +13,15 @@
 # limitations under the License.
 """Retry + dead-letter handling for ``@message_listener`` handlers.
 
-Adapter-agnostic: the handler is wrapped once at wiring time, so retry/DLQ behaves
-identically across the Kafka, RabbitMQ, and in-memory brokers. Mirrors Spring Kafka's
-``@RetryableTopic`` / ``DefaultErrorHandler`` dead-letter routing.
+On a broker that consumes through a listener container (Kafka, RabbitMQ: it declares
+``manages_listener_errors = True``), the container retries and dead-letters each delivery itself, outside
+the delivery's unit of work, with its attempts acknowledged to the broker only once they committed (see
+:mod:`pyfly.messaging.listener_container`). :func:`wrap_listener` then only attaches the listener's own
+``retries`` / ``retry_delay`` / ``dead_letter_topic`` to the handler, as
+:class:`~pyfly.messaging.listener_container.ListenerOptions`.
+
+On any other broker (the in-memory one), the handler is retried in process and dead-lettered by
+republishing, as it always was.
 """
 
 from __future__ import annotations
@@ -24,6 +30,12 @@ import asyncio
 import functools
 import logging
 
+from pyfly.messaging.listener_container import (
+    LinearBackOff,
+    ListenerEndpoint,
+    ListenerOptions,
+    manages_listener_errors,
+)
 from pyfly.messaging.ports.outbound import MessageBrokerPort, MessageHandler
 from pyfly.messaging.types import Message
 
@@ -34,14 +46,31 @@ def wrap_listener(
     handler: MessageHandler,
     broker: MessageBrokerPort,
     *,
-    retries: int = 0,
-    retry_delay: float = 0.0,
+    retries: int | None = 0,
+    retry_delay: float | None = 0.0,
     dead_letter_topic: str | None = None,
 ) -> MessageHandler:
-    """Wrap *handler* so a failing message is retried up to *retries* times (linear
-    ``retry_delay`` backoff) and, if still failing and *dead_letter_topic* is set,
-    re-published there with diagnostic headers. With no retries and no DLQ, *handler*
-    is returned unchanged (zero overhead)."""
+    """Wrap *handler* for *broker* with the listener's retry and dead-letter settings.
+
+    - A broker with a listener container gets a :class:`ListenerEndpoint` carrying the settings; ``None``
+      keeps the container's own (``retries`` is the number of deliveries after the first one, and
+      ``retry_delay`` a linear back-off: attempt N+1 waits ``retry_delay * N`` seconds).
+    - Any other broker gets the in-process wrapper: a failing message is retried up to *retries* times
+      (linear ``retry_delay`` back-off) and, if still failing and *dead_letter_topic* is set, re-published
+      there with diagnostic headers. With no retries and no DLQ, *handler* is returned unchanged (zero
+      overhead).
+    """
+    if manages_listener_errors(broker):
+        return ListenerEndpoint(
+            handler,
+            ListenerOptions(
+                max_attempts=None if retries is None else max(0, retries) + 1,
+                backoff=None if retry_delay is None else LinearBackOff(retry_delay),
+                dead_letter=dead_letter_topic,
+            ),
+        )
+    retries = retries or 0
+    retry_delay = retry_delay or 0.0
     if retries <= 0 and dead_letter_topic is None:
         return handler
 
