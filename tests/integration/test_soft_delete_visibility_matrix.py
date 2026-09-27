@@ -499,6 +499,30 @@ async def test_deleting_a_loaded_root_deletes_its_soft_deleted_children(
     assert await _unlinked_notes(factory) == [("dead", True), ("live", True)]
 
 
+@pytest.mark.parametrize("how", ["delete_all_by_id", "delete_all", "delete_every_row"])
+async def test_deleting_several_roots_through_the_orm_deletes_their_soft_deleted_children(
+    relational_backend: RelationalBackend, how: str
+) -> None:
+    """The repository deletes that load several roots at once (their collections with one ``SELECT`` per
+    relationship) reach the soft-deleted children too, whether the roots were loaded before or by the
+    delete itself."""
+    factory = await _thread_factory(relational_backend)
+    thread_ids = [await _thread(factory), await _thread(factory)]
+    async with factory() as session:
+        threads = ThreadRepository(session=session)
+        if how == "delete_all_by_id":
+            await threads.delete_all_by_id(thread_ids)
+        elif how == "delete_all":
+            loaded = [await threads.find_by_id(thread_id) for thread_id in thread_ids]
+            await threads.delete_all([thread for thread in loaded if thread is not None])
+        else:
+            await threads.delete_all()
+        await session.commit()
+
+    assert [await _every_row(factory, model) for model in (Thread, ThreadPost, ThreadReaction)] == [0, 0, 0]
+    assert await _unlinked_notes(factory) == [("dead", True), ("dead", True), ("live", True), ("live", True)]
+
+
 async def test_deleting_a_root_whose_collections_were_loaded_filtered(relational_backend: RelationalBackend) -> None:
     """The collections were loaded without the deleted rows (a selectin load, a lazy load of a post loaded
     on its own): the hard delete reloads them with the deleted rows first."""
