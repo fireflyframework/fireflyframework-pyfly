@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import (
@@ -40,8 +41,8 @@ from sqlalchemy import (
     inspect,
     select,
 )
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy.entity import Base
@@ -224,3 +225,27 @@ def _drop_the_email_unique_constraint(sync: Connection) -> None:
     operations = Operations(MigrationContext.configure(sync, opts={"target_metadata": Base.metadata}))
     with operations.batch_alter_table("nc_account") as batch:
         batch.drop_constraint(UNIQUE_EMAIL, type_="unique")
+
+
+@pytest.mark.backends("mariadb")
+async def test_mariadb_through_a_mysql_url_adopts_the_convention(relational_backend: RelationalBackend) -> None:
+    """``mysql+asyncmy://`` against MariaDB (dialect ``mysql``, ``is_mariadb``) is the common form: the same
+    renames, MariaDB's own ``DROP CONSTRAINT`` for the check included."""
+    engine = create_async_engine(make_url(relational_backend.url).set(drivername="mysql+asyncmy"))
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_legacy_metadata().create_all)
+        assert engine.dialect.name == "mysql" and engine.dialect.is_mariadb  # known once connected
+
+        def adopt(sync: Connection) -> list[ConstraintRename]:
+            operations = Operations(MigrationContext.configure(sync))
+            return rename_constraints_to_convention(operations, Base.metadata, tables=["nc_owner", "nc_account"])
+
+        async with engine.begin() as connection:
+            assert {rename.kind for rename in await connection.run_sync(adopt)} == {"unique", "foreign_key", "check"}
+        async with engine.connect() as connection:
+            after = await connection.run_sync(_names)
+        assert UNIQUE_EMAIL in after["unique"] and after["foreign_keys"] == [FOREIGN_KEY]
+        assert _unnamed_check() in after["checks"]
+    finally:
+        await engine.dispose()

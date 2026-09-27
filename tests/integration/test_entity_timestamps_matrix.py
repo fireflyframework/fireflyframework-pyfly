@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import String, inspect, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -233,3 +234,20 @@ async def test_mysql_family_columns_are_datetime_6(relational_backend: Relationa
         )
     for name in ("created_at", "updated_at", "deleted_at", "due_at"):
         assert getattr(columns[name], "fsp", None) == 6, (name, columns[name])
+
+
+@pytest.mark.backends("mariadb")
+async def test_mariadb_through_a_mysql_url_keeps_microseconds(relational_backend: RelationalBackend) -> None:
+    """``mysql+asyncmy://`` against MariaDB (dialect ``mysql``) gets ``DATETIME(6)`` too."""
+    url = make_url(relational_backend.url).set(drivername="mysql+asyncmy")
+    backend = RelationalBackend(relational_backend.lane, url.render_as_string(hide_password=False))
+    factory = await _sessions(backend)
+    written = datetime(2026, 9, 24, 12, 0, 0, 654321, tzinfo=PLUS_TWO)
+    try:
+        async with factory() as session, session.begin():
+            event = TimestampedEvent(label="mysql-url", due_at=written)
+            session.add(event)
+        reloaded = await _reload(factory, event)
+        assert reloaded.due_at == written and _is_utc(reloaded.due_at)
+    finally:
+        await backend.dispose()

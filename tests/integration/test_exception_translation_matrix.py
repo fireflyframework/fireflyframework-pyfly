@@ -30,6 +30,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
@@ -274,3 +275,21 @@ async def test_a_savepoint_release_failure_is_translated(relational_backend: Rel
         assert emails == ["outer@example.com", "second@example.com"]
     finally:
         await ctx.stop()
+
+
+@pytest.mark.backends("mariadb")
+async def test_mariadb_through_a_mysql_url_translates_the_same(relational_backend: RelationalBackend) -> None:
+    """``mysql+asyncmy://`` against MariaDB (dialect ``mysql``) reports the same violations."""
+    url = make_url(relational_backend.url).set(drivername="mysql+asyncmy")
+    factory = await _sessions(RelationalBackend(relational_backend.lane, url.render_as_string(hide_password=False)))
+    try:
+        error = await _failed_save(factory, _account(balance=-5))
+        assert error.context == {"violation": "check", "constraint": CHECK}
+        async with factory() as session:
+            await TranslationAccountRepository(session=session).save(_account())
+            await session.commit()
+        duplicate = await _failed_save(factory, _account(nickname="again"))
+        assert isinstance(duplicate, DuplicateKeyException)
+        assert duplicate.context["constraint"] == UNIQUE_EMAIL
+    finally:
+        await factory.kw["bind"].dispose()
