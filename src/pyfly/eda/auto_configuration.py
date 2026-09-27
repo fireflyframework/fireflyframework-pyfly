@@ -53,7 +53,8 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
 * ``listener.*`` — the Kafka and RabbitMQ listener container: ``transactional``, ``datasource``,
   ``shutdown-timeout``, ``concurrency``, ``retry.max-attempts``, ``retry.initial-delay``,
   ``retry.multiplier``, ``retry.max-delay`` (see
-  :meth:`~pyfly.messaging.listener_container.ListenerContainerSettings.from_config`).
+  :meth:`~pyfly.messaging.listener_container.ListenerContainerSettings.from_config`), and
+  ``kafka.max-poll-records`` (``100``).
 
 An :class:`~pyfly.eda.dlq.EdaDeadLetterStore` bean, when the application defines one, records every
 event the Kafka or RabbitMQ bus dead-letters after its handlers failed on every attempt.

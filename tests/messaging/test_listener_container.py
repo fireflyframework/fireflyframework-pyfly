@@ -329,16 +329,25 @@ async def test_a_unit_that_committed_before_a_cancellation_still_counts_as_commi
 
 
 @pytest.mark.parametrize(
-    ("listener", "key"),
+    ("messaging", "key"),
     [
-        ({"retry": {"max-attempts": "0"}}, "max_attempts"),
-        ({"retry": {"max-attempts": "many"}}, "pyfly.messaging.listener.retry.max-attempts"),
-        ({"shutdown-timeout": "soon"}, "pyfly.messaging.listener.shutdown-timeout"),
-        ({"transactional": "maybe"}, "pyfly.messaging.listener.transactional"),
-        ({"concurrency": "0"}, "concurrency"),
+        ({"listener": {"retry": {"max-attempts": "0"}}}, "pyfly.messaging.listener.retry.max-attempts"),
+        ({"listener": {"retry": {"max-attempts": "many"}}}, "pyfly.messaging.listener.retry.max-attempts"),
+        ({"listener": {"retry": {"initial-delay": "-1"}}}, "pyfly.messaging.listener.retry.initial-delay"),
+        ({"listener": {"shutdown-timeout": "soon"}}, "pyfly.messaging.listener.shutdown-timeout"),
+        ({"listener": {"shutdown-timeout": "-1"}}, "pyfly.messaging.listener.shutdown-timeout"),
+        ({"listener": {"transactional": "maybe"}}, "pyfly.messaging.listener.transactional"),
+        ({"listener": {"concurrency": "0"}}, "pyfly.messaging.listener.concurrency"),
+        ({"rabbitmq": {"prefetch": "0"}}, "pyfly.messaging.rabbitmq.prefetch"),
+        ({"kafka": {"max-poll-records": "0"}}, "pyfly.messaging.kafka.max-poll-records"),
     ],
 )
-def test_a_configured_value_that_is_invalid_is_refused(listener: dict[str, object], key: str) -> None:
-    config = Config({"pyfly": {"messaging": {"listener": listener}}})
-    with pytest.raises(ValueError, match=key):
+def test_a_configured_value_that_is_invalid_is_refused_naming_its_key(messaging: dict[str, object], key: str) -> None:
+    config = Config({"pyfly": {"messaging": messaging}})
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")):
         ListenerContainerSettings.from_config(config, "pyfly.messaging")
+
+
+def test_the_kafka_poll_size_is_read_from_configuration() -> None:
+    config = Config({"pyfly": {"eda": {"kafka": {"max-poll-records": "10"}}}})
+    assert ListenerContainerSettings.from_config(config, "pyfly.eda").max_poll_records == 10

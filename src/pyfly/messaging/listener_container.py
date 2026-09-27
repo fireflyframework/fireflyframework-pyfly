@@ -334,14 +334,17 @@ class ListenerContainerSettings:
     """The settings every container of one adapter shares.
 
     - *retry*: the default :class:`RetryPolicy` (a listener's :class:`ListenerOptions` override it);
-    - *transactional*: run each delivery in a unit of work the container opens (on *datasource*, the
-      default datasource when ``None``); an application without a data layer runs without one either way;
+    - *transactional*: run each delivery in a unit of work the container opens (for a listener without
+      ``@transactional``, on *datasource*, the default datasource when ``None``); an application without a
+      data layer runs without one either way;
     - *shutdown_timeout*: how long ``stop()`` waits for the deliveries in flight before it cancels them;
     - *concurrency*: the most RabbitMQ deliveries one adapter runs at once (``None``: sized from the
-      datasource's connection pool, one on SQLite, never more than *prefetch*);
+      datasource's connection pool, one on SQLite, never more than *prefetch*; a value set here is used
+      as it is);
     - *prefetch*: the RabbitMQ ``basic.qos`` prefetch count of each consumer channel;
     - *poll_timeout* and *max_poll_records*: how long one Kafka poll waits, and how many records it
-      returns at most (the offsets are committed after each poll's records are done).
+      returns at most (the offsets are committed after each poll's records are done, so a crash in the
+      middle of a poll delivers its completed records again).
     """
 
     retry: RetryPolicy = field(default_factory=RetryPolicy)
@@ -365,12 +368,14 @@ class ListenerContainerSettings:
 
     @classmethod
     def from_config(cls, config: Config, prefix: str) -> ListenerContainerSettings:
-        """The settings under ``<prefix>.listener.*`` (and ``<prefix>.rabbitmq.prefetch``).
+        """The settings under ``<prefix>.listener.*`` (and ``<prefix>.rabbitmq.prefetch``,
+        ``<prefix>.kafka.max-poll-records``).
 
         *prefix* is ``pyfly.messaging`` or ``pyfly.eda``. Keys: ``transactional`` (``true``),
         ``datasource``, ``shutdown-timeout`` (``10``), ``concurrency``, ``retry.max-attempts`` (``5``),
-        ``retry.initial-delay`` (``1.0``), ``retry.multiplier`` (``2.0``), ``retry.max-delay`` (``30.0``).
-        A value that does not parse raises ``ValueError`` naming the key.
+        ``retry.initial-delay`` (``1.0``), ``retry.multiplier`` (``2.0``), ``retry.max-delay`` (``30.0``);
+        ``rabbitmq.prefetch`` (``20``) and ``kafka.max-poll-records`` (``100``). A value that does not
+        parse, or is out of range, raises ``ValueError`` naming the key.
         """
         base = f"{prefix}.listener"
         defaults = cls()
@@ -380,33 +385,43 @@ class ListenerContainerSettings:
             value = config.get(key)
             return None if value == "" else value
 
-        def number(key: str, default: float) -> float:
-            value = raw(f"{base}.{key}")
-            return default if value is None else parse_float(value, f"{base}.{key}")
-
-        def integer(key: str, default: int) -> int:
+        def number(key: str, default: float, *, least: float | None = None) -> float:
             value = raw(key)
-            return default if value is None else parse_int(value, key)
+            parsed = default if value is None else parse_float(value, key)
+            if least is not None and parsed < least:
+                raise ValueError(f"{key} must be at least {least:g}, got {parsed:g}")
+            return parsed
+
+        def integer(key: str, default: int | None, *, least: int) -> int | None:
+            value = raw(key)
+            parsed = default if value is None else parse_int(value, key)
+            if parsed is not None and parsed < least:
+                raise ValueError(f"{key} must be at least {least}, got {parsed}")
+            return parsed
+
+        def required(value: int | None) -> int:
+            assert value is not None  # a key with a default
+            return value
 
         transactional = raw(f"{base}.transactional")
         datasource = raw(f"{base}.datasource")
-        concurrency = raw(f"{base}.concurrency")
         return cls(
             retry=RetryPolicy(
-                max_attempts=integer(f"{base}.retry.max-attempts", defaults.retry.max_attempts),
+                max_attempts=required(integer(f"{base}.retry.max-attempts", defaults.retry.max_attempts, least=1)),
                 backoff=ExponentialBackOff(
-                    initial=number("retry.initial-delay", default_backoff.initial),
-                    multiplier=number("retry.multiplier", default_backoff.multiplier),
-                    max_delay=number("retry.max-delay", default_backoff.max_delay),
+                    initial=number(f"{base}.retry.initial-delay", default_backoff.initial, least=0),
+                    multiplier=number(f"{base}.retry.multiplier", default_backoff.multiplier, least=0),
+                    max_delay=number(f"{base}.retry.max-delay", default_backoff.max_delay, least=0),
                 ),
             ),
             transactional=(
                 defaults.transactional if transactional is None else parse_bool(transactional, f"{base}.transactional")
             ),
             datasource=None if datasource is None else str(datasource),
-            shutdown_timeout=number("shutdown-timeout", defaults.shutdown_timeout),
-            concurrency=None if concurrency is None else parse_int(concurrency, f"{base}.concurrency"),
-            prefetch=integer(f"{prefix}.rabbitmq.prefetch", defaults.prefetch),
+            shutdown_timeout=number(f"{base}.shutdown-timeout", defaults.shutdown_timeout, least=0),
+            concurrency=integer(f"{base}.concurrency", None, least=1),
+            prefetch=required(integer(f"{prefix}.rabbitmq.prefetch", defaults.prefetch, least=1)),
+            max_poll_records=required(integer(f"{prefix}.kafka.max-poll-records", defaults.max_poll_records, least=1)),
         )
 
 

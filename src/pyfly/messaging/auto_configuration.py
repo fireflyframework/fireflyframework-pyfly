@@ -19,7 +19,8 @@ settings from ``pyfly.messaging.listener.*`` (see
 :meth:`~pyfly.messaging.listener_container.ListenerContainerSettings.from_config`), plus:
 
 * ``kafka.bootstrap-servers`` (``localhost:9092``), ``kafka.auto-offset-reset`` (``latest``),
-  ``kafka.dlt.enabled`` (``true``) and ``kafka.dlt.suffix`` (``.DLT``);
+  ``kafka.dlt.enabled`` (``true``), ``kafka.dlt.suffix`` (``.DLT``) and ``kafka.max-poll-records``
+  (``100``);
 * ``rabbitmq.url``, ``rabbitmq.prefetch`` (``20``) and ``rabbitmq.dead-letter-exchange``
   (``pyfly.dlx``).
 """
