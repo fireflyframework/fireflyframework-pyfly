@@ -72,3 +72,25 @@ class TestSameTypeBeans:
         await ctx.start()
         consumer = ctx.get_bean(WidgetConsumer)
         assert sorted(w.label for w in consumer.widgets) == ["one", "two"]
+
+
+class TestSeveralPrimaries:
+    def test_two_primary_beans_of_one_type_are_reported_as_two_primaries(self):
+        """Two ``@primary`` candidates used to be reported as "none is marked @primary"."""
+        from pyfly.container.container import Container
+        from pyfly.container.exceptions import NoUniqueBeanError
+
+        container = Container()
+        container.register(Widget, name="widget_one")
+        container.get_registration(Widget).primary = True  # type: ignore[union-attr]
+        container.register(Widget, name="widget_two")
+        container.get_registration(Widget).primary = True  # type: ignore[union-attr]
+
+        with pytest.raises(NoUniqueBeanError) as raised:
+            container.resolve(Widget)
+
+        message = str(raised.value)
+        assert "are marked @primary" in message
+        assert "none is marked @primary" not in message
+        assert raised.value.primary_names == ["widget_one", "widget_two"]
+        assert "Keep @primary on one" in message

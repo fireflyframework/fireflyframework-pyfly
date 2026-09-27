@@ -451,6 +451,7 @@ class Container:
             bean_type=cls,
             candidates=[cls for _ in siblings],
             candidate_names=[reg.display_name for reg in siblings],
+            primary_names=[reg.display_name for reg in primaries],
         )
 
     def _same_type_registrations(self, cls: type) -> list[Registration]:

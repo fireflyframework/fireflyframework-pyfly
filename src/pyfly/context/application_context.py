@@ -1375,6 +1375,7 @@ class ApplicationContext:
                     bean_type=exc.bean_type,
                     candidates=exc.candidates,
                     candidate_names=exc.candidate_names,
+                    primary_names=exc.primary_names,
                     required_by=f"{type(config_instance).__qualname__}.{method.__name__}()",
                     parameter=f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}",
                 ) from None
