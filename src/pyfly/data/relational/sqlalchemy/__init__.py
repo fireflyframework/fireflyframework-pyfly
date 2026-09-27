@@ -31,6 +31,7 @@ from pyfly.data.relational.sqlalchemy.transactional import (
     reactive_transactional,
     transactional,
 )
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
 __all__ = [
     "AuditingEntityListener",
@@ -50,6 +51,7 @@ __all__ = [
     "SoftDeleteRepository",
     "Specification",
     "SqlAlchemyTransactionManager",
+    "UtcDateTime",
     "VersionedMixin",
     "_active_session_var",
     "query",

@@ -11,18 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for BaseEntity and Page types."""
+"""Tests for BaseEntity, UtcDateTime and Page types.
 
-from datetime import datetime
+The timestamp contract on every backend (reload, UTC, microseconds, offset parameters) is
+``tests/integration/test_entity_timestamps_matrix.py``; these tests pin the type itself.
+"""
+
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
 from sqlalchemy import String
+from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
+from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.schema import CreateTable
 
 from pyfly.data.page import Page
+from pyfly.data.relational.sqlalchemy import UtcDateTime as ExportedUtcDateTime
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime, to_utc
 
 
 class User(BaseEntity):
@@ -31,6 +40,15 @@ class User(BaseEntity):
     __tablename__ = "users"
 
     name: Mapped[str] = mapped_column(String(100))
+
+
+class StrictReading(Base):
+    """A strict ``UtcDateTime`` column: naive values are rejected."""
+
+    __tablename__ = "entity_strict_readings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    taken_at: Mapped[datetime] = mapped_column(UtcDateTime(strict=True))
 
 
 @pytest.fixture
@@ -91,11 +109,88 @@ class TestBaseEntity:
         assert user.updated_by == "system"
 
     @pytest.mark.asyncio
-    async def test_timestamps_are_utc(self, session: AsyncSession):
+    async def test_timestamps_reload_as_aware_utc(self, session: AsyncSession):
+        """The value read back from the database, not the in-memory default (C178): SQLite returned it
+        naive, so ``created_at < datetime.now(UTC)`` raised ``TypeError`` after a reload."""
         user = User(name="Alice")
         session.add(user)
         await session.flush()
-        assert user.created_at.tzinfo is not None
+        stamped, user_id = user.created_at, user.id
+        await session.commit()
+        session.expunge_all()
+
+        reloaded = await session.get(User, user_id)
+
+        assert reloaded is not None
+        assert reloaded.created_at.utcoffset() == timedelta(0)
+        assert reloaded.updated_at.utcoffset() == timedelta(0)
+        assert reloaded.created_at == stamped
+        assert reloaded.created_at <= datetime.now(UTC)
+
+
+def _ddl(model: type, dialect: object) -> str:
+    return str(CreateTable(model.__table__).compile(dialect=dialect))  # type: ignore[attr-defined]
+
+
+class TestUtcDateTime:
+    def test_exported_from_the_sqlalchemy_package(self) -> None:
+        assert ExportedUtcDateTime is UtcDateTime
+
+    @pytest.mark.parametrize(
+        ("dialect", "ddl"),
+        [
+            (postgresql.dialect(), "created_at TIMESTAMP WITH TIME ZONE NOT NULL"),
+            (sqlite.dialect(), "created_at DATETIME NOT NULL"),
+            (mysql.dialect(), "created_at DATETIME(6) NOT NULL"),
+            (mysql.dialect(is_mariadb=True), "created_at DATETIME(6) NOT NULL"),
+            (mssql.dialect(), "created_at DATETIMEOFFSET NOT NULL"),
+            (oracle.dialect(), "created_at TIMESTAMP WITH TIME ZONE NOT NULL"),
+        ],
+        ids=["postgresql", "sqlite", "mysql", "mariadb", "mssql", "oracle"],
+    )
+    def test_column_type_per_dialect(self, dialect: object, ddl: str) -> None:
+        """Microseconds on MySQL/MariaDB (``DATETIME`` had none), the offset kept where the backend has a
+        type for it (Oracle got a ``DATE`` before), and unchanged DDL on PostgreSQL and SQLite."""
+        assert ddl in _ddl(User, dialect)
+
+    def test_bind_converts_to_utc_and_strips_the_offset_where_the_column_has_none(self) -> None:
+        plus_two = datetime(2026, 9, 24, 12, 0, 0, 5, tzinfo=timezone(timedelta(hours=2)))
+        column_type = UtcDateTime()
+        assert column_type.process_bind_param(plus_two, sqlite.dialect()) == datetime(2026, 9, 24, 10, 0, 0, 5)
+        assert column_type.process_bind_param(plus_two, mysql.dialect()) == datetime(2026, 9, 24, 10, 0, 0, 5)
+        on_pg = column_type.process_bind_param(plus_two, postgresql.dialect())
+        assert on_pg == plus_two and on_pg.tzinfo is UTC
+
+    def test_result_attaches_utc(self) -> None:
+        loaded = UtcDateTime().process_result_value(datetime(2026, 9, 24, 10, 0), sqlite.dialect())
+        assert loaded == datetime(2026, 9, 24, 10, 0, tzinfo=UTC)
+
+    def test_to_utc(self) -> None:
+        assert to_utc(datetime(2026, 1, 1, 12, 0)) == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        assert to_utc(datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5)))) == datetime(
+            2026, 1, 1, 17, 0, tzinfo=UTC
+        )
+        with pytest.raises(ValueError, match="naive datetime"):
+            to_utc(datetime(2026, 1, 1, 12, 0), strict=True)
+
+    @pytest.mark.asyncio
+    async def test_strict_column_rejects_a_naive_value(self, session: AsyncSession) -> None:
+        session.add(StrictReading(id=1, taken_at=datetime(2026, 9, 24, 10, 0)))
+        with pytest.raises(StatementError, match="naive datetime"):
+            await session.flush()
+
+    @pytest.mark.asyncio
+    async def test_strict_column_stores_an_aware_value(self, session: AsyncSession) -> None:
+        taken = datetime(2026, 9, 24, 12, 0, tzinfo=timezone(timedelta(hours=2)))
+        session.add(StrictReading(id=2, taken_at=taken))
+        await session.commit()
+        session.expunge_all()
+        reloaded = await session.get(StrictReading, 2)
+        assert reloaded is not None and reloaded.taken_at == taken and reloaded.taken_at.tzinfo is UTC
+
+    def test_repr_renders_for_migrations(self) -> None:
+        assert repr(UtcDateTime()) == "UtcDateTime()"
+        assert repr(UtcDateTime(strict=True)) == "UtcDateTime(strict=True)"
 
 
 class TestPage:

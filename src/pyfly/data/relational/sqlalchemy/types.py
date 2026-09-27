@@ -1,0 +1,133 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Portable column types for PyFly entities.
+
+:class:`UtcDateTime` stores an instant, the same way on every backend. A plain
+``DateTime(timezone=True)`` does not: PostgreSQL keeps the instant (``TIMESTAMP WITH TIME ZONE``) and
+reads a naive value as the *host's* local time, while SQLite, MySQL and MariaDB compile it to
+``DATETIME``, drop the offset of an aware value (``12:00+02:00`` is stored as ``12:00``), read back naive
+values, and on MySQL/MariaDB keep whole seconds only (MySQL rounds into the future, MariaDB truncates).
+The same entity then compares, sorts and filters differently per backend, and ``updated_at -
+created_at`` raises ``TypeError`` wherever one side was loaded and the other stamped.
+
+``UtcDateTime`` normalizes on the way in and on the way out:
+
+- **bind**: an aware value is converted to UTC; a naive value is taken as UTC (or rejected with
+  ``strict=True``). Backends without a time-zone type get the naive UTC wall time, so their stored
+  values sort and compare as instants.
+- **result**: every value comes back aware, in UTC. On asyncpg the driver already returns aware UTC
+  (whatever the server's ``TimeZone``), so the result processing is skipped there.
+- **DDL**: ``TIMESTAMP WITH TIME ZONE`` on PostgreSQL and Oracle, ``DATETIMEOFFSET`` on SQL Server,
+  ``DATETIME`` on SQLite (all unchanged from ``DateTime(timezone=True)``, except Oracle, which got a
+  ``DATE`` without fractional seconds), and ``DATETIME(6)`` on MySQL and MariaDB (microseconds).
+
+Query parameters compared with a ``UtcDateTime`` column go through the same bind processing, so a
+derived ``find_by_created_at_between(lo, hi)`` with ``+02:00`` parameters compares instants on every
+backend. Raw ``text()`` SQL does not know the column type and gets no normalization.
+
+``BaseEntity.created_at``/``updated_at`` and ``SoftDeleteMixin.deleted_at`` use it. Declare it on your own
+columns (``mapped_column(UtcDateTime())``), or make it the type of every ``Mapped[datetime]`` of your
+models before they are defined::
+
+    Base.registry.update_type_annotation_map({datetime: UtcDateTime()})
+
+Existing MySQL/MariaDB tables keep ``DATETIME`` until migrated
+(``ALTER TABLE t MODIFY created_at DATETIME(6) NOT NULL``). The values the framework stamped there are
+already UTC wall times, so they read back correctly as they are.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import DateTime
+from sqlalchemy.engine import Dialect
+from sqlalchemy.types import TypeDecorator, TypeEngine
+
+_NATIVE_TIME_ZONE_DIALECTS = frozenset({"postgresql", "oracle", "mssql"})
+"""Dialects whose column type keeps the offset, so a bound value stays aware."""
+
+_MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
+
+
+def to_utc(value: datetime, *, strict: bool = False) -> datetime:
+    """*value* as an aware UTC ``datetime``.
+
+    An aware value is converted to UTC. A naive value is taken as UTC, or rejected with ``ValueError``
+    when *strict* is true (a naive ``datetime`` usually means the caller forgot the zone).
+    """
+    if value.tzinfo is None or value.utcoffset() is None:
+        if strict:
+            raise ValueError(
+                f"naive datetime {value.isoformat()} for a strict UtcDateTime column: pass an aware value "
+                "(datetime.now(UTC), or a value with its offset)"
+            )
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+class UtcDateTime(TypeDecorator[datetime]):
+    """An instant with microsecond precision, aware UTC in Python on every backend (module documentation).
+
+    Args:
+        strict: reject naive values with ``ValueError`` instead of taking them as UTC.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def __init__(self, *, strict: bool = False) -> None:
+        super().__init__()
+        self.strict = strict
+
+    @property
+    def python_type(self) -> type[datetime]:
+        return datetime
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name in _MYSQL_FAMILY:
+            from sqlalchemy.dialects import mysql
+
+            return dialect.type_descriptor(mysql.DATETIME(fsp=6))
+        if dialect.name == "oracle":
+            from sqlalchemy.dialects import oracle
+
+            return dialect.type_descriptor(oracle.TIMESTAMP(timezone=True))
+        return dialect.type_descriptor(DateTime(timezone=True))
+
+    def process_bind_param(self, value: Any, dialect: Dialect) -> Any:
+        if not isinstance(value, datetime):
+            return value
+        instant = to_utc(value, strict=self.strict)
+        if dialect.name in _NATIVE_TIME_ZONE_DIALECTS:
+            return instant
+        # DATETIME has no offset: store the UTC wall time, so stored values order as instants.
+        return instant.replace(tzinfo=None)
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
+        if isinstance(value, datetime):
+            return to_utc(value)
+        unchanged: datetime | None = value  # NULL
+        return unchanged
+
+    def result_processor(self, dialect: Dialect, coltype: Any) -> Any:
+        """The implementation type's result processing, plus :meth:`process_result_value` everywhere but
+        asyncpg, whose driver already returns aware UTC: reads on PostgreSQL stay at native speed."""
+        if dialect.driver == "asyncpg":
+            return self.impl_instance.result_processor(dialect, coltype)
+        return super().result_processor(dialect, coltype)
+
+    def __repr__(self) -> str:
+        return "UtcDateTime(strict=True)" if self.strict else "UtcDateTime()"

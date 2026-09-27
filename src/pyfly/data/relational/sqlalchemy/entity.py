@@ -19,8 +19,14 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -32,12 +38,13 @@ class SoftDeleteMixin:
 
     Entities using this mixin are never physically removed by
     :class:`SoftDeleteRepository`; instead their ``deleted_at`` column
-    is set to the current UTC time.
+    is set to the current UTC time (a :class:`~pyfly.data.relational.sqlalchemy.types.UtcDateTime`:
+    aware UTC with microseconds on every backend).
     """
 
     __abstract__ = True
 
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), default=None, nullable=True)
 
     @property
     def is_deleted(self) -> bool:
@@ -66,6 +73,8 @@ class BaseEntity(Base):
 
     All domain entities should inherit from this class to get automatic
     UUID primary keys and created_at/updated_at/created_by/updated_by tracking.
+    The timestamps are :class:`~pyfly.data.relational.sqlalchemy.types.UtcDateTime` columns: aware UTC
+    with microseconds on every backend, after a reload too.
     """
 
     __abstract__ = True
@@ -75,13 +84,13 @@ class BaseEntity(Base):
         default=uuid.uuid4,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(UTC),
+        UtcDateTime(),
+        default=_utc_now,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        UtcDateTime(),
+        default=_utc_now,
+        onupdate=_utc_now,
     )
     created_by: Mapped[str | None] = mapped_column(
         String(255),

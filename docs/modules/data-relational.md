@@ -17,6 +17,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
 - [Entity Definition](#entity-definition)
   - [Base (DeclarativeBase)](#base-declarativebase)
   - [BaseEntity: Audit Trail Fields](#baseentity-audit-trail-fields)
+  - [UtcDateTime: One Instant on Every Backend](#utcdatetime-one-instant-on-every-backend)
   - [Defining Your Own Entities](#defining-your-own-entities)
 - [Repository Pattern](#repository-pattern)
   - [Repository Class](#repository-class)
@@ -118,12 +119,51 @@ from pyfly.data.relational.sqlalchemy import BaseEntity
 | Field        | Type              | Column Type        | Description                          |
 |--------------|-------------------|--------------------|--------------------------------------|
 | `id`         | `Mapped[UUID]`    | Primary key        | Auto-generated UUID v4               |
-| `created_at` | `Mapped[datetime]`| `DateTime(tz=True)`| Set automatically on insert          |
-| `updated_at` | `Mapped[datetime]`| `DateTime(tz=True)`| Set on insert, updated on every save |
+| `created_at` | `Mapped[datetime]`| `UtcDateTime`      | Set automatically on insert          |
+| `updated_at` | `Mapped[datetime]`| `UtcDateTime`      | Set on insert, updated on every save |
 | `created_by` | `Mapped[str\|None]`| `String(255)`     | Creator identifier (default `None`)  |
 | `updated_by` | `Mapped[str\|None]`| `String(255)`     | Updater identifier (default `None`)  |
 
 `BaseEntity` is declared with `__abstract__ = True`, so it does not create its own database table.
+
+### UtcDateTime: One Instant on Every Backend
+
+`created_at`, `updated_at` and `SoftDeleteMixin.deleted_at` are `UtcDateTime` columns. A plain
+`DateTime(timezone=True)` is not portable: PostgreSQL keeps the instant, while SQLite, MySQL and MariaDB
+store it as `DATETIME`, drop the offset of an aware value, return naive values, and (MySQL/MariaDB) keep
+whole seconds only. `UtcDateTime` behaves the same everywhere:
+
+- **Writes.** An aware value is converted to UTC. A naive value is taken as UTC; declare
+  `UtcDateTime(strict=True)` to reject it with `ValueError` instead.
+- **Reads.** Every value comes back aware, in UTC, with its microseconds, after `save()` and after a
+  reload. `entity.updated_at - entity.created_at` works on every backend.
+- **Queries.** Parameters compared with the column are normalized too, so a derived
+  `find_by_created_at_between(lo, hi)` given `+02:00` values compares instants on every backend. Raw
+  `text()` SQL does not know the column type and is not normalized.
+- **DDL.** `TIMESTAMP WITH TIME ZONE` on PostgreSQL and Oracle, `DATETIMEOFFSET` on SQL Server, `DATETIME`
+  on SQLite, and `DATETIME(6)` on MySQL and MariaDB.
+
+Use it for your own instants, or make it the type of every `Mapped[datetime]` before your models are
+defined:
+
+```python
+from datetime import datetime
+
+from pyfly.data.relational.sqlalchemy import Base, BaseEntity, UtcDateTime
+from sqlalchemy.orm import Mapped, mapped_column
+
+Base.registry.update_type_annotation_map({datetime: UtcDateTime()})  # optional, application-wide
+
+
+class Shipment(BaseEntity):
+    __tablename__ = "shipments"
+
+    due_at: Mapped[datetime] = mapped_column(UtcDateTime())
+```
+
+**Existing MySQL/MariaDB tables** keep `DATETIME` (whole seconds) until you migrate them:
+`ALTER TABLE orders MODIFY created_at DATETIME(6) NOT NULL` (and `updated_at`, `deleted_at`). The values
+the framework stamped there are already UTC wall times, so they read back correctly as they are.
 
 ### Defining Your Own Entities
 
