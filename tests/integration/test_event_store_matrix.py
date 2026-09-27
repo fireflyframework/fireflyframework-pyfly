@@ -138,6 +138,21 @@ async def test_events_round_trip_with_their_sequence_metadata_and_global_positio
     assert json.loads(stored_metadata) == {"correlation_id": "c-1"}
 
 
+async def test_an_envelope_equals_itself_read_back_whatever_its_global_position(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The global position is where the store placed the event, not part of the event: an envelope handed to
+    ``append`` (no position yet) equals the same event loaded back (with one)."""
+    store = await _store(relational_backend)
+    appended = _envelope("Opened", amount=1)
+    await store.append("acc", "Account", [appended], expected_version=0)
+    await _drain(store)
+
+    loaded = await store.load("acc")
+    assert appended.global_position is None and loaded[0].global_position is not None
+    assert loaded == [appended]
+
+
 async def test_the_global_stream_follows_commit_order_not_the_envelope_clock(
     relational_backend: RelationalBackend,
 ) -> None:
