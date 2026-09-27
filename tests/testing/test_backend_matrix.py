@@ -243,6 +243,13 @@ def test_data_relational_requires_a_sqlalchemy_whose_mysql_pre_ping_works() -> N
     assert Version(sqlalchemy.__version__) >= _PRE_PING_FIXED
 
 
+def test_data_relational_admits_the_sqlalchemy_2_0_and_2_1_lines() -> None:
+    # No upper bound: the lock holds the latest release (2.1) and CI runs the suite on 2.0 too.
+    floor = _requirement(_pyproject()["project"]["optional-dependencies"]["data-relational"], "sqlalchemy")
+    assert floor.specifier.contains("2.0.54") and floor.specifier.contains("2.1.1"), f"{floor} excludes a line"
+    assert not any(spec.operator in ("<", "<=", "~=", "==") for spec in floor.specifier), f"{floor} caps SQLAlchemy"
+
+
 def test_the_mysql_extra_installs_asyncmy() -> None:
     extras = _pyproject()["project"]["optional-dependencies"]
     assert _requirement(extras["mysql"], "asyncmy")

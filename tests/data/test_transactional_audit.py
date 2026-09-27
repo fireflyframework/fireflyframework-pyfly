@@ -80,7 +80,10 @@ class CxItemRepository(Repository[CxItem, int]):
 
 
 class _CloseTheConnection(TransactionSynchronizationAdapter):
-    """Drops the unit's connection right before COMMIT: the commit fails in flight."""
+    """Drops the unit's connection once its COMMIT reached the driver: the commit fails in flight.
+
+    The connection closes inside the driver's own commit call. Closed before it, in ``before_commit``, it no
+    longer fails the COMMIT on SQLAlchemy 2.1, whose aiosqlite adaptation skips a commit on a closed connection."""
 
     def __init__(self, repo: CxItemRepository) -> None:
         self._repo = repo
@@ -88,7 +91,14 @@ class _CloseTheConnection(TransactionSynchronizationAdapter):
     async def before_commit(self, read_only: bool) -> None:
         connection = await self._repo._session.connection()
         raw = await connection.get_raw_connection()
-        await raw.driver_connection.close()
+        driver = raw.driver_connection
+        commit = driver.commit
+
+        async def commit_as_the_connection_drops() -> None:
+            await driver.close()
+            await commit()
+
+        driver.commit = commit_as_the_connection_drops
 
 
 class _Gate(TransactionSynchronizationAdapter):

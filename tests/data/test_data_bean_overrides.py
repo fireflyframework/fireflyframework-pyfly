@@ -818,7 +818,7 @@ async def test_a_connect_suspended_in_its_connect_event_survives_the_stop_that_d
 
     def _slow_setup(dbapi_connection: Any, _record: Any) -> None:
         inside.set()
-        dbapi_connection.await_(asyncio.sleep(0.1))
+        dbapi_connection.run_async(lambda _driver: asyncio.sleep(0.1))  # SQLAlchemy 2.1 dropped .await_
 
     event.listen(engine.sync_engine, "connect", _slow_setup)
 

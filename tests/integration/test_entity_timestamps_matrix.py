@@ -360,7 +360,7 @@ async def test_a_legacy_naive_postgresql_column_is_migrated_before_it_adopts_the
         written = datetime(2026, 9, 24, 12, 0, 0, 5, tzinfo=PLUS_TWO)
         await connection.execute(table.insert().values(id=2, at=written))
     async with engine.connect() as connection:
-        rows = dict((await connection.execute(select(table.c.id, table.c.at).order_by(table.c.id))).tuples().all())
+        rows = dict((await connection.execute(select(table.c.id, table.c.at).order_by(table.c.id))).all())
     assert rows == {1: datetime(2026, 9, 24, 10, 0, 0, 123456, tzinfo=UTC), 2: written}
     assert all(_is_utc(value) for value in rows.values())
 
