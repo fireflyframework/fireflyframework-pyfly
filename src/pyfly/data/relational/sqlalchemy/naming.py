@@ -11,13 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Adopt the constraint naming convention on a database created before it: the one-time rename migration.
+"""The constraint naming convention and Alembic: the operations opt-in and the one-time rename migration.
 
-``Base.metadata`` names every unnamed constraint with
-:data:`~pyfly.data.relational.sqlalchemy.entity.NAMING_CONVENTION` since 26.09.08. A database created before
-keeps the names its backend chose (``accounts_email_key`` on PostgreSQL, ``email`` on MySQL, none on SQLite),
-and a revision written against the convention names (``drop_constraint("uq_accounts_email")``) fails there.
-Opt in once, from an Alembic revision, and the existing constraints get the convention names::
+``Base`` names every unnamed constraint of its tables with
+:data:`~pyfly.data.relational.sqlalchemy.entity.NAMING_CONVENTION` since 26.09.08: ``create_all()`` renders
+the names, and a revision Alembic autogenerates against ``Base.metadata`` spells them out (``op.f()``).
+``Base.metadata.naming_convention``, which Alembic applies to the constraints a revision's *operations* leave
+unnamed, stays SQLAlchemy's default, so a history written before replays on a fresh database with the names
+it always had: its first revision creates an unnamed unique constraint, the backend names it
+``accounts_email_key``, and a later revision that drops it by that name still finds it. (With the convention
+in the operations, the fresh database would get ``uq_accounts_email`` and that revision would fail.) A
+history written under the convention opts its operations in with :func:`apply_convention_to_operations`.
+
+A database created before 26.09.08 keeps the names its backend chose (``accounts_email_key`` on PostgreSQL,
+``email`` on MySQL, none on SQLite), and a revision written against the convention names
+(``drop_constraint("uq_accounts_email")``) fails there. Opt in once, from an Alembic revision, and the
+existing constraints get the convention names::
 
     # migrations/versions/xxxx_adopt_the_constraint_naming_convention.py
     from alembic import op
@@ -77,6 +86,25 @@ class ConstraintRename:
     new: str
 
 
+def apply_convention_to_operations(metadata: MetaData | None = None) -> MetaData:
+    """Opt a migration environment in: Alembic operations name the unnamed constraints of revisions with
+    :data:`~pyfly.data.relational.sqlalchemy.entity.NAMING_CONVENTION` too, as the models name theirs.
+
+    Call it in ``env.py`` on the ``target_metadata`` (default: ``Base.metadata``), and only for a history
+    whose revisions were all first applied under the convention: one that starts on 26.09.08 or later, or
+    that renamed its constraints with :func:`rename_constraints_to_convention` and never replays the
+    revisions before it on a fresh database. Returns *metadata*.
+    """
+    if metadata is None:
+        from pyfly.data.relational.sqlalchemy.entity import Base
+
+        metadata = Base.metadata
+    from pyfly.data.relational.sqlalchemy.entity import NAMING_CONVENTION
+
+    metadata.naming_convention = dict(NAMING_CONVENTION)
+    return metadata
+
+
 def rename_constraints_to_convention(
     operations: Any, metadata: MetaData | None = None, *, tables: Iterable[str] | None = None
 ) -> list[ConstraintRename]:
@@ -99,6 +127,7 @@ def rename_constraints_to_convention(
         )
     inspector = inspect(bind)
     existing = set(inspector.get_table_names())
+    convention = _convention_of(metadata)
     selected = None if tables is None else set(tables)
     renames: list[ConstraintRename] = []
     for table in metadata.sorted_tables:
@@ -108,15 +137,23 @@ def rename_constraints_to_convention(
         if not planned:
             continue
         if dialect == "sqlite":
-            with operations.batch_alter_table(
-                table.name, recreate="always", naming_convention=metadata.naming_convention
-            ):
+            with operations.batch_alter_table(table.name, recreate="always", naming_convention=convention):
                 pass
         else:
             for rename, constraint in planned:
                 _apply(operations, bind, dialect, table, rename, constraint)
         renames.extend(rename for rename, _constraint in planned)
     return renames
+
+
+def _convention_of(metadata: MetaData) -> dict[str, Any]:
+    """The convention that names *metadata*'s constraints: PyFly's for a ``use_naming_convention`` metadata
+    (``Base.metadata``), whose own ``naming_convention`` is SQLAlchemy's default; otherwise its own."""
+    from pyfly.data.relational.sqlalchemy.entity import NAMING_CONVENTION, uses_naming_convention
+
+    if uses_naming_convention(metadata):
+        return dict(NAMING_CONVENTION)
+    return dict(metadata.naming_convention)
 
 
 def _plan(inspector: Inspector, table: Table, dialect: str) -> list[tuple[ConstraintRename, Any]]:
