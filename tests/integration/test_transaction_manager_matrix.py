@@ -31,6 +31,9 @@
   cancels a unit's statement on the server (WP01-12, WP01-13).
 - SQLite file and PostgreSQL: a client that disconnects from a Server-Sent Events stream served by a real
   uvicorn server while a unit is open (Starlette cancels the stream through an anyio scope, C062).
+- Every backend: repositories reached through every holder shape write inside the one unit (C006), and
+  ``gather()`` fan-out inside a unit is serialized without poisoning a pooled connection (C005).
+- PostgreSQL: a single-statement ``infrastructure_unit()`` outside a transaction runs on ``AUTOCOMMIT``.
 
 Every scenario ends with no pooled connection checked out and, on PostgreSQL, no backend idle in
 transaction.
@@ -52,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, c
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
+from pyfly.container.provider import Provider
 from pyfly.container.stereotypes import component, repository, service
 from pyfly.context.application_context import ApplicationContext
 from pyfly.data import Isolation, Propagation, transactional
@@ -65,6 +69,7 @@ from pyfly.data.transaction import (
     TransactionSynchronizationAdapter,
     TransactionTimedOutError,
     UnexpectedRollbackError,
+    infrastructure_unit,
     register_synchronization,
 )
 from pyfly.resilience.retry import retry
@@ -222,6 +227,38 @@ class Outer:
         pid = int((await self.items._session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
         await self.items.save(MxItem(name="maybe-committed"))
         register_synchronization(_Terminate(admin_url, pid))
+
+
+@service
+class Holders:
+    """Repositories reached through every shape the old structural patching missed (C006)."""
+
+    def __init__(
+        self,
+        inner: Inner,
+        repos: list[MxItemRepository],
+        provider: Provider[MxItemRepository],
+        session: AsyncSession,
+    ) -> None:
+        self.deep = {"level": [inner]}
+        self.by_name = {"items": repos[0]}
+        self.provider = provider
+        self.session = session
+
+    @transactional
+    async def write_everywhere(self, *, fail: bool) -> None:
+        await self.deep["level"][0].items.save(MxItem(name="deep"))
+        await self.by_name["items"].save(MxItem(name="dict"))
+        await self.provider.get().save(MxItem(name="provider"))
+        self.session.add(MxItem(name="session"))
+        await self.session.flush()
+        if fail:
+            raise ValueError("every shape rolls back together")
+
+    @transactional
+    async def fan_out(self) -> None:
+        items = self.provider.get()
+        await asyncio.gather(*(items.save(MxItem(name=f"child-{i}")) for i in range(8)))
 
 
 class Gate(TransactionSynchronizationAdapter):
@@ -658,3 +695,54 @@ async def test_an_sse_client_disconnect_mid_transaction_leaves_the_pool_healthy(
     committed = sorted(await matrix.committed())
     # Each stream committed its first event; the unit open at the disconnect rolled back.
     assert committed == ["event-0-0", "event-1-0", "event-2-0", "plain-0", "plain-1", "plain-2"]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Holder shapes, fan-out, single-statement infrastructure units
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def test_every_holder_shape_writes_inside_the_unit(relational_backend: RelationalBackend) -> None:
+    started = await _matrix(relational_backend, Holders)
+    try:
+        holders = started.ctx.get_bean(Holders)
+        with pytest.raises(ValueError):
+            await holders.write_everywhere(fail=True)
+        assert await started.committed() == []
+        await holders.write_everywhere(fail=False)
+        assert await started.committed() == ["deep", "dict", "provider", "session"]
+        await started.assert_clean()
+    finally:
+        await started.ctx.stop()
+
+
+async def test_gather_inside_a_unit_is_serialized_and_leaves_the_pool_healthy(
+    relational_backend: RelationalBackend,
+) -> None:
+    started = await _matrix(relational_backend, Holders)
+    try:
+        await started.ctx.get_bean(Holders).fan_out()
+        assert sorted(await started.committed()) == [f"child-{i}" for i in range(8)]
+        for i in range(3):  # the next, unrelated units run on the same pooled connection
+            await started.outer.place(f"after-{i}")
+        assert len(await started.committed()) == 11
+        await started.assert_clean()
+    finally:
+        await started.ctx.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_a_single_statement_infrastructure_unit_runs_on_autocommit(
+    relational_backend: RelationalBackend,
+) -> None:
+    started = await _matrix(relational_backend)
+    try:
+        wire: list[str] = []
+        _log_wire_queries(started.engine, wire)
+        async with infrastructure_unit("primary", single_statement=True) as session:
+            await session.execute(text("INSERT INTO mx_item (name) VALUES ('outbox-row')"))
+        assert not [q for q in wire if q.upper().startswith(("BEGIN", "COMMIT"))]
+        assert await started.committed() == ["outbox-row"]
+        await started.assert_clean()
+    finally:
+        await started.ctx.stop()

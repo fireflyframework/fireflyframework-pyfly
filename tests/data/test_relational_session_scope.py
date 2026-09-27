@@ -343,3 +343,27 @@ class TestSessionProviderAndInfrastructureUnits:
         async with infrastructure_unit(registry.primary) as session:
             await session.execute(text("INSERT INTO scope_row (name) VALUES ('committed')"))
         assert await _names(url) == ["committed"]
+
+
+class TestTheInstalledTransactionManagers:
+    async def test_a_context_installs_its_managers_while_it_runs(self, tmp_path: Path) -> None:
+        from pyfly.data.transaction import TransactionManagerRegistry, installed_registry
+
+        def _context(name: str) -> ApplicationContext:
+            url = f"sqlite+aiosqlite:///{tmp_path / name}"
+            config = Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": url, "ddl-auto": "none"}}}})
+            ctx = ApplicationContext(config)
+            ctx.register_bean(RelationalAutoConfiguration)
+            return ctx
+
+        first, second = _context("first.db"), _context("second.db")
+        await first.start()
+        first_managers = first.get_bean(TransactionManagerRegistry)
+        assert installed_registry() is first_managers
+        await second.start()
+        second_managers = second.get_bean(TransactionManagerRegistry)
+        assert installed_registry() is second_managers
+        await first.stop()
+        assert installed_registry() is second_managers  # only the installed registry is removed
+        await second.stop()
+        assert installed_registry() is None
