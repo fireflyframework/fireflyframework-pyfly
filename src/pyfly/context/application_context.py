@@ -602,6 +602,14 @@ class ApplicationContext:
                 if return_type is None:
                     continue
 
+                # A non-singleton bean is built when its scope asks for an instance, never here: a
+                # REQUEST-scoped factory has no request at startup (one that reads the request or
+                # takes another request-scoped bean failed start()), and the product of a
+                # refresh-scoped or transient factory was thrown away (an extra engine per scoped
+                # datasource). The declared return class is the registration key, as in Spring.
+                if self._register_scoped_bean_method(config_instance, attr_name, method, return_type):
+                    continue
+
                 # Resolve the factory's parameters from the container. USER configurations are
                 # processed before AUTO-configurations so that @conditional_on_missing_bean can
                 # see what the user declared — but that means a user factory taking an
@@ -628,6 +636,27 @@ class ApplicationContext:
 
                 result = method(**kwargs)
                 self._register_bean_result(config_instance, attr_name, method, return_type, result)
+
+    def _register_scoped_bean_method(self, config_instance: Any, attr_name: str, method: Any, return_type: Any) -> bool:
+        """Register a non-singleton ``@bean`` method under its declared class without calling it.
+
+        Returns ``False`` for a singleton, and for a non-singleton whose return hint declares no single
+        class (``A | B``): that one is still called once at startup to learn its concrete type.
+        """
+        bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
+        if bean_scope == Scope.SINGLETON:
+            return False
+        declared = self._declared_bean_type(return_type)
+        if declared is None:
+            return False
+        bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
+        self._container.register(declared, scope=bean_scope, name=bean_name)
+        registration = self._container._registrations[declared]
+        registration.scope = bean_scope  # the method's scope, even when the class carries a stereotype's
+        registration.factory = self._bean_factory(config_instance, method)
+        if getattr(method, "__pyfly_bean_primary__", False):
+            registration.primary = True
+        return True
 
     def _register_bean_result(
         self,
