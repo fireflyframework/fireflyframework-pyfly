@@ -36,7 +36,8 @@ after the beans it depends on:
    is created from here on, a transient or scoped bean still is), then the instances the custom
    scopes hold (refresh-scoped beans) are destroyed;
 4. the other lifecycle beans stop: they own the resources the destroyed beans used (clients,
-   schema, the datasource lifecycle);
+   schema, the datasource lifecycle); then the singleton ``@bean`` products get their declared
+   ``destroy_method``;
 5. every :class:`ResourceRegistry` bean (the datasource registry) is disposed, last.
 
 Until step 5 a resource registry of the context ignores a request to close itself

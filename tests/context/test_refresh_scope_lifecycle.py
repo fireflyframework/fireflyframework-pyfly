@@ -566,3 +566,49 @@ async def test_a_singleton_gets_its_declared_destroy_method_at_stop_and_nothing_
     assert EVENTS == ["writer.pre_destroy", "engine.disposed"]  # after the bean that used it
     assert await _rows(urls["a"]) == ["final"]
     assert _SINGLETON_ENGINES[0].pool.checkedin() == 0
+
+
+class _Checkpointer:
+    """A lifecycle bean (default phase) that writes a last row when it stops."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.engine = engine
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE IF NOT EXISTS note (body TEXT NOT NULL)"))
+            await conn.execute(text("INSERT INTO note (body) VALUES ('checkpoint')"))
+        EVENTS.append("checkpointer.stop")
+
+
+@configuration
+class _EngineWithLifecycleUser:
+    @bean(destroy_method="dispose")
+    def own_engine(self, config: Config) -> AsyncEngine:
+        engine = create_async_engine(str(config.get("reporting.url")))
+        event.listen(engine.sync_engine, "engine_disposed", lambda _engine: EVENTS.append("engine.disposed"))
+        _SINGLETON_ENGINES.append(engine)
+        return engine
+
+    @bean
+    def checkpointer(self, own_engine: AsyncEngine) -> _Checkpointer:
+        return _Checkpointer(own_engine)
+
+
+async def test_a_singleton_destroy_method_runs_after_the_lifecycle_beans_stop(urls: dict[str, str]) -> None:
+    """The destroy method releases a resource: it used to run with the ``@pre_destroy`` methods, before
+    the lifecycle beans stopped, so one that used the engine in ``stop()`` reopened its pool, and
+    nothing disposed that pool again."""
+    EVENTS.clear()
+    _SINGLETON_ENGINES.clear()
+    ctx = ApplicationContext(_config())
+    ctx.register_bean(_EngineWithLifecycleUser)
+    await ctx.start()
+    await ctx.stop()
+
+    assert EVENTS == ["checkpointer.stop", "engine.disposed"]
+    assert await _rows(urls["a"]) == ["checkpoint"]
+    assert _SINGLETON_ENGINES[0].pool.checkedin() == 0

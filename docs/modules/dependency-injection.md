@@ -801,9 +801,11 @@ During `ApplicationContext.start()`, the context:
 | `profile` | `str` | `""` | Create the bean only for matching profiles. |
 | `destroy_method` | `str` | `INFER_DESTROY_METHOD` | The method called on the product when the bean is destroyed, after its `@pre_destroy` (a coroutine is awaited). `""` declares none. |
 
-**Destroy methods.** A singleton is destroyed when the context stops (step 3 of
-[the stop() lifecycle](#the-stop-lifecycle)); a refresh- or custom-scoped bean when its scope evicts
-it and when the context stops; a transient bean never. The default, `INFER_DESTROY_METHOD`
+**Destroy methods.** A singleton is destroyed when the context stops: its `@pre_destroy` runs in
+step 3 of [the stop() lifecycle](#the-stop-lifecycle), and its destroy method at the end of step 4,
+after the lifecycle beans stopped, since one of them may still use the product in its `stop()`. A
+refresh- or custom-scoped bean is destroyed when its scope evicts it and when the context stops; a
+transient bean never. The default, `INFER_DESTROY_METHOD`
 (`pyfly.container.bean`, Spring's `"(inferred)"`), infers the method for a **scoped** bean that declares
 no `@pre_destroy` and no `stop()`: the first of `dispose()`, `aclose()` and `close()` it has that takes no
 argument. A **singleton** infers nothing: its product is usually released by its owner, in order (the
@@ -1399,7 +1401,9 @@ When `ApplicationContext.stop()` is called (each step bounded per bean by
 4. **Stop the other lifecycle beans** -- highest phase first, in reverse start order within a
    phase. They own the resources the destroyed beans used (clients, the `create-drop` schema). A
    scoped instance one of them builds while stopping is destroyed right after; from then on no
-   scoped instance is built either, since nothing would destroy it.
+   scoped instance is built either, since nothing would destroy it. Then each singleton `@bean`
+   product gets its declared `destroy_method` (in the order of step 3): it releases what a lifecycle
+   bean may still have used in its `stop()`, which would otherwise reopen a disposed engine's pool.
 5. **Dispose the resource registries** -- every bean that implements
    `pyfly.kernel.lifecycle.ResourceRegistry` (`async dispose_all()`): the `DataSourceRegistry`
    closes every engine, **last**.

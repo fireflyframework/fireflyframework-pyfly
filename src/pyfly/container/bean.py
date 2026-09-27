@@ -68,8 +68,9 @@ def bean(
         destroy_method: The method of the product the container calls when it destroys
             the bean, after its ``@pre_destroy`` methods (a coroutine is awaited) — the
             ``@Bean(destroyMethod=...)`` equivalent. A singleton is destroyed when the
-            context stops, a refresh- or custom-scoped bean when its scope evicts it and
-            when the context stops; a transient bean is never destroyed. The default,
+            context stops (its destroy method after the lifecycle beans stopped), a
+            refresh- or custom-scoped bean when its scope evicts it and when the context
+            stops; a transient bean is never destroyed. The default,
             :data:`INFER_DESTROY_METHOD`, infers it for a scoped bean only; a singleton's
             product is usually released by its owner in order (the datasource registry
             closes the engines last), so name the method to have a singleton's product

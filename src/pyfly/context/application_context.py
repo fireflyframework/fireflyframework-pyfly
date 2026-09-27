@@ -511,7 +511,9 @@ class ApplicationContext:
         4. the other lifecycle beans stop, highest phase first and in reverse start order within a
            phase: they own what the destroyed beans used (clients, ``create-drop`` schema). A scoped
            instance one of them built while stopping is destroyed after them, and from then on no
-           scoped instance is built either;
+           scoped instance is built either. Then the singleton ``@bean`` products get their declared
+           ``destroy_method`` (an engine's ``dispose()``), in the order of step 3: a lifecycle bean
+           may still have used them in its ``stop()``;
         5. every :class:`~pyfly.kernel.lifecycle.ResourceRegistry` bean is disposed: the datasource
            registry closes every engine, last;
         6. the singletons this run built are released, and everything the run added (lifecycle
@@ -598,13 +600,8 @@ class ApplicationContext:
         # a Provider[AsyncSession] or a proxied refresh-scoped datasource.
         self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON,))
         live = self._live_instances_in_destroy_order()
-        declared = {
-            id(reg.instance): reg.destroy_method
-            for reg in self._all_registrations()
-            if reg.instance is not None and reg.destroy_method is not None
-        }
         for instance in live:
-            await self._destroy_instance(instance, declared.get(id(instance)), shutdown_timeout, infer=False)
+            await self._pre_destroy_instance(instance, shutdown_timeout)
 
         # 3b. The instances the custom scopes hold (refresh-scoped datasources), now that the singletons
         # that used them through a proxy or a Provider are done with them.
@@ -620,6 +617,18 @@ class ApplicationContext:
         # no scoped instance is created either: nothing would destroy it.
         await self._destroy_scoped_instances(shutdown_timeout)
         self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON, *self._container._custom_scopes))
+
+        # 4c. The destroy methods of the singleton @bean products (an engine's dispose(), a client's
+        # close()), in the destroy order: they release what the lifecycle beans may still have used in
+        # their stop(), which would otherwise reopen a pool nobody disposes again.
+        declared = {
+            id(reg.instance): reg.destroy_method
+            for reg in self._all_registrations()
+            if reg.instance is not None and reg.destroy_method is not None
+        }
+        for instance in live:
+            if id(instance) in declared:
+                await self._call_destroy_method(instance, declared[id(instance)], shutdown_timeout, infer=False)
         return live
 
     async def _destroy_scoped_instances(self, timeout: float) -> None:
@@ -710,14 +719,22 @@ class ApplicationContext:
 
         *declared* is the ``destroy_method`` of the ``@bean`` that produced it (``None`` for any other
         bean). The inferred one is looked for only when *infer* is true: for a scoped instance, never
-        for a singleton. Each call is bounded by *timeout*; a failure is logged and does not stop the
-        destruction of the others.
+        for a singleton (whose two halves ``stop()`` runs at different steps). Each call is bounded by
+        *timeout*; a failure is logged and does not stop the destruction of the others.
         """
-        name = type(instance).__qualname__
+        await self._pre_destroy_instance(instance, timeout)
+        await self._call_destroy_method(instance, declared, timeout, infer=infer)
+
+    async def _pre_destroy_instance(self, instance: Any, timeout: float) -> None:
+        """Run the ``@pre_destroy`` methods of *instance* within *timeout*."""
         try:
             await asyncio.wait_for(self._call_pre_destroy(instance), timeout=timeout)
         except TimeoutError:
-            logger.warning("pre_destroy_timeout", extra={"bean": name, "timeout_s": timeout})
+            logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": timeout})
+
+    async def _call_destroy_method(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
+        """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*."""
+        name = type(instance).__qualname__
         method_name = self._destroy_method_name(instance, declared, infer=infer)
         if method_name is None:
             return
