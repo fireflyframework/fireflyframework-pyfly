@@ -271,8 +271,10 @@ class SqlAlchemyEventStore:
     ``auto``), ``auto`` follows it, and an explicit strategy that differs from it is refused at start (two
     strategies on one table would skip events).
 
-    The application context starts the store; one built by hand starts on first use, or with :meth:`start`.
-    Events a table got before it had global positions (rows an earlier release wrote, after a migration added
+    The application context starts the store; one built by hand starts on first use, or with :meth:`start`. On
+    SQLite, whose one writer holds the database's write lock until its unit of work ends, a store whose tables do
+    not exist yet cannot create them from inside a unit that has written: start it before. Events a table got
+    before it had global positions (rows an earlier release wrote, after a migration added
     the column) are placed on the stream like any other event without one, oldest ``occurred_at`` first: by the
     readers with ``head-row``, at start with ``xid8``.
     """
