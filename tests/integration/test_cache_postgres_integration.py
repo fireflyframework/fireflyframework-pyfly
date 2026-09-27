@@ -279,3 +279,27 @@ async def test_each_operation_is_one_round_trip_on_postgresql(relational_backend
     await cache.purge_expired()
 
     assert not [q for q in wire if q.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))]
+
+
+async def test_the_context_wires_the_sql_cache_and_creates_its_table(relational_backend: RelationalBackend) -> None:
+    from pyfly.cache.ports.outbound import CacheAdapter
+    from pyfly.context.application_context import ApplicationContext
+
+    ctx = ApplicationContext(
+        relational_backend.config(
+            {
+                "pyfly.data.relational.enabled": "false",  # ddl-auto=create would create every model of the run
+                "pyfly.data.relational.ddl-auto": "create",
+                "pyfly.cache.enabled": "true",
+                "pyfly.cache.provider": "postgres",
+            }
+        )
+    )
+    await ctx.start()
+    try:
+        cache = ctx.get_bean(CacheAdapter)  # type: ignore[type-abstract]
+        assert isinstance(cache, PostgresCacheAdapter)
+        await cache.put("wired", {"ok": True}, ttl=timedelta(minutes=1))
+        assert await cache.get("wired") == {"ok": True}
+    finally:
+        await ctx.stop()

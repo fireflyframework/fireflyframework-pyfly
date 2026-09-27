@@ -364,3 +364,31 @@ async def test_the_advisory_lock_stop_releases_what_it_holds(relational_backend:
 
 def test_the_lease_table_is_the_framework_s() -> None:
     assert locks.name == "pyfly_locks"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Wired by the application context
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def test_the_context_wires_the_lease_lock_and_creates_its_table(relational_backend: RelationalBackend) -> None:
+    from pyfly.context.application_context import ApplicationContext
+    from pyfly.scheduling.lock import DistributedLock
+
+    ctx = ApplicationContext(
+        relational_backend.config(
+            {
+                "pyfly.data.relational.enabled": "false",  # ddl-auto=create would create every model of the run
+                "pyfly.data.relational.ddl-auto": "create",
+                "pyfly.scheduling.lock.provider": "database",
+            }
+        )
+    )
+    await ctx.start()
+    try:
+        lock = ctx.get_bean(DistributedLock)  # type: ignore[type-abstract]
+        assert isinstance(lock, LeaseLock)
+        assert await lock.try_acquire("wp10a-context", 60.0) is True
+    finally:
+        await ctx.stop()  # stop releases the lease it still holds
+    assert await (await _lease(relational_backend)).try_acquire("wp10a-context", 60.0) is True
