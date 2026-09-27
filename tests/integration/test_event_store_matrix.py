@@ -613,3 +613,38 @@ async def test_a_page_of_the_stream_is_read_through_the_global_position_index(
             rows = (await connection.execute(text(f"EXPLAIN {page}"))).mappings().all()
             plan = "\n".join(str(row["key"]) for row in rows)
     assert "ix_pyfly_event_store_global_position" in plan, plan
+
+
+async def test_skewed_clocks_do_not_reorder_the_stream(relational_backend: RelationalBackend) -> None:
+    """C070: with a node's clock an hour ahead, the stream (ordered by ``occurred_at``) put an event before the
+    one it followed, and a cursor between them lost it. Positions follow commit order, whatever the clocks."""
+    store = await _store(relational_backend)
+    now = datetime.now(UTC)
+    await store.append(
+        "acc", "Account", [_envelope("OpenedOnFastNode", occurred_at=now + timedelta(hours=1))], expected_version=0
+    )
+    await store.append("acc", "Account", [_envelope("DepositedOnSlowNode", occurred_at=now)], expected_version=1)
+    await asyncio.sleep(0.01)  # SQLite's clock counts milliseconds
+    await store.append(
+        "other", "Account", [_envelope("OtherOnSlowNode", occurred_at=now - timedelta(hours=1))], expected_version=0
+    )
+
+    events = await _drain(store)
+    assert _types(events) == ["OpenedOnFastNode", "DepositedOnSlowNode", "OtherOnSlowNode"]
+
+
+async def test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order(
+    relational_backend: RelationalBackend,
+) -> None:
+    store = await _store(relational_backend)
+    await store.append("big-a", "Order", [_envelope(f"A{i}") for i in range(1300)], expected_version=0)
+    await store.append("big-b", "Order", [_envelope(f"B{i}") for i in range(1300)], expected_version=0)
+
+    first_page = await store.stream_all(limit=500)
+    assert len(first_page) == 500
+    events = first_page + await _drain(store, first_page[-1].global_position or 0, limit=500)
+    assert len(events) == 2600 and len({event.event_id for event in events}) == 2600
+    assert [event.sequence for event in events if event.aggregate_id == "big-a"] == list(range(1, 1301))
+    assert [event.sequence for event in events if event.aggregate_id == "big-b"] == list(range(1, 1301))
+    if store.position_strategy == "head-row":
+        assert [event.global_position for event in events] == list(range(1, 2601))

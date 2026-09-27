@@ -95,7 +95,7 @@ XID8_ORDINAL_BITS = 20
 to one event table."""
 
 _XID8_SCALE = 1 << XID8_ORDINAL_BITS
-_SEQUENCE_BATCH = 1000  # committed events given positions per sequencing unit
+_NUMBERING_BATCH = 1000  # committed events given positions per numbering unit
 _ASSIGN_CHUNK = 500  # events per positions UPDATE (one CASE branch and one IN value each)
 
 
@@ -467,7 +467,7 @@ class SqlAlchemyEventStore:
                         page = page.where(table.c.global_position < _xid8_horizon())
                     rows = (await session.execute(page.order_by(table.c.global_position).limit(limit))).all()
                     return [self._envelope(payload, position) for payload, position in rows]
-            await self._number_committed(manager)
+            await self._number_committed(manager, all_rounds=False)
             probe = False
 
     async def latest_version(self, aggregate_id: str) -> int:
@@ -542,10 +542,11 @@ class SqlAlchemyEventStore:
         if pending:
             await self._number_committed(manager)
 
-    async def _number_committed(self, manager: TransactionManager) -> None:
+    async def _number_committed(self, manager: TransactionManager, *, all_rounds: bool = True) -> None:
         """Give the committed events that have no global position theirs, in units of their own, one
-        :data:`_SEQUENCE_BATCH` at a time (``READ COMMITTED`` where the backend has it: each round sees every
-        event committed before it, and no snapshot conflict can fail it)."""
+        :data:`_NUMBERING_BATCH` at a time (``READ COMMITTED`` where the backend has it: each round sees every
+        event committed before it, and no snapshot conflict can fail it). A page read runs one round (*all_rounds*
+        false), so a backlog is numbered while the pages are read rather than before the first one."""
         isolation = Isolation.READ_COMMITTED
         if not manager.capabilities.supports_isolation(isolation):
             isolation = Isolation.DEFAULT  # SQLite: one writer at a time, which is stronger
@@ -555,14 +556,14 @@ class SqlAlchemyEventStore:
             while True:
                 async with template.transaction() as unit:
                     assert unit is not None
-                    count = await self._position_committed(unit.resource)
+                    count = await self._number_round(unit.resource)
                 numbered += count
-                if count < _SEQUENCE_BATCH:
+                if count < _NUMBERING_BATCH or not all_rounds:
                     break
-        _logger.debug("event_store_events_positioned", extra={"table": self._table_name, "events": numbered})
+        _logger.debug("event_store_events_numbered", extra={"table": self._table_name, "events": numbered})
 
-    async def _position_committed(self, session: AsyncSession) -> int:
-        """One sequencing round: lock the head row, give the next positions to the committed events that have
+    async def _number_round(self, session: AsyncSession) -> int:
+        """One numbering round: lock the head row, give the next positions to the committed events that have
         none (oldest record first, an aggregate's in sequence order), move the head row on. Returns how many."""
         from sqlalchemy import case, func, select, update
 
@@ -581,7 +582,7 @@ class SqlAlchemyEventStore:
             select(table.c.event_id)
             .where(table.c.global_position.is_(None))
             .order_by(func.coalesce(table.c.recorded_at, table.c.occurred_at), table.c.aggregate_id, table.c.sequence)
-            .limit(_SEQUENCE_BATCH)
+            .limit(_NUMBERING_BATCH)
         )
         found: Sequence[Any] = (await session.execute(pending)).scalars().all()
         event_ids = [str(event_id) for event_id in found]
