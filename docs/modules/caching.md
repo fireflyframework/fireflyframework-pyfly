@@ -241,7 +241,7 @@ await cache.clear()
 |-----------|------|-------------|
 | `engine` | `AsyncEngine`, `DataSource` or datasource name | Where the entries live. The adapter does not dispose it on `stop()`: the engine belongs to the datasource registry (or to the caller). |
 | `create_table` | `bool` (default `True`) | Create the table on `start()` when it is missing; with `False` the table is only checked, and a missing one fails the start. |
-| `purge_interval` | `timedelta \| None` (default 60 s) | How often a write purges expired rows; `None` leaves purging to `purge_expired()`. |
+| `purge_interval` | `timedelta \| None` (default 60 s) | How often a write purges a batch of expired rows; `None` leaves purging to `purge_expired()`. |
 | `table_name` | `str` (default `pyfly_cache_entries`) | The table. |
 
 ### Table schema
@@ -273,9 +273,12 @@ When `ttl` is provided the adapter stores the expiry as a UTC instant in
 the process's time zone, and nodes in different zones agree. Expiry is
 enforced at read time (`get()`, `exists()`, `get_keys()` and `get_stats()`
 skip expired rows), and expired rows are **purged**: at most once per
-`pyfly.cache.postgres.purge-interval` (60 s by default) a write deletes them
-in batches, after its transaction commits. `purge_expired()` does it on
-demand.
+`pyfly.cache.postgres.purge-interval` (60 s by default) a write deletes one
+batch of them (`PURGE_BATCH`, 1000 rows), after its transaction commits. While
+a batch comes back full the purge stays due and the next write deletes the
+next batch, so a backlog (the expired rows of a release that never purged) is
+worked off a batch per write instead of landing on one request.
+`purge_expired()` deletes them all on demand, for a scheduled sweep.
 
 ### Write semantics
 

@@ -80,7 +80,7 @@ async def cache(tmp_path: Path) -> AsyncIterator[PostgresCacheAdapter]:
 
 
 class TestPostgresCacheAdapterSQLite:
-    """Full behaviour tests using a SQLite file database (no Docker)."""
+    """Full behavior tests using a SQLite file database (no Docker)."""
 
     @pytest.mark.asyncio
     async def test_protocol_compliance(self, cache: PostgresCacheAdapter) -> None:

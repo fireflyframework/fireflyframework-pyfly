@@ -24,8 +24,10 @@ SQLAlchemy supports: the table is a Core table with portable types and the upser
 - **An expired key is free.** ``put_if_absent`` takes a key whose entry expired (one statement on
   PostgreSQL and SQLite: ``ON CONFLICT ... DO UPDATE ... WHERE expires_at <= now``), so it works as a
   lock or a dedupe marker with a TTL, as on Redis.
-- **Expired rows are purged.** At most once per ``purge_interval`` a write purges expired rows, in batches,
-  after its transaction commits; :meth:`PostgresCacheAdapter.purge_expired` does it on demand.
+- **Expired rows are purged.** At most once per ``purge_interval`` a write purges one batch of expired rows
+  (:attr:`PostgresCacheAdapter.PURGE_BATCH`) after its transaction commits, and while a batch comes back
+  full the next write purges the next one, so a backlog is worked off without ever landing on one request;
+  :meth:`PostgresCacheAdapter.purge_expired` deletes them all on demand.
 - **One round trip.** Every operation runs through :func:`~pyfly.data.transaction.infrastructure_unit`:
   outside a unit of work a single statement runs on an autocommit connection on PostgreSQL. Inside a unit
   on the cache's datasource it joins that unit, so an entry written by a transaction that rolls back is
@@ -93,7 +95,7 @@ def _like_prefix(prefix: str) -> str:
 class PostgresCacheAdapter:
     """Cache adapter backed by a SQL table (see the module documentation).
 
-    Values are serialised to JSON bytes before storage (identical to the Redis adapter) so any
+    Values are serialized to JSON bytes before storage (identical to the Redis adapter) so any
     JSON-compatible Python object can be cached transparently.
 
     Args:
@@ -203,7 +205,7 @@ class PostgresCacheAdapter:
     # ------------------------------------------------------------------
 
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
-        """Serialise and upsert *value* with optional TTL."""
+        """Serialize and upsert *value* with optional TTL."""
         from pyfly.data.relational.upsert import native_upsert, upsert
 
         await self._ensure_started()
@@ -218,7 +220,7 @@ class PostgresCacheAdapter:
         await self._purge_if_due()
 
     async def get(self, key: str) -> Any | None:
-        """Retrieve and deserialise a cached value, honouring expiry."""
+        """Retrieve and deserialize a cached value, honoring expiry."""
         from sqlalchemy import select
 
         await self._ensure_started()
@@ -237,7 +239,7 @@ class PostgresCacheAdapter:
             return decoded
         except (ValueError, TypeError):
             self._misses += 1
-            _logger.warning("Failed to deserialise cached value for key '%s'", key)
+            _logger.warning("Failed to deserialize cached value for key '%s'", key)
             return None
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
@@ -317,26 +319,32 @@ class PostgresCacheAdapter:
 
     async def purge_expired(self) -> int:
         """Delete every expired entry, :attr:`PURGE_BATCH` rows per statement; return how many were deleted."""
+        await self._ensure_started()
+        purged = 0
+        while True:
+            deleted = await self._purge_batch()
+            purged += deleted
+            if deleted < self.PURGE_BATCH:
+                return purged
+
+    async def _purge_batch(self) -> int:
+        """Delete up to :attr:`PURGE_BATCH` expired entries (all of them where the dialect has no bounded
+        ``DELETE``), in one statement; return how many were deleted."""
         from sqlalchemy import delete, select
 
-        await self._ensure_started()
         table = self._table
-        now = self._clock()
-        expired = table.c.expires_at <= now
+        expired = table.c.expires_at <= self._clock()
         if self._backend in ("mysql", "mariadb"):
-            statement: Any = delete(table).where(expired).with_dialect_options(mysql_limit=self.PURGE_BATCH)
+            # Both spellings: a mariadb:// URL's dialect reads only mariadb_limit, a mysql:// one mysql_limit.
+            limit = {"mysql_limit": self.PURGE_BATCH, "mariadb_limit": self.PURGE_BATCH}
+            statement: Any = delete(table).where(expired).with_dialect_options(**limit)
         elif self._backend in _UNBOUNDED_KEY_DIALECTS:
             batch = select(table.c.cache_key).where(expired).limit(self.PURGE_BATCH)
             statement = delete(table).where(table.c.cache_key.in_(batch))
         else:
             statement = delete(table).where(expired)
-        purged = 0
-        while True:
-            async with self._writing(single_statement=True) as session:
-                deleted = int((await session.execute(statement)).rowcount)
-            purged += deleted
-            if deleted < self.PURGE_BATCH:
-                return purged
+        async with self._writing(single_statement=True) as session:
+            return int((await session.execute(statement)).rowcount)
 
     async def _purge_if_due(self) -> None:
         interval = self._purge_interval
@@ -348,11 +356,15 @@ class PostgresCacheAdapter:
         await after_commit(self._purge_quietly, datasource=resolve_manager(self._target).datasource)
 
     async def _purge_quietly(self) -> None:
+        """One batch, so a write never carries a backlog: while a full batch comes back the purge stays due,
+        and the next write deletes the next batch."""
         try:
-            purged = await self.purge_expired()
+            purged = await self._purge_batch()
         except Exception:  # noqa: BLE001 — a failed purge must never fail a cache write
             _logger.warning("cache_purge_failed", extra={"table": self._table_name}, exc_info=True)
             return
+        if purged >= self.PURGE_BATCH:
+            self._last_purge = float("-inf")
         if purged:
             _logger.debug("cache_expired_entries_purged", extra={"table": self._table_name, "count": purged})
 

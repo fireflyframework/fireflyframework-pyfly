@@ -148,6 +148,31 @@ async def test_writes_purge_expired_rows_once_per_interval(relational_backend: R
     assert await _rows(cache.engine) == 1
 
 
+async def test_a_write_purges_one_batch_and_the_next_writes_the_rest(relational_backend: RelationalBackend) -> None:
+    """The write that found a purge due deleted every expired row before returning: a backlog (the rows of the
+    releases that never purged) landed on one request, which grew with it (745 ms for 300k rows). A write now
+    purges one batch; while a full batch comes back, the next write purges the next one, and once the backlog
+    is gone the interval applies again."""
+    cache = await _cache(relational_backend, purge_interval=timedelta(seconds=1))
+    cache.PURGE_BATCH = 4
+    for index in range(10):
+        await cache.put(f"backlog-{index}", index, ttl=timedelta(milliseconds=1))
+    await asyncio.sleep(1.1)
+
+    rows = []
+    for key in ("a", "b", "c"):
+        await cache.put(key, key)
+        rows.append(await _rows(cache.engine))
+    assert rows == [10 + 1 - 4, 7 + 1 - 4, 4 + 1 - 2]  # 4 expired rows, then 4, then the last 2
+
+    for index in range(3):
+        await cache.put(f"later-{index}", index, ttl=timedelta(milliseconds=1))
+    await asyncio.sleep(0.05)
+    await cache.put("d", "d")
+    assert await _rows(cache.engine) == 3 + 3 + 1  # within the interval again: nothing purged
+    assert await cache.purge_expired() == 3
+
+
 async def test_a_write_in_a_transaction_that_rolls_back_is_rolled_back(relational_backend: RelationalBackend) -> None:
     """The adapter joins the unit of work on its datasource: an entry does not outlive the rollback of the
     transaction that wrote it."""
