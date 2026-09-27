@@ -453,8 +453,9 @@ def bulk_delete_safe(entity: type, session: AsyncSession | Session | None = None
 
     It does not when the ORM would do more than one ``DELETE`` per row: a version column to check, a
     relationship it cascades to or whose foreign keys it nulls out (unless ``passive_deletes`` leaves that to
-    the database), joined-table inheritance, or listeners of the mapper's delete events or of *session*'s
-    delete lifecycle events.
+    the database), joined-table inheritance, or listeners of the mapper's delete events, of *session*'s
+    delete lifecycle events or of its flushes (``before_flush``, ``after_flush``, ``after_flush_postexec``: an
+    audit of ``session.deleted`` would miss the rows).
     """
     mapper: Mapper[Any] = sa_inspect(entity)
     if mapper.version_id_col is not None or mapper.inherits is not None or mapper.polymorphic_on is not None:
@@ -470,9 +471,20 @@ def bulk_delete_safe(entity: type, session: AsyncSession | Session | None = None
     if session is not None:
         sync_session = session.sync_session if isinstance(session, AsyncSession) else session
         dispatch = sync_session.dispatch
-        if dispatch.persistent_to_deleted or dispatch.deleted_to_detached:
+        if any(getattr(dispatch, hook) for hook in _SESSION_DELETE_HOOKS):
             return False
     return True
+
+
+_SESSION_DELETE_HOOKS = (
+    "persistent_to_deleted",
+    "deleted_to_detached",
+    "before_flush",
+    "after_flush",
+    "after_flush_postexec",
+)
+"""Session events that see an entity deleted through the ORM (a flush listener auditing ``session.deleted``),
+and never see the rows a bulk ``DELETE`` removes."""
 
 
 # ---------------------------------------------------------------------------------------------------------

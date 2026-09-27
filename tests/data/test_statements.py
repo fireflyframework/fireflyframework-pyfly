@@ -38,7 +38,7 @@ import pytest
 from sqlalchemy import ForeignKey, Integer, String, event, select
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 from sqlalchemy.engine import Dialect
-from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship, selectinload
+from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload
 from sqlalchemy.sql import Select
 
 from pyfly.data.pageable import Order, Sort
@@ -439,6 +439,17 @@ class TestDeleteStrategy:
         assert bulk_delete_safe(ContractLine)
         assert bulk_delete_safe(ContractChild)  # many-to-one only
         assert bulk_delete_safe(StPassive)  # passive_deletes: the database cascades
+
+    @pytest.mark.parametrize("hook", ["before_flush", "after_flush", "after_flush_postexec", "persistent_to_deleted"])
+    def test_a_session_that_watches_its_flushes_needs_the_orm(self, hook: str) -> None:
+        """A flush listener (a common audit of ``session.deleted``) never sees the rows a bulk DELETE removes."""
+        session = Session()
+        assert bulk_delete_safe(ContractLine, session)
+        event.listen(session, hook, lambda *_args: None)
+        try:
+            assert not bulk_delete_safe(ContractLine, session)
+        finally:
+            session.close()
 
 
 # ---------------------------------------------------------------------------------------------------------
