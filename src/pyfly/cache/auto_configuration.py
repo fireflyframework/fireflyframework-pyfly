@@ -75,11 +75,11 @@ class CacheAutoConfiguration:
             # primary datasource, an identical URL reuses that datasource's engine.
             registry = context_datasource_registry(config, container)
             datasource = module_datasource(registry, config, "pyfly.cache.postgres", name="cache")
-            seconds = float(config.get("pyfly.cache.postgres.purge-interval", 60))
+            purge_interval = _purge_interval(config.get("pyfly.cache.postgres.purge-interval", 60))
             return PostgresCacheAdapter(
                 datasource,
                 create_table=creates_tables(registry.properties.ddl_auto),
-                purge_interval=timedelta(seconds=seconds) if seconds > 0 else None,
+                purge_interval=purge_interval if purge_interval > timedelta(0) else None,
             )
 
         from pyfly.cache.adapters.memory import InMemoryCache
@@ -95,3 +95,16 @@ class CacheAutoConfiguration:
         from pyfly.cache.health import CacheHealthIndicator
 
         return CacheHealthIndicator(adapter=cache_adapter)
+
+
+def _purge_interval(configured: Any) -> timedelta:
+    """``pyfly.cache.postgres.purge-interval``: seconds, or a duration (``90s``, ``500ms``, ``2m``, ``1h``)."""
+    from pyfly.resilience.registry import parse_duration
+
+    try:
+        return parse_duration(configured)
+    except ValueError as exc:
+        raise ValueError(
+            f"pyfly.cache.postgres.purge-interval must be a number of seconds or a duration such as '90s', "
+            f"'500ms', '2m' or '1h' (0 turns the purge on writes off), got {configured!r}"
+        ) from exc

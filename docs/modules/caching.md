@@ -320,7 +320,7 @@ pyfly:
     postgres:
       datasource: caching          # a datasource of pyfly.data.relational.datasources
       # url: postgresql+asyncpg://user:pass@host/db   (or its URL; not both)
-      purge-interval: 60           # seconds; 0 turns the purge on writes off
+      purge-interval: 60s          # seconds or a duration (500ms, 2m, 1h); 0 turns the purge on writes off
 ```
 
 The table is created at startup if `pyfly.data.relational.ddl-auto` is
@@ -653,7 +653,7 @@ pyfly:
 | `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (used when provider is `"redis"` or auto-detected). |
 | `pyfly.cache.postgres.url` | *(none)*: the primary datasource | PostgreSQL connection URL (used when provider is `"postgres"`). See below. |
 | `pyfly.cache.postgres.datasource` | *(none)*: the primary datasource | Name of the datasource the cache table lives on (instead of a URL). |
-| `pyfly.cache.postgres.purge-interval` | `60` | Seconds between purges of expired rows made by writes; `0` turns them off. |
+| `pyfly.cache.postgres.purge-interval` | `60` | Time between purges of expired rows made by writes: seconds or a duration (`90s`, `500ms`, `2m`, `1h`); `0` turns them off. |
 
 `pyfly.cache.postgres.url` resolves through the
 [datasource registry](data-relational.md#module-datasources) (the application's `DataSourceRegistry` bean

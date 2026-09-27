@@ -310,6 +310,55 @@ class TestPostgresCacheAutoConfiguration:
         finally:
             await registry.close()
 
+    @pytest.mark.parametrize(
+        ("configured", "seconds"),
+        [(60, 60.0), ("2.5", 2.5), ("90s", 90.0), ("500ms", 0.5), ("2m", 120.0), ("1h", 3600.0), ("0", None)],
+    )
+    async def test_the_purge_interval_is_a_duration(
+        self, tmp_path: Path, configured: object, seconds: float | None
+    ) -> None:
+        """``purge-interval: 60s`` failed the startup with a bare ``ValueError`` from ``float()``."""
+        from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+        config = Config(
+            {
+                "pyfly": {
+                    "cache": {"provider": "postgres", "postgres": {"purge-interval": configured}},
+                    "data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'a.db'}"}},
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(config)
+        try:
+            adapter = CacheAutoConfiguration().cache_adapter(config)
+            assert isinstance(adapter, PostgresCacheAdapter)
+            assert adapter._purge_interval == seconds
+        finally:
+            await registry.close()
+
+    @pytest.mark.parametrize("configured", ["soon", "-5s", "10 minutes"])
+    async def test_a_purge_interval_that_is_not_a_duration_names_the_key(self, tmp_path: Path, configured: str) -> None:
+        from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+        config = Config(
+            {
+                "pyfly": {
+                    "cache": {"provider": "postgres", "postgres": {"purge-interval": configured}},
+                    "data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'a.db'}"}},
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(config)
+        try:
+            with pytest.raises(ValueError, match=r"pyfly\.cache\.postgres\.purge-interval"):
+                CacheAutoConfiguration().cache_adapter(config)
+        finally:
+            await registry.close()
+
     def test_the_configured_postgres_url_is_not_a_made_up_default(self) -> None:
         """configprops reported postgres.url=localhost:5432/cache, a database nothing connects to: with no URL
         and no datasource the cache is on the primary datasource."""
