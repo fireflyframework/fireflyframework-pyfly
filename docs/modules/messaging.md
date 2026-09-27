@@ -298,7 +298,10 @@ Spring AMQP:
   only after that unit committed: the Kafka offset is committed, the AMQP message is
   acked. An application without a data layer runs its listeners without a unit and
   acknowledges once they return; `pyfly.messaging.listener.transactional: false`
-  does the same with one.
+  does the same with one. On a SQLite file database the unit holds the single write
+  lock for the whole delivery, so a `REQUIRES_NEW` write inside a listener raises
+  `IllegalTransactionStateError` there: join the delivery's unit, or switch the
+  container's unit off.
 * **A failure is attempted again, after a back-off.** Kafka seeks the partition back
   to the record and pauses it for the delay, so the record is fetched again and the
   records after it keep their order. RabbitMQ holds the message for the delay, then
