@@ -25,6 +25,7 @@ the server lanes in the integration suite.
 from __future__ import annotations
 
 import asyncio
+import logging
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.cli.db import _ENV_PY_TEMPLATE
-from pyfly.data.relational.sqlalchemy.entity import Base
+from pyfly.data.relational.sqlalchemy.entity import Base, use_naming_convention
 from pyfly.data.relational.sqlalchemy.naming import ConstraintRename, rename_constraints_to_convention
 from tests.support.backend_matrix import RelationalBackend
 
@@ -255,6 +256,53 @@ async def test_mariadb_through_a_mysql_url_adopts_the_convention(relational_back
         assert _unnamed_check() in after["checks"]
     finally:
         await engine.dispose()
+
+
+def _schema_table(metadata: MetaData, schema: str | None) -> Table:
+    return Table(
+        "nc_schema_account",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("email", String(100), unique=True),
+        schema=schema,
+    )
+
+
+def _unique_names(sync: Connection) -> list[str]:
+    return sorted(u["name"] or "" for u in inspect(sync).get_unique_constraints("nc_schema_account"))
+
+
+async def test_a_table_of_another_schema_is_skipped_not_matched_by_name(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The database is inspected in its default schema. A model table of another schema used to be matched
+    with the same-named table of the default schema, and that table's constraints were renamed. It is skipped
+    now, with a warning; a table declared with the default schema's name is renamed as before."""
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(_schema_table(MetaData(), None).metadata.create_all)
+        before = await connection.run_sync(_unique_names)
+        default_schema = await connection.run_sync(lambda sync: inspect(sync).default_schema_name)
+
+    def adopt(schema: str) -> Any:
+        def run(sync: Connection) -> list[ConstraintRename]:
+            modeled = _schema_table(use_naming_convention(MetaData()), schema).metadata
+            return rename_constraints_to_convention(Operations(MigrationContext.configure(sync)), modeled)
+
+        return run
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.sqlalchemy.naming"):
+        async with engine.begin() as connection:
+            assert await connection.run_sync(adopt("pyfly_other_schema")) == []
+    async with engine.connect() as connection:
+        assert await connection.run_sync(_unique_names) == before
+    assert "pyfly_other_schema.nc_schema_account" in caplog.text
+
+    async with engine.begin() as connection:
+        renamed = await connection.run_sync(adopt(default_schema))
+    assert "uq_nc_schema_account_email" in {rename.new for rename in renamed}
+    async with engine.connect() as connection:
+        assert await connection.run_sync(_unique_names) == ["uq_nc_schema_account_email"]
 
 
 # ---------------------------------------------------------------------------------------------------------

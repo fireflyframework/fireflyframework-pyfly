@@ -53,10 +53,16 @@ name differs:
 
 It is idempotent: a second run renames nothing. Other dialects raise ``NotImplementedError``. A check whose SQL
 text the backend rewrote beyond whitespace, quoting and parentheses is not matched and keeps its name.
+
+Only the tables of the database's default schema are considered: the current schema on PostgreSQL
+(``public`` by default), the connection's database on MySQL/MariaDB, ``main`` on SQLite. A table declared
+with another ``schema`` is skipped with a warning, instead of being matched with a same-named table of the
+default schema.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -72,6 +78,8 @@ CHECK = "check"
 
 _MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
 _SUPPORTED = frozenset({"postgresql", "sqlite"}) | _MYSQL_FAMILY
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -111,8 +119,9 @@ def rename_constraints_to_convention(
     """Rename the constraints of the database behind *operations* (Alembic's ``op``, or an
     ``alembic.operations.Operations``) to the names *metadata* gives them (default: ``Base.metadata``).
 
-    *tables* restricts the tables considered (default: every table of *metadata* that exists). Returns what
-    was renamed. See the module documentation.
+    *tables* restricts the tables considered (default: every table of *metadata* that exists). Only tables of
+    the database's default schema are renamed: a table declared with another ``schema`` is skipped with a
+    warning. Returns what was renamed. See the module documentation.
     """
     if metadata is None:
         from pyfly.data.relational.sqlalchemy.entity import Base
@@ -132,6 +141,17 @@ def rename_constraints_to_convention(
     renames: list[ConstraintRename] = []
     for table in metadata.sorted_tables:
         if table.name not in existing or (selected is not None and table.name not in selected):
+            continue
+        if table.schema is not None and table.schema != inspector.default_schema_name:
+            # The inspector and the rename statements see the default schema only: a same-named table there
+            # is another table, whose constraints must not be renamed after this one.
+            logger.warning(
+                "rename_constraints_to_convention skips %s.%s: only tables of the default schema (%s) are "
+                "renamed; rename its constraints with the backend's own statements",
+                table.schema,
+                table.name,
+                inspector.default_schema_name,
+            )
             continue
         planned = _plan(inspector, table, dialect)
         if not planned:

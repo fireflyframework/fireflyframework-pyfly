@@ -177,9 +177,11 @@ It matches each constraint of each existing table to its model (a unique constra
 foreign key by its columns and referred table, a check by its SQL text, the primary key) and renames the
 ones whose name differs: `ALTER TABLE ... RENAME CONSTRAINT` on PostgreSQL; `RENAME INDEX` for a unique key,
 and a drop and re-create of a foreign key or check, on MySQL and MariaDB; a batch recreate of the table on
-SQLite. Running it again renames nothing. Other dialects raise `NotImplementedError`. Replayed on a fresh
-database, the older revisions create the backend's names and this one renames them, so the history keeps
-working there too.
+SQLite. Running it again renames nothing. Other dialects raise `NotImplementedError`. Only the tables of the
+database's default schema are renamed: a model table declared with another `schema` is skipped with a
+warning (rename its constraints with the backend's own statements), never matched with a same-named table of
+the default schema. Replayed on a fresh database, the older revisions create the backend's names and this
+one renames them, so the history keeps working there too.
 
 ### BaseEntity: Audit Trail Fields
 
