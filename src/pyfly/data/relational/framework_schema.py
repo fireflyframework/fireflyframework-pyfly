@@ -570,7 +570,7 @@ def _index_problems(connection: Connection, tables: Sequence[Table], create: boo
         if postgresql:
             schema = table.schema or inspector.default_schema_name
             rows = connection.execute(_INVALID_INDEXES, {"table": table.name, "schema": schema})
-            invalid = {str(name).lower() for name in rows.scalars()}
+            invalid = {str(row[0]).lower() for row in rows}
         for index in sorted(table.indexes, key=lambda declared: str(declared.name)):
             name = str(index.name)
             if name.lower() in invalid:

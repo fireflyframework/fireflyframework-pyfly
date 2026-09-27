@@ -43,6 +43,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 from sqlalchemy.schema import conv
 from sqlalchemy.sql.schema import ColumnCollectionConstraint, Constraint, SchemaItem
 
+from pyfly.data.relational.sqlalchemy.compat import foreign_key_target_table
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
 
@@ -77,7 +78,7 @@ def _unique_name(constraint: Constraint, table: Table) -> str:
 
 def _foreign_key_name(constraint: Constraint, table: Table) -> str:
     assert isinstance(constraint, ForeignKeyConstraint)
-    referred = constraint.elements[0].target_fullname.split(".")[-2]
+    referred = foreign_key_target_table(constraint.elements[0])
     return _bounded("_".join(["fk", table.name, *_column_names(constraint), referred]))
 
 

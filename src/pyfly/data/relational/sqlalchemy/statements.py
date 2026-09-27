@@ -92,6 +92,7 @@ from sqlalchemy.types import Enum, String, TypeDecorator
 from pyfly.data.pageable import NullHandling, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
+from pyfly.data.relational.sqlalchemy.compat import drop_distinct_on_extension
 
 __all__ = [
     "FetchPlan",
@@ -239,20 +240,20 @@ def in_criteria(
 # ---------------------------------------------------------------------------------------------------------
 
 
-def exists_probe(source: Any, *criteria: Any) -> Select[tuple[int]]:
+def exists_probe(source: Any, *criteria: Any) -> Select[Any]:
     """``SELECT 1 FROM source WHERE criteria LIMIT 1``.
 
     *source* is an entity, a table, or a ``select(Entity)`` whose FROM and WHERE are kept (its columns,
     ORDER BY and loader options are not). Run it with :func:`exists`.
     """
     if isinstance(source, Select):
-        probe: Select[tuple[int]] = source.with_only_columns(_ONE, maintain_column_froms=True).order_by(None)
+        probe: Select[Any] = source.with_only_columns(_ONE, maintain_column_froms=True).order_by(None)
     else:
         probe = select(_ONE).select_from(source)
     return probe.where(*criteria).limit(1)
 
 
-async def exists(session: AsyncSession, probe: Select[tuple[int]]) -> bool:
+async def exists(session: AsyncSession, probe: Select[Any]) -> bool:
     """Run *probe* (:func:`exists_probe`) and tell whether it found a row."""
     return (await session.execute(probe)).scalar() is not None
 
@@ -381,7 +382,7 @@ def distinct_entity_page(
     return outer
 
 
-def distinct_entity_count(statement: Select[Any], entity: type) -> Select[tuple[int]]:
+def distinct_entity_count(statement: Select[Any], entity: type) -> Select[Any]:
     """``SELECT count(*)`` of the distinct *entity* primary keys *statement* matches (see :func:`row_count` for
     what the count keeps of *statement*)."""
     mapper: Mapper[Any] = sa_inspect(entity)
@@ -390,7 +391,7 @@ def distinct_entity_count(statement: Select[Any], entity: type) -> Select[tuple[
     return _count(keys, statement)
 
 
-def row_count(statement: Select[Any]) -> Select[tuple[int]]:
+def row_count(statement: Select[Any]) -> Select[Any]:
     """``SELECT count(*)`` of the rows *statement* matches.
 
     The count runs over *statement* as a subquery, without its ORDER BY and its lock (counting locks nothing,
@@ -401,8 +402,8 @@ def row_count(statement: Select[Any]) -> Select[tuple[int]]:
     return _count(statement, statement)
 
 
-def _count(counted: Select[Any], source: Select[Any]) -> Select[tuple[int]]:
-    count: Select[tuple[int]] = select(func.count()).select_from(_unlocked(counted.order_by(None)).subquery())
+def _count(counted: Select[Any], source: Select[Any]) -> Select[Any]:
+    count: Select[Any] = select(func.count()).select_from(_unlocked(counted.order_by(None)).subquery())
     criteria = [option for option in source._with_options if isinstance(option, LoaderCriteriaOption)]
     if criteria:
         count = count.options(*criteria)
@@ -426,6 +427,7 @@ def _entity_rows(statement: Select[Any]) -> Select[Any]:
     rows = _unlocked(statement).order_by(None).group_by(None).limit(None).offset(None)
     # The generative calls returned a copy of its own: what is reset here is shared with no other statement.
     rows._distinct, rows._distinct_on, rows._having_criteria = False, (), ()
+    drop_distinct_on_extension(rows)  # SQLAlchemy 2.1's ext(postgresql.distinct_on(...))
     return rows
 
 

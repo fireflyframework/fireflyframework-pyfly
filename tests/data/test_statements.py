@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import warnings
 from typing import Any
 
 import pytest
@@ -76,6 +77,8 @@ from pyfly.data.relational.sqlalchemy.statements import (
     stream_safe,
 )
 from tests.support.contract_models import ContractChild, ContractLine, ContractParent, ContractVersioned
+
+_SYNTAX_EXTENSIONS = hasattr(Select, "ext")  # SQLAlchemy 2.1
 
 
 class StShelf(Base):
@@ -146,7 +149,9 @@ def _audit_delete(_mapper: Any, _connection: Any, _target: Any) -> None:
 
 
 DIALECTS: dict[str, Dialect] = {
-    "postgresql": postgresql.dialect(),
+    # The driver the postgresql extra installs, named: a bare postgresql.dialect() is SQLAlchemy's default driver,
+    # psycopg2 on 2.0 and psycopg 3 on 2.1, and the two render bound parameters differently.
+    "postgresql": postgresql.asyncpg.dialect(),
     "sqlite": sqlite.dialect(),
     "mysql": mysql.dialect(),
     "mariadb": mysql.dialect(is_mariadb=True),
@@ -303,7 +308,7 @@ class TestExistsProbe:
         sql = _sql(exists_probe(base, ContractParent.name == "x"), DIALECTS["postgresql"])
         assert sql.startswith("SELECT 1 FROM contract_parent WHERE")
         assert "contract_parent.active IS true" in sql and "contract_parent.name =" in sql
-        assert "ORDER BY" not in sql and sql.endswith("LIMIT %(param_1)s")
+        assert "ORDER BY" not in sql and sql.endswith("LIMIT $2::INTEGER")
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -446,7 +451,7 @@ class TestDistinctEntities:
         assert "contract_child.label" in entities.split(" FROM ")[0]  # the collection's rows come with the page
         joined = "FROM contract_parent JOIN contract_child ON contract_parent.id = contract_child.parent_id JOIN"
         assert entities.endswith(joined)
-        assert sql.endswith("WHERE contract_child.label = %(label_1)s ORDER BY pyfly_page.pyfly_o0")
+        assert sql.endswith("WHERE contract_child.label = $1::VARCHAR ORDER BY pyfly_page.pyfly_o0")
         # A FROM that starts with another table: the page's keys join the entity, which that table does not name.
         correlated = (
             select(ContractParent)
@@ -456,6 +461,31 @@ class TestDistinctEntities:
         )
         sql = _sql(distinct_entity_page(correlated, ContractParent, limit=2), dialect)
         assert sql.split(" (SELECT DISTINCT ")[0].endswith("FROM contract_child, contract_parent JOIN")
+
+    @pytest.mark.parametrize(
+        "spell",
+        [
+            pytest.param(lambda statement: statement.distinct(ContractParent.name), id="distinct-expressions"),
+            pytest.param(
+                lambda statement: statement.ext(postgresql.distinct_on(ContractParent.name)),
+                id="distinct_on-extension",
+                marks=pytest.mark.skipif(not _SYNTAX_EXTENSIONS, reason="SQLAlchemy 2.0 has no syntax extensions"),
+            ),
+        ],
+    )
+    def test_a_distinct_on_shapes_only_the_keys(self, spell: Any) -> None:
+        """PostgreSQL's ``DISTINCT ON`` picks the page's keys like any ``DISTINCT``, and the entities are read without
+        it. SQLAlchemy 2.0 spells it ``distinct(*expressions)`` (deprecated on 2.1), 2.1 as a syntax extension that
+        resetting ``_distinct`` leaves behind: the entities' ``SELECT`` rendered ``SELECT ON (...)``."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # 2.1 deprecates distinct(*expressions)
+            statement = spell(_joined_parents()).order_by(ContractParent.name)
+        dialect = DIALECTS["postgresql"]
+        entities, keys = _sql(distinct_entity_page(statement, ContractParent, limit=2), dialect).split(" JOIN (", 1)
+        assert keys.startswith("SELECT DISTINCT ON (contract_parent.name) contract_parent.id AS pyfly_k0, ")
+        assert entities.startswith("SELECT contract_parent.name, ") and " ON (" not in entities.split(" FROM ")[0]
+        count = _sql(distinct_entity_count(statement, ContractParent), dialect)
+        assert "(SELECT DISTINCT ON (contract_parent.name) contract_parent.id " in count
 
     def test_the_statements_own_distinct_grouping_and_limit_shape_only_the_keys(self) -> None:
         """A statement's ``DISTINCT``, ``GROUP BY``, ``HAVING``, ``LIMIT`` and ``OFFSET`` decide which entities the
@@ -473,7 +503,7 @@ class TestDistinctEntities:
         sql = _sql(distinct_entity_page(grouped, ContractParent, offset=2, limit=2), DIALECTS["postgresql"])
         keys, entities = sql.split(") AS pyfly_page ")
         assert "GROUP BY contract_parent.id HAVING count(contract_child.id) > " in keys
-        assert keys.endswith("LIMIT %(param_1)s OFFSET %(param_2)s")  # the page's cut, not the statement's
+        assert keys.endswith("LIMIT $3::INTEGER OFFSET $4::INTEGER")  # the page's cut, not the statement's
         assert sql.startswith("SELECT contract_parent.")  # no DISTINCT on the entities
         assert not any(clause in entities for clause in ("DISTINCT", "GROUP BY", "HAVING", "LIMIT", "OFFSET"))
         assert grouped._distinct and grouped._having_criteria and grouped._limit_clause is not None  # unchanged
@@ -710,6 +740,17 @@ class TestSqlAlchemyInternals:
         assert (plain._distinct, plain._distinct_on, plain._having_criteria) == (False, (), ())
         shaped = plain.group_by(ContractChild.parent_id).having(named).distinct()
         assert (shaped._distinct, shaped._distinct_on, len(shaped._having_criteria)) == (True, (), 1)
+
+    @pytest.mark.skipif(not _SYNTAX_EXTENSIONS, reason="SQLAlchemy 2.0 has no syntax extensions")
+    def test_the_distinct_on_extension(self) -> None:
+        """compat.drop_distinct_on_extension reads 2.1's ``_pre_columns_clause``, where ``ext(distinct_on(...))``
+        goes (``_distinct_on`` stays empty)."""
+        from sqlalchemy.dialects.postgresql.ext import DistinctOnClause
+
+        statement = select(ContractParent).ext(postgresql.distinct_on(ContractParent.name))
+        assert statement._distinct and statement._distinct_on == ()
+        assert isinstance(statement._pre_columns_clause, DistinctOnClause)
+        assert select(ContractParent)._pre_columns_clause is None
 
     def test_an_orm_result_says_when_it_must_be_made_unique(self) -> None:
         """unique_entities and stream_all read ``_unique_filter_state``: set on a result whose joined eager load

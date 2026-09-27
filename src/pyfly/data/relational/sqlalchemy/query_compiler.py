@@ -142,7 +142,7 @@ class QueryMethodCompiler:
             stmt = select(func.count()).select_from(entity)
             stmt = self._apply_where(stmt, parsed, entity, args)
             result = await session.execute(stmt)
-            return cast(bool, result.scalar_one() > 0)
+            return bool(result.scalar_one() > 0)
 
         return _execute
 

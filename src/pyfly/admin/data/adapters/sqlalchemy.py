@@ -31,6 +31,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from pyfly.admin.data.identifiers import EditTokens, decode_id, encode_id, json_value
 from pyfly.admin.data.models import AdminField, AdminOperationContext, AdminPage, AdminQuery, AdminRecord, ModelAdmin
 from pyfly.data.relational.dialect_customizers import begin_immediate
+from pyfly.data.relational.sqlalchemy.compat import python_type as _python_type
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete
 from pyfly.kernel.exceptions import (
     ConflictException,
@@ -77,7 +78,7 @@ class SqlAlchemyAdminProvider:
             column = columns[name]
             adapter = resource.field_adapters.get(name)
             try:
-                python_type = column.type.python_type
+                python_type = _python_type(column.type)
             except NotImplementedError as exc:
                 if adapter is None:
                     raise ValueError(
@@ -121,7 +122,7 @@ class SqlAlchemyAdminProvider:
         predicates: list[Any] = []
         if id is not None:
             keys = [name for name, col in columns.items() if col.primary_key]
-            values = decode_id(id, [columns[name].type.python_type for name in keys])
+            values = decode_id(id, [_python_type(columns[name].type) for name in keys])
             predicates.extend(getattr(resource.model, name) == value for name, value in zip(keys, values, strict=True))
         for name, value in resource.scope(context).items():
             if name not in columns:
@@ -153,7 +154,7 @@ class SqlAlchemyAdminProvider:
                 typed = (
                     resource.field_adapters[name].parse(value)
                     if name in resource.field_adapters
-                    else TypeAdapter(columns[name].type.python_type).validate_python(value)
+                    else TypeAdapter(_python_type(columns[name].type)).validate_python(value)
                 )
             except (KeyError, ValueError, TypeError) as exc:
                 raise ValidationException("Invalid filter value") from exc
@@ -221,7 +222,7 @@ class SqlAlchemyAdminProvider:
                         raise ValueError("Non-nullable field")
                     value = resource.field_adapters[field.name].parse(raw) if raw is not None else None
                 else:
-                    annotation = column.type.python_type
+                    annotation: Any = _python_type(column.type)
                     if column.nullable:
                         annotation = annotation | None
                     value = TypeAdapter(annotation).validate_python(values[field.name])
