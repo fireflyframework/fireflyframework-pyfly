@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from pyfly.eda.adapters.database import DatabaseEventBus
+from pyfly.eda.adapters.database import DatabaseEventBus, _channel_name, listen_driver_supported
 from pyfly.eda.adapters.postgres import (
     PostgresEventBus,
     _normalise_dsn,
-    _quote_ident,
     _sqlalchemy_url,
 )
 from pyfly.eda.ports.outbound import EventPublisher
@@ -42,8 +41,15 @@ class TestPostgresEventBus:
             PostgresEventBus(dsn="postgresql://x/y", channel="x;DROP TABLE")
 
     def test_valid_identifier_accepted(self) -> None:
-        assert _quote_ident("pyfly_eda") == "pyfly_eda"
-        assert _quote_ident("Pyfly_Eda_123") == "Pyfly_Eda_123"
+        assert _channel_name("pyfly_eda") == "pyfly_eda"
+        assert _channel_name("Pyfly_Eda_123") == "Pyfly_Eda_123"
+
+    def test_the_pool_s_connection_listens_only_with_asyncpg(self) -> None:
+        """The LISTEN connection uses asyncpg's listener API: on a pooled psycopg connection it cannot listen
+        (start() failed with AttributeError), so the bus polls there unless it has a listen_dsn of its own."""
+        assert listen_driver_supported("asyncpg", None) is True
+        assert listen_driver_supported("psycopg", None) is False
+        assert listen_driver_supported("psycopg", "postgresql://u:p@h/db") is True
 
     def test_destinations_default_to_all(self) -> None:
         bus = PostgresEventBus(dsn="postgresql://x/y")

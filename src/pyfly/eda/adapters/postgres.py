@@ -46,7 +46,6 @@ Requires ``asyncpg`` (``pip install pyfly[postgresql]`` or ``pip install pyfly[e
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from pyfly.eda.adapters.database import DatabaseEventBus
@@ -55,16 +54,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pyfly.data.relational.datasource_registry import DataSourceRegistry
-
-_VALID_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
-
-def _quote_ident(name: str) -> str:
-    """Validate identifier (channel / group) for safe interpolation."""
-    if not _VALID_IDENT.match(name):
-        msg = f"invalid identifier: {name!r}"
-        raise ValueError(msg)
-    return name
 
 
 def _normalise_dsn(dsn: str) -> str:
@@ -91,7 +80,8 @@ class PostgresEventBus(DatabaseEventBus):
     builds a registry of its own for it (with the framework's pool and dialect setup), closed when it stops.
     With neither, the default datasource. *listen_dsn* is a direct URL for the ``LISTEN`` connection, *channel*
     the notification channel, *auto_create_tables* whether missing outbox tables are created. Every other
-    option is :class:`~pyfly.eda.adapters.database.DatabaseEventBus`'s.
+    option is :class:`~pyfly.eda.adapters.database.DatabaseEventBus`'s. A publish after :meth:`stop` on a bus
+    that built its own registry builds it for that publish alone, and closes it again.
     """
 
     def __init__(
@@ -117,7 +107,7 @@ class PostgresEventBus(DatabaseEventBus):
             group=group,
             poll_interval=poll_interval_s,
             create_tables=auto_create_tables,
-            channel=_quote_ident(channel),
+            channel=channel,
             listen_dsn=listen_dsn,
             **options,
         )
@@ -134,6 +124,9 @@ class PostgresEventBus(DatabaseEventBus):
             self._own_registry = registry
             datasource = registry.primary
         self.outbox.use_datasource(datasource)
+
+    def _owns_datasource(self) -> bool:
+        return self._dsn is not None and (self._own_registry is not None or self.outbox.datasource is None)
 
     async def _release_datasource(self) -> None:
         registry, self._own_registry = self._own_registry, None

@@ -17,7 +17,7 @@ The adapter used to replay ``CREATE TABLE/INDEX IF NOT EXISTS`` in every process
 role needed schema-creation rights for work it never did. The outbox tables are framework tables now: the bus
 creates the missing ones through the framework metadata (``ensure_tables``), and when they all exist it only
 reads the catalog. These tests count the statements a real SQLite file database receives; the privilege
-behaviour itself is proved against PostgreSQL in ``tests/integration/test_eda_postgres_least_privilege.py``.
+behavior itself is proved against PostgreSQL in ``tests/integration/test_eda_postgres_least_privilege.py``.
 """
 
 from __future__ import annotations

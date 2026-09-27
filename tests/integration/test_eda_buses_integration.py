@@ -253,7 +253,12 @@ async def test_concurrent_first_boots_all_succeed_and_a_failed_start_leaves_noth
     key. And a start whose LISTEN connection is refused left its pool behind."""
     from pyfly.eda.adapters.postgres import PostgresEventBus
 
+    async def handler(envelope: EventEnvelope) -> None:
+        del envelope
+
     buses = [PostgresEventBus(dsn=relational_backend.url, group=f"g{n}") for n in range(4)]
+    for bus in buses:
+        bus.subscribe("*", handler)  # a bus that consumes opens its LISTEN connection as it starts
     try:
         outcomes = await asyncio.gather(*(bus.start() for bus in buses), return_exceptions=True)
         assert outcomes == [None] * 4
@@ -267,6 +272,7 @@ async def test_concurrent_first_boots_all_succeed_and_a_failed_start_leaves_noth
     refused = PostgresEventBus(
         dsn=relational_backend.url, listen_dsn=wrong.render_as_string(hide_password=False), group="refused"
     )
+    refused.subscribe("*", handler)
     with pytest.raises(Exception, match="(?i)password|auth|role"):
         await refused.start()
     assert refused.running is False
@@ -280,7 +286,11 @@ async def test_concurrent_starts_open_one_listen_connection(
 ) -> None:
     from pyfly.eda.adapters.postgres import PostgresEventBus
 
+    async def handler(envelope: EventEnvelope) -> None:
+        del envelope
+
     bus = PostgresEventBus(dsn=relational_backend.url, group="once")
+    bus.subscribe("*", handler)
     try:
         await asyncio.gather(*(bus.start() for _ in range(5)))
         assert await _listening(admin) == 1
@@ -297,7 +307,8 @@ async def test_a_lost_listen_connection_is_reopened_and_reported_meanwhile(
     relational_backend: RelationalBackend, admin: AsyncEngine
 ) -> None:
     """C148: after pg_terminate_backend of the LISTEN connection, every event waited for the poll, for the
-    rest of the process, and health said UP."""
+    rest of the process, and nothing said so. It is reopened now; meanwhile the health indicator stays UP (the
+    relay still delivers, at every poll: a DOWN would pull or restart a serving process) and says it is degraded."""
     from pyfly.eda.adapters.postgres import PostgresEventBus
 
     arrived: dict[str, float] = {}
@@ -328,12 +339,15 @@ async def test_a_lost_listen_connection_is_reopened_and_reported_meanwhile(
         assert killed == [(True,)]
         await _wait_for(lambda: bus.listener_state.value == "reconnecting", timeout=5)
         status = await health.health()
-        assert status.status == "DOWN"
+        assert status.status == "UP"
         assert status.details["listener"] == "reconnecting"
+        assert "LISTEN connection is lost" in status.details["degraded"]
+        assert status.details["since"] is not None
 
         await _wait_for(lambda: bus.listener_state.value == "listening", timeout=10)
         assert await _listening(admin) == 1
-        assert (await health.health()).status == "UP"
+        status = await health.health()
+        assert (status.status, status.details["listener"], "degraded" in status.details) == ("UP", "listening", False)
 
         # Wake-ups are back: well under the one-second poll.
         await asyncio.sleep(1.2)  # let the relay settle into a full poll wait
@@ -343,6 +357,73 @@ async def test_a_lost_listen_connection_is_reopened_and_reported_meanwhile(
         assert arrived["after"] - sent < 0.5
     finally:
         await bus.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_a_bus_that_only_publishes_opens_no_listen_connection_and_stays_up(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """A bus with no handler (a process that only publishes) opened a LISTEN connection it had no use for, and
+    once that connection was lost (a restart, a failover, idle_session_timeout) nothing reopened it: its relay
+    ran no rounds without a subscription, and its health stayed DOWN for good."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="publisher", poll_interval_s=0.5)
+    health = EventPublisherHealthIndicator(bus)
+    arrived: list[str] = []
+    try:
+        await bus.start()
+        assert (bus.listener_state.value, await _listening(admin)) == ("off", 0)
+        await bus.publish("d", "published", {})
+        await asyncio.sleep(1.5)  # three polls
+        status = await health.health()
+        assert (status.status, status.details["listener"]) == ("UP", "off")
+
+        async def handler(envelope: EventEnvelope) -> None:
+            arrived.append(envelope.event_type)
+
+        bus.subscribe("*", handler)  # it consumes from now on: its relay opens the connection
+        await _wait_for(lambda: bus.listener_state.value == "listening", timeout=5)
+        assert await _listening(admin) == 1
+        await bus.publish("d", "consumed", {})
+        await _wait_for(lambda: "consumed" in arrived)
+    finally:
+        await bus.stop()
+    assert await _listening(admin) == 0
+
+
+async def _connections(admin: AsyncEngine) -> int:
+    """How many other backends are connected to the test's database."""
+    async with admin.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+@pytest.mark.backends(PG)
+async def test_a_publish_after_stop_on_a_bus_given_a_url_leaves_no_pool_behind(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """Outside an application context a bus given a URL builds a registry of its own. A publish after stop()
+    built it again, and only another stop() closed it: its pooled connection stayed open."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="late")
+    await bus.start()
+    await bus.stop()
+    assert await _connections(admin) == 0
+
+    await asyncio.gather(*(bus.publish("d", "late", {"n": n}) for n in range(3)))  # written, nothing kept open
+    assert await _connections(admin) == 0
+    async with admin.connect() as conn:
+        assert (await conn.execute(text(f"SELECT count(*) FROM {OUTBOX_TABLE}"))).scalar_one() == 3
 
 
 @requires_docker
