@@ -16,7 +16,16 @@
 Mirrors Java's ``CommandBus`` interface and ``DefaultCommandBus``
 implementation.  The full pipeline is:
 
-    correlate → validate → authorize → execute → metrics → events
+    correlate → validate → authorize → execute → metrics → events → query-cache invalidation
+
+Query-cache invalidation (with a ``query_cache``): once the command's unit of work commits (at once when
+it runs outside one; nothing when it fails or rolls back), the bus evicts
+
+- the command's ``get_cache_key()`` (a query's cache key) for every caller, also under every registered
+  query handler's ``cache_key_prefix``;
+- every cached result of the query handlers tagged with ``@cache_evict(EventType)`` for an event the
+  command produced (``domain_events`` on its result or on the command) or for an event its own handler is
+  tagged with.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import logging
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pyfly.cqrs.authorization.service import AuthorizationService
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_group
 from pyfly.cqrs.command.handler import CommandHandler
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
@@ -75,7 +85,8 @@ class DefaultCommandBus:
     3. Authorize command
     4. Execute handler
     5. Publish domain events (if publisher available)
-    6. Record metrics
+    6. Invalidate the query cache after the commit (if a query cache is available)
+    7. Record metrics
     """
 
     def __init__(
@@ -86,6 +97,8 @@ class DefaultCommandBus:
         metrics: CqrsMetricsService | None = None,
         event_publisher: Any | None = None,
         event_failure_strategy: EventFailureStrategy = EventFailureStrategy.LOG,
+        *,
+        query_cache: QueryCacheAdapter | None = None,
     ) -> None:
         self._registry = registry
         self._validation = validation
@@ -93,6 +106,7 @@ class DefaultCommandBus:
         self._metrics = metrics or CqrsMetricsService()
         self._event_publisher = event_publisher
         self._event_failure_strategy = event_failure_strategy
+        self._query_cache = query_cache
 
     # ── CommandBus protocol ────────────────────────────────────
 
@@ -143,7 +157,11 @@ class DefaultCommandBus:
             if self._event_publisher:
                 await self._try_publish_events(command, result)
 
-            # 6. Metrics
+            # 6. Query-cache invalidation (after the commit inside a unit of work)
+            if self._query_cache is not None and self._query_cache.is_available:
+                await self._invalidate_queries(command, result, handler)
+
+            # 7. Metrics
             duration = self._metrics.now() - start
             self._metrics.record_command_success(command, duration)
 
@@ -170,6 +188,33 @@ class DefaultCommandBus:
                 CorrelationContext.clear()
             else:
                 CorrelationContext.set_correlation_id(previous_cid)
+
+    async def _invalidate_queries(self, command: Command[Any], result: Any, handler: CommandHandler[Any, Any]) -> None:
+        """Evict what *command* made stale (see the module docs). The query cache defers the evictions to
+        the commit of the current unit of work; a failing eviction is logged, never raised."""
+        cache = self._query_cache
+        assert cache is not None
+        try:
+            key = command.get_cache_key()
+            if key:
+                await evict_query_key(cache, self._registry, key)
+            produced = self._produced_event_types(command, result, handler)
+            if not produced:
+                return
+            for query_type in sorted(self._registry.get_registered_query_types(), key=lambda t: t.__qualname__):
+                query_handler = self._registry.find_query_handler(query_type)
+                tags = query_handler.get_cache_evict_events()
+                if query_handler.supports_caching() and any(issubclass(p, t) for p in produced for t in tags):
+                    await cache.evict_prefix(query_cache_group(query_handler))
+        except Exception as exc:  # noqa: BLE001 — the command has run; a stale cache must not fail it
+            _logger.error("Query-cache invalidation failed for %s: %s", type(command).__name__, exc, exc_info=True)
+
+    @staticmethod
+    def _produced_event_types(command: Any, result: Any, handler: CommandHandler[Any, Any]) -> set[type]:
+        events = getattr(result, "domain_events", None) or getattr(command, "domain_events", None) or ()
+        produced = {type(event) for event in events}
+        produced.update(t for t in getattr(type(handler), "__pyfly_cache_evict_events__", ()) if isinstance(t, type))
+        return produced
 
     async def _try_publish_events(self, command: Any, result: Any) -> None:
         """Publish domain events if the handler/command produced any.

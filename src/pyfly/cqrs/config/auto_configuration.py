@@ -64,11 +64,11 @@ class CqrsAutoConfiguration:
     * :class:`CommandEventPublisher` (``EdaCommandEventPublisher`` when an EDA
       :class:`~pyfly.eda.ports.outbound.EventPublisher` bean is present, else
       :class:`NoOpEventPublisher`)
-    * :class:`DefaultCommandBus`
+    * :class:`DefaultCommandBus` (it invalidates the query cache after a command commits)
     * :class:`QueryCacheAdapter` (conditional on cache availability)
     * :class:`EdaCacheInvalidationBridge` (when an EDA ``EventPublisher`` bean is
       present; ``None`` otherwise)
-    * :class:`DefaultQueryBus`
+    * :class:`DefaultQueryBus` (``pyfly.cqrs.query.caching_enabled: false`` turns its cache off)
     """
 
     @bean
@@ -126,13 +126,17 @@ class CqrsAutoConfiguration:
         authorization: AuthorizationService,
         metrics: CqrsMetricsService,
         event_publisher: CommandEventPublisher,
+        query_cache: QueryCacheAdapter | None = None,
     ) -> DefaultCommandBus:
+        # The query cache lets the bus evict what a committed command made stale (Command.get_cache_key()
+        # and @cache_evict event tags).
         return DefaultCommandBus(
             registry=registry,
             validation=validation,
             authorization=authorization,
             metrics=metrics,
             event_publisher=event_publisher,
+            query_cache=query_cache,
         )
 
     @bean
@@ -187,4 +191,5 @@ class CqrsAutoConfiguration:
             metrics=metrics,
             cache_adapter=cache,
             default_cache_ttl=props.query.cache_ttl,
+            caching_enabled=props.query.caching_enabled,
         )

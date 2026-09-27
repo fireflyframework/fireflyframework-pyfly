@@ -45,7 +45,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pyfly.cache.serialization import restore, uncacheable_type
 from pyfly.cqrs.authorization.service import AuthorizationService
-from pyfly.cqrs.cache.adapter import QueryCacheAdapter, query_cache_key, scoped_key
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_key, scoped_key
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
@@ -262,16 +262,3 @@ class DefaultQueryBus:
             return  # no negative caching unless the handler opts in
         ttl_seconds = handler.get_cache_ttl_seconds() or self._default_cache_ttl
         await self._cache.put(cache_key, result, ttl=timedelta(seconds=ttl_seconds))
-
-
-async def evict_query_key(cache: QueryCacheAdapter, registry: HandlerRegistry, cache_key: str) -> None:
-    """Evict *cache_key* (a query's ``get_cache_key()``) for every caller's scope, as stored by a handler
-    without a ``cache_key_prefix`` and by each registered handler that declares one."""
-    await cache.evict(cache_key)
-    prefixes = {
-        prefix
-        for query_type in registry.get_registered_query_types()
-        if (prefix := registry.find_query_handler(query_type).get_cache_key_prefix()) is not None
-    }
-    for prefix in sorted(prefixes):
-        await cache.evict(f"{prefix}:{cache_key}")

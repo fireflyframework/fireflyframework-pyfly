@@ -39,6 +39,7 @@ from pyfly.cache.transaction import TransactionAwareCache
 from pyfly.cqrs.types import QueryCacheScope
 
 if TYPE_CHECKING:
+    from pyfly.cqrs.command.registry import HandlerRegistry
     from pyfly.cqrs.context.execution_context import ExecutionContext
     from pyfly.cqrs.query.handler import QueryHandler
 
@@ -177,3 +178,16 @@ class QueryCacheAdapter:
     @property
     def is_available(self) -> bool:
         return self._cache is not None
+
+
+async def evict_query_key(cache: QueryCacheAdapter, registry: HandlerRegistry, cache_key: str) -> None:
+    """Evict *cache_key* (a query's ``get_cache_key()``) for every caller's scope, as stored by a handler
+    without a ``cache_key_prefix`` and by each registered handler that declares one."""
+    await cache.evict(cache_key)
+    prefixes = {
+        prefix
+        for query_type in registry.get_registered_query_types()
+        if (prefix := registry.find_query_handler(query_type).get_cache_key_prefix()) is not None
+    }
+    for prefix in sorted(prefixes):
+        await cache.evict(f"{prefix}:{cache_key}")
