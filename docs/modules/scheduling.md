@@ -599,7 +599,11 @@ task = executor.submit_sync(cpu_heavy_function, arg1, arg2)
 **API:**
 
 - **start()**: No-op (ready after construction).
-- **stop()**: Waits for all pending tasks (as `AsyncIOTaskExecutor.stop()`), clears task set, shuts down the thread pool.
+- **stop()**: Waits for all pending tasks (as `AsyncIOTaskExecutor.stop()`), clears task set, shuts down the
+  thread pool and waits for its threads off the event loop: a thread may still be running a synchronous job
+  whose run was cancelled at its `lock_ttl`, and the application goes on meanwhile. When the wait is cut short
+  (`pyfly.context.shutdown-timeout`), the functions still queued never start and a running one finishes on its
+  thread.
 
 ---
 

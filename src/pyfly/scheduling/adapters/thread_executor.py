@@ -61,8 +61,19 @@ class ThreadPoolTaskExecutor:
         """No-op -- thread pool is ready after construction."""
 
     async def stop(self) -> None:
-        """Stop the executor and thread pool, waiting for pending tasks (cancelling them if the wait is
-        cancelled; a thread already running a function finishes it)."""
-        await drain(self._tasks)
-        self._tasks.clear()
-        self._executor.shutdown(wait=True)
+        """Stop the executor and thread pool, waiting for pending tasks, then for the pool's threads.
+
+        A thread may still be running a function whose task has ended (a synchronous ``@scheduled`` job
+        cancelled at its ``lock_ttl`` goes on in its thread): it is waited for off the event loop, so the
+        application goes on meanwhile. When the wait is cancelled (the context's shutdown timeout), the pending
+        tasks are cancelled and awaited, the functions still queued never start, and a thread already running a
+        function finishes it on its own.
+        """
+        try:
+            await drain(self._tasks)
+            self._tasks.clear()
+            await asyncio.to_thread(self._executor.shutdown, True)
+        except BaseException:
+            self._tasks.clear()
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            raise

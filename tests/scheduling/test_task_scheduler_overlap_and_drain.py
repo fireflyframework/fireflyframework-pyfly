@@ -32,8 +32,10 @@ The database side (real ``@transactional`` runs, a real lease lock) is in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -357,6 +359,73 @@ async def test_a_sync_job_runs_on_the_thread_executors_pool() -> None:
     await scheduler.stop()
 
     assert bean.threads[0].startswith("pyfly-pool")
+
+
+class OverrunningSyncJob:
+    """A synchronous job past its lock's ttl: its run is cancelled, but its thread goes on."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    @scheduled(fixed_rate=timedelta(seconds=30), lock="sync", lock_ttl=timedelta(seconds=0.05))
+    def work(self) -> None:
+        self.started.set()
+        self.release.wait(1.0)
+
+
+class Heartbeat:
+    """Counts the event loop's turns while it is free."""
+
+    def __init__(self) -> None:
+        self.ticks = 0
+        self._task = asyncio.create_task(self._beat())
+
+    async def _beat(self) -> None:
+        while True:
+            await asyncio.sleep(0.01)
+            self.ticks += 1
+
+    async def stop(self) -> None:
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+
+async def _start_overrunning_sync_job() -> tuple[OverrunningSyncJob, TaskScheduler]:
+    bean = OverrunningSyncJob()
+    scheduler = TaskScheduler(executor=ThreadPoolTaskExecutor(max_workers=1), lock=InProcessDistributedLock())
+    scheduler.discover([bean])
+    with patch.object(logging.getLogger("pyfly.scheduling.task_scheduler"), "error"):  # the ttl overrun
+        await scheduler.start()
+        await _until(bean.started.is_set)
+        await asyncio.sleep(0.1)  # its run was cancelled at the ttl; its thread is still running
+    return bean, scheduler
+
+
+async def test_stopping_waits_for_a_thread_still_running_without_blocking_the_event_loop() -> None:
+    bean, scheduler = await _start_overrunning_sync_job()
+    heartbeat = Heartbeat()
+    stopping = asyncio.create_task(scheduler.stop())
+    await asyncio.sleep(0.2)
+    try:
+        assert not stopping.done()  # it waits for the thread
+        assert heartbeat.ticks >= 5  # while the event loop goes on
+    finally:
+        bean.release.set()
+        await asyncio.wait_for(stopping, 5)
+        await heartbeat.stop()
+
+
+async def test_a_stop_cut_short_leaves_a_thread_still_running_behind_at_once() -> None:
+    bean, scheduler = await _start_overrunning_sync_job()
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(scheduler.stop(), 0.05)  # the context's shutdown timeout
+        assert time.monotonic() - started < 0.5  # not the thread's remaining second
+    finally:
+        bean.release.set()
 
 
 async def test_runs_start_with_the_transaction_state_cleared() -> None:
