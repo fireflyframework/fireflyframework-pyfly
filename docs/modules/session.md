@@ -4,8 +4,8 @@ The `pyfly.session` module provides server-side HTTP session management with a
 pluggable store backend. It mirrors the Spring Session model: a `SessionFilter`
 reads a session cookie on every request, loads (or creates) an `HttpSession`
 from a `SessionStore`, attaches it to `request.state.session`, and persists
-changes after the response. Two stores ship out of the box — in-memory for
-development and Redis for production.
+changes after the response. Three stores ship out of the box — in-memory for
+development, and Redis or a SQL table (any relational backend) for production.
 
 ---
 
@@ -36,7 +36,7 @@ automatically:
 pyfly:
   session:
     enabled: true
-    store: memory         # memory (default) | redis
+    store: memory         # memory (default) | redis | postgres
     cookie-name: PYFLY_SESSION   # default
     ttl: 1800             # seconds (default: 30 minutes)
     cookie:
@@ -48,15 +48,20 @@ pyfly:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `pyfly.session.enabled` | — | Must be `true` to activate session support |
-| `pyfly.session.store` | `memory` | Store backend: `memory` or `redis` |
+| `pyfly.session.store` | `memory` | Store backend: `memory`, `redis` or `postgres` (case-insensitive); any other value raises `ValueError` at startup |
 | `pyfly.session.cookie-name` | `PYFLY_SESSION` | Name of the session cookie |
 | `pyfly.session.ttl` | `1800` | Session lifetime in seconds |
 | `pyfly.session.cookie.secure` | `false` | Set `true` to mark the cookie `Secure` (HTTPS only) |
 | `pyfly.session.redis.url` | `redis://localhost:6379/0` | Redis connection URL (used when `store=redis`) |
+| `pyfly.session.postgres.datasource` | primary | The datasource of the SQL store (`store=postgres`) |
+| `pyfly.session.postgres.url` | — | Alias resolved through the `DataSourceRegistry`: the registered datasource with that URL, or a new `session` datasource |
 
 The `redis` store requires `redis.asyncio` to be installed
 (`pip install redis`). If it is not available, the auto-configuration falls
-back silently to the in-memory store.
+back to the in-memory store and logs a `session_store_fallback` WARNING.
+
+> **Before 26.09.08** any `store` value other than `redis` (`jdbc`, `postgres`,
+> a typo) silently became the in-memory store.
 
 ---
 
@@ -130,6 +135,24 @@ client = aioredis.from_url("redis://localhost:6379/0")
 store = RedisSessionStore(client=client)
 ```
 
+### `SqlSessionStore`
+
+```python
+from pyfly.session.adapters.sql_session_store import SqlSessionStore
+```
+
+A session store in the application's relational database (`store=postgres`), Spring Session JDBC's
+place: every instance shares the sessions with no Redis. It runs on every backend SQLAlchemy supports
+(PostgreSQL, MySQL, MariaDB, SQLite) on the framework table `pyfly_sessions` (`session_id`, the attributes
+as JSON with the Redis store's type tags, `expires_at` as a UTC instant, indexed).
+`SqlSessionStore(engine_factory, *, table="pyfly_sessions", create_table=True, purge_interval=timedelta(seconds=60), clock=None)`:
+`engine_factory` is the datasource (an `AsyncEngine`, a registry `DataSource`, a datasource name, or a
+callable returning one). `start()` creates the table when the schema strategy allows it
+(`pyfly.data.relational.ddl-auto`), otherwise checks it and fails fast. A session is read only before it
+expires; a write purges a batch of expired sessions at most once per `purge_interval`, after its commit,
+and `purge_expired()` deletes them all. Each operation joins the unit of work bound for the store's
+datasource, and outside one is a single statement.
+
 ### `SessionFilter`
 
 ```python
@@ -175,8 +198,10 @@ when `pyfly.session.concurrency.enabled=true` — see
 
 `SessionStoreAutoConfiguration` checks `pyfly.session.store`:
 
-- `redis` → `RedisSessionStore` (requires `redis.asyncio`; falls back to memory if unavailable)
-- any other value → `InMemorySessionStore`
+- `redis` → `RedisSessionStore` (requires `redis.asyncio`; falls back to memory, with a WARNING, if unavailable)
+- `postgres` → `SqlSessionStore` on the datasource `pyfly.session.postgres.*` names (the primary by default),
+  resolved in the context's `DataSourceRegistry`
+- `memory` → `InMemorySessionStore`; any other value raises `ValueError`
 
 Provide your own `SessionStore` bean to bypass auto-configuration entirely.
 
@@ -228,6 +253,26 @@ pyfly:
   pending session and responds with HTTP `401` and body
   `{"error": "max_sessions", ...}`.
 
+**Only live sessions count, and the cap holds under concurrency.**
+
+- A session counts toward the cap while the session store has it. At each login the controller drops the
+  registrations of the principal's sessions the store no longer has (expired, invalidated by the
+  application, lost in a restart), as Spring's `getAllSessions(principal, false)` leaves expired ones out, so
+  a user whose sessions ended without a logout is never locked out. The login handler saves the session it
+  logs in (`request.state.persist_session`, set by the `SessionFilter`) before registering it, so a
+  concurrent login never takes it for a dead one.
+- Counting, evicting and registering is one atomic step of the registry
+  (`AtomicSessionRegistry.register_limited`): one unit of work that holds the principal's row on SQL, one Lua
+  script on Redis, one lock in memory. Concurrent logins of one principal, on one instance or several, never
+  exceed the cap. A custom registry without that method is serialized per principal within the process.
+- The SQL registry is purged: a registration comes due for a liveness check one session TTL after it was
+  registered or renewed; a login (at most once a minute) or `controller.purge_expired()` drops the due
+  registrations whose session is gone and renews the others.
+
+> **Before 26.09.08** the cap was a list and a register in separate transactions (max-sessions=1 let
+> concurrent logins all in), and no registration was ever removed but by logout or eviction: with
+> `reject-new`, a user whose sessions expired could never log in again.
+
 ### Registry Backends
 
 The cap is enforced against a `SessionRegistry` — a per-principal index of live
@@ -238,7 +283,7 @@ the box, selected by `pyfly.session.concurrency.registry`:
 |---|---|---|---|
 | `memory` (default) | `InMemorySessionRegistry` | Single process only | none |
 | `redis` | `RedisSessionRegistry` | Cross-process / multi-instance | `redis.asyncio` installed |
-| `postgres` | `PostgresSessionRegistry` | Cross-process / durable | SQLAlchemy `AsyncEngine` bean |
+| `postgres` | `PostgresSessionRegistry` | Cross-process / durable | a relational datasource (any SQL backend) |
 
 - **`memory`** — in-process index guarded by an `asyncio.Lock` (mirrors
   `InMemorySessionStore`). Each app instance counts only its own sessions, so
@@ -252,11 +297,20 @@ the box, selected by `pyfly.session.concurrency.registry`:
   comes from `pyfly.session.concurrency.redis.url`, falling back to
   `pyfly.session.redis.url`, then `redis://localhost:6379/0`.
 - **`postgres`** — a durable, queryable, cross-process index for
-  relational-only deployments (no Redis required). Session ids are stored in a
-  Postgres table (`session_id` PK, `principal`, `created_at`), created lazily
-  and idempotently on first use. Resolves a SQLAlchemy `AsyncEngine` bean from
-  the container; this requires the data module / an `AsyncEngine` to be
-  configured.
+  relational-only deployments (no Redis required), on every backend SQLAlchemy
+  supports. Registrations live in the framework table
+  `pyfly_session_registrations` (`session_id` PK, `principal`, `created_at`,
+  `expires_at`: when the registration comes due for a liveness check), and
+  `pyfly_session_principals` holds one row per principal, which a capped login
+  locks. The tables are created when the controller starts if the schema
+  strategy allows it, otherwise checked. The datasource is the one
+  `pyfly.session.concurrency.postgres.datasource` names, or the one
+  `pyfly.session.concurrency.postgres.url` resolves to in the context's
+  `DataSourceRegistry`, or the primary. Pair it with a shared session store
+  (`store=postgres` or `redis`): with the in-memory store, evicting a session
+  another instance holds leaves it usable there, and the auto-configuration
+  logs a `session_registry_not_shared` WARNING. Registrations an earlier
+  release wrote to `pyfly_session_registry` are not read (drop that table).
 
 ### Configuration (Registry Backend)
 
@@ -274,7 +328,9 @@ pyfly:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `pyfly.session.concurrency.registry` | `memory` | Registry backend: `memory`, `redis`, or `postgres` (case-insensitive) |
+| `pyfly.session.concurrency.registry` | `memory` | Registry backend: `memory`, `redis`, or `postgres` (case-insensitive); any other value raises `ValueError` |
+| `pyfly.session.concurrency.postgres.datasource` | primary | The datasource of the SQL registry |
+| `pyfly.session.concurrency.postgres.url` | — | Alias resolved through the `DataSourceRegistry` (a new `session-registry` datasource for another URL) |
 | `pyfly.session.concurrency.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis connection URL (used when `registry=redis`) |
 
 ### Auto-Configuration
@@ -290,13 +346,15 @@ it to `OAuth2LoginHandler`, so no manual wiring is required:
 |---|---|---|
 | `SessionConcurrencyAutoConfiguration` | `session_concurrency_controller` | `pyfly.session.concurrency.enabled=true` |
 
-The Redis client and SQLAlchemy `AsyncEngine` are obtained in the
-auto-configuration (the composition root) and injected into the adapters — the
-adapters never import their driver at module scope (hexagonal wiring).
+The Redis client and the datasource are obtained in the auto-configuration
+(the composition root) and injected into the adapters — the adapters never
+import their driver at module scope (hexagonal wiring).
 
-The controller's `session_deleter` is wired to `SessionStore.delete`, so an
-evicted session is purged from whichever store backend is active (memory or
-Redis).
+The controller gets the `SessionStore` (to tell live sessions from dead ones)
+and its `delete` as the `session_deleter`, so an evicted session is deleted from
+whichever store backend is active; it ends for every instance when the store is
+shared (Redis or SQL). The controller is a lifecycle bean: its start creates or
+checks the SQL registry's tables.
 
 ### Key APIs
 
@@ -334,10 +392,23 @@ class SessionRegistry(Protocol):
     async def count(self, principal: str) -> int: ...
 ```
 
+`AtomicSessionRegistry` adds the capped registration the controller uses when a
+registry has it:
+
+```python
+from pyfly.session.concurrency import AtomicSessionRegistry, SessionRegistration
+
+class AtomicSessionRegistry(Protocol):
+    async def register_limited(
+        self, principal: str, session_id: str, created_at: float, *, max_sessions: int, evict_oldest: bool
+    ) -> SessionRegistration: ...  # SessionRegistration(accepted, evicted)
+```
+
 `InMemorySessionRegistry` is the in-process implementation (guarded by an
 `asyncio.Lock`), the default used by auto-configuration when
 `registry=memory`. Two cross-process implementations ship as adapters; both
-have their driver/engine injected by the composition root:
+have their driver/datasource injected by the composition root, and both
+implement `register_limited`:
 
 ```python
 from pyfly.session.adapters.redis_registry import RedisSessionRegistry
@@ -347,12 +418,16 @@ from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 `RedisSessionRegistry(client, *, key_prefix="pyfly:session:user:", ttl=86400)`
 stores each principal's sessions in a Redis sorted set (oldest-first by
 `created_at`). The `ttl` (seconds) bounds orphan growth and slides forward on
-each `register`. Used when `registry=redis`.
+each `register`. Its `register_limited` is one Lua script over the set. Used
+when `registry=redis`.
 
-`PostgresSessionRegistry(engine_factory, *, table="pyfly_session_registry")`
-stores sessions in a Postgres table. `engine_factory` is a zero-arg callable
-returning a SQLAlchemy `AsyncEngine` (resolved lazily on first use); the table
-name is validated as a SQL identifier. Used when `registry=postgres`.
+`PostgresSessionRegistry(engine_factory, *, table="pyfly_session_registrations", principals_table="pyfly_session_principals", ttl=timedelta(seconds=1800), create_table=True, clock=None)`
+stores sessions in SQL tables. `engine_factory` is the datasource (an
+`AsyncEngine`, a registry `DataSource`, a datasource name, or a callable
+returning one, resolved on first use); the table names are validated as SQL
+identifiers; `ttl` (the session timeout) is how long a registration goes before
+its liveness is checked again. Its operations never join a unit of work of the
+caller. Used when `registry=postgres`.
 
 You may still provide your own `SessionRegistry` bean to override the
 auto-configured one entirely.
@@ -361,9 +436,10 @@ auto-configured one entirely.
 
 | Method | Description |
 |---|---|
-| `__init__(registry, policy, *, session_deleter=None)` | `session_deleter` is an `async (session_id) -> None` callable used to evict store entries |
-| `on_login(principal, session_id, created_at)` | Registers the session, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise |
+| `__init__(registry, policy, *, session_deleter=None, session_store=None, purge_interval=timedelta(seconds=60))` | `session_store` tells live sessions from dead ones; `session_deleter` (by default the store's `delete`) is an `async (session_id) -> None` callable used to evict store entries |
+| `on_login(principal, session_id, created_at)` | Drops the principal's dead sessions, then registers the session atomically, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it |
 | `on_logout(principal, session_id)` | Deregisters the session |
+| `purge_expired()` | Drops the due registrations whose session is gone and renews the others (SQL registry); returns how many were dropped |
 
 Constructing a controller manually:
 
@@ -379,7 +455,7 @@ store = InMemorySessionStore()
 controller = SessionConcurrencyController(
     InMemorySessionRegistry(),
     ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new"),
-    session_deleter=store.delete,
+    session_store=store,
 )
 
 # allowed is False once the cap is exceeded under "reject-new"

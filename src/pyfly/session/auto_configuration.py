@@ -46,10 +46,10 @@ def _backend(config: Config, key: str, accepted: tuple[str, ...]) -> str:
     return value
 
 
-def _relational_datasource(config: Config, container: Container | None, prefix: str, *, name: str) -> Any:
-    """The datasource of a SQL session component, from the context's ``DataSourceRegistry``: ``<prefix>.datasource``
-    names one, ``<prefix>.url`` is an alias resolved through the registry, and with neither it is the
-    primary. Returns the datasource and whether the component may create its tables."""
+def _relational_datasource(config: Config, container: Container | None, prefix: str, *, name: str) -> tuple[Any, bool]:
+    """The datasource of a SQL session component, from the context's ``DataSourceRegistry``
+    (``<prefix>.datasource`` names one, ``<prefix>.url`` is an alias resolved through the registry, and with
+    neither it is the primary), and whether the component may create its tables."""
     from pyfly.data.relational.framework_schema import context_datasource_registry, creates_tables, module_datasource
 
     registry = context_datasource_registry(config, container)
