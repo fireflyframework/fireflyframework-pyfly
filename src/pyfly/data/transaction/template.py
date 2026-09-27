@@ -50,7 +50,9 @@ Completion rules:
   cancelled: the unit is poisoned (its connection discarded) and ``CancelledError`` is raised, chained
   from the driver's error (:func:`~pyfly.data.transaction.unit_of_work.cancellation_replaced_by`). A
   boundary that starts in cleanup code (``except CancelledError:``, ``finally:``, anyio's shielded cleanup)
-  counts only the cancel requests that arrive after it started, so its failures keep their type.
+  counts only the cancel requests that arrive after it started, so its failures keep their type. A
+  statement's failure keeps its type in the cancelled unit's own cleanup too (its guarded operation judged
+  it); any other exception raised there ends the unit as cancelled and is logged at WARNING.
 """
 
 from __future__ import annotations
@@ -90,6 +92,7 @@ from pyfly.data.transaction.unit_of_work import (
     UnitStatus,
     cancel_requests,
     cancellation_replaced_by,
+    judged_by_its_operation,
     raise_cancellation,
 )
 
@@ -342,12 +345,25 @@ def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None, since
     Returns whether *error* is a driver error that stood in for a cancellation requested after *since* (the
     task's cancel requests when the boundary started): the boundary then raises the cancellation instead
     (:func:`~pyfly.data.transaction.unit_of_work.raise_cancellation`).
+
+    A statement's own failure never gets here as a stand-in: the guarded operation that ran it judged it
+    already. What does is an exception no operation judged, raised while the unit was being cancelled: a
+    driver error from a path outside the operation guard (a raw ``AsyncConnection``), or an exception the
+    unit's own cleanup code raised (a ``finally:`` block in the body). The unit cannot tell them apart, so
+    both end it as cancelled, as the cancel scope that fired expects; the exception is logged at WARNING
+    with its traceback so that a business exception is never lost silently.
     """
     if isinstance(error, asyncio.CancelledError):
         unit.poisoned = True
         return False
     if cancellation_replaced_by(error, since=since):
+        assert error is not None
         unit.poisoned = True
+        _logger.warning(
+            "transaction_error_replaced_by_cancellation",
+            extra={"datasource": unit.datasource, "unit": unit.describe(), "error": type(error).__name__},
+            exc_info=(type(error), error, error.__traceback__),
+        )
         return True
     return False
 
@@ -701,8 +717,12 @@ def _failed_within_savepoint(manager: TransactionManager, unit: UnitOfWork, save
 
 def _driver_error(error: BaseException | None) -> bool:
     """Whether *error* may be a driver's stand-in for a cancellation (an ordinary exception that is not the
-    unit of work's own, nor the end of a streamed result)."""
-    return isinstance(error, Exception) and not isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
+    unit of work's own, nor the end of a streamed result, nor one its guarded operation judged its own)."""
+    return (
+        isinstance(error, Exception)
+        and not isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
+        and not judged_by_its_operation(error)
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------

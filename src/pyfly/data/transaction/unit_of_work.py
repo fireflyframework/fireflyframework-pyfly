@@ -45,12 +45,14 @@ child task may use its parent's unit. That is made safe here:
   turned back into the cancellation (:func:`cancellation_replaced_by`), so a cancel scope still catches it.
   Only a cancel request that arrived while the operation ran counts: cleanup code that runs while its task
   is still being cancelled (``except CancelledError:``, ``finally:``, anyio's shielded cleanup) sees its
-  own failures as themselves.
+  own failures as themselves, and a boundary around it never overrules that judgment
+  (:func:`judged_by_its_operation`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import itertools
 from contextvars import ContextVar
@@ -117,7 +119,10 @@ def cancellation_replaced_by(error: BaseException | None, *, since: int) -> bool
     stays above zero in ``except CancelledError:``, in ``finally:`` and in anyio's
     ``with CancelScope(shield=True):`` until the cancel scope exits), and an ordinary failure of the data
     access done there, or a business exception it raises, is its own outcome. The unit of work's own errors,
-    and the end of a streamed result, never stand in for a cancellation.
+    and the end of a streamed result, never stand in for a cancellation, and neither does an error that the
+    guarded operation which raised it judged its own already (:func:`judged_by_its_operation`), nor one
+    raised from such an error (``raise ... from``): a boundary that started before the cancel request
+    arrived must not overrule the statement that ran in cleanup after it.
     """
     if (
         error is None
@@ -125,7 +130,30 @@ def cancellation_replaced_by(error: BaseException | None, *, since: int) -> bool
         or isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
     ):
         return False
-    return cancel_requests() > since
+    return cancel_requests() > since and not judged_by_its_operation(error)
+
+
+_JUDGED = "__pyfly_judged_by_its_operation__"
+"""The attribute a guarded operation sets on an error it raised as itself (not as a cancellation)."""
+
+
+def judged_by_its_operation(error: BaseException) -> bool:
+    """Whether *error*, or an error it was raised from (its ``__cause__`` chain), left a guarded operation
+    on a unit as itself: the operation found no cancel request that arrived while it ran, so the error is
+    the statement's own outcome (a duplicate saved in cleanup code), never a driver's stand-in for one."""
+    current: BaseException | None = error
+    for _ in range(32):  # a chain is short; this only bounds a pathological cycle
+        if current is None:
+            return False
+        if getattr(current, _JUDGED, False):
+            return True
+        current = current.__cause__
+    return False
+
+
+def _judged(error: BaseException) -> None:
+    with contextlib.suppress(AttributeError, TypeError):  # an exception type that refuses attributes
+        setattr(error, _JUDGED, True)
 
 
 def _cancellation_behind(error: BaseException) -> asyncio.CancelledError | None:
@@ -256,6 +284,8 @@ class _Operation:
             # the connection is in an unknown state, and the caller must see the cancellation.
             unit.poisoned = True
             await raise_cancellation(exc)
+        if isinstance(exc, Exception):
+            _judged(exc)  # the statement's own failure: a boundary around it must not take it for a stand-in
         unit.operation_failed(exc)
 
 

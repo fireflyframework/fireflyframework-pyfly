@@ -26,7 +26,13 @@ there must see its ordinary failures as themselves. Here:
 - a participant that fails in its own unit's cancellation handler raises its own exception there;
 - an ``infrastructure_unit`` that hits a duplicate in shielded cleanup raises ``IntegrityError``;
 - a unit whose body swallowed its own deadline's cancellation (``Task.uncancel()``) and then raised a
-  business exception raises that exception, not ``TransactionTimedOutError``.
+  business exception raises that exception, not ``TransactionTimedOutError``;
+- a ``@transactional`` body whose own ``finally:`` cleanup (native, or anyio's shielded scope) saves a
+  duplicate while its unit is being cancelled raises ``IntegrityError``: the statement's own operation
+  judged that failure, so the unit never mistakes it for a driver's stand-in for the cancellation;
+- a business exception such a body raises there ends the unit as cancelled, because the unit cannot tell
+  it from a driver error raised outside a guarded statement, and it is logged at WARNING with its
+  traceback instead of disappearing.
 
 After each, no pooled connection is checked out, PostgreSQL has no backend idle in transaction, and the
 next unit commits; a unit whose statement failed in cleanup returned its healthy connection to the pool
@@ -36,6 +42,7 @@ instead of discarding it.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 import anyio
@@ -115,6 +122,31 @@ class CcService:
             assert task is not None
             task.uncancel()  # the body handles its deadline itself
         raise InsufficientFundsError("declined after the deadline")
+
+    @transactional
+    async def work_then_save_a_duplicate_in_its_own_cleanup(self) -> None:
+        await self.items.save(CcItem(id=30, name="work"))
+        try:
+            await asyncio.sleep(10)
+        finally:
+            await self.items.save(CcItem(id=1, name="duplicate"))  # while this unit is being cancelled
+
+    @transactional
+    async def work_then_save_a_duplicate_in_its_own_shielded_cleanup(self) -> None:
+        await self.items.save(CcItem(id=30, name="work"))
+        try:
+            await anyio.sleep(10)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.items.save(CcItem(id=1, name="duplicate"))
+
+    @transactional
+    async def work_then_fail_in_its_own_cleanup(self) -> None:
+        await self.items.save(CcItem(id=30, name="work"))
+        try:
+            await asyncio.sleep(10)
+        finally:
+            raise InsufficientFundsError("refund declined while cancelling")
 
 
 class Cleanup:
@@ -285,4 +317,44 @@ async def test_an_infrastructure_unit_in_anyio_shielded_cleanup_raises_integrity
 async def test_a_business_exception_after_the_body_handled_its_deadline_keeps_its_type(cleanup: Cleanup) -> None:
     with pytest.raises(InsufficientFundsError):
         await cleanup.service.swallow_the_deadline_then_fail()
+    assert await cleanup.committed() == ["first"]
+
+
+async def test_a_duplicate_saved_in_the_cancelled_units_own_cleanup_raises_integrity_error(cleanup: Cleanup) -> None:
+    opened = cleanup.connections_opened
+    task = asyncio.create_task(cleanup.service.work_then_save_a_duplicate_in_its_own_cleanup())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(IntegrityError):
+        await task
+    assert cleanup.connections_opened == opened  # a failed statement leaves a healthy connection
+    assert await cleanup.committed() == ["first"]
+
+
+async def test_a_duplicate_saved_in_the_cancelled_units_own_shielded_cleanup_raises_integrity_error(
+    cleanup: Cleanup,
+) -> None:
+    with pytest.raises(IntegrityError), anyio.move_on_after(0.05):
+        await cleanup.service.work_then_save_a_duplicate_in_its_own_shielded_cleanup()
+    assert await cleanup.committed() == ["first"]
+
+
+async def test_a_business_exception_in_the_cancelled_units_own_cleanup_is_logged(
+    cleanup: Cleanup, caplog: pytest.LogCaptureFixture
+) -> None:
+    task = asyncio.create_task(cleanup.service.work_then_fail_in_its_own_cleanup())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with (
+        caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
+        pytest.raises(asyncio.CancelledError) as raised,
+    ):
+        await task
+    assert isinstance(raised.value.__cause__, InsufficientFundsError)
+    replaced = [
+        record for record in caplog.records if record.getMessage() == "transaction_error_replaced_by_cancellation"
+    ]
+    assert len(replaced) == 1
+    assert replaced[0].levelno == logging.WARNING
+    assert replaced[0].exc_info is not None and isinstance(replaced[0].exc_info[1], InsufficientFundsError)
     assert await cleanup.committed() == ["first"]

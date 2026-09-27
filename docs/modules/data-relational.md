@@ -1412,11 +1412,12 @@ the cancellation it stood in for: the unit's connection is discarded, `Cancelled
 from the driver's error), and the cancel scope that fired catches it, `wait_for` times out, or the unit's
 own `timeout` raises `TransactionTimedOutError`.
 
-Cleanup code is not affected: a task stays "being cancelled" (`Task.cancelling() > 0`) throughout
-`except CancelledError:`, `finally:` and anyio's `with CancelScope(shield=True):` cleanup, and the data
-access done there only counts cancel requests that arrive after it started. A duplicate saved in a
-compensation handler raises `IntegrityError`, a `@transactional` audit call that raises a business
-exception in shielded cleanup raises that exception, and the rest of the cleanup runs:
+Cleanup code that runs outside the cancelled unit is not affected: a task stays "being cancelled"
+(`Task.cancelling() > 0`) throughout `except CancelledError:`, `finally:` and anyio's
+`with CancelScope(shield=True):` cleanup, and the data access done there only counts cancel requests that
+arrive after it started. A duplicate saved in a compensation handler raises `IntegrityError`, a
+`@transactional` audit call that raises a business exception in shielded cleanup raises that exception,
+and the rest of the cleanup runs:
 
 ```python
 async def handle(self, request: Request) -> None:
@@ -1430,6 +1431,15 @@ async def handle(self, request: Request) -> None:
                 pass
             await self.audit.record(request.id)
 ```
+
+Cleanup inside the cancelled unit itself (a `finally:` block in the `@transactional` body) keeps the
+failures of its statements: a duplicate saved there raises `IntegrityError`, because the operation that
+ran the statement judged it after the cancel request had arrived. Any other exception raised there while
+the unit is being cancelled ends the unit as cancelled instead, with `CancelledError` chained from it
+(`__cause__`): the unit cannot tell it from a driver error raised outside a guarded statement (on a raw
+`AsyncConnection`), which must end as the cancellation so that the cancel scope that fired catches it.
+Such an exception is logged at `WARNING` as `transaction_error_replaced_by_cancellation`, with its
+traceback. Cleanup whose own exceptions the caller must see belongs outside the cancelled unit, as above.
 
 On SQLite a discarded connection rolls back on aiosqlite's worker thread before its handle closes, and a
 statement still running there is interrupted, so a cancelled unit never leaves `BEGIN IMMEDIATE`'s write
