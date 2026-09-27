@@ -73,7 +73,8 @@ class OAuth2LoginHandler:
         client_repository: Repository to look up client registrations.
         concurrency: An optional ``SessionConcurrencyController``. The callback then saves the logged-in
             session (``request.state.persist_session``) and registers it, enforcing the per-principal cap;
-            that save is the login's last write of the session.
+            that save is the login's last write of the session. If the save or the registration fails, the
+            session is invalidated.
     """
 
     def __init__(
@@ -248,10 +249,16 @@ class OAuth2LoginHandler:
         # SessionFilter does not save an unchanged session again): a concurrent login may evict
         # this session meanwhile, and a later save would bring it back, live and uncounted.
         if self._concurrency is not None:
-            persist = getattr(request.state, "persist_session", None)
-            if persist is not None:
-                await persist()
-            allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            try:
+                persist = getattr(request.state, "persist_session", None)
+                if persist is not None:
+                    await persist()
+                allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            except BaseException:
+                # Saved but perhaps never registered: the SessionFilter deletes it rather than leave a
+                # logged-in session the cap does not count.
+                session.invalidate()
+                raise
             if not allowed:
                 session.invalidate()
                 return JSONResponse(

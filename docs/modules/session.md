@@ -276,7 +276,9 @@ pyfly:
   logs in (`request.state.persist_session`, set by the `SessionFilter`) before registering it, so a
   concurrent login never takes it for a dead one. That save is the login's last write of the session: the
   handler makes every change (the security context, the redirect it consumes) before it, and the filter does
-  not save the unchanged session again, so a session a concurrent login evicted stays evicted. This needs a store that holds every session the registry
+  not save the unchanged session again, so a session a concurrent login evicted stays evicted. If the save or
+  the registration fails, the handler invalidates the session and the filter deletes it, so no logged-in
+  session is left that the cap does not count. This needs a store that holds every session the registry
   counts: beside a cross-process registry (`redis` or `postgres`), only a shared store (`store=postgres` or
   `redis`) does. With the in-memory store there, the auto-configuration does not give the store to the
   controller (it would take the other instances' live sessions for dead ones and admit logins over the cap),

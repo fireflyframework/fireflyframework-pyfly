@@ -35,6 +35,7 @@ from pyfly.session.concurrency import (
     ConcurrencyControlPolicy,
     InMemorySessionRegistry,
     SessionConcurrencyController,
+    SessionRegistration,
 )
 from tests.integration import _session_logins as logins
 
@@ -124,6 +125,37 @@ async def test_a_login_without_a_cap_saves_the_logged_in_session() -> None:
     saved = await store.get(result.session_id)
     assert saved is not None and saved["SECURITY_CONTEXT"].user_id == "alice"
     assert "oauth2_state" not in saved and "oauth2_redirect_uri" not in saved
+
+
+class _UnreachableRegistry(InMemorySessionRegistry):
+    """A registry whose database does not answer (the SQL registry after its three reruns, or down)."""
+
+    async def register_limited(
+        self, principal: str, session_id: str, created_at: float, *, max_sessions: int, evict_oldest: bool
+    ) -> SessionRegistration:
+        await asyncio.sleep(0)
+        raise ConnectionError("the session registry is unreachable")
+
+
+@pytest.mark.asyncio
+async def test_a_login_whose_registration_fails_leaves_no_session_behind() -> None:
+    """The handler saves the session before registering it: when the registration fails, that session must
+    not stay in the store, logged in and never counted by the cap."""
+    store = _YieldingStore()
+    controller = SessionConcurrencyController(
+        _UnreachableRegistry(), ConcurrencyControlPolicy(max_sessions=1), session_store=store
+    )
+    replica = logins.Replica(store, controller)
+    pre_auth = await logins.start_login(store)
+    request = logins.callback_request(pre_auth)
+
+    with pytest.raises(ConnectionError):
+        await logins.run_callback(replica, request)
+
+    session = request.state.session
+    assert session.id != pre_auth and session.invalidated
+    assert not await store.exists(session.id)
+    assert not await store.exists(pre_auth)
 
 
 @pytest.mark.asyncio
