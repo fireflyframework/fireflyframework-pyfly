@@ -763,6 +763,11 @@ class _OrderByUnknown(Repository[CheckedItem, int]):
     async def find_by_tag_order_by_label(self, tag: str) -> list[CheckedItem]: ...
 
 
+class _BadQuery(Repository[CheckedItem, int]):
+    @query("SELECT c FROM CheckedItem c WHERE c.nmae = :name")
+    async def by_name(self, name: str) -> list[CheckedItem]: ...
+
+
 class _Valid(Repository[CheckedItem, int]):
     """Everything that is checked, done right."""
 
@@ -806,6 +811,7 @@ class TestDerivedMethodsAreCheckedAtStartup:
             (_TwoResultTypes, "one type"),
             (_UnresolvedAnnotation, "annotations do not resolve"),
             (_OrderByUnknown, "order_by_label"),
+            (_BadQuery, "no attribute or column 'nmae'"),
         ],
     )
     def test_the_repository_fails_to_build(

@@ -33,12 +33,20 @@ Usage::
 
         @query('{"email": ":email", "active": true}')
         async def find_active_by_email(self, email: str) -> list[UserDoc]: ...
+
+A relational ``@query`` that changes rows (``UPDATE``, ``DELETE``, ``INSERT``) is also marked
+:func:`modifying` (Spring's ``@Modifying``); it returns the number of rows it changed::
+
+    @modifying
+    @query("UPDATE User u SET u.active = false WHERE u.last_login < :cutoff")
+    async def deactivate_idle(self, cutoff: datetime) -> int: ...
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, overload
 
 
 def query(value: str, *, native: bool = False) -> Callable[..., Any]:
@@ -67,4 +75,46 @@ def query(value: str, *, native: bool = False) -> Callable[..., Any]:
         func.__pyfly_query_native__ = native  # type: ignore[attr-defined]
         return func
 
+    return decorator
+
+
+@dataclass(frozen=True)
+class ModifyingOptions:
+    """What a :func:`modifying` query does around its statement (Spring's ``@Modifying`` attributes)."""
+
+    flush_automatically: bool = True
+    """Flush the unit of work's pending changes before the statement, so it sees them (the default: a raw
+    statement does not flush them itself)."""
+    clear_automatically: bool = False
+    """Detach every entity the unit of work holds after the statement (Spring's ``clearAutomatically``), so the
+    next read loads the rows as the statement left them instead of the stale copies."""
+
+
+@overload
+def modifying(func: Callable[..., Any], /) -> Callable[..., Any]: ...
+@overload
+def modifying(
+    func: None = None, /, *, flush_automatically: bool = True, clear_automatically: bool = False
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
+def modifying(
+    func: Callable[..., Any] | None = None,
+    /,
+    *,
+    flush_automatically: bool = True,
+    clear_automatically: bool = False,
+) -> Any:
+    """Mark a ``@query`` method as a statement that changes rows (``UPDATE``, ``DELETE``, ``INSERT``).
+
+    The method returns the number of rows the statement changed (or ``None`` when annotated ``-> None``), and
+    runs in a write unit of work. Without it, a changing statement is refused when the repository is built.
+    Use it bare (``@modifying``) or with options (:class:`ModifyingOptions`), above or below ``@query``.
+    """
+    options = ModifyingOptions(flush_automatically=flush_automatically, clear_automatically=clear_automatically)
+
+    def decorator(function: Callable[..., Any]) -> Callable[..., Any]:
+        function.__pyfly_modifying__ = options  # type: ignore[attr-defined]
+        return function
+
+    if func is not None:
+        return decorator(func)
     return decorator

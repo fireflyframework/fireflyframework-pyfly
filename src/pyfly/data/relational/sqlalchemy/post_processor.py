@@ -22,11 +22,11 @@ from collections.abc import Callable, Collection
 from typing import Any
 
 from pyfly.data.pageable import Pageable, Sort
-from pyfly.data.post_processor import BaseRepositoryPostProcessor, QueryMethod, check_arguments
+from pyfly.data.post_processor import BaseRepositoryPostProcessor, QueryMethod, check_arguments, describe_method
 from pyfly.data.query_parser import ElementKind, InvalidQueryMethodError, ParsedQuery, ResultKind, is_special_parameter
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor
 from pyfly.data.relational.sqlalchemy.query_compiler import DerivedQuery, QueryMethodCompiler, derived_properties
-from pyfly.data.relational.sqlalchemy.repository import Repository, is_read_method, repository_operation
+from pyfly.data.relational.sqlalchemy.repository import Repository, repository_operation
 from pyfly.data.transaction.registry import TransactionManagerRegistry
 
 _READ_FLAG = "__pyfly_read_operation__"
@@ -160,14 +160,24 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         return repository_operation(wrapper, read=bool(getattr(compiled_fn, _READ_FLAG, False)), atomic=True)
 
     def _process_query_decorated(self, bean: Any, cls: type, attr_name: str, attr: Any, entity: Any) -> bool:
-        """Process ``@query``-decorated methods."""
-        if hasattr(attr, "__pyfly_query__"):
-            compiled_fn = self._query_executor.compile_query_method(attr, entity)
-            read = is_read_method(attr_name) or str(attr.__pyfly_query__).lstrip().upper().startswith("SELECT")
-            wrapper = self._wrap_query_method(compiled_fn, read=read)
-            setattr(bean, attr_name, wrapper.__get__(bean, cls))
-            return True
-        return False
+        """Compile a ``@query`` method (:mod:`~pyfly.data.relational.sqlalchemy.query`) into a repository
+        operation that binds its arguments by the stub's signature, by position or by keyword: a read for a
+        query, a write for a ``@modifying`` statement."""
+        if not hasattr(attr, "__pyfly_query__"):
+            return False
+        method = describe_method(cls, attr_name, attr, entity)
+        compiled = self._query_executor.compile_query_method(attr, entity, name=method.qualified_name)
+
+        async def queried(self_arg: Any, *args: Any, **kwargs: Any) -> Any:
+            return await compiled(self_arg._session, **method.bind(args, kwargs))
+
+        queried.__name__ = attr_name
+        queried.__qualname__ = f"{cls.__qualname__}.{attr_name}"
+        queried.__doc__ = method.function.__doc__
+        queried.__module__ = method.function.__module__
+        read = not getattr(compiled, "is_modifying", False)
+        setattr(bean, attr_name, repository_operation(queried, read=read, atomic=True).__get__(bean, cls))
+        return True
 
     # ------------------------------------------------------------------
     # Wrapper factories
@@ -175,7 +185,8 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
 
     @staticmethod
     def _wrap_query_method(compiled_fn: Any, *, read: bool = False) -> Any:
-        """Wrap a ``@query``-compiled function as a repository operation on ``bean._session``."""
+        """Wrap a ``@query``-compiled function as a repository operation on ``bean._session`` (keyword
+        arguments only; the post-processor binds positional ones by the method's signature first)."""
 
         async def wrapper(self_arg: Any, **kwargs: Any) -> Any:
             return await compiled_fn(self_arg._session, **kwargs)

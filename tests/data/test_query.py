@@ -15,13 +15,22 @@
 
 from __future__ import annotations
 
+from typing import Any
+from uuid import UUID
+
 import pytest
 from sqlalchemy import Integer, String
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.data.page import Page
+from pyfly.data.pageable import Pageable
+from pyfly.data.query import modifying
+from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
-from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query
+from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, transpile_jpql
+from pyfly.data.relational.sqlalchemy.repository import Repository
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -141,75 +150,159 @@ class TestCompileQueryMethodValidation:
 # ===========================================================================
 
 
+class QGroup(Base):
+    """A table named with a reserved word, and an attribute whose column is named differently."""
+
+    __tablename__ = "group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    label: Mapped[str] = mapped_column("title", String(40))
+    active: Mapped[bool] = mapped_column(default=True)
+
+
+ITEM_COLUMNS = (
+    "i.name, i.email, i.role, i.active, i.score, i.id, i.created_at, i.updated_at, i.created_by, i.updated_by"
+)
+
+
+def _sql(jpql: str, entity: type = Item, dialect: Any = None, **kwargs: Any) -> str:
+    return transpile_jpql(jpql, entity, dialect, **kwargs).sql
+
+
 class TestJpqlTranspiler:
-    """Test the JPQL-to-SQL transpiler."""
+    """The JPQL transpiler rewrites tokens: aliases stay, attributes become columns, literals are untouched."""
 
-    def test_simple_select_transpiles(self):
-        """4. Simple JPQL select transpiles to SQL."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT i FROM Item i WHERE i.name = :name",
-            Item,
+    def test_an_entity_select_selects_its_columns_through_the_alias(self):
+        assert _sql("SELECT i FROM Item i WHERE i.name = :name") == (
+            f"SELECT {ITEM_COLUMNS} FROM q_items i WHERE i.name = :name"
         )
-        assert "SELECT * FROM q_items" in sql
-        assert "name = :name" in sql
-        # Alias should be stripped
-        assert "i." not in sql
 
-    def test_count_transpiles(self):
-        """5. COUNT JPQL transpiles correctly."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT COUNT(i) FROM Item i WHERE i.role = :role",
-            Item,
+    def test_count_of_the_alias_counts_rows(self):
+        assert _sql("SELECT COUNT(i) FROM Item i WHERE i.role = :role") == (
+            "SELECT COUNT(*) FROM q_items i WHERE i.role = :role"
         )
-        assert "SELECT COUNT(*) FROM q_items" in sql
-        assert "role = :role" in sql
+        assert _sql("SELECT COUNT(DISTINCT i) FROM Item AS i") == "SELECT COUNT(DISTINCT i.id) FROM q_items AS i"
 
-    def test_alias_stripping(self):
-        """6. All alias references are stripped from the query."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT u FROM Item u WHERE u.email = :email AND u.role = :role",
-            Item,
+    def test_a_selected_attribute_keeps_its_alias(self):
+        assert _sql("SELECT c.name FROM Item c WHERE c.active = true") == (
+            "SELECT c.name FROM q_items c WHERE c.active = true"
         )
-        assert "u." not in sql
-        assert "email = :email" in sql
-        assert "role = :role" in sql
 
-    def test_true_false_replacement(self):
-        """7. true/false are replaced with 1/0."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT i FROM Item i WHERE i.active = true",
-            Item,
+    def test_attributes_name_their_columns(self):
+        assert _sql("SELECT g.label FROM QGroup g WHERE g.label = :label", QGroup) == (
+            "SELECT g.title FROM group g WHERE g.title = :label"
         )
-        assert "= 1" in sql
-        assert "true" not in sql.lower().replace("q_items", "")
 
-    def test_false_replacement(self):
-        """false is replaced with 0."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT i FROM Item i WHERE i.active = false",
-            Item,
-        )
-        assert "= 0" in sql
+    def test_names_are_quoted_for_the_dialect(self):
+        sql = _sql("SELECT g FROM QGroup g WHERE g.label = :label", QGroup, postgresql.dialect())
+        assert sql == 'SELECT g.id, g.title, g.active FROM "group" g WHERE g.title = :label'
 
-    def test_uses_tablename(self):
-        """Transpiler uses __tablename__ from entity."""
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT i FROM Item i WHERE i.name = :name",
-            Item,
-        )
-        assert "q_items" in sql
+    def test_boolean_literals_are_what_the_dialect_accepts(self):
+        jpql = "SELECT i FROM Item i WHERE i.active = true AND i.score != false"
+        assert _sql(jpql, dialect=postgresql.dialect()).endswith("WHERE i.active = true AND i.score != false")
+        assert _sql(jpql, dialect=sqlite.dialect()).endswith("WHERE i.active = 1 AND i.score != 0")
+        assert _sql(jpql, dialect=mysql.dialect()).endswith("WHERE i.active = 1 AND i.score != 0")
 
-    def test_regex_does_not_match_into_where(self):
-        """Regression: FROM regex must not eat SQL keywords as alias."""
-        # If the entity name does not appear, transpiler should
-        # degrade gracefully (no alias found, minimal transformation).
-        sql = QueryExecutor._transpile_jpql(
-            "SELECT i FROM Item i WHERE i.score > :min",
-            Item,
+    def test_is_true_and_string_literals_are_left_as_written(self):
+        jpql = "SELECT c.name FROM Item c WHERE c.active IS true OR c.active IS NOT false OR c.role = 'status = true'"
+        assert _sql(jpql, dialect=sqlite.dialect()) == (
+            "SELECT c.name FROM q_items c WHERE c.active IS true OR c.active IS NOT false OR c.role = 'status = true'"
         )
-        # WHERE must survive intact
-        assert "WHERE" in sql
-        assert "score > :min" in sql
+
+    def test_the_alias_is_rewritten_only_where_it_is_one(self):
+        """C049/C051: the regex stripped 'i.' from literals, from identifiers ending in the alias, and from
+        schema-qualified names."""
+        jpql = (
+            "SELECT i.name FROM Item i WHERE i.email LIKE '%@example.com' AND i.role = 'wiki.pyfly.io' "
+            "AND i.name IN (SELECT r.code FROM sales_data.regions r) AND i.email <> 'n/a.'"
+        )
+        assert _sql(jpql) == (
+            "SELECT i.name FROM q_items i WHERE i.email LIKE '%@example.com' AND i.role = 'wiki.pyfly.io' "
+            "AND i.name IN (SELECT r.code FROM sales_data.regions r) AND i.email <> 'n/a.'"
+        )
+
+    def test_a_correlated_subquery_keeps_its_correlation(self):
+        jpql = "SELECT a FROM Item a WHERE EXISTS (SELECT 1 FROM q_orders o WHERE o.item_id = a.id)"
+        assert _sql(jpql).endswith("FROM q_items a WHERE EXISTS (SELECT 1 FROM q_orders o WHERE o.item_id = a.id)")
+
+    def test_positional_parameters_name_the_methods_parameters(self):
+        assert _sql("SELECT i.id FROM Item i WHERE i.role = ?1 AND i.score > ?2", positional=["role", "floor"]) == (
+            "SELECT i.id FROM q_items i WHERE i.role = :role AND i.score > :floor"
+        )
+        with pytest.raises(InvalidQueryMethodError, match=r"\?3 names parameter 3"):
+            _sql("SELECT i.id FROM Item i WHERE i.role = ?3", positional=["role"])
+
+    def test_in_binds_a_collection(self):
+        transpiled = transpile_jpql("SELECT i.id FROM Item i WHERE i.id IN (:ids) OR i.role IN :roles", Item)
+        assert transpiled.sql == "SELECT i.id FROM q_items i WHERE i.id IN :ids OR i.role IN :roles"
+        assert transpiled.expanding == {"ids", "roles"}
+
+    def test_colons_in_literals_are_not_parameters(self):
+        transpiled = transpile_jpql("SELECT i.id FROM Item i WHERE i.name = 'a:b' AND i.email = :email", Item)
+        assert transpiled.binds == ("email",)
+        assert "'a\\:b'" in transpiled.sql
+
+    def test_update_and_delete_drop_the_alias(self):
+        update = "UPDATE Item i SET i.active = false, i.score = i.score + 1 WHERE i.role = :role"
+        assert _sql(update, dialect=postgresql.dialect()) == (
+            "UPDATE q_items SET active = false, score = q_items.score + 1 WHERE q_items.role = :role"
+        )
+        delete = "DELETE FROM QGroup AS g WHERE g.label = :label"
+        assert _sql(delete, QGroup, postgresql.dialect()) == 'DELETE FROM "group" WHERE "group".title = :label'
+
+    def test_an_unknown_attribute_or_an_unterminated_literal_fails(self):
+        with pytest.raises(InvalidQueryMethodError, match="no attribute or column 'nmae'"):
+            _sql("SELECT i FROM Item i WHERE i.nmae = :name")
+        with pytest.raises(InvalidQueryMethodError, match="Unterminated"):
+            _sql("SELECT i FROM Item i WHERE i.name = 'x")
+
+    def test_the_legacy_static_method_still_transpiles(self):
+        assert QueryExecutor._transpile_jpql("SELECT i FROM Item i", Item) == f"SELECT {ITEM_COLUMNS} FROM q_items i"
+
+
+class _Repo(Repository[Item, UUID]):
+    """Methods for the startup checks (each test compiles one)."""
+
+    @query("SELECT i FROM Item i WHERE i.name = :nme")
+    async def unknown_parameter(self, name: str) -> list[Item]: ...
+
+    @query("UPDATE Item i SET i.active = false")
+    async def update_without_modifying(self) -> int: ...
+
+    @modifying
+    @query("SELECT i FROM Item i")
+    async def modifying_select(self) -> list[Item]: ...
+
+    @modifying
+    @query("UPDATE Item i SET i.active = false")
+    async def modifying_returning_entities(self) -> list[Item]: ...
+
+    @query("SELECT i FROM Item i")
+    async def paged(self) -> Page[Item]: ...
+
+    @query("SELECT i FROM Item i ORDER BY i.name")
+    async def with_pageable(self, pageable: Pageable) -> list[Item]: ...
+
+    @query("SELECT i FROM Item i")
+    async def nothing(self) -> None: ...
+
+
+class TestQueryMethodsAreCheckedAtStartup:
+    @pytest.mark.parametrize(
+        ("method", "message"),
+        [
+            ("unknown_parameter", ":nme"),
+            ("update_without_modifying", "mark the method @modifying"),
+            ("modifying_select", "this one is a SELECT"),
+            ("modifying_returning_entities", "returns int"),
+            ("paged", "not a Page or Slice"),
+            ("with_pageable", "takes no Pageable or Sort"),
+            ("nothing", "not None"),
+        ],
+    )
+    def test_the_method_fails_to_compile(self, method: str, message: str):
+        with pytest.raises(InvalidQueryMethodError, match=message):
+            QueryExecutor().compile_query_method(getattr(_Repo, method), Item)
 
 
 # ===========================================================================
