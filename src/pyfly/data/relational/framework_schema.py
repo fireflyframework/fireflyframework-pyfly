@@ -406,13 +406,13 @@ def framework_engine(target: object) -> AsyncEngine:
 async def ensure_tables(target: object, *tables: Table, create: bool = True) -> None:
     """Make sure *tables* exist on *target*'s database (see :func:`framework_engine`), or fail fast.
 
-    With *create*, the missing tables (and their indexes) are created first, in one transaction of their
-    own. Processes starting together may all try: one that loses a race gets an error from the database
-    (MySQL and MariaDB commit each ``CREATE TABLE`` on its own, so the others may still be creating the
-    rest), and tries again, skipping what exists, up to :data:`CREATE_ATTEMPTS` times. Then every table is
-    checked: it must exist and have every declared column, and on PostgreSQL a :class:`UtcTimestamp` column
-    must be ``TIMESTAMP WITH TIME ZONE``. Raises :class:`FrameworkSchemaError` naming each problem and how to
-    fix it.
+    With *create*, the missing tables (with their indexes), and the missing indexes of the tables that
+    exist, are created first, in one transaction of their own. Processes starting together may all try:
+    one that loses a race gets an error from the database (MySQL and MariaDB commit each ``CREATE TABLE``
+    on its own, so the others may still be creating the rest), and tries again, skipping what exists, up
+    to :data:`CREATE_ATTEMPTS` times. Then every table is checked: it must exist and have every declared
+    column, and on PostgreSQL a :class:`UtcTimestamp` column must be ``TIMESTAMP WITH TIME ZONE``. Raises
+    :class:`FrameworkSchemaError` naming each problem and how to fix it.
     """
     if not tables:
         return
@@ -447,7 +447,18 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
 
 
 def _create(connection: Connection, tables: Sequence[Table]) -> None:
-    framework_metadata.create_all(connection, tables=list(tables), checkfirst=True)
+    """Create the missing tables, and the missing indexes of the tables that exist (a table an earlier
+    release created without them: the cache's ``expires_at`` index keeps its purge off a full scan)."""
+    inspector = inspect(connection)
+    existing = [table for table in tables if inspector.has_table(table.name, schema=table.schema)]
+    missing = [table for table in tables if table not in existing]
+    for metadata in {id(table.metadata): table.metadata for table in missing}.values():
+        metadata.create_all(connection, tables=[table for table in missing if table.metadata is metadata])
+    for table in existing:
+        present = {index["name"] for index in inspector.get_indexes(table.name, schema=table.schema)}
+        for index in table.indexes:
+            if index.name not in present:
+                index.create(connection)
 
 
 def _problems(connection: Connection, tables: Sequence[Table]) -> list[str]:

@@ -159,3 +159,22 @@ async def test_utc_timestamp_keeps_the_instant_and_its_microseconds(relational_b
     assert rows[1] == aware and rows[1].tzinfo == UTC and rows[1].microsecond == 123456
     assert rows[2] == naive.replace(tzinfo=UTC) and rows[2].tzinfo == UTC and rows[2].microsecond == 654321
     assert in_window == [2]  # 01:00:00.654321 UTC is 03:00:00.654321 at +02:00
+
+
+async def test_a_table_an_earlier_release_created_gets_its_missing_indexes(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The cache table used to be created without the ``expires_at`` index its purge now filters on."""
+    earlier = MetaData()
+    cache_entries.to_metadata(earlier).indexes.clear()
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(earlier.create_all)
+
+    await ensure_tables(engine, cache_entries)
+
+    def indexes(connection: Connection) -> set[str]:
+        return {index["name"] for index in inspect(connection).get_indexes("pyfly_cache_entries")}
+
+    async with engine.connect() as connection:
+        assert "ix_pyfly_cache_entries_expires_at" in await connection.run_sync(indexes)
