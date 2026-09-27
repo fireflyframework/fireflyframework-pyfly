@@ -125,3 +125,16 @@ class TestSqlAlchemyConcurrency:
             assert await store.latest_version("acc-1") == 2
         finally:
             await engine.dispose()
+
+
+def test_a_concurrency_error_is_the_kernel_s_optimistic_locking_failure() -> None:
+    """ConcurrencyError is an OptimisticLockingFailureException (26.09.08): the web layer answers 409 and a
+    message listener retries it as a transient failure, as for an entity's optimistic lock."""
+    from pyfly.kernel.exceptions import ConflictException, OptimisticLockingFailureException
+    from pyfly.messaging.listener_container import is_transient_failure
+
+    error = ConcurrencyError("expected version 1, found 2", context={"aggregate_id": "acc-1"})
+    assert isinstance(error, OptimisticLockingFailureException)
+    assert isinstance(error, ConflictException)
+    assert error.context == {"aggregate_id": "acc-1"}
+    assert is_transient_failure(error)

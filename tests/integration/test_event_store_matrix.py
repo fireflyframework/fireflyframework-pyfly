@@ -588,3 +588,28 @@ async def test_the_event_table_of_an_earlier_release_upgrades_with_the_documente
     events = await _drain(store)
     assert _types(events) == ["First", "Second", "New"]
     assert [event.global_position for event in events] == [1, 2, 3]
+
+
+async def test_a_page_of_the_stream_is_read_through_the_global_position_index(
+    relational_backend: RelationalBackend,
+) -> None:
+    """C070: every poll sorted the whole table (``Seq Scan`` + ``Sort`` on ``occurred_at``)."""
+    from sqlalchemy import text
+
+    store = await _store(relational_backend)
+    for block in range(20):
+        await store.append(f"bulk-{block}", "Order", [_envelope(f"B{i}") for i in range(100)], expected_version=0)
+    middle = (await store.stream_all(after_position=0, limit=1000))[-1].global_position
+    page = f"SELECT payload, global_position FROM pyfly_event_store WHERE global_position > {middle} "
+    page += "ORDER BY global_position LIMIT 100"
+    async with store.engine.connect() as connection:
+        if relational_backend.dialect == "postgresql":
+            await connection.execute(text("ANALYZE pyfly_event_store"))
+            plan = "\n".join(str(row[0]) for row in await connection.execute(text(f"EXPLAIN {page}")))
+        elif relational_backend.dialect == "sqlite":
+            plan = "\n".join(str(row[-1]) for row in await connection.execute(text(f"EXPLAIN QUERY PLAN {page}")))
+        else:
+            await connection.execute(text("ANALYZE TABLE pyfly_event_store"))
+            rows = (await connection.execute(text(f"EXPLAIN {page}"))).mappings().all()
+            plan = "\n".join(str(row["key"]) for row in rows)
+    assert "ix_pyfly_event_store_global_position" in plan, plan
