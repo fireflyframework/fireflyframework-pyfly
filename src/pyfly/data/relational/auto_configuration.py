@@ -23,12 +23,14 @@ Two auto-configurations live here:
   relational repositories are disabled. It also exposes the
   :class:`~pyfly.data.transaction.registry.TransactionManagerRegistry` (one SQLAlchemy transaction manager
   per datasource), installed while the context runs, so ``@transactional`` and repositories find their
-  transaction manager by datasource name.
+  transaction manager by datasource name, and the :class:`RepositoryWiringCheck`, which fails the start on a
+  relational repository the relational beans did not wire.
 - :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled=true``) keeps the beans an
   application injects (``async_engine``, ``async_session_factory``, ``routing_session_factory``,
   ``named_data_sources``, ``async_session``, ``engine_lifecycle``, ``db_health_indicator``,
   ``query_metrics``) with their names and types. Each is now a view over the registry (the
-  ``DataSourceRegistry`` bean). It adds the ``session_provider`` bean, and the
+  ``DataSourceRegistry`` bean); ``engine_lifecycle`` applies the schema strategy (``ddl-auto``) through a
+  :class:`~pyfly.data.relational.schema.SchemaInitializer`. It adds the ``session_provider`` bean, and the
   ``primary_transaction_manager`` bean, which serves the ``primary`` datasource's units on the primary
   ``async_sessionmaker`` bean: an application's singleton session factory, engine or registry bean replaces
   the primary for ``@transactional``, repositories, ``SessionProvider``, the ``AsyncSession`` bean and
