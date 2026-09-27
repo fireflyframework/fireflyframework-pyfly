@@ -83,6 +83,10 @@ class CcItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(64))
 
+    def is_new(self) -> bool:
+        """Always inserted (the ``Persistable`` hook): saving a taken id is a duplicate, never a merge."""
+        return True
+
 
 @repository
 class CcItemRepository(Repository[CcItem, int]):

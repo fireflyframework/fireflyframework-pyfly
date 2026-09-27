@@ -384,7 +384,16 @@ class LockMode(enum.Enum):
     @property
     def for_update(self) -> dict[str, bool]:
         """The arguments of ``Select.with_for_update()`` for this mode."""
-        return _FOR_UPDATE[self]
+        return dict(_FOR_UPDATE[self])
+
+    def apply(self, statement: Select[Any]) -> Select[Any]:
+        """*statement* taking this lock on the rows it reads."""
+        flags = _FOR_UPDATE[self]
+        return statement.with_for_update(
+            read=flags.get("read", False),
+            nowait=flags.get("nowait", False),
+            skip_locked=flags.get("skip_locked", False),
+        )
 
 
 _FOR_UPDATE: dict[LockMode, dict[str, bool]] = {

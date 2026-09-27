@@ -23,7 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pyfly.data.page import Page
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
-from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.repository import Repository, is_read_method
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.transactional import reactive_transactional
 
@@ -365,3 +365,17 @@ class TestRepositoryIntId:
         a = await int_repo.save(IntItem(name="First"))
         b = await int_repo.save(IntItem(name="Second"))
         assert b.id == a.id + 1
+
+
+class TestReadMethodNames:
+    """A read-prefixed name runs in a read auto unit, unless it holds a write word before its criteria."""
+
+    def test_a_write_word_before_the_criteria_makes_a_write_method(self) -> None:
+        assert not is_read_method("get_or_create")
+        assert not is_read_method("find_or_create_by_email")
+        assert not is_read_method("find_and_update")
+        assert not is_read_method("find_and_lock_by_id")
+        assert is_read_method("find_by_update_time")
+        assert is_read_method("find_all_by_created_at")
+        assert is_read_method("scroll")
+        assert is_read_method("get_settings")
