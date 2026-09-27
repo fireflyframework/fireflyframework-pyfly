@@ -26,8 +26,9 @@ created_at`` raises ``TypeError`` wherever one side was loaded and the other sta
 - **bind**: an aware value is converted to UTC; a naive value is taken as UTC (or rejected with
   ``strict=True``). Backends without a time-zone type get the naive UTC wall time, so their stored
   values sort and compare as instants.
-- **result**: every value comes back aware, in UTC. On asyncpg the driver already returns aware UTC
-  (whatever the server's ``TimeZone``), so the result processing is skipped there.
+- **result**: every value comes back aware, in UTC. On asyncpg the driver already returns a
+  ``timestamptz`` as aware UTC (whatever the server's ``TimeZone``), so only a naive value is processed
+  there.
 - **DDL**: ``TIMESTAMP WITH TIME ZONE`` on PostgreSQL and Oracle, ``DATETIMEOFFSET`` on SQL Server,
   ``DATETIME`` on SQLite (all unchanged from ``DateTime(timezone=True)``, except Oracle, which got a
   ``DATE`` without fractional seconds), and ``DATETIME(6)`` on MySQL and MariaDB (microseconds).
@@ -48,8 +49,9 @@ already UTC wall times, so they read back correctly as they are.
 
 On PostgreSQL the type expects ``TIMESTAMP WITH TIME ZONE``. A ``timestamp without time zone`` column
 that adopts it (the ``update_type_annotation_map`` line above makes every ``Mapped[datetime]`` one) reads
-back naive on asyncpg, and the server converts the aware values bound to it, and compares with it, in the
-session's ``TimeZone``. Migrate such a column first, reading its values as the UTC wall times they are:
+back its wall times as UTC, but the server converts the aware values bound to it, and compares with it, in
+the session's ``TimeZone``: under a non-UTC ``TimeZone`` the stored instants drift. Migrate such a column
+first, reading its values as the UTC wall times they are:
 ``ALTER TABLE t ALTER COLUMN c TYPE timestamptz USING c AT TIME ZONE 'UTC'``.
 """
 
@@ -130,13 +132,20 @@ class UtcDateTime(TypeDecorator[datetime]):
 
     def result_processor(self, dialect: Dialect, coltype: Any) -> Any:
         """The implementation type's result processing, then :meth:`process_result_value`. It runs for every
-        datetime of every row read, so the common cases take a short path: on asyncpg nothing is added (the
-        driver already returns aware UTC, whatever the server's ``TimeZone``), and on SQLite the text the
-        bind stored (the UTC wall time) is parsed straight to an aware value."""
+        datetime of every row read, so the common cases take a short path: on asyncpg an aware value is
+        returned as it is (the driver returns ``timestamptz`` as aware UTC, whatever the server's
+        ``TimeZone``) and only a naive one (a ``timestamp without time zone`` column) is tagged UTC, and on
+        SQLite the text the bind stored (the UTC wall time) is parsed straight to an aware value."""
         impl_processor = self.impl_instance.result_processor(dialect, coltype)
-        if dialect.driver == "asyncpg":
-            return impl_processor
         to_aware = self.process_result_value
+        if dialect.driver == "asyncpg" and impl_processor is None:
+
+            def process_asyncpg(value: Any) -> Any:
+                if value is None or value.tzinfo is not None:
+                    return value
+                return to_aware(value, dialect)
+
+            return process_asyncpg
 
         def process(value: Any) -> Any:
             if impl_processor is not None:

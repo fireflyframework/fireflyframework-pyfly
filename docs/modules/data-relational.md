@@ -243,15 +243,16 @@ the framework stamped there are already UTC wall times, so they read back correc
 
 **PostgreSQL `timestamp without time zone` columns** are not `UtcDateTime`'s type (it expects
 `timestamptz`, which `BaseEntity` has always created). One that adopts it, for example through the
-`update_type_annotation_map` line above, reads back naive on asyncpg, and PostgreSQL converts the aware
-values written to it, and compared with it, in the session's `TimeZone`. Migrate it first:
+`update_type_annotation_map` line above, reads back its wall times as UTC, but PostgreSQL converts the
+aware values written to it, and compared with it, in the session's `TimeZone`, so under a non-UTC
+`TimeZone` the stored instants drift. Migrate it first:
 `ALTER TABLE shipments ALTER COLUMN due_at TYPE timestamptz USING due_at AT TIME ZONE 'UTC'` reads the
 stored values as the UTC wall times they are.
 
 **Read cost.** Values read on SQLite, MySQL and MariaDB get their `UTC` zone attached in Python. A
 200-row `find_all()` of a `BaseEntity` (two timestamps a row) over a SQLite file measured 2 to 5% slower
 than with a naive `DateTime` (SQLite text is parsed straight to an aware value). asyncpg returns aware
-values itself, so PostgreSQL reads pay nothing.
+values itself, so PostgreSQL reads pay one `tzinfo` check per value.
 
 ### Defining Your Own Entities
 

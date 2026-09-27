@@ -258,9 +258,10 @@ async def test_a_legacy_naive_postgresql_column_is_migrated_before_it_adopts_the
     relational_backend: RelationalBackend,
 ) -> None:
     """``UtcDateTime`` expects ``timestamptz`` on PostgreSQL. A ``timestamp without time zone`` column that
-    adopts it (``update_type_annotation_map`` makes every ``Mapped[datetime]`` one) reads back naive on
-    asyncpg, and the server converts its writes with the session's ``TimeZone``. The documented migration
-    reads the old values as the UTC wall times they are."""
+    adopts it (``update_type_annotation_map`` makes every ``Mapped[datetime]`` one) reads back its wall
+    times as UTC, aware like every other value of the type, but the server converts the writes bound to it
+    with the session's ``TimeZone``. The documented migration reads the old values as the UTC wall times
+    they are."""
     table = Table("wp05_legacy_naive", MetaData(), Column("id", Integer, primary_key=True), Column("at", UtcDateTime()))
     engine = relational_backend.create_engine()
     async with engine.begin() as connection:
@@ -268,7 +269,17 @@ async def test_a_legacy_naive_postgresql_column_is_migrated_before_it_adopts_the
         await connection.execute(text("INSERT INTO wp05_legacy_naive VALUES (1, '2026-09-24 10:00:00.123456')"))
     async with engine.connect() as connection:
         before = (await connection.execute(select(table.c.at))).scalar_one()
-    assert before.tzinfo is None  # the hazard the documentation warns about
+    assert before == datetime(2026, 9, 24, 10, 0, 0, 123456, tzinfo=UTC) and _is_utc(before)
+
+    tokyo_write = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    async with engine.begin() as connection:
+        await connection.execute(text("SET LOCAL TimeZone = 'Asia/Tokyo'"))
+        await connection.execute(table.insert().values(id=3, at=tokyo_write))
+    async with engine.connect() as connection:
+        drifted = (await connection.execute(select(table.c.at).where(table.c.id == 3))).scalar_one()
+    assert drifted == tokyo_write + timedelta(hours=9)  # the hazard the documentation warns about
+    async with engine.begin() as connection:
+        await connection.execute(table.delete().where(table.c.id == 3))
 
     async with engine.begin() as connection:
         await connection.execute(
