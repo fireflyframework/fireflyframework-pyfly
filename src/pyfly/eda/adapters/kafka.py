@@ -24,12 +24,16 @@ per-aggregate ordering the other Firefly publishers guarantee holds here too.
 
 The consumer is a :class:`~pyfly.messaging.listener_container.KafkaListenerContainer`, shared with the
 messaging adapter: auto-commit is off, the matching handlers of one record run in one unit of work the
-container opens (their ``@transactional`` joins it), and the offset is committed only after that unit
-committed. A handler failure seeks the partition back and attempts the record again after a back-off
-(``pyfly.eda.listener.retry.*``); after the last attempt the record is dead-lettered to
+container opens with their ``@transactional`` settings (which join it), and the offset is committed only
+after that unit committed. A handler failure seeks the partition back and attempts the record again
+after a back-off (``pyfly.eda.listener.retry.*``); after the last attempt the record is dead-lettered to
 ``<topic>.DLT`` (and recorded in the :class:`~pyfly.eda.dlq.EdaDeadLetterStore`, when one is given),
 then committed. A record the serializer cannot read is dead-lettered at once. ``stop()`` waits for the
 record in flight and never commits the offset of one it had to cancel. Delivery is at-least-once.
+
+The consumer joins its group when the bus starts, but fetches nothing until a handler has subscribed:
+the application context starts the bus before it subscribes the ``@event_listener`` methods, and a
+record fetched in between would match no handler and be committed, lost to the group.
 
 The adapter requires aiokafka to be installed (``pip install pyfly[kafka]``
 or ``pip install pyfly[eda]``).
@@ -37,6 +41,8 @@ or ``pip install pyfly[eda]``).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import fnmatch
 import logging
 from collections.abc import Callable
@@ -130,7 +136,11 @@ class KafkaEventBus:
     dead_letter_store:
         An :class:`~pyfly.eda.dlq.EdaDeadLetterStore` that also records
         every event whose handlers failed on every attempt, with the error
-        and the attempt count.
+        and the attempt count. Once the record is in the dead-letter topic,
+        a failure to record it there is logged and counted
+        (``dead_letter_store_failures``), not retried; without a
+        dead-letter topic the store is the only copy, and the record stays
+        uncommitted until the store takes it.
     consumer_factory / producer_factory:
         Build the aiokafka clients (``AIOKafkaConsumer`` / ``AIOKafkaProducer``
         by default), called with ``bootstrap_servers`` and the bus's settings.
@@ -164,6 +174,8 @@ class KafkaEventBus:
         self._consumer_factory = consumer_factory
         self._producer_factory = producer_factory
         self._handlers: list[tuple[str, EventHandler]] = []
+        #: Set once a handler subscribed: the consumer fetches nothing before.
+        self._listening = asyncio.Event()
         self._producer: Any = None
         self._container: KafkaListenerContainer[EventEnvelope] | None = None
         self._started = False
@@ -175,9 +187,14 @@ class KafkaEventBus:
         #: Dead-letter publishes that failed after every retry. The record stays uncommitted and is
         #: dead-lettered again, so this counts broker trouble, not lost messages.
         self.dlt_publish_failures = 0
+        #: Events in the dead-letter topic that the dead-letter store failed to record.
+        self.dead_letter_store_failures = 0
 
     def subscribe(self, event_type_pattern: str, handler: EventHandler) -> None:
+        """Register a handler for events matching *event_type_pattern*. The consumer starts fetching once
+        the first one subscribed; the ones subscribed in the same step land before it fetches."""
         self._handlers.append((event_type_pattern, handler))
+        self._listening.set()
 
     async def publish(
         self,
@@ -196,13 +213,12 @@ class KafkaEventBus:
         one aggregate could be consumed in either order.
 
         A bus that was never started starts on its first publish. While it stops (a handler in flight
-        publishing) and after it stopped (a ``@pre_destroy`` publishing), the producer is used, or opened
-        again, but the consumer is not started: consumers restart only through :meth:`start`.
+        publishing) its producer is used; after it stopped (a ``@pre_destroy`` publishing) each publish
+        opens a producer of its own and closes it again. Neither starts the consumer: consumers restart
+        only through :meth:`start`.
         """
         if self._producer is None:
-            if self._stopped:
-                await self._start_producer()
-            else:
+            if not self._stopped:
                 await self.start()
         elif not self._started and not self._stopping and not self._stopped:
             await self.start()
@@ -217,12 +233,20 @@ class KafkaEventBus:
         record_key = (
             key if key is not None else partition_key(event_type, envelope.headers, header=self._partition_key_header)
         )
-        await self._producer.send_and_wait(
-            destination,
-            value=self._serializer.serialize(envelope),
-            key=record_key.encode("utf-8"),
-            headers=record_headers or None,
-        )
+        record = {
+            "value": self._serializer.serialize(envelope),
+            "key": record_key.encode("utf-8"),
+            "headers": record_headers or None,
+        }
+        if self._producer is not None:
+            await self._producer.send_and_wait(destination, **record)
+            return
+        producer = await self._new_producer()  # stopped: nothing would close a producer kept open now
+        try:
+            await producer.send_and_wait(destination, **record)
+        finally:
+            with contextlib.suppress(Exception):
+                await producer.stop()
 
     async def start(self) -> None:
         if self._started:
@@ -231,22 +255,24 @@ class KafkaEventBus:
         if self._producer is None:
             await self._start_producer()
 
-        # Always attach the consumer — pyfly's ApplicationContext auto-starts adapter beans before
-        # application code calls subscribe(), so the consumer cannot wait for handlers. The handler list
-        # is read for every record; a record no handler matches is simply committed.
+        # The consumer joins its group now (a broker it cannot reach fails the start), but fetches only once
+        # a handler subscribed: pyfly's ApplicationContext starts adapter beans before it subscribes the
+        # @event_listener methods. The handler list is read for every record; a record no handler matches
+        # is committed.
         if self._topics:
-            dead_letter = self._dead_letter if self._dlt_suffix is not None or self._dead_letter_store else None
+            has_dead_letter = self._dlt_suffix is not None or self._dead_letter_store is not None
             self._container = KafkaListenerContainer(
                 topics=self._topics,
                 group=self._group,
                 consumer_factory=self._new_consumer,
                 convert=self._envelope_of,
                 handler=self._dispatch,
-                dead_letter=dead_letter,
+                dead_letter=self._dead_letter if has_dead_letter else None,
                 settings=self._settings,
                 auto_offset_reset="earliest",
                 name=f"eda:{','.join(self._topics)}",
                 listeners=self._matching,
+                ready=self._listening,
             )
             await self._container.start()
 
@@ -271,6 +297,10 @@ class KafkaEventBus:
     # -- consuming -------------------------------------------------------------------------------------
 
     async def _start_producer(self) -> None:
+        self._producer = await self._new_producer()
+
+    async def _new_producer(self) -> Any:
+        """A started producer."""
         if self._producer_factory is not None:
             producer = self._producer_factory(bootstrap_servers=self._bootstrap_servers)
         else:
@@ -278,7 +308,7 @@ class KafkaEventBus:
 
             producer = AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
         await producer.start()
-        self._producer = producer
+        return producer
 
     def _new_consumer(self, **settings: Any) -> Any:
         if self._consumer_factory is not None:
@@ -299,16 +329,20 @@ class KafkaEventBus:
         for handler in self._matching(envelope):
             await handler(envelope)
 
-    async def _dead_letter(self, record: Any, error: BaseException, attempts: int) -> None:
+    async def _dead_letter(self, record: Any, error: BaseException, attempts: int) -> bool:
         """Republish ``record`` verbatim to ``<topic><dlt_suffix>`` with the reason and origin, and record a
-        failed event in the dead-letter store.
+        failed event in the dead-letter store; ``False`` when neither kept it (a record the serializer
+        cannot read, with the dead-letter topic off).
 
         The bytes, key and headers are the original ones — a dead-letter record must be replayable — plus
         ``x-dlt-reason``, ``x-dlt-source-topic``, ``x-dlt-source-partition``, ``x-dlt-source-offset`` and
         ``x-dlt-attempts``, so an operator can find where it came from. The publish is retried with a
         linear back-off; when it still fails the error propagates and the container leaves the record
-        uncommitted, to dead-letter it again later.
+        uncommitted, to dead-letter it again later. Once the record is in the dead-letter topic, the store
+        is best effort: its failure is logged and counted, since publishing the record again for it would
+        only put more copies in the topic.
         """
+        published = False
         if self._dlt_suffix is not None:
             topic = f"{record.topic}{self._dlt_suffix}"
             extra = dead_letter_headers(
@@ -321,6 +355,7 @@ class KafkaEventBus:
                 self.dlt_publish_failures += 1
                 raise
             self.dlt_published += 1
+            published = True
             logger.warning(
                 "record_dead_lettered topic=%s offset=%s dlt=%s reason=%s",
                 record.topic,
@@ -328,13 +363,24 @@ class KafkaEventBus:
                 topic,
                 type(failure_cause(error)).__name__,
             )
-        if self._dead_letter_store is not None and not isinstance(error, PoisonMessageError):
-            cause = failure_cause(error)
-            await self._dead_letter_store.add(
-                EdaDeadLetterEntry(
-                    event=self._serializer.deserialize(record.value),
-                    error_type=type(cause).__name__,
-                    error_message=str(cause),
-                    attempts=attempts,
-                )
+        if self._dead_letter_store is None or isinstance(error, PoisonMessageError):
+            return published  # the store keeps events, and there is none in bytes no serializer reads
+        cause = failure_cause(error)
+        entry = EdaDeadLetterEntry(
+            event=self._serializer.deserialize(record.value),
+            error_type=type(cause).__name__,
+            error_message=str(cause),
+            attempts=attempts,
+        )
+        try:
+            await self._dead_letter_store.add(entry)
+        except Exception:
+            if not published:
+                raise  # the store is the only copy: the record stays uncommitted until it takes it
+            self.dead_letter_store_failures += 1
+            logger.exception(
+                "dead_letter_store_failed topic=%s offset=%s: the event is in the dead-letter topic, not in the store",
+                record.topic,
+                record.offset,
             )
+        return True

@@ -570,3 +570,61 @@ async def test_a_cancelled_error_the_handler_raises_itself_is_a_failed_delivery(
     finally:
         await container.stop()
     assert attempts == [("m1", 1), ("m1", 2), ("m2", 1)]
+
+
+async def test_the_loop_fetches_nothing_until_it_is_ready() -> None:
+    cluster = FakeKafkaCluster()
+    cluster.append(TOPIC, b"m1")
+    handled: list[str] = []
+    ready = asyncio.Event()
+
+    async def handler(message: Message) -> None:
+        handled.append(message.value.decode())
+
+    container: KafkaListenerContainer[Message] = KafkaListenerContainer(
+        topics=[TOPIC],
+        group=GROUP,
+        consumer_factory=cluster.consumer,
+        convert=kafka_adapter.message_of,
+        handler=handler,
+        dead_letter=None,
+        settings=fast(transactional=False),
+        auto_offset_reset="earliest",
+        ready=ready,
+    )
+    await container.start()
+    try:
+        [consumer] = cluster.consumers
+        assert consumer.started  # the consumer joined its group at start
+        await asyncio.sleep(0.1)
+        assert handled == [] and consumer.positions[next(iter(consumer.positions))] == 0
+        ready.set()
+        await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 1, what="m1 committed")
+    finally:
+        await container.stop()
+    assert handled == ["m1"]
+
+
+async def test_a_container_that_is_not_ready_stops_at_once() -> None:
+    cluster = FakeKafkaCluster()
+
+    async def handler(message: Message) -> None:
+        raise AssertionError("nothing is fetched")
+
+    container: KafkaListenerContainer[Message] = KafkaListenerContainer(
+        topics=[TOPIC],
+        group=GROUP,
+        consumer_factory=cluster.consumer,
+        convert=kafka_adapter.message_of,
+        handler=handler,
+        dead_letter=None,
+        settings=fast(transactional=False, shutdown_timeout=5.0),
+        auto_offset_reset="earliest",
+        ready=asyncio.Event(),
+    )
+    await container.start()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await container.stop()
+    assert loop.time() - began < 1.0
+    assert not container.running and cluster.consumers[0].closed

@@ -22,13 +22,18 @@ to every handler whose pattern matches ``envelope.event_type``.
 Each destination's queue is consumed by a
 :class:`~pyfly.messaging.listener_container.RabbitListenerContainer`, shared with the messaging adapter:
 a channel of its own with a bounded prefetch (``pyfly.eda.rabbitmq.prefetch``), manual acknowledgement,
-and the matching handlers of one message in one unit of work the container opens, acked only after it
-committed. A handler failure is attempted again after a back-off (``pyfly.eda.listener.retry.*``), by
-republishing the message to its queue with its attempt count; after the last attempt, and at once for a
-message the serializer cannot read, it is dead-lettered to ``<exchange>.dlx`` into the durable queue
-``<group>.<destination>.dlq``. The bus's consumers share a concurrency limit sized from the datasource
-pool. Until 26.09.08 a failing handler was requeued at once, forever, with every message of the backlog
-running at the same time.
+and the matching handlers of one message in one unit of work the container opens with their
+``@transactional`` settings, acked only after it committed. A handler failure is attempted again after a
+back-off (``pyfly.eda.listener.retry.*``), by republishing the message to its queue with its attempt
+count; after the last attempt, and at once for a message the serializer cannot read, it is dead-lettered
+to ``<exchange>.dlx`` into the durable queue ``<group>.<destination>.dlq``. The bus's consumers share a
+concurrency limit sized from the datasource pool. Before 26.09.08 a failing handler was requeued at once,
+forever, with every message of the backlog running at the same time.
+
+The queues are declared when the bus starts, so events published from then on wait in them, but
+consuming begins only once a handler has subscribed: the application context starts the bus before it
+subscribes the ``@event_listener`` methods, and a message delivered in between would match no handler
+and be acked, lost.
 
 The adapter requires aio-pika to be installed (``pip install pyfly[rabbitmq]``
 or ``pip install pyfly[eda]``).
@@ -89,7 +94,9 @@ class RabbitMqEventBus:
         ``<exchange_name>.dlx``.
     dead_letter_store:
         An :class:`~pyfly.eda.dlq.EdaDeadLetterStore` that also records
-        every event whose handlers failed on every attempt.
+        every event whose handlers failed on every attempt. The event is
+        in the dead-letter queue first, so a failure to record it is logged
+        and counted (``dead_letter_store_failures``), not retried.
     connection_factory:
         Opens the connection (``aio_pika.connect_robust`` by default).
     """
@@ -120,6 +127,8 @@ class RabbitMqEventBus:
         self._dead_letter_store = dead_letter_store
         self._connection_factory = connection_factory
         self._handlers: list[tuple[str, EventHandler]] = []
+        #: Set once a handler subscribed: the consumers begin consuming then.
+        self._listening = asyncio.Event()
         self._connection: Any = None
         self._channel: Any = None
         self._exchange: Any = None
@@ -132,6 +141,8 @@ class RabbitMqEventBus:
         self._started = False
         self._stopping = False
         self._stopped = False
+        #: Events in the dead-letter queue that the dead-letter store failed to record.
+        self.dead_letter_store_failures = 0
 
     def subscribe(self, event_type_pattern: str, handler: EventHandler) -> None:
         """Register a handler for events matching *event_type_pattern*.
@@ -139,9 +150,12 @@ class RabbitMqEventBus:
         Handlers may be registered before or after :meth:`start`: each running
         consumer reads the current handler list on every message, so a handler
         added after start begins receiving matching events immediately — no
-        restart and no extra consumer.
+        restart and no extra consumer. The consumers begin consuming once the
+        first handler subscribed; the ones subscribed in the same step land
+        before the first delivery.
         """
         self._handlers.append((event_type_pattern, handler))
+        self._listening.set()
 
     async def publish(
         self,
@@ -153,13 +167,12 @@ class RabbitMqEventBus:
         """Publish an event to *destination* on the exchange.
 
         A bus that was never started starts on its first publish. While it stops (a handler in flight
-        publishing) and after it stopped (a ``@pre_destroy`` publishing), the publishing channel is used,
-        or opened again, but no consumer is started: consumers restart only through :meth:`start`.
+        publishing) its publishing channel is used; after it stopped (a ``@pre_destroy`` publishing) each
+        publish opens a connection of its own and closes it again. Neither starts a consumer: consumers
+        restart only through :meth:`start`.
         """
         if self._exchange is None:
-            if self._stopped:
-                await self._open_publisher()
-            else:
+            if not self._stopped:
                 await self.start()
         elif not self._started and not self._stopping and not self._stopped:
             await self.start()
@@ -177,7 +190,15 @@ class RabbitMqEventBus:
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=envelope.event_id,
         )
-        await self._exchange.publish(message, routing_key=destination)
+        if self._exchange is not None:
+            await self._exchange.publish(message, routing_key=destination)
+            return
+        connection, _channel, exchange = await self._connect()  # stopped: nothing would close it later
+        try:
+            await exchange.publish(message, routing_key=destination)
+        finally:
+            with contextlib.suppress(Exception):
+                await connection.close()
 
     async def start(self) -> None:
         """Connect to RabbitMQ and begin consuming from all destinations."""
@@ -201,14 +222,22 @@ class RabbitMqEventBus:
         self._started = True
 
     async def _open_publisher(self) -> None:
+        self._connection, self._channel, self._exchange = await self._connect()
+
+    async def _connect(self) -> tuple[Any, Any, Any]:
+        """A connection, its publishing channel and the declared exchange."""
         import aio_pika
 
         connect = self._connection_factory or aio_pika.connect_robust
-        self._connection = await connect(self._url)
-        self._channel = await self._connection.channel()
-        self._exchange = await self._channel.declare_exchange(
-            self._exchange_name, aio_pika.ExchangeType.DIRECT, durable=True
-        )
+        connection = await connect(self._url)
+        try:
+            channel = await connection.channel()
+            exchange = await channel.declare_exchange(self._exchange_name, aio_pika.ExchangeType.DIRECT, durable=True)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await connection.close()
+            raise
+        return connection, channel, exchange
 
     async def _start_consumer(self, destination: str) -> None:
         """Consume ``<group>.<destination>``, bound to *destination*, through a listener container."""
@@ -225,6 +254,7 @@ class RabbitMqEventBus:
             after_dead_letter=self._record_dead_letter if self._dead_letter_store is not None else None,
             name=f"eda:{queue}",
             listeners=self._matching,
+            ready=self._listening,
         )
         self._containers.append(container)
         await container.start()
@@ -242,17 +272,28 @@ class RabbitMqEventBus:
             await handler(envelope)
 
     async def _record_dead_letter(self, message: Any, error: BaseException, attempts: int) -> None:
+        """Record a dead-lettered event in the store, best effort: it is in the dead-letter queue already,
+        and failing here would only run the handlers and dead-letter it again."""
         if self._dead_letter_store is None or isinstance(error, PoisonMessageError):
             return
         cause = failure_cause(error)
-        await self._dead_letter_store.add(
-            EdaDeadLetterEntry(
-                event=self._serializer.deserialize(message.body),
-                error_type=type(cause).__name__,
-                error_message=str(cause),
-                attempts=attempts,
+        try:
+            await self._dead_letter_store.add(
+                EdaDeadLetterEntry(
+                    event=self._serializer.deserialize(message.body),
+                    error_type=type(cause).__name__,
+                    error_message=str(cause),
+                    attempts=attempts,
+                )
             )
-        )
+        except Exception:
+            self.dead_letter_store_failures += 1
+            logger.exception(
+                "dead_letter_store_failed routing_key=%s message_id=%s: the event is in the dead-letter queue, not in "
+                "the store",
+                getattr(message, "routing_key", None),
+                getattr(message, "message_id", None),
+            )
 
     async def _stop_consumers(self) -> None:
         containers = list(self._containers)

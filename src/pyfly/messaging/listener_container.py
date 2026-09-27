@@ -794,7 +794,9 @@ class KafkaListenerContainer(Generic[T]):
     - *handler* runs inside the delivery's unit of work;
     - *listeners* returns the listeners a payload reaches (``None``: *handler* itself), whose
       ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`);
-    - *dead_letter* publishes a record that ran out of attempts; ``None`` logs it and skips it.
+    - *dead_letter* publishes a record that ran out of attempts; ``None`` logs it and skips it;
+    - *ready*: the loop fetches nothing until this event is set (a bus sets it once a handler
+      subscribed); ``None`` fetches from the start.
 
     Offsets are committed after each poll's records are done, and before a partition is sought back, and
     when partitions are revoked, and at stop: always the offset after the last record whose unit
@@ -816,6 +818,7 @@ class KafkaListenerContainer(Generic[T]):
         auto_offset_reset: str = "latest",
         name: str | None = None,
         listeners: ListenerLookup | None = None,
+        ready: asyncio.Event | None = None,
     ) -> None:
         self._topics = list(topics)
         self._group = group
@@ -828,11 +831,12 @@ class KafkaListenerContainer(Generic[T]):
         self._auto_offset_reset = auto_offset_reset
         self.name = name or ",".join(self._topics)
         self._listeners = listeners
+        self._ready = ready
         self._invoker = ListenerInvoker(settings, name=self.name)
         self._consumer: Any = None
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
-        self._polling = False
+        #: Cleared while a record is in flight: a stop cancels the loop only when it is set.
         self._idle = asyncio.Event()
         self._idle.set()
         #: Partitions this member owns (``None`` without a group: everything it fetches).
@@ -905,7 +909,7 @@ class KafkaListenerContainer(Generic[T]):
         task, consumer = self._task, self._consumer
         self._stopping = True
         if task is not None:
-            if self._polling:
+            if self._idle.is_set():
                 task.cancel()  # nothing is in flight: the fetched records are simply not processed
             await _wait_or_cancel({task}, self._settings.shutdown_timeout, container=self.name)
         self._task = None
@@ -921,9 +925,10 @@ class KafkaListenerContainer(Generic[T]):
 
     async def _run(self, consumer: Any) -> None:
         loop = asyncio.get_running_loop()
+        if self._ready is not None:
+            await self._ready.wait()  # nothing is in flight: a stop cancels the wait
         while not self._stopping:
             self._resume_due(consumer, loop.time())
-            self._polling = True
             try:
                 batch = await consumer.getmany(
                     timeout_ms=self._poll_timeout_ms(loop.time()), max_records=self._settings.max_poll_records
@@ -934,8 +939,6 @@ class KafkaListenerContainer(Generic[T]):
                 logger.warning("listener_poll_failed container=%s: %s", self.name, error)
                 await asyncio.sleep(1.0)
                 continue
-            finally:
-                self._polling = False
             for tp, records in batch.items():
                 for record in records:
                     if self._stopping or not self._owns(tp):
@@ -1254,7 +1257,9 @@ class RabbitListenerContainer(Generic[T]):
       failure is logged and the message acked all the same, since the copy is safe;
     - *limit* is the adapter's :class:`ConcurrencyLimit`, shared by its consumers;
     - *listeners* returns the listeners a payload reaches (``None``: *handler* itself), whose
-      ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`).
+      ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`);
+    - *ready*: the queue and its routes are declared at :meth:`start`, but consuming begins only once this
+      event is set (a bus sets it once a handler subscribed); ``None`` consumes from the start.
 
     The consumer channel has publisher confirms and ``on_return_raises``: a republished or dead-lettered
     copy that no queue takes raises instead of vanishing, and the original stays unacknowledged.
@@ -1275,6 +1280,7 @@ class RabbitListenerContainer(Generic[T]):
         after_dead_letter: RabbitDeadLetterHook | None = None,
         name: str | None = None,
         listeners: ListenerLookup | None = None,
+        ready: asyncio.Event | None = None,
     ) -> None:
         self._connection = connection
         self._queue_name = queue
@@ -1288,7 +1294,9 @@ class RabbitListenerContainer(Generic[T]):
         self._after_dead_letter = after_dead_letter
         self.name = name or queue
         self._listeners = listeners
+        self._ready = ready
         self._invoker = ListenerInvoker(settings, name=self.name)
+        self._consuming: asyncio.Task[None] | None = None
         self._channel: Any = None
         self._queue: Any = None
         self._exchanges: dict[str, Any] = {}
@@ -1304,7 +1312,7 @@ class RabbitListenerContainer(Generic[T]):
 
     async def start(self) -> None:
         """Open the consumer channel, set its prefetch, declare the queue, its bindings and the dead-letter
-        routes, and start consuming with manual acknowledgement."""
+        routes, and start consuming with manual acknowledgement (once *ready* is set)."""
         if self._channel is not None:
             return
         import aio_pika
@@ -1325,12 +1333,26 @@ class RabbitListenerContainer(Generic[T]):
                     dead = await channel.declare_queue(route.queue, durable=True)
                     await dead.bind(exchange, routing_key=route.routing_key)
             self._channel, self._queue = channel, queue
-            self._tag = await queue.consume(self._on_message, no_ack=False)
+            if self._ready is None or self._ready.is_set():
+                self._tag = await queue.consume(self._on_message, no_ack=False)
+            else:
+                self._consuming = detached(
+                    self._consume_when_ready(self._ready, queue), name=f"pyfly-rabbit-listener-ready[{self.name}]"
+                )
         except BaseException:
             self._channel = self._queue = None
             with contextlib.suppress(Exception):
                 await channel.close()
             raise
+
+    async def _consume_when_ready(self, ready: asyncio.Event, queue: Any) -> None:
+        await ready.wait()
+        if self._stopping or self._queue is not queue:
+            return
+        try:
+            self._tag = await queue.consume(self._on_message, no_ack=False)
+        except Exception:
+            logger.exception("listener_consume_failed container=%s queue=%s", self.name, self._queue_name)
 
     async def _exchange(self, channel: Any, name: str, kind: Any) -> Any:
         exchange = self._exchanges.get(name)
@@ -1345,6 +1367,11 @@ class RabbitListenerContainer(Generic[T]):
         requeues whatever is still unacknowledged)."""
         self._stopping = True
         self._stopped.set()
+        consuming, self._consuming = self._consuming, None
+        if consuming is not None and not consuming.done():
+            consuming.cancel()
+            with contextlib.suppress(BaseException):
+                await consuming
         channel, queue, tag = self._channel, self._queue, self._tag
         self._tag = None
         if queue is not None and tag is not None:

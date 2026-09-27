@@ -422,3 +422,42 @@ async def test_a_failing_after_dead_letter_hook_does_not_dead_letter_the_message
     assert broker.bodies(f"{QUEUE}.dlq") == [b"m"]
     assert outcomes(broker, b"m") == [("ack", None)]
     assert any("listener_after_dead_letter_failed" in record.getMessage() for record in caplog.records)
+
+
+async def test_the_queue_is_declared_at_start_and_consumed_once_ready() -> None:
+    broker = FakeAmqpBroker()
+    ready = asyncio.Event()
+    handled: list[bytes] = []
+
+    async def handler(message: Any) -> None:
+        handled.append(message.body)
+
+    container = _container(await broker.connect("amqp://fake/"), handler, ready=ready)
+    await container.start()
+    try:
+        assert broker.route("pyfly", TOPIC) == {QUEUE}
+        assert broker.route("pyfly.dlx", QUEUE) == {f"{QUEUE}.dlq"}
+        broker.publish_to("pyfly", TOPIC, b"early")
+        await asyncio.sleep(0.05)
+        assert handled == [] and broker.bodies(QUEUE) == [b"early"]  # it waits in its queue
+        ready.set()
+        await eventually(lambda: handled == [b"early"] and not broker.bodies(QUEUE), what="the delivery")
+    finally:
+        await container.stop()
+    assert outcomes(broker, b"early") == [("ack", None)]
+
+
+async def test_a_container_stopped_before_it_was_ready_never_consumes() -> None:
+    broker = FakeAmqpBroker()
+    ready = asyncio.Event()
+
+    async def handler(message: Any) -> None:
+        raise AssertionError("nothing is consumed")
+
+    container = _container(await broker.connect("amqp://fake/"), handler, ready=ready)
+    await container.start()
+    await container.stop()
+    ready.set()
+    broker.publish_to("pyfly", TOPIC, b"m")
+    await asyncio.sleep(0.05)
+    assert broker.bodies(QUEUE) == [b"m"]

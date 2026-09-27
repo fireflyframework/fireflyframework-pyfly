@@ -27,6 +27,9 @@ Things the Kafka bus did not do until this suite existed:
   commits, a failure is attempted again after a back-off and dead-lettered after the last attempt, and
   a stop drains the record in flight. The fake cluster below keeps positions and committed offsets, so
   these tests see what the broker would.
+* the consumer fetched from the moment the bus started, which the application context does before it
+  subscribes the ``@event_listener`` methods: a backlog fetched in between matched no handler and was
+  committed, lost to the group. It now fetches once a handler subscribed.
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ from typing import Any
 
 import pytest
 
+from pyfly.container.stereotypes import service
+from pyfly.context.lifecycle import post_construct
 from pyfly.core.config import Config
 from pyfly.data.transaction import current_unit_of_work
 from pyfly.data.transactional import transactional
@@ -83,6 +88,10 @@ def _bus(cluster: FakeKafkaCluster, **kwargs: Any) -> KafkaEventBus:
 
 def _envelope(event_type: str = "order.created", **payload: Any) -> bytes:
     return JsonEventSerializer().serialize(EventEnvelope(event_type=event_type, payload=payload, destination=TOPIC))
+
+
+async def _ignore(_envelope: EventEnvelope) -> None:
+    """A handler, so that the bus consumes."""
 
 
 class TestPartitionKey:
@@ -165,6 +174,7 @@ class TestDeadLetterTopic:
         cluster = FakeKafkaCluster()
         cluster.append(TOPIC, b"{")
         bus = _bus(cluster)
+        bus.subscribe("order.*", _ignore)
         await bus.start()
         try:
             bus._producer.failures = 3  # one round of three publish attempts
@@ -181,6 +191,7 @@ class TestDeadLetterTopic:
         cluster = FakeKafkaCluster()
         cluster.append(TOPIC, b"{")
         bus = _bus(cluster, dlt_suffix=None)
+        bus.subscribe("order.*", _ignore)
         with caplog.at_level(logging.ERROR):
             await bus.start()
             try:
@@ -231,6 +242,83 @@ class TestDeadLetterTopic:
         [entry] = await store.list()
         assert entry.event.payload == {"id": 7}
         assert (entry.error_type, entry.error_message, entry.attempts) == ("RuntimeError", "projection is broken", 3)
+
+    async def test_a_failing_dead_letter_store_does_not_publish_the_record_again(self, caplog: Any) -> None:
+        """The record is in the DLT before the store is asked: a store that fails is logged and counted,
+        and the record is committed, not dead-lettered again round after round."""
+        cluster = FakeKafkaCluster()
+        cluster.append(TOPIC, _envelope(id=7))
+
+        class BrokenStore(InMemoryEdaDeadLetterStore):
+            calls = 0
+
+            async def add(self, entry: Any) -> None:
+                BrokenStore.calls += 1
+                raise RuntimeError("the dead-letter table is unreachable")
+
+        async def boom(_: EventEnvelope) -> None:
+            raise RuntimeError("projection is broken")
+
+        bus = _bus(cluster, dead_letter_store=BrokenStore())
+        bus.subscribe("order.*", boom)
+        with caplog.at_level(logging.ERROR):
+            await bus.start()
+            try:
+                await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 1, what="dead-lettered, committed")
+                await asyncio.sleep(0.1)
+            finally:
+                await bus.stop()
+        assert len(cluster.records(f"{TOPIC}.DLT")) == 1
+        assert (BrokenStore.calls, bus.dead_letter_store_failures, bus.dlt_published) == (1, 1, 1)
+        assert any("dead_letter_store_failed" in record.getMessage() for record in caplog.records)
+
+    async def test_without_a_dlt_the_store_is_the_only_copy_and_the_record_waits_for_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(listener_container, "DEAD_LETTER_RETRY_DELAY", 0.05)
+        cluster = FakeKafkaCluster()
+        cluster.append(TOPIC, _envelope(id=7))
+        failures = [2]
+
+        class FlakyStore(InMemoryEdaDeadLetterStore):
+            async def add(self, entry: Any) -> None:
+                if failures[0]:
+                    failures[0] -= 1
+                    raise RuntimeError("the dead-letter table is unreachable")
+                await super().add(entry)
+
+        async def boom(_: EventEnvelope) -> None:
+            raise RuntimeError("projection is broken")
+
+        store = FlakyStore()
+        bus = _bus(cluster, dlt_suffix=None, dead_letter_store=store)
+        bus.subscribe("order.*", boom)
+        await bus.start()
+        try:
+            await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 1, what="recorded, then committed")
+        finally:
+            await bus.stop()
+        [entry] = await store.list()
+        assert entry.event.payload == {"id": 7}
+        assert bus.dead_letter_store_failures == 0  # not lost: it was retried until the store took it
+
+    async def test_an_unreadable_record_with_no_dlt_is_logged_as_skipped_not_dead_lettered(self, caplog: Any) -> None:
+        """The store keeps events, and bytes no serializer reads are none: nothing keeps a copy."""
+        cluster = FakeKafkaCluster()
+        cluster.append(TOPIC, b"{")
+        store = InMemoryEdaDeadLetterStore()
+        bus = _bus(cluster, dlt_suffix=None, dead_letter_store=store)
+        bus.subscribe("order.*", _ignore)
+        with caplog.at_level(logging.WARNING, logger="pyfly.messaging.listener_container"):
+            await bus.start()
+            try:
+                await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 1, what="skipped and committed")
+            finally:
+                await bus.stop()
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("listener_delivery_skipped" in message for message in messages)
+        assert not any("listener_delivery_dead_lettered" in message for message in messages)
+        assert await store.list() == []
 
     def test_auto_configuration_reads_the_dlt_and_key_settings(self) -> None:
         config = Config(
@@ -340,6 +428,37 @@ class TestTransactionalEventListener:
         assert await committed_bodies(relational_backend) == ["late"]
 
 
+@service
+class SlowToStart:
+    """A bean whose initialization awaits: the context runs it after the bus started, before the
+    @event_listener methods are subscribed."""
+
+    @post_construct
+    async def warm_up(self) -> None:
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_a_backlog_waiting_before_the_application_starts_reaches_its_listeners(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The consumer joins its group when the context starts the bus, but fetches nothing until the
+    @event_listener methods subscribed, so no record of the backlog is committed unseen."""
+    cluster = FakeKafkaCluster()
+    bodies = [f"e{index}" for index in range(5)]
+    for body in bodies:
+        cluster.append(TOPIC, _envelope(body=body))
+    behavior = Behavior()
+    bus = _bus(cluster, settings=ListenerContainerSettings(retry=FAST.retry, poll_timeout=0.05))
+    ctx = await boot(relational_backend, event_bus_bean(bus), SlowToStart, event_listener_bean(behavior))
+    try:
+        await eventually(lambda: cluster.committed_offset(GROUP, TOPIC) == 5, what="the backlog committed")
+    finally:
+        await ctx.stop()
+    assert behavior.finished == bodies
+    assert await committed_bodies(relational_backend) == bodies
+
+
 class TestStopAndPublish:
     async def test_a_publish_while_stopping_neither_restarts_the_consumer_nor_fails(self) -> None:
         cluster = FakeKafkaCluster()
@@ -373,6 +492,9 @@ class TestStopAndPublish:
         await bus.publish("goodbye", "app.stopping", {})  # a @pre_destroy announcing the shutdown
         assert [record.topic for record in cluster.records("goodbye")] == ["goodbye"]
         assert len(cluster.consumers) == 1 and cluster.consumers[0].closed
+        # A producer of its own, closed again: nothing would close one the bus kept open after it stopped.
+        assert len(cluster.producers) == 2 and not any(producer.started for producer in cluster.producers)
+        assert bus._producer is None
         await bus.start()  # a restart brings the consumer back
         try:
             assert len(cluster.consumers) == 2 and cluster.consumers[1].started

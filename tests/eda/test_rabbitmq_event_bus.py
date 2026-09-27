@@ -18,6 +18,10 @@ C065 (26.09.08): a failing handler used to be requeued at once, forever, with ev
 running at the same time (no prefetch). The bus now consumes through the listener container: a prefetch
 per consumer channel, a concurrency limit, a bounded number of attempts with a delay, then the
 dead-letter queue ``<queue>.dlq`` behind ``<exchange>.dlx``.
+
+The bus declares its queues when it starts but consumes only once a handler subscribed: the application
+context starts it before it subscribes the ``@event_listener`` methods, and a backlog delivered in between
+matched no handler and was acked, lost.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from pyfly.container.stereotypes import service
+from pyfly.context.lifecycle import post_construct
 from pyfly.core.config import Config
 from pyfly.data.transaction import Isolation, UnitOfWork, current_unit_of_work
 from pyfly.data.transactional import transactional
@@ -98,11 +103,17 @@ class TestRabbitMqEventBus:
 
         broker = FakeAmqpBroker()
         bus = _bus(broker)
+        received: list[EventEnvelope] = []
+
+        async def handler(envelope: EventEnvelope) -> None:
+            received.append(envelope)
+
+        bus.subscribe("order.*", handler)
         await bus.start()
         try:
             exchange = bus._exchange
             await bus.publish("orders", "order.created", {"id": 1}, headers={"x-tenant": "acme"})
-            await eventually(lambda: _settled(broker), what="the message consumed")
+            await eventually(lambda: _settled(broker) and len(received) == 1, what="the message consumed")
         finally:
             await bus.stop()
         [(message, routing_key)] = exchange.published
@@ -135,10 +146,31 @@ class TestRabbitMqEventBus:
             assert broker.route("test-exchange", "payments") == {"svc.payments"}
             assert broker.route("test-exchange.dlx", "svc.orders") == {"svc.orders.dlq"}
             assert broker.route("test-exchange.dlx", "svc.payments") == {"svc.payments.dlq"}
-            consumers = [channel for channel in broker.channels if channel.consumers]
-            assert [channel.qos_calls for channel in consumers] == [[20], [20]]
+            consumer_channels = [channel for channel in broker.channels if channel.qos_calls]
+            assert [channel.qos_calls for channel in consumer_channels] == [[20], [20]]
         finally:
             await bus.stop()
+
+    async def test_the_bus_consumes_only_once_a_handler_subscribed(self) -> None:
+        """An event published before any handler subscribed waits in its queue, and is not acked unseen."""
+        broker = FakeAmqpBroker()
+        bus = _bus(broker)
+        received: list[str] = []
+
+        async def handler(envelope: EventEnvelope) -> None:
+            received.append(envelope.event_type)
+
+        await bus.start()
+        try:
+            await bus.publish("orders", "order.created", {"id": 1})
+            await asyncio.sleep(0.05)
+            assert broker.bodies(QUEUE) and not broker.outcomes
+            assert not any(channel.consumers for channel in broker.channels)
+            bus.subscribe("order.*", handler)
+            await eventually(lambda: received == ["order.created"] and _settled(broker), what="the delivery")
+        finally:
+            await bus.stop()
+        assert [outcome for outcome, *_ in broker.outcomes] == ["ack"]
 
     async def test_start_is_idempotent(self) -> None:
         broker = FakeAmqpBroker()
@@ -204,6 +236,11 @@ class TestDispatch:
     async def test_a_message_that_cannot_be_read_is_dead_lettered_at_once(self, caplog: Any) -> None:
         broker = FakeAmqpBroker()
         bus = _bus(broker)
+
+        async def handler(envelope: EventEnvelope) -> None:
+            pass
+
+        bus.subscribe("order.*", handler)
         with caplog.at_level(logging.WARNING, logger="pyfly.messaging.listener_container"):
             await bus.start()
             try:
@@ -270,6 +307,53 @@ class TestDispatch:
             await bus.stop()
         [entry] = await store.list()
         assert (entry.event.payload, entry.error_type, entry.attempts) == ({"id": 9}, "RuntimeError", 3)
+
+    async def test_a_failing_dead_letter_store_neither_loops_nor_floods_the_dlq(self, caplog: Any) -> None:
+        """The event is in the DLQ before the store is asked: a store that fails (its table is unreachable
+        during a database outage) is logged and counted, and the handler is not run again for it."""
+        broker = FakeAmqpBroker()
+        runs: list[int] = []
+
+        class BrokenStore(InMemoryEdaDeadLetterStore):
+            calls = 0
+
+            async def add(self, entry: Any) -> None:
+                BrokenStore.calls += 1
+                raise RuntimeError("the dead-letter table is unreachable")
+
+        async def bad_handler(envelope: EventEnvelope) -> None:
+            runs.append(1)
+            raise ValueError("bad event")
+
+        settings = ListenerContainerSettings(retry=RetryPolicy(max_attempts=1), transactional=False)
+        bus = _bus(broker, settings=settings, dead_letter_store=BrokenStore())
+        bus.subscribe("order.*", bad_handler)
+        await bus.start()
+        try:
+            with caplog.at_level(logging.ERROR):
+                broker.publish_to("pyfly", "orders", _envelope(id=1))
+                await eventually(lambda: len(broker.messages(f"{QUEUE}.dlq")) == 1, what="the dead letter")
+                await asyncio.sleep(0.2)
+        finally:
+            await bus.stop()
+        assert (len(runs), BrokenStore.calls, bus.dead_letter_store_failures) == (1, 1, 1)
+        assert len(broker.messages(f"{QUEUE}.dlq")) == 1
+        assert [outcome for outcome, *_ in broker.outcomes] == ["ack"]
+        assert any("dead_letter_store_failed" in record.getMessage() for record in caplog.records)
+
+    async def test_a_publish_after_stop_closes_the_connection_it_opened(self) -> None:
+        """A ``@pre_destroy`` announcing the shutdown publishes on a connection of its own, closed again:
+        nothing would close one the bus kept open after it stopped."""
+        broker = FakeAmqpBroker()
+        bus = _bus(broker)
+        await bus.start()
+        await bus.stop()
+        broker.declare_queue("goodbye")
+        broker.bindings.setdefault("pyfly", {}).setdefault("goodbye", set()).add("goodbye")
+        await bus.publish("goodbye", "app.stopping", {})
+        assert len(broker.bodies("goodbye")) == 1
+        assert len(broker.connections) == 2 and all(connection.closed for connection in broker.connections)
+        assert bus._connection is None and not bus._started
 
     async def test_a_backlog_is_bounded_by_the_prefetch_and_the_concurrency_limit(self) -> None:
         broker = FakeAmqpBroker()
@@ -372,6 +456,39 @@ async def test_deliveries_do_not_inherit_the_transaction_of_the_publisher(
     [handler_unit] = behavior.units
     assert handler_unit is not None and handler_unit != request_units[0]
     assert await committed_bodies(relational_backend) == ["late"]
+
+
+@service
+class SlowToStart:
+    """A bean whose initialization awaits: the context runs it after the bus started, before the
+    @event_listener methods are subscribed."""
+
+    @post_construct
+    async def warm_up(self) -> None:
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_a_backlog_waiting_before_the_application_starts_reaches_its_listeners(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The context starts the bus, then initializes the other beans (one of them slowly), then subscribes
+    the @event_listener methods: nothing is consumed before they subscribed, so nothing is acked unseen."""
+    broker = FakeAmqpBroker()
+    broker.declare_queue(QUEUE)
+    broker.bindings.setdefault("pyfly", {}).setdefault("orders", set()).add(QUEUE)
+    bodies = [f"e{index}" for index in range(5)]
+    for body in bodies:
+        broker.publish_to("pyfly", "orders", _envelope(body=body))
+    behavior = Behavior()
+    bus = _bus(broker, settings=ListenerContainerSettings(retry=FAST.retry))
+    ctx = await boot(relational_backend, event_bus_bean(bus), SlowToStart, event_listener_bean(behavior))
+    try:
+        await eventually(lambda: len(behavior.finished) == 5 and _settled(broker), what="the backlog")
+    finally:
+        await ctx.stop()
+    assert sorted(behavior.finished) == bodies
+    assert await committed_bodies(relational_backend) == bodies
 
 
 SERIALIZABLE_UNITS: list[UnitOfWork | None] = []
