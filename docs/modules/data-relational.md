@@ -614,7 +614,11 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
   blocks one after another; to run steps concurrently, give each one a unit of its own
   (`Propagation.REQUIRES_NEW`, which commits on its own, or `detached()`). A `NESTED` scope that ends
   while a task it started still holds a savepoint on top of its own neither releases nor rolls back
-  across it: the unit is marked rollback-only and the scope raises `IllegalTransactionStateError`.
+  across it: the unit is marked rollback-only and the scope raises `IllegalTransactionStateError`. A
+  unit does not commit under such a task either: a `@transactional` method (or a repository call's own
+  unit) that returns while a child task it started still holds a savepoint rolls back and raises
+  `IllegalTransactionStateError`, since committing would release that savepoint under the child and keep
+  its work even if the child then fails.
 
   ```python
   @transactional
@@ -628,7 +632,9 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
       return rejected
   ```
 - A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
-  instead of writing into a transaction nobody will commit.
+  instead of writing into a transaction nobody will commit. So does a `NESTED` step whose unit ended
+  under it, whether its body returns or raises: its savepoint can no longer be released or rolled back,
+  and its work went with the unit.
 - Work that must outlive its caller's unit runs through `detached()`, with the transaction state cleared:
 
 ```python

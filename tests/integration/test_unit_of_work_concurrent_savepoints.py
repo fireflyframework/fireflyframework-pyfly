@@ -24,7 +24,13 @@ would commit without it. The unit refuses instead, with ``IllegalTransactionStat
 - ``gather`` over the ``async with session.begin_nested():`` idiom;
 - a plain repository write from a sibling while a ``NESTED`` step holds its savepoint;
 - a ``NESTED`` scope that ends while a child task it started still holds a savepoint on top of its own:
-  it neither releases nor rolls back across that savepoint, and the unit rolls back.
+  it neither releases nor rolls back across that savepoint, and the unit rolls back;
+- a unit whose boundary ends while a child task it started still holds a savepoint on it (a
+  ``@transactional`` method, or a repository call's own unit, that returns without awaiting the child): it
+  does not commit, which would release that savepoint under the child and commit the child's work whatever
+  the child does next; it rolls back and raises instead;
+- a ``NESTED`` step whose unit ended under it fails with ``IllegalTransactionStateError`` whether it
+  returns or raises: its work went with the unit, not with its savepoint.
 
 Every step's reported outcome matches the committed rows: a step never reports success while its row is
 missing. Children of a task that holds a savepoint (fan-out inside a ``NESTED`` scope) still work inside
@@ -51,7 +57,7 @@ from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transaction import IllegalTransactionStateError
-from tests.support.backend_matrix import MYSQL, PG, SQLITE_FILE, RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL)
 
@@ -65,6 +71,8 @@ class CsItem(Base):
 
 @repository
 class CsItemRepository(Repository[CsItem, int]):
+    child: asyncio.Task[None] | None = None
+
     async def insert_ignoring(self, name: str, pause: float) -> bool:
         """The SQLAlchemy savepoint idiom, with an await inside the block (an external call)."""
         session = self._session
@@ -75,6 +83,21 @@ class CsItemRepository(Repository[CsItem, int]):
         except IntegrityError:
             return False
         return True
+
+    async def return_under_a_savepoint_child(self, holding: asyncio.Event, release: asyncio.Event) -> None:
+        """A method of the application's own (not atomic) whose child task holds a savepoint as it returns."""
+        session = self._session
+
+        async def child() -> None:
+            async with session.begin_nested():
+                session.add(CsItem(name="child"))
+                await session.flush()
+                holding.set()
+                await release.wait()
+
+        await self.save(CsItem(name="seed"))
+        self.child = asyncio.create_task(child())
+        await holding.wait()
 
 
 @service
@@ -103,6 +126,13 @@ class CsStep:
         return name
 
     @transactional(propagation=Propagation.NESTED)
+    async def insert_hold_then_fail(self, name: str, holding: asyncio.Event, release: asyncio.Event) -> str:
+        await self.items.save(CsItem(name=name))
+        holding.set()
+        await release.wait()
+        raise ValueError(f"{name} failed after its write")
+
+    @transactional(propagation=Propagation.NESTED)
     async def fan_out_inside(self, names: Sequence[str]) -> list[str]:
         await asyncio.gather(*(self.items.save(CsItem(name=name)) for name in names[:-1]))
         await asyncio.create_task(self.insert(names[-1], 0))  # one child, one NESTED step on top of ours
@@ -120,6 +150,7 @@ class CsOuter:
     def __init__(self, items: CsItemRepository, step: CsStep) -> None:
         self.items = items
         self.step = step
+        self.child: asyncio.Task[str] | None = None
 
     @transactional
     async def gather_nested(self, steps: Sequence[tuple[str, float]]) -> list[object]:
@@ -154,6 +185,22 @@ class CsOuter:
     async def end_a_nested_scope_under_a_running_child(self, holding: asyncio.Event, release: asyncio.Event) -> None:
         await self.items.save(CsItem(name="seed"))
         await self.step.leave_a_nested_child_running(holding, release)
+
+    @transactional
+    async def return_under_a_nested_child(
+        self, child_fails: bool, holding: asyncio.Event, release: asyncio.Event
+    ) -> None:
+        await self.items.save(CsItem(name="seed"))
+        step = self.step.insert_hold_then_fail if child_fails else self.step.insert_and_hold
+        self.child = asyncio.create_task(step("child", holding, release))
+        await holding.wait()  # the child's NESTED savepoint is open: this unit completes under it
+
+    @transactional
+    async def fail_under_a_nested_child(self, holding: asyncio.Event, release: asyncio.Event) -> None:
+        await self.items.save(CsItem(name="seed"))
+        self.child = asyncio.create_task(self.step.insert_hold_then_fail("child", holding, release))
+        await holding.wait()
+        raise ValueError("the unit failed")
 
 
 class Harness:
@@ -260,4 +307,64 @@ async def test_a_nested_scope_never_ends_across_a_savepoint_a_running_child_hold
     assert child is not None
     with pytest.raises(IllegalTransactionStateError, match="already rolled_back"):
         await child  # its unit rolled back while it held its savepoint: it reports a failure, not success
+    assert await harness.committed() == []
+
+
+async def _outcome_of(child: asyncio.Task[object] | None, release: asyncio.Event) -> object:
+    """Let *child* go on and return what it ended with (its result or its exception)."""
+    release.set()
+    assert child is not None
+    try:
+        return await child
+    except Exception as error:  # noqa: BLE001 — the outcome is what the test checks
+        return error
+
+
+@pytest.mark.backends(SQLITE_FILE, PG, MYSQL, MARIADB)
+@pytest.mark.parametrize("child_fails", [False, True], ids=["child-returns", "child-raises"])
+async def test_a_unit_never_commits_under_a_savepoint_a_running_child_holds(
+    harness: Harness, child_fails: bool
+) -> None:
+    holding, release = asyncio.Event(), asyncio.Event()
+    try:
+        with pytest.raises(IllegalTransactionStateError, match="cannot commit: task .* still holds a savepoint"):
+            await harness.outer.return_under_a_nested_child(child_fails, holding, release)
+        assert await harness.committed() == []
+    finally:
+        outcome = await _outcome_of(harness.outer.child, release)
+    # Its unit rolled back under its savepoint: the child reports a failure whether it returns or raises.
+    assert isinstance(outcome, IllegalTransactionStateError), repr(outcome)
+    assert "already rolled_back" in str(outcome)
+    if child_fails:
+        assert isinstance(outcome.__context__, ValueError)
+    assert await harness.committed() == []
+
+
+@pytest.mark.backends(SQLITE_FILE, PG, MYSQL, MARIADB)
+async def test_a_nested_step_that_fails_after_its_unit_ended_fails_loudly(harness: Harness) -> None:
+    holding, release = asyncio.Event(), asyncio.Event()
+    try:
+        with pytest.raises(ValueError, match="the unit failed"):
+            await harness.outer.fail_under_a_nested_child(holding, release)
+    finally:
+        outcome = await _outcome_of(harness.outer.child, release)
+    # Its ROLLBACK TO SAVEPOINT cannot run on a completed unit: the step says so instead of reporting its own
+    # failure as if its savepoint had undone its work.
+    assert isinstance(outcome, IllegalTransactionStateError), repr(outcome)
+    assert "already rolled_back" in str(outcome)
+    assert isinstance(outcome.__context__, ValueError)
+    assert await harness.committed() == []
+
+
+@pytest.mark.backends(SQLITE_FILE, PG, MYSQL, MARIADB)
+async def test_a_repository_call_never_commits_its_unit_under_a_childs_savepoint(harness: Harness) -> None:
+    items = harness.ctx.get_bean(CsItemRepository)
+    holding, release = asyncio.Event(), asyncio.Event()
+    try:
+        with pytest.raises(IllegalTransactionStateError, match="cannot commit: task .* still holds a savepoint"):
+            await items.return_under_a_savepoint_child(holding, release)
+        assert await harness.committed() == []
+    finally:
+        outcome = await _outcome_of(items.child, release)
+    assert isinstance(outcome, IllegalTransactionStateError), repr(outcome)
     assert await harness.committed() == []

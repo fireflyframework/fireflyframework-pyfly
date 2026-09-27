@@ -39,7 +39,11 @@ Completion rules:
   innermost savepoint (sibling steps in ``asyncio.gather``) raises
   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError`, and a scope that would end across a
   savepoint a task it started still holds marks the unit rollback-only and raises it too, instead of
-  releasing or rolling back that task's work.
+  releasing or rolling back that task's work. Nor does a unit commit while a task other than its
+  boundary's holds a savepoint on it (a child the body started and did not await): it rolls back, and
+  the boundary raises ``IllegalTransactionStateError``. A ``NESTED`` scope whose unit completed under it
+  raises ``IllegalTransactionStateError`` whether its body returned or raised: its work went with the
+  unit, not with its savepoint.
 - ``timeout`` bounds a new unit's body with ``asyncio.timeout``; on expiry the unit rolls back and
   :class:`~pyfly.data.transaction.errors.TransactionTimedOutError` is raised.
 - Commit, rollback, savepoint release and session close are shielded: they run in their own task,
@@ -321,6 +325,14 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
             rollback_error.__cause__ = reason
         outcome.error = rollback_error
         return
+    # Checked right before the unit leaves ACTIVE, with no await in between: a savepoint opened after this
+    # check cannot hold work the commit takes, since the unit refuses every operation from here on.
+    refusal = _commit_refused(unit)
+    if refusal is not None:
+        unit.set_rollback_only(refusal, depth=0)
+        await _rollback(unit, outcome)
+        outcome.error = refusal
+        return
     unit.status = UnitStatus.COMPLETING
     await _before_completion(unit, outcome)
     _result, error, cancelled = await run_shielded(_commit_and_release(unit))
@@ -332,6 +344,24 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
         outcome.status = CompletionStatus.UNKNOWN
     else:
         outcome.status = CompletionStatus.ROLLED_BACK
+
+
+def _commit_refused(unit: UnitOfWork) -> IllegalTransactionStateError | None:
+    """The refusal to commit *unit* while another live task holds a savepoint on it
+    (:meth:`~pyfly.data.transaction.unit_of_work.UnitOfWork.savepoint_holder`): a child task the boundary's
+    body started and did not await. Committing would release that savepoint under the task and commit its
+    work whatever the task does next (it may still fail and roll back to that savepoint, too late)."""
+    holder = unit.savepoint_holder()
+    if holder is None:
+        return None
+    return IllegalTransactionStateError(
+        f"{unit.describe()} cannot commit: task {holder.get_name()!r} still holds a savepoint on it (a "
+        "Propagation.NESTED step or a session.begin_nested() block it has not ended). Committing would release "
+        "that savepoint under the task and commit its work whatever the task does next, so the unit rolled back "
+        "instead. Await the tasks that use a unit before its boundary ends, or run work that must outlive the "
+        "unit with pyfly.data.transaction.detached().",
+        datasource=unit.datasource,
+    )
 
 
 def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None, since: int) -> bool:
@@ -582,7 +612,7 @@ class TransactionBoundary:
             or _failed_within_savepoint(manager, unit, self._savepoint)
         ):
             unit.savepoint_depth = depth - 1
-            cancelled = await self._roll_back_to_savepoint(unit, depth)
+            cancelled = await self._roll_back_to_savepoint(unit, depth, error)
             if cancelled:
                 raise asyncio.CancelledError
             return
@@ -593,8 +623,12 @@ class TransactionBoundary:
         _result, release_error, cancelled = await run_shielded(manager.release_savepoint(unit, self._savepoint))
         unit.savepoint_depth = depth - 1
         if release_error is not None:
-            if isinstance(release_error, Exception) and not unit.poisoned:
-                cancelled = await self._roll_back_to_savepoint(unit, depth) or cancelled
+            if unit.completed:
+                # The unit ended under the scope (its boundary did not wait for this task): the release was
+                # refused, and nothing is left to roll back to or to mark. The refusal reaches the caller.
+                unit.savepoint_closed(self._savepoint)
+            elif isinstance(release_error, Exception) and not unit.poisoned:
+                cancelled = await self._roll_back_to_savepoint(unit, depth, release_error) or cancelled
                 if manager.is_disconnect(release_error):
                     unit.set_rollback_only(release_error)  # the connection went with the savepoint
             else:
@@ -615,18 +649,29 @@ class TransactionBoundary:
             release_error.__context__ = error
         raise release_error
 
-    async def _roll_back_to_savepoint(self, unit: UnitOfWork, depth: int) -> bool:
+    async def _roll_back_to_savepoint(self, unit: UnitOfWork, depth: int, failure: BaseException | None) -> bool:
         """``ROLLBACK TO SAVEPOINT`` of this ``NESTED`` scope, shielded: it forgets a rollback-only mark set
         inside the scope, or marks the outer unit when it fails. Returns whether the task was cancelled
-        meanwhile."""
+        meanwhile.
+
+        On a unit that completed while the scope held its savepoint (the boundary that owned the unit ended
+        before this task did), the rollback is refused and there is no outer unit left to mark: that refusal
+        (:class:`~pyfly.data.transaction.errors.IllegalTransactionStateError`) is raised, with *failure* (what
+        the scope ends with) as its context. The scope's caller never takes the scope's own failure for work
+        its savepoint undid: that work went with the unit.
+        """
         _result, rollback_error, cancelled = await run_shielded(
             self._manager.rollback_to_savepoint(unit, self._savepoint)
         )
-        if rollback_error is not None:
-            unit.set_rollback_only(rollback_error)
-        else:
+        if rollback_error is None:
             unit.savepoint_rolled_back(depth)
+        elif not unit.completed:
+            unit.set_rollback_only(rollback_error)
         unit.savepoint_closed(self._savepoint)
+        if rollback_error is not None and unit.completed and not cancelled:
+            if failure is not None and failure is not rollback_error:
+                rollback_error.__context__ = failure
+            raise rollback_error
         return cancelled
 
     def _refuse_ending_across_another_task(self, unit: UnitOfWork) -> None:

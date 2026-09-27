@@ -30,6 +30,8 @@ child task may use its parent's unit. That is made safe here:
   (a sibling in ``gather()``) would run inside that savepoint and be released or rolled back with it, so
   it raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead
   (:meth:`UnitOfWork.check_savepoint_owner`). A savepoint whose task has finished no longer holds the unit.
+  Nor does the unit commit while another live task holds a savepoint on it
+  (:meth:`UnitOfWork.savepoint_holder`): it rolls back and its boundary raises instead.
 - A task that uses a unit that already completed gets
   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the unit, instead of writing
   into a transaction nobody will commit. Work that must outlive its transaction runs through
@@ -416,6 +418,21 @@ class UnitOfWork:
             if above and _foreign(entry, task, held):
                 return entry.owner
             above = above or entry.handle is handle
+        return None
+
+    def savepoint_holder(self) -> asyncio.Task[Any] | None:
+        """A live task, other than the running one, that holds an open savepoint on the unit (typically a child
+        task that outlived the boundary that started it), if any. A savepoint the running task was started
+        inside does not count.
+
+        Committing the unit would release that task's savepoint under it and commit its work, whatever the
+        task does next.
+        """
+        held = _HELD_SAVEPOINTS.get()
+        task = asyncio.current_task()
+        for entry in self._savepoints:
+            if _foreign(entry, task, held):
+                return entry.owner
         return None
 
     def check_savepoint_owner(self) -> None:
