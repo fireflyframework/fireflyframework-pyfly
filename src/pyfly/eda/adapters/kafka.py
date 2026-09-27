@@ -20,10 +20,16 @@ deserialises the envelope and dispatches to every handler whose
 pattern matches ``envelope.event_type``.
 
 Every record is produced with a partition key (see :func:`partition_key`) so the
-per-aggregate ordering the other Firefly publishers guarantee holds here too,
-and a record the serializer cannot read is dead-lettered to ``<topic>.DLT``
-before the loop moves on, so auto-commit never advances past a message nobody
-has seen.
+per-aggregate ordering the other Firefly publishers guarantee holds here too.
+
+The consumer is a :class:`~pyfly.messaging.listener_container.KafkaListenerContainer`, shared with the
+messaging adapter: auto-commit is off, the matching handlers of one record run in one unit of work the
+container opens (their ``@transactional`` joins it), and the offset is committed only after that unit
+committed. A handler failure seeks the partition back and attempts the record again after a back-off
+(``pyfly.eda.listener.retry.*``); after the last attempt the record is dead-lettered to
+``<topic>.DLT`` (and recorded in the :class:`~pyfly.eda.dlq.EdaDeadLetterStore`, when one is given),
+then committed. A record the serializer cannot read is dead-lettered at once. ``stop()`` waits for the
+record in flight and never commits the offset of one it had to cancel. Delivery is at-least-once.
 
 The adapter requires aiokafka to be installed (``pip install pyfly[kafka]``
 or ``pip install pyfly[eda]``).
@@ -31,23 +37,42 @@ or ``pip install pyfly[eda]``).
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import fnmatch
 import logging
+from collections.abc import Callable
 from typing import Any
 
+from pyfly.eda.dlq import EdaDeadLetterEntry, EdaDeadLetterStore
 from pyfly.eda.ports.outbound import EventHandler
 from pyfly.eda.serializers import EventSerializer, JsonEventSerializer
+from pyfly.eda.types import EventEnvelope
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
+from pyfly.messaging.adapters.kafka import DLT_BACKOFF_SECONDS, publish_with_retries
+from pyfly.messaging.listener_container import (
+    DEAD_LETTER_PUBLISH_ATTEMPTS,
+    KafkaListenerContainer,
+    ListenerContainerSettings,
+    PoisonMessageError,
+    dead_letter_headers,
+    failure_cause,
+)
 
 logger = logging.getLogger(__name__)
 
 #: The header LaraFly's ``KafkaEventPublisher`` reads first when choosing a key.
 DEFAULT_PARTITION_KEY_HEADER = "partition_key"
-#: Suffix of the dead-letter topic a poison record goes to: ``orders`` -> ``orders.DLT``.
+#: Suffix of the dead-letter topic a record goes to: ``orders`` -> ``orders.DLT``.
 DEFAULT_DLT_SUFFIX = ".DLT"
-DLT_PUBLISH_ATTEMPTS = 3
-DLT_BACKOFF_SECONDS = 0.5
+DLT_PUBLISH_ATTEMPTS = DEAD_LETTER_PUBLISH_ATTEMPTS
+
+__all__ = [
+    "DEFAULT_DLT_SUFFIX",
+    "DEFAULT_PARTITION_KEY_HEADER",
+    "DLT_BACKOFF_SECONDS",
+    "DLT_PUBLISH_ATTEMPTS",
+    "KafkaEventBus",
+    "partition_key",
+]
 
 
 def partition_key(
@@ -84,8 +109,9 @@ class KafkaEventBus:
         dispatches to any matching handler. Defaults to ``["pyfly.events"]``.
     group:
         Kafka consumer group. ``None`` means an isolated consumer (each
-        bus instance reads every record). Set to a stable string when
-        you want at-most-once delivery across replicas.
+        bus instance reads every record, and no offset is committed, so a
+        restart delivers nothing again). Set a stable string to share the
+        topics across replicas with at-least-once delivery.
     serializer:
         ``EventSerializer`` used to encode and decode envelopes.
         Defaults to ``JsonEventSerializer``.
@@ -93,11 +119,25 @@ class KafkaEventBus:
         The envelope header consulted first for the record key (see
         :func:`partition_key`). Defaults to ``partition_key``.
     dlt_suffix:
-        Suffix of the dead-letter topic an undeserialisable record is
-        republished to, verbatim, before the consume loop moves on.
-        ``None`` switches dead-lettering off and restores log-and-skip.
-        Defaults to ``.DLT``.
+        Suffix of the dead-letter topic a record goes to, verbatim, when
+        the serializer cannot read it or its handlers failed on every
+        attempt. ``None`` switches the dead-letter topic off: such a record
+        is logged and skipped (and recorded in *dead_letter_store*, if
+        any). Defaults to ``.DLT``.
+    settings:
+        The listener container settings (``pyfly.eda.listener.*``: retry
+        policy, unit of work, shutdown timeout).
+    dead_letter_store:
+        An :class:`~pyfly.eda.dlq.EdaDeadLetterStore` that also records
+        every event whose handlers failed on every attempt, with the error
+        and the attempt count.
+    consumer_factory / producer_factory:
+        Build the aiokafka clients (``AIOKafkaConsumer`` / ``AIOKafkaProducer``
+        by default), called with ``bootstrap_servers`` and the bus's settings.
     """
+
+    #: A consumer: it stops before any ``@pre_destroy``, draining the record in flight.
+    phase = CONSUMER_PHASE
 
     def __init__(
         self,
@@ -108,6 +148,10 @@ class KafkaEventBus:
         serializer: EventSerializer | None = None,
         partition_key_header: str = DEFAULT_PARTITION_KEY_HEADER,
         dlt_suffix: str | None = DEFAULT_DLT_SUFFIX,
+        settings: ListenerContainerSettings | None = None,
+        dead_letter_store: EdaDeadLetterStore | None = None,
+        consumer_factory: Callable[..., Any] | None = None,
+        producer_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._bootstrap_servers = bootstrap_servers
         self._topics = list(topics) if topics else ["pyfly.events"]
@@ -115,15 +159,21 @@ class KafkaEventBus:
         self._serializer: EventSerializer = serializer or JsonEventSerializer()
         self._partition_key_header = partition_key_header
         self._dlt_suffix = dlt_suffix
+        self._settings = settings or ListenerContainerSettings()
+        self._dead_letter_store = dead_letter_store
+        self._consumer_factory = consumer_factory
+        self._producer_factory = producer_factory
         self._handlers: list[tuple[str, EventHandler]] = []
         self._producer: Any = None
-        self._consumer: Any = None
-        self._consume_task: asyncio.Task[None] | None = None
+        self._container: KafkaListenerContainer[EventEnvelope] | None = None
         self._started = False
+        self._stopping = False
+        self._stopped = False
         #: Records sent to a dead-letter topic. Scrape it and alert on it: a silent DLT is the
         #: same failure as a lost message, only later.
         self.dlt_published = 0
-        #: Records lost because even the dead-letter publish failed after every retry.
+        #: Dead-letter publishes that failed after every retry. The record stays uncommitted and is
+        #: dead-lettered again, so this counts broker trouble, not lost messages.
         self.dlt_publish_failures = 0
 
     def subscribe(self, event_type_pattern: str, handler: EventHandler) -> None:
@@ -144,10 +194,18 @@ class KafkaEventBus:
         :func:`partition_key` over the envelope headers. Until 26.09.06 no key
         was sent at all and Kafka round-robined the records, so two events of
         one aggregate could be consumed in either order.
+
+        A bus that was never started starts on its first publish. While it stops (a handler in flight
+        publishing) and after it stopped (a ``@pre_destroy`` publishing), the producer is used, or opened
+        again, but the consumer is not started: consumers restart only through :meth:`start`.
         """
-        if not self._started:
+        if self._producer is None:
+            if self._stopped:
+                await self._start_producer()
+            else:
+                await self.start()
+        elif not self._started and not self._stopping and not self._stopped:
             await self.start()
-        from pyfly.eda.types import EventEnvelope
 
         envelope = EventEnvelope(
             event_type=event_type,
@@ -169,118 +227,110 @@ class KafkaEventBus:
     async def start(self) -> None:
         if self._started:
             return
-        from aiokafka import AIOKafkaConsumer, AIOKafkaProducer  # type: ignore[import-untyped]
+        self._stopped = False
+        if self._producer is None:
+            await self._start_producer()
 
-        self._producer = AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
-        await self._producer.start()
-
-        # Always attach the consumer — pyfly's ApplicationContext auto-
-        # starts adapter beans before application code calls subscribe(),
-        # so we cannot gate the consumer on handlers being present yet.
-        # _consume_loop iterates _handlers per-message; an empty list
-        # means messages are received-and-dropped (with auto-commit) but
-        # that's expected behaviour when no subscribers exist.
+        # Always attach the consumer — pyfly's ApplicationContext auto-starts adapter beans before
+        # application code calls subscribe(), so the consumer cannot wait for handlers. The handler list
+        # is read for every record; a record no handler matches is simply committed.
         if self._topics:
-            self._consumer = AIOKafkaConsumer(
-                *self._topics,
-                bootstrap_servers=self._bootstrap_servers,
-                group_id=self._group,
-                enable_auto_commit=True,
+            dead_letter = self._dead_letter if self._dlt_suffix is not None or self._dead_letter_store else None
+            self._container = KafkaListenerContainer(
+                topics=self._topics,
+                group=self._group,
+                consumer_factory=self._new_consumer,
+                convert=self._envelope_of,
+                handler=self._dispatch,
+                dead_letter=dead_letter,
+                settings=self._settings,
                 auto_offset_reset="earliest",
+                name=f"eda:{','.join(self._topics)}",
             )
-            await self._consumer.start()
-            self._consume_task = asyncio.create_task(self._consume_loop())
+            await self._container.start()
 
         self._started = True
 
     async def stop(self) -> None:
-        self._started = False
-        if self._consume_task is not None:
-            self._consume_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._consume_task
-            self._consume_task = None
-        if self._consumer is not None:
-            await self._consumer.stop()
-            self._consumer = None
-        if self._producer is not None:
-            await self._producer.stop()
-            self._producer = None
+        """Stop the consumer gracefully (the record in flight finishes, or is cancelled without its offset
+        being committed), then the producer."""
+        self._stopping = True
+        try:
+            if self._container is not None:
+                await self._container.stop()
+                self._container = None
+        finally:
+            self._started = False
+            self._stopping = False
+            self._stopped = True
+            if self._producer is not None:
+                await self._producer.stop()
+                self._producer = None
 
-    async def _dead_letter(self, record: Any, reason: str) -> None:
-        """Republish ``record`` verbatim to ``<topic><dlt_suffix>`` with the reason and origin.
+    # -- consuming -------------------------------------------------------------------------------------
 
-        The bytes, key and headers are the original ones — a dead-letter record must be
-        replayable — plus ``x-dlt-reason``, ``x-dlt-source-topic`` and ``x-dlt-source-offset`` so
-        an operator can find where it came from. The publish is retried with a linear back-off
-        because the most likely cause of a failed DLT publish is the broker being briefly away,
-        and after the last attempt the loss is logged CRITICAL and counted: at that point the
-        message is gone and the only honest thing left is to say so loudly.
+    async def _start_producer(self) -> None:
+        if self._producer_factory is not None:
+            producer = self._producer_factory(bootstrap_servers=self._bootstrap_servers)
+        else:
+            from aiokafka import AIOKafkaProducer  # type: ignore[import-untyped]
+
+            producer = AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
+        await producer.start()
+        self._producer = producer
+
+    def _new_consumer(self, **settings: Any) -> Any:
+        if self._consumer_factory is not None:
+            return self._consumer_factory(bootstrap_servers=self._bootstrap_servers, **settings)
+        from aiokafka import AIOKafkaConsumer
+
+        return AIOKafkaConsumer(bootstrap_servers=self._bootstrap_servers, **settings)
+
+    def _envelope_of(self, record: Any, _attempt: int) -> EventEnvelope:
+        return self._serializer.deserialize(record.value)
+
+    async def _dispatch(self, envelope: EventEnvelope) -> None:
+        """Every matching handler, in the record's unit of work: one failure fails the record."""
+        for pattern, handler in list(self._handlers):
+            if fnmatch.fnmatch(envelope.event_type, pattern):
+                await handler(envelope)
+
+    async def _dead_letter(self, record: Any, error: BaseException, attempts: int) -> None:
+        """Republish ``record`` verbatim to ``<topic><dlt_suffix>`` with the reason and origin, and record a
+        failed event in the dead-letter store.
+
+        The bytes, key and headers are the original ones — a dead-letter record must be replayable — plus
+        ``x-dlt-reason``, ``x-dlt-source-topic``, ``x-dlt-source-partition``, ``x-dlt-source-offset`` and
+        ``x-dlt-attempts``, so an operator can find where it came from. The publish is retried with a
+        linear back-off; when it still fails the error propagates and the container leaves the record
+        uncommitted, to dead-letter it again later.
         """
-        topic = f"{record.topic}{self._dlt_suffix}"
-        headers = list(record.headers or [])
-        headers.append(("x-dlt-reason", reason.encode("utf-8")))
-        headers.append(("x-dlt-source-topic", str(record.topic).encode("utf-8")))
-        headers.append(("x-dlt-source-offset", str(record.offset).encode("utf-8")))
-
-        last_error: Exception | None = None
-        for attempt in range(1, DLT_PUBLISH_ATTEMPTS + 1):
+        if self._dlt_suffix is not None:
+            topic = f"{record.topic}{self._dlt_suffix}"
+            extra = dead_letter_headers(
+                topic=record.topic, error=error, attempts=attempts, partition=record.partition, offset=record.offset
+            )
+            headers = list(record.headers or []) + [(name, value.encode("utf-8")) for name, value in extra.items()]
             try:
-                await self._producer.send_and_wait(topic, value=record.value, key=record.key, headers=headers)
-            except Exception as exc:
-                last_error = exc
-                if attempt < DLT_PUBLISH_ATTEMPTS:
-                    await asyncio.sleep(DLT_BACKOFF_SECONDS * attempt)
-                continue
+                await publish_with_retries(self._producer, topic, value=record.value, key=record.key, headers=headers)
+            except Exception:
+                self.dlt_publish_failures += 1
+                raise
             self.dlt_published += 1
             logger.warning(
                 "record_dead_lettered topic=%s offset=%s dlt=%s reason=%s",
                 record.topic,
                 record.offset,
                 topic,
-                reason,
+                type(failure_cause(error)).__name__,
             )
-            return
-
-        self.dlt_publish_failures += 1
-        logger.critical(
-            "dead_letter_publish_failed topic=%s offset=%s dlt=%s error=%s — the message is lost",
-            record.topic,
-            record.offset,
-            topic,
-            last_error,
-        )
-
-    async def _consume_loop(self) -> None:
-        try:
-            async for record in self._consumer:
-                try:
-                    envelope = self._serializer.deserialize(record.value)
-                except Exception as exc:
-                    # With auto-commit on, the offset advances whether or not anyone read this
-                    # record, so it must be dead-lettered BEFORE the loop moves on — a decorator
-                    # on a listener cannot help, no listener ever sees it. Handler failures are
-                    # deliberately not dead-lettered here: the envelope was readable, and what
-                    # to do with a failing handler (retry, DLT by event id, fail fast) is the
-                    # listener's error strategy, not the transport's.
-                    if self._dlt_suffix is not None:
-                        await self._dead_letter(record, reason=type(exc).__name__)
-                    else:
-                        logger.exception(
-                            "Failed to deserialize record from topic=%s offset=%s",
-                            record.topic,
-                            record.offset,
-                        )
-                    continue
-                for pattern, handler in self._handlers:
-                    if fnmatch.fnmatch(envelope.event_type, pattern):
-                        try:
-                            await handler(envelope)
-                        except Exception:
-                            logger.exception(
-                                "Handler for pattern=%s raised on event_type=%s",
-                                pattern,
-                                envelope.event_type,
-                            )
-        except asyncio.CancelledError:
-            pass
+        if self._dead_letter_store is not None and not isinstance(error, PoisonMessageError):
+            cause = failure_cause(error)
+            await self._dead_letter_store.add(
+                EdaDeadLetterEntry(
+                    event=self._serializer.deserialize(record.value),
+                    error_type=type(cause).__name__,
+                    error_message=str(cause),
+                    attempts=attempts,
+                )
+            )

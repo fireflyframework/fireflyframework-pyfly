@@ -47,6 +47,16 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
   schema is managed by migrations and the framework must never issue DDL at all.
 * ``rabbitmq.url`` — AMQP URL. Default ``amqp://guest:guest@localhost/``.
 * ``rabbitmq.exchange-name`` — Exchange name. Default ``pyfly``.
+* ``rabbitmq.prefetch`` — ``basic.qos`` prefetch of each consumer channel. Default ``20``.
+* ``rabbitmq.dead-letter-exchange`` — where an event goes after its last attempt. Default
+  ``<exchange-name>.dlx`` (queue ``<group>.<destination>.dlq``).
+* ``listener.*`` — the Kafka and RabbitMQ listener container: ``transactional``, ``datasource``,
+  ``shutdown-timeout``, ``concurrency``, ``retry.max-attempts``, ``retry.initial-delay``,
+  ``retry.multiplier``, ``retry.max-delay`` (see
+  :meth:`~pyfly.messaging.listener_container.ListenerContainerSettings.from_config`).
+
+An :class:`~pyfly.eda.dlq.EdaDeadLetterStore` bean, when the application defines one, records every
+event the Kafka or RabbitMQ bus dead-letters after its handlers failed on every attempt.
 """
 
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
@@ -63,6 +73,7 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+from pyfly.eda.dlq import EdaDeadLetterStore
 from pyfly.eda.health import EventPublisherHealthIndicator
 from pyfly.eda.ports.outbound import EventPublisher
 
@@ -87,7 +98,7 @@ class EdaAutoConfiguration:
         return "memory"
 
     @bean
-    def event_publisher(self, config: Config) -> EventPublisher:
+    def event_publisher(self, config: Config, dead_letter_store: EdaDeadLetterStore | None = None) -> EventPublisher:
         configured = str(config.get("pyfly.eda.provider", "auto"))
         provider = configured if configured != "auto" else self.detect_provider()
 
@@ -111,6 +122,8 @@ class EdaAutoConfiguration:
                 serializer=serializer,
                 partition_key_header=key_header,
                 dlt_suffix=dlt_suffix,
+                settings=self._listener_settings(config),
+                dead_letter_store=dead_letter_store,
             )
 
         if provider == "redis":
@@ -155,17 +168,28 @@ class EdaAutoConfiguration:
 
             url = str(config.get("pyfly.eda.rabbitmq.url", "amqp://guest:guest@localhost/"))
             exchange_name = str(config.get("pyfly.eda.rabbitmq.exchange-name", "pyfly"))
+            dead_letter_exchange = config.get("pyfly.eda.rabbitmq.dead-letter-exchange")
             return RabbitMqEventBus(
                 url=url,
                 exchange_name=exchange_name,
                 destinations=destinations,
                 group=group,
                 serializer=serializer,
+                settings=self._listener_settings(config),
+                dead_letter_exchange=str(dead_letter_exchange) if dead_letter_exchange else None,
+                dead_letter_store=dead_letter_store,
             )
 
         from pyfly.eda.adapters.memory import InMemoryEventBus
 
         return InMemoryEventBus()
+
+    @staticmethod
+    def _listener_settings(config: Config) -> Any:
+        """The Kafka and RabbitMQ listener container settings, from ``pyfly.eda.listener.*``."""
+        from pyfly.messaging.listener_container import ListenerContainerSettings
+
+        return ListenerContainerSettings.from_config(config, "pyfly.eda")
 
     @staticmethod
     def _make_serializer(config: Config) -> Any:
