@@ -27,6 +27,7 @@ from pyfly.session.adapters.memory import InMemorySessionStore
 from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.concurrency import (
     ConcurrencyControlPolicy,
+    ExpiringSessionRegistry,
     InMemorySessionRegistry,
     SessionConcurrencyController,
 )
@@ -148,6 +149,53 @@ async def test_expired_sessions_do_not_count_toward_the_cap() -> None:
     assert await ctl.on_login("alice", "s3", 3.0) is True
 
     assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s3"]  # the dead entries were dropped
+
+
+@pytest.mark.asyncio
+async def test_the_in_memory_registry_is_purged_under_the_default_unlimited_cap() -> None:
+    """C076: with concurrency enabled and max-sessions=-1 (the default), each login added an in-memory
+    registration that only a logout removed, so sessions that simply ended stayed registered until a restart.
+    In-memory registrations come due for a liveness check as the SQL registry's do, and the purge drops them."""
+    now = [datetime.now(UTC)]
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry(ttl=timedelta(seconds=60), clock=lambda: now[0])
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(), session_store=store, purge_interval=timedelta(0)
+    )
+    await _live(store, "live", "gone-1", "gone-2", "next")
+    for index, sid in enumerate(("live", "gone-1", "gone-2")):
+        assert await ctl.on_login("alice", sid, float(index))
+    await store.delete("gone-1")
+    await store.delete("gone-2")
+    assert await ctl.purge_expired() == 0  # no registration is due yet
+
+    now[0] = now[0] + timedelta(seconds=61)
+    assert await ctl.on_login("bob", "next", 5.0)  # a login purges the due registrations too
+
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["live"]
+    assert await reg.expired_sessions(limit=10) == []  # the live registration was renewed, not dropped
+
+
+@pytest.mark.asyncio
+async def test_the_in_memory_registry_reports_due_registrations_most_overdue_first() -> None:
+    now = [datetime.now(UTC)]
+    reg = InMemorySessionRegistry(ttl=60, clock=lambda: now[0])
+    assert isinstance(reg, ExpiringSessionRegistry)
+    await reg.register("alice", "a1", 1.0)
+    now[0] = now[0] + timedelta(seconds=10)
+    await reg.register("bob", "b1", 2.0)
+    await reg.register_limited("alice", "a2", 3.0, max_sessions=5, evict_oldest=True)
+    await reg.register("carol", "c1", 4.0)
+    await reg.deregister("carol", "c1")
+
+    now[0] = now[0] + timedelta(seconds=70)
+    assert await reg.expired_sessions(limit=10) == [("alice", "a1"), ("alice", "a2"), ("bob", "b1")]
+    assert await reg.expired_sessions(limit=1) == [("alice", "a1")]
+
+    await reg.renew(["a2", "unknown"])
+    assert await reg.expired_sessions(limit=10) == [("alice", "a1"), ("bob", "b1")]
+    with pytest.raises(ValueError, match="ttl must be positive"):
+        InMemorySessionRegistry(ttl=0)
 
 
 @pytest.mark.asyncio

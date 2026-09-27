@@ -158,3 +158,23 @@ def test_a_redis_registry_without_its_driver_falls_back_loudly(
     assert not any(message.startswith("session_registry_not_shared") for message in messages)
     assert isinstance(controller.registry, InMemorySessionRegistry)
     assert controller.session_store is store  # a registry of this instance: its store knows every session
+
+
+def test_the_in_memory_registry_is_purged_on_the_session_ttl(tmp_path: Path) -> None:
+    """C076: the default registry kept every registration until a logout or a restart. It comes due for a
+    liveness check one session TTL after it was registered, and the controller gets the store to check it."""
+    from datetime import timedelta
+
+    from pyfly.container.container import Container
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration
+    from pyfly.session.concurrency import ExpiringSessionRegistry, InMemorySessionRegistry
+
+    store = InMemorySessionStore()
+    controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+        _config(tmp_path, ttl=90, concurrency={"enabled": True}), store, Container()
+    )
+
+    registry = controller.registry
+    assert isinstance(registry, InMemorySessionRegistry) and isinstance(registry, ExpiringSessionRegistry)
+    assert registry._ttl == timedelta(seconds=90)
+    assert controller.session_store is store

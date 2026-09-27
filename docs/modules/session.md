@@ -278,7 +278,8 @@ pyfly:
   isolation refuses to evict a registration that changed after the login read it ("Record has changed since
   last read", error 1020), the login runs its unit again on a fresh read, up to three times, and then raises
   `OptimisticLockingFailureException`.
-- The SQL registry is purged when the controller has the store: a registration comes due for a liveness
+- The SQL and in-memory registries are purged when the controller has the store, whatever the cap (with
+  max-sessions `-1` nothing else removes a registration but a logout): a registration comes due for a liveness
   check one session TTL after it was registered or renewed; `controller.purge_expired()` drops the due
   registrations whose session is gone and renews the others. A login also checks up to
   `LOGIN_PURGE_BATCH` (50) due registrations, at most once a minute per instance, and the next logins take the
@@ -304,6 +305,9 @@ the box, selected by `pyfly.session.concurrency.registry`:
   `InMemorySessionStore`). Each app instance counts only its own sessions, so
   the cap is **not** enforced across multiple processes. Suitable for
   single-node deployments, development, and testing. State is lost on restart.
+  Its registrations come due for a liveness check one session TTL
+  (`pyfly.session.ttl`) after they were registered or renewed, so the purge
+  drops those of sessions that ended without a logout.
 - **`redis`** — a cross-process index shared by all app instances. Each
   principal's live sessions are stored in a Redis sorted set (score =
   `created_at`, member = `session_id`), so `list_sessions` is naturally
@@ -437,9 +441,12 @@ class AtomicSessionRegistry(Protocol):
     ) -> SessionRegistration: ...  # SessionRegistration(accepted, evicted)
 ```
 
-`InMemorySessionRegistry` is the in-process implementation (guarded by an
-`asyncio.Lock`), the default used by auto-configuration when
-`registry=memory`. Two cross-process implementations ship as adapters; both
+`InMemorySessionRegistry(*, ttl=timedelta(seconds=1800), clock=None)` is the
+in-process implementation (guarded by an `asyncio.Lock`), the default used by
+auto-configuration when `registry=memory` (with `ttl=pyfly.session.ttl`). Like
+the SQL registry it is an `ExpiringSessionRegistry`: `ttl` (positive: anything
+else raises `ValueError`) is how long a registration goes before its liveness
+is checked again. Two cross-process implementations ship as adapters; both
 have their driver/datasource injected by the composition root, and both
 implement `register_limited`:
 
@@ -476,7 +483,7 @@ auto-configured one entirely.
 | `__init__(registry, policy, *, session_deleter=None, session_store=None, purge_interval=timedelta(seconds=60))` | `session_store` tells live sessions from dead ones; `session_deleter` (by default the store's `delete`) is an `async (session_id) -> None` callable used to evict store entries |
 | `on_login(principal, session_id, created_at)` | Drops the principal's dead sessions, then registers the session atomically, enforcing the cap. Returns `False` if rejected (`reject-new`), `True` otherwise. Register a session after saving it |
 | `on_logout(principal, session_id)` | Deregisters the session |
-| `purge_expired()` | Drops the due registrations whose session is gone and renews the others (SQL registry); returns how many were dropped |
+| `purge_expired()` | Drops the due registrations whose session is gone and renews the others (an `ExpiringSessionRegistry`: the SQL and in-memory registries); returns how many were dropped |
 
 Constructing a controller manually:
 

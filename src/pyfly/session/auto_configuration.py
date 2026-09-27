@@ -154,7 +154,7 @@ class SessionConcurrencyAutoConfiguration:
                     "installed; the in-memory registry caps each instance's sessions on its own"
                 )
             registry_type = "memory"
-            registry = InMemorySessionRegistry()
+            registry = InMemorySessionRegistry(ttl=int(config.get("pyfly.session.ttl", 1800)))
         liveness_store: SessionStore | None = session_store
         if _process_local_store_beside_a_shared_registry(registry_type, session_store):
             # This instance's store knows only the sessions this instance holds: asked about another

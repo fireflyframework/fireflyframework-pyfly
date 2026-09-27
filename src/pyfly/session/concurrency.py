@@ -21,7 +21,8 @@ unchanged.
 
 - **Only live sessions count.** Given the session store, the controller drops, at each login, the
   registrations of the principal's sessions the store no longer has (expired, invalidated, lost in a
-  restart), so a user whose sessions ended without a logout is never locked out; a purge drops the others.
+  restart), so a user whose sessions ended without a logout is never locked out; a purge drops the others
+  (from an :class:`ExpiringSessionRegistry`: the SQL and in-memory ones).
   The store must be as shared as the registry (the auto-configuration gives no process-local store to a
   cross-process registry).
 - **The cap holds under concurrency.** Counting the principal's sessions, evicting and registering the new
@@ -34,12 +35,13 @@ unchanged.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -87,8 +89,8 @@ class AtomicSessionRegistry(Protocol):
 
 @runtime_checkable
 class ExpiringSessionRegistry(Protocol):
-    """A registry whose registrations come due for a liveness check (the SQL registry): the purge drops the
-    registrations of sessions the store no longer has and renews the others."""
+    """A registry whose registrations come due for a liveness check (the SQL and in-memory registries): the
+    purge drops the registrations of sessions the store no longer has and renews the others."""
 
     async def expired_sessions(self, *, limit: int) -> list[tuple[str, str]]:
         """Up to *limit* ``(principal, session_id)`` registrations due for a check, most overdue first."""
@@ -113,19 +115,46 @@ def plan_registration(
 
 class InMemorySessionRegistry:
     """In-process :class:`SessionRegistry` (mirrors InMemorySessionStore); its capped registration is atomic
-    within the process."""
+    within the process.
 
-    def __init__(self) -> None:
+    It is an :class:`ExpiringSessionRegistry`: a registration comes due for a liveness check one *ttl* after
+    it was registered or renewed, so the controller's purge drops the registrations of sessions that ended
+    without a logout, whatever the cap (with max-sessions -1 nothing else would).
+
+    Args:
+        ttl: How long a registration goes before its liveness is checked again (the session timeout, by
+            default ``pyfly.session.ttl``); seconds or a ``timedelta``, positive (``ValueError`` otherwise).
+        clock: The current UTC instant (tests pass their own).
+    """
+
+    def __init__(
+        self, *, ttl: timedelta | float = timedelta(seconds=1800), clock: Callable[[], datetime] | None = None
+    ) -> None:
+        self._ttl = ttl if isinstance(ttl, timedelta) else timedelta(seconds=float(ttl))
+        if self._ttl <= timedelta(0):
+            # A renewal would leave the registration due: the purge would check the same batch forever.
+            raise ValueError(f"The session-registry ttl must be positive, got {self._ttl}")
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._by_principal: dict[str, dict[str, float]] = {}
+        # Session id -> (its next liveness check, its principal): a session id has one principal, as a SQL
+        # registration row does.
+        self._due: dict[str, tuple[datetime, str]] = {}
         self._lock = asyncio.Lock()
 
     async def register(self, principal: str, session_id: str, created_at: float) -> None:
         async with self._lock:
-            self._by_principal.setdefault(principal, {})[session_id] = created_at
+            self._add(principal, session_id, created_at)
 
     async def deregister(self, principal: str, session_id: str) -> None:
         async with self._lock:
             self._remove(principal, session_id)
+
+    def _add(self, principal: str, session_id: str, created_at: float) -> None:
+        registered = self._due.get(session_id)
+        if registered is not None and registered[1] != principal:
+            self._remove(registered[1], session_id)
+        self._by_principal.setdefault(principal, {})[session_id] = created_at
+        self._due[session_id] = (self._clock() + self._ttl, principal)
 
     def _remove(self, principal: str, session_id: str) -> None:
         sessions = self._by_principal.get(principal)
@@ -133,6 +162,9 @@ class InMemorySessionRegistry:
             sessions.pop(session_id, None)
             if not sessions:
                 del self._by_principal[principal]
+        registered = self._due.get(session_id)
+        if registered is not None and registered[1] == principal:
+            del self._due[session_id]
 
     async def list_sessions(self, principal: str) -> list[tuple[str, float]]:
         async with self._lock:
@@ -154,8 +186,27 @@ class InMemorySessionRegistry:
                 return SessionRegistration(False)
             for evicted_id in evicted:
                 self._remove(principal, evicted_id)
-            self._by_principal.setdefault(principal, {})[session_id] = created_at
+            self._add(principal, session_id, created_at)
             return SessionRegistration(True, tuple(evicted))
+
+    async def expired_sessions(self, *, limit: int) -> list[tuple[str, str]]:
+        """Up to *limit* ``(principal, session_id)`` registrations due for a liveness check, most overdue
+        first."""
+        now = self._clock()
+        async with self._lock:
+            due = heapq.nsmallest(
+                limit, ((at, session_id, principal) for session_id, (at, principal) in self._due.items() if at <= now)
+            )
+        return [(principal, session_id) for _at, session_id, principal in due]
+
+    async def renew(self, session_ids: Sequence[str]) -> None:
+        """Push the next liveness check of *session_ids* one *ttl* away."""
+        next_check = self._clock() + self._ttl
+        async with self._lock:
+            for session_id in session_ids:
+                registered = self._due.get(session_id)
+                if registered is not None:
+                    self._due[session_id] = (next_check, registered[1])
 
 
 @dataclass(frozen=True)
