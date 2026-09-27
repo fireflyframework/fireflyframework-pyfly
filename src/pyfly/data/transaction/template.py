@@ -88,14 +88,21 @@ callback increments, labelled by datasource and phase."""
 # ---------------------------------------------------------------------------------------------------------
 
 
-def _shield_scope() -> contextlib.AbstractContextManager[Any]:
+_anyio: Any = None
+
+
+def shield_scope() -> contextlib.AbstractContextManager[Any]:
     """An anyio shield when anyio is installed: under Starlette's level-triggered cancellation every await
     of a cancelled task is cancelled again, which a plain ``asyncio.shield`` does not stop."""
-    try:
-        import anyio
-    except ImportError:  # pragma: no cover — anyio ships with every web stack PyFly supports
-        return contextlib.nullcontext()
-    return anyio.CancelScope(shield=True)
+    global _anyio
+    if _anyio is None:
+        try:
+            import anyio
+        except ImportError:  # pragma: no cover — anyio ships with every web stack PyFly supports
+            _anyio = False
+        else:
+            _anyio = anyio
+    return _anyio.CancelScope(shield=True) if _anyio else contextlib.nullcontext()
 
 
 async def run_shielded(operation: Awaitable[T]) -> tuple[T | None, BaseException | None, bool]:
@@ -106,7 +113,7 @@ async def run_shielded(operation: Awaitable[T]) -> tuple[T | None, BaseException
     """
     task: asyncio.Future[T] = asyncio.ensure_future(operation)
     cancelled = False
-    with _shield_scope():
+    with shield_scope():
         while not task.done():
             try:
                 await asyncio.wait((task,))
@@ -128,13 +135,6 @@ async def shielded(operation: Awaitable[T]) -> T:
     if cancelled:
         raise asyncio.CancelledError
     return result  # type: ignore[return-value]
-
-
-async def _guarded(unit: UnitOfWork, operation: Callable[[], Awaitable[T]]) -> T:
-    """Run a completion *operation* under the unit's operation guard (it waits for an operation a child
-    task still has in flight)."""
-    async with unit.guard:
-        return await operation()
 
 
 class _Outcome:
@@ -211,32 +211,69 @@ async def _after_completion(unit: UnitOfWork, status: CompletionStatus) -> None:
 # ---------------------------------------------------------------------------------------------------------
 
 
-async def _release(unit: UnitOfWork, outcome: _Outcome) -> None:
-    _result, error, cancelled = await run_shielded(_guarded(unit, lambda: unit.manager.release(unit)))
-    outcome.cancelled = outcome.cancelled or cancelled
-    if error is not None:
-        _logger.warning(
-            "unit_of_work_release_failed",
-            extra={"datasource": unit.datasource, "unit": unit.describe()},
-            exc_info=(type(error), error, error.__traceback__),
-        )
+def _log_cleanup_failure(event: str, unit: UnitOfWork, error: BaseException) -> None:
+    _logger.warning(
+        event,
+        extra={"datasource": unit.datasource, "unit": unit.describe()},
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
+async def _release_quietly(unit: UnitOfWork) -> None:
+    try:
+        await unit.manager.release(unit)
+    except Exception as error:  # noqa: BLE001 — the unit is complete; a failing close must not mask that
+        _log_cleanup_failure("unit_of_work_release_failed", unit, error)
+
+
+async def _rollback_and_release(unit: UnitOfWork) -> None:
+    """Roll back and release, under the unit's guard; a failing rollback is logged, never raised."""
+    async with unit.guard:
+        try:
+            await unit.manager.rollback(unit)
+        except Exception as error:  # noqa: BLE001 — the cause of the rollback is the error that matters
+            _log_cleanup_failure("unit_of_work_rollback_failed", unit, error)
+        unit.status = UnitStatus.ROLLED_BACK
+        await _release_quietly(unit)
+
+
+async def _commit_and_release(unit: UnitOfWork) -> None:
+    """Commit and release, under the unit's guard. A commit failure is raised after the unit is released
+    (rolled back first, unless the outcome is unknown)."""
+    manager = unit.manager
+    async with unit.guard:
+        try:
+            await manager.commit(unit)
+        except CommitOutcomeUnknownError:
+            unit.status = UnitStatus.UNKNOWN
+            await _release_quietly(unit)
+            raise
+        except BaseException:
+            # A definite failure (a constraint at flush or commit time): the transaction did not commit.
+            try:
+                await manager.rollback(unit)
+            except Exception as error:  # noqa: BLE001 — the commit failure is the one to report
+                _logger.debug(
+                    "unit_of_work_rollback_after_commit_failure",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            unit.status = UnitStatus.ROLLED_BACK
+            await _release_quietly(unit)
+            raise
+        unit.status = UnitStatus.COMMITTED
+        await _release_quietly(unit)
 
 
 async def _rollback(unit: UnitOfWork, outcome: _Outcome) -> None:
-    """Roll *unit* back and release it; a failing rollback is logged, never raised over the cause."""
+    """Roll *unit* back and release it (one shielded task); a failing rollback is logged, never raised."""
     unit.status = UnitStatus.COMPLETING
     await _before_completion(unit, outcome)
-    _result, error, cancelled = await run_shielded(_guarded(unit, lambda: unit.manager.rollback(unit)))
+    _result, error, cancelled = await run_shielded(_rollback_and_release(unit))
     outcome.cancelled = outcome.cancelled or cancelled
     if error is not None:
-        _logger.warning(
-            "unit_of_work_rollback_failed",
-            extra={"datasource": unit.datasource, "unit": unit.describe()},
-            exc_info=(type(error), error, error.__traceback__),
-        )
+        _log_cleanup_failure("unit_of_work_rollback_failed", unit, error)
     unit.status = UnitStatus.ROLLED_BACK
     outcome.status = CompletionStatus.ROLLED_BACK
-    await _release(unit, outcome)
 
 
 async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
@@ -248,8 +285,7 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
         outcome.error = sync_error
         await _rollback(unit, outcome)
         return
-    manager = unit.manager
-    if unit.rollback_only or unit.poisoned or not manager.resource_active(unit):
+    if unit.rollback_only or unit.poisoned or not unit.manager.resource_active(unit):
         reason = unit.rollback_only_reason
         await _rollback(unit, outcome)
         message = (
@@ -265,30 +301,15 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
         return
     unit.status = UnitStatus.COMPLETING
     await _before_completion(unit, outcome)
-    _result, error, cancelled = await run_shielded(_guarded(unit, lambda: manager.commit(unit)))
+    _result, error, cancelled = await run_shielded(_commit_and_release(unit))
     outcome.cancelled = outcome.cancelled or cancelled
-    if error is None:
-        unit.status = UnitStatus.COMMITTED
-        outcome.status = CompletionStatus.COMMITTED
-        await _release(unit, outcome)
-        return
     outcome.error = error
-    if isinstance(error, CommitOutcomeUnknownError):
-        unit.status = UnitStatus.UNKNOWN
+    if error is None:
+        outcome.status = CompletionStatus.COMMITTED
+    elif isinstance(error, CommitOutcomeUnknownError):
         outcome.status = CompletionStatus.UNKNOWN
-        await _release(unit, outcome)
-        return
-    # A definite failure (a constraint at flush or commit time): the transaction did not commit.
-    _result, cleanup_error, cancelled = await run_shielded(_guarded(unit, lambda: manager.rollback(unit)))
-    outcome.cancelled = outcome.cancelled or cancelled
-    if cleanup_error is not None:
-        _logger.debug(
-            "unit_of_work_rollback_after_commit_failure",
-            exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
-        )
-    unit.status = UnitStatus.ROLLED_BACK
-    outcome.status = CompletionStatus.ROLLED_BACK
-    await _release(unit, outcome)
+    else:
+        outcome.status = CompletionStatus.ROLLED_BACK
 
 
 def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None) -> None:

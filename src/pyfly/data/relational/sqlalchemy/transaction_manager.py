@@ -54,7 +54,13 @@ from typing import Any
 from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, AsyncSessionTransaction, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    AsyncSessionTransaction,
+    async_sessionmaker,
+)
 from sqlalchemy.orm import Session
 
 from pyfly.data.relational.datasource_registry import (
@@ -77,7 +83,7 @@ from pyfly.data.transaction.registry import (
     installed_registry,
     register_resource_resolver,
 )
-from pyfly.data.transaction.template import run_shielded
+from pyfly.data.transaction.template import run_shielded, shield_scope
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
 __all__ = ["SqlAlchemyTransactionManager", "transaction_managers_for"]
@@ -306,25 +312,21 @@ class SqlAlchemyTransactionManager:
         if read_only:
             _install_read_only_guard(session, unit)
 
-        async def _acquire() -> None:
-            async with unit.operation():
-                connection = await AsyncSession.connection(session, execution_options=options)
-                if dialect == "sqlite":
-                    # aiosqlite runs a statement on its own thread; a cancelled one is interrupted there.
-                    unit.attributes[_DRIVER_CONNECTION] = (await connection.get_raw_connection()).driver_connection
-                statement = _READ_ONLY_DIALECT_STATEMENT.get(dialect) if read_only else None
-                if statement is not None and not unit.attributes.get(_AUTOCOMMIT):
-                    await connection.exec_driver_sql(statement)
-
-        # The checkout and BEGIN run in a task of their own: SQLAlchemy cleans up a connection whose BEGIN
-        # fails before the session holds it, and a cancellation landing there (Starlette cancels a
-        # disconnected stream through an anyio scope) would leave that connection checked out forever.
-        # Here the BEGIN completes, the session holds the connection, and _discard releases it.
-        _result, error, cancelled = await run_shielded(_acquire())
-        if error is not None or cancelled:
-            await self._discard(unit)
-            raise error if error is not None else asyncio.CancelledError()
         try:
+            # The checkout and BEGIN run under an anyio shield: SQLAlchemy cleans up a connection whose BEGIN
+            # fails before the session holds it, and Starlette's level-triggered cancellation (a disconnected
+            # stream) would cancel that cleanup too and leave the connection checked out forever. Shielded,
+            # the BEGIN completes and the session holds the connection; a cancellation is honored right
+            # after, and completing the unit discards that connection.
+            with shield_scope():
+                async with unit.operation():
+                    connection = await AsyncSession.connection(session, execution_options=options)
+                    if dialect == "sqlite":
+                        # aiosqlite runs a statement on its own thread; a cancelled one is interrupted there.
+                        unit.attributes[_DRIVER_CONNECTION] = _driver_of(connection)
+                    statement = _READ_ONLY_DIALECT_STATEMENT.get(dialect) if read_only else None
+                    if statement is not None and not unit.attributes.get(_AUTOCOMMIT):
+                        await connection.exec_driver_sql(statement)
             if target is not None:
                 await target.run_after_begin(session)
         except BaseException:
@@ -463,6 +465,12 @@ class SqlAlchemyTransactionManager:
 # ---------------------------------------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------------------------------------
+
+
+def _driver_of(connection: AsyncConnection) -> Any:
+    """The driver connection under *connection* (no I/O: the connection is checked out already)."""
+    sync_connection = connection.sync_connection
+    return sync_connection.connection.driver_connection if sync_connection is not None else None
 
 
 async def _discard_connections(unit: UnitOfWork) -> None:
