@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Integer, MetaData, String, Table
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Integer, MetaData, Table, Unicode, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 from sqlalchemy.sql.schema import ColumnCollectionConstraint, Constraint
 
@@ -107,6 +107,21 @@ the relational module documentation for the one-time rename migration.
 """
 
 
+def _uncluster_random_key(cls: type[Base]) -> None:
+    """Make a random UUID primary key (:class:`BaseEntity`'s ``id``: a ``Uuid`` column with a Python-side
+    default) ``NONCLUSTERED`` on SQL Server; the dialect option is ignored elsewhere. An entity whose key is
+    something else (an identity integer, a key it assigns itself) keeps the default clustering."""
+    table = vars(cls).get("__table__")
+    if not isinstance(table, Table):
+        return
+    columns = list(table.primary_key.columns)
+    if len(columns) != 1:
+        return
+    key = columns[0]
+    if isinstance(key.type, Uuid) and key.default is not None and key.default.is_callable:
+        table.primary_key.dialect_kwargs["mssql_clustered"] = False
+
+
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base for all PyFly entities.
 
@@ -121,6 +136,7 @@ class Base(DeclarativeBase):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         _keep_version_id_col(cls)
         super().__init_subclass__(**kwargs)
+        _uncluster_random_key(cls)
 
 
 class SoftDeleteMixin:
@@ -204,6 +220,10 @@ class BaseEntity(Base):
     UUID primary keys and created_at/updated_at/created_by/updated_by tracking.
     The timestamps are :class:`~pyfly.data.relational.sqlalchemy.types.UtcDateTime` columns: aware UTC
     with microseconds on every backend, after a reload too.
+
+    On SQL Server the user columns are ``NVARCHAR`` (a ``VARCHAR`` stores characters outside the database
+    code page as ``?``), and the random UUID key is a ``NONCLUSTERED`` primary key (as the clustered index,
+    every insert would land on a random page). The DDL of every other backend is unchanged.
     """
 
     __abstract__ = True
@@ -222,10 +242,10 @@ class BaseEntity(Base):
         onupdate=_utc_now,
     )
     created_by: Mapped[str | None] = mapped_column(
-        String(255),
+        Unicode(255),
         default=None,
     )
     updated_by: Mapped[str | None] = mapped_column(
-        String(255),
+        Unicode(255),
         default=None,
     )

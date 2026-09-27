@@ -149,6 +149,10 @@ from pyfly.data.relational.sqlalchemy import BaseEntity
 
 `BaseEntity` is declared with `__abstract__ = True`, so it does not create its own database table.
 
+On SQL Server, `created_by`/`updated_by` are `NVARCHAR(255)` (a `VARCHAR` stores characters outside the
+database code page as `?`), and the random UUID key is a `NONCLUSTERED` primary key, so inserts do not land
+on random pages of the clustered index. The DDL of every other backend is unchanged.
+
 ### UtcDateTime: One Instant on Every Backend
 
 `created_at`, `updated_at` and `SoftDeleteMixin.deleted_at` are `UtcDateTime` columns. A plain

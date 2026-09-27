@@ -65,6 +65,14 @@ class ConventionChild(Base):
     parent_id: Mapped[int] = mapped_column(ForeignKey("entity_convention_parent_with_a_rather_long_table_name.id"))
 
 
+class IntegerKeyedEntity(BaseEntity):
+    """A BaseEntity whose key is its own sequential integer, not the random UUID."""
+
+    __tablename__ = "entity_integer_keyed"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # type: ignore[assignment]
+
+
 class StrictReading(Base):
     """A strict ``UtcDateTime`` column: naive values are rejected."""
 
@@ -214,6 +222,31 @@ class TestUtcDateTime:
     def test_repr_renders_for_migrations(self) -> None:
         assert repr(UtcDateTime()) == "UtcDateTime()"
         assert repr(UtcDateTime(strict=True)) == "UtcDateTime(strict=True)"
+
+
+class TestSqlServerColumns:
+    """SQL Server gets Unicode audit columns and a non-clustered random-UUID key (C169); the other dialects'
+    DDL is unchanged."""
+
+    def test_audit_user_columns_are_nvarchar_on_sql_server(self) -> None:
+        ddl = _ddl(User, mssql.dialect())
+        assert "created_by NVARCHAR(255) NULL" in ddl
+        assert "updated_by NVARCHAR(255) NULL" in ddl
+
+    def test_random_uuid_key_is_not_the_clustered_index_on_sql_server(self) -> None:
+        assert "CONSTRAINT pk_users PRIMARY KEY NONCLUSTERED (id)" in _ddl(User, mssql.dialect())
+
+    def test_an_entity_with_its_own_key_keeps_the_default_clustering(self) -> None:
+        ddl = _ddl(IntegerKeyedEntity, mssql.dialect())
+        assert "PRIMARY KEY (id)" in ddl and "NONCLUSTERED" not in ddl
+
+    @pytest.mark.parametrize(
+        "dialect", [postgresql.dialect(), mysql.dialect(), sqlite.dialect()], ids=["postgresql", "mysql", "sqlite"]
+    )
+    def test_other_dialects_are_unchanged(self, dialect: object) -> None:
+        ddl = _ddl(User, dialect)
+        assert "created_by VARCHAR(255)" in ddl
+        assert "CONSTRAINT pk_users PRIMARY KEY (id)" in ddl
 
 
 class TestNamingConvention:
