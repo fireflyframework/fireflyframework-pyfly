@@ -13,20 +13,17 @@
 # limitations under the License.
 """Unit tests for PostgresCacheAdapter.
 
-These tests run against an in-memory SQLite engine (via aiosqlite) so no Docker
-is required.  The SQL used by the adapter is deliberately kept portable
-(LIKE/LIMIT/INSERT ON CONFLICT DO NOTHING|UPDATE all work on SQLite ≥ 3.24).
-
-BYTEA vs BLOB: SQLite stores ``bytes`` values in a BLOB column regardless of the
-DDL type name (``BYTEA``), so the round-trip works identically.
-TIMESTAMPTZ: SQLite stores it as TEXT/REAL; comparison with a naive datetime
-value via ``>`` works because both sides are ISO-format strings when using the
-aiosqlite dialect.  The adapter always stores naive UTC datetimes, so the
-comparison is consistent.
+These tests run against a SQLite file database (via aiosqlite), so no Docker is required: the adapter's
+table is a portable Core table and its upserts are the dialect's own. Every server backend (PostgreSQL,
+MySQL, MariaDB) runs in ``tests/integration/test_cache_postgres_integration.py``, with the time-zone,
+expiry, purge and round-trip checks.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -47,10 +44,14 @@ class TestGlobToLike:
         assert _glob_to_like("foo?bar") == "foo_bar"
 
     def test_literal_percent_is_escaped(self) -> None:
-        assert _glob_to_like("100%") == r"100\%"
+        assert _glob_to_like("100%") == "100!%"
 
     def test_literal_underscore_is_escaped(self) -> None:
-        assert _glob_to_like("a_b") == r"a\_b"
+        assert _glob_to_like("a_b") == "a!_b"
+
+    def test_the_escape_character_itself_is_escaped(self) -> None:
+        # "!" reads the same in every dialect's string literal; a backslash does not (MySQL).
+        assert _glob_to_like("wow!*") == "wow!!%"
 
     def test_wildcard_only(self) -> None:
         assert _glob_to_like("*") == "%"
@@ -60,23 +61,26 @@ class TestGlobToLike:
 
 
 # ---------------------------------------------------------------------------
-# Adapter against SQLite in-memory
+# Adapter against a SQLite file
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-async def cache() -> PostgresCacheAdapter:
-    """Return a started PostgresCacheAdapter backed by SQLite in-memory."""
+async def cache(tmp_path: Path) -> AsyncIterator[PostgresCacheAdapter]:
+    """Return a started PostgresCacheAdapter backed by a SQLite file database."""
     from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found,unused-ignore]
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cache.db'}")
     adapter = PostgresCacheAdapter(engine=engine)
     await adapter.start()
-    return adapter
+    try:
+        yield adapter
+    finally:
+        await engine.dispose()
 
 
 class TestPostgresCacheAdapterSQLite:
-    """Full behaviour tests using an in-memory SQLite engine (no Docker)."""
+    """Full behaviour tests using a SQLite file database (no Docker)."""
 
     @pytest.mark.asyncio
     async def test_protocol_compliance(self, cache: PostgresCacheAdapter) -> None:
@@ -147,6 +151,12 @@ class TestPostgresCacheAdapterSQLite:
         assert await cache.get("exists") == "original"
 
     @pytest.mark.asyncio
+    async def test_put_if_absent_takes_an_expired_key(self, cache: PostgresCacheAdapter) -> None:
+        await cache.put("lock", "old", ttl=timedelta(microseconds=1))
+        assert await cache.put_if_absent("lock", "new") is True
+        assert await cache.get("lock") == "new"
+
+    @pytest.mark.asyncio
     async def test_clear_removes_all(self, cache: PostgresCacheAdapter) -> None:
         await cache.put("a", 1)
         await cache.put("b", 2)
@@ -208,11 +218,10 @@ class TestPostgresCacheAdapterSQLite:
 
 
 class TestPostgresCacheAutoConfiguration:
-    """Assert that provider=postgres wires up a PostgresCacheAdapter."""
+    """Assert that provider=postgres wires up a PostgresCacheAdapter on the right datasource."""
 
     async def test_cache_adapter_returns_postgres_adapter(self) -> None:
         # pyfly.cache.postgres.url resolves through the datasource registry: one engine per database.
-        from pyfly.cache.adapters.postgres import PostgresCacheAdapter
         from pyfly.cache.auto_configuration import CacheAutoConfiguration
         from pyfly.core.config import Config
         from pyfly.data.relational.datasource_registry import DataSourceRegistry
@@ -230,6 +239,80 @@ class TestPostgresCacheAutoConfiguration:
             with patch("pyfly.cache.auto_configuration.AutoConfiguration.is_available", return_value=True):
                 adapter = CacheAutoConfiguration().cache_adapter(config)
             assert isinstance(adapter, PostgresCacheAdapter)
-            assert adapter._engine is registry.primary.engine  # the same database: the primary's engine
+            assert adapter.engine is registry.primary.engine  # the same database: the primary's engine
         finally:
             await registry.close()
+
+    async def test_the_datasource_key_names_the_cache_datasource(self, tmp_path: Path) -> None:
+        from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+        config = Config(
+            {
+                "pyfly": {
+                    "cache": {"provider": "postgres", "postgres": {"datasource": "caching"}},
+                    "data": {
+                        "relational": {
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                            "datasources": {"caching": {"url": f"sqlite+aiosqlite:///{tmp_path / 'cache.db'}"}},
+                        }
+                    },
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(config)
+        try:
+            adapter = CacheAutoConfiguration().cache_adapter(config)
+            assert isinstance(adapter, PostgresCacheAdapter)
+            assert adapter.engine is registry.get("caching").engine
+        finally:
+            await registry.close()
+
+    async def test_the_context_registry_bean_is_the_one_the_cache_runs_on(self, tmp_path: Path) -> None:
+        from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.container.container import Container
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+        config = Config({"pyfly": {"cache": {"provider": "postgres"}}})
+        own = DataSourceRegistry(
+            Config({"pyfly": {"data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'a.db'}"}}}})
+        )
+        container = Container()
+        container.register_instance(DataSourceRegistry, own)
+        try:
+            adapter = CacheAutoConfiguration().cache_adapter(config, container)
+            assert isinstance(adapter, PostgresCacheAdapter)
+            assert adapter.engine is own.primary.engine
+        finally:
+            await own.close()
+
+    async def test_with_ddl_auto_none_the_cache_only_checks_its_table(self, tmp_path: Path) -> None:
+        from pyfly.cache.auto_configuration import CacheAutoConfiguration
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.data.relational.framework_schema import FrameworkSchemaError
+
+        config = Config(
+            {
+                "pyfly": {
+                    "cache": {"provider": "postgres"},
+                    "data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'a.db'}", "ddl-auto": "none"}},
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(config)
+        try:
+            adapter = CacheAutoConfiguration().cache_adapter(config)
+            with pytest.raises(FrameworkSchemaError, match="pyfly_cache_entries does not exist"):
+                await adapter.start()  # type: ignore[attr-defined]
+        finally:
+            await registry.close()
+
+    def test_the_configured_postgres_url_is_not_a_made_up_default(self) -> None:
+        """configprops reported postgres.url=localhost:5432/cache, a database nothing connects to: with no URL
+        and no datasource the cache is on the primary datasource."""
+        from pyfly.config.properties.cache import CacheProperties
+
+        assert CacheProperties().postgres == {"url": None, "datasource": None, "purge-interval": 60}

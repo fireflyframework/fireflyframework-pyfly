@@ -78,6 +78,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 if TYPE_CHECKING:
+    from pyfly.container.container import Container
     from pyfly.core.config import Config
     from pyfly.data.relational.datasource_registry import DataSource, DataSourceRegistry
 
@@ -93,6 +94,7 @@ __all__ = [
     "UtcTimestamp",
     "cache_entries",
     "cache_entries_table",
+    "context_datasource_registry",
     "creates_tables",
     "ensure_tables",
     "framework_engine",
@@ -342,6 +344,21 @@ def creates_tables(ddl_auto: str | None) -> bool:
     tables are never dropped); ``none`` and ``validate`` leave the schema to migrations, and the store
     only checks it."""
     return str(ddl_auto or "").strip().lower() in _CREATING_STRATEGIES
+
+
+def context_datasource_registry(config: Config, container: Container | None = None) -> DataSourceRegistry:
+    """The ``DataSourceRegistry`` a framework store's auto-configuration resolves its datasource in: the
+    context's bean (an application's singleton registry replaces the configuration's), or the registry of
+    *config* when there is no container or no such bean."""
+    from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    if container is not None:
+        try:
+            return container.resolve(DataSourceRegistry)
+        except (NoSuchBeanError, NoUniqueBeanError):
+            pass
+    return DataSourceRegistry.for_config(config)
 
 
 def module_datasource(registry: DataSourceRegistry, config: Config, prefix: str, *, name: str) -> DataSource:

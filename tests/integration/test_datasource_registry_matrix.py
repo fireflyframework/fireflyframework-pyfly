@@ -93,6 +93,12 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
         overrides.update(
             {"pyfly.cache.enabled": "true", "pyfly.cache.provider": "postgres", "pyfly.cache.postgres.url": url}
         )
+    # ddl-auto=none: the framework stores check their tables at start, as migrations would have created them.
+    from pyfly.data.relational.framework_schema import cache_entries, ensure_tables, orchestration_state
+
+    migrations = create_async_engine(url, poolclass=NullPool)
+    await ensure_tables(migrations, orchestration_state, cache_entries)
+    await migrations.dispose()
     context = ApplicationContext(relational_backend.config(overrides))
     await context.start()
     registry = context.get_bean(DataSourceRegistry)
@@ -113,7 +119,8 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
             from pyfly.cache.ports.outbound import CacheAdapter
 
             stores.append(context.get_bean(CacheAdapter))
-        assert all(store._engine is primary for store in stores)  # type: ignore[attr-defined]
+        # The framework-table stores expose their datasource's engine as ``engine``.
+        assert all((getattr(store, "engine", None) or store._engine) is primary for store in stores)
 
         for engine in engines:
             assert engine.pool.size() == 3

@@ -150,6 +150,12 @@ class TestDisposal:
 
     async def test_modules_share_the_primary_and_stop_disposes_every_engine(self, tmp_path: Path) -> None:
         url = _sqlite(tmp_path / "app.db")
+        # ddl-auto=none: the saga store checks its table at start, as a migration would have created it.
+        from pyfly.data.relational.framework_schema import ensure_tables, orchestration_state
+
+        migrations = create_async_engine(url)
+        await ensure_tables(migrations, orchestration_state)
+        await migrations.dispose()
         context = await _started(
             _config(
                 {
@@ -186,7 +192,7 @@ class TestDisposal:
             ]
             assert context.get_bean(EventStore)._engine is primary  # type: ignore[attr-defined]
             assert context.get_bean(SnapshotStore)._engine is primary  # type: ignore[attr-defined]
-            assert context.get_bean(ExecutionPersistenceProvider)._engine is primary  # type: ignore[attr-defined]
+            assert context.get_bean(ExecutionPersistenceProvider).engine is primary  # type: ignore[attr-defined]
         finally:
             await context.stop()
         assert sorted(disposed) == sorted(id(engine.sync_engine) for engine in engines)

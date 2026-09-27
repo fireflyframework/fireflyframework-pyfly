@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_missing_bean,
@@ -42,7 +44,7 @@ class CacheAutoConfiguration:
         return "memory"
 
     @bean
-    def cache_adapter(self, config: Config) -> CacheAdapter:
+    def cache_adapter(self, config: Config, container: Container | None = None) -> CacheAdapter:
         configured = str(config.get("pyfly.cache.provider", "auto"))
         provider = configured if configured != "auto" else self.detect_provider()
 
@@ -62,14 +64,23 @@ class CacheAutoConfiguration:
                     "install pyfly[data-relational,postgresql]."
                 )
             from pyfly.cache.adapters.postgres import PostgresCacheAdapter
-            from pyfly.data.relational.datasource_registry import DataSourceRegistry
-
-            # pyfly.cache.postgres.url is an alias resolved through the datasource registry: no URL is
-            # the application's primary datasource, an identical URL reuses that datasource's engine.
-            datasource = DataSourceRegistry.for_config(config).resolve(
-                config.get("pyfly.cache.postgres.url"), name="cache", url_key="pyfly.cache.postgres.url"
+            from pyfly.data.relational.framework_schema import (
+                context_datasource_registry,
+                creates_tables,
+                module_datasource,
             )
-            return PostgresCacheAdapter(engine=datasource.engine)
+
+            # pyfly.cache.postgres.datasource names a datasource of the context's registry, and
+            # pyfly.cache.postgres.url is an alias resolved through it: neither is the application's
+            # primary datasource, an identical URL reuses that datasource's engine.
+            registry = context_datasource_registry(config, container)
+            datasource = module_datasource(registry, config, "pyfly.cache.postgres", name="cache")
+            seconds = float(config.get("pyfly.cache.postgres.purge-interval", 60))
+            return PostgresCacheAdapter(
+                datasource,
+                create_table=creates_tables(registry.properties.ddl_auto),
+                purge_interval=timedelta(seconds=seconds) if seconds > 0 else None,
+            )
 
         from pyfly.cache.adapters.memory import InMemoryCache
 
