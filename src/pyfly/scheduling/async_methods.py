@@ -29,7 +29,8 @@ The application context replaces every ``@async_method`` of a bean with :func:`d
   ``asyncio.to_thread``.
 
 The calls are drained when the application context stops: the executor belongs to the ``TaskScheduler``,
-which the context stops (waiting for its tasks) before any ``@pre_destroy``.
+which the context stops (waiting for its tasks) before any ``@pre_destroy``. A call submitted once the
+scheduler has stopped (by another consumer-phase bean still draining) is not waited for.
 """
 
 from __future__ import annotations

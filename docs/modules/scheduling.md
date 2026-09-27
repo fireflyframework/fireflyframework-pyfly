@@ -824,7 +824,9 @@ and the application context replaces the bean's method with a dispatcher
 - **Synchronous methods** run in the executor's thread pool
   (`ThreadPoolTaskExecutor.run_sync`), or through `asyncio.to_thread`.
 - **Shutdown** waits for the calls in flight: they run on the `TaskScheduler`'s
-  executor, which the context stops before any `@pre_destroy`.
+  executor, which the context stops before any `@pre_destroy`. A call submitted
+  once the scheduler has stopped (by another consumer-phase bean still draining,
+  such as a message listener) is not waited for.
 
 ```python
 from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
