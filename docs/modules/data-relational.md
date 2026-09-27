@@ -903,20 +903,29 @@ factory to its manager (`reactive_transactional(factory)`, a `_session_factory` 
 - A session factory over an engine of its own, or the factory over your `AsyncEngine` bean, gets
   the capabilities and begin options of that engine's dialect and no after-begin customizers: the
   registry applies those to the datasources it builds.
+- A session factory bound to no engine (`async_sessionmaker(binds={...})` only) cannot serve a unit
+  of work, which runs on one connection of one engine: the units stay on the registry's primary, and
+  a WARNING (`relational_session_factory_not_bound`) says so. Bind the factory to its engine to make
+  it the primary.
 - The framework disposes what it disposed before: the registry's engines, and an `AsyncEngine`
   bean the registry does not own (through the engine lifecycle). The engine under your session
   factory bean stays yours to dispose.
 - Beside a `DataSourceRegistry` bean, the modules that look the registry up by configuration (event
   store, snapshots, saga persistence, the PostgreSQL cache) keep the configuration's registry; the
-  context closes both when it stops.
+  context closes both when it stops. Return `DataSourceRegistry.for_config(config)` from your bean to
+  keep one registry.
 - `primary_transaction_manager` itself is not a replacement point: replace the session factory,
   the engine or the registry.
+- Contexts started on one `Config` share its registry, and with it their transaction managers: the
+  `primary` units of all of them run on the primary of the context bound last. A context unbinds its
+  primary when it stops (unless another context bound its own since). Give each context a `Config` of
+  its own to keep their primaries apart.
 
 **Never declare a singleton `AsyncEngine` or `async_sessionmaker` bean for a second database**: it
 takes over the primary. Declare the database under `pyfly.data.relational.datasources.<name>` (see
 [Multiple Named Datasources](#multiple-named-datasources)) and use `registry.engine("<name>")`,
-`registry.session_factory("<name>")` or `NamedDataSources`. Two configurations still **split** the
-primary, and a WARNING says so, once per engine and run:
+`registry.session_factory("<name>")` or `NamedDataSources`. Three configurations still **split** the
+primary, and a WARNING says so, once per engine (or registry) and run:
 
 - An engine bean the registry does not own, or a session factory bean over an engine of its own,
   while `pyfly.data.relational.url` is configured: every unit of work runs on your engine, and
@@ -926,6 +935,10 @@ primary, and a WARNING says so, once per engine and run:
 - A session factory bean over a named datasource or a replica of the registry: the `primary` units
   and the units that name that datasource are two units on one database, and
   `DataSourceRegistry.primary` keeps the URL. It logs `relational_primary_on_named_datasource`.
+- A `DataSourceRegistry` bean of your own while `pyfly.data.relational.url` is configured: the units
+  of work and the relational beans run on your registry, and the modules that look the registry up by
+  configuration build engines and pools of their own in the configuration's. It logs
+  `relational_registry_not_the_configurations`.
 
 A session factory over the registry's own primary engine is no split. Driver arguments, pool
 settings and the credentials provider are all configurable on the registry's own primary, so an

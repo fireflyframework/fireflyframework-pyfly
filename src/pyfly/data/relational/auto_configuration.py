@@ -32,7 +32,8 @@ Two auto-configurations live here:
   ``primary_transaction_manager`` bean, which serves the ``primary`` datasource's units on the primary
   ``async_sessionmaker`` bean: an application's singleton session factory, engine or registry bean replaces
   the primary for ``@transactional``, repositories, ``SessionProvider``, the ``AsyncSession`` bean and
-  ``infrastructure_unit()`` alike.
+  ``infrastructure_unit()`` alike, and ``primary_transaction_manager_binding`` undoes that binding when the
+  context stops (contexts started on one ``Config`` share its registry and transaction managers).
 """
 
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
@@ -57,6 +58,7 @@ try:
         SqlAlchemyTransactionManager,
         bind_primary_session_factory,
         transaction_managers_for,
+        unbind_primary_session_factory,
     )
 except ImportError:
     AsyncEngine = object  # type: ignore[misc,assignment]
@@ -126,6 +128,35 @@ _NAMED_SPLIT_HINT = (
     "the datasource where it is used (@transactional(datasource=...), __datasource__, "
     "registry.session_factory(name)) instead of declaring a session factory bean over it"
 )
+
+
+_REGISTRY_SPLIT_HINT = (
+    "@transactional, repositories, SessionProvider, infrastructure_unit() and the relational beans run on this "
+    "registry, the application's DataSourceRegistry bean, while the modules that look the registry up by "
+    "configuration (event store, snapshots, saga persistence, the PostgreSQL cache: "
+    "DataSourceRegistry.for_config) keep the configuration's, with engines and pools of their own built from "
+    "pyfly.data.relational; declare the datasources under pyfly.data.relational instead of a registry bean, or "
+    "return DataSourceRegistry.for_config(config) from it"
+)
+
+# The application registries a split from the configuration's was reported for: a restarted context (it builds
+# the bean again) warns again.
+_REGISTRY_SPLIT_REPORTED: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def _warn_if_registry_split(datasource_registry: DataSourceRegistry, config: Config) -> None:
+    """WARNING (``relational_registry_not_the_configurations``), once per registry, when the context's
+    ``DataSourceRegistry`` bean is the application's own while ``pyfly.data.relational.url`` is configured:
+    the units of work run on it, and the modules that look the registry up by configuration on the
+    configuration's (the counterpart of ``relational_engine_not_in_registry`` for a registry bean)."""
+    if datasource_registry in _REGISTRY_SPLIT_REPORTED:
+        return
+    if not str(RelationalProperties.from_config(config).url or "").strip():
+        return
+    if datasource_registry is DataSourceRegistry.for_config(config):
+        return
+    _REGISTRY_SPLIT_REPORTED.add(datasource_registry)
+    _logger.warning("relational_registry_not_the_configurations", extra={"hint": _REGISTRY_SPLIT_HINT})
 
 
 def _datasources(datasource_registry: DataSourceRegistry | None, config: Config) -> DataSourceRegistry:
@@ -329,6 +360,28 @@ class TransactionManagerRegistryLifecycle:
         uninstall_registry(self._registry)
 
 
+class PrimaryTransactionManagerBinding:
+    """Unbinds the primary session factory from the transaction managers when the context stops.
+
+    Contexts started on one ``Config`` share its registry and its transaction managers; a context that stops
+    must not leave its session factory (and the engine under it, which may be disposed) serving the others'
+    ``primary`` units (:func:`~pyfly.data.relational.sqlalchemy.transaction_manager.unbind_primary_session_factory`,
+    a no-op when another context bound its own since). The binding itself is made when the
+    ``primary_transaction_manager`` bean is built, at every start.
+    """
+
+    def __init__(self, registry: DataSourceRegistry, manager: SqlAlchemyTransactionManager) -> None:
+        self._registry = registry
+        self._manager = manager
+
+    async def start(self) -> None:
+        """No-op: ``primary_transaction_manager`` bound the manager when it was built."""
+
+    async def stop(self) -> None:
+        """Unbind the manager, if it is still the bound one."""
+        unbind_primary_session_factory(self._registry, self._manager)
+
+
 def _context_transaction_managers(
     provider: Provider[TransactionManagerRegistry] | None, config: Config | None
 ) -> Callable[[], TransactionManagerRegistry | None]:
@@ -458,11 +511,18 @@ class DataSourceAutoConfiguration:
         return DataSourceSpiRegistrar(datasource_registry)
 
     @bean
-    def transaction_manager_registry(self, datasource_registry: DataSourceRegistry) -> TransactionManagerRegistry:
+    def transaction_manager_registry(
+        self, datasource_registry: DataSourceRegistry, config: Config
+    ) -> TransactionManagerRegistry:
         """One ``SqlAlchemyTransactionManager`` per datasource of the registry, by datasource name (the
         default is the primary); datasources registered later get theirs on first use. With the relational
         beans enabled, the primary's is ``primary_transaction_manager``, on the primary session factory
-        bean (an application's session factory, engine or registry bean included)."""
+        bean (an application's session factory, engine or registry bean included).
+
+        On an application's own ``DataSourceRegistry`` bean beside a configured ``pyfly.data.relational.url``
+        it logs ``relational_registry_not_the_configurations``: the modules that look the registry up by
+        configuration keep the configuration's."""
+        _warn_if_registry_split(datasource_registry, config)
         return transaction_managers_for(datasource_registry)
 
     @bean
@@ -560,7 +620,10 @@ class RelationalAutoConfiguration:
         ``infrastructure_unit()`` and the ``AsyncSession`` bean run on one primary: the registry's, or the
         application's singleton ``async_sessionmaker``, ``AsyncEngine`` or ``DataSourceRegistry`` bean that
         replaced it. A primary that still splits from a datasource of the registry logs a WARNING
-        (``relational_engine_not_in_registry``, ``relational_primary_on_named_datasource``).
+        (``relational_engine_not_in_registry``, ``relational_primary_on_named_datasource``), and so does a
+        session factory bound to no engine, which leaves the units on the registry's primary
+        (``relational_session_factory_not_bound``). The binding is undone when the context stops
+        (``primary_transaction_manager_binding``): contexts on one ``Config`` share the transaction managers.
 
         Replace the session factory, the engine or the registry to change the primary, not this bean.
         """
@@ -568,6 +631,17 @@ class RelationalAutoConfiguration:
         manager = bind_primary_session_factory(registry, async_session_factory)
         _warn_if_split_primary(manager, registry)
         return manager
+
+    @bean
+    def primary_transaction_manager_binding(
+        self,
+        primary_transaction_manager: SqlAlchemyTransactionManager,
+        config: Config,
+        datasource_registry: DataSourceRegistry | None = None,
+    ) -> PrimaryTransactionManagerBinding:
+        """Unbinds ``primary_transaction_manager`` when the context stops
+        (:class:`PrimaryTransactionManagerBinding`)."""
+        return PrimaryTransactionManagerBinding(_datasources(datasource_registry, config), primary_transaction_manager)
 
     @bean(scope=Scope.TRANSIENT)
     def async_session(

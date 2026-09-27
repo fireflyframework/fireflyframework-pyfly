@@ -1050,3 +1050,132 @@ async def test_a_manager_refuses_a_session_factory_over_another_engine_than_its_
     finally:
         await other.dispose()
         await registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Primary data beans the units of work cannot run on, or cannot see: a session factory bound to no engine,
+# a registry bean beside the configuration's, and a context that stops while its factory is the primary.
+# ---------------------------------------------------------------------------
+
+
+@configuration
+class _UnboundSessionFactory:
+    @bean
+    def unbound_sessions(self) -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(binds={Base: _engine("user")}, expire_on_commit=False)
+
+
+async def test_a_session_factory_bound_to_no_engine_leaves_the_units_on_the_registry_primary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A unit of work runs on one connection of one engine, and ``binds={...}`` names none: the units stay on
+    the registry's primary, as they did before the primary followed the session factory bean, and a WARNING
+    says so. They used to fail at their first use with "not bound to an AsyncEngine"."""
+    await _relational_app(tmp_path, "user")
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UnboundSessionFactory)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    with caplog.at_level(logging.WARNING):
+        await ctx.start()
+    factory = ctx.get_bean(async_sessionmaker)
+    try:
+        registry = ctx.get_bean(DataSourceRegistry)
+        owners = ctx.get_bean(_DatabaseOwnerRepository)
+        assert [owner.name for owner in await owners.find_all()] == ["primary"]
+        await owners.save(_DatabaseOwner(id=2, name="second"))
+        assert await _engine_owner_count(registry.primary.engine) == 2
+        assert ctx.get_bean(TransactionManagerRegistry).get() is SqlAlchemyTransactionManager.for_datasource(
+            registry.primary
+        )
+        warnings = [r for r in caplog.records if r.getMessage() == "relational_session_factory_not_bound"]
+        assert len(warnings) == 1
+        assert "binds" in warnings[0].hint  # type: ignore[attr-defined]
+    finally:
+        await ctx.stop()
+        for engine in factory.kw["binds"].values():
+            await engine.dispose()
+
+
+def _registry_split_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == "relational_registry_not_the_configurations"]
+
+
+async def test_a_user_datasource_registry_beside_a_configured_url_warns_that_the_modules_keep_their_own(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The units of work and the relational beans run on the application's registry, while the modules that
+    look the registry up by configuration build their engines in the configuration's: said once, like the
+    engine bean's split."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserRegistryConfiguration)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        warnings = _registry_split_warnings(caplog)
+        assert len(warnings) == 1
+        assert "DataSourceRegistry.for_config" in warnings[0].hint  # type: ignore[attr-defined]
+    finally:
+        await ctx.stop()
+
+
+@configuration
+class _ConfigurationsRegistry:
+    @bean
+    def the_configurations_registry(self, config: Config) -> DataSourceRegistry:
+        return DataSourceRegistry.for_config(config)
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["auto-configured", "declared-as-the-configurations"])
+async def test_the_configurations_registry_is_no_split(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, declared: bool
+) -> None:
+    ctx = ApplicationContext(_config(tmp_path))
+    if declared:
+        ctx.register_bean(_ConfigurationsRegistry)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        assert _registry_split_warnings(caplog) == []
+    finally:
+        await ctx.stop()
+
+
+async def test_a_stopped_context_unbinds_its_session_factory_from_the_primary(tmp_path: Path) -> None:
+    """Contexts on one ``Config`` share its registry and its transaction managers. A context that stops no
+    longer leaves its session factory serving their ``primary``, nor mapped to its manager."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserSessionFactory)
+    await ctx.start()
+    factory = ctx.get_bean(async_sessionmaker)
+    managers = ctx.get_bean(TransactionManagerRegistry)
+    bound = managers.get()
+    try:
+        assert bound.sessionmaker is factory  # type: ignore[attr-defined]
+    finally:
+        await ctx.stop()
+        await factory.kw["bind"].dispose()
+    assert "primary" not in managers.names()
+    assert SqlAlchemyTransactionManager.for_sessionmaker(factory) is not bound
+
+
+async def test_a_stopped_context_leaves_the_primary_another_context_bound_since(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first = ApplicationContext(config)
+    first.register_bean(_UserSessionFactory)
+    await first.start()
+    first_factory = first.get_bean(async_sessionmaker)
+    second = ApplicationContext(config)
+    second.register_bean(_UserSessionFactory)
+    await second.start()  # the last binding serves both: they share the configuration's registry
+    second_factory = second.get_bean(async_sessionmaker)
+    managers = second.get_bean(TransactionManagerRegistry)
+    try:
+        assert first.get_bean(TransactionManagerRegistry) is managers
+        bound = managers.get()
+        assert bound.sessionmaker is second_factory  # type: ignore[attr-defined]
+        await first.stop()
+        assert managers.find("primary") is bound  # not the first context's to unbind
+    finally:
+        await second.stop()
+        await first_factory.kw["bind"].dispose()
+        await second_factory.kw["bind"].dispose()

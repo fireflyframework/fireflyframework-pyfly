@@ -114,7 +114,12 @@ from pyfly.data.transaction.registry import (
 from pyfly.data.transaction.template import run_shielded, shield_scope
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
-__all__ = ["SqlAlchemyTransactionManager", "bind_primary_session_factory", "transaction_managers_for"]
+__all__ = [
+    "SqlAlchemyTransactionManager",
+    "bind_primary_session_factory",
+    "transaction_managers_for",
+    "unbind_primary_session_factory",
+]
 
 _logger = logging.getLogger(__name__)
 
@@ -139,6 +144,14 @@ _HOLDER = "_pyfly_unit_holder"
 
 _READ_ONLY_DIALECT_STATEMENT = {"mysql": "SET TRANSACTION READ ONLY", "mariadb": "SET TRANSACTION READ ONLY"}
 
+
+_UNBOUND_FACTORY_HINT = (
+    "the primary async_sessionmaker bean is bound to no AsyncEngine (binds={...} only), and a unit of work "
+    "runs on one connection of one engine: @transactional, repositories, SessionProvider, infrastructure_unit() "
+    "and the AsyncSession bean inside a unit run on DataSourceRegistry.primary (pyfly.data.relational.url) "
+    "instead; bind the factory to its engine (async_sessionmaker(engine)) to make it the primary, and declare "
+    "further databases under pyfly.data.relational.datasources.<name>"
+)
 
 _MANAGER = "_pyfly_transaction_manager"
 """The attribute a ``DataSource``, an ad-hoc session factory or an ad-hoc engine's ``sync_engine`` keeps its
@@ -898,11 +911,20 @@ def bind_primary_session_factory(
       datasource's): the factory's sessions with that datasource's replica, begin options and after-begin
       customizers, bound under ``primary``;
     - a factory over an engine the registry did not build: the factory's sessions, with the capabilities and
-      begin options of its engine's dialect and no customizers. The registry never disposes that engine.
+      begin options of its engine's dialect and no customizers. The registry never disposes that engine;
+    - a factory bound to no engine (``binds={...}`` only): a unit of work runs on one connection of one
+      engine, which such a factory does not name, so the registry primary's manager keeps serving the
+      ``primary`` datasource, and a WARNING (``relational_session_factory_not_bound``) says so.
+
+    Contexts started on one ``Config`` share its registry, and so its transaction managers: the last one
+    bound serves them all. A context unbinds its own when it stops (:func:`unbind_primary_session_factory`).
     """
     owned = datasource_of(factory)
     if owned is not None and owned.registry is datasources and owned.name == PRIMARY and not owned.is_replica:
         manager = SqlAlchemyTransactionManager.for_datasource(owned)
+    elif owned is None and not isinstance(factory.kw.get("bind"), AsyncEngine):
+        _logger.warning("relational_session_factory_not_bound", extra={"hint": _UNBOUND_FACTORY_HINT})
+        manager = SqlAlchemyTransactionManager.for_datasource(datasources.primary)
     else:
         bind = factory.kw.get("bind")
         owner = datasources.find_by_engine(bind) if isinstance(bind, AsyncEngine) else None
@@ -922,3 +944,17 @@ def bind_primary_session_factory(
                     setattr(factory, _MANAGER, manager)
     transaction_managers_for(datasources).register(manager)
     return manager
+
+
+def unbind_primary_session_factory(datasources: DataSourceRegistry, manager: SqlAlchemyTransactionManager) -> None:
+    """Undo :func:`bind_primary_session_factory` for *manager*: it stops serving the ``primary`` datasource
+    of :func:`transaction_managers_for` *datasources*, and its session factory stops mapping to it, unless
+    another binding replaced it since (a context started later on the same configuration). The context that
+    bound it calls this when it stops; the registry's own primary serves ``primary`` again."""
+    managers = getattr(datasources, _MANAGERS, None)
+    if isinstance(managers, TransactionManagerRegistry):
+        managers.unregister(manager)
+    factory = manager.sessionmaker
+    with _LOOKUP_LOCK:
+        if getattr(factory, _MANAGER, None) is manager:
+            delattr(factory, _MANAGER)

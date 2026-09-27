@@ -114,6 +114,16 @@ class TransactionManagerRegistry:
             if default:
                 self._default = manager.datasource
 
+    def unregister(self, manager: TransactionManager) -> bool:
+        """Remove *manager* if it is the one registered under its datasource name (another registered since
+        stays); returns whether it was. A resolver then serves that name again."""
+        with self._lock:
+            name = manager.datasource
+            if self._managers.get(name) is not manager:
+                return False
+            del self._managers[name]
+            return True
+
     def add_resolver(self, resolver: ManagerResolver) -> None:
         """Ask *resolver* for a datasource name no registered manager serves."""
         with self._lock:
