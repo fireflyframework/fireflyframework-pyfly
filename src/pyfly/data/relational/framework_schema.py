@@ -29,14 +29,19 @@ metadata and this one (``target_metadata = [Base.metadata, framework_metadata]``
 
 The tables, and who uses them:
 
-=============================  ====================================================================
-Table                          Used by
-=============================  ====================================================================
-``pyfly_orchestration_state``  ``SqlAlchemyPersistenceProvider`` (saga, TCC and workflow state)
-``pyfly_cache_entries``        ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
-``pyfly_locks``                ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
-``pyfly_users``                ``SqlUserDetailsService``
-=============================  ====================================================================
+===============================  ============================================================================
+Table                            Used by
+===============================  ============================================================================
+``pyfly_orchestration_state``    ``SqlAlchemyPersistenceProvider`` (saga, TCC and workflow state)
+``pyfly_cache_entries``          ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
+``pyfly_locks``                  ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
+``pyfly_users``                  ``SqlUserDetailsService``
+``pyfly_oauth2_grants``          ``PostgresTokenStore``: refresh tokens, authorization codes, pushed requests
+``pyfly_oauth2_token_families``  ``PostgresTokenStore``: the refresh-token rotation families
+``pyfly_sessions``               ``SqlSessionStore`` (``pyfly.session.store=postgres``)
+``pyfly_session_registrations``  ``PostgresSessionRegistry``: the sessions of each principal
+``pyfly_session_principals``     ``PostgresSessionRegistry``: a row per principal, locked by a login
+===============================  ============================================================================
 
 A store that is configured with another table name declares that table here too, through the table's
 factory function (:func:`orchestration_state_table` and the others), so a migration environment that
@@ -62,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import (
     TIMESTAMP,
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Index,
@@ -92,7 +98,12 @@ __all__ = [
     "FRAMEWORK_TABLE_PREFIX",
     "LOCKS",
     "NAMING_CONVENTION",
+    "OAUTH2_GRANTS",
+    "OAUTH2_TOKEN_FAMILIES",
     "ORCHESTRATION_STATE",
+    "SESSIONS",
+    "SESSION_PRINCIPALS",
+    "SESSION_REGISTRATIONS",
     "USERS",
     "FrameworkSchemaError",
     "KeyString",
@@ -110,8 +121,18 @@ __all__ = [
     "long_binary",
     "long_text",
     "module_datasource",
+    "oauth2_grants",
+    "oauth2_grants_table",
+    "oauth2_token_families",
+    "oauth2_token_families_table",
     "orchestration_state",
     "orchestration_state_table",
+    "session_principals",
+    "session_principals_table",
+    "session_registrations",
+    "session_registrations_table",
+    "sessions",
+    "sessions_table",
     "users",
     "users_table",
 ]
@@ -139,6 +160,11 @@ ORCHESTRATION_STATE = "pyfly_orchestration_state"
 CACHE_ENTRIES = "pyfly_cache_entries"
 LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
+OAUTH2_GRANTS = "pyfly_oauth2_grants"
+OAUTH2_TOKEN_FAMILIES = "pyfly_oauth2_token_families"
+SESSIONS = "pyfly_sessions"
+SESSION_REGISTRATIONS = "pyfly_session_registrations"
+SESSION_PRINCIPALS = "pyfly_session_principals"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -348,6 +374,104 @@ def users_table(name: str = USERS) -> Table:
     return _declare("users", name, build)
 
 
+def oauth2_grants_table(name: str = OAUTH2_GRANTS) -> Table:
+    """The table of the SQL OAuth2 token store: refresh tokens, authorization codes and pushed authorization
+    requests, one row each (``kind`` says which).
+
+    The columns a grant decides on are typed, so each grant is a conditional statement: ``used`` (a code or a
+    refresh token is consumed with ``UPDATE ... WHERE used = false``), ``expires_at`` (indexed, for the purge)
+    and ``family_id`` (indexed: a refresh token's rotation family, and the family a code issued, so a family is
+    revoked with one statement). ``data`` is the rest of the record as JSON (scope, user, PKCE challenge...).
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("token_id", key_string(), primary_key=True),
+            Column("kind", key_string(32), nullable=False),
+            Column("client_id", key_string(), nullable=False),
+            Column("family_id", key_string(), nullable=True, index=True),
+            Column("used", Boolean(), nullable=False, default=False),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+            Column("data", long_text(), nullable=False),
+        )
+
+    return _declare("oauth2_grants", name, build)
+
+
+def oauth2_token_families_table(name: str = OAUTH2_TOKEN_FAMILIES) -> Table:
+    """The refresh-token rotation families of the SQL OAuth2 token store, one row each.
+
+    ``active`` only ever goes from true to false (a revocation is ``UPDATE ... SET active = false``), and a
+    rotation locks the row and mints its token only while it is true. ``expires_at`` is the expiry of the
+    family's latest token.
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("family_id", key_string(), primary_key=True),
+            Column("client_id", key_string(), nullable=False),
+            Column("active", Boolean(), nullable=False, default=True),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("oauth2_token_families", name, build)
+
+
+def sessions_table(name: str = SESSIONS) -> Table:
+    """The table of the SQL session store: each HTTP session's attributes as JSON, and when it expires."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("session_id", key_string(), primary_key=True),
+            Column("data", long_text(), nullable=False),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("sessions", name, build)
+
+
+def session_registrations_table(name: str = SESSION_REGISTRATIONS) -> Table:
+    """The sessions of each principal, for the session concurrency cap (``PostgresSessionRegistry``).
+
+    ``expires_at`` (indexed) is when the registry next checks that the session is still alive: the purge
+    drops the registration of a session the session store no longer has, and renews the others.
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("session_id", key_string(), primary_key=True),
+            Column("principal", key_string(), nullable=False, index=True),
+            Column("created_at", UtcTimestamp(), nullable=False),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("session_registrations", name, build)
+
+
+def session_principals_table(name: str = SESSION_PRINCIPALS) -> Table:
+    """One row per principal that logged in under a session cap: a login locks it (``UPDATE ... SET version =
+    version + 1``) while it counts and registers the principal's sessions, so concurrent logins of one
+    principal, on any instance, take turns."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("principal", key_string(), primary_key=True),
+            Column("version", BigInteger(), nullable=False, default=0),
+        )
+
+    return _declare("session_principals", name, build)
+
+
 orchestration_state = orchestration_state_table()
 """``pyfly_orchestration_state`` (:func:`orchestration_state_table`)."""
 
@@ -359,6 +483,21 @@ locks = locks_table()
 
 users = users_table()
 """``pyfly_users`` (:func:`users_table`)."""
+
+oauth2_grants = oauth2_grants_table()
+"""``pyfly_oauth2_grants`` (:func:`oauth2_grants_table`)."""
+
+oauth2_token_families = oauth2_token_families_table()
+"""``pyfly_oauth2_token_families`` (:func:`oauth2_token_families_table`)."""
+
+sessions = sessions_table()
+"""``pyfly_sessions`` (:func:`sessions_table`)."""
+
+session_registrations = session_registrations_table()
+"""``pyfly_session_registrations`` (:func:`session_registrations_table`)."""
+
+session_principals = session_principals_table()
+"""``pyfly_session_principals`` (:func:`session_principals_table`)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
