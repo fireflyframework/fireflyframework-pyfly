@@ -33,7 +33,6 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import String, func, select, update
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.context.request_context import RequestContext
 from pyfly.data import transactional
@@ -42,6 +41,7 @@ from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity, SoftDeleteMixin, VersionedMixin
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from pyfly.security.context import SecurityContext
 from tests.integration._repository_harness import Datasources, dml, repository_datasources, sql_of
 from tests.support.backend_matrix import RelationalBackend
@@ -179,7 +179,7 @@ async def test_every_soft_delete_bumps_the_version(relational_backend: Relationa
 
         holder = next(item for item in stale if item.name == "one")
         holder.name = "edited after delete"
-        with pytest.raises(StaleDataError):  # the stale holder can no longer edit the deleted row
+        with pytest.raises(OptimisticLockingFailureException):  # the stale holder can no longer edit the deleted row
             await items.save(holder)
 
 
@@ -193,9 +193,9 @@ async def test_a_stale_entity_is_not_soft_deleted(relational_backend: Relational
         fresh.name = "changed"
         await items.save(fresh)
 
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException):
             await items.delete(stale)
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException):
             await items.delete_all([stale])
         assert await items.count() == 1
         await items.delete(fresh)
@@ -212,7 +212,7 @@ async def test_a_version_sql_cannot_compute_goes_through_the_orm(relational_back
         assert stale is not None
         await items.delete_all_by_id([one.id])
         stale.name = "edited after delete"
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException):
             await items.save(stale)
 
         fresh = await items.find_by_id(two.id)
@@ -220,7 +220,7 @@ async def test_a_version_sql_cannot_compute_goes_through_the_orm(relational_back
         assert fresh is not None and other is not None
         fresh.name = "changed"
         await items.save(fresh)
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException):
             await items.delete(other)
         before = fresh.token
         await items.delete(fresh)

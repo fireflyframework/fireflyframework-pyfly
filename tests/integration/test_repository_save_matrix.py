@@ -22,7 +22,7 @@
   transaction) is re-attached and updated with one ``UPDATE``. "New" is Spring's rule: a ``Persistable``
   ``is_new()`` hook, else a ``None`` version, else a ``None`` primary key.
 - Optimistic locking holds across the request boundary: a DTO or a detached copy carrying a stale version
-  raises ``StaleDataError``.
+  raises ``OptimisticLockingFailureException`` (translated from ``StaleDataError``).
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from tests.integration._repository_harness import Datasources, dml, repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 from tests.support.contract_models import CONTRACT_MODELS, ContractChild, ContractParent, ContractVersioned
@@ -328,10 +329,11 @@ async def test_a_stale_version_is_rejected_from_a_dto_and_from_a_detached_copy(
         fresh.quantity = 2
         await versioned.save(fresh)  # version 2 now
 
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException) as stale_dto:
             await versioned.save(ContractVersioned(id=saved.id, version=1, name="v", quantity=9))
+        assert isinstance(stale_dto.value.__cause__, StaleDataError)
         stale_copy.quantity = 3
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException):
             await versioned.save(stale_copy)
         async with datasources.engine.connect() as conn:
             row = (await conn.execute(select(ContractVersioned.quantity, ContractVersioned.version))).one()

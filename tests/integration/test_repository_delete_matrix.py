@@ -40,6 +40,7 @@ from pyfly.data import transactional
 from pyfly.data.pageable import Sort
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.kernel.exceptions import DataIntegrityException, OptimisticLockingFailureException
 from tests.integration._repository_harness import Datasources, dml, repository_datasources, sql_of
 from tests.support.backend_matrix import RelationalBackend
 from tests.support.contract_models import (
@@ -205,9 +206,11 @@ async def test_the_batch_deletes_are_bulk_and_bypass_the_cascade(relational_back
     async with repository_datasources(relational_backend, *MODELS) as datasources:
         parents = ParentRepository()
         families = await _family(parents, 2)
-        with pytest.raises(IntegrityError):  # the foreign key refuses what the ORM cascade would have done
+        # the foreign key refuses what the ORM cascade would have done
+        with pytest.raises(DataIntegrityException) as refused:
             await parents.delete_all_by_id_in_batch([families[0].id])
-        with pytest.raises(IntegrityError):
+        assert isinstance(refused.value.__cause__, IntegrityError)
+        with pytest.raises(DataIntegrityException):
             await parents.delete_all_in_batch()
         assert await _count(datasources, ContractParent) == 2
 
@@ -253,9 +256,10 @@ async def test_a_stale_version_is_rejected_by_every_delete(relational_backend: R
         fresh.quantity = 2
         await versioned.save(fresh)
 
-        with pytest.raises(StaleDataError):
+        with pytest.raises(OptimisticLockingFailureException) as stale_delete:
             await versioned.delete(stale)
-        with pytest.raises(StaleDataError):
+        assert isinstance(stale_delete.value.__cause__, StaleDataError)
+        with pytest.raises(OptimisticLockingFailureException):
             await versioned.delete_all([stale])
         assert await _count(datasources, ContractVersioned) == 1
         await versioned.delete_all_by_id([saved.id])  # by id: no version to compare
