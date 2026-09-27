@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -80,11 +79,14 @@ class Notifier:
         self.rows = rows
         self.units: list[object] = []
         self.threads: list[str] = []
+        self.gate = asyncio.Event()  # an audit waits for it, then takes 0.3 s
+        self.gate.set()
 
     @async_method
     @transactional
     async def audit(self, order: str, *, fail: bool = False) -> str:
         self.units.append(current_unit_of_work())
+        await self.gate.wait()
         await asyncio.sleep(0.3)
         await self.rows.save(OrderRow(kind=f"audit-{order}"))
         if fail:
@@ -164,12 +166,13 @@ async def harness(relational_backend: RelationalBackend) -> AsyncIterator[Harnes
 async def test_the_caller_returns_at_once_and_the_method_runs_in_its_own_unit(harness: Harness) -> None:
     orders = harness.ctx.get_bean(Orders)
     notifier = harness.ctx.get_bean(Notifier)
-    started = time.monotonic()
-    await orders.place("o0")
-    assert time.monotonic() - started < 0.25  # not blocked for the audit's 0.3 s
+    notifier.gate.clear()  # the audit cannot end until the caller has returned
+    await asyncio.wait_for(orders.place("o0"), 10)  # not blocked by the audit
 
     task = orders.calls[0]
     assert isinstance(task, asyncio.Task)
+    assert not task.done()
+    notifier.gate.set()
     assert await asyncio.wait_for(task, 10) == "audited o0"
     assert notifier.units[0] is not None and notifier.units[0] is not orders.units[0]
     assert await harness.committed() == ["audit-o0", "order-o0"]
