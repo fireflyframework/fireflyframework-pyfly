@@ -23,14 +23,18 @@ nothing else, so resetting the query cache never drops the orchestration state, 
 for the commit and are dropped on rollback. A cache failure is logged and never fails the query or the
 command that caused it.
 
-An entry is keyed by the caller's scope too (:func:`scoped_key`): a result cached for one tenant or user
-is never served to another. Evicting a key evicts it for every scope.
+An entry is keyed by the caller's scope too (:func:`scope_digest`): a result cached for one tenant or
+user is never served to another. Evicting a key evicts it for every scope at the cost of one write: the
+scoped entries of a key live under its current *generation* (``<key>|<generation>|scope=<digest>``), and
+eviction replaces the generation, which leaves the old entries unreachable until their TTL expires. No
+eviction scans the keyspace.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +52,10 @@ _logger = logging.getLogger(__name__)
 CQRS_CACHE_PREFIX = ":cqrs:"
 
 SCOPE_SEPARATOR = "|scope="
-"""What separates a query's cache key from the digest of the caller's scope."""
+"""What separates a scoped entry's key and generation from the digest of the caller's scope."""
+
+GENERATION_SUFFIX = "|generation"
+"""The suffix of the entry holding a key's current generation."""
 
 
 def _ambient_tenant() -> str | None:
@@ -96,14 +103,13 @@ def query_cache_group(handler: QueryHandler[Any, Any]) -> str:
     return f"{query_type.__name__ if query_type is not None else type(handler).__name__}:"
 
 
-def scoped_key(cache_key: str, scope: QueryCacheScope, context: ExecutionContext | None) -> str:
-    """*cache_key* for the caller: followed by a digest of its scope (:func:`scope_of`), or unchanged for
-    a ``GLOBAL`` handler and for a caller with no tenant, organization or user at all."""
+def scope_digest(scope: QueryCacheScope, context: ExecutionContext | None) -> str | None:
+    """A digest of the caller's scope (:func:`scope_of`), or ``None`` for a ``GLOBAL`` handler and for a
+    caller with no tenant, organization or user at all (their entries are not scoped)."""
     parts = scope_of(scope, context)
     if all(value is None for _name, value in parts):
-        return cache_key
-    digest = hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()[:16]
-    return f"{cache_key}{SCOPE_SEPARATOR}{digest}"
+        return None
+    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()[:16]
 
 
 class QueryCacheAdapter:
@@ -117,6 +123,33 @@ class QueryCacheAdapter:
         self._region: TransactionAwareCache | None = None
         if cache is not None:
             self._region = TransactionAwareCache(PrefixedCache(cache, CQRS_CACHE_PREFIX), on_write_error="log")
+
+    # ── keys ───────────────────────────────────────────────────
+
+    async def entry_key(self, cache_key: str, digest: str | None) -> str | None:
+        """The key the entry of *cache_key* lives under for the caller whose scope is *digest*
+        (:func:`scope_digest`): *cache_key* itself when unscoped, else a key under the current generation of
+        *cache_key*. ``None`` when the cache cannot be read (the call is then not cached)."""
+        if digest is None or self._region is None:
+            return cache_key
+        try:
+            generation = await self._generation(cache_key)
+        except Exception as exc:
+            _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
+            return None
+        return f"{cache_key}|{generation}{SCOPE_SEPARATOR}{digest}"
+
+    async def _generation(self, cache_key: str) -> str:
+        assert self._region is not None
+        key = cache_key + GENERATION_SUFFIX
+        current = await self._region.get(key)
+        if current is not None:
+            return str(current)
+        # No generation yet (or it was evicted): start a fresh one, so no older entry can be reached again.
+        fresh = uuid.uuid4().hex[:12]
+        if await self._region.put_if_absent(key, fresh):
+            return fresh
+        return str(await self._region.get(key) or fresh)
 
     # ── read ───────────────────────────────────────────────────
 
@@ -153,16 +186,17 @@ class QueryCacheAdapter:
     # ── evict ──────────────────────────────────────────────────
 
     async def evict(self, cache_key: str) -> bool:
-        """Evict *cache_key* for every caller's scope (after the commit inside a unit of work, where it
-        returns ``False``)."""
+        """Evict *cache_key* for every caller's scope: its unscoped entry, and its scoped entries by moving it
+        to a new generation. After the commit inside a unit of work, where it returns ``False``."""
         if self._region is None:
             return False
         evicted = await self._region.evict(cache_key)
-        scoped = await self._region.evict_by_prefix(f"{cache_key}{SCOPE_SEPARATOR}")
-        return evicted or scoped > 0
+        await self._region.put(cache_key + GENERATION_SUFFIX, uuid.uuid4().hex[:12])
+        return evicted
 
     async def evict_prefix(self, prefix: str) -> int:
-        """Evict every entry whose key starts with *prefix* (a query handler's group), for every scope."""
+        """Evict every entry whose key starts with *prefix* (a query handler's group), for every scope. This
+        one scans the query cache's keys (a ``SCAN`` on Redis)."""
         if self._region is None:
             return 0
         return await self._region.evict_by_prefix(prefix)

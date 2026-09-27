@@ -195,11 +195,28 @@ async def test_an_explicitly_global_handler_is_shared(setup: Setup) -> None:
 
 
 async def test_clearing_a_key_clears_it_for_every_scope(setup: Setup) -> None:
-    bus, handlers, cache = setup
+    bus, handlers, _cache = setup
     await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
     await bus.query_with_context(ListDocsQuery(), _ctx("globex"))
-    assert len(cache.get_keys()) == 2
-    await bus.clear_cache(ListDocsQuery().get_cache_key())
-    assert cache.get_keys() == []
     await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
-    assert type(handlers["docs"]).calls == 3
+    assert type(handlers["docs"]).calls == 2
+    await bus.clear_cache(ListDocsQuery().get_cache_key())
+    await bus.query_with_context(ListDocsQuery(), _ctx("acme"))
+    await bus.query_with_context(ListDocsQuery(), _ctx("globex"))
+    assert type(handlers["docs"]).calls == 4
+
+
+async def test_evicting_a_key_never_scans_the_cache(setup: Setup) -> None:
+    bus, _handlers, cache = setup
+    scans: list[str] = []
+    evict_by_prefix = cache.evict_by_prefix
+
+    async def recorded(prefix: str) -> int:
+        scans.append(prefix)
+        return await evict_by_prefix(prefix)
+
+    cache.evict_by_prefix = recorded  # type: ignore[method-assign]
+    for tenant in ("acme", "globex", "initech"):
+        await bus.query_with_context(ListDocsQuery(), _ctx(tenant))
+    await bus.clear_cache(ListDocsQuery().get_cache_key())
+    assert scans == []  # one write moves the key to a new generation, whatever the number of scopes

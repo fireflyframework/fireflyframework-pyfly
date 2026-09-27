@@ -45,7 +45,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pyfly.cache.serialization import restore, uncacheable_type
 from pyfly.cqrs.authorization.service import AuthorizationService
-from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_key, scoped_key
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter, evict_query_key, query_cache_key, scope_digest
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
@@ -171,7 +171,7 @@ class DefaultQueryBus:
             handler = self._registry.find_query_handler(type(query))
 
             # 5. Cache check (keyed by the caller's scope)
-            cache_key = self._cache_key(query, handler, context)
+            cache_key = await self._cache_key(query, handler, context)
             cached_result = await self._try_cache_get(cache_key, handler)
             if cached_result is not _CACHE_MISS:
                 duration = self._metrics.now() - start
@@ -208,7 +208,7 @@ class DefaultQueryBus:
 
     # ── caching helpers ────────────────────────────────────────
 
-    def _cache_key(
+    async def _cache_key(
         self, query: Query[Any], handler: QueryHandler[Any, Any], context: ExecutionContext | None
     ) -> str | None:
         """The cache key of this call, or ``None`` when it is not cached."""
@@ -223,7 +223,8 @@ class DefaultQueryBus:
         raw = query.get_cache_key()
         if not raw:
             return None
-        return scoped_key(query_cache_key(handler, raw), handler.get_cache_scope(), context)
+        digest = scope_digest(handler.get_cache_scope(), context)
+        return await self._cache.entry_key(query_cache_key(handler, raw), digest)
 
     def _result_type_cacheable(self, handler: QueryHandler[Any, Any]) -> bool:
         handler_type = type(handler)

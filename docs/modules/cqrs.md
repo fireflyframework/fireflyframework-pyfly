@@ -552,6 +552,13 @@ class ListInvoicesHandler(QueryHandler[ListInvoicesQuery, list[InvoiceDto]]): ..
 A `ContextAwareQueryHandler` is never served from the cache without a context:
 it refuses such a call, and a hit must not bypass that.
 
+Evicting a key (`clear_cache`, a command's `get_cache_key()`, a bridge rule)
+reaches every caller's entry with one write, whatever the number of tenants and
+users: scoped entries live under the key's current generation
+(`<key>|<generation>|scope=<digest>`), and the eviction replaces the generation.
+The old entries are unreachable from then on and expire with their TTL. A scoped
+lookup reads the generation first, one extra round trip.
+
 > **Prior behaviour (corrected in 26.09.08):** the key was the query's own key
 > only, so the first tenant (or user) to run a cacheable query filled the entry
 > every other tenant was served for `cache_ttl`, 900 seconds by default.
