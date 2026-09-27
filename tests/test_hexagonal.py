@@ -196,17 +196,58 @@ class TestPortSwappability:
 
     @pytest.mark.asyncio
     async def test_mock_session_port(self):
-        class MockSession:
-            async def begin(self) -> Any:
-                return self
+        """SessionPort is the deprecated alias of the unit of work's TransactionManager SPI: a backend that
+        implements the SPI can stand in for the relational one."""
+        from pyfly.data.transaction import (
+            TransactionCapabilities,
+            TransactionDefinition,
+            TransactionManager,
+            TransactionTemplate,
+            UnitOfWork,
+        )
 
-            async def commit(self) -> None:
-                pass
+        class MockManager:
+            datasource = "memory"
+            capabilities = TransactionCapabilities(backend="memory", supports_savepoints=False)
 
-            async def rollback(self) -> None:
-                pass
+            def __init__(self) -> None:
+                self.log: list[str] = []
 
-        session = MockSession()
-        assert isinstance(session, SessionPort)
-        await session.begin()
-        await session.commit()
+            async def begin(self, definition: TransactionDefinition) -> UnitOfWork:
+                self.log.append("begin")
+                return UnitOfWork(self, self.datasource, resource=None, definition=definition)
+
+            async def open_auto_unit(self, *, read_only: bool, autocommit: bool | None = None) -> UnitOfWork:
+                return UnitOfWork(self, self.datasource, resource=None, auto=True, read_only=read_only)
+
+            async def commit(self, unit: UnitOfWork) -> None:
+                self.log.append("commit")
+
+            async def rollback(self, unit: UnitOfWork) -> None:
+                self.log.append("rollback")
+
+            async def release(self, unit: UnitOfWork) -> None:
+                self.log.append("release")
+
+            async def create_savepoint(self, unit: UnitOfWork) -> Any: ...
+
+            async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+
+            async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+
+            def resource_active(self, unit: UnitOfWork) -> bool:
+                return True
+
+            def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool:
+                return False
+
+            def is_disconnect(self, error: BaseException) -> bool:
+                return False
+
+        manager = MockManager()
+        assert SessionPort is TransactionManager
+        assert isinstance(manager, SessionPort)
+
+        async with TransactionTemplate(manager).transaction() as unit:
+            assert unit is not None and unit.datasource == "memory"
+        assert manager.log == ["begin", "commit", "release"]
