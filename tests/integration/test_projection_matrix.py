@@ -355,7 +355,8 @@ async def test_catch_up_runs_at_full_speed_with_the_default_settings(relational_
     elapsed = time.monotonic() - started
 
     assert len(seen) == 1000 and len(set(seen)) == 1000
-    assert elapsed < 2.5, f"1000 events took {elapsed:.2f}s ({1000 / elapsed:.0f} events/s)"
+    # Sleeping a poll interval after each page, as before, takes at least 9 s; the margin absorbs a loaded host.
+    assert elapsed < 5.0, f"1000 events took {elapsed:.2f}s ({1000 / elapsed:.0f} events/s)"
 
 
 async def test_a_rebuild_is_an_explicit_reset_and_a_new_projection_can_start_at_the_head(

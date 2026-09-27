@@ -118,7 +118,8 @@ async def test_full_pages_are_read_back_to_back_and_the_page_size_is_configurabl
     await runner.stop()
 
     assert len(recorder.seen) == 500
-    assert elapsed < 0.9, f"catch-up slept between full pages: {elapsed:.2f}s"
+    # Sleeping the default poll interval after each of the 13 pages would take at least 12 s.
+    assert elapsed < 3.0, f"catch-up slept between full pages: {elapsed:.2f}s"
     assert set(store.limits) == {40}
 
 
