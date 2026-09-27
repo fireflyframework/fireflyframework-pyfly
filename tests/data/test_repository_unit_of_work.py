@@ -17,12 +17,15 @@ A DI-built repository holds no session. Outside a transaction every call runs in
 commits (writes) or ends without writing (reads) and always returns its connection; inside a unit it joins.
 This covers the inherited methods, ``SoftDeleteRepository``, a subclass's own methods, the derived and
 ``@query`` methods the post-processor compiles, datasource affinity, ``stream_all`` owning its connection,
-the after-begin customizers of auto units, and entities outliving their auto unit. Everything runs on a
-SQLite file database with the registry's settings, through a real ApplicationContext.
+the after-begin customizers of auto units, and entities outliving their auto unit. A framework method
+never holds the unit's operation guard while it calls a method a subclass may override: an override that
+fans out with ``gather()`` would wait for the guard its own caller holds. Everything runs on a SQLite file
+database with the registry's settings, through a real ApplicationContext.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -109,6 +112,22 @@ class SeamReportRepository(Repository[SeamReport, int]):
     __datasource__ = "reporting"
 
 
+@repository
+class FanOutItemRepository(Repository[SeamItem, int]):
+    """Overrides ``find_by_id`` with a ``gather()`` fan-out over two framework methods."""
+
+    async def find_by_id(self, id: int) -> SeamItem | None:  # noqa: A002 — the framework's signature
+        item, _total = await asyncio.gather(super().find_by_id(id), self.count())
+        return item
+
+
+@repository
+class FanOutSoftRepository(SoftDeleteRepository[SeamSoft, int]):
+    async def find_by_id(self, id: int) -> SeamSoft | None:  # noqa: A002 — the framework's signature
+        item, _total = await asyncio.gather(super().find_by_id(id), self.count())
+        return item
+
+
 @component
 class RecordingCustomizer:
     """An after-begin customizer bean: it runs inside every unit on its datasource, auto units included."""
@@ -160,6 +179,8 @@ async def seam(tmp_path: Path) -> AsyncIterator[Harness]:
         SeamItemRepository,
         SeamSoftRepository,
         SeamReportRepository,
+        FanOutItemRepository,
+        FanOutSoftRepository,
         RecordingCustomizer,
     ):
         ctx.register_bean(bean)
@@ -199,7 +220,7 @@ class TestAutoUnits:
         await items.save(SeamItem(name="one"))
         engine = seam.ctx.get_bean(DataSourceRegistry).primary.engine
         with StatementCounter(engine) as counter:
-            assert await items.find_twice() == (1, True)  # count, then exists_by_id -> find_by_id
+            assert await items.find_twice() == (1, True)  # count, then exists_by_id
         assert counter.rollbacks == 1  # one read unit for the whole call
         assert counter.counts().get("BEGIN") == 1
 
@@ -275,6 +296,26 @@ class TestAutoUnits:
     async def test_without_a_context_a_managed_repository_says_why(self) -> None:
         with pytest.raises(IllegalTransactionStateError, match="no application context"):
             await Repository(SeamItem).count()
+
+
+class TestOperationGuard:
+    @pytest.mark.parametrize("repository_type", [FanOutItemRepository, FanOutSoftRepository])
+    async def test_exists_by_id_does_not_wait_for_an_override_that_fans_out(
+        self, seam: Harness, repository_type: type[Repository[Any, int]]
+    ) -> None:
+        repo = seam.ctx.get_bean(repository_type)
+        model = SeamItem if repository_type is FanOutItemRepository else SeamSoft
+        await repo.save(model(name="present"))
+        assert (await asyncio.wait_for(repo.find_by_id(1), 5)) is not None
+        assert await asyncio.wait_for(repo.exists_by_id(1), 5) is True
+        assert await asyncio.wait_for(repo.exists_by_id(2), 5) is False
+
+        @transactional
+        async def inside() -> tuple[bool, bool]:
+            found = await repo.find_by_id(1) is not None
+            return found, await repo.exists_by_id(1)
+
+        assert await asyncio.wait_for(inside(), 5) == (True, True)
 
 
 class TestStreamAll:

@@ -25,9 +25,11 @@ methods the post-processor compiles) is wrapped so that each call opens an **ope
   is retried once when its connection turns out to be dead, and any other method a write unit that
   commits. Both run the datasource's after-begin customizers, and both always release their connection.
 
-Nested repository calls inside one operation share its unit, so ``exists_by_id`` calling ``find_by_id``
-is one unit. Entities returned from an auto unit are detached with their loaded state intact
-(``expire_on_commit=False``); lazy relationships need an explicit fetch.
+Nested repository calls inside one operation share its unit: a subclass method calling ``count()`` and
+``exists_by_id()`` is one unit. The framework's own methods are atomic for a task that shares the unit
+(they hold its operation guard for the whole call), so they never call a method a subclass may override.
+Entities returned from an auto unit are detached with their loaded state intact (``expire_on_commit=False``);
+lazy relationships need an explicit fetch.
 
 Two modes:
 
@@ -373,8 +375,7 @@ class Repository(Generic[T, ID]):
 
     async def find_by_id(self, id: ID) -> T | None:
         """Find an entity by its primary key."""
-        session = self._require_session()
-        return await session.get(self._model, id)
+        return await self._select_by_id(id)
 
     async def find_all_by_id(self, ids: list[ID]) -> list[T]:
         """Find all entities with IDs in the given list (Spring ``findAllById``)."""
@@ -386,8 +387,17 @@ class Repository(Generic[T, ID]):
         return list(result.scalars().all())
 
     async def exists_by_id(self, id: ID) -> bool:
-        """Check whether an entity with the given id exists (Spring ``existsById``)."""
-        return await self.find_by_id(id) is not None
+        """Check whether an entity with the given id exists (Spring ``existsById``).
+
+        It does not go through ``find_by_id``: a framework method holds the unit's operation guard for the
+        whole call, and never calls a method a subclass may override while it does (an override that fans
+        out with ``gather()`` would wait for the guard its own caller holds).
+        """
+        return await self._select_by_id(id) is not None
+
+    async def _select_by_id(self, id: ID) -> T | None:
+        session = self._require_session()
+        return await session.get(self._model, id)
 
     async def count(self) -> int:
         """Return the total number of entities."""

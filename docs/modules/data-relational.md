@@ -575,7 +575,8 @@ A repository call resolves its session when it runs:
 - **Inside a unit for its datasource** (`@transactional`, a `TransactionTemplate` block, a
   `reactive_transactional` function), it joins that unit and uses its session.
 - **Outside a transaction**, the outermost repository call opens a short **auto unit** of its own, and
-  nested repository calls inside it share it (`exists_by_id` calling `find_by_id` is one unit):
+  nested repository calls inside it share it (a custom method calling `count()` and `exists_by_id()` is
+  one unit):
   - a **read** method (`find*`, `count*`, `exists*`, `stream*`, `get*`) gets a read unit. On
     PostgreSQL it runs on an `AUTOCOMMIT` connection, one round trip instead of three, unless the
     datasource has [after-begin customizers](#after-begin-customizers) (their transaction-local settings
@@ -595,7 +596,9 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
 
 - Operations on a unit's session run under the unit's **operation guard**, a lock that is reentrant per
   task. `asyncio.gather()` fan-out inside `@transactional` is serialized, and the framework's repository
-  methods are atomic (`save` is add, flush and refresh as one step).
+  methods are atomic (`save` is add, flush and refresh as one step). An atomic method never calls a
+  method a subclass may override while it holds the guard (`exists_by_id` does not go through
+  `find_by_id`), so an override that fans out cannot wait for its own caller.
 - A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
   instead of writing into a transaction nobody will commit.
 - Work that must outlive its caller's unit runs through `detached()`, with the transaction state cleared:

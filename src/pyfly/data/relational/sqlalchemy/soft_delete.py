@@ -113,15 +113,19 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     async def find_by_id(self, id: ID) -> T | None:
         """Find by ID, excluding soft-deleted entities."""
+        return await self._select_active_by_id(id)
+
+    async def exists_by_id(self, id: ID) -> bool:
+        """Check existence, excluding soft-deleted entities (without calling the overridable ``find_by_id``
+        while it holds the unit's operation guard, as :meth:`Repository.exists_by_id`)."""
+        return await self._select_active_by_id(id) is not None
+
+    async def _select_active_by_id(self, id: ID) -> T | None:
         session = self._require_session()
         entity = await session.get(self._model, id)
         if entity is not None and hasattr(entity, "deleted_at") and entity.deleted_at is not None:
             return None
         return entity
-
-    async def exists_by_id(self, id: ID) -> bool:
-        """Check existence, excluding soft-deleted entities."""
-        return await self.find_by_id(id) is not None
 
     @overload
     async def find_all(self, criteria: None = ..., **filters: Any) -> list[T]: ...
