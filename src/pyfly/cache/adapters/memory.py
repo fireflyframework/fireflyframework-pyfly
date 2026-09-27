@@ -20,12 +20,20 @@ from collections import OrderedDict
 from datetime import timedelta
 from typing import Any
 
+from pyfly.cache.serialization import Copy, encode_copy
+
 
 class InMemoryCache:
     """In-memory cache with optional TTL and LRU bounding.
 
     Suitable for development, testing, and single-process applications.
     Also serves as the default fallback in CacheManager.
+
+    Entries are copies (the same value semantics as the Redis and PostgreSQL adapters): ``put`` stores a
+    detached copy of the value and every ``get`` returns a new copy, so callers never share one object,
+    and a change to a value after it was put, or to a hit, never reaches the cache. A live ORM object (a
+    SQLAlchemy-mapped instance or a Beanie document, also inside a container or a DTO) is refused with
+    :class:`~pyfly.cache.serialization.CacheValueError`: cache a DTO built from it.
 
     Args:
         max_size: When set, the cache holds at most this many entries and evicts
@@ -34,11 +42,12 @@ class InMemoryCache:
     """
 
     def __init__(self, max_size: int | None = None) -> None:
-        self._store: OrderedDict[str, tuple[Any, float | None]] = OrderedDict()
+        self._store: OrderedDict[str, tuple[Copy, float | None]] = OrderedDict()
         self._max_size = max_size
         self._hits = 0
         self._misses = 0
         self._evictions = 0
+        self._dedicated: dict[str, InMemoryCache] = {}
 
     async def get(self, key: str) -> Any | None:
         """Get a value by key. Returns None if missing or expired."""
@@ -55,14 +64,18 @@ class InMemoryCache:
 
         self._store.move_to_end(key)  # mark most-recently-used (LRU)
         self._hits += 1
-        return value
+        return value.value()
 
     async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
-        """Store a value with optional TTL, evicting the LRU entry when full."""
+        """Store a copy of *value* with optional TTL, evicting the LRU entry when full.
+
+        Raises :class:`~pyfly.cache.serialization.CacheValueError` for a live ORM object.
+        """
+        stored = encode_copy(value)
         expires_at = None
         if ttl is not None:
             expires_at = time.monotonic() + ttl.total_seconds()
-        self._store[key] = (value, expires_at)
+        self._store[key] = (stored, expires_at)
         self._store.move_to_end(key)
         if self._max_size is not None:
             while len(self._store) > self._max_size:
@@ -70,7 +83,7 @@ class InMemoryCache:
                 self._evictions += 1
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
-        """Store *value* only if *key* is absent — atomic under asyncio (audit #75)."""
+        """Store a copy of *value* only if *key* is absent — atomic under asyncio (audit #75)."""
         if await self.exists(key):
             return False
         await self.put(key, value, ttl)
@@ -125,8 +138,20 @@ class InMemoryCache:
         return [k for k, (_, exp) in self._store.items() if exp is None or exp > now]
 
     async def clear(self) -> None:
-        """Remove all entries."""
+        """Remove every entry of this cache (a :meth:`with_namespace` cache keeps its own)."""
         self._store.clear()
+
+    def with_namespace(self, name: str) -> InMemoryCache:
+        """A cache of its own for *name*, disjoint from this one: :meth:`clear` never touches it.
+
+        Durable consumers (idempotency records, orchestration state) keep their entries there, so clearing
+        the evictable cache cannot drop them. The same name always gives the same cache.
+        """
+        dedicated = self._dedicated.get(name)
+        if dedicated is None:
+            dedicated = InMemoryCache(max_size=self._max_size)
+            self._dedicated[name] = dedicated
+        return dedicated
 
     async def start(self) -> None:
         """No-op for in-memory cache."""

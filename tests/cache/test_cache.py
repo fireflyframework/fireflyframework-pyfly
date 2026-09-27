@@ -13,14 +13,48 @@
 # limitations under the License.
 """Tests for cache abstraction, in-memory cache, @cache decorator, and CacheManager."""
 
+from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.cache.adapters import InMemoryCache
 from pyfly.cache.decorators import cache
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.serialization import CacheValueError
+from pyfly.data.relational.sqlalchemy.entity import Base
+
+
+class CachedProduct(Base):
+    """A mapped entity: the in-memory cache must never hold a live instance of it (C022)."""
+
+    __tablename__ = "wp14_cached_product"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+
+
+@dataclass
+class ProductView:
+    id: int
+    name: str
+    tags: list[str] = field(default_factory=list)
+
+
+class ProductDto(BaseModel):
+    id: int
+    name: str
+
+
+class WrapsAnEntity(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    product: Any
 
 
 class TestInMemoryCache:
@@ -89,6 +123,85 @@ class TestInMemoryCache:
         c: CacheAdapter = InMemoryCache()
         await c.put("x", 42)
         assert await c.get("x") == 42
+
+
+class TestInMemoryCacheValueSemantics:
+    """InMemoryCache stores copies (C022): callers never share, or corrupt, one cached object."""
+
+    async def test_a_value_changed_after_put_does_not_change_the_entry(self) -> None:
+        c = InMemoryCache()
+        value = {"id": 1, "tags": ["a"]}
+        await c.put("k", value)
+        value["tags"].append("changed-after-put")
+        assert await c.get("k") == {"id": 1, "tags": ["a"]}
+
+    async def test_every_get_returns_its_own_copy(self) -> None:
+        c = InMemoryCache()
+        await c.put("k", ProductView(1, "widget", ["new"]))
+        first = await c.get("k")
+        first.name = "B-preview-not-saved"
+        first.tags.append("B")
+        second = await c.get("k")
+        assert first is not second
+        assert second == ProductView(1, "widget", ["new"])
+
+    async def test_copies_keep_their_type(self) -> None:
+        c = InMemoryCache()
+        await c.put("dto", ProductDto(id=7, name="gadget"))
+        restored = await c.get("dto")
+        assert isinstance(restored, ProductDto)
+        assert restored == ProductDto(id=7, name="gadget")
+
+    async def test_a_value_of_a_local_class_is_still_copied(self) -> None:
+        class Local:
+            def __init__(self, n: int) -> None:
+                self.n = n
+
+        c = InMemoryCache()
+        original = Local(3)
+        await c.put("local", original)
+        restored = await c.get("local")
+        assert restored is not original
+        assert restored.n == 3
+
+    async def test_put_if_absent_stores_a_copy(self) -> None:
+        c = InMemoryCache()
+        value = {"n": 1}
+        assert await c.put_if_absent("k", value) is True
+        value["n"] = 2
+        assert await c.get("k") == {"n": 1}
+
+    async def test_a_mapped_entity_is_refused(self) -> None:
+        c = InMemoryCache()
+        with pytest.raises(CacheValueError, match="CachedProduct"):
+            await c.put("p", CachedProduct(id=1, name="widget"))
+        assert await c.exists("p") is False
+
+    async def test_a_mapped_entity_inside_a_container_is_refused(self) -> None:
+        c = InMemoryCache()
+        with pytest.raises(CacheValueError, match="CachedProduct"):
+            await c.put("list", [CachedProduct(id=1, name="a"), CachedProduct(id=2, name="b")])
+        with pytest.raises(CacheValueError, match="CachedProduct"):
+            await c.put("dto", WrapsAnEntity(product=CachedProduct(id=1, name="a")))
+        with pytest.raises(CacheValueError, match="CachedProduct"):
+            await c.put_if_absent("dict", {"page": [CachedProduct(id=1, name="a")]})
+        assert c.get_keys() == []
+
+    async def test_a_beanie_document_is_refused(self) -> None:
+        from beanie import Document
+
+        class CachedNote(Document):
+            text: str
+
+        c = InMemoryCache()
+        with pytest.raises(CacheValueError, match="CachedNote"):
+            await c.put("note", CachedNote.model_construct(text="hi"))
+        with pytest.raises(CacheValueError, match="CachedNote"):
+            await c.put("notes", {"items": [CachedNote.model_construct(text="hi")]})
+
+    def test_cache_value_error_is_a_type_error(self) -> None:
+        # Code that caught the old serializer's TypeError keeps working.
+        assert issubclass(CacheValueError, TypeError)
 
 
 class TestCacheDecorator:
