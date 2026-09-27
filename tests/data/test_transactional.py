@@ -830,6 +830,18 @@ class ShapeWriter:
         return asyncio.get_running_loop().create_task(late())
 
     @transactional
+    async def leave_a_requires_new_task_behind(
+        self, inventory: Inventory, started: asyncio.Event
+    ) -> asyncio.Task[None]:
+        await self.items.save(TxItem(name="root"))
+
+        async def late() -> None:
+            await started.wait()
+            await inventory.audit_new("late-audit")  # REQUIRES_NEW does not use the completed unit
+
+        return asyncio.get_running_loop().create_task(late())
+
+    @transactional
     async def detach_work(self, inventory: Inventory) -> asyncio.Task[None]:
         await self.items.save(TxItem(name="root"))
         return detached(inventory.reserve("detached"))
@@ -874,6 +886,19 @@ class TestHolderShapesAndTasks:
             with pytest.raises(IllegalTransactionStateError, match="already committed"):
                 await task
             assert await started.items() == ["root"]
+            assert started.checked_out() == 0
+        finally:
+            await started.ctx.stop()
+
+    async def test_requires_new_from_a_task_that_outlived_its_unit_works(self, tmp_path: Path) -> None:
+        started = await self._app(tmp_path)
+        try:
+            gate = asyncio.Event()
+            task = await started.bean(ShapeWriter).leave_a_requires_new_task_behind(started.bean(Inventory), gate)
+            gate.set()
+            await task
+            assert await started.items() == ["root"]
+            assert await started.audits() == ["late-audit"]
             assert started.checked_out() == 0
         finally:
             await started.ctx.stop()

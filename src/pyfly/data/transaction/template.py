@@ -359,6 +359,10 @@ async def _complete(unit: UnitOfWork, definition: TransactionDefinition, error: 
 # ---------------------------------------------------------------------------------------------------------
 
 
+_JOINING = frozenset({Propagation.REQUIRED, Propagation.SUPPORTS, Propagation.MANDATORY, Propagation.NESTED})
+"""The propagations that use a bound unit."""
+
+
 class _Mode(enum.Enum):
     NEW = "new"
     JOIN = "join"
@@ -389,8 +393,11 @@ class TransactionBoundary:
         bound = state.binding(datasource)
         existing = bound if isinstance(bound, UnitOfWork) else None
         propagation = definition.propagation
+        if existing is not None and existing.completed:
+            if propagation in _JOINING:
+                existing.check_usable()  # a task that outlived its caller's unit tries to use it: fail loudly
+            existing = None  # a boundary that does not join starts from no unit at all
         if existing is not None:
-            existing.check_usable()
             if propagation is Propagation.NEVER:
                 raise IllegalTransactionStateError(
                     f"Propagation.NEVER: {existing.describe()} is active", datasource=datasource
@@ -411,7 +418,10 @@ class TransactionBoundary:
             )
         if propagation in (Propagation.REQUIRED, Propagation.REQUIRES_NEW, Propagation.NESTED):
             return await self._new(state, None)
-        self._run_without(state, datasource, bound.unit if isinstance(bound, Suspended) else None)
+        # Keep what this task holds open on the datasource (a suspended unit, a repository call's auto unit)
+        # in the suspension marker, so a write that would wait for its lock is recognized (SQLite).
+        held = bound.unit if isinstance(bound, Suspended) else state.scope(datasource)
+        self._run_without(state, datasource, held)
         return None
 
     def _join(self, existing: UnitOfWork) -> None:
@@ -470,6 +480,7 @@ class TransactionBoundary:
         unit = self._unit
         if mode is _Mode.JOIN:
             assert unit is not None
+            _poison_on_cancellation(unit, exc)
             if exc is not None and self._definition.rollback_on(exc):
                 unit.set_rollback_only(exc)
             return
