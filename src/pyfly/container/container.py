@@ -144,6 +144,20 @@ def _collect_generic_args(cls: Any) -> set[type]:
     return found
 
 
+def scope_key(reg: Registration) -> str:
+    """The key a scope caches the instance of *reg* under: one per bean definition.
+
+    It names the definition, not the class: the module-qualified class and, for a named bean, its
+    name. Two ``@bean`` methods that return one class (two request- or refresh-scoped session
+    factories, one per database) are two definitions with two keys, and so are two classes that share
+    a ``__qualname__`` in different modules. Keying by ``__qualname__`` alone (26.09.07 and earlier)
+    handed every name after the first the first one's instance.
+    """
+    impl = reg.impl_type
+    qualified = f"{getattr(impl, '__module__', '')}.{getattr(impl, '__qualname__', reg.display_name)}"
+    return f"__pyfly_bean_{qualified}#{reg.name}" if reg.name else f"__pyfly_bean_{qualified}"
+
+
 class Container:
     """Dependency injection container.
 
@@ -454,7 +468,7 @@ class Container:
             )
 
         # Store request-scoped instances in the context's attributes
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        cache_key = scope_key(reg)
         existing = ctx.get(cache_key)
         if existing is not None:
             return existing
@@ -485,14 +499,42 @@ class Container:
                 f"Ensure the session module (SessionFilter) is enabled."
             )
 
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        cache_key = scope_key(reg)
         existing = session.get_attribute(cache_key)
+        if existing is not None:
+            return existing
+        existing = self._adopt_legacy_session_attribute(session, reg, cache_key)
         if existing is not None:
             return existing
 
         instance = self._create_instance(reg)
         session.set_attribute(cache_key, instance)
         return instance
+
+    def _adopt_legacy_session_attribute(self, session: Any, reg: Registration, cache_key: str) -> Any | None:
+        """The instance a session stored under the key of 26.09.07 and earlier, moved to *cache_key*.
+
+        Until 26.09.07 a SESSION-scoped bean lived under ``__pyfly_bean_<class qualname>``, and a
+        session persisted in a store (Redis) still carries that key. It is adopted only when exactly
+        one SESSION-scoped registration maps to it and the stored object is of that registration's
+        type; when two beans shared the key, nobody can tell whose object it is, and it is left alone.
+        """
+        legacy_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        if legacy_key == cache_key:
+            return None
+        stored = session.get_attribute(legacy_key)
+        if stored is None or not _assignable(stored, reg.impl_type):
+            return None
+        sharing = {
+            id(candidate)
+            for candidate in (*self._registrations.values(), *self._all.values(), *self._named.values())
+            if candidate.scope == Scope.SESSION and f"__pyfly_bean_{candidate.impl_type.__qualname__}" == legacy_key
+        }
+        if len(sharing) != 1:
+            return None
+        session.set_attribute(cache_key, stored)
+        session.remove_attribute(legacy_key)
+        return stored
 
     def _resolve_custom_scoped(self, reg: Registration) -> Any:
         """Resolve a bean through a custom :class:`ScopeHandler` registered by name."""
@@ -503,8 +545,7 @@ class Container:
                 f"{reg.display_name}. Available: {sorted(self._custom_scopes)}. "
                 f"Call container.register_scope({reg.scope!r}, handler) first."
             )
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
-        return handler.get(cache_key, lambda: self._create_instance(reg))
+        return handler.get(scope_key(reg), lambda: self._create_instance(reg))
 
     def _create_instance(self, reg: Registration) -> Any:
         """Create an instance, resolving constructor and field dependencies."""
