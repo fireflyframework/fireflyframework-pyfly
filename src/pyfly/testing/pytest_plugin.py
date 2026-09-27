@@ -29,13 +29,16 @@ pytest loads it with PyFly (the ``pyfly`` pytest11 entry point). It adds:
   By default it is a SQLite file in the test's ``tmp_path`` with the relational layer enabled;
 - the ``data_test`` marker.
 
-The fixtures are asynchronous: run the tests with pytest-asyncio (``asyncio_mode = "auto"``, as the projects
-``pyfly new`` generates do) or declare them ``@pytest.mark.asyncio``.
+The slice starts in an asynchronous fixture: run the tests with pytest-asyncio (``asyncio_mode = "auto"``, as
+the projects ``pyfly new`` generates do) or declare them ``@pytest.mark.asyncio``. ``data_context`` itself is
+synchronous: it makes the test take part in the slice's rollback transaction in the context the test runs in,
+whether or not the runner carries an async fixture's context variables over to the test (pytest-asyncio 0.23
+does not).
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -46,6 +49,7 @@ from pyfly.testing.slices import DataTestOptions, data_test_options
 if TYPE_CHECKING:
     from pyfly.context.application_context import ApplicationContext
     from pyfly.core.config import Config
+    from pyfly.testing.rollback import RollbackTransaction
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -104,20 +108,38 @@ def pyfly_data_config() -> Config | None:
 
 
 @_async_fixture
-async def data_context(
+async def _pyfly_data_slice(
     request: pytest.FixtureRequest, tmp_path: Path, pyfly_data_config: Config | None
-) -> AsyncIterator[ApplicationContext]:
-    """A started data slice for the test (see the module documentation); its units of work roll back when the
-    test ends, and the slice stops."""
+) -> AsyncIterator[tuple[ApplicationContext, RollbackTransaction | None]]:
+    """The started data slice behind ``data_context``, with its rollback transaction (``None`` without
+    rollback); the transaction rolls back and the slice stops when the test ends."""
     from pyfly.testing.slice_context import data_slice
 
     options = _options(request)
     config = options.config or pyfly_data_config or default_data_config(tmp_path)
-    async with await data_slice(
+    started = await data_slice(
         *options.beans,
         config=config,
         overrides=dict(options.overrides),
         rollback=options.rollback,
         datasources=options.datasources,
-    ) as context:
+    )
+    async with started as context:
+        yield context, started.rollback
+
+
+@pytest.fixture
+def data_context(
+    _pyfly_data_slice: tuple[ApplicationContext, RollbackTransaction | None],
+) -> Iterator[ApplicationContext]:
+    """A started data slice for the test (see the module documentation); its units of work roll back when the
+    test ends, and the slice stops.
+
+    The test takes part in the rollback transaction through a context variable: it is bound here, in the
+    context the test runs in, because the async fixture that began the transaction may have run in another."""
+    context, rollback = _pyfly_data_slice
+    if rollback is None:
+        yield context
+        return
+    with rollback.taking_part():
         yield context

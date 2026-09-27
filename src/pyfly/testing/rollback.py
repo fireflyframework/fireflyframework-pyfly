@@ -53,7 +53,8 @@ Only relational datasources roll back; a document datasource (MongoDB) is left a
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import contextlib
+from collections.abc import Iterable, Iterator
 from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
@@ -108,6 +109,25 @@ class RollbackTransaction:
             if datasource is None or original.datasource == datasource:
                 return connection
         raise LookupError(f"Datasource {datasource!r} does not roll back in this transaction")
+
+    @contextlib.contextmanager
+    def taking_part(self) -> Iterator[Self]:
+        """Make the code of the block, and the tasks it starts, take part in this transaction.
+
+        The task that entered the transaction takes part already; this is for code that runs in another
+        context, such as a test body whose runner does not carry the context variables an async fixture set
+        over to the test (the ``data_context`` fixture of PyFly's pytest plugin uses it). The transaction must
+        have begun, and must outlive the block."""
+        if self._token is None:
+            raise RuntimeError("The rollback transaction is not running (enter it with 'async with' first)")
+        token = _ACTIVE.set(self)
+        try:
+            yield self
+        finally:
+            try:
+                _ACTIVE.reset(token)
+            except ValueError:  # left in another context than the one that entered
+                _ACTIVE.set(None)
 
     async def __aenter__(self) -> Self:
         from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager

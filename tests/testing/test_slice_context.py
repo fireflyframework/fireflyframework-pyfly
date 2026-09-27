@@ -305,3 +305,36 @@ async def test_units_that_wait_for_each_other_share_the_test_connection(tmp_path
             await asyncio.create_task(member_service.join(email))
         assert await members.count() == 5
     assert _rows(path) == 0
+
+
+@pytest.mark.asyncio
+async def test_code_that_runs_in_another_context_takes_part_through_taking_part(tmp_path: Path) -> None:
+    """A test runner may run the test body in another context than the fixture that began the transaction:
+    ``taking_part()`` binds the transaction there (the plugin's ``data_context`` does)."""
+    import contextvars
+
+    from pyfly.testing import RollbackTransaction
+
+    path = tmp_path / "app.db"
+    async with await data_slice(SliceMemberRepository, config=_relational(f"sqlite+aiosqlite:///{path}")) as ctx:
+        members = ctx.get_bean(SliceMemberRepository)
+        rollback = RollbackTransaction(ctx)
+        with pytest.raises(RuntimeError, match="not running"), rollback.taking_part():
+            pass
+
+        async def write(email: str, *, take_part: bool) -> None:
+            if not take_part:
+                await members.save(_SliceMember(email=email))
+                return
+            with rollback.taking_part():
+                await members.save(_SliceMember(email=email))
+
+        loop = asyncio.get_running_loop()
+        async with rollback:
+            # Without it, that context's unit runs on the datasource's own manager, and commits.
+            await loop.create_task(write("committed@example.com", take_part=False), context=contextvars.Context())
+            assert _rows(path) == 1
+            await loop.create_task(write("rolled-back@example.com", take_part=True), context=contextvars.Context())
+            assert await members.count() == 2
+            assert _rows(path) == 1
+    assert _rows(path) == 1

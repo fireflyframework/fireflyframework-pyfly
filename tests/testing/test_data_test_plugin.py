@@ -143,6 +143,28 @@ def test_data_test_classes_run_in_a_slice_whose_units_roll_back(tmp_path: Path) 
     assert "7 passed" in result.stdout, result.stdout
 
 
+_NO_CONTEXT_PROPAGATION = """\
+
+import pytest_asyncio.plugin
+
+# A runner that does not carry an async fixture's context variables over to the test (pytest-asyncio 0.23).
+assert hasattr(pytest_asyncio.plugin, "_apply_contextvar_changes")
+pytest_asyncio.plugin._apply_contextvar_changes = lambda context: None
+"""
+
+
+def test_the_units_roll_back_under_a_runner_that_keeps_fixture_context_variables_apart(tmp_path: Path) -> None:
+    """The rollback transaction reached the test through a context variable the async fixture set: a runner
+    that runs the test in a context of its own (pytest-asyncio 0.23) sent the test's units to the datasource's
+    own manager, and every one of them committed. The sync ``data_context`` fixture binds it where the test runs."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\nasyncio_mode = auto\n")
+    (tmp_path / "conftest.py").write_text(_CONFTEST + _NO_CONTEXT_PROPAGATION)
+    (tmp_path / "test_members.py").write_text(_TESTS)
+    result = _run_pytest(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "7 passed" in result.stdout, result.stdout
+
+
 def test_the_default_configuration_is_a_sqlite_file_per_test(tmp_path: Path) -> None:
     (tmp_path / "pytest.ini").write_text("[pytest]\nasyncio_mode = auto\n")
     (tmp_path / "test_default.py").write_text(_TESTS.split("@DataTest(beans=[MemberRepository], rollback=False)")[0])

@@ -562,8 +562,10 @@ def pyfly_data_config(postgres):
 ```
 
 A single test function takes the marker instead: `@pytest.mark.data_test(beans=[UserRepository])`, then
-requests `data_context`. The fixtures are asynchronous: run the tests with pytest-asyncio
-(`asyncio_mode = "auto"`, as projects from `pyfly new` do).
+requests `data_context`. The slice starts in an asynchronous fixture: run the tests with pytest-asyncio
+(`asyncio_mode = "auto"`, as projects from `pyfly new` do). `data_context` binds the rollback transaction in
+the context the test runs in, so the rollback holds whether or not the runner carries an async fixture's
+context variables over to the test (pytest-asyncio 0.23 does not).
 
 What rolls back is described under [Rolling back a test's units of work](#rolling-back-a-tests-units-of-work).
 Until 26.09.08 `@DataTest` only marked the class.
@@ -765,7 +767,9 @@ async def test_register():
     # nothing was committed
 ```
 
-The same helper works around any started context: `async with RollbackTransaction(ctx): ...`. While it runs,
+The same helper works around any started context: `async with RollbackTransaction(ctx): ...` (code that runs
+in another context than the task that entered it, such as a test body run by another runner, takes part inside
+`with rollback.taking_part(): ...`). While it runs,
 each covered datasource holds one connection with a transaction open, and the datasource's transaction manager
 runs every unit of work of the test as a savepoint of that transaction: repository calls, `@transactional`
 services, `SessionProvider` units and the framework stores all take part. Each unit still completes on its own
