@@ -73,6 +73,10 @@ class TestVendorIsolation:
                 "and 'security/auto_configuration' not in l "
                 "and 'transactional/auto_configuration' not in l "
                 "and '/cache/adapters/postgres' not in l "
+                # The transactional outbox's SQL store, its bus and its dead-letter store (framework tables).
+                "and '/eda/outbox' not in l "
+                "and '/eda/adapters/database' not in l "
+                "and '/eda/dlq' not in l "
                 "and 'cache/auto_configuration' not in l "
                 "and 'web/converters' not in l "
                 # The statement counter is the SQL-engine test utility; it imports SQLAlchemy lazily.

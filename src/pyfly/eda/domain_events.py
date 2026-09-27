@@ -223,21 +223,18 @@ class _UnitEvents:
 
 def _install_orm_hook() -> None:
     """Collect the pending events of an aggregate a relational unit of work saves (``session.add``), once per
-    process; a no-op without SQLAlchemy."""
+    process; a no-op without the relational module."""
     global _orm_hook_installed
     if _orm_hook_installed:
         return
     try:
-        from sqlalchemy import event
-        from sqlalchemy.orm import Session
+        from pyfly.data.relational.sqlalchemy.attach_events import listen_for_attached
     except ImportError:  # pragma: no cover — SQLAlchemy is an optional dependency
         return
     with _LOCK:
-        if _orm_hook_installed:
-            return
-        event.listen(Session, "transient_to_pending", _attached)
-        event.listen(Session, "detached_to_persistent", _attached)
-        _orm_hook_installed = True
+        if not _orm_hook_installed:
+            listen_for_attached(_attached)
+            _orm_hook_installed = True
 
 
 def _attached(session: Any, instance: object) -> None:
