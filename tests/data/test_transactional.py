@@ -683,6 +683,32 @@ class TestResolution:
         assert definition.propagation is Propagation.MANDATORY
         assert definition.datasource == "reporting"
 
+    async def test_the_deprecated_relational_runner_still_runs_a_unit(self, app: App) -> None:
+        from pyfly.data.relational.sqlalchemy.transactional import run_relational_transaction
+
+        legacy = app.bean(LegacyOrders)
+
+        async def place(service: LegacyOrders, name: str, *, fail: bool = False) -> None:
+            await service.items.save(TxItem(name=name))
+            if fail:
+                raise ValueError("rolled back")
+
+        with pytest.warns(DeprecationWarning, match="run_relational_transaction"):
+            await run_relational_transaction(place, (legacy, "via-runner"), {})
+        with pytest.warns(DeprecationWarning), pytest.raises(ValueError):
+            await run_relational_transaction(place, (legacy, "runner-rolled-back"), {"fail": True})
+        assert await app.items() == ["via-runner"]
+
+    async def test_a_manager_and_a_datasource_that_disagree_are_refused(self, app: App) -> None:
+        from pyfly.data.transaction import resolve_manager
+
+        @transactional(manager=resolve_manager("primary"), datasource="reporting")
+        async def ambiguous() -> None:
+            pytest.fail("the body must not run")
+
+        with pytest.raises(IllegalTransactionStateError, match="reporting"):
+            await ambiguous()
+
     async def test_a_plain_function_runs_on_the_default_datasource(self, app: App) -> None:
         items = app.bean(TxItemRepository)
 

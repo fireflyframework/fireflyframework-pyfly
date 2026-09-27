@@ -21,13 +21,16 @@
   :class:`~pyfly.data.transaction.template.TransactionTemplate`, so it binds its unit: ``@transactional``
   code called inside it joins, and ``MANDATORY``/``NEVER`` see it.
 - ``_active_session_var``, kept as a compatible read-only view of the unit bound to the running task (it
-  was the ``ContextVar`` the previous implementation bound a session in).
+  was the ``ContextVar`` the previous implementation bound a session in);
+- :func:`run_relational_transaction`, the previous implementation's relational runner, kept as a deprecated
+  entry point over the same machinery.
 """
 
 from __future__ import annotations
 
 import functools
 import inspect
+import warnings
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
@@ -38,13 +41,15 @@ from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.decorator import transactional
 from pyfly.data.transaction.definition import Isolation, Propagation, TransactionDefinition
 from pyfly.data.transaction.errors import IllegalTransactionStateError
-from pyfly.data.transaction.template import TransactionBoundary
+from pyfly.data.transaction.registry import resolve_manager
+from pyfly.data.transaction.template import TransactionBoundary, execute_in_transaction
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
 __all__ = [
     "Isolation",
     "Propagation",
     "reactive_transactional",
+    "run_relational_transaction",
     "transactional",
 ]
 
@@ -121,3 +126,41 @@ def reactive_transactional(
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+async def run_relational_transaction(
+    func: Callable[..., Coroutine[Any, Any, Any]],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    propagation: Propagation = Propagation.REQUIRED,
+    isolation: Isolation = Isolation.DEFAULT,
+    read_only: bool = False,
+    rollback_for: tuple[type[BaseException], ...] = (Exception,),
+    no_rollback_for: tuple[type[BaseException], ...] = (),
+) -> Any:
+    """Deprecated: await ``func(*args, **kwargs)`` in one transactional boundary, as ``@transactional``
+    does. Use ``@transactional`` or :class:`~pyfly.data.transaction.template.TransactionTemplate`.
+
+    The boundary runs on the datasource of ``args[0]._session_factory`` when the first argument has one,
+    and on the default datasource otherwise. The rollback rules are ``@transactional``'s (additive).
+    """
+    warnings.warn(
+        "run_relational_transaction() is deprecated; use @transactional or TransactionTemplate",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    definition = TransactionDefinition(
+        propagation=propagation,
+        isolation=isolation,
+        read_only=read_only,
+        rollback_for=tuple(rollback_for),
+        no_rollback_for=tuple(no_rollback_for),
+    )
+    factory = getattr(args[0], "_session_factory", None) if args else None
+    manager = (
+        SqlAlchemyTransactionManager.for_sessionmaker(factory)
+        if isinstance(factory, async_sessionmaker)
+        else resolve_manager(None)
+    )
+    return await execute_in_transaction(manager, definition, func, args, kwargs)

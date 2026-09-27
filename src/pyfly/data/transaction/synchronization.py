@@ -145,8 +145,11 @@ def register_synchronization(synchronization: TransactionSynchronization, *, dat
 
     The unit is the one bound for *datasource*, or the innermost bound unit when *datasource* is
     ``None`` (a repository call's auto unit counts). Raises
-    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` when there is none; check
-    :func:`~pyfly.data.transaction.context.is_transaction_active` first, or use :func:`after_commit`.
+    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` when there is none, a ``SUPPORTS``
+    or ``NOT_SUPPORTED`` boundary without a unit included: this is a plain call, and the synchronization's
+    callbacks are coroutines it cannot run at once. Check
+    :func:`~pyfly.data.transaction.context.is_transaction_active` first, or use :func:`after_commit` or
+    :func:`on_phase`, which run their callback at once outside a unit.
     """
     unit = current_state().target(datasource)
     if unit is None:

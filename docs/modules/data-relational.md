@@ -1350,7 +1350,10 @@ async def place(self, order: Order) -> None:
 back. `after_commit` and `after_completion` run once the connection is released, outside any transaction
 (repository calls there get auto units); a failure there is logged and counted in
 `pyfly.tx.synchronization.failures`, and never turns a committed unit into a failure. Outside a
-transaction `after_commit(callback)` runs the callback at once.
+transaction (a `SUPPORTS` or `NOT_SUPPORTED` boundary with no unit included) `after_commit(callback)` and
+`on_phase(...)` run the callback at once, while `register_synchronization()` raises
+`IllegalTransactionStateError`: there is no unit to register on, and its callbacks are coroutines it cannot
+run from a plain call. Check `is_transaction_active()` first, or use `after_commit()`.
 
 #### Cancellation and commit outcome
 

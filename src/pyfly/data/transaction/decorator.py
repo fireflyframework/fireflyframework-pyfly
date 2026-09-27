@@ -22,7 +22,9 @@ async generator: a transaction cannot safely span iteration, and
 The transaction manager is resolved per call, in this order:
 
 1. ``manager=`` (a :class:`~pyfly.data.transaction.manager.TransactionManager` or a datasource name) or
-   ``datasource="name"``, on the method or on a class-level ``@transactional``;
+   ``datasource="name"``, on the method or on a class-level ``@transactional`` (a ``manager=`` and a
+   ``datasource=`` that name different datasources raise
+   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError`);
 2. the legacy attributes, kept for compatibility: ``self._session_factory`` (an ``async_sessionmaker``,
    mapped to its registry datasource) and ``self._motor_client``. A service that exposes both raises
    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` unless a datasource is named;
@@ -195,7 +197,14 @@ def _decorate_function(function: Any, options: dict[str, Any]) -> Any:
 def _resolve(qualname: str, definition: TransactionDefinition, target: object, args: tuple[Any, ...]) -> object:
     """The transaction manager of one call (see the module documentation for the order)."""
     if target is not None:
-        return resolve_manager(target)
+        explicit = resolve_manager(target)
+        if definition.datasource is not None and explicit.datasource != definition.datasource:
+            raise IllegalTransactionStateError(
+                f"{qualname}: manager= runs on datasource {explicit.datasource!r} but datasource= names "
+                f"{definition.datasource!r}; name the datasource once.",
+                datasource=definition.datasource,
+            )
+        return explicit
     if definition.datasource is not None:
         return resolve_manager(definition.datasource)
     holder = args[0] if args else None
