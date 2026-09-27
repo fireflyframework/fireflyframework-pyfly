@@ -401,7 +401,16 @@ class SqlAlchemyEventStore:
         guarded = strategy == POSITION_XID8 and bool(events)
         checked: list[ColumnElement[Any]] = [func.coalesce(func.max(table.c.sequence), 0)]
         if guarded:
-            checked += [func.max(table.c.global_position), _xid8_base()]
+            # The aggregate's highest position is its last event's (the guard keeps them in sequence order): one
+            # row read through the (aggregate_id, sequence) index, not every event of the aggregate.
+            last_event = (
+                select(table.c.global_position)
+                .where(table.c.aggregate_id == aggregate_id)
+                .order_by(table.c.sequence.desc())
+                .limit(1)
+                .scalar_subquery()
+            )
+            checked += [last_event, _xid8_base()]
         async with infrastructure_unit(manager) as session:
             # Read the current version INSIDE the write unit, so the check and the insert are one transaction;
             # the UNIQUE (aggregate_id, sequence) constraint is the backstop against a concurrent writer.
