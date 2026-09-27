@@ -735,6 +735,14 @@ class Container:
             # on every resolution (notably TRANSIENT @bean beans).
             if reg.factory is not None:
                 instance = reg.factory()
+                if instance is None:
+                    # A factory declared ``-> Port | None`` declined. A scoped one is asked on every
+                    # resolution; declining means there is no bean (an Optional parameter gets None,
+                    # a required one fails), never a bean whose value is None.
+                    raise NoSuchBeanError(
+                        bean_type=reg.impl_type,
+                        required_by=f"the factory of bean {reg.display_name!r}, which returned None (it declined)",
+                    )
                 self._inject_autowired_fields(instance)
                 metrics = self._ensure_metrics(reg.impl_type)
                 metrics.creation_time_ns = time.perf_counter_ns() - start

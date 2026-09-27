@@ -33,7 +33,7 @@ pytest.importorskip("sqlalchemy")
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
 
-from pyfly.container import bean, configuration  # noqa: E402
+from pyfly.container import NoSuchBeanError, Provider, bean, configuration, service  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME  # noqa: E402
 from pyfly.container.types import Scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
@@ -148,3 +148,48 @@ async def test_a_refresh_scoped_engine_factory_builds_no_engine_until_it_is_reso
         for each in _BUILT:
             await each.dispose()
         _BUILT.clear()
+
+
+class _Port:
+    pass
+
+
+class _Adapter(_Port):
+    pass
+
+
+_ENABLED: list[bool] = []
+
+
+@configuration
+class _DecliningFactories:
+    """``-> Port | None``: a factory that may decline. A scoped one is asked at each resolution."""
+
+    @bean(scope=Scope.TRANSIENT)
+    def port(self) -> _Port | None:
+        _CALLS.append("port")
+        return _Adapter() if _ENABLED[0] else None
+
+
+@service
+class _OptionalUser:
+    def __init__(self, ports: Provider[_Port]) -> None:
+        self.ports = ports
+
+
+async def test_a_scoped_factory_that_declines_is_no_bean() -> None:
+    """It used to be registered without being called and then injected ``None`` as the bean."""
+    _ENABLED[:] = [False]
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_DecliningFactories)
+    ctx.register_bean(_OptionalUser)
+    await ctx.start()
+    try:
+        with pytest.raises(NoSuchBeanError, match="returned None"):
+            ctx.get_bean(_Port)
+        assert ctx.container._resolve_param(_Port | None) is None  # an Optional parameter gets None
+        _ENABLED[:] = [True]
+        assert isinstance(ctx.get_bean(_OptionalUser).ports.get(), _Adapter)
+    finally:
+        await ctx.stop()
+    assert _CALLS == ["port", "port", "port"]
