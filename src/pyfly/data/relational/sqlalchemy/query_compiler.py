@@ -34,7 +34,9 @@ cache key on the statement, so a call costs what running a prebuilt statement co
   ``find_by``, ``exists_by``, ``delete_by``, and ``count_by`` without ``_or_``), and raises ``ValueError``
   otherwise;
 - ``_containing``, ``_starting_with`` and ``_ending_with`` match their argument as it is (its ``%`` and ``_``
-  escaped, ``ESCAPE '/'``); ``_like`` takes a pattern.
+  escaped, ``ESCAPE '/'``); ``_like`` takes a pattern;
+- a relationship compared with an instance, and a repository whose ``_criteria()`` is its own override (read on
+  every call), build their statement per call.
 
 What each prefix runs:
 
@@ -57,6 +59,7 @@ deleted ones too inside ``including_deleted()``.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -187,6 +190,8 @@ class _Call:
     nulls: tuple[bool, ...]
     parameters: list[dict[str, Any]]
     literals: dict[int, Any]
+    criteria: tuple[Any, ...] = ()
+    """The repository's own read criteria, for a query that reads them on every call."""
 
 
 class DerivedQuery:
@@ -203,7 +208,7 @@ class DerivedQuery:
         shape: ResultShape,
         *,
         name: str,
-        criteria: Sequence[Any] = (),
+        criteria: Sequence[Any] | None = (),
         load: Sequence[Any] = (),
         soft_deletes: bool = False,
     ) -> None:
@@ -211,12 +216,13 @@ class DerivedQuery:
         self._entity = entity
         self._shape = shape
         self._name = name
-        self._criteria = tuple(criteria)
+        # None: the repository's own criteria (a subclass overriding _criteria()), read on every call.
+        self._criteria = tuple(criteria) if criteria is not None else None
         self._load = tuple(load)
         self._soft_deletes = soft_deletes
         self._mapper: Mapper[Any] = sa_inspect(entity)
         self._parts = self._compile_parts()
-        self._dynamic = any(part.relationship is not None for part in self._parts)
+        self._dynamic = self._criteria is None or any(part.relationship is not None for part in self._parts)
         self._orders = self._compile_orders()
         self._columns = self._projection_columns()
         self._statements: dict[tuple[Any, ...], Any] = {}
@@ -308,7 +314,8 @@ class DerivedQuery:
 
     def _statement(self, kind: str, dialect: Dialect, call: _Call, *, visible_only: bool = False) -> Any:
         """The statement of *kind* for *dialect* and the call's ``None`` pattern, built on first use (a call with
-        a relationship predicate builds its own, since it compares with the instance it is given)."""
+        a relationship predicate builds its own, since it compares with the instance it is given, and so does a
+        repository whose own ``_criteria()`` may change from call to call)."""
         key = (kind, backend_name(dialect), call.nulls, visible_only)
         if not self._dynamic:
             statement = self._statements.get(key)
@@ -321,7 +328,7 @@ class DerivedQuery:
         return statement
 
     def _build(self, kind: str, dialect: Dialect, call: _Call, *, visible_only: bool) -> Any:
-        where = [*self._criteria]
+        where = [*(self._criteria if self._criteria is not None else call.criteria)]
         predicate = self._predicate(dialect, call)
         if predicate is not None:
             where.append(predicate)
@@ -538,6 +545,8 @@ class DerivedQuery:
             repository = Repository(self._entity, session)
         dialect = dialect_of(session)
         call = self._call(dialect, values)
+        if self._criteria is None:
+            call = dataclasses.replace(call, criteria=tuple(repository._criteria()))
         prefix = self._parsed.prefix
         if prefix == "find_by":
             return await self._find(repository, session, dialect, call, pageable, sort)
@@ -706,10 +715,24 @@ class QueryMethodCompiler:
             entity,
             shape,
             name=described,
-            criteria=repository._criteria() if repository is not None else (),
+            criteria=_static_criteria(repository),
             load=repository._load_options(None) if repository is not None else (),
             soft_deletes=isinstance(repository, SoftDeleteRepository),
         )
+
+
+def _static_criteria(repository: Repository[Any, Any] | None) -> tuple[Any, ...] | None:
+    """*repository*'s read criteria, when the framework's own ``_criteria()`` gives them (the same on every
+    call); ``None`` when a subclass overrides it, so the query reads them on every call."""
+    if repository is None:
+        return ()
+    from pyfly.data.relational.sqlalchemy.repository import Repository
+    from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
+
+    own = type(repository)._criteria
+    if own is Repository._criteria or own is SoftDeleteRepository._criteria:
+        return tuple(repository._criteria())
+    return None
 
 
 def _shape_of(prefix: str, return_type: Any, entity: type, name: str) -> ResultShape:

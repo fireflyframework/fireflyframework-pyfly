@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -235,6 +236,20 @@ class CustomerRepository(Repository[DqCustomer, int]):
     async def delete_by_name(self, name: str) -> int: ...
 
 
+_TENANT: ContextVar[str] = ContextVar("dq_tenant", default="x")
+
+
+class TenantAccountRepository(Repository[DqAccount, int]):
+    """Its own read criteria, read on every call (a tenant filter from the request's context)."""
+
+    def _criteria(self) -> tuple[Any, ...]:
+        return (DqAccount.tag == _TENANT.get(),)
+
+    async def find_by_balance_greater_than_equal(self, balance: int) -> list[DqAccount]: ...
+
+    async def count_by_logged_in(self, logged_in: bool) -> int: ...
+
+
 MODELS = (DqAccount, DqOrder, DqShelf, DqBook, DqCustomer, DqInvoice)
 
 
@@ -338,6 +353,20 @@ async def test_pages_slices_and_sorts(relational_backend: RelationalBackend) -> 
         ordered = await accounts.find_by_tag_in(["x", "t"], Sort.by(Order.desc("balance"), Order.asc("id")))
         assert [item.id for item in ordered] == [3, 2, 4, 1]
         assert [item.id for item in await accounts.find_by_tag_order_by_balance_desc_id_asc("t")] == [3, 2]
+
+
+async def test_a_repositorys_own_criteria_are_read_on_every_call(relational_backend: RelationalBackend) -> None:
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _accounts(datasources)
+        accounts = _built(TenantAccountRepository())
+        assert _ids(await accounts.find_by_balance_greater_than_equal(0)) == [1, 4]
+        assert await accounts.count_by_logged_in(False) == 1
+        token = _TENANT.set("t")
+        try:
+            assert _ids(await accounts.find_by_balance_greater_than_equal(0)) == [2, 3]
+            assert await accounts.count_by_logged_in(False) == 1
+        finally:
+            _TENANT.reset(token)
 
 
 async def test_projections(relational_backend: RelationalBackend) -> None:
