@@ -180,7 +180,9 @@ async def test_close_is_bounded_when_the_database_black_holes_the_pool(relationa
     app_name = f"pyfly-blackhole-{uuid.uuid4().hex[:8]}"
     proxy, port = await _proxy(relational_backend)
     registry = DataSourceRegistry(
-        relational_backend.config({"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)})
+        relational_backend.config(
+            {"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)}
+        )
     )
     engine = registry.primary.engine
     try:
@@ -211,7 +213,9 @@ async def test_ctx_stop_ends_on_time_when_the_database_black_holes_the_pool(
     app_name = f"pyfly-ctxstop-{uuid.uuid4().hex[:8]}"
     proxy, port = await _proxy(relational_backend)
     context = ApplicationContext(
-        relational_backend.config({"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)})
+        relational_backend.config(
+            {"pyfly.app.name": app_name, "pyfly.data.relational.url": _proxied(relational_backend, port)}
+        )
     )
     await context.start()
     try:
