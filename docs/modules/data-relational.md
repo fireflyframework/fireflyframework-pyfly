@@ -918,8 +918,9 @@ factory to its manager (`reactive_transactional(factory)`, a `_session_factory` 
   the engine or the registry.
 - Contexts started on one `Config` share its registry, and with it their transaction managers: the
   `primary` units of all of them run on the primary of the context bound last. A context unbinds its
-  primary when it stops (unless another context bound its own since). Give each context a `Config` of
-  its own to keep their primaries apart.
+  primary when it stops (unless another context bound its own since), and the first context to stop
+  closes the shared registry, disposing the engines the others still use. Give each context a
+  `Config` of its own.
 
 **Never declare a singleton `AsyncEngine` or `async_sessionmaker` bean for a second database**: it
 takes over the primary. Declare the database under `pyfly.data.relational.datasources.<name>` (see
