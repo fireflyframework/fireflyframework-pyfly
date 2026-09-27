@@ -209,14 +209,18 @@ async def _mysql_lock(connection: AsyncConnection, timeout: float) -> AsyncItera
 
 
 async def _release(connection: AsyncConnection, statement: str, parameters: dict[str, Any]) -> None:
-    """Release a session lock; a connection that failed or was lost releases it on the server anyway."""
+    """Release a session lock. When that fails the connection is invalidated, never returned to the pool: the
+    pool's reset (a rollback) keeps a session lock, and the next checkout would hold it without knowing; a closed
+    connection releases it on the server."""
     try:
         if connection.in_transaction():
             await connection.rollback()
         await connection.execute(text(statement), parameters)
         await _end_transaction(connection)
     except DBAPIError:
-        _logger.debug("schema_lock_release_failed", exc_info=True)
+        _logger.warning("schema_lock_release_failed", exc_info=True)
+        with contextlib.suppress(Exception):
+            await connection.invalidate()
 
 
 def _where(connection: AsyncConnection) -> str:
