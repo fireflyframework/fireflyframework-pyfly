@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -48,6 +49,7 @@ from pyfly.data.transaction.template import infrastructure_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
 __all__ = [
+    "RELEASING_SAVEPOINT",
     "GuardedResult",
     "ScopedAsyncSession",
     "SessionProvider",
@@ -60,6 +62,12 @@ __all__ = [
 # ---------------------------------------------------------------------------------------------------------
 # The session of a unit
 # ---------------------------------------------------------------------------------------------------------
+
+
+RELEASING_SAVEPOINT = "pyfly_releasing_savepoint"
+"""``UnitOfWork.attributes`` key: ``(task, SessionTransaction)`` of the savepoint the application is
+releasing, set under the operation guard while the release runs. The transaction manager attributes a
+failure of the flush that releasing runs, in that task, to that savepoint."""
 
 
 class GuardedResult:
@@ -250,7 +258,13 @@ class UnitSession(AsyncSession):
 class UnitSavepoint(AsyncSessionTransaction):
     """A savepoint the application opens on a unit's session (``session.begin_nested()``): its
     ``SAVEPOINT``, ``RELEASE SAVEPOINT`` and ``ROLLBACK TO SAVEPOINT`` run under the unit's operation guard,
-    like every other statement of the unit, and never across the code inside the block."""
+    like every other statement of the unit, and never across the code inside the block.
+
+    Releasing it flushes what the block left pending (``session.add()`` or ``merge()`` with no flush inside
+    the block). When that flush fails, SQLAlchemy rolls the savepoint back, and at the end of an ``async
+    with`` block also closes it, before the failure is raised: the failure went away with the savepoint and
+    does not mark the unit, exactly as when the block flushes explicitly (see :data:`RELEASING_SAVEPOINT`).
+    """
 
     __slots__ = ("_pyfly_unit",)
 
@@ -263,16 +277,38 @@ class UnitSavepoint(AsyncSessionTransaction):
             return await super().start(is_ctxmanager)
 
     async def commit(self) -> None:
-        async with self._pyfly_unit.operation():
-            await super().commit()
+        unit = self._pyfly_unit
+        marker = (asyncio.current_task(), self.sync_transaction)
+        try:
+            async with unit.operation():
+                unit.attributes[RELEASING_SAVEPOINT] = marker
+                await super().commit()
+        finally:
+            _released(unit, marker)
 
     async def rollback(self) -> None:
         async with self._pyfly_unit.operation():
             await super().rollback()
 
     async def __aexit__(self, type_: Any, value: Any, traceback: Any) -> None:
-        async with self._pyfly_unit.operation():
-            await super().__aexit__(type_, value, traceback)
+        unit = self._pyfly_unit
+        if type_ is not None:
+            async with unit.operation():
+                await super().__aexit__(type_, value, traceback)
+            return
+        marker = (asyncio.current_task(), self.sync_transaction)
+        try:
+            async with unit.operation():
+                unit.attributes[RELEASING_SAVEPOINT] = marker
+                await super().__aexit__(type_, value, traceback)
+        finally:
+            _released(unit, marker)
+
+
+def _released(unit: UnitOfWork, marker: tuple[Any, Any]) -> None:
+    """Forget the release marked by *marker* (the operation guard recorded its failure, if any, by now)."""
+    if unit.attributes.get(RELEASING_SAVEPOINT) is marker:
+        del unit.attributes[RELEASING_SAVEPOINT]
 
 
 def _refuse_dml(unit: UnitOfWork, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:

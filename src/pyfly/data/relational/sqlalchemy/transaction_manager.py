@@ -85,7 +85,7 @@ from pyfly.data.relational.datasource_registry import (
 )
 from pyfly.data.relational.dialect_customizers import begin_execution_options, is_file_database
 from pyfly.data.relational.sqlalchemy import sqlite_discard
-from pyfly.data.relational.sqlalchemy.session import UnitSession, unit_session_class
+from pyfly.data.relational.sqlalchemy.session import RELEASING_SAVEPOINT, UnitSession, unit_session_class
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
 from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError
@@ -530,7 +530,9 @@ class SqlAlchemyTransactionManager:
         every backend, so the failure is forgotten when the savepoint rolls back (the ``async with
         session.begin_nested():`` idiom around an insert that may be a duplicate). It moves to the enclosing
         savepoint when the savepoint is released, and it marks the unit when the savepoint is still open as
-        the unit completes (``resource_active``).
+        the unit completes (``resource_active``). The flush that releasing such a savepoint runs (the idiom
+        with no flush inside the block) is the savepoint's too: when it fails, SQLAlchemy has rolled the
+        savepoint back by the time the failure is raised, and nothing is left to mark.
 
         A failure does not poison the unit (its connection is healthy, and a rollback that fails discards it
         anyway): a driver error raised in place of a cancellation is handled by the operation guard, which
@@ -538,6 +540,8 @@ class SqlAlchemyTransactionManager:
         """
         marks = isinstance(error, DBAPIError) or not _transaction_active(unit)
         if marks and not unit.poisoned and not self.is_disconnect(error):
+            if _rolled_back_on_release(unit):
+                return False
             savepoint = _application_savepoint(unit)
             if savepoint is not None:
                 _record_savepoint_failure(unit, savepoint, error)
@@ -634,6 +638,20 @@ def _application_savepoint(unit: UnitOfWork) -> SessionTransaction | None:
     if nested is None or _template_depth(unit, nested) is not None:
         return None
     return nested
+
+
+def _rolled_back_on_release(unit: UnitOfWork) -> bool:
+    """Whether releasing an application savepoint failed and that savepoint is gone (SQLAlchemy rolled it back
+    and closed it), leaving the transaction around it active."""
+    marker = unit.attributes.get(RELEASING_SAVEPOINT)
+    if marker is None:
+        return False
+    task, releasing = marker
+    if task is not asyncio.current_task():
+        return False  # another task's release: this failure is not its flush's
+    sync_session = unit.resource.sync_session
+    current = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    return current is not None and current.is_active and not _within(current, releasing)
 
 
 def _within(transaction: SessionTransaction | None, container: SessionTransaction) -> bool:

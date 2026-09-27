@@ -1298,7 +1298,7 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
 - A statement that fails inside a savepoint the application opened itself does not mark the unit when
   that savepoint rolls back: after `ROLLBACK TO SAVEPOINT` the transaction is healthy on every backend.
   The SQLAlchemy idiom works as it does without PyFly, on the repository's `_session`, an injected
-  `AsyncSession` or `SessionProvider.current()`:
+  `AsyncSession` or `SessionProvider.current()`, with or without a flush inside the block:
 
   ```python
   @transactional
@@ -1307,11 +1307,15 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
       for name in names:
           try:
               async with session.begin_nested():
-                  session.add(Tag(name=name))
-                  await session.flush()
+                  session.add(Tag(name=name))  # or: await session.merge(Tag(name=name))
           except IntegrityError:
               pass  # a duplicate: its savepoint rolled back, the unit goes on
   ```
+
+  Without a flush inside the block, the insert runs in the flush that releasing the savepoint does at the
+  end of the block; when it fails, SQLAlchemy rolls the savepoint back before the `IntegrityError` reaches
+  the `except`, and the failure went away with it. The same holds for `await savepoint.commit()` followed
+  by `await savepoint.rollback()` when the commit fails.
 
   A failure caught while its savepoint stays open counts when the savepoint is released (it moves to the
   enclosing savepoint, or marks the unit), and when the unit completes with the savepoint still open (the

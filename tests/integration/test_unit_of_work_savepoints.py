@@ -19,6 +19,10 @@ SQLAlchemy idiom ``async with session.begin_nested(): ...`` around an insert tha
 therefore commits the rest, through the repository's session, an injected ``AsyncSession`` and
 ``SessionProvider.current()``, with ORM flushes and with raw statements.
 
+The idiom also works without a flush inside the block (the form of SQLAlchemy's documentation), with
+``session.add()`` or ``session.merge()``: the insert then runs in the flush that releasing the savepoint
+does, SQLAlchemy rolls the savepoint back when it fails, and that failure went away with it.
+
 A failure the application catches without rolling its savepoint back still dooms the unit (on PostgreSQL
 the transaction is dead until then, and the same rule holds on every backend): the unit rolls back and
 ``UnexpectedRollbackError`` is raised. Inside ``Propagation.NESTED``, such a failure rolls the NESTED
@@ -111,6 +115,37 @@ class SpService:
                 pass  # already there: the savepoint rolled back, and the transaction goes on
 
     @transactional
+    async def insert_ignoring_duplicates_without_a_flush(self, names: list[str], via: str) -> None:
+        session = self._session_via(via)
+        for name in names:
+            try:
+                async with session.begin_nested():
+                    session.add(SpItem(name=name))  # flushed when the block releases the savepoint
+            except IntegrityError:
+                pass
+
+    @transactional
+    async def merge_ignoring_duplicates(self, names: list[str], via: str) -> None:
+        session = self._session_via(via)
+        for name in names:
+            try:
+                async with session.begin_nested():
+                    await session.merge(SpItem(name=name))
+            except IntegrityError:
+                pass
+
+    @transactional
+    async def commit_savepoints_explicitly(self, names: list[str]) -> None:
+        session = self.items._session
+        for name in names:
+            savepoint = await session.begin_nested()
+            session.add(SpItem(name=name))
+            try:
+                await savepoint.commit()
+            except IntegrityError:
+                await savepoint.rollback()
+
+    @transactional
     async def insert_raw_ignoring_duplicates(self, names: list[str]) -> None:
         session = self.items._session
         for name in names:
@@ -183,6 +218,27 @@ async def savepoints(relational_backend: RelationalBackend) -> AsyncIterator[Sav
 @pytest.mark.parametrize("via", ["repository", "injected", "provider"])
 async def test_the_savepoint_idiom_commits_everything_but_the_duplicates(savepoints: Savepoints, via: str) -> None:
     await savepoints.service.insert_ignoring_duplicates(["a", "b", "a", "c", "b"], via)
+    assert await savepoints.committed() == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("via", ["repository", "injected", "provider"])
+async def test_the_savepoint_idiom_without_a_flush_commits_everything_but_the_duplicates(
+    savepoints: Savepoints, via: str
+) -> None:
+    await savepoints.service.insert_ignoring_duplicates_without_a_flush(["a", "b", "a", "c", "b"], via)
+    assert await savepoints.committed() == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("via", ["repository", "injected"])
+async def test_the_savepoint_idiom_with_merge_commits_everything_but_the_duplicates(
+    savepoints: Savepoints, via: str
+) -> None:
+    await savepoints.service.merge_ignoring_duplicates(["a", "b", "a", "c"], via)
+    assert await savepoints.committed() == ["a", "b", "c"]
+
+
+async def test_savepoints_committed_and_rolled_back_explicitly(savepoints: Savepoints) -> None:
+    await savepoints.service.commit_savepoints_explicitly(["a", "b", "a", "c"])
     assert await savepoints.committed() == ["a", "b", "c"]
 
 
