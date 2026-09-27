@@ -239,6 +239,23 @@ async def expired_grants_are_refused(store: Any) -> None:
     assert isinstance(expired_code, SecurityException) and "expired" in str(expired_code).lower()
 
 
+async def only_a_refresh_token_is_one(store: Any) -> None:
+    """A code or a pushed request_uri presented as a refresh token is unknown. The key-value layout keys a
+    refresh token by its bare id and the other records by ``kind:id``, so introspecting ``par:<request_uri>``
+    or ``authcode:<code>`` reported an active refresh token."""
+    authorization_server = server(store)
+    code = await code_for(authorization_server)
+    pushed = await authorization_server.pushed_authorization_request("web", {"scope": "read"})
+
+    for impostor in (f"authcode:{code}", f"par:{pushed['request_uri']}"):
+        assert not await is_active(authorization_server, impostor), impostor
+        refused = await attempt(refresh(authorization_server, impostor, client_id="web"))
+        assert isinstance(refused, SecurityException) and refused.code == "INVALID_GRANT"
+
+    assert await authorization_server.consume_pushed_request(pushed["request_uri"], "web") == {"scope": "read"}
+    assert "refresh_token" in await redeem(authorization_server, code)
+
+
 SEQUENTIAL_SCENARIOS = (
     a_request_uri_belongs_to_its_client,
     rotation_chain_and_replay,
@@ -246,5 +263,6 @@ SEQUENTIAL_SCENARIOS = (
     a_code_replayed_later_revokes_what_it_issued,
     revocation_revokes_the_family,
     expired_grants_are_refused,
+    only_a_refresh_token_is_one,
 )
 """The scenarios without concurrency, which every store (atomic or not) passes."""

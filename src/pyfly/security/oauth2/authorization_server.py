@@ -194,6 +194,13 @@ class KeyValueTokenStore:
         return token_id
 
     @staticmethod
+    def _names_a_refresh_token(token_id: str) -> bool:
+        """Whether *token_id* can be a refresh token's key. The other records' keys have a ``kind:`` prefix,
+        and a refresh token id (URL-safe Base64, in every release) has no colon: ``par:<request_uri>`` or
+        ``authcode:<code>`` presented as a refresh token must not find that record."""
+        return ":" not in token_id
+
+    @staticmethod
     def _family_key(family_id: str) -> str:
         return f"family:{family_id}"
 
@@ -235,6 +242,8 @@ class KeyValueTokenStore:
         await self._after_write()
 
     async def load(self, kind: str, token_id: str) -> TokenRecord | None:
+        if kind == REFRESH_TOKEN and not self._names_a_refresh_token(token_id):
+            return None
         async with self._lock:
             stored = await self._find(self._key(kind, token_id))
             if stored is None:
@@ -270,6 +279,8 @@ class KeyValueTokenStore:
         return GrantOutcome.GRANTED
 
     async def rotate(self, token_id: str, token: TokenRecord, *, now: int) -> GrantOutcome:
+        if not self._names_a_refresh_token(token_id):
+            return GrantOutcome.UNKNOWN
         async with self._lock:
             stored = await self._find(token_id)
             if stored is None or stored.get("family_id") != token.family_id:
