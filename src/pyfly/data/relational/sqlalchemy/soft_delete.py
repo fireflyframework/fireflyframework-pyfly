@@ -44,14 +44,17 @@ from sqlalchemy import Update, and_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapper
+from sqlalchemy.orm import Mapper, load_only, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
 from pyfly.data.auditing import AuditingHandler, active_auditing_handler
 from pyfly.data.relational.sqlalchemy.repository import ID, Repository, _state
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete as delete_for_good
-from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import (
+    including_deleted,
+    reaches_soft_deleted_rows,
+)
 from pyfly.data.relational.sqlalchemy.statements import RESERVED_BINDS, dialect_of, unique_entities
 
 T = TypeVar("T")
@@ -161,16 +164,36 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     async def restore(self, id: ID) -> T | None:
         """Restore a soft-deleted entity by clearing ``deleted_at`` (through the ORM: the version is bumped and
-        the audit columns stamped); returns the entity, or ``None`` when the id matches no row."""
+        the audit columns stamped); returns the entity, or ``None`` when the id matches no row.
+
+        The entity is read with ``include_deleted``, which its eager loads inherit: it is returned as a live
+        entity, so the relationships to soft-delete entities it has loaded are loaded again, without the
+        deleted rows (one ``SELECT`` of its key and one per relationship), also when it was live already."""
         session = self._session
-        entity = await session.get(
-            self._model, self._key_value(self._identity(id)), execution_options={"include_deleted": True}
-        )
+        identity = self._identity(id)
+        entity = await session.get(self._model, self._key_value(identity), execution_options={"include_deleted": True})
         if entity is None:
             return None
-        if getattr(entity, "deleted_at", None) is not None:
+        state = _state(entity)
+        if "deleted_at" not in state.dict:
+            await session.refresh(entity, ["deleted_at"])  # expired in the unit: never load it on access
+        restoring = state.dict.get("deleted_at") is not None
+        if restoring:
             entity.deleted_at = None  # type: ignore[attr-defined]
             await session.flush()
+        revealed = [
+            relationship.key
+            for relationship in self._mapper.relationships
+            if relationship.key in state.dict
+            and relationship.lazy not in (None, "noload")
+            and reaches_soft_deleted_rows(relationship)
+        ]
+        if revealed:
+            session.expire(entity, revealed)
+            options = [selectinload(getattr(self._model, key)) for key in revealed]
+            only = load_only(*self._pk_attributes)
+            await session.execute(select(self._model).where(*self._pk_equals(identity)).options(only, *options))
+        if restoring:
             await self._load_generated(session, [entity])
         return entity
 

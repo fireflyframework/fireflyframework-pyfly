@@ -2266,7 +2266,7 @@ keys, and then every other active row without `RETURNING`, so what it returns do
 | `delete_all_in_batch(entities=None)` / `delete_all_by_id_in_batch(ids)` | Bulk soft deletes, no version check (an entity only pending in the unit is not inserted) |
 | `find_by_id(id)`, `find_all(...)`, `find_slice`, `scroll`, `stream_all`, `find_all_by_id`, `exists_by_id`, `count()`, `find_all_by_spec*` | Exclude soft-deleted entities |
 | `find_all_including_deleted(**filters)` | Includes soft-deleted entities |
-| `restore(id)` | Clears `deleted_at` through the ORM (the version is bumped, the audit columns stamped); `None` for a missing id |
+| `restore(id)` | Clears `deleted_at` through the ORM (the version is bumped, the audit columns stamped) and returns the entity, its loaded collections of soft-delete entities read again without the deleted rows; `None` for a missing id |
 | `hard_delete(id)` | Permanently removes from DB, a soft-deleted row included (cascades run, and reach soft-deleted dependents) |
 
 **Deleted rows are invisible to every ORM load, not only to the repository's own reads.** Like Hibernate's

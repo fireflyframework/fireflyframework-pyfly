@@ -347,6 +347,38 @@ async def test_soft_delete_repository_still_reaches_deleted_rows_where_it_must(
             assert await session.get(SoftAuthor, library.dora.id) is None
 
 
+async def test_a_restored_entity_comes_back_without_its_soft_deleted_children(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``restore`` reads the soft-deleted entity with ``include_deleted``, which reaches its eager loads, so its
+    collections held the deleted rows; once restored it is a live entity, and they are loaded again without
+    them. So is a collection the session loaded inside ``including_deleted()``, and so is an entity that was
+    live already (nothing to restore)."""
+    factory, library = await _library(relational_backend)
+    async with factory() as session, session.begin():
+        session.add(SoftBook(title="d-dead", author_id=library.dora.id, deleted_at=datetime.now(UTC)))
+    async with factory() as session:
+        authors = SoftAuthorRepository(session=session)
+        restored = await authors.restore(library.dora.id)
+        alice = await authors.restore(library.alice.id)
+        await session.commit()
+    assert restored is not None and not restored.is_deleted
+    assert _titles(restored.books) == ["d-live"]
+    assert alice is not None and not alice.is_deleted and _titles(alice.books) == ["a-live"]
+
+    async with factory() as session:
+        authors = SoftAuthorRepository(session=session)
+        await authors.delete_by_id(library.dora.id)
+        with including_deleted():
+            dora = await session.get(SoftAuthor, library.dora.id)
+            assert dora is not None
+            assert _titles(await session.run_sync(lambda _sync: dora.lazy_books)) == ["d-dead", "d-live"]
+        restored = await authors.restore(library.dora.id)
+        assert restored is dora and not restored.is_deleted
+        assert _titles(restored.books) == ["d-live"] and _titles(restored.lazy_books) == ["d-live"]
+        await session.commit()
+
+
 async def test_an_entity_created_in_the_session_lazy_loads_without_deleted_children(
     relational_backend: RelationalBackend,
 ) -> None:
