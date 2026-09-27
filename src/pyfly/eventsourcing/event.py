@@ -43,8 +43,9 @@ class StoredEventEnvelope:
 
     ``occurred_at`` is data: when the event happened, by the clock of the process that built the envelope.
     ``global_position`` is where the store placed the event on its global stream, in commit order; the store
-    sets it on the envelopes it reads (``None`` on an envelope not read from a store, or read inside the unit
-    of work that appended it), and it is not part of the JSON form.
+    sets it on the envelopes it reads (``None`` on an envelope not read from a store, or read before the store
+    numbered the event: the ``head-row`` strategy numbers an event once it has committed), and it is not part of
+    the JSON form.
     """
 
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
