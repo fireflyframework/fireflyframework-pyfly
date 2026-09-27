@@ -233,6 +233,8 @@ class UnitOfWork:
 
     def operation_failed(self, error: BaseException) -> None:
         """Record that an operation on the resource raised *error*."""
+        if isinstance(error, (StopAsyncIteration, StopIteration)):
+            return  # the end of a streamed result, not a failure
         if not isinstance(error, Exception):
             # Cancelled (or interrupted) while the operation was in flight: the connection is in an
             # unknown state and must not go back to the pool.

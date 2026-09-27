@@ -29,6 +29,8 @@
 - PostgreSQL only: a cancel in the middle of a statement, two cancels during a rollback held back by a
   partitioned network, a commit whose backend is terminated in flight, and the statement timeout that
   cancels a unit's statement on the server (WP01-12, WP01-13).
+- SQLite file and PostgreSQL: a client that disconnects from a Server-Sent Events stream served by a real
+  uvicorn server while a unit is open (Starlette cancels the stream through an anyio scope, C062).
 
 Every scenario ends with no pooled connection checked out and, on PostgreSQL, no backend idle in
 transaction.
@@ -66,7 +68,7 @@ from pyfly.data.transaction import (
     register_synchronization,
 )
 from pyfly.resilience.retry import retry
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 from tests.support.partition_proxy import PartitionProxy
 
 
@@ -200,6 +202,11 @@ class Outer:
         await self.items.save(MxItem(name="doomed"))
         proxy.partition()
         raise ValueError("the rollback is held back by the partition")
+
+    @transactional
+    async def save_event(self, name: str) -> None:
+        await self.items.save(MxItem(name=name))
+        await asyncio.sleep(0.3)  # the unit is open when the client goes away
 
     @transactional(timeout=5)
     async def statement_timeout(self) -> str:
@@ -563,9 +570,7 @@ async def test_two_cancels_during_a_held_back_rollback(relational_backend: Relat
 
 
 @pytest.mark.backends(PG)
-async def test_a_commit_that_loses_its_backend_has_an_unknown_outcome(
-    matrix: Matrix, pg_server_url: str
-) -> None:
+async def test_a_commit_that_loses_its_backend_has_an_unknown_outcome(matrix: Matrix, pg_server_url: str) -> None:
     admin_url = make_url(pg_server_url).set(database=make_url(matrix.backend.url).database)
     with pytest.raises(CommitOutcomeUnknownError):
         await matrix.outer.commit_loses_its_backend(admin_url.render_as_string(hide_password=False))
@@ -594,3 +599,62 @@ async def test_a_timeout_also_bounds_the_statement_on_the_server(matrix: Matrix)
     finally:
         await engine.dispose()
     assert running == 0
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A Server-Sent Events client that disconnects mid-transaction (C062)
+# ---------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.backends(SQLITE_FILE, PG)
+async def test_an_sse_client_disconnect_mid_transaction_leaves_the_pool_healthy(matrix: Matrix) -> None:
+    import httpx
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import Response
+    from starlette.routing import Route
+
+    from pyfly.web.sse.adapters.starlette import make_sse_response
+
+    outer = matrix.outer
+
+    async def events(stream_number: str) -> AsyncIterator[dict[str, int]]:
+        number = 0
+        while True:
+            await outer.save_event(f"event-{stream_number}-{number}")
+            yield {"number": number}
+            number += 1
+
+    async def stream(request: Request) -> Response:
+        return make_sse_response(events(request.query_params["n"]))
+
+    async def plain(request: Request) -> Response:
+        await outer.place(f"plain-{request.query_params['n']}")
+        return Response("ok")
+
+    app = Starlette(routes=[Route("/events", stream), Route("/plain", plain)])
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off"))
+    serving = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+            for attempt in range(3):
+                async with client.stream("GET", "/events", params={"n": attempt}) as response:
+                    async for line in response.aiter_lines():
+                        if line.startswith("data:"):
+                            break  # one event read; leaving the block disconnects mid-transaction
+                for _ in range(100):  # the server notices the disconnect and cancels the stream
+                    if matrix.checked_out() == 0:
+                        break
+                    await asyncio.sleep(0.05)
+                assert matrix.checked_out() == 0
+                assert (await client.get("/plain", params={"n": attempt})).text == "ok"
+    finally:
+        server.should_exit = True
+        await serving
+    committed = sorted(await matrix.committed())
+    # Each stream committed its first event; the unit open at the disconnect rolled back.
+    assert committed == ["event-0-0", "event-1-0", "event-2-0", "plain-0", "plain-1", "plain-2"]

@@ -53,7 +53,7 @@ from typing import Any
 
 from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, AsyncSessionTransaction, async_sessionmaker
 from sqlalchemy.orm import Session
 
@@ -69,7 +69,7 @@ from pyfly.data.relational.dialect_customizers import begin_execution_options, i
 from pyfly.data.relational.sqlalchemy.session import UnitSession, unit_session_class
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
-from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError
+from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError, TransactionError
 from pyfly.data.transaction.manager import TransactionCapabilities
 from pyfly.data.transaction.registry import (
     PRIMARY,
@@ -77,6 +77,7 @@ from pyfly.data.transaction.registry import (
     installed_registry,
     register_resource_resolver,
 )
+from pyfly.data.transaction.template import run_shielded
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 
 __all__ = ["SqlAlchemyTransactionManager", "transaction_managers_for"]
@@ -304,7 +305,8 @@ class SqlAlchemyTransactionManager:
         session.info["read_only"] = read_only
         if read_only:
             _install_read_only_guard(session, unit)
-        try:
+
+        async def _acquire() -> None:
             async with unit.operation():
                 connection = await AsyncSession.connection(session, execution_options=options)
                 if dialect == "sqlite":
@@ -313,6 +315,16 @@ class SqlAlchemyTransactionManager:
                 statement = _READ_ONLY_DIALECT_STATEMENT.get(dialect) if read_only else None
                 if statement is not None and not unit.attributes.get(_AUTOCOMMIT):
                     await connection.exec_driver_sql(statement)
+
+        # The checkout and BEGIN run in a task of their own: SQLAlchemy cleans up a connection whose BEGIN
+        # fails before the session holds it, and a cancellation landing there (Starlette cancels a
+        # disconnected stream through an anyio scope) would leave that connection checked out forever.
+        # Here the BEGIN completes, the session holds the connection, and _discard releases it.
+        _result, error, cancelled = await run_shielded(_acquire())
+        if error is not None or cancelled:
+            await self._discard(unit)
+            raise error if error is not None else asyncio.CancelledError()
+        try:
             if target is not None:
                 await target.run_after_begin(session)
         except BaseException:
@@ -328,8 +340,6 @@ class SqlAlchemyTransactionManager:
 
     async def _discard(self, unit: UnitOfWork) -> None:
         """Close the session of a unit that failed to start (shielded; its failure is the one to raise)."""
-        from pyfly.data.transaction.template import run_shielded
-
         _result, error, _cancelled = await run_shielded(self._close(unit, invalidate=unit.poisoned))
         if error is not None:
             _logger.debug("unit_of_work_discard_failed", exc_info=(type(error), error, error.__traceback__))
@@ -426,7 +436,15 @@ class SqlAlchemyTransactionManager:
 
     def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool:
         """Every driver error marks the unit: on PostgreSQL the transaction is dead after any failed
-        statement, and the same rule on every backend keeps one outcome for the same code."""
+        statement, and the same rule on every backend keeps one outcome for the same code.
+
+        An error that is neither SQLAlchemy's nor the unit of work's also poisons the unit: a raw driver
+        error (aiosqlite's "Connection closed" once its thread stopped), or what SQLAlchemy raised in place
+        of a cancellation that hit its own cleanup, leaves the connection in an unknown state, so it is
+        discarded instead of being awaited again.
+        """
+        if not isinstance(error, (SQLAlchemyError, TransactionError)):
+            unit.poisoned = True
         return isinstance(error, DBAPIError) or not self.resource_active(unit)
 
     def is_disconnect(self, error: BaseException) -> bool:

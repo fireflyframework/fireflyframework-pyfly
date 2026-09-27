@@ -108,7 +108,11 @@ class TransactionManager(Protocol):
         ...
 
     def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool:
-        """Whether *error*, raised by an operation on *unit*'s resource, leaves the transaction unusable."""
+        """Whether *error*, raised by an operation on *unit*'s resource, leaves the transaction unusable.
+
+        A backend may also set ``unit.poisoned`` when the error leaves the connection in an unknown state;
+        a poisoned unit's connection is discarded instead of rolled back.
+        """
         ...
 
     def is_disconnect(self, error: BaseException) -> bool:

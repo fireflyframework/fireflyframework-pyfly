@@ -291,8 +291,21 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
     await _release(unit, outcome)
 
 
+def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None) -> None:
+    """A unit that ends because its task was cancelled discards its connection instead of rolling it back.
+
+    The cancellation may have landed while a statement was in flight, and the driver may then be half
+    closed underneath SQLAlchemy (an anyio scope re-cancels the driver's own cleanup), so nothing on that
+    connection is awaited again. Closing it rolls the transaction back on the server; the pool opens a new
+    connection when it next needs one.
+    """
+    if isinstance(error, asyncio.CancelledError):
+        unit.poisoned = True
+
+
 async def _complete(unit: UnitOfWork, definition: TransactionDefinition, error: BaseException | None) -> _Outcome:
     """Complete a unit this boundary owns, after its body returned (*error* is ``None``) or raised."""
+    _poison_on_cancellation(unit, error)
     outcome = _Outcome()
     if error is None:
         await _commit(unit, outcome)
@@ -453,6 +466,7 @@ class TransactionBoundary:
         depth = unit.savepoint_depth
         unit.savepoint_depth -= 1
         manager = self._manager
+        _poison_on_cancellation(unit, error)
         if unit.poisoned:
             unit.set_rollback_only(error)
             return
@@ -476,6 +490,7 @@ class TransactionBoundary:
             raise asyncio.CancelledError
 
     async def _exit_new(self, unit: UnitOfWork, error: BaseException | None) -> None:
+        _poison_on_cancellation(unit, error)
         body_error = error
         if self._timeout is not None:
             try:
@@ -550,6 +565,7 @@ async def complete_auto_unit(
     ``UnexpectedRollbackError``, a commit failure) and a cancellation that arrived meanwhile; the caller
     re-raises *error* itself.
     """
+    _poison_on_cancellation(unit, error)
     outcome = _Outcome()
     try:
         if error is not None:
