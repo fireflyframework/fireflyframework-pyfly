@@ -131,7 +131,7 @@ class GetOrderQuery(Query[dict | None]):
 | `get_timestamp()` | `datetime` | UTC creation time. |
 | `get_metadata()` | `dict[str, Any]` | Arbitrary metadata. |
 | `is_cacheable()` / `set_cacheable(bool)` | `bool` | Whether results can be cached (default `True`). |
-| `get_cache_key()` | `str \| None` | Cache key. For dataclass subclasses: `ClassName:sha256_hex16(fields)` — a stable SHA-256 digest so the same query maps to the same key across processes. For non-dataclass subclasses: the class name. Override to provide a fully custom key. |
+| `get_cache_key()` | `str \| None` | Cache key. For dataclass subclasses: `ClassName:<sha256>`, the full SHA-256 (64 hex characters) of the field names and the `repr()` of their values, each length-prefixed (`cache_key_digest` in `pyfly.cqrs.types`): the same query maps to the same key in every process, and no caller can craft field values whose key collides with another query's. For non-dataclass subclasses: the class name. Override to provide a fully custom key. |
 
 Queries share the same `validate()`, `authorize()`, and `authorize_with_context(ctx)` hooks as commands.
 
@@ -541,6 +541,11 @@ can trust it (an empty identifier counts as none):
 * the `X-Tenant-Id` header of the request. Any client can send it and nothing
   authenticates it, so it only *narrows* an entry: it is part of the key, but
   it never identifies a caller by itself.
+
+The key carries the full SHA-256 of that identity (64 hex characters, each
+name and value length-prefixed before hashing), never a truncated digest: a
+client that chooses its `X-Tenant-Id` cannot search offline for a value whose
+digest collides with another caller's and be served that caller's entry.
 
 A handler's cache scope decides who shares an entry, and which identity it
 needs:

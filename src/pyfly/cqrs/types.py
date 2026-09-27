@@ -25,6 +25,7 @@ and :mod:`pyfly.cqrs.query.handler` (``QueryHandler[Q, R]``).
 from __future__ import annotations
 
 import enum
+import hashlib
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar, cast
 from uuid import uuid4
@@ -33,6 +34,30 @@ from pyfly.cqrs.authorization.types import AuthorizationResult
 from pyfly.cqrs.validation.types import ValidationResult
 
 R = TypeVar("R")
+
+
+def cache_key_digest(*components: str | None) -> str:
+    """The SHA-256 digest of *components*, in full: 64 hex characters.
+
+    Each component is encoded on its own before hashing, as a netstring of its UTF-8 bytes
+    (``<length>:<bytes>,``), and ``None`` as ``-``, which no netstring starts with. Two different sequences
+    therefore never hash the same bytes: ``("a|b", "c")`` and ``("a", "b|c")`` differ, and so do ``None``,
+    ``""`` and ``"None"``. The encoding does not depend on ``repr()``, so a digest is the same in every
+    process and on every Python version.
+
+    The digest is never truncated. The query cache keys entries by digests of values a client chooses (the
+    fields of a query, the ``X-Tenant-Id`` header): against a 64-bit digest a client could search offline for
+    a value whose digest equals another caller's and be served that caller's entry, while finding one for the
+    full SHA-256 is a second preimage.
+    """
+    encoded = bytearray()
+    for component in components:
+        if component is None:
+            encoded += b"-"
+            continue
+        data = component.encode("utf-8", "surrogatepass")
+        encoded += b"%d:%b," % (len(data), data)
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class QueryCacheScope(enum.Enum):
@@ -192,20 +217,20 @@ class Query(Generic[R]):
     def get_cache_key(self) -> str | None:
         """Smart cache key — override for custom keys, else auto-generated from class + fields.
 
-        Uses a stable SHA-256 digest (not the process-randomized built-in
-        ``hash()``) so the same query maps to the same key across processes and
-        restarts (audit #100).
+        A dataclass query's key is ``<ClassName>:<digest>``, where the digest is the full SHA-256 of its field
+        names and the ``repr()`` of their values (:func:`cache_key_digest`): stable across processes and
+        restarts (not the process-randomized built-in ``hash()``, audit #100), and never truncated, since the
+        fields may come from the caller and a ``GLOBAL`` entry is shared by every caller.
 
         The key names the query, not the caller: the bus adds the handler's ``cache_key_prefix`` and the
         caller's tenant and user (:class:`QueryCacheScope`), so do not put them in it yourself.
         """
         import dataclasses
-        import hashlib
 
         if not dataclasses.is_dataclass(self):
             return type(self).__name__
-        fields = {f.name: repr(getattr(self, f.name)) for f in dataclasses.fields(self)}
-        digest = hashlib.sha256(repr(sorted(fields.items())).encode("utf-8")).hexdigest()[:16]
+        fields = sorted((f.name, repr(getattr(self, f.name))) for f in dataclasses.fields(self))
+        digest = cache_key_digest(*(part for field in fields for part in field))
         return f"{type(self).__name__}:{digest}"
 
     # ── hooks for bus pipeline ─────────────────────────────────

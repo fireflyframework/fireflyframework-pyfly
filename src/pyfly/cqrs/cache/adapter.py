@@ -41,7 +41,6 @@ never reused, so a deleted or expired one is replaced by a fresh one that reache
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import uuid
 from collections.abc import Iterable
@@ -50,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 from pyfly.cache.namespaces import PrefixedCache
 from pyfly.cache.transaction import TransactionAwareCache
-from pyfly.cqrs.types import QueryCacheScope
+from pyfly.cqrs.types import QueryCacheScope, cache_key_digest
 
 if TYPE_CHECKING:
     from pyfly.cqrs.command.registry import HandlerRegistry
@@ -143,11 +142,18 @@ def query_cache_group(handler: QueryHandler[Any, Any]) -> str:
 
 
 def scope_digest(scope: Scope) -> str | None:
-    """A digest of *scope* (:func:`scope_of`) to key an entry by; ``None`` for ``()`` (a ``GLOBAL`` entry is
-    not scoped)."""
+    """The digest of *scope* (:func:`scope_of`) to key an entry by; ``None`` for ``()`` (a ``GLOBAL`` entry is
+    not scoped).
+
+    It is the full SHA-256 of the scope's names and values, each length-prefixed
+    (:func:`~pyfly.cqrs.types.cache_key_digest`): the digest is all that separates one caller's entry from
+    another's under a key's generation, and the scope holds the ``X-Tenant-Id`` header, which the client
+    chooses. A truncated digest would let a client search offline for a header value that collides with
+    another caller's scope.
+    """
     if not scope:
         return None
-    return hashlib.sha256(repr(scope).encode("utf-8")).hexdigest()[:16]
+    return cache_key_digest(*(part for pair in scope for part in pair))
 
 
 class QueryCacheAdapter:

@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 
 import pytest
 
 from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.context.request_context import RequestContext
-from pyfly.cqrs.cache.adapter import QueryCacheAdapter, scope_digest, scope_of
+from pyfly.cqrs.cache.adapter import SCOPE_SEPARATOR, QueryCacheAdapter, scope_digest, scope_of
 from pyfly.cqrs.cache.decorators import cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.context.execution_context import ExecutionContext, ExecutionContextBuilder
@@ -290,3 +291,40 @@ def test_scope_digest_tells_scopes_apart() -> None:
     assert alice is not None and bob is not None and acme is not None
     assert len({scope_digest(alice), scope_digest(bob), scope_digest(acme)}) == 3
     assert scope_digest(()) is None  # GLOBAL: the entry is not scoped
+
+
+def test_scope_digest_is_a_full_sha256() -> None:
+    # X-Tenant-Id is chosen by the client and is part of every scope: with a truncated digest a client could
+    # search offline for a header value whose digest equals another caller's (a 64-bit digest falls to about
+    # 2**64 / N hashes against N cached callers) and be served that caller's entry.
+    alice = scope_of(QueryCacheScope.USER, _ctx(tenant="acme", user="alice"))
+    assert alice is not None
+    digest = scope_digest(alice)
+    assert digest is not None
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    # The same caller gets the same entry key in every process, on every Python version: pinned.
+    assert digest == "13d1be8317455ad02216564d6a726e8dd5271774d5e06d68942d59f59351c3a6"
+
+
+def test_the_scope_encoding_is_unambiguous() -> None:
+    # Each component is length-prefixed: values cannot run into each other, and None is not "None" or "".
+    assert scope_digest((("tenant", "a|b"), ("user", "c"))) != scope_digest((("tenant", "a"), ("user", "b|c")))
+    assert scope_digest((("tenant", "a"), ("user", "bc"))) != scope_digest((("tenant", "ab"), ("user", "c")))
+    assert scope_digest((("tenant", None),)) != scope_digest((("tenant", "None"),))
+    assert scope_digest((("tenant", None),)) != scope_digest((("tenant", ""),))
+    assert scope_digest((("tenant", "x"),)) != scope_digest((("tenantx", None),))
+
+
+async def test_callers_that_differ_only_in_the_tenant_header_or_the_principal_get_entries_of_their_own(
+    handlers: tuple[MyOrdersHandler, TenantPlansHandler, CountriesHandler],
+) -> None:
+    cache = InMemoryCache()
+    registry = HandlerRegistry()
+    registry.register_query_handler(handlers[0])
+    bus = DefaultQueryBus(registry=registry, cache_adapter=QueryCacheAdapter(cache))
+    assert await _in_request(bus, MyOrders(), principal="alice", header="acme") == ["order 1"]
+    assert await _in_request(bus, MyOrders(), principal="alice", header="x262424") == ["order 2"]  # a forged header
+    assert await _in_request(bus, MyOrders(), principal="mallory", header="acme") == ["order 3"]
+    digests = [key.rsplit(SCOPE_SEPARATOR, 1)[1] for key in cache.get_keys() if SCOPE_SEPARATOR in key]
+    assert len(set(digests)) == 3
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests)

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -47,6 +48,12 @@ class GetOrderQuery(Query[dict]):
 @dataclass(frozen=True)
 class ListOrdersQuery(Query[list[dict]]):
     customer_id: str = "cust-1"
+
+
+@dataclass(frozen=True)
+class FindByNameQuery(Query[list[dict]]):
+    first: str = ""
+    last: str = ""
 
 
 # ── subclass with custom validate / authorize ─────────────────
@@ -233,6 +240,28 @@ class TestQuery:
         q1 = GetOrderQuery(order_id="order-1")
         q2 = GetOrderQuery(order_id="order-1")
         assert q1.get_cache_key() == q2.get_cache_key()
+
+    def test_get_cache_key_digest_is_a_full_sha256(self) -> None:
+        # Its fields may come from the caller, and a GLOBAL entry is shared by every caller: a truncated digest
+        # could be collided with another query's key offline.
+        name, digest = GetOrderQuery(order_id="order-1").get_cache_key().split(":")
+        assert name == "GetOrderQuery"
+        assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+    def test_get_cache_key_fields_cannot_run_into_each_other(self) -> None:
+        keys = {
+            FindByNameQuery(first="a', 'b", last="c").get_cache_key(),
+            FindByNameQuery(first="a", last="b', 'c").get_cache_key(),
+            FindByNameQuery(first="ab", last="c").get_cache_key(),
+            FindByNameQuery(first="a", last="bc").get_cache_key(),
+        }
+        assert len(keys) == 4
+
+    def test_get_cache_key_is_stable(self) -> None:
+        # The same query maps to the same key in every process and on every Python version: pinned.
+        assert GetOrderQuery(order_id="order-1").get_cache_key() == (
+            "GetOrderQuery:e45b42ca399e7cc326107d4d8390f526d4573cd3ae9b8e1c8b99741caaf0d7a7"
+        )
 
     @pytest.mark.asyncio
     async def test_validate_returns_success_by_default(self) -> None:
