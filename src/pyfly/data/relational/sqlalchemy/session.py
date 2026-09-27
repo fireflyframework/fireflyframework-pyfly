@@ -16,7 +16,11 @@
 - :class:`UnitSession` is the session of a unit the transaction manager opened. Every operation runs under
   the unit's operation guard (a child task that shares the unit waits its turn instead of corrupting the
   session), refuses a completed unit, and records failures; so do the ``SAVEPOINT``, ``RELEASE`` and
-  ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``. In a read-only unit (``read_only=True``, or the read
+  ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``, and every fetch of a streamed result
+  (:class:`GuardedResult`). On MySQL and MariaDB, whose connection has one active result at a time, an open
+  streamed result holds the unit until it is exhausted or closed: every other operation raises
+  ``IllegalTransactionStateError`` meanwhile, and a stream still open when its unit completes is closed
+  first (:func:`close_open_stream`). In a read-only unit (``read_only=True``, or the read
   auto unit of a ``find*``/``count*``/``exists*``/``stream*``/``get*`` repository method) a Core
   ``INSERT``/``UPDATE``/``DELETE`` is refused before it is sent, on every backend, as the ORM flush guard
   refuses ORM writes (a raw ``text()`` statement is not inspected). ``commit``, ``rollback`` and ``close``
@@ -42,6 +46,7 @@ from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from sqlalchemy import event
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction, async_sessionmaker
 from sqlalchemy.orm import Session, SessionTransaction
 
@@ -58,6 +63,7 @@ __all__ = [
     "SessionProvider",
     "UnitSavepoint",
     "UnitSession",
+    "close_open_stream",
     "track_savepoint",
     "unit_session_class",
 ]
@@ -101,46 +107,156 @@ def track_savepoint(unit: UnitOfWork, savepoint: AsyncSessionTransaction) -> Non
     unit.savepoint_opened(savepoint)
 
 
+class _OpenStream:
+    """A streamed result that holds its unit's connection until it is exhausted or closed, on a backend whose
+    connection has one active result at a time (``UnitOfWork.stream_opened``)."""
+
+    __slots__ = ("failed", "owner", "result", "statement")
+
+    def __init__(self, statement: Any, result: Any) -> None:
+        self.statement = statement
+        self.result = result  # the streamed result as opened (the results derived from it share its cursor)
+        self.owner = asyncio.current_task()
+        self.failed = False  # a fetch failed in the driver: its state is unknown, so it is never read to its end
+
+    def __str__(self) -> str:
+        try:
+            sql = " ".join(str(self.statement).split())
+        except Exception:  # noqa: BLE001 — a statement that cannot render itself is still named by its type
+            sql = type(self.statement).__name__
+        if len(sql) > 160:
+            sql = f"{sql[:157]}..."
+        owner = repr(self.owner.get_name()) if self.owner is not None else "(none)"
+        return f"a streamed result of task {owner} ({sql})"
+
+
+def _cursor_released(result: Any) -> bool:
+    """Whether the server-side cursor under *result* (a streamed result, or one derived from it) is released:
+    its rows are exhausted or it was closed, so the connection can run another statement. SQLAlchemy
+    soft-closes the ``CursorResult`` then (an ORM result keeps it as ``raw``)."""
+    current = getattr(result, "_real_result", result)
+    for _ in range(8):  # an ORM result wraps the cursor result once; this only bounds a pathological chain
+        raw = getattr(current, "raw", None)
+        if raw is None:
+            break
+        current = raw
+    return getattr(current, "_soft_closed", False) is True
+
+
 class GuardedResult:
-    """A streamed result of a unit's session whose fetches run under the unit's operation guard."""
+    """A streamed result of a unit's session whose fetches run under the unit's operation guard.
 
-    __slots__ = ("_result", "_unit")
+    On a backend whose connection has one active result at a time it also holds the unit while its cursor is
+    open (``UnitOfWork.stream_opened``): the results derived from it (``.scalars()``, ``.partitions()``)
+    share that hold, and the first fetch that finds the rows exhausted, or :meth:`close`, releases it.
+    """
 
-    def __init__(self, result: Any, unit: UnitOfWork) -> None:
+    __slots__ = ("_result", "_stream", "_unit")
+
+    def __init__(self, result: Any, unit: UnitOfWork, stream: _OpenStream | None = None) -> None:
         self._result = result
         self._unit = unit
+        self._stream = stream
 
     def __aiter__(self) -> GuardedResult:
         return self
 
     async def __anext__(self) -> Any:
-        async with self._unit.operation():
-            return await self._result.__anext__()
+        async with self._unit.operation(stream=self._stream):
+            try:
+                return await self._result.__anext__()
+            except BaseException as error:
+                self._failed(error)
+                raise
+            finally:
+                self._release_when_done()
+
+    async def close(self) -> None:
+        """Close the result; the rows not fetched yet are dropped (on MySQL and MariaDB they are read first,
+        as the connection requires). Nothing is left to close once the rows are exhausted, or once the unit
+        completed (its end closed the result along with its connection)."""
+        unit = self._unit
+        stream = self._stream
+        if unit.completed or _cursor_released(self._result):
+            if stream is not None:
+                unit.stream_closed(stream)
+            return
+        async with unit.operation(stream=stream):
+            try:
+                await self._result.close()
+            finally:
+                if stream is not None:
+                    unit.stream_closed(stream)
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._result, name)
         if not callable(attribute):
             return attribute
         unit = self._unit
+        stream = self._stream
         if inspect.iscoroutinefunction(attribute):
 
             async def guarded(*args: Any, **kwargs: Any) -> Any:
-                async with unit.operation():
-                    return _wrap(await attribute(*args, **kwargs), unit)
+                async with unit.operation(stream=stream):
+                    try:
+                        return _wrap(await attribute(*args, **kwargs), unit, stream)
+                    except BaseException as error:
+                        self._failed(error)
+                        raise
+                    finally:
+                        self._release_when_done()
 
             return guarded
 
         def plain(*args: Any, **kwargs: Any) -> Any:
-            return _wrap(attribute(*args, **kwargs), unit)
+            return _wrap(attribute(*args, **kwargs), unit, stream)
 
         return plain
 
+    def _release_when_done(self) -> None:
+        stream = self._stream
+        if stream is not None and _cursor_released(self._result):
+            self._unit.stream_closed(stream)
 
-def _wrap(value: Any, unit: UnitOfWork) -> Any:
+    def _failed(self, error: BaseException) -> None:
+        """A fetch raised *error*: after a driver error or a cancellation the cursor's state on the connection
+        is unknown, and the stream is never read to its end (``close_open_stream``)."""
+        if self._stream is not None and (isinstance(error, DBAPIError) or not isinstance(error, Exception)):
+            self._stream.failed = True
+
+
+def _wrap(value: Any, unit: UnitOfWork, stream: _OpenStream | None) -> Any:
     """Keep a result derived from a streamed result (``.scalars()``, ``.partitions()``) guarded."""
     if hasattr(value, "__anext__") and not isinstance(value, GuardedResult):
-        return GuardedResult(value, unit)
+        return GuardedResult(value, unit, stream)
     return value
+
+
+def _opened(result: Any, unit: UnitOfWork, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _OpenStream | None:
+    """Record *result*, a streamed result just opened on *unit* under its guard, as the stream that holds the
+    unit, when the unit's connection has one active result at a time and the result's cursor is open."""
+    if unit.manager.capabilities.multiple_active_results or _cursor_released(result):
+        return None
+    stream = _OpenStream(args[0] if args else kwargs.get("statement"), result)
+    unit.stream_opened(stream)
+    return stream
+
+
+async def close_open_stream(unit: UnitOfWork) -> None:
+    """Close the streamed result that holds *unit* (``UnitOfWork.stream_opened``), if one is open; the
+    transaction manager calls it under the unit's guard before it commits or rolls back.
+
+    On MySQL and MariaDB a ``COMMIT`` or ``ROLLBACK`` cannot run while a result is open on the connection:
+    closing it reads the rows not fetched yet and drops them (what the driver does before any other
+    statement), which leaves the connection clean. A stream whose last fetch failed is only forgotten: its
+    state is unknown, and the unit's rollback discards the connection if it cannot run.
+    """
+    stream = unit.open_stream
+    if not isinstance(stream, _OpenStream):
+        return
+    unit.stream_closed(stream)
+    if not stream.failed:
+        await stream.result.close()
 
 
 class UnitSession(AsyncSession):
@@ -238,7 +354,8 @@ class UnitSession(AsyncSession):
         if unit is None:
             return await super().stream(*args, **kwargs)
         async with unit.operation():
-            return GuardedResult(await super().stream(*args, **kwargs), unit)
+            result = await super().stream(*args, **kwargs)
+            return GuardedResult(result, unit, _opened(result, unit, args, kwargs))
 
     async def stream_scalars(self, *args: Any, **kwargs: Any) -> Any:
         unit = self._pyfly_unit
@@ -248,7 +365,8 @@ class UnitSession(AsyncSession):
             # AsyncSession.stream_scalars() goes through self.stream(), which would guard every fetch a
             # second time: open the stream unguarded here and guard its scalars once.
             result = await AsyncSession.stream(self, *args, **kwargs)
-        return GuardedResult(result.scalars(), unit)
+            stream = _opened(result, unit, args, kwargs)
+        return GuardedResult(result.scalars(), unit, stream)
 
     def begin_nested(self) -> AsyncSessionTransaction:
         unit = self._pyfly_unit
@@ -261,6 +379,9 @@ class UnitSession(AsyncSession):
         if unit is not None:
             unit.check_usable()
             unit.check_savepoint_owner()  # the next flush would write it inside another task's savepoint
+            # Its flush would be refused while a stream holds the unit, and the object would stay pending
+            # until the unit's own flush at commit: refused now, the caller's failure is the whole outcome.
+            unit.check_open_stream()
         super().add(instance, _warn=_warn)
 
     def add_all(self, instances: Any) -> None:
@@ -268,6 +389,7 @@ class UnitSession(AsyncSession):
         if unit is not None:
             unit.check_usable()
             unit.check_savepoint_owner()
+            unit.check_open_stream()
         super().add_all(instances)
 
     # -- completion belongs to the unit ------------------------------------------------------------------------

@@ -43,13 +43,17 @@ class TransactionCapabilities:
 
     ``isolation_levels`` are the levels it accepts (``"SERIALIZABLE"``, ``"READ COMMITTED"``...);
     ``fast_autocommit_reads`` says a single-statement read is cheaper on an autocommit connection than in
-    a transaction (PostgreSQL).
+    a transaction (PostgreSQL). ``multiple_active_results`` says another operation can run on a unit's
+    resource while a streamed result is open on it; where it cannot (MySQL, MariaDB), the backend records
+    each open stream on its unit (:meth:`~pyfly.data.transaction.unit_of_work.UnitOfWork.stream_opened`),
+    and the unit refuses every other operation until the stream is done.
     """
 
     backend: str
     supports_savepoints: bool
     isolation_levels: frozenset[str] = field(default_factory=frozenset)
     fast_autocommit_reads: bool = False
+    multiple_active_results: bool = True
 
     def supports_isolation(self, isolation: Isolation) -> bool:
         """Whether *isolation* can be applied (``DEFAULT`` always can)."""

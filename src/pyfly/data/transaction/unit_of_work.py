@@ -32,6 +32,12 @@ child task may use its parent's unit. That is made safe here:
   (:meth:`UnitOfWork.check_savepoint_owner`). A savepoint whose task has finished no longer holds the unit.
   Nor does the unit commit while another live task holds a savepoint on it
   (:meth:`UnitOfWork.savepoint_holder`): it rolls back and its boundary raises instead.
+- On a backend whose connection has one active result at a time (MySQL, MariaDB:
+  ``TransactionCapabilities.multiple_active_results`` is false), a streamed result that is open holds the
+  unit (:meth:`UnitOfWork.stream_opened`): any other operation, from the stream's own task or another one,
+  raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the stream before
+  anything reaches the server, instead of corrupting the connection. The stream's own fetches go on, and
+  the stream stops holding the unit once it is exhausted or closed.
 - A task that uses a unit that already completed gets
   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the unit, instead of writing
   into a transaction nobody will commit. Work that must outlive its transaction runs through
@@ -254,10 +260,11 @@ class OperationGuard:
 class _Operation:
     """One guarded operation on a unit's resource (see :meth:`UnitOfWork.operation`)."""
 
-    __slots__ = ("_since", "_unit")
+    __slots__ = ("_since", "_stream", "_unit")
 
-    def __init__(self, unit: UnitOfWork) -> None:
+    def __init__(self, unit: UnitOfWork, stream: object | None) -> None:
         self._unit = unit
+        self._stream = stream
         self._since = 0
 
     async def __aenter__(self) -> UnitOfWork:
@@ -269,6 +276,8 @@ class _Operation:
             unit.check_usable()  # it may have completed while this task waited for the guard
             if unit._savepoints:
                 unit.check_savepoint_owner()  # another task may have opened a savepoint meanwhile
+            if unit._open_stream is not None:
+                unit.check_open_stream(self._stream)  # a stream may have been opened meanwhile
         except BaseException:
             unit.guard.release()
             raise
@@ -328,6 +337,7 @@ class UnitOfWork:
         self._rollback_only_depth: int | None = None
         self._rollback_only_reason: BaseException | str | None = None
         self._savepoints: list[_Savepoint] = []  # open savepoints, outermost first
+        self._open_stream: object | None = None  # the streamed result that holds the unit (stream_opened)
 
     # -- state ------------------------------------------------------------------------------------------
 
@@ -461,6 +471,46 @@ class UnitOfWork:
             datasource=self.datasource,
         )
 
+    # -- streams ------------------------------------------------------------------------------------------
+
+    @property
+    def open_stream(self) -> object | None:
+        """The streamed result that holds the unit (:meth:`stream_opened`), if one is open."""
+        return self._open_stream
+
+    def stream_opened(self, stream: object) -> None:
+        """Record that *stream*, a streamed result just opened on the unit's resource, holds the unit until
+        :meth:`stream_closed`.
+
+        A backend whose connection has one active result at a time
+        (``TransactionCapabilities.multiple_active_results`` false: MySQL, MariaDB) calls it for each streamed
+        result it opens. Until the stream is exhausted or closed, every operation other than the stream's own
+        (``operation(stream=stream)``) raises :class:`IllegalTransactionStateError` (:meth:`check_open_stream`):
+        a statement sent on the connection meanwhile would corrupt it. ``str(stream)`` names it in that error.
+        """
+        self._open_stream = stream
+
+    def stream_closed(self, stream: object) -> None:
+        """Forget *stream*: it was exhausted or closed, and the connection can run other statements again."""
+        if self._open_stream is stream:
+            self._open_stream = None
+
+    def check_open_stream(self, stream: object | None = None) -> None:
+        """Raise :class:`IllegalTransactionStateError` when a streamed result other than *stream* holds the unit
+        (:meth:`stream_opened`)."""
+        open_stream = self._open_stream
+        if open_stream is None or open_stream is stream:
+            return
+        raise IllegalTransactionStateError(
+            f"Task {_task_name(asyncio.current_task())} cannot use {self.describe()}: {open_stream} is still open "
+            f"on its connection, and a {self.manager.capabilities.backend} connection has one active result at a "
+            "time, so no other statement can run on it until that result is exhausted or closed. Finish the "
+            "stream first, close it early (async with contextlib.aclosing(repository.stream_all()) as rows: ...), "
+            "collect the rows you need before the other work, or run that work in a unit of its own "
+            "(Propagation.REQUIRES_NEW, pyfly.data.transaction.detached()).",
+            datasource=self.datasource,
+        )
+
     # -- operations ---------------------------------------------------------------------------------------
 
     def check_usable(self) -> None:
@@ -473,10 +523,13 @@ class UnitOfWork:
                 datasource=self.datasource,
             )
 
-    def operation(self) -> _Operation:
+    def operation(self, *, stream: object | None = None) -> _Operation:
         """An async context manager around one operation on the resource: it takes the operation guard,
-        refuses a completed unit, and records a failure (rollback-only, or poisoned on cancellation)."""
-        return _Operation(self)
+        refuses a completed unit, and records a failure (rollback-only, or poisoned on cancellation).
+
+        *stream* is the streamed result the operation fetches from (or closes): while a stream holds the unit
+        (:meth:`stream_opened`), only its own operations run."""
+        return _Operation(self, stream)
 
     def operation_failed(self, error: BaseException) -> None:
         """Record that an operation on the resource raised *error*."""

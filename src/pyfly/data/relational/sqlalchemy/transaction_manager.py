@@ -36,6 +36,10 @@ fast autocommit reads (PostgreSQL) runs on an ``AUTOCOMMIT`` connection, one rou
 unless the datasource has after-begin customizers: their transaction-local settings would not outlive
 their own statement there. A write auto unit commits.
 
+A streamed result still open when a unit completes is closed before its ``COMMIT`` or ``ROLLBACK`` on a
+dialect whose connection has one active result at a time (MySQL, MariaDB): nothing else can run on that
+connection until it is.
+
 A commit whose connection fails while ``COMMIT`` is in flight raises
 :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`. A unit whose operation was cancelled in
 flight (the unit is *poisoned*) has its connection invalidated instead of rolled back, so the pool never
@@ -93,6 +97,7 @@ from pyfly.data.relational.sqlalchemy import sqlite_discard
 from pyfly.data.relational.sqlalchemy.session import (
     RELEASING_SAVEPOINT,
     UnitSession,
+    close_open_stream,
     track_savepoint,
     unit_session_class,
 )
@@ -264,7 +269,7 @@ class SqlAlchemyTransactionManager:
 
     @property
     def capabilities(self) -> TransactionCapabilities:
-        """Savepoints, isolation levels and fast autocommit reads, from the dialect."""
+        """Savepoints, isolation levels, fast autocommit reads and multiple active results, from the dialect."""
         if self._capabilities is not None:
             return self._capabilities
         dialect = self.dialect_capabilities
@@ -273,6 +278,7 @@ class SqlAlchemyTransactionManager:
             supports_savepoints=dialect.supports_savepoints,
             isolation_levels=dialect.isolation_levels,
             fast_autocommit_reads=dialect.fast_autocommit_reads,
+            multiple_active_results=dialect.multiple_active_results,
         )
         if self.engine.dialect.server_version_info is not None:
             self._capabilities = capabilities  # final once the dialect has met the server
@@ -456,8 +462,12 @@ class SqlAlchemyTransactionManager:
     # -- completing units -----------------------------------------------------------------------------------
 
     async def commit(self, unit: UnitOfWork) -> None:
-        """Flush and commit; a connection failure during ``COMMIT`` raises ``CommitOutcomeUnknownError``."""
+        """Flush and commit; a connection failure during ``COMMIT`` raises ``CommitOutcomeUnknownError``.
+
+        A streamed result still open on a connection that has one active result at a time (MySQL, MariaDB)
+        is closed first (``close_open_stream``): nothing else can run on that connection before it is."""
         session = unit.resource
+        await close_open_stream(unit)
         await AsyncSession.flush(session)  # a failure here is definite: nothing was committed
         try:
             await AsyncSession.commit(session)
@@ -480,7 +490,8 @@ class SqlAlchemyTransactionManager:
         """Roll back, or discard the connection of a poisoned unit (its state is unknown).
 
         A read auto unit ends this way too; its entities are detached first, so what the call returned keeps
-        its loaded state (a rollback would expire it).
+        its loaded state (a rollback would expire it). A streamed result still open on a connection that has
+        one active result at a time is closed first, as for a commit.
         """
         session = unit.resource
         if unit.poisoned and _SHARED_CONNECTION not in unit.attributes:
@@ -489,6 +500,7 @@ class SqlAlchemyTransactionManager:
         if unit.auto and unit.read_only:
             session.expunge_all()
         try:
+            await close_open_stream(unit)
             await AsyncSession.rollback(session)
         except Exception:
             # The connection could not roll back (it was lost): make sure the pool discards it.

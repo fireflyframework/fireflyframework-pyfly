@@ -201,6 +201,7 @@ async def test_capabilities_are_final_after_the_first_connection(relational_back
         assert caps is datasource.capabilities  # cached once the dialect met the server
         assert caps.supports_savepoints is True
         assert caps.fast_autocommit_reads is (relational_backend.lane == PG)
+        assert caps.multiple_active_results is (relational_backend.lane not in (MYSQL, MARIADB))
         if relational_backend.lane == PG:
             assert caps.dialect == "postgresql" and caps.supports_returning
             assert "READ UNCOMMITTED" not in caps.isolation_levels  # asyncpg has none

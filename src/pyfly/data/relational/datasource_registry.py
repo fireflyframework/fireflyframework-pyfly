@@ -112,6 +112,10 @@ DEV_FALLBACK_URL = "sqlite+aiosqlite:///./app.db"
 
 _SAVEPOINT_DIALECTS = frozenset({"sqlite", "postgresql", "mysql", "mariadb", "mssql", "oracle"})
 
+# A MySQL or MariaDB connection has one active result at a time: no statement can run on it while a streamed
+# (unbuffered, server-side cursor) result is open, and asyncmy corrupts the connection instead of refusing.
+_SINGLE_RESULT_DIALECTS = frozenset({"mysql", "mariadb"})
+
 # Largest IN list / bound-parameter count per statement the driver accepts (SQLite before 3.32: 999).
 _MAX_IN_PARAMS = {"postgresql": 32767, "mysql": 65535, "mariadb": 65535, "mssql": 2000, "oracle": 1000}
 
@@ -256,7 +260,11 @@ class DataSourceCapabilities:
     """What a datasource's dialect and driver support, for the accelerators that are dialect-gated.
 
     ``fast_autocommit_reads`` is true only on PostgreSQL, where a single-statement read on an
-    ``AUTOCOMMIT`` connection costs one round trip instead of three. ``isolation_levels`` are the
+    ``AUTOCOMMIT`` connection costs one round trip instead of three. ``multiple_active_results`` says a
+    statement can run on a connection while a streamed result (a server-side cursor: ``stream_all``,
+    ``session.stream()``) is open on it: true on PostgreSQL (asyncpg keeps the cursor a portal of the
+    transaction) and SQLite, false on MySQL and MariaDB, whose connection has one active result at a time.
+    ``isolation_levels`` are the
     transaction isolation levels the driver accepts (``AUTOCOMMIT`` excluded). ``max_in_params`` is the
     largest IN list a statement may bind. The ``*_returning`` flags come from the dialect and are final
     once the first connection has told SQLAlchemy the server version (MariaDB gained ``RETURNING`` in
@@ -273,6 +281,7 @@ class DataSourceCapabilities:
     fast_autocommit_reads: bool
     isolation_levels: frozenset[str]
     max_in_params: int
+    multiple_active_results: bool
 
     def supports_isolation(self, level: str) -> bool:
         """Whether *level* (``"SERIALIZABLE"``, ``"read committed"``...) is available on this datasource."""
@@ -304,6 +313,7 @@ class DataSourceCapabilities:
             fast_autocommit_reads=name == "postgresql",
             isolation_levels=levels - {"AUTOCOMMIT"},
             max_in_params=max_in,
+            multiple_active_results=name not in _SINGLE_RESULT_DIALECTS,
         )
 
 

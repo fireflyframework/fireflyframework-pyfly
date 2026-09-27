@@ -58,6 +58,7 @@ from pyfly.data.relational.dialect_customizers import (
     run_after_begin,
     uses_sqlite_begin_recipe,
 )
+from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 
 
 class _Base(DeclarativeBase):
@@ -428,42 +429,57 @@ class TestCapabilities:
         assert caps.dialect == "sqlite" and caps.driver == "aiosqlite"
         assert caps.supports_savepoints is True
         assert caps.fast_autocommit_reads is False
+        assert caps.multiple_active_results is True
         assert caps.isolation_levels == frozenset({"READ UNCOMMITTED", "SERIALIZABLE"})
         assert caps.supports_isolation("serializable") and not caps.supports_isolation("READ COMMITTED")
         assert caps.max_in_params in (999, 32766)
 
     @pytest.mark.parametrize(
-        ("url", "dialect", "fast", "levels"),
+        ("url", "dialect", "fast", "levels", "multiple_active_results"),
         [
             (
                 "postgresql+asyncpg://u@h/db",
                 "postgresql",
                 True,
                 {"READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"},
+                True,
             ),
             (
                 "mysql+asyncmy://u@h/db",
                 "mysql",
                 False,
                 {"READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"},
+                False,
             ),
             (
                 "mariadb+asyncmy://u@h/db",
                 "mariadb",
                 False,
                 {"READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"},
+                False,
             ),
         ],
     )
     async def test_server_dialects_before_connecting(
-        self, url: str, dialect: str, fast: bool, levels: set[str], registries: list[DataSourceRegistry]
+        self,
+        url: str,
+        dialect: str,
+        fast: bool,
+        levels: set[str],
+        multiple_active_results: bool,
+        registries: list[DataSourceRegistry],
     ) -> None:
-        # asyncpg has no READ UNCOMMITTED; only PostgreSQL gets the autocommit-read accelerator.
-        caps = _registry(registries, _config({"url": url})).primary.capabilities
+        # asyncpg has no READ UNCOMMITTED; only PostgreSQL gets the autocommit-read accelerator; a MySQL or
+        # MariaDB connection has one active result at a time.
+        datasource = _registry(registries, _config({"url": url})).primary
+        caps = datasource.capabilities
         assert caps.dialect == dialect
         assert caps.fast_autocommit_reads is fast
         assert caps.isolation_levels == frozenset(levels)
         assert caps.supports_savepoints is True
+        assert caps.multiple_active_results is multiple_active_results
+        manager = SqlAlchemyTransactionManager.for_datasource(datasource)
+        assert manager.capabilities.multiple_active_results is multiple_active_results
 
     def test_of_a_dialect(self) -> None:
         engine = create_async_engine("postgresql+asyncpg://u@h/db")

@@ -481,18 +481,23 @@ class Repository(Generic[T, ID]):
         """Stream entities lazily (``Flux<T>`` analogue) via a server-side cursor.
 
         Rows are fetched in growing batches (:data:`STREAM_FIRST_BATCH` rows first, up to
-        :data:`STREAM_BATCH_SIZE`): one fetch, and one pass of the unit's operation guard, per batch.
+        :data:`STREAM_BATCH_SIZE`): one fetch, and one pass of the unit's operation guard, per batch. A
+        stream closed before its end (``aclose()``, ``contextlib.aclosing``) closes its cursor at once, which
+        frees the connection (on MySQL and MariaDB, nothing else runs on it while the cursor is open).
         """
         session = self._require_session()
         stmt = self._filtered_select(**filters)
         if criteria is not None:
             stmt = self._apply_orders(stmt, criteria)
         result = await session.stream_scalars(stmt)
-        size = STREAM_FIRST_BATCH
-        while batch := await result.fetchmany(size):
-            for row in batch:
-                yield row
-            size = min(size * 5, STREAM_BATCH_SIZE)
+        try:
+            size = STREAM_FIRST_BATCH
+            while batch := await result.fetchmany(size):
+                for row in batch:
+                    yield row
+                size = min(size * 5, STREAM_BATCH_SIZE)
+        finally:
+            await result.close()
 
     async def _find_page(self, pageable: Pageable, **filters: Any) -> Page[T]:
         session = self._require_session()

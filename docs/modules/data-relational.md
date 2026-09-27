@@ -596,7 +596,9 @@ A repository call resolves its session when it runs:
   explicit fetch.
 - `stream_all` captures the unit at its first step, or opens its own read unit (always a transaction:
   server-side cursors need one), and owns that connection until the iterator is exhausted or
-  `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`.
+  `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`: closing it early closes its
+  cursor at once (on MySQL and MariaDB that reads the rest of its rows and drops them, as the
+  connection requires). A stream still open when its unit completes is closed first.
 
 Every `asyncio` task created inside a transaction inherits its unit. That is made safe:
 
@@ -630,6 +632,22 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
           except IntegrityError:
               rejected.append(row)  # rolled back to its savepoint; the rest of the unit goes on
       return rejected
+  ```
+- On MySQL and MariaDB a connection has one active result at a time, so an open stream (`stream_all`,
+  `session.stream()`) holds its unit until it is exhausted or closed: any other statement on the unit
+  meanwhile, from the stream's own loop or from a sibling in `gather()`, raises
+  `IllegalTransactionStateError` naming the stream, before it reaches the server (asyncmy would corrupt
+  the connection instead). The stream goes on, and the unit stays usable. Collect the rows first, close
+  the stream early, or give the other work a unit of its own (`Propagation.REQUIRES_NEW`, `detached()`).
+  PostgreSQL and SQLite run other statements beside an open stream, and nothing changes there
+  (`DataSource.capabilities.multiple_active_results`).
+
+  ```python
+  @transactional
+  async def reprice(self) -> None:
+      stale = [product async for product in self.products.stream_all() if product.stale]
+      for product in stale:  # after the stream: on MySQL a save inside the loop above is refused
+          await self.products.save(product.repriced())
   ```
 - A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
   instead of writing into a transaction nobody will commit. So does a `NESTED` step whose unit ended
@@ -1160,6 +1178,7 @@ rebuild its connection string or restart the application.
 | `supports_savepoints` | SQLite (with the recipe), PostgreSQL, MySQL, MariaDB, SQL Server and Oracle. |
 | `supports_returning`, `insert_returning`, `update_returning`, `delete_returning` | Final after the first connection. For example, MariaDB 11 has `INSERT ... RETURNING` and MySQL 8 has none. |
 | `fast_autocommit_reads` | `True` only on PostgreSQL. |
+| `multiple_active_results` | Whether a statement can run on a connection while a streamed result is open on it. `False` on MySQL and MariaDB: the unit of work then refuses other statements until the stream is exhausted or closed. |
 | `isolation_levels` | The driver's levels. asyncpg has no `READ UNCOMMITTED`; SQLite has only `SERIALIZABLE` and `READ UNCOMMITTED`. |
 | `max_in_params` | The largest IN list a statement may bind. |
 
