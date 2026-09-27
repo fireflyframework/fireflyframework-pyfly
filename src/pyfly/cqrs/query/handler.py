@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 from types import get_original_bases as get_orig_bases
-from typing import Generic, TypeVar, get_args
+from typing import Any, Generic, TypeVar, get_args
 
 from pyfly.cqrs.context.execution_context import ExecutionContext
+from pyfly.cqrs.types import QueryCacheScope
 from pyfly.kernel.exceptions import is_expected_error
 
 Q = TypeVar("Q")  # Query type
@@ -51,7 +52,7 @@ class QueryHandler(Generic[Q, R]):
     def __init__(self) -> None:
         self._query_type: type | None = self._resolve_query_type()
 
-    def _resolve_query_type(self) -> type | None:
+    def _handler_type_args(self) -> tuple[Any, ...]:
         for base in get_orig_bases(type(self)):
             origin = getattr(base, "__origin__", None)
             if origin is not None and (
@@ -59,11 +60,26 @@ class QueryHandler(Generic[Q, R]):
             ):
                 args = get_args(base)
                 if args:
-                    return args[0] if isinstance(args[0], type) else None
+                    return args
+        return ()
+
+    def _resolve_query_type(self) -> type | None:
+        args = self._handler_type_args()
+        if args:
+            return args[0] if isinstance(args[0], type) else None
         return None
 
     def get_query_type(self) -> type | None:
         return self._query_type
+
+    def get_result_type(self) -> Any:
+        """The declared result type ``R`` of ``QueryHandler[Q, R]`` (``Any`` when not declared).
+
+        The bus rebuilds a cache hit as this type (a JSON cache returns plain JSON types) and refuses to
+        cache a result type that is an ORM-mapped class or a Beanie document.
+        """
+        args = self._handler_type_args()
+        return args[1] if len(args) > 1 else Any
 
     # ── caching metadata ───────────────────────────────────────
 
@@ -77,6 +93,32 @@ class QueryHandler(Generic[Q, R]):
     def get_cache_ttl_seconds(self) -> int | None:
         """Cache TTL in seconds, or *None* for the default."""
         return getattr(type(self), "__pyfly_cache_ttl__", None)
+
+    def get_cache_key_prefix(self) -> str | None:
+        """The prefix of this handler's cache keys (``cache_key_prefix``), or *None*.
+
+        The bus stores a result under ``<prefix>:<query cache key>``; the prefix also names the group of
+        entries an event-tag eviction removes (see :meth:`get_cache_evict_events`).
+        """
+        prefix = getattr(type(self), "__pyfly_cache_key_prefix__", None)
+        return str(prefix) if prefix else None
+
+    def get_cache_scope(self) -> QueryCacheScope:
+        """Whose results a cached entry holds (``USER`` unless the handler declares otherwise).
+
+        ``USER`` keys an entry by tenant, organization and user, ``TENANT`` by tenant and organization, and
+        ``GLOBAL`` shares it with every caller (declare it only for data that is the same for everyone).
+        """
+        scope = getattr(type(self), "__pyfly_cache_scope__", None)
+        return QueryCacheScope(scope) if scope is not None else QueryCacheScope.USER
+
+    def caches_none(self) -> bool:
+        """Whether a ``None`` result is cached (negative caching); off unless the handler declares it."""
+        return bool(getattr(type(self), "__pyfly_cache_none__", False))
+
+    def get_cache_evict_events(self) -> tuple[type, ...]:
+        """The event types that invalidate this handler's cached entries (``@cache_evict(...)``)."""
+        return tuple(getattr(type(self), "__pyfly_cache_evict_events__", ()))
 
     # ── template method ────────────────────────────────────────
 

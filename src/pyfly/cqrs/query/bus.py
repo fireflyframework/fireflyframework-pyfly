@@ -17,20 +17,41 @@ Mirrors Java's ``QueryBus`` interface and ``DefaultQueryBus``
 implementation.  The full pipeline is:
 
     correlate → validate → authorize → cache check → execute → cache put → metrics
+
+Caching (a ``@query_handler(cacheable=True)`` handler, a cacheable query, a cache adapter):
+
+- **Keys carry the caller's scope.** An entry is keyed by the query's ``get_cache_key()`` (after the
+  handler's ``cache_key_prefix``) and by the caller: the tenant, organization and user of the
+  ``ExecutionContext`` of :meth:`DefaultQueryBus.query_with_context`, completed with the ambient tenant
+  (``X-Tenant-Id``) and authenticated user of the request. A result cached for one tenant or user is never
+  served to another. The handler's cache scope narrows that (``TENANT``) or lifts it (``GLOBAL``, for data
+  that is the same for everyone). A ``ContextAwareQueryHandler`` is never served from the cache without a
+  context: it refuses such a call.
+- **Writes wait for the commit.** Inside a unit of work the result is stored after the commit, and not
+  at all on rollback (it may be a row that never commits).
+- **Hits have the declared type.** A hit is rebuilt as the handler's result type ``R``, so a JSON cache
+  (Redis, PostgreSQL) returns the DTO, not a ``dict``. A result type that is an ORM-mapped class or a
+  Beanie document is never cached (a WARNING names the handler once).
+- **None** is cached only when the handler opts in (``cache_none``); otherwise a ``None`` result is not
+  stored, and the next call runs the handler again.
+- ``pyfly.cqrs.query.caching_enabled: false`` turns the query cache off.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any, Protocol, runtime_checkable
 
+from pyfly.cache.serialization import restore, uncacheable_type
 from pyfly.cqrs.authorization.service import AuthorizationService
+from pyfly.cqrs.cache.adapter import QueryCacheAdapter, query_cache_key, scoped_key
 from pyfly.cqrs.command.metrics import CqrsMetricsService
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
 from pyfly.cqrs.context.execution_context import ExecutionContext
 from pyfly.cqrs.exceptions import QueryProcessingException
-from pyfly.cqrs.query.handler import QueryHandler
+from pyfly.cqrs.query.handler import ContextAwareQueryHandler, QueryHandler
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Query
 
@@ -67,8 +88,11 @@ class DefaultQueryBus:
     3. Authorize query
     4. Check cache (if enabled & handler supports caching)
     5. Execute handler on cache miss
-    6. Store result in cache
+    6. Store result in cache (after the commit inside a unit of work)
     7. Record metrics
+
+    *cache_adapter* is a :class:`~pyfly.cqrs.cache.adapter.QueryCacheAdapter`; a plain
+    :class:`~pyfly.cache.ports.outbound.CacheAdapter` is wrapped in one.
     """
 
     def __init__(
@@ -79,13 +103,21 @@ class DefaultQueryBus:
         metrics: CqrsMetricsService | None = None,
         cache_adapter: Any | None = None,
         default_cache_ttl: int = 900,
+        *,
+        caching_enabled: bool = True,
     ) -> None:
         self._registry = registry
         self._validation = validation
         self._authorization = authorization
         self._metrics = metrics or CqrsMetricsService()
-        self._cache = cache_adapter
+        self._cache: QueryCacheAdapter | None = (
+            cache_adapter
+            if cache_adapter is None or isinstance(cache_adapter, QueryCacheAdapter)
+            else QueryCacheAdapter(cache_adapter)
+        )
         self._default_cache_ttl = default_cache_ttl
+        self._caching_enabled = caching_enabled
+        self._uncacheable: dict[type, bool] = {}
 
     # ── QueryBus protocol ──────────────────────────────────────
 
@@ -105,10 +137,13 @@ class DefaultQueryBus:
         return self._registry.has_query_handler(query_type)
 
     async def clear_cache(self, cache_key: str) -> None:
+        """Evict the entries of *cache_key* (a query's ``get_cache_key()``) for every caller, under every
+        registered handler's ``cache_key_prefix`` too; after the commit inside a unit of work."""
         if self._cache:
-            await self._cache.evict(cache_key)
+            await evict_query_key(self._cache, self._registry, cache_key)
 
     async def clear_all_cache(self) -> None:
+        """Evict every query-cache entry, and nothing else the cache holds."""
         if self._cache:
             await self._cache.clear()
 
@@ -135,8 +170,9 @@ class DefaultQueryBus:
             # 4. Find handler
             handler = self._registry.find_query_handler(type(query))
 
-            # 5. Cache check
-            cached_result = await self._try_cache_get(query, handler)
+            # 5. Cache check (keyed by the caller's scope)
+            cache_key = self._cache_key(query, handler, context)
+            cached_result = await self._try_cache_get(cache_key, handler)
             if cached_result is not _CACHE_MISS:
                 duration = self._metrics.now() - start
                 self._metrics.record_query_success(query, duration)
@@ -150,7 +186,7 @@ class DefaultQueryBus:
                 result = await handler.handle(query)
 
             # 7. Cache put
-            await self._try_cache_put(query, handler, result)
+            await self._try_cache_put(cache_key, handler, result)
 
             # 8. Metrics
             duration = self._metrics.now() - start
@@ -172,52 +208,70 @@ class DefaultQueryBus:
 
     # ── caching helpers ────────────────────────────────────────
 
-    async def _try_cache_get(self, query: Query[Any], handler: QueryHandler[Any, Any]) -> Any:
-        if not self._cache:
+    def _cache_key(
+        self, query: Query[Any], handler: QueryHandler[Any, Any], context: ExecutionContext | None
+    ) -> str | None:
+        """The cache key of this call, or ``None`` when it is not cached."""
+        if not self._cache or not self._caching_enabled:
+            return None
+        if not query.is_cacheable() or not handler.supports_caching():
+            return None
+        if context is None and isinstance(handler, ContextAwareQueryHandler):
+            return None  # the handler refuses a call without a context; a hit must not bypass that
+        if not self._result_type_cacheable(handler):
+            return None
+        raw = query.get_cache_key()
+        if not raw:
+            return None
+        return scoped_key(query_cache_key(handler, raw), handler.get_cache_scope(), context)
+
+    def _result_type_cacheable(self, handler: QueryHandler[Any, Any]) -> bool:
+        handler_type = type(handler)
+        cacheable = self._uncacheable.get(handler_type)
+        if cacheable is None:
+            reason = uncacheable_type(handler.get_result_type())
+            cacheable = reason is None
+            self._uncacheable[handler_type] = cacheable
+            if reason is not None:
+                _logger.warning(
+                    "query_cache_disabled handler=%s: its result type is %s, which is never cached (a cached ORM "
+                    "object would be shared across requests and outlive its session); return a DTO instead",
+                    handler_type.__qualname__,
+                    reason,
+                )
+        return cacheable
+
+    async def _try_cache_get(self, cache_key: str | None, handler: QueryHandler[Any, Any]) -> Any:
+        if cache_key is None or self._cache is None:
             return _CACHE_MISS
-        if not query.is_cacheable():
+        found, value = await self._cache.lookup(cache_key)
+        if not found:
             return _CACHE_MISS
-        if not handler.supports_caching():
-            return _CACHE_MISS
-        cache_key = self._build_cache_key(query)
-        if cache_key is None:
-            return _CACHE_MISS
+        if value is None:
+            return None if handler.caches_none() else _CACHE_MISS
         try:
-            result = await self._cache.get(cache_key)
-            if result is None:
-                return _CACHE_MISS
-            return result
-        except Exception as exc:
-            _logger.warning("Cache get failed for %s: %s", cache_key, exc)
+            return restore(value, handler.get_result_type())
+        except Exception as exc:  # noqa: BLE001 — an entry that no longer fits the result type is a miss
+            _logger.warning("Cached result for %s no longer fits %s: %s", cache_key, type(handler).__name__, exc)
             return _CACHE_MISS
 
-    async def _try_cache_put(self, query: Query[Any], handler: QueryHandler[Any, Any], result: Any) -> None:
-        if not self._cache:
+    async def _try_cache_put(self, cache_key: str | None, handler: QueryHandler[Any, Any], result: Any) -> None:
+        if cache_key is None or self._cache is None:
             return
-        if not query.is_cacheable():
-            return
-        if not handler.supports_caching():
-            return
-        cache_key = self._build_cache_key(query)
-        if cache_key is None:
-            return
+        if result is None and not handler.caches_none():
+            return  # no negative caching unless the handler opts in
         ttl_seconds = handler.get_cache_ttl_seconds() or self._default_cache_ttl
-        try:
-            from datetime import timedelta
+        await self._cache.put(cache_key, result, ttl=timedelta(seconds=ttl_seconds))
 
-            await self._cache.put(cache_key, result, ttl=timedelta(seconds=ttl_seconds))
-        except Exception as exc:
-            _logger.warning("Cache put failed for %s: %s", cache_key, exc)
 
-    @staticmethod
-    def _build_cache_key(query: Query[Any]) -> str | None:
-        """Return the raw cache key from the query — NO prefix.
-
-        The :class:`~pyfly.cqrs.cache.adapter.QueryCacheAdapter` is the single
-        layer that applies the ``:cqrs:`` prefix, so the bus must pass the raw
-        key to the adapter on every call (get, put, evict).
-        """
-        key = query.get_cache_key()
-        if key:
-            return key
-        return None
+async def evict_query_key(cache: QueryCacheAdapter, registry: HandlerRegistry, cache_key: str) -> None:
+    """Evict *cache_key* (a query's ``get_cache_key()``) for every caller's scope, as stored by a handler
+    without a ``cache_key_prefix`` and by each registered handler that declares one."""
+    await cache.evict(cache_key)
+    prefixes = {
+        prefix
+        for query_type in registry.get_registered_query_types()
+        if (prefix := registry.find_query_handler(query_type).get_cache_key_prefix()) is not None
+    }
+    for prefix in sorted(prefixes):
+        await cache.evict(f"{prefix}:{cache_key}")

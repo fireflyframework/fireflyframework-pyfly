@@ -14,10 +14,10 @@
 """Tests for DefaultQueryBus pipeline with caching."""
 
 from dataclasses import dataclass
-from datetime import timedelta
 
 import pytest
 
+from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
 from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
@@ -87,28 +87,6 @@ class CacheableGetOrderHandler(QueryHandler[GetOrderQuery, dict]):
         return {"id": query.order_id, "status": "fresh"}
 
 
-# -- Fake cache adapter -----------------------------------------------------
-
-
-class FakeCacheAdapter:
-    """In-memory cache adapter mimicking the CacheAdapter port."""
-
-    def __init__(self) -> None:
-        self._store: dict[str, object] = {}
-
-    async def get(self, key: str) -> object | None:
-        return self._store.get(key)
-
-    async def put(self, key: str, value: object, ttl: timedelta | None = None) -> None:
-        self._store[key] = value
-
-    async def evict(self, key: str) -> None:
-        self._store.pop(key, None)
-
-    async def clear(self) -> None:
-        self._store.clear()
-
-
 # -- Tests ------------------------------------------------------------------
 
 
@@ -170,7 +148,7 @@ class TestDefaultQueryBus:
     async def test_cache_hit_returns_cached_result(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query1 = GetOrderQuery(order_id="ord-cached")
@@ -186,7 +164,7 @@ class TestDefaultQueryBus:
     async def test_cache_miss_executes_handler(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         result = await bus.query(GetOrderQuery(order_id="ord-new"))
@@ -196,7 +174,7 @@ class TestDefaultQueryBus:
     async def test_cache_disabled_when_query_not_cacheable(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         q1 = GetOrderQuery(order_id="ord-1")
@@ -212,7 +190,7 @@ class TestDefaultQueryBus:
     async def test_cache_disabled_when_handler_not_cacheable(self, registry: HandlerRegistry) -> None:
         handler = GetOrderHandler()  # not decorated with cacheable=True
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         await bus.query(GetOrderQuery(order_id="ord-1"))
@@ -222,15 +200,15 @@ class TestDefaultQueryBus:
     async def test_clear_cache_evicts_key(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query = GetOrderQuery(order_id="ord-evict")
         await bus.query(query)
         assert handler.call_count == 1
 
-        # _build_cache_key now returns the RAW key (no ":cqrs:" prefix).
-        # FakeCacheAdapter does not add any prefix, so we evict using the raw key.
+        # The bus takes the query's own key and evicts it for every caller (the ":cqrs:" prefix and the
+        # caller's scope are the query cache's business).
         cache_key = query.get_cache_key()
         await bus.clear_cache(cache_key)
 
@@ -240,7 +218,7 @@ class TestDefaultQueryBus:
     async def test_clear_all_cache(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         await bus.query(GetOrderQuery(order_id="ord-all"))

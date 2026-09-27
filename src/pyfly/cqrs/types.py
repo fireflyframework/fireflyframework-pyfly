@@ -24,6 +24,7 @@ and :mod:`pyfly.cqrs.query.handler` (``QueryHandler[Q, R]``).
 
 from __future__ import annotations
 
+import enum
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar, cast
 from uuid import uuid4
@@ -32,6 +33,25 @@ from pyfly.cqrs.authorization.types import AuthorizationResult
 from pyfly.cqrs.validation.types import ValidationResult
 
 R = TypeVar("R")
+
+
+class QueryCacheScope(enum.Enum):
+    """Whose results a cached query entry holds, and so who may be served it.
+
+    The query bus keys an entry by the caller's identity: the ``ExecutionContext`` of
+    ``query_with_context``, completed with the ambient tenant (``X-Tenant-Id``) and authenticated user of
+    the request. Declare a handler's scope with ``@cacheable(scope=...)`` from
+    :mod:`pyfly.cqrs.cache.decorators`.
+    """
+
+    USER = "user"
+    """Keyed by tenant, organization and user (the default): nobody is served another user's result."""
+
+    TENANT = "tenant"
+    """Keyed by tenant and organization: the users of one tenant share entries."""
+
+    GLOBAL = "global"
+    """Not keyed by caller: every caller shares the entry. Only for data that is the same for everyone."""
 
 
 class Command(Generic[R]):
@@ -168,6 +188,9 @@ class Query(Generic[R]):
         Uses a stable SHA-256 digest (not the process-randomized built-in
         ``hash()``) so the same query maps to the same key across processes and
         restarts (audit #100).
+
+        The key names the query, not the caller: the bus adds the handler's ``cache_key_prefix`` and the
+        caller's tenant and user (:class:`QueryCacheScope`), so do not put them in it yourself.
         """
         import dataclasses
         import hashlib
