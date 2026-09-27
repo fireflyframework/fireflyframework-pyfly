@@ -29,10 +29,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.transaction import TransactionTemplate, current_unit_of_work
-from pyfly.eventsourcing.checkpoint import CheckpointStore, InMemoryCheckpointStore
+from pyfly.eventsourcing.checkpoint import CheckpointStore, InMemoryCheckpointStore, SqlAlchemyCheckpointStore
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
-from pyfly.eventsourcing.store import InMemoryEventStore
+from pyfly.eventsourcing.store import InMemoryEventStore, SqlAlchemyEventStore
 from pyfly.scheduling.adapters.lease_lock import LeaseLock
 
 
@@ -166,6 +166,41 @@ async def test_without_checkpoints_the_runner_keeps_its_position_in_memory() -> 
     await runner.stop()
     await runner.stop()  # idempotent
     assert recorder.seen == ["e0", "e1", "e2", "more0"]
+
+
+async def test_a_durable_store_with_checkpoints_in_memory_is_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of WP08: a runner over the SQL event store without ``checkpoints=`` replays the store at every start
+    and runs on every replica (C066, C067), silently. It still runs, and says so at start."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    try:
+        store = SqlAlchemyEventStore(engine)
+        await store.start()
+        durable = ProjectionRunner(FunctionProjection("durable", _Recorder()), store, poll_interval_s=0.01)
+        with caplog.at_level("WARNING", logger="pyfly.eventsourcing.projection"):
+            await durable.start()
+            await durable.stop()
+        warnings = [record for record in caplog.records if record.msg == "projection_checkpoints_in_memory"]
+        assert [record.levelname for record in warnings] == ["WARNING"]
+        assert warnings[0].projection == "durable"  # type: ignore[attr-defined]
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="pyfly.eventsourcing.projection"):
+            checkpointed = ProjectionRunner(
+                FunctionProjection("checkpointed", _Recorder()),
+                store,
+                poll_interval_s=0.01,
+                checkpoints=SqlAlchemyCheckpointStore(engine),
+            )
+            await checkpointed.start()
+            await checkpointed.stop()
+            in_memory = ProjectionRunner(FunctionProjection("memory", _Recorder()), InMemoryEventStore())
+            await in_memory.start()
+            await in_memory.stop()
+        assert "projection_checkpoints_in_memory" not in caplog.text
+    finally:
+        await engine.dispose()
 
 
 async def test_the_runner_works_outside_the_transaction_that_started_it() -> None:

@@ -82,7 +82,8 @@ def _takes_positions(store: EventStore) -> bool:
 class ProjectionRunner:
     """Feeds the events of a store's global stream to a projection (see the module documentation).
 
-    - *checkpoints*: where the projection's position is kept (in the runner when ``None``).
+    - *checkpoints*: where the projection's position is kept (in the runner when ``None``: a new runner starts
+      from the beginning, and :meth:`start` logs a WARNING when the store is a durable one).
     - *batch_size*: the events read, applied and checkpointed together.
     - *poll_interval_s*: the sleep once caught up, and before a failed event is retried.
     - *lease*: the lease that makes one runner active; ``None`` takes the checkpoint store's lease when it has
@@ -130,6 +131,7 @@ class ProjectionRunner:
         if start_from == "latest" and not callable(getattr(store, "last_position", None)):
             raise TypeError(f"start_from='latest' needs {type(store).__name__}.last_position()")
         self._checkpoints: CheckpointStore = checkpoints if checkpoints is not None else InMemoryCheckpointStore()
+        self._own_checkpoints = checkpoints is None
         if lease is None:
             offered = getattr(checkpoints, "projection_lease", None)
             lease = offered() if callable(offered) else False
@@ -156,6 +158,17 @@ class ProjectionRunner:
         if self._start_from == "latest":
             last_position: Callable[[], Awaitable[int]] = self._store.last_position  # type: ignore[attr-defined]
             self._latest = await last_position()
+        if self._own_checkpoints and self._positions and getattr(self._store, "engine", None) is not None:
+            _logger.warning(
+                "projection_checkpoints_in_memory",
+                extra={
+                    "projection": self.name,
+                    "store": type(self._store).__name__,
+                    "hint": "the events are durable but the runner keeps its position in memory: it applies the whole "
+                    "store again at every start, and on every replica; pass checkpoints= (the "
+                    "projection_checkpoint_store bean)",
+                },
+            )
         if not self._positions:
             _logger.warning(
                 "projection_store_without_positions",
