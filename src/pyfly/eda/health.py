@@ -15,9 +15,11 @@
 
 Strategy is broker-aware via duck typing:
 
-* If the publisher exposes a ``ping()`` coroutine, call it.
-* Else, if it exposes a ``_started`` boolean (matches every adapter in
-  ``pyfly.eda.adapters``), surface that.
+* If the publisher exposes a ``health_status()`` coroutine, its answer is the indicator's: the outbox buses
+  (``database``, ``postgres``) report whether they run, whether their database answers, and the state of their
+  PostgreSQL ``LISTEN`` connection (``DOWN`` while a lost one is being reopened: events then wait for the poll).
+* Else, if the publisher exposes a ``ping()`` coroutine, call it.
+* Else, if it exposes a ``_started`` boolean, surface that.
 * Else, return ``UP`` (the in-memory bus has no failure mode).
 
 This keeps the indicator broker-agnostic. For a deeper check, register
@@ -37,6 +39,18 @@ class EventPublisherHealthIndicator:
         self._publisher = publisher
 
     async def health(self) -> HealthStatus:
+        status = getattr(self._publisher, "health_status", None)
+        if callable(status):
+            try:
+                result = await status()
+            except Exception as exc:
+                return HealthStatus(
+                    status="DOWN",
+                    details={"error": type(exc).__name__, "message": str(exc)[:200]},
+                )
+            if isinstance(result, HealthStatus):
+                return result
+
         ping = getattr(self._publisher, "ping", None)
         if callable(ping):
             try:
