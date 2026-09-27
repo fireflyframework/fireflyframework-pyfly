@@ -42,7 +42,8 @@ class DistributedLock(Protocol):
 
     An implementation must end the lock after *ttl* seconds when its holder has not released it (a hung
     job), and a release by a holder whose lock already ended must not end a lock another holder took since.
-    The lease table tells holders apart per acquisition, the in-process lock per task, and
+    The lease table tells holders apart per acquisition, the in-process lock and the PostgreSQL advisory lock
+    per task (a task whose lock ended at the TTL is displaced, and its late release is a no-op), and
     ``RedisDistributedLock`` per lock instance (so across nodes, not between two runs in one process).
     """
 

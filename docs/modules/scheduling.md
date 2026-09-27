@@ -655,8 +655,11 @@ pyfly:
   (`scheduler_advisory_lock_expired`) but does not cancel the job, as with the
   lease table; and an acquisition or an unlock that fails (a cancellation
   included) discards the connection instead of returning a session that may
-  hold the lock to the pool. The datasource must be PostgreSQL, or the startup
-  fails.
+  hold the lock to the pool. An acquisition belongs to the task that took it:
+  a tick whose lock ended at `lock_ttl` (or whose session the server ended,
+  logged as `scheduler_advisory_lock_lost`) does not release the lock the next
+  tick of the process took since. The datasource must be PostgreSQL, or the
+  startup fails.
 
 **When to use which:**
 

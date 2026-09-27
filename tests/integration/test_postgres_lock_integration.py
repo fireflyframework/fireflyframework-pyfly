@@ -16,9 +16,9 @@
 - :class:`LeaseLock`, the default database lock, on every relational lane: a ShedLock-style lease row that
   honors its TTL and holds no connection while the job runs (F10, C150).
 - :class:`PostgresAdvisoryLock`, the opt-in PostgreSQL accelerator: its lock connection is idle, not idle in
-  transaction, so a server idle timeout never drops it mid-job (F10); a watchdog ends it at the TTL (C150);
-  an unlock that fails discards the connection instead of returning a session that still holds the lock to
-  the pool (C175).
+  transaction, so a server idle timeout never drops it mid-job (F10); a watchdog ends it at the TTL (C150),
+  and the tick it ended does not release the lock the next tick took since; an unlock that fails discards the
+  connection instead of returning a session that still holds the lock to the pool (C175).
 """
 
 from __future__ import annotations
@@ -337,6 +337,16 @@ async def _eventually_free(admin: AsyncEngine, name: str) -> list[int]:
     return holders
 
 
+async def _eventually_held(admin: AsyncEngine, name: str) -> list[int]:
+    """The lock's holders once somebody holds it, polled for up to two seconds."""
+    for _ in range(40):
+        holders = await _lock_holders(admin, name)
+        if holders:
+            return holders
+        await asyncio.sleep(0.05)
+    return holders
+
+
 async def _lock_holders(admin: AsyncEngine, name: str) -> list[int]:
     key = PostgresAdvisoryLock._key(name)
     async with admin.connect() as connection:
@@ -399,6 +409,163 @@ async def test_the_advisory_watchdog_ends_a_hung_holder_s_lock_at_its_ttl(
     assert await _lock_holders(admin, "nightly") != []
     await node_b.release("nightly")
     assert await _eventually_free(admin, "nightly") == []
+
+
+@pytest.mark.backends(PG)
+async def test_a_late_release_keeps_the_lock_the_next_tick_of_the_process_took_since(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """The DistributedLock contract: a release by a holder whose lock already ended must not end a lock another
+    holder took since. Two ticks of one job in one process: the watchdog ends the first one's lock at its ttl,
+    the second takes it, then the first ends and releases late. That release ended the second tick's lock, and
+    another node ran the job beside it."""
+    node_a = PostgresAdvisoryLock(relational_backend.create_engine())
+    node_b = PostgresAdvisoryLock(relational_backend.create_engine())
+    first_lock_ended, first_may_end = asyncio.Event(), asyncio.Event()
+    second_holds, second_may_end = asyncio.Event(), asyncio.Event()
+
+    async def first_tick() -> None:
+        assert await node_a.try_acquire("nightly", 0.3) is True
+        await first_may_end.wait()  # hangs past its ttl
+        await node_a.release("nightly")
+
+    async def second_tick() -> None:
+        await first_lock_ended.wait()
+        assert await node_a.try_acquire("nightly", 60.0) is True
+        second_holds.set()
+        await second_may_end.wait()
+        await node_a.release("nightly")
+
+    first, second = asyncio.create_task(first_tick()), asyncio.create_task(second_tick())
+    try:
+        await asyncio.sleep(0.3)
+        assert await _eventually_free(admin, "nightly") == []  # the watchdog ended the first tick's lock
+        first_lock_ended.set()
+        await second_holds.wait()
+        first_may_end.set()
+        await first
+
+        assert await node_b.try_acquire("nightly", 60.0) is False  # the second tick still holds it
+        assert await _lock_holders(admin, "nightly") != []
+        second_may_end.set()
+        await second
+        assert await _eventually_free(admin, "nightly") == []  # the second tick's own release ends it
+    finally:
+        first_may_end.set()
+        second_may_end.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await node_b.stop()
+        await node_a.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_a_holder_whose_session_ended_does_not_release_the_lock_taken_since(
+    relational_backend: RelationalBackend, admin: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The server ends the session holding the lock (a terminated backend, a restart) while the job runs:
+    another run of the job in this process takes the lock, and the first run's late release leaves it alone.
+    The first run's hold was overwritten: its connection stayed checked out, and its release ended the second
+    run's lock."""
+    engine = relational_backend.create_engine(pool_size=2, max_overflow=0)
+    node_a = PostgresAdvisoryLock(engine)
+    node_b = PostgresAdvisoryLock(relational_backend.create_engine())
+    first_may_end, second_holds, second_may_end = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def first_run() -> None:
+        assert await node_a.try_acquire("nightly", 60.0) is True
+        await first_may_end.wait()
+        await node_a.release("nightly")
+
+    async def second_run() -> None:
+        assert await node_a.try_acquire("nightly", 60.0) is True
+        second_holds.set()
+        await second_may_end.wait()
+        await node_a.release("nightly")
+
+    first = asyncio.create_task(first_run())
+    second: asyncio.Task[None] | None = None
+    try:
+        [pid] = await _eventually_held(admin, "nightly")
+        async with admin.connect() as connection:
+            await connection.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        assert await _eventually_free(admin, "nightly") == []
+
+        with caplog.at_level(logging.WARNING, logger="pyfly.scheduling.adapters.postgres_lock"):
+            second = asyncio.create_task(second_run())
+            await second_holds.wait()
+        first_may_end.set()
+        await first
+
+        assert await node_b.try_acquire("nightly", 60.0) is False  # the second run still holds it
+        await asyncio.sleep(0.05)  # the lost connection is discarded in the background
+        assert engine.pool.checkedout() == 1  # type: ignore[attr-defined]  # only the second run's
+        second_may_end.set()
+        await second
+        assert await _eventually_free(admin, "nightly") == []
+        assert "scheduler_advisory_lock_lost" in caplog.text
+    finally:
+        first_may_end.set()
+        second_may_end.set()
+        await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
+        await node_b.stop()
+        await node_a.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_a_release_from_a_task_that_never_held_the_lock_ends_it(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """Only a displaced holder's release is a no-op: a task that neither holds the lock nor lost it to the
+    watchdog (a shutdown hook, a job that hands its release to another task) still ends it."""
+    node = PostgresAdvisoryLock(relational_backend.create_engine())
+    acquired = asyncio.create_task(node.try_acquire("nightly", 60.0))
+    assert await acquired is True
+
+    await node.release("nightly")
+
+    assert await _eventually_free(admin, "nightly") == []
+    assert node._held == {}
+
+
+@pytest.mark.backends(PG)
+async def test_a_hung_tick_does_not_let_another_node_run_beside_the_next_tick(
+    relational_backend: RelationalBackend,
+) -> None:
+    """End to end with two schedulers: node A's first tick hangs past ``lock_ttl``, the watchdog ends its lock,
+    and A's second tick takes it. When the first tick ends, its release ended the second tick's lock and node
+    B ran the job while that tick still ran within its ttl."""
+    runs = {"a": 0, "b": 0}
+    release_first, release_second = asyncio.Event(), asyncio.Event()
+
+    class NodeAJob:
+        @scheduled(fixed_rate=timedelta(seconds=1), lock="wp10a-advisory", lock_ttl=timedelta(milliseconds=600))
+        async def run(self) -> None:
+            runs["a"] += 1
+            await (release_first if runs["a"] == 1 else release_second).wait()
+
+    class NodeBJob:
+        @scheduled(fixed_rate=timedelta(milliseconds=50), lock="wp10a-advisory", lock_ttl=timedelta(seconds=30))
+        async def run(self) -> None:
+            runs["b"] += 1
+
+    node_a = TaskScheduler(lock=PostgresAdvisoryLock(relational_backend.create_engine()))
+    node_b = TaskScheduler(lock=PostgresAdvisoryLock(relational_backend.create_engine()))
+    node_a.discover([NodeAJob()])
+    node_b.discover([NodeBJob()])
+    await node_a.start()
+    try:
+        await asyncio.sleep(1.2)  # tick 1's lock ended at 0.6 s; tick 2 took it at 1 s, until 1.6 s
+        assert runs["a"] == 2
+        release_first.set()  # tick 1 ends and releases late
+        await asyncio.sleep(0.05)
+        await node_b.start()
+        await asyncio.sleep(0.15)
+        assert runs["b"] == 0, f"node B ran while node A's second tick held the lock within its ttl: {runs}"
+    finally:
+        release_first.set()
+        release_second.set()
+        await node_a.stop()
+        await node_b.stop()
 
 
 @pytest.mark.backends(PG)

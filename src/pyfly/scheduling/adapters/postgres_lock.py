@@ -26,6 +26,9 @@ A session-level advisory lock lives with the connection that took it, so that co
   server's ``idle_in_transaction_session_timeout`` cannot drop it (and the lock) mid-job;
 - a watchdog ends the lock at its TTL: a hung job's lock is released (the connection closed) and a WARNING
   logged, so the job runs elsewhere after ``lock_ttl`` instead of never;
+- an acquisition belongs to the task that took it. Once the watchdog ended a task's lock (or the server ended
+  the session that held it), that task is *displaced*: its late release is a no-op, so it never ends the lock
+  a later run of the job in this process took since. A release from any other task ends the lock;
 - an acquisition or an unlock that fails, whatever the error (a cancellation included), discards the
   connection instead of returning it to the pool: the pool's reset (a ``ROLLBACK``) keeps a session lock,
   which would stay taken for good.
@@ -37,19 +40,21 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 _logger = logging.getLogger(__name__)
 
 
 class _Hold:
-    """A held lock: its connection, and the watchdog that ends it at the TTL."""
+    """A held lock: its connection, the task that took it, and the watchdog that ends it at the TTL."""
 
-    __slots__ = ("connection", "watchdog")
+    __slots__ = ("connection", "task", "watchdog")
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, task: asyncio.Task[Any] | None) -> None:
         self.connection = connection
+        self.task = task
         self.watchdog: asyncio.TimerHandle | None = None
 
 
@@ -63,9 +68,11 @@ class PostgresAdvisoryLock:
     def __init__(self, engine_factory: Callable[[], Any] | Any) -> None:
         self._engine_factory = engine_factory
         self._engine: Any = None
+        # The bookkeeping below changes only between awaits, so the event loop keeps it consistent.
         self._held: dict[str, _Hold] = {}
-        self._expiring: set[asyncio.Task[None]] = set()
-        self._guard = asyncio.Lock()
+        # name -> the tasks whose lock on it ended without their release: a late release of theirs is a no-op
+        self._displaced: dict[str, weakref.WeakSet[asyncio.Task[Any]]] = {}
+        self._ending: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def _key(name: str) -> int:
@@ -90,12 +97,15 @@ class PostgresAdvisoryLock:
         """Nothing to prepare: advisory locks need no table."""
 
     async def stop(self) -> None:
-        """Release every lock still held and stop the watchdogs (the jobs have drained by now). Idempotent."""
-        for name in list(self._held):
-            with contextlib.suppress(Exception):  # the unlock failure is logged; the connection is gone
-                await self.release(name)
-        if self._expiring:
-            await asyncio.gather(*self._expiring, return_exceptions=True)
+        """Release every lock still held and wait for the watchdogs' unlocks (the jobs have drained by now).
+        Idempotent."""
+        while self._held:
+            name, hold = self._held.popitem()
+            self._cancel_watchdog(hold)
+            await self._end(name, hold)
+        self._displaced.clear()
+        if self._ending:
+            await asyncio.gather(*self._ending, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # DistributedLock
@@ -117,21 +127,46 @@ class PostgresAdvisoryLock:
         if not acquired:
             await conn.close()  # don't leak the connection when the lock is held elsewhere
             return False
-        hold = _Hold(conn)
-        async with self._guard:
-            self._held[name] = hold  # keep the connection — the lock lives with it
+        lost = self._held.pop(name, None)
+        if lost is not None:
+            # The server granted the lock, so the session of the hold still recorded for it ended (a restart,
+            # a terminated backend): that holder lost its lock, and its late release must not end this one.
+            _logger.warning(
+                "scheduler_advisory_lock_lost",
+                extra={"lock": name, "hint": "the session holding the lock ended while its job ran"},
+            )
+            self._retire(name, lost, self._discard(lost.connection))
+        task = asyncio.current_task()
+        hold = _Hold(conn, task)
+        self._held[name] = hold  # keep the connection — the lock lives with it
+        displaced = self._displaced.get(name)
+        if displaced is not None:
+            if task is not None:
+                displaced.discard(task)  # it holds the lock again
+            if not displaced:
+                del self._displaced[name]
         hold.watchdog = asyncio.get_running_loop().call_later(max(ttl, 0.0), self._expire, name, hold)
         return True
 
     async def release(self, name: str) -> None:
         """Unlock *name* and return its connection; on any unlock failure the connection is discarded (the
-        server ends the session and its locks) and the failure is raised."""
-        async with self._guard:
-            hold = self._held.pop(name, None)
+        server ends the session and its locks) and the failure is raised.
+
+        A no-op when *name* is not held, and when the running task is displaced (its lock ended at the TTL):
+        whoever holds *name* since keeps it. A release from any other task ends the lock."""
+        task = asyncio.current_task()
+        hold = self._held.get(name)
+        if hold is None or hold.task is not task:
+            displaced = self._displaced.get(name)
+            if displaced is not None and task is not None and task in displaced:
+                displaced.discard(task)
+                if not displaced:
+                    del self._displaced[name]
+                return
         if hold is None:
             return
-        if hold.watchdog is not None:
-            hold.watchdog.cancel()
+        del self._held[name]
+        self._cancel_watchdog(hold)
         await self._unlock(name, hold)
 
     # ------------------------------------------------------------------
@@ -152,6 +187,14 @@ class PostgresAdvisoryLock:
             raise
         await conn.close()
 
+    async def _end(self, name: str, hold: _Hold) -> None:
+        """Unlock *hold* where nobody awaits the failure: it is logged (the connection was discarded, and the
+        server ended the session and its lock)."""
+        try:
+            await self._unlock(name, hold)
+        except Exception:  # noqa: BLE001 — logged; the connection is gone
+            _logger.warning("scheduler_advisory_unlock_failed", extra={"lock": name}, exc_info=True)
+
     @staticmethod
     async def _discard(conn: Any) -> None:
         """Invalidate *conn* (the server ends its session, and the session's locks) and give its pool slot
@@ -161,16 +204,25 @@ class PostgresAdvisoryLock:
         with contextlib.suppress(Exception):
             await conn.close()
 
-    def _expire(self, name: str, hold: _Hold) -> None:
-        task = asyncio.get_running_loop().create_task(self._end_expired(name, hold))
-        self._expiring.add(task)
-        task.add_done_callback(self._expiring.discard)
+    @staticmethod
+    def _cancel_watchdog(hold: _Hold) -> None:
+        if hold.watchdog is not None:
+            hold.watchdog.cancel()
 
-    async def _end_expired(self, name: str, hold: _Hold) -> None:
-        async with self._guard:
-            if self._held.get(name) is not hold:
-                return  # released meanwhile
-            del self._held[name]
+    def _retire(self, name: str, hold: _Hold, ending: Coroutine[Any, Any, None]) -> None:
+        """Displace the task of *hold* (no longer in ``_held``) and run *ending*, which frees its connection, in
+        the background; :meth:`stop` waits for it."""
+        self._cancel_watchdog(hold)
+        if hold.task is not None:
+            self._displaced.setdefault(name, weakref.WeakSet()).add(hold.task)
+        task = asyncio.get_running_loop().create_task(ending)
+        self._ending.add(task)
+        task.add_done_callback(self._ending.discard)
+
+    def _expire(self, name: str, hold: _Hold) -> None:
+        if self._held.get(name) is not hold:
+            return  # released meanwhile
+        del self._held[name]
         _logger.warning(
             "scheduler_advisory_lock_expired",
             extra={
@@ -179,7 +231,4 @@ class PostgresAdvisoryLock:
                 "raise lock_ttl above the job's longest run",
             },
         )
-        try:
-            await self._unlock(name, hold)
-        except Exception:  # noqa: BLE001 — the connection was discarded; the server released the lock
-            _logger.warning("scheduler_advisory_unlock_failed", extra={"lock": name}, exc_info=True)
+        self._retire(name, hold, self._end(name, hold))
