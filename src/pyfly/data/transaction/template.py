@@ -56,7 +56,10 @@ Completion rules:
   boundary that starts in cleanup code (``except CancelledError:``, ``finally:``, anyio's shielded cleanup)
   counts only the cancel requests that arrive after it started, so its failures keep their type. A
   statement's failure keeps its type in the cancelled unit's own cleanup too (its guarded operation judged
-  it); any other exception raised there ends the unit as cancelled and is logged at WARNING.
+  it), and so does an exception raised from it (``raise DomainError() from error``: the judgment follows
+  ``__cause__``); any other exception raised there, one raised while merely handling that failure
+  included (``except IntegrityError: raise DomainError()``), ends the unit as cancelled and is logged at
+  WARNING.
 """
 
 from __future__ import annotations
@@ -377,11 +380,13 @@ def _poison_on_cancellation(unit: UnitOfWork, error: BaseException | None, since
     (:func:`~pyfly.data.transaction.unit_of_work.raise_cancellation`).
 
     A statement's own failure never gets here as a stand-in: the guarded operation that ran it judged it
-    already. What does is an exception no operation judged, raised while the unit was being cancelled: a
-    driver error from a path outside the operation guard (a raw ``AsyncConnection``), or an exception the
-    unit's own cleanup code raised (a ``finally:`` block in the body). The unit cannot tell them apart, so
-    both end it as cancelled, as the cancel scope that fired expects; the exception is logged at WARNING
-    with its traceback so that a business exception is never lost silently.
+    already, and an exception raised from it (``__cause__``) counts as judged too; one raised while merely
+    handling it (only ``__context__`` links them) does not. What does get here is an exception no operation
+    judged, raised while the unit was being cancelled: a driver error from a path outside the operation
+    guard (a raw ``AsyncConnection``), or an exception the unit's own cleanup code raised (a ``finally:``
+    block in the body). The unit cannot tell them apart, so both end it as cancelled, as the cancel scope
+    that fired expects; the exception is logged at WARNING with its traceback so that a business exception
+    is never lost silently.
     """
     if isinstance(error, asyncio.CancelledError):
         unit.poisoned = True

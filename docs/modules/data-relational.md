@@ -610,17 +610,29 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
 - Savepoints do not fan out. They are a stack on the unit's one connection, and the guard does not span
   the code inside a savepoint, so while a task holds one (a `Propagation.NESTED` step, a
   `session.begin_nested()` block) the unit belongs to that task and to the tasks it starts inside the
-  savepoint. A statement, a savepoint or a `NESTED` step from any other task, such as a sibling in
-  `gather()`, raises `IllegalTransactionStateError` instead of running inside that savepoint, where a
-  `ROLLBACK TO SAVEPOINT` would undo it after it reported success. Run `NESTED` steps and savepoint
-  blocks one after another; to run steps concurrently, give each one a unit of its own
-  (`Propagation.REQUIRES_NEW`, which commits on its own, or `detached()`). A `NESTED` scope that ends
-  while a task it started still holds a savepoint on top of its own neither releases nor rolls back
-  across it: the unit is marked rollback-only and the scope raises `IllegalTransactionStateError`. A
-  unit does not commit under such a task either: a `@transactional` method (or a repository call's own
-  unit) that returns while a child task it started still holds a savepoint rolls back and raises
-  `IllegalTransactionStateError`, since committing would release that savepoint under the child and keep
-  its work even if the child then fails.
+  savepoint. Any operation from another task, such as a sibling in `gather()`, raises
+  `IllegalTransactionStateError` instead of running inside that savepoint, where a `ROLLBACK TO
+  SAVEPOINT` would undo it after it reported success: a write, a read (it would see work the savepoint
+  may still undo, and its autoflush would write inside it), a fetch from a stream, a savepoint or a
+  `NESTED` step. Run `NESTED` steps and savepoint blocks one after another; to run steps concurrently,
+  give each one a unit of its own (`Propagation.REQUIRES_NEW`, which commits on its own, or
+  `detached()`; on SQLite a child task's write unit fails with `database is locked` while its parent's
+  write unit is open, see [SQLite Setup](#sqlite-setup)).
+
+  The check sees operations, not attribute changes. The unit has one session, so an entity one task
+  loaded is the entity every task of the unit gets, and a change a sibling makes to it
+  (`order.status = "paid"`, with no statement of its own) stays pending until the next flush. When that
+  flush is the autoflush of a query the savepoint's task runs, the change is written inside that
+  savepoint and rolled back with it, after the sibling reported success. Do not change loaded entities
+  from concurrent tasks inside a unit: change them in the task that holds the savepoint, or after the
+  `NESTED` steps end.
+
+  A `NESTED` scope that ends while a task it started still holds a savepoint on top of its own neither
+  releases nor rolls back across it: the unit is marked rollback-only and the scope raises
+  `IllegalTransactionStateError`. A unit does not commit under such a task either: a `@transactional`
+  method (or a repository call's own unit) that returns while a child task it started still holds a
+  savepoint rolls back and raises `IllegalTransactionStateError`, since committing would release that
+  savepoint under the child and keep its work even if the child then fails.
 
   ```python
   @transactional
@@ -1610,6 +1622,20 @@ the unit is being cancelled ends the unit as cancelled instead, with `CancelledE
 `AsyncConnection`), which must end as the cancellation so that the cancel scope that fired catches it.
 Such an exception is logged at `WARNING` as `transaction_error_replaced_by_cancellation`, with its
 traceback. Cleanup whose own exceptions the caller must see belongs outside the cancelled unit, as above.
+
+The judgment follows `raise ... from`: an exception raised from a statement's failure (its `__cause__`
+chain reaches the failure the operation judged) keeps its type, and one raised while merely handling it
+(only `__context__` links them) does not:
+
+```python
+finally:
+    try:
+        await self.holds.save(Hold(order_id))
+    except IntegrityError as error:
+        raise HoldExistsError(order_id) from error   # raised as HoldExistsError
+    # except IntegrityError:
+    #     raise HoldExistsError(order_id)            # ends as CancelledError, logged at WARNING
+```
 
 On SQLite a discarded connection rolls back on aiosqlite's worker thread before its handle closes, and a
 statement still running there is interrupted, so a cancelled unit never leaves `BEGIN IMMEDIATE`'s write

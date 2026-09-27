@@ -29,7 +29,10 @@ child task may use its parent's unit. That is made safe here:
   to the task that opened it and to the tasks that task starts inside it: an operation from any other task
   (a sibling in ``gather()``) would run inside that savepoint and be released or rolled back with it, so
   it raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead
-  (:meth:`UnitOfWork.check_savepoint_owner`). A savepoint whose task has finished no longer holds the unit.
+  (:meth:`UnitOfWork.check_savepoint_owner`): a write, a read, a stream fetch or a savepoint alike. The
+  check sees operations, not attribute changes: a sibling's change to a loaded entity (the unit's session
+  shares it) is written by the next flush, and when that is an autoflush inside the savepoint it is rolled
+  back with it. A savepoint whose task has finished no longer holds the unit.
   Nor does the unit commit while another live task holds a savepoint on it
   (:meth:`UnitOfWork.savepoint_holder`): it rolls back and its boundary raises instead.
 - On a backend whose connection has one active result at a time (MySQL, MariaDB:
@@ -466,8 +469,9 @@ class UnitOfWork:
             "the unit's one connection, so a statement or a savepoint from another task would run inside that "
             "savepoint and be released or rolled back with it. Run NESTED steps and savepoint blocks one after "
             "another, not from concurrent tasks (asyncio.gather), or give each concurrent step a unit of its "
-            "own: Propagation.REQUIRES_NEW (it commits on its own; on SQLite it waits for the one write lock), "
-            "or pyfly.data.transaction.detached().",
+            "own: Propagation.REQUIRES_NEW (it commits on its own; on SQLite, a write unit a child task opens "
+            "while its parent's write unit is open waits busy_timeout for the one write lock and fails with "
+            "'database is locked'), or pyfly.data.transaction.detached().",
             datasource=self.datasource,
         )
 

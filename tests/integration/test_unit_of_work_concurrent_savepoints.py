@@ -261,6 +261,8 @@ async def test_gather_over_nested_steps_refuses_the_steps_that_would_interleave(
     assert outcomes[0] == "ok"
     assert all(isinstance(outcome, IllegalTransactionStateError) for outcome in outcomes[1:]), outcomes
     assert "savepoint" in str(outcomes[1])
+    # The advice names what REQUIRES_NEW from a child task does on SQLite: it fails, it does not just wait.
+    assert "fails with 'database is locked'" in str(outcomes[1])
     assert committed == ["ok", "seed"]
 
 

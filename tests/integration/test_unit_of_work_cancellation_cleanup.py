@@ -32,7 +32,10 @@ there must see its ordinary failures as themselves. Here:
   judged that failure, so the unit never mistakes it for a driver's stand-in for the cancellation;
 - a business exception such a body raises there ends the unit as cancelled, because the unit cannot tell
   it from a driver error raised outside a guarded statement, and it is logged at WARNING with its
-  traceback instead of disappearing.
+  traceback instead of disappearing;
+- a business exception raised there *from* a statement's failure (``raise DomainError() from error``)
+  keeps its type, since the judgment follows ``__cause__``; raised while merely handling that failure
+  (``except IntegrityError: raise DomainError()``) it ends the unit as cancelled and is logged at WARNING.
 
 After each, no pooled connection is checked out, PostgreSQL has no backend idle in transaction, and the
 next unit commits; a unit whose statement failed in cleanup returned its healthy connection to the pool
@@ -68,6 +71,10 @@ pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL)
 
 class InsufficientFundsError(Exception):
     """A business exception."""
+
+
+class DuplicateItemError(Exception):
+    """A business exception a duplicate key is translated into."""
 
 
 class CcItem(Base):
@@ -139,6 +146,19 @@ class CcService:
         finally:
             with anyio.CancelScope(shield=True):
                 await self.items.save(CcItem(id=1, name="duplicate"))
+
+    @transactional
+    async def work_then_translate_a_duplicate_in_its_own_cleanup(self, chained: bool) -> None:
+        await self.items.save(CcItem(id=30, name="work"))
+        try:
+            await asyncio.sleep(10)
+        finally:
+            try:
+                await self.items.save(CcItem(id=1, name="duplicate"))  # while this unit is being cancelled
+            except IntegrityError as error:
+                if chained:
+                    raise DuplicateItemError("item 1 exists") from error
+                raise DuplicateItemError("item 1 exists")  # noqa: B904 — the unchained form is the point
 
     @transactional
     async def work_then_fail_in_its_own_cleanup(self) -> None:
@@ -357,4 +377,38 @@ async def test_a_business_exception_in_the_cancelled_units_own_cleanup_is_logged
     assert len(replaced) == 1
     assert replaced[0].levelno == logging.WARNING
     assert replaced[0].exc_info is not None and isinstance(replaced[0].exc_info[1], InsufficientFundsError)
+    assert await cleanup.committed() == ["first"]
+
+
+async def test_a_business_exception_raised_from_a_failed_statement_in_the_units_own_cleanup_keeps_its_type(
+    cleanup: Cleanup, caplog: pytest.LogCaptureFixture
+) -> None:
+    task = asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=True))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with (
+        caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
+        pytest.raises(DuplicateItemError) as raised,
+    ):
+        await task
+    assert isinstance(raised.value.__cause__, IntegrityError)
+    assert not [r for r in caplog.records if r.getMessage() == "transaction_error_replaced_by_cancellation"]
+    assert await cleanup.committed() == ["first"]
+
+
+async def test_a_business_exception_raised_while_handling_a_failed_statement_ends_as_the_cancellation(
+    cleanup: Cleanup, caplog: pytest.LogCaptureFixture
+) -> None:
+    task = asyncio.create_task(cleanup.service.work_then_translate_a_duplicate_in_its_own_cleanup(chained=False))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with (
+        caplog.at_level(logging.WARNING, logger="pyfly.data.transaction.template"),
+        pytest.raises(asyncio.CancelledError) as raised,
+    ):
+        await task
+    assert isinstance(raised.value.__cause__, DuplicateItemError)
+    assert isinstance(raised.value.__cause__.__context__, IntegrityError)  # linked, but not raised from it
+    replaced = [r for r in caplog.records if r.getMessage() == "transaction_error_replaced_by_cancellation"]
+    assert len(replaced) == 1 and replaced[0].levelno == logging.WARNING
     assert await cleanup.committed() == ["first"]
