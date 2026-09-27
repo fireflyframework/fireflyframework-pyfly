@@ -21,13 +21,18 @@ Before the framework MetaData, every ``pyfly_*`` table was raw DDL outside any M
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import Column, Integer, MetaData, String, Table, insert, inspect, select, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pyfly.data.relational.framework_schema import (
     FrameworkSchemaError,
@@ -224,3 +229,119 @@ async def test_on_postgresql_a_missing_index_is_built_while_the_old_nodes_keep_w
             text("SELECT indisvalid FROM pg_index WHERE indexrelid = 'ix_pyfly_cache_entries_expires_at'::regclass")
         )
         assert valid.scalar_one() is True
+
+
+@contextlib.asynccontextmanager
+async def _engine_that_cannot_build_indexes(backend: RelationalBackend) -> AsyncIterator[AsyncEngine]:
+    """An engine on the lane's database that reads and writes its tables but may not build an index: a
+    read-only file on SQLite, a role that does not own the tables on PostgreSQL, a user without the ``INDEX``
+    privilege on MySQL and MariaDB."""
+    url = make_url(backend.url)
+    if backend.is_embedded:
+        engine = create_async_engine(f"sqlite+aiosqlite:///file:{url.database}?mode=ro&uri=true")
+        try:
+            yield engine
+        finally:
+            await engine.dispose()
+        return
+    user = f"wp10a_ix_{uuid.uuid4().hex[:8]}"
+    admin = backend.create_engine(isolation_level="AUTOCOMMIT")
+    postgresql = backend.dialect == "postgresql"
+    async with admin.connect() as connection:
+        if postgresql:
+            await connection.execute(text(f"CREATE ROLE {user} LOGIN PASSWORD 'pw'"))
+            await connection.execute(
+                text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {user}")
+            )
+        else:
+            await connection.execute(text(f"CREATE USER '{user}'@'%' IDENTIFIED BY 'pw'"))
+            await connection.execute(
+                text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON `{url.database}`.* TO '{user}'@'%'")
+            )
+    engine = create_async_engine(url.set(username=user, password="pw"), **backend.engine_options())
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+        async with admin.connect() as connection:
+            if postgresql:
+                await connection.execute(text(f"DROP OWNED BY {user}"))
+                await connection.execute(text(f"DROP ROLE {user}"))
+            else:
+                await connection.execute(text(f"DROP USER '{user}'@'%'"))
+
+
+async def test_a_missing_index_that_could_not_be_built_is_reported(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every attempt to build the missing index failed (a user that may not build one): the failure was logged
+    at DEBUG, and then an INFO said the tables had been created by another process. The purge ran without its
+    index and nothing said so."""
+    earlier = MetaData()
+    cache_entries.to_metadata(earlier).indexes.clear()
+    async with relational_backend.create_engine().begin() as connection:
+        await connection.run_sync(earlier.create_all)
+
+    async with _engine_that_cannot_build_indexes(relational_backend) as engine:
+        with caplog.at_level(logging.INFO, logger="pyfly.data.relational.framework_schema"):
+            await ensure_tables(engine, cache_entries)  # the table and its columns are there: it starts
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "framework_tables_created_concurrently" not in messages
+    assert "framework_schema_changes_failed" in messages
+    [missing] = [record for record in caplog.records if record.getMessage() == "framework_index_missing"]
+    assert missing.levelno == logging.WARNING
+    assert missing.__dict__["index"] == "ix_pyfly_cache_entries_expires_at"
+    assert missing.__dict__["table"] == "pyfly_cache_entries"
+
+
+async def test_a_missing_index_is_reported_when_migrations_own_the_schema(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    earlier = MetaData()
+    cache_entries.to_metadata(earlier).indexes.clear()
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(earlier.create_all)
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.framework_schema"):
+        await ensure_tables(engine, cache_entries, create=False)
+
+    [missing] = [record for record in caplog.records if record.getMessage() == "framework_index_missing"]
+    assert missing.__dict__["index"] == "ix_pyfly_cache_entries_expires_at"
+    assert "migration" in missing.__dict__["hint"]
+
+
+@pytest.mark.backends(PG)
+async def test_an_invalid_index_an_interrupted_concurrent_build_left_is_reported(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A concurrent build that fails or is interrupted leaves an INVALID index, which ``CREATE INDEX
+    CONCURRENTLY IF NOT EXISTS`` skips: the index was never used, never rebuilt, and nothing said so."""
+    earlier = MetaData()
+    cache_entries.to_metadata(earlier).indexes.clear()
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(earlier.create_all)
+        await connection.execute(
+            text(
+                "INSERT INTO pyfly_cache_entries (cache_key, value, expires_at) VALUES "
+                "('a', decode('00', 'hex'), '2026-01-01T00:00:00Z'), ('b', decode('00', 'hex'), '2026-01-01T00:00:00Z')"
+            )
+        )
+    admin = relational_backend.create_engine(isolation_level="AUTOCOMMIT")
+    async with admin.connect() as connection:
+        with pytest.raises(Exception, match="could not create unique index"):
+            await connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX CONCURRENTLY ix_pyfly_cache_entries_expires_at "
+                    "ON pyfly_cache_entries (expires_at)"
+                )
+            )
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.framework_schema"):
+        await ensure_tables(engine, cache_entries)
+
+    [invalid] = [record for record in caplog.records if record.getMessage() == "framework_index_invalid"]
+    assert invalid.__dict__["index"] == "ix_pyfly_cache_entries_expires_at"
+    assert "REINDEX INDEX CONCURRENTLY ix_pyfly_cache_entries_expires_at" in invalid.__dict__["hint"]

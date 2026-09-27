@@ -422,11 +422,18 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
     to :data:`CREATE_ATTEMPTS` times. Then every table is checked: it must exist and have every declared
     column, and on PostgreSQL a :class:`UtcTimestamp` column must be ``TIMESTAMP WITH TIME ZONE``. Raises
     :class:`FrameworkSchemaError` naming each problem and how to fix it.
+
+    Indexes only speed the stores up, so a problem with one is logged, not raised: when every attempt failed
+    a WARNING (``framework_schema_changes_failed``) carries the last error, a declared index that is missing
+    gets a WARNING (``framework_index_missing``) with the statement that creates it, and on PostgreSQL an
+    index a failed or interrupted concurrent build left invalid, which the server does not use and
+    ``IF NOT EXISTS`` skips, gets one (``framework_index_invalid``) with the ``REINDEX`` that rebuilds it.
     """
     if not tables:
         return
     engine = framework_engine(target)
     creation_error: DBAPIError | None = None
+    created = False
     if create:
         for attempt in range(1, CREATE_ATTEMPTS + 1):
             try:
@@ -439,22 +446,31 @@ async def ensure_tables(target: object, *tables: Table, create: bool = True) -> 
                 _logger.debug("framework_tables_creation_failed", extra={"attempt": attempt}, exc_info=True)
                 await asyncio.sleep(0.05 * attempt)
             else:
+                created = True
                 break
     async with engine.connect() as connection:
         problems = await connection.run_sync(_problems, tables)
+        index_problems = [] if problems else await connection.run_sync(_index_problems, tables, create)
+    names = [table.name for table in tables]
     if problems:
-        names = ", ".join(table.name for table in tables)
         hint = (
             "Create them with a migration (list pyfly.data.relational.framework_schema.framework_metadata in "
             "Alembic's target_metadata) or let the store create them (pyfly.data.relational.ddl-auto=create)."
         )
+        where = engine.url.render_as_string(hide_password=True)
         raise FrameworkSchemaError(
-            f"The framework tables {names} on {engine.url.render_as_string(hide_password=True)} are not usable: "
-            + "; ".join(problems)
-            + f". {hint}"
+            f"The framework tables {', '.join(names)} on {where} are not usable: " + "; ".join(problems) + f". {hint}"
         ) from creation_error
-    if creation_error is not None:
-        _logger.info("framework_tables_created_concurrently", extra={"tables": [table.name for table in tables]})
+    if create and not created:
+        _logger.warning(
+            "framework_schema_changes_failed",
+            extra={"tables": names, "attempts": CREATE_ATTEMPTS},
+            exc_info=creation_error,
+        )
+    elif creation_error is not None:
+        _logger.info("framework_tables_created_concurrently", extra={"tables": names})
+    for event, details in index_problems:
+        _logger.warning(event, extra=details)
 
 
 def _create(connection: Connection, tables: Sequence[Table]) -> list[Index]:
@@ -493,6 +509,49 @@ async def _create_indexes_concurrently(engine: AsyncEngine, indexes: Sequence[In
             ddl = str(CreateIndex(index, if_not_exists=True).compile(dialect=autocommit.dialect))
             await autocommit.execute(text(_CREATE_INDEX.sub(r"CREATE \1INDEX CONCURRENTLY ", ddl, count=1)))
             _logger.info("framework_index_created", extra={"index": index.name})
+
+
+_INVALID_INDEXES = text(
+    "SELECT ic.relname FROM pg_catalog.pg_index i "
+    "JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid "
+    "JOIN pg_catalog.pg_class tc ON tc.oid = i.indrelid "
+    "JOIN pg_catalog.pg_namespace n ON n.oid = tc.relnamespace "
+    "WHERE NOT i.indisvalid AND tc.relname = :table AND n.nspname = :schema"
+)
+
+
+def _index_problems(connection: Connection, tables: Sequence[Table], create: bool) -> list[tuple[str, dict[str, str]]]:
+    """The declared indexes of *tables* (which exist) that are missing, or on PostgreSQL invalid: the event to
+    log for each, and its details."""
+    inspector = inspect(connection)
+    postgresql = connection.dialect.name == "postgresql"
+    found: list[tuple[str, dict[str, str]]] = []
+    for table in tables:
+        if not table.indexes:
+            continue
+        present = {str(index["name"]).lower() for index in inspector.get_indexes(table.name, schema=table.schema)}
+        invalid: set[str] = set()
+        if postgresql:
+            schema = table.schema or inspector.default_schema_name
+            rows = connection.execute(_INVALID_INDEXES, {"table": table.name, "schema": schema})
+            invalid = {str(name).lower() for name in rows.scalars()}
+        for index in sorted(table.indexes, key=lambda declared: str(declared.name)):
+            name = str(index.name)
+            if name.lower() in invalid:
+                hint = (
+                    "a concurrent build of it failed or was interrupted, so PostgreSQL does not use it: rebuild it "
+                    f"with REINDEX INDEX CONCURRENTLY {name}"
+                )
+                found.append(("framework_index_invalid", {"index": name, "table": table.name, "hint": hint}))
+            elif name.lower() not in present:
+                if create:
+                    reason = "it could not be built (framework_schema_changes_failed says why)"
+                else:
+                    reason = "the schema is left to migrations (pyfly.data.relational.ddl-auto)"
+                ddl = str(CreateIndex(index).compile(dialect=connection.dialect)).strip()
+                hint = f"{reason}: create it with a migration or run {ddl}"
+                found.append(("framework_index_missing", {"index": name, "table": table.name, "hint": hint}))
+    return found
 
 
 def _problems(connection: Connection, tables: Sequence[Table]) -> list[str]:

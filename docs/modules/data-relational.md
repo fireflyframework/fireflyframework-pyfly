@@ -1142,9 +1142,13 @@ A store creates its tables when it starts if `ddl-auto` is `create` (the default
 with `none`, `validate` or any other value it only checks them, and fails the startup naming each missing table
 or column (`FrameworkSchemaError`). When it may create them, it also adds the indexes a table an earlier release
 created is missing (the cache's `expires_at` index); on PostgreSQL with `CREATE INDEX CONCURRENTLY`, so the nodes
-still running the earlier release keep writing to the table during a rolling deploy. A concurrent build that is
-interrupted leaves an invalid index behind: rebuild it with `REINDEX INDEX CONCURRENTLY <name>`. The same helper
-is public:
+still running the earlier release keep writing to the table during a rolling deploy. Indexes only speed the
+stores up, so a problem with one does not fail the startup; it logs a WARNING instead. `framework_index_missing`
+names an index that is not there (the store's user may not build it, or migrations own the schema) with the
+statement that creates it, and `framework_schema_changes_failed` carries the error of the last attempt. On
+PostgreSQL, `framework_index_invalid` names an index a failed or interrupted concurrent build left invalid (the
+server does not use it, and `IF NOT EXISTS` skips it): rebuild it with `REINDEX INDEX CONCURRENTLY <name>`. The
+same helper is public:
 
 ```python
 from pyfly.data.relational.framework_schema import ensure_tables, locks
