@@ -16,7 +16,9 @@
 MySQL and MariaDB have one active result per connection; the unit holds to that rule wherever its
 transaction manager says so (``TransactionCapabilities.multiple_active_results`` false). Here SQLite runs
 the same tests with the capability turned off, so the refusal, the release of an exhausted or closed
-stream and the close of an abandoned one are checked on every fast run, not only on the server lanes.
+stream and the close of an abandoned one are checked on every fast run, not only on the server lanes; and
+the harness's ``OneActiveResult`` fails a test whose connection took a statement, a ``COMMIT``, a
+``ROLLBACK`` or a savepoint while a stream's cursor was still open on it.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from tests.integration.test_unit_of_work_streams import (  # noqa: F401 — the 
     test_a_statement_between_two_fetches_of_the_same_task,
     test_a_stream_abandoned_open_does_not_break_the_commit,
     test_a_stream_abandoned_open_does_not_break_the_rollback,
+    test_a_stream_abandoned_open_is_closed_before_the_commit_even_when_its_close_runs_meanwhile,
     test_a_stream_closed_early_frees_the_connection,
     test_a_stream_of_its_own_closed_early_frees_its_connection,
     test_an_exhausted_stream_frees_the_connection,

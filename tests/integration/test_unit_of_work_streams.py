@@ -26,8 +26,16 @@ closed when its unit completes, so the unit still commits or rolls back cleanly.
 a stream (a fetch in flight, the close of a stream ended early) ends as the cancellation and leaves no
 connection behind.
 
+A ``break`` does not close a stream: Python closes the abandoned generator later, in a task of its own.
+That close is cleanup: it never leaves a stream open for its unit's ``COMMIT`` (a synchronization whose
+``before_completion`` awaits lets it run in the middle of the completion), and it never raises the unit's
+own refusals into a task nobody awaits (``Task exception was never retrieved``). Every test here fails on
+an exception the event loop reports.
+
 The fast suite runs the single-result rules on SQLite too, with the capability turned off
 (``TransactionCapabilities.multiple_active_results``): see ``test_unit_of_work_streams_single_result``.
+There, :class:`OneActiveResult` records every statement, ``COMMIT``, ``ROLLBACK`` or savepoint that
+reaches a connection while a stream's cursor is open on it, which MySQL and MariaDB cannot take.
 
 Every body runs under ``asyncio.wait_for``: before the refusal existed a MariaDB run hung, and a MySQL run
 hung past its own ``wait_for`` in the rollback of the corrupted connection.
@@ -37,16 +45,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import anyio
 import pytest
-from sqlalchemy import Identity, Integer, String, text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import Identity, Integer, String, event, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
@@ -55,9 +65,14 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.data import Propagation, transactional
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
+from pyfly.data.relational.sqlalchemy import session as unit_sessions
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import IllegalTransactionStateError
+from pyfly.data.transaction import (
+    IllegalTransactionStateError,
+    TransactionSynchronizationAdapter,
+    register_synchronization,
+)
 from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL, MARIADB)
@@ -66,6 +81,13 @@ T = TypeVar("T")
 
 ROWS = 300
 BOUND = 20.0  # seconds: a hang fails the test instead of holding the suite
+
+# A cancelled unit discards its connection with the unbuffered result still open on it; when the garbage
+# collector later reaches that result, asyncmy's MySQLResult.__del__ calls _finish_unbuffered_query()
+# without awaiting it. Nothing is sent (the coroutine never runs), and the connection is gone already.
+IGNORE_UNBUFFERED_RESULT_COLLECTED = pytest.mark.filterwarnings(
+    "ignore:coroutine 'MySQLResult._finish_unbuffered_query' was never awaited"
+)
 
 
 class StItem(Base):
@@ -103,6 +125,15 @@ class StItemRepository(Repository[StItem, int]):
                 if streamed == 10:
                     break
         return streamed
+
+
+class AwaitingBeforeCompletion(TransactionSynchronizationAdapter):
+    """A synchronization whose ``before_completion`` awaits (a metrics flush, a log shipper): other tasks run
+    while the unit completes."""
+
+    async def before_completion(self) -> None:
+        for _ in range(5):
+            await asyncio.sleep(0)
 
 
 @service
@@ -186,6 +217,26 @@ class StService:
         return streamed
 
     @transactional
+    async def break_out_then_commit_past_an_awaiting_synchronization(self) -> int:
+        register_synchronization(AwaitingBeforeCompletion())
+        await self.items.save(StItem(name="before-the-stream"))
+        streamed = 0
+        async for _item in self.items.stream_all():
+            streamed += 1
+            if streamed == 10:
+                break  # Python closes the abandoned stream in a task of its own: here, during before_completion
+        return streamed
+
+    @transactional
+    async def break_out_then_count(self) -> int:
+        streamed = 0
+        async for _item in self.items.stream_all():
+            streamed += 1
+            if streamed == 10:
+                break  # the stream's close, in a task of its own, waits for the guard while count() runs
+        return await self.items.count()
+
+    @transactional
     async def write_after_closing_a_stream_early(self) -> int:
         streamed = 0
         async with contextlib.aclosing(self.items.stream_all()) as stream:
@@ -213,11 +264,55 @@ class StService:
         return streamed
 
 
+def _cursor_result(result: Any) -> Any:
+    current = getattr(result, "_real_result", result)
+    while getattr(current, "raw", None) is not None:
+        current = current.raw
+    return current
+
+
+class OneActiveResult:
+    """Holds a connection that can run statements beside an open stream (SQLite) to MySQL's rule: every
+    statement, ``COMMIT``, ``ROLLBACK`` or savepoint that reaches a connection while the cursor of a stream
+    opened on it is still open is recorded as a violation."""
+
+    def __init__(self) -> None:
+        self.results: list[Any] = []
+        self.violations: list[str] = []
+
+    def install(self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+        opened = unit_sessions._opened
+
+        def recording(result: Any, unit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            self.results.append(result)
+            return opened(result, unit, args, kwargs)
+
+        monkeypatch.setattr(unit_sessions, "_opened", recording)
+        sync = engine.sync_engine
+        event.listen(sync, "before_cursor_execute", lambda conn, *_: self._check(conn, "a statement"))
+        event.listen(sync, "commit", lambda conn: self._check(conn, "COMMIT"))
+        event.listen(sync, "rollback", lambda conn: self._check(conn, "ROLLBACK"))
+        event.listen(sync, "savepoint", lambda conn, *_: self._check(conn, "SAVEPOINT"))
+        event.listen(sync, "release_savepoint", lambda conn, *_: self._check(conn, "RELEASE SAVEPOINT"))
+        event.listen(sync, "rollback_savepoint", lambda conn, *_: self._check(conn, "ROLLBACK TO SAVEPOINT"))
+
+    def _check(self, connection: Connection, what: str) -> None:
+        if connection.invalidated:
+            return  # a discarded connection: SQLAlchemy reports its rollback, and sends nothing
+        for result in self.results:
+            if _cursor_result(result).context.root_connection is connection and not unit_sessions._cursor_released(
+                result
+            ):
+                self.violations.append(f"{what} sent beside an open stream")
+
+
 class Harness:
     def __init__(self, backend: RelationalBackend, ctx: ApplicationContext, *, single_result: bool) -> None:
         self.backend = backend
         self.ctx = ctx
         self.single_result_connection = single_result
+        self.loop_errors: list[dict[str, Any]] = []
+        self.one_active_result: OneActiveResult | None = None
 
     @property
     def service(self) -> StService:
@@ -245,25 +340,58 @@ def single_result(relational_backend: RelationalBackend) -> bool:
 
 
 @pytest.fixture
-async def harness(relational_backend: RelationalBackend, single_result: bool) -> AsyncIterator[Harness]:
+async def harness(
+    relational_backend: RelationalBackend, single_result: bool, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[Harness]:
     await relational_backend.create_tables(StItem)
     ctx = ApplicationContext(relational_backend.config())
     for bean in (RelationalAutoConfiguration, StItemRepository, StService):
         ctx.register_bean(bean)
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
     await ctx.start()
     try:
         started = Harness(relational_backend, ctx, single_result=single_result)
+        loop.set_exception_handler(lambda _loop, context: started.loop_errors.append(context))
+        if single_result and relational_backend.lane not in (MYSQL, MARIADB):
+            started.one_active_result = OneActiveResult()
+            started.one_active_result.install(ctx.get_bean(DataSourceRegistry).primary.engine, monkeypatch)
         await started.service.seed()
         yield started
         # The connection went back to the pool healthy: the next unit works on it.
         assert started.checked_out() == 0
         assert await bounded(started.ctx.get_bean(StItemRepository).count()) >= ROWS
+        for _ in range(10):  # let abandoned streams close, and collect the tasks that closed them
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+        reported = [f"{c.get('message')}: {c.get('exception')!r}" for c in started.loop_errors]
+        assert reported == [], "the event loop reported exceptions nobody retrieved"
+        if started.one_active_result is not None:
+            assert started.one_active_result.violations == [], "a connection took a statement beside a stream"
     finally:
+        loop.set_exception_handler(previous)
         await ctx.stop()
 
 
 async def bounded(call: Awaitable[T]) -> T:
     return await asyncio.wait_for(call, BOUND)
+
+
+async def within_bound(call: Awaitable[T], what: str) -> T:
+    """Await *call* for :data:`BOUND` seconds at most, even when it hangs in shielded work (a COMMIT on a
+    corrupted MySQL connection) that ``wait_for`` cannot cancel: then every other task is cancelled, which
+    ends the shielded work too, and the test fails."""
+    task = asyncio.ensure_future(call)
+    done, _pending = await asyncio.wait({task}, timeout=BOUND)
+    if not done:
+        current = asyncio.current_task()
+        for other in asyncio.all_tasks():
+            if other is not current:
+                other.cancel()
+        await asyncio.wait({task}, timeout=BOUND)
+        pytest.fail(f"{what} did not end within {BOUND} s")
+    return task.result()
 
 
 async def test_a_statement_between_two_fetches_of_the_same_task(harness: Harness) -> None:
@@ -351,6 +479,24 @@ async def test_a_savepoint_block_that_leaves_its_stream_open_still_ends(harness:
     assert await harness.extra_rows() == ["after-the-block", "in-the-block"]
 
 
+async def test_a_stream_abandoned_open_is_closed_before_the_commit_even_when_its_close_runs_meanwhile(
+    harness: Harness,
+) -> None:
+    streamed = await within_bound(
+        harness.service.break_out_then_commit_past_an_awaiting_synchronization(), "the unit's commit"
+    )
+    assert streamed == 10
+    assert await harness.extra_rows() == ["before-the-stream"]
+
+
+@pytest.mark.backends(SQLITE_FILE, PG)
+async def test_a_stream_abandoned_open_closes_quietly_when_its_unit_completes_first(harness: Harness) -> None:
+    # The stream's close waits for the guard while count() runs, and gets it once the unit is completing: it
+    # must not raise the unit's refusal into its own task (the harness fails on what the loop reports).
+    assert await bounded(harness.service.break_out_then_count()) == ROWS
+
+
+@IGNORE_UNBUFFERED_RESULT_COLLECTED
 @pytest.mark.backends(MYSQL, MARIADB)
 async def test_a_stream_cancelled_in_mid_fetch_ends_as_the_cancellation_at_once(harness: Harness) -> None:
     fetched = asyncio.Event()
@@ -385,10 +531,7 @@ async def _cancelled_read(harness: Harness, kind: str, delay: float) -> str:
     return "completed"
 
 
-# A cancelled unit discards its connection with the unbuffered result still open on it; when the garbage
-# collector later reaches that result, asyncmy's MySQLResult.__del__ calls _finish_unbuffered_query()
-# without awaiting it. Nothing is sent (the coroutine never runs), and the connection is gone already.
-@pytest.mark.filterwarnings("ignore:coroutine 'MySQLResult._finish_unbuffered_query' was never awaited")
+@IGNORE_UNBUFFERED_RESULT_COLLECTED
 @pytest.mark.parametrize("kind", ["anyio", "wait_for"])
 async def test_a_cancel_anywhere_in_a_stream_ends_as_the_cancellation_and_leaves_nothing_behind(
     harness: Harness, kind: str

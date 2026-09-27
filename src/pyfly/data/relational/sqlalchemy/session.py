@@ -174,24 +174,36 @@ class GuardedResult:
 
     async def close(self) -> None:
         """Close the result; the rows not fetched yet are dropped (on MySQL and MariaDB they are read first,
-        as the connection requires). Nothing is left to close once the rows are exhausted, or once the unit
-        completed (its end closed the result along with its connection). Nothing is sent on a connection in
-        an unknown state either (a cancellation, or a driver error, interrupted a fetch): the stream keeps
-        holding the unit until the unit ends and its connection is rolled back or discarded."""
+        as the connection requires). Nothing is left to close once the rows are exhausted.
+
+        Closing is cleanup, and it often runs in a task of its own: Python closes an async generator left
+        unfinished (a ``break`` out of ``stream_all``) later, in a new task. So it never raises the unit's
+        own refusals, and it leaves the cursor to the unit when the unit cannot take its close now: once the
+        unit is completing (its ``COMMIT`` or ``ROLLBACK`` closes the stream first, under its guard:
+        :func:`close_open_stream`), when the close is refused (the unit started completing while this waited
+        for its guard, or another task holds a savepoint on it: the end of the unit, or of that savepoint,
+        closes the stream), and when a cancellation or a driver error interrupted a fetch (the connection is
+        in an unknown state, and the unit discards it). Until then the stream keeps holding the unit.
+        """
         unit = self._unit
         stream = self._stream
-        if unit.completed or _cursor_released(self._result):
+        if _cursor_released(self._result):
             if stream is not None:
                 unit.stream_closed(stream)
             return
-        if unit.poisoned or (stream is not None and stream.failed):
+        if unit.completed or unit.poisoned or (stream is not None and stream.failed):
             return
-        async with unit.operation(stream=stream):
-            try:
-                await self._result.close()
-            finally:
-                if stream is not None:
-                    unit.stream_closed(stream)
+        try:
+            async with unit.operation(stream=stream):
+                try:
+                    await self._result.close()
+                except BaseException as error:
+                    self._failed(error)
+                    raise
+        except IllegalTransactionStateError:
+            return
+        if stream is not None:
+            unit.stream_closed(stream)
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._result, name)
