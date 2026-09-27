@@ -216,22 +216,62 @@ class TestScheduledWiring:
 class TestAsyncMethodWiring:
     @pytest.mark.asyncio
     async def test_wraps_async_methods(self):
-        """@async_method decorated methods are wrapped for async execution."""
+        """@async_method calls return their task at once; the method runs in it (Spring @Async)."""
+        import asyncio
+        import threading
+
         from pyfly.scheduling.decorators import async_method
+
+        release = asyncio.Event()
 
         @service
         class MyService:
             @async_method
             def heavy_computation(self):
-                return 42
+                return threading.current_thread().name
+
+            @async_method
+            async def slow(self):
+                await release.wait()
+                return "slow done"
 
         ctx = ApplicationContext(Config({}))
         ctx.register_bean(MyService)
         await ctx.start()
 
-        assert ctx.wiring_counts["async_methods"] == 1
+        assert ctx.wiring_counts["async_methods"] == 2
+        svc = ctx.get_bean(MyService)
+        pending = await svc.slow()  # returns at once: the method waits for `release`
+        assert isinstance(pending, asyncio.Task) and not pending.done()
+        release.set()
+        assert await pending == "slow done"
+        thread = await (await svc.heavy_computation())
+        assert thread != threading.main_thread().name  # a sync method runs off the event loop
 
         await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_waits_for_the_calls_in_flight(self):
+        import asyncio
+
+        from pyfly.scheduling.decorators import async_method
+
+        finished: list[str] = []
+
+        @service
+        class Auditor:
+            @async_method
+            async def record(self):
+                await asyncio.sleep(0.05)
+                finished.append("recorded")
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(Auditor)
+        await ctx.start()
+        await ctx.get_bean(Auditor).record()
+        await ctx.stop()
+
+        assert finished == ["recorded"]
 
 
 # --- Test: Registry stats ---

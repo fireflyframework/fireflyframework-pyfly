@@ -798,9 +798,40 @@ class NotificationService:
         await self.email_client.send(to, subject, body)
 ```
 
-Under the hood, `@async_method` sets `__pyfly_async__ = True` on the function.
-The framework picks this up and routes the call through the configured
-`TaskExecutorPort`.
+Under the hood, `@async_method` sets `__pyfly_async__ = True` on the function,
+and the application context replaces the bean's method with a dispatcher
+(`pyfly.scheduling.async_methods.dispatching`), Spring `@Async` style:
+
+- **The caller returns at once.** `await notifier.send_email(...)` submits the
+  call through the `TaskScheduler`'s `TaskExecutorPort` and gives back the
+  `asyncio.Task` running it. Await that task when you need the result:
+  `result = await (await service.compute(order))`.
+- **Its own unit of work.** The task starts with the transaction state cleared
+  (`pyfly.data.transaction.detached`): a `@transactional` method opens its own
+  transaction. Its failure never rolls the caller back, a caller that fails
+  after the call does not discard its writes, and the caller's commit does not
+  wait for it.
+- **Uncaught exceptions** go to the `AsyncUncaughtExceptionHandler` bean
+  (`handle_uncaught_exception(error, method, args, kwargs)`), by default
+  `LoggingAsyncUncaughtExceptionHandler`, which logs `async_method_failed` at
+  `ERROR`. A caller that awaits the task gets the exception as well.
+- **Synchronous methods** run in the executor's thread pool
+  (`ThreadPoolTaskExecutor.run_sync`), or through `asyncio.to_thread`.
+- **Shutdown** waits for the calls in flight: they run on the `TaskScheduler`'s
+  executor, which the context stops before any `@pre_destroy`.
+
+```python
+from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
+
+@component
+class AlertingHandler(AsyncUncaughtExceptionHandler):
+    def handle_uncaught_exception(self, error, method, args, kwargs) -> None:
+        alerts.raise_incident(f"{method.__qualname__} failed: {error}")
+```
+
+Until 26.09.07 `@async_method` awaited coroutine methods inline: the call ran in
+the caller's transaction, blocked the caller for its whole duration, and its
+failure rolled the caller back.
 
 ---
 

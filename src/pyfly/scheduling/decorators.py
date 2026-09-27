@@ -77,9 +77,12 @@ def scheduled(
 
 
 def async_method(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark a method to execute asynchronously via TaskExecutor.
+    """Mark a bean method to execute asynchronously via the TaskExecutor (Spring ``@Async``).
 
-    The caller returns immediately -- the actual execution is offloaded.
+    The caller returns immediately with the :class:`asyncio.Task` running the method (await it for the
+    result). The method runs with its own units of work, never in the caller's transaction, and its uncaught
+    exceptions go to the ``AsyncUncaughtExceptionHandler`` bean, by default the log
+    (:mod:`pyfly.scheduling.async_methods`).
     """
     func.__pyfly_async__ = True  # type: ignore[attr-defined]
     return func

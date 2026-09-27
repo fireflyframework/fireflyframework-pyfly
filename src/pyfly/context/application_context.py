@@ -1742,30 +1742,56 @@ class ApplicationContext:
             logger.debug("Discovered %d @scheduled method(s)", count)
 
     def _wire_async_methods(self) -> None:
-        """Scan beans for @async_method and wrap them to execute in a thread pool."""
+        """Scan beans for @async_method and dispatch their calls through the scheduler's executor.
+
+        A call returns at once with the task running the method, started with the transaction state cleared
+        (:mod:`pyfly.scheduling.async_methods`). The executor is the ``TaskScheduler``'s, so the drain step of
+        :meth:`stop` waits for the calls in flight; an ``AsyncUncaughtExceptionHandler`` bean, when declared,
+        receives their uncaught exceptions.
+        """
+        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler, dispatching
+
         count = 0
+        dispatch: tuple[Any, Any] | None = None
         for reg in self._container._registrations.values():
             if reg.instance is None:
                 continue
             for attr_name, method in self._safe_members(reg.instance):
                 if not getattr(method, "__pyfly_async__", False):
                     continue
-
-                # Wrap the method to offload execution
-                original = method
-
-                @functools.wraps(original)
-                async def async_wrapper(*args: Any, _orig: Any = original, **kwargs: Any) -> Any:
-                    loop = asyncio.get_running_loop()
-                    if inspect.iscoroutinefunction(_orig):
-                        return await _orig(*args, **kwargs)
-                    return await loop.run_in_executor(None, functools.partial(_orig, *args, **kwargs))
-
-                setattr(reg.instance, attr_name, async_wrapper)
+                if dispatch is None:
+                    handler: Any = None
+                    try:
+                        handler = self._container.resolve(AsyncUncaughtExceptionHandler)  # type: ignore[type-abstract]
+                    except BeanCreationException:
+                        handler = next(
+                            (
+                                live.instance
+                                for live in self._unique_live_instances()
+                                if isinstance(live.instance, AsyncUncaughtExceptionHandler)
+                            ),
+                            None,
+                        )
+                    dispatch = (self._async_method_scheduler().executor, handler)
+                setattr(reg.instance, attr_name, dispatching(method, dispatch[0], dispatch[1]))
                 count += 1
         self._wiring_counts["async_methods"] = count
         if count:
             logger.debug("Wired %d @async_method(s)", count)
+
+    def _async_method_scheduler(self) -> Any:
+        """The ``TaskScheduler`` whose executor runs the @async_method calls: the auto-configured bean, else one
+        of the context's own. Either way it is the one the drain step of :meth:`stop` stops."""
+        from pyfly.scheduling.task_scheduler import TaskScheduler
+
+        if self._task_scheduler is None:
+            for reg in self._container._registrations.values():
+                if isinstance(reg.instance, TaskScheduler):
+                    self._task_scheduler = reg.instance
+                    break
+            else:
+                self._task_scheduler = TaskScheduler()
+        return self._task_scheduler
 
     def _wire_shell_commands(self) -> None:
         """Scan @shell_component beans for @shell_method methods and register with ShellRunnerPort."""
