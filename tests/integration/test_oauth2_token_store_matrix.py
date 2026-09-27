@@ -397,3 +397,32 @@ async def test_the_store_starts_idempotently_and_expiry_is_an_instant(relational
             ).scalar_one()
         assert stored.tzinfo is not None
         assert abs(stored.timestamp() - record.expires_at) < 1
+
+
+async def test_a_code_replay_and_a_family_revocation_do_not_deadlock(relational_backend: RelationalBackend) -> None:
+    """A late redemption of a code (which holds the code's row) revokes the family it issued while a revocation
+    of that family (which holds the family's row) deletes its tokens: the deletion must not reach for the code's
+    row, or MySQL and MariaDB deadlock the two and fail one of them."""
+    async with _store(relational_backend) as (store, engine):
+        authorization_server = grants.server(store)
+        code = await grants.code_for(authorization_server)
+        issued = await grants.redeem(authorization_server, code)
+        record = await store.load(REFRESH_TOKEN, issued["refresh_token"])
+        assert record is not None and record.family_id is not None
+        paused, resume = asyncio.Event(), asyncio.Event()
+
+        async def revocation() -> None:
+            _PAUSED_TASK.set(True)
+            await store.revoke_family(str(record.family_id))
+
+        late = grants.server(store)._new_refresh_token("web", "read", family_id="late-family")
+        with _pause_before_write(engine, 2, paused, resume):
+            revoking = asyncio.create_task(revocation())
+            await asyncio.wait_for(paused.wait(), 10)
+            replaying = asyncio.create_task(store.redeem(code, late, now=int(time.time())))
+            await asyncio.sleep(0.3)  # the replay holds the code's row and waits for the family's
+            resume.set()
+            _, outcome = await asyncio.gather(revoking, replaying)
+
+        assert outcome.value == "replayed"
+        assert not await grants.is_active(authorization_server, issued["refresh_token"])

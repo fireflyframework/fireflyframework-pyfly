@@ -380,8 +380,11 @@ def oauth2_grants_table(name: str = OAUTH2_GRANTS) -> Table:
 
     The columns a grant decides on are typed, so each grant is a conditional statement: ``used`` (a code or a
     refresh token is consumed with ``UPDATE ... WHERE used = false``), ``expires_at`` (indexed, for the purge)
-    and ``family_id`` (indexed: a refresh token's rotation family, and the family a code issued, so a family is
-    revoked with one statement). ``data`` is the rest of the record as JSON (scope, user, PKCE challenge...).
+    and ``family_id`` (a refresh token's rotation family, and the family a code issued). A family's tokens are
+    deleted with one statement through the ``(family_id, kind)`` index, which never reaches the row of the code
+    that issued the family (MySQL and MariaDB lock every row a deletion scans: a late redemption of that code,
+    holding its row, would deadlock with the revocation). ``data`` is the rest of the record as JSON (scope,
+    user, PKCE challenge...).
     """
 
     def build(table_name: str) -> Table:
@@ -391,10 +394,11 @@ def oauth2_grants_table(name: str = OAUTH2_GRANTS) -> Table:
             Column("token_id", key_string(), primary_key=True),
             Column("kind", key_string(32), nullable=False),
             Column("client_id", key_string(), nullable=False),
-            Column("family_id", key_string(), nullable=True, index=True),
+            Column("family_id", key_string(), nullable=True),
             Column("used", Boolean(), nullable=False, default=False),
             Column("expires_at", UtcTimestamp(), nullable=False, index=True),
             Column("data", long_text(), nullable=False),
+            Index(None, "family_id", "kind"),
         )
 
     return _declare("oauth2_grants", name, build)
