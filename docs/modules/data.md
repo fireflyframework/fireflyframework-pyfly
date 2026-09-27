@@ -1262,7 +1262,9 @@ Some capabilities are **backend-specific** today:
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
 | `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ⚠️ commit/abort per call (replica set); the unit-of-work manager for MongoDB is still to come |
 
-**Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; DTO / open (SpEL) / dynamic / association-traversing projections; the
+**Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; open
+(SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational
+`@query` builds any class from its rows: `-> list[OrderSummary]` is `OrderSummary(**row)`); the
 derived-query keywords `Distinct` / `Top<N>` / `First` and property paths through relationships (use `@query`
 instead); `ExampleMatcher` string-match modes; named queries and `Pageable`/SpEL injection into `@query`. For
 these, fall back to `@query` (or `native=True`) — it covers every case the derived parser doesn't.
