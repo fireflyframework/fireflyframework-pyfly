@@ -128,8 +128,8 @@ class EngineLifecycle:
     * ``none`` — skip DDL (for Alembic-managed databases)
 
     ``stop()`` closes the session it was given and, when *dispose_engine* is true (a standalone
-    engine), disposes the engine. A registry engine is left to the registry, which disposes every
-    engine once when the context stops.
+    engine), disposes the engine; a connection still in use is closed when it is returned. A registry
+    engine is left to the registry, which disposes every engine once when the context stops.
     """
 
     _VALID_DDL_MODES = {"none", "create", "create-drop"}
@@ -171,6 +171,10 @@ class EngineLifecycle:
         except Exception:
             _logger.debug("session_close_failed", exc_info=True)
         if self._dispose_engine:
+            from pyfly.data.relational.datasource_registry import close_connections_on_return
+
+            # A connection still in use (a probe in flight) is closed when it is returned, not pooled.
+            close_connections_on_return(self._engine)
             await self._engine.dispose()
 
 

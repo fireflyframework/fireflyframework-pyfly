@@ -18,22 +18,32 @@ connections in it that nobody would dispose: a late write, a readiness probe tha
 after ``ctx.stop()``, a bean that kept the engine. The closed registry's engines now refuse to
 connect, and the db health indicator of a closed registry answers ``OUT_OF_SERVICE`` without
 touching its engines.
+
+A connection that is in use while the registry closes finishes its work, and is closed when it is
+returned. ``AsyncEngine.dispose()`` only closes the idle connections: a returned one went back into
+the disposed pool and stayed open until the garbage collector found that pool (on PostgreSQL the
+backend stayed in ``pg_stat_activity`` after ``ctx.stop()``).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import event, text  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine  # noqa: E402
 
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
-from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry  # noqa: E402
+from pyfly.data.relational.datasource_registry import (  # noqa: E402
+    DataSourceConfigurationError,
+    DataSourceRegistry,
+    close_connections_on_return,
+)
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator  # noqa: E402
 
 
@@ -85,3 +95,60 @@ async def test_a_readiness_probe_after_stop_answers_out_of_service_without_conne
     assert status.status == "OUT_OF_SERVICE"
     assert connects == []
     assert engine.pool.checkedin() == 0
+
+
+def _closed_connections(engine: AsyncEngine) -> list[Any]:
+    """The DBAPI connections of *engine*'s pool closed from now on (SQLAlchemy's ``close`` pool event)."""
+    closed: list[Any] = []
+    event.listen(engine.sync_engine, "close", lambda dbapi_connection, _record: closed.append(dbapi_connection))
+    return closed
+
+
+async def _dbapi_connection(conn: AsyncConnection) -> Any:
+    return (await conn.get_raw_connection()).dbapi_connection
+
+
+async def test_a_connection_in_use_while_the_registry_closes_is_closed_when_returned(tmp_path: Path) -> None:
+    registry = DataSourceRegistry(_config(tmp_path))
+    engine = registry.primary.engine
+    closed = _closed_connections(engine)
+    async with engine.connect() as conn:
+        in_use = await _dbapi_connection(conn)
+        await registry.close()
+        assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1  # it finishes its work
+        assert in_use not in closed
+
+    assert in_use in closed  # returned: closed, not kept in the disposed pool
+
+
+async def test_a_connection_in_use_while_the_context_stops_is_closed_when_returned(tmp_path: Path) -> None:
+    """A readiness probe or a request in flight when the last step of ``ctx.stop()`` closes the registry."""
+    context = ApplicationContext(_config(tmp_path))
+    await context.start()
+    engine = context.get_bean(AsyncEngine)
+    closed = _closed_connections(engine)
+    async with engine.connect() as conn:
+        in_use = await _dbapi_connection(conn)
+        await context.stop()
+        assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+        assert in_use not in closed
+
+    assert in_use in closed
+
+
+async def test_an_engine_disposed_by_its_owner_closes_the_connections_returned_after(tmp_path: Path) -> None:
+    """``close_connections_on_return`` is what an owner calls before disposing an engine of its own."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'own.db'}")
+    closed = _closed_connections(engine)
+    async with engine.connect() as conn:
+        in_use = await _dbapi_connection(conn)
+        close_connections_on_return(engine)
+        await engine.dispose()
+        await conn.execute(text("SELECT 1"))
+        assert in_use not in closed
+
+    assert in_use in closed
+    async with engine.connect() as conn:  # the engine still works, and pools nothing any more
+        later = await _dbapi_connection(conn)
+    assert later in closed
+    await engine.dispose()

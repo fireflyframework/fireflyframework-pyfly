@@ -120,6 +120,24 @@ def _takes_no_arguments(member: Any) -> bool:
     return True
 
 
+def _close_connections_on_return(instance: Any) -> None:
+    """Before an ``AsyncEngine`` bean's ``dispose()``: close each connection in use when it is returned.
+
+    ``dispose()`` closes the idle connections only, and one checked out at that moment (a request, a
+    health probe) went back into the disposed pool and stayed open until the garbage collector found
+    it. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`. Anything
+    that is not a SQLAlchemy ``AsyncEngine`` is left alone, and SQLAlchemy is imported only for one.
+    """
+    if not type(instance).__module__.startswith("sqlalchemy."):
+        return
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    if isinstance(instance, AsyncEngine):
+        from pyfly.data.relational.datasource_registry import close_connections_on_return
+
+        close_connections_on_return(instance)
+
+
 def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
     """``(name, bound member)`` for the methods of *instance* marked with *marker*.
 
@@ -695,10 +713,10 @@ class ApplicationContext:
         It gets the whole destruction contract, each step bounded by the shutdown timeout: its
         ``@pre_destroy`` methods; then the destroy method of the ``@bean`` that produced it (its
         ``destroy_method``, or when it declares no other destruction the inferred ``dispose()``,
-        ``aclose()`` or ``close()``: the documented refresh-scoped ``AsyncEngine`` bean disposes its
-        pool this way); then ``stop()`` when it is a lifecycle bean. The context does not start a
-        scoped lifecycle bean (the scope builds it on demand, in a synchronous resolution), but its
-        ``stop()`` is how it releases what it holds.
+        ``aclose()`` or ``close()``: a refresh-scoped ``AsyncEngine`` bean disposes its pool this way,
+        and a connection still in use then is closed when it is returned); then ``stop()`` when it is
+        a lifecycle bean. The context does not start a scoped lifecycle bean (the scope builds it on
+        demand, in a synchronous resolution), but its ``stop()`` is how it releases what it holds.
         """
         limit = float(self._config.get("pyfly.context.shutdown-timeout", 30)) if timeout is None else timeout
         registration = self._scoped_registration(key)
@@ -735,12 +753,18 @@ class ApplicationContext:
             logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": timeout})
 
     async def _call_destroy_method(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
-        """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*."""
+        """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*.
+
+        Before an ``AsyncEngine``'s ``dispose()``, a connection still in use is made to close when it is
+        returned (``dispose()`` closes the idle connections only).
+        """
         name = type(instance).__qualname__
         method_name = self._destroy_method_name(instance, declared, infer=infer)
         if method_name is None:
             return
         try:
+            if method_name == "dispose":
+                _close_connections_on_return(instance)
             result = getattr(instance, method_name)()
             if inspect.isawaitable(result):
                 await asyncio.wait_for(result, timeout=timeout)

@@ -24,16 +24,22 @@
   is now bounded and the stuck connections are terminated.
 - C030/C031/C099: two refresh-scoped datasources of one type, injected into a singleton through a
   scoped proxy, keep their own database across ``POST /actuator/refresh`` cycles, and every refresh
-  destroys the evicted datasources, so no pool piles up. The same holds for the documented
+  destroys the evicted datasources, so no pool piles up. The same holds for a
   ``@scoped_proxy @bean(scope="refresh") -> AsyncEngine``, which has no ``@pre_destroy``: the
   evicted engine is disposed through its inferred destroy method.
+- A connection in use while its engine is disposed (``registry.close()``, ``ctx.stop()``, a
+  ``POST /actuator/refresh`` that evicts the engine) is closed when it is returned: its backend
+  leaves ``pg_stat_activity`` without a garbage collection.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import time
 import uuid
+from collections.abc import Iterator
 from typing import Annotated, Any
 
 import pytest
@@ -476,7 +482,7 @@ async def _bodies(url: str) -> list[str]:
 
 @configuration
 class _RefreshScopedEngine:
-    """The example of the dependency-injection guide: a proxied refresh-scoped engine bean, nothing else."""
+    """A proxied refresh-scoped engine bean, nothing else."""
 
     @scoped_proxy
     @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
@@ -525,4 +531,109 @@ async def test_refreshing_a_scoped_engine_bean_leaks_no_pool(relational_backend:
     finally:
         await context.stop()
 
+    assert await _settles_at_zero(relational_backend, app_name) == 0
+
+
+# ---------------------------------------------------------------------------
+# A connection in use while its engine is disposed (the registry closes, ctx.stop() closes the
+# registry, a refresh disposes an evicted engine bean) is closed when it is returned. dispose() closes
+# the idle connections only: a returned one went back into the disposed pool, and its backend stayed
+# in pg_stat_activity until the garbage collector found that pool. The garbage collector is off in
+# these tests, so only the checkin can close it.
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _no_garbage_collection() -> Iterator[None]:
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
+async def _sleep_on(conn: Any) -> asyncio.Future[Any]:
+    """Run a one-second query on *conn* in the background, once it has started on the server."""
+    query = asyncio.ensure_future(conn.execute(text("SELECT pg_sleep(1)")))
+    await asyncio.sleep(0.2)
+    assert not query.done()
+    return query
+
+
+@pytest.mark.backends(PG)
+async def test_a_connection_in_use_while_the_registry_closes_is_closed_when_returned(
+    relational_backend: RelationalBackend,
+) -> None:
+    app_name = f"pyfly-inuse-{uuid.uuid4().hex[:8]}"
+    registry = DataSourceRegistry(relational_backend.config({"pyfly.app.name": app_name}))
+    engine = registry.primary.engine
+    try:
+        with _no_garbage_collection():
+            async with engine.connect() as conn:
+                query = await _sleep_on(conn)
+                await registry.close()
+                await query  # the query in flight finishes on its connection
+                assert await _server_connections(relational_backend, app_name) == 1
+
+            assert await _settles_at_zero(relational_backend, app_name) == 0
+    finally:
+        await registry.close()
+
+
+@pytest.mark.backends(PG)
+async def test_a_connection_in_use_while_the_context_stops_is_closed_when_returned(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A request or a readiness probe in flight when the last step of ``ctx.stop()`` closes the registry."""
+    app_name = f"pyfly-stopinuse-{uuid.uuid4().hex[:8]}"
+    context = ApplicationContext(relational_backend.config({"pyfly.app.name": app_name}))
+    await context.start()
+    engine = context.get_bean(AsyncEngine)
+    with _no_garbage_collection():
+        async with engine.connect() as conn:
+            query = await _sleep_on(conn)
+            await context.stop()
+            await query
+            assert await _server_connections(relational_backend, app_name) == 1
+
+        assert await _settles_at_zero(relational_backend, app_name) == 0
+
+
+@pytest.mark.backends(PG)
+async def test_a_connection_in_use_across_an_actuator_refresh_is_closed_when_returned(
+    relational_backend: RelationalBackend,
+) -> None:
+    from httpx import ASGITransport, AsyncClient
+    from starlette.applications import Starlette
+
+    from pyfly.actuator.adapters.starlette import make_starlette_actuator_routes
+    from pyfly.actuator.endpoints.refresh_endpoint import RefreshEndpoint
+    from pyfly.actuator.registry import ActuatorRegistry
+
+    app_name = f"pyfly-refreshinuse-{uuid.uuid4().hex[:8]}"
+    _REPORTING.update({"url": relational_backend.url, "app": app_name})
+    context = ApplicationContext(Config({}))
+    context.register_bean(_RefreshScopedEngine)
+    context.register_bean(_ReportingReader)
+    await context.start()
+    registry = ActuatorRegistry()
+    registry.register(RefreshEndpoint(context))
+    app = Starlette(routes=make_starlette_actuator_routes(registry))
+    reader = context.get_bean(_ReportingReader)
+    try:
+        with _no_garbage_collection():
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://app") as client:
+                async with reader.engine.connect() as conn:
+                    query = await _sleep_on(conn)
+                    response = await client.post("/actuator/refresh")
+                    assert response.status_code == 200
+                    assert len(response.json()["refreshed"]) == 1  # the engine in use was evicted
+                    await query
+                    assert await _server_connections(relational_backend, app_name) == 1
+
+                assert await _settles_at_zero(relational_backend, app_name) == 0
+    finally:
+        await context.stop()
     assert await _settles_at_zero(relational_backend, app_name) == 0

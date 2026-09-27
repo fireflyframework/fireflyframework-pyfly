@@ -86,12 +86,18 @@ class ContextRefresher:
         Returns the cache keys of the evicted refresh-scoped beans.
 
         The evicted instances are destroyed after the swap: the scope already hands out new ones, so
-        a new request gets the rebuilt bean while the evicted one is closing. Work that still holds
-        the evicted instance finishes on it (``AsyncEngine.dispose()`` lets a checked-out connection
-        finish and closes it when it is returned). Until 26.09.07 nothing destroyed them: each
-        refresh of a bean that owned an engine leaked that engine's pool. Destroying runs the
-        ``@pre_destroy`` methods, the destroy method of a ``@bean`` product (a refresh-scoped
-        ``AsyncEngine`` bean is disposed) and ``stop()`` of a lifecycle bean.
+        a new request gets the rebuilt bean while the evicted one is closing. Until 26.09.07 nothing
+        destroyed them: each refresh of a bean that owned an engine leaked that engine's pool.
+        Destroying runs the ``@pre_destroy`` methods, the destroy method of a ``@bean`` product (a
+        refresh-scoped ``AsyncEngine`` bean is disposed) and ``stop()`` of a lifecycle bean.
+
+        Work that still holds the evicted instance finishes on it. ``AsyncEngine.dispose()`` closes
+        the idle connections only; before it disposes an ``AsyncEngine`` bean, the context makes a
+        connection still in use close when it is returned
+        (:func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`). An engine
+        that a bean disposes itself (in its ``@pre_destroy`` or its own ``dispose()``) gets that only
+        when the bean calls ``close_connections_on_return`` first: otherwise the returned connection
+        goes back into the disposed pool and stays open until the garbage collector finds that pool.
         """
         # 1. Re-read the config sources so rebuilt beans pick up file/profile changes
         # (no-op for dict-constructed config).

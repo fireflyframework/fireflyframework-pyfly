@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 
@@ -159,6 +159,24 @@ async def test_the_registry_engine_is_no_split(tmp_path: Path, caplog: pytest.Lo
         assert await _database_of(ctx.get_bean(async_sessionmaker)) == "auto.db"
     finally:
         await ctx.stop()
+
+
+async def test_a_connection_in_use_on_the_user_engine_at_stop_is_closed_when_returned(tmp_path: Path) -> None:
+    """The engine lifecycle disposes the application's engine; a connection in use then is closed when it is
+    returned, instead of going back into the disposed pool."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserEngine)
+    await ctx.start()
+    engine = ctx.get_bean(AsyncEngine)
+    closed: list[Any] = []
+    event.listen(engine.sync_engine, "close", lambda dbapi_connection, _record: closed.append(dbapi_connection))
+    async with engine.connect() as conn:
+        in_use = (await conn.get_raw_connection()).dbapi_connection
+        await ctx.stop()
+        assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+        assert in_use not in closed
+
+    assert in_use in closed
 
 
 _BUILT: list[AsyncEngine] = []

@@ -421,6 +421,28 @@ def _refuse_new_connections(datasource: DataSource) -> None:
     event.listen(datasource.engine.sync_engine, "do_connect", _refuse, insert=True)
 
 
+def close_connections_on_return(engine: AsyncEngine) -> None:
+    """Close every connection returned to *engine* from now on, instead of pooling it.
+
+    Call it before disposing an engine that may be in use. ``dispose()`` closes the connections idle
+    in the pool and replaces the pool; a connection checked out at that moment is left alone, and
+    when it is returned it goes back into the disposed pool, where it stays open until the garbage
+    collector finds that pool (on PostgreSQL its backend stays in ``pg_stat_activity``). With this
+    hook the connection finishes its work and is closed as soon as it is returned. The hook follows
+    the engine into the pool ``dispose()`` creates, so the engine pools nothing any more: use it only
+    for an engine you are done with. :meth:`DataSourceRegistry.close`, the ``ApplicationContext``
+    (before the ``dispose()`` destroy method of an engine bean) and the engine lifecycle (before it
+    disposes an application's engine) install it.
+    """
+
+    def _close_returned(dbapi_connection: Any, record: ConnectionPoolEntry) -> None:
+        # The credentials rotation closes a connection of an evicted pool the same way (_returned).
+        if dbapi_connection is not None:
+            record.invalidate()
+
+    event.listen(engine.sync_engine, "checkin", _close_returned)
+
+
 def _terminate_idle_connections(pool: Any) -> int:
     """Close the socket of every connection idle in *pool*, sending nothing; returns how many.
 
@@ -729,7 +751,9 @@ class DataSourceRegistry:
         From the moment it is called the engines refuse to connect: using one after close raises
         :class:`DataSourceConfigurationError` instead of silently opening a pool that nobody would ever
         dispose. A connection checked out before the close finishes its work and is closed when it is
-        returned.
+        returned (:func:`close_connections_on_return`): ``dispose()`` alone closes the idle connections
+        only, and a returned one went back into the disposed pool, open until the garbage collector
+        found that pool.
 
         While an ``ApplicationContext`` that holds this registry as a bean is stopping, a close
         requested before its final step (by the registry's lifecycle bean) does nothing: the context
@@ -752,6 +776,8 @@ class DataSourceRegistry:
         targets = list(unique.values())
         for datasource in targets:
             _refuse_new_connections(datasource)
+            # dispose() closes the idle connections only: one in use now is closed when it is returned.
+            close_connections_on_return(datasource.engine)
         # The pool each dispose works on: a cancelled dispose never replaces it, and its idle
         # connections are terminated from here.
         pools = {id(datasource): datasource.engine.sync_engine.pool for datasource in targets}

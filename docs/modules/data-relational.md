@@ -735,6 +735,19 @@ connections are terminated all the same. From the moment it is closed, the regis
 the db health indicator of a closed registry answers `OUT_OF_SERVICE` without touching them. A
 restarted context builds a new registry.
 
+A connection that is **in use** while the registry closes (a request or a readiness probe in flight
+during `ctx.stop()`) finishes its work and is **closed when it is returned**. `AsyncEngine.dispose()`
+alone closes the idle connections only: a connection returned later went back into the disposed
+pool and stayed open (on PostgreSQL, in `pg_stat_activity`) until the garbage collector found that
+pool. An engine you dispose yourself gets the same treatment when you call
+`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
+`dispose()`; the context does it for an `AsyncEngine` bean it disposes (a declared or inferred
+`dispose()` destroy method), and the engine lifecycle for an application's engine.
+
+The registry belongs to the **configuration object** (`DataSourceRegistry.for_config(config)`): two
+contexts built on one `Config` share it, and stopping one closes it for both, so the other's engines
+refuse to connect from then on. Give each context its own `Config`.
+
 ### Configuration Reference
 
 Every key is read for its exact name, so `${...}` placeholders resolve and a `PYFLY_*` environment

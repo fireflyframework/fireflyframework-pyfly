@@ -654,7 +654,10 @@ order:
 2. for the product of a `@bean` method, its destroy method: the one `@bean(destroy_method=...)`
    names, or, when the product declares no `@pre_destroy` and no `stop()`, the first of
    `dispose()`, `aclose()` and `close()` it has that takes no argument (Spring's inferred destroy
-   method), so a refresh-scoped `AsyncEngine` bean is disposed;
+   method), so a refresh-scoped `AsyncEngine` bean is disposed. Before an `AsyncEngine`'s
+   `dispose()`, the context makes a connection still in use close when it is returned
+   (`dispose()` alone closes the idle ones, and a connection returned later stayed open in the
+   disposed pool until the garbage collector found it);
 3. `stop()`, when it defines `start()` and `stop()`. The context does not start a scoped lifecycle
    bean (the scope builds it on demand, in a synchronous resolution), but `stop()` is how it
    releases what it holds.
@@ -669,6 +672,8 @@ to the current instance (Spring Cloud proxies refresh-scoped beans by default; P
 opt-in), or inject `Provider[FeatureFlags]` and call `get()` each time.
 
 ```python
+from pyfly.data.relational.datasource_registry import close_connections_on_return
+
 @refresh_scope(proxy=True)
 @component
 class ReportingDataSource:
@@ -676,8 +681,9 @@ class ReportingDataSource:
         self.engine = create_async_engine(str(config.get("reporting.url")))
 
     @pre_destroy
-    async def close(self) -> None:
-        await self.engine.dispose()     # runs when a refresh evicts this instance
+    async def close(self) -> None:      # runs when a refresh evicts this instance
+        close_connections_on_return(self.engine)   # a connection still in use closes when returned
+        await self.engine.dispose()
 
 
 @service
@@ -707,6 +713,7 @@ swapped the scope's instance inside the block.
 
 ```python
 from pyfly.container.refresh_scope import scoped_proxy
+from pyfly.data.relational.datasource_registry import close_connections_on_return
 
 class ReportingDatabase:
     """The reporting engine and its sessions, rebuilt on every refresh."""
@@ -716,6 +723,7 @@ class ReportingDatabase:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def dispose(self) -> None:
+        close_connections_on_return(self.engine)
         await self.engine.dispose()
 
 
@@ -728,7 +736,11 @@ class ReportingConfiguration:
 ```
 
 Each refresh destroys the evicted holder through its inferred destroy method (`dispose()`), and so
-does `ApplicationContext.stop()` for the live one. The holder type keeps the reporting engine apart
+does `ApplicationContext.stop()` for the live one. An engine a bean disposes itself needs
+`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`) before
+`dispose()`: without it, a connection in use during the refresh goes back into the disposed pool
+when it is returned and stays open until the garbage collector finds that pool. The context does it
+for an `AsyncEngine` bean it disposes, and the datasource registry for its own engines. The holder type keeps the reporting engine apart
 from the application's primary: a refresh-scoped `AsyncEngine` bean does not replace the primary
 either (only a singleton does), but an injection by type (`AsyncEngine`) receives the primary, so
 it has to be injected by name.
@@ -1433,7 +1445,8 @@ When `ApplicationContext.stop()` is called (each step bounded per bean by
    bean may still have used in its `stop()`, which would otherwise reopen a disposed engine's pool.
 5. **Dispose the resource registries** -- every bean that implements
    `pyfly.kernel.lifecycle.ResourceRegistry` (`async dispose_all()`): the `DataSourceRegistry`
-   closes every engine, **last**.
+   closes every engine, **last**. A connection still in use then (a request or a readiness probe in
+   flight) finishes its work and is closed when it is returned.
 6. **Release** -- the singletons this run built are released, and everything the run added (the
    started lifecycle beans, the post-processors discovered from beans, the event listeners it
    wired, the post-create hook) is forgotten, so a later `start()` is a cold start. From here on

@@ -23,9 +23,11 @@
   Cloud's scoped proxy does; ``Provider[T]`` stays the explicit alternative.
 - A destroyed scoped instance gets the whole contract, not only ``@pre_destroy``: a lifecycle bean
   is stopped, and the product of a ``@bean`` method gets its destroy method, declared
-  (``@bean(destroy_method=...)``) or inferred (``dispose()``, ``aclose()`` or ``close()``). The
-  documented ``@scoped_proxy @bean(scope="refresh") -> AsyncEngine`` has no ``@pre_destroy`` to write,
-  and every refresh leaked the evicted engine's pool.
+  (``@bean(destroy_method=...)``) or inferred (``dispose()``, ``aclose()`` or ``close()``). A
+  ``@scoped_proxy @bean(scope="refresh") -> AsyncEngine`` has no ``@pre_destroy`` to write, and every
+  refresh leaked the evicted engine's pool.
+- A connection in use while the context disposes an engine (a refresh evicting it, the stop) is closed
+  when it is returned, instead of going back into the disposed pool.
 
 Everything runs on SQLite file databases; the URL of the reporting datasource comes from an
 environment variable that the tests switch between two files.
@@ -35,23 +37,26 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import event, text  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker, create_async_engine  # noqa: E402
 
 from pyfly.container import Provider, bean, component, configuration, service  # noqa: E402
 from pyfly.container.bean import INFER_DESTROY_METHOD  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, refresh_scope, scoped_proxy  # noqa: E402
+from pyfly.container.scoped_proxy import proxy_target  # noqa: E402
 from pyfly.container.types import Scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.context.lifecycle import pre_destroy  # noqa: E402
 from pyfly.context.refresh import ContextRefresher  # noqa: E402
 from pyfly.context.request_context import RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
+from pyfly.data.relational.datasource_registry import close_connections_on_return  # noqa: E402
 
 DESTROYED: list[int] = []
 DISPOSED: list[int] = []
@@ -321,7 +326,7 @@ _ENGINES: list[AsyncEngine] = []
 
 @configuration
 class _DocumentedScopedEngine:
-    """The example of the dependency-injection guide, verbatim: no ``@pre_destroy`` anywhere."""
+    """A proxied refresh-scoped engine bean and nothing else: no ``@pre_destroy`` anywhere."""
 
     @scoped_proxy
     @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
@@ -612,6 +617,115 @@ async def test_a_singleton_destroy_method_runs_after_the_lifecycle_beans_stop(ur
     assert EVENTS == ["checkpointer.stop", "engine.disposed"]
     assert await _rows(urls["a"]) == ["checkpoint"]
     assert _SINGLETON_ENGINES[0].pool.checkedin() == 0
+
+
+# ---------------------------------------------------------------------------
+# A connection in use while the context disposes an engine bean (a refresh evicting it, the stop) is
+# closed when it is returned. ``AsyncEngine.dispose()`` closes the idle connections only; a returned
+# one went back into the disposed pool and stayed open until the garbage collector found that pool.
+# ---------------------------------------------------------------------------
+
+
+def _closed_connections(engine: AsyncEngine) -> list[Any]:
+    """The DBAPI connections of *engine*'s pool closed from now on (SQLAlchemy's ``close`` pool event)."""
+    closed: list[Any] = []
+    event.listen(engine.sync_engine, "close", lambda dbapi_connection, _record: closed.append(dbapi_connection))
+    return closed
+
+
+async def _dbapi_connection(conn: AsyncConnection) -> Any:
+    return (await conn.get_raw_connection()).dbapi_connection
+
+
+async def test_a_connection_in_use_while_a_refresh_disposes_the_engine_is_closed_when_returned(
+    urls: dict[str, str],
+) -> None:
+    _ENGINES.clear()
+    ctx = ApplicationContext(_config())
+    ctx.register_bean(_DocumentedScopedEngine)
+    await ctx.start()
+    engine = ctx.get_bean(AsyncEngine)  # the proxy
+    try:
+        async with engine.connect() as conn:
+            closed = _closed_connections(_ENGINES[-1])
+            in_use = await _dbapi_connection(conn)
+            await ctx.get_bean(ContextRefresher).refresh()
+            assert DISPOSED == [1]  # the evicted engine was disposed while the connection was in use
+            assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+            assert in_use not in closed
+
+        assert in_use in closed  # returned: closed, not kept in the disposed pool
+    finally:
+        await ctx.stop()
+
+
+@configuration
+class _DisposedSingletonEngine:
+    @bean(destroy_method="dispose")
+    def own_engine(self, config: Config) -> AsyncEngine:
+        engine = create_async_engine(str(config.get("reporting.url")))
+        _SINGLETON_ENGINES.append(engine)
+        return engine
+
+
+async def test_a_connection_in_use_while_the_stop_disposes_a_singleton_engine_is_closed_when_returned(
+    urls: dict[str, str],
+) -> None:
+    _SINGLETON_ENGINES.clear()
+    ctx = ApplicationContext(_config())
+    ctx.register_bean(_DisposedSingletonEngine)
+    await ctx.start()
+    engine = ctx.get_bean(AsyncEngine)
+    closed = _closed_connections(engine)
+    async with engine.connect() as conn:
+        in_use = await _dbapi_connection(conn)
+        await ctx.stop()
+        assert (await conn.execute(text("SELECT 1"))).scalar_one() == 1
+        assert in_use not in closed
+
+    assert in_use in closed
+
+
+class ReportingDatabase:
+    """The holder of the dependency-injection guide's scoped proxy example, verbatim."""
+
+    def __init__(self, url: str) -> None:
+        self.engine = create_async_engine(url)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+
+    async def dispose(self) -> None:
+        close_connections_on_return(self.engine)
+        await self.engine.dispose()
+
+
+@configuration
+class _ReportingConfiguration:
+    @scoped_proxy
+    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def reporting_database(self, config: Config) -> ReportingDatabase:
+        return ReportingDatabase(str(config.get("reporting.url")))
+
+
+async def test_the_guides_reporting_holder_closes_a_session_in_use_across_a_refresh(urls: dict[str, str]) -> None:
+    ctx = ApplicationContext(_config())
+    ctx.register_bean(_ReportingConfiguration)
+    await ctx.start()
+    reporting = ctx.get_bean(ReportingDatabase)  # the proxy
+    try:
+        evicted = proxy_target(reporting)
+        closed = _closed_connections(evicted.engine)
+        async with reporting.sessions() as session:
+            await session.execute(text("SELECT 1"))
+            in_use = await _dbapi_connection(await session.connection())
+            await ctx.get_bean(ContextRefresher).refresh()
+            assert proxy_target(reporting) is not evicted
+            assert evicted.engine.pool.checkedin() == 0  # disposed through the inferred dispose()
+            await session.execute(text("SELECT 1"))
+            assert in_use not in closed
+
+        assert in_use in closed
+    finally:
+        await ctx.stop()
 
 
 # ---------------------------------------------------------------------------
