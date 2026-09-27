@@ -98,6 +98,7 @@ __all__ = [
     "in_list_limit",
     "joins_rows",
     "loader_options",
+    "loads_per_batch",
     "order_expressions",
     "padded",
     "primary_key_orders",
@@ -350,6 +351,31 @@ def stream_safe(statement: Select[Any], entity: type) -> Select[Any]:
     the collections of each fetched batch are loaded by one more statement. Unchanged when there is none."""
     options = list(_joined_collections(sa_inspect(entity), None, frozenset()))
     return statement.options(*options) if options else statement
+
+
+_PER_BATCH_LOADS = frozenset({"selectin", "subquery", "immediate"})
+"""Relationship loading strategies that run statements of their own for the rows a result fetched."""
+
+
+def loads_per_batch(entity: type) -> bool:
+    """Whether reading *entity* rows in a stream runs statements of its own for each fetched batch: a
+    ``selectin``, ``subquery`` or ``immediate`` relationship (its own, or one behind a joined many-to-one), or a
+    joined collection, which :func:`stream_safe` turns into a ``selectin`` load. A joined many-to-one comes with
+    its row and runs nothing."""
+    return _loads_per_batch(sa_inspect(entity), frozenset())
+
+
+def _loads_per_batch(mapper: Mapper[Any], seen: frozenset[Mapper[Any]]) -> bool:
+    for relationship in mapper.relationships:
+        if relationship.lazy in _PER_BATCH_LOADS:
+            return True
+        if relationship.lazy not in ("joined", False):
+            continue
+        if relationship.uselist:
+            return True
+        if relationship.mapper not in seen and _loads_per_batch(relationship.mapper, seen | {mapper}):
+            return True
+    return False
 
 
 def _joined_collections(mapper: Mapper[Any], path: Any, seen: frozenset[Mapper[Any]]) -> Iterator[Any]:

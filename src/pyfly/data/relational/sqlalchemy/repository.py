@@ -118,6 +118,7 @@ from pyfly.data.relational.sqlalchemy.statements import (
     in_criteria,
     joins_rows,
     loader_options,
+    loads_per_batch,
     order_expressions,
     primary_key_orders,
     stream_safe,
@@ -1086,8 +1087,10 @@ class Repository(Generic[T, ID]):
         (:data:`STREAM_FIRST_BATCH` rows first, up to :data:`STREAM_BATCH_SIZE`): one fetch, and one pass of the
         unit's operation guard, per batch. A collection the entity loads eagerly with a join is loaded with
         ``selectin`` per batch instead (a streamed result cannot be made unique). On MySQL and MariaDB, where
-        nothing else runs on a connection while its cursor is open, a stream that loads relationships per batch
-        is read in full first. A stream closed before its end (``aclose()``, ``contextlib.aclosing``) closes its
+        nothing else runs on a connection while its cursor is open, a stream that loads relationships with
+        statements of their own per batch (a fetch plan, ``selectin``, a joined collection:
+        ``statements.loads_per_batch``) is read in full first; a joined many-to-one comes with its row and is
+        streamed. A stream closed before its end (``aclose()``, ``contextlib.aclosing``) closes its
         cursor at once, which frees the connection.
         """
         if chunk_size is not None and chunk_size < 1:
@@ -1099,8 +1102,8 @@ class Repository(Generic[T, ID]):
         options = self._load_options(load)
         planned = stmt.options(*options)
         streamed = stream_safe(planned, self._model)
-        loads_per_batch = bool(options) or streamed is not planned or self._eager_relationships()
-        if loads_per_batch and not DataSourceCapabilities.of(dialect_of(session)).multiple_active_results:
+        per_batch = bool(options) or streamed is not planned or loads_per_batch(self._model)
+        if per_batch and not DataSourceCapabilities.of(dialect_of(session)).multiple_active_results:
             for entity in unique_entities(await session.execute(planned)):
                 yield entity
             return
@@ -1114,12 +1117,6 @@ class Repository(Generic[T, ID]):
                     size = min(size * 5, STREAM_BATCH_SIZE)
         finally:
             await result.close()
-
-    def _eager_relationships(self) -> bool:
-        return any(
-            relationship.lazy is False or relationship.lazy in _EAGER_LOADS
-            for relationship in self._mapper.relationships
-        )
 
     async def _page(
         self, session: AsyncSession, base: Select[Any], pageable: Pageable, load: FetchPlan | None

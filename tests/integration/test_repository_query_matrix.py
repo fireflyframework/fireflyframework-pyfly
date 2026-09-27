@@ -82,6 +82,20 @@ class RqBook(Base):
     shelf_id: Mapped[int] = mapped_column(ForeignKey("rq_shelf.id"))
 
 
+class RqEntry(Base):
+    """An entry whose score comes with it through a join (a ``lazy="joined"`` many-to-one)."""
+
+    __tablename__ = "rq_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    score_id: Mapped[int] = mapped_column(ForeignKey("rq_score.id"))
+    score: Mapped[RqScore] = relationship(lazy="joined")
+
+
+class EntryRepository(Repository[RqEntry, int]):
+    pass
+
+
 class ScoreRepository(Repository[RqScore, int]):
     pass
 
@@ -103,7 +117,7 @@ class EagerParentRepository(Repository[ContractParent, uuid.UUID]):
     __load__ = ("children",)
 
 
-MODELS = (*CONTRACT_MODELS, RqScore, RqShelf, RqBook)
+MODELS = (*CONTRACT_MODELS, RqScore, RqShelf, RqBook, RqEntry)
 
 SCORES = {1: 10, 2: None, 3: 5, 4: None, 5: 7, 6: 3, 7: 1}
 """The audit's probe rows (C112): id -> score, two of them NULL."""
@@ -535,3 +549,26 @@ async def test_stream_all_reads_fixed_size_batches_when_asked(relational_backend
                 async for _row in rows:
                     pass
         assert datasources.checked_out() == 0
+
+
+@pytest.mark.backends("mysql", "mariadb")
+async def test_a_joined_many_to_one_is_streamed_from_the_cursor_on_mysql(relational_backend: RelationalBackend) -> None:
+    """A joined many-to-one comes with its row and needs no statement per batch, so MySQL and MariaDB stream it
+    from the server-side cursor instead of reading everything first (which only per-batch loads require): the
+    open cursor is why another statement on the unit is refused until the stream is closed."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _scores(datasources)
+        async with datasources.engine.begin() as conn:
+            await conn.execute(insert(RqEntry), [{"id": n, "score_id": n} for n in SCORES])
+        entries = EntryRepository()
+
+        @transactional
+        async def peek() -> tuple[int, int]:
+            async with contextlib.aclosing(entries.stream_all(Sort.by("id"))) as rows:
+                first = await anext(rows)
+                with pytest.raises(IllegalTransactionStateError):
+                    await entries.count()
+            return first.score.id, await entries.count()
+
+        assert await peek() == (1, 7)
+        assert [(entry.id, entry.score.id) async for entry in entries.stream_all(Sort.by("id"))][-1] == (7, 7)

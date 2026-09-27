@@ -57,6 +57,7 @@ from pyfly.data.relational.sqlalchemy.statements import (
     in_list_limit,
     joins_rows,
     loader_options,
+    loads_per_batch,
     order_expressions,
     padded,
     primary_key_orders,
@@ -93,6 +94,32 @@ class StPassiveNote(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     passive_id: Mapped[int] = mapped_column(ForeignKey("st_passive.id", ondelete="CASCADE"))
+
+
+class StOwner(Base):
+    __tablename__ = "st_owner"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class StCar(Base):
+    """A joined many-to-one to a target that loads nothing else: its rows need no other statement."""
+
+    __tablename__ = "st_car"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("st_owner.id"))
+    owner: Mapped[StOwner] = relationship(lazy="joined")
+
+
+class StBike(Base):
+    """A ``selectin`` many-to-one: its rows need one more statement per batch."""
+
+    __tablename__ = "st_bike"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("st_owner.id"))
+    owner: Mapped[StOwner] = relationship(lazy="selectin")
 
 
 class StListened(Base):
@@ -476,6 +503,13 @@ class TestStreams:
     def test_a_mapper_without_joined_collections_is_unchanged(self) -> None:
         statement = select(ContractParent)
         assert stream_safe(statement, ContractParent) is statement
+
+    def test_what_a_batch_of_rows_loads_with_statements_of_its_own(self) -> None:
+        assert not loads_per_batch(ContractParent)  # lazy loads only
+        assert not loads_per_batch(StCar)  # a joined many-to-one comes with the row
+        assert loads_per_batch(StBike)  # selectin
+        assert loads_per_batch(StShelf)  # a joined collection, which a stream loads with selectin
+        assert loads_per_batch(StBook)  # the shelf's joined books, behind its joined many-to-one
 
     def test_explicit_selectin_options_survive(self) -> None:
         statement = stream_safe(select(StShelf).options(selectinload(StShelf.books)), StShelf)
