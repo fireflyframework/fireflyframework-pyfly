@@ -156,6 +156,7 @@ class TestDisposal:
             ensure_tables,
             event_store,
             event_store_head,
+            locks,
             orchestration_state,
             projection_checkpoints,
             snapshots,
@@ -163,7 +164,7 @@ class TestDisposal:
 
         migrations = create_async_engine(url)
         await ensure_tables(
-            migrations, orchestration_state, event_store, event_store_head, snapshots, projection_checkpoints
+            migrations, orchestration_state, event_store, event_store_head, snapshots, projection_checkpoints, locks
         )
         await migrations.dispose()
         context = await _started(
@@ -214,12 +215,13 @@ class TestDisposal:
             ensure_tables,
             event_store,
             event_store_head,
+            locks,
             projection_checkpoints,
             snapshots,
         )
 
         for database, tables in (
-            ("app.db", [projection_checkpoints]),  # the checkpoints follow the event store's provider, on the primary
+            ("app.db", [projection_checkpoints, locks]),  # the checkpoints follow the event store's provider
             ("events.db", [event_store, event_store_head, snapshots]),
         ):
             migrations = create_async_engine(_sqlite(tmp_path / database))

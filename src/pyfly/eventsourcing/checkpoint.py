@@ -192,13 +192,14 @@ class SqlAlchemyCheckpointStore:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Create the table when allowed, then check it; raises ``FrameworkSchemaError`` when it is unusable.
+        """Create the checkpoint table and the lease table (``pyfly_locks``, for :meth:`projection_lease`) when
+        allowed, then check them; raises ``FrameworkSchemaError`` when one is unusable.
 
         The application context starts the store; one built by hand starts on first use."""
-        from pyfly.data.relational.framework_schema import ensure_tables
+        from pyfly.data.relational.framework_schema import ensure_tables, locks_table
 
         with outside_transaction():
-            await ensure_tables(self._target, self._table, create=self._create_table)
+            await ensure_tables(self._target, self._table, locks_table(), create=self._create_table)
         self._started = True
 
     async def _ready(self) -> None:
