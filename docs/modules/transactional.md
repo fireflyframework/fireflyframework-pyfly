@@ -1036,7 +1036,21 @@ a crash is therefore still there for the next process: its
 `SagaRecoveryService.recover_stale()` finds it in flight and marks it failed,
 and `/api/orchestration/executions` lists sagas and TCC transactions beside
 workflows. (Before 26.09.08 the saga and TCC engines always used an in-memory
-adapter, whatever the provider.)
+adapter, whatever the provider.) An application's own
+`TransactionalPersistencePort` bean replaces `transactional_persistence_port`.
+
+The port serializes the updates of one execution (`update_step_status`,
+`mark_completed`: the parallel steps of a layer each keep their status), and
+executions never wait for one another.
+
+With the `sqlalchemy` provider, saga and TCC state is written through the unit
+of work bound for the provider's datasource, like any other state: a saga run
+inside a `@transactional` method writes its `IN_FLIGHT` row, its step statuses
+and its completion in the caller's transaction. Two consequences follow. Until
+the caller commits, no other process sees the saga, so a crash mid-saga leaves
+nothing to recover; and when the caller rolls back, the record of the saga
+(including the remote steps it already ran) is rolled back with it. Start a
+saga outside the business transaction when its log must outlive it.
 
 #### Redis provider
 
@@ -1339,7 +1353,7 @@ DI container:
 | `tcc_engine_properties` | `TccEngineProperties` | TCC configuration. |
 | `backpressure_properties` | `BackpressureProperties` | Backpressure configuration. |
 | `orchestration_persistence` | `ExecutionPersistenceProvider` | Provider selected by `pyfly.transactional.persistence.provider` (`InMemoryPersistenceProvider`, `RedisPersistenceProvider`, `SqlAlchemyPersistenceProvider`, or `CachePersistenceProvider`). |
-| `transactional_persistence_port` | `TransactionalPersistencePort` | `ProviderPersistencePort` on `orchestration_persistence`: what the saga engine, the TCC engine and `SagaRecoveryService` persist through. |
+| `transactional_persistence_port` | `TransactionalPersistencePort` | `ProviderPersistencePort` on `orchestration_persistence`: what the saga engine, the TCC engine and `SagaRecoveryService` persist through (unless the application defines its own `TransactionalPersistencePort` bean). |
 | `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat; the engines do not use it). |
 | `logger_events_adapter` | `LoggerEventsAdapter` | Default logging events adapter. |
 | `saga_argument_resolver` | `ArgumentResolver` | Parameter injection resolver. |

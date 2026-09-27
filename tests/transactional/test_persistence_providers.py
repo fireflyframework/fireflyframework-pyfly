@@ -35,8 +35,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pyfly.container import bean, component, configuration
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import ExecutionState
+from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -732,3 +735,82 @@ class TestProviderPersistencePort:
         assert first is not None and set(first["steps"]) == {f"step-{index}" for index in range(5)}
         assert second is not None and second["status"] == "COMPLETED"
         assert port._serials == {}  # one lock per execution in flight, none kept afterwards
+
+
+# ===========================================================================
+# The port bean: the configured provider's, unless the application has its own
+# ===========================================================================
+
+
+class _ApplicationPort(InMemoryPersistenceAdapter):
+    """An application's own TransactionalPersistencePort."""
+
+
+@configuration
+class _ApplicationPortConfiguration:
+    @bean
+    def application_port(self) -> TransactionalPersistencePort:
+        return _ApplicationPort()
+
+
+@component
+class _ApplicationPortComponent(InMemoryPersistenceAdapter, TransactionalPersistencePort):
+    """An application's own port, declared as a component implementing the port."""
+
+
+class TestTransactionalPersistencePortBean:
+    async def test_the_engines_persist_through_the_configured_provider(self) -> None:
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            assert isinstance(port, ProviderPersistencePort)
+            assert ctx.get_bean(SagaEngine)._persistence_port is port
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.parametrize("declaration", [_ApplicationPortConfiguration, _ApplicationPortComponent])
+    async def test_an_application_port_bean_replaces_the_provider_s(self, declaration: type) -> None:
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+        from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+        from pyfly.transactional.saga.persistence.recovery import SagaRecoveryService
+        from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        ctx.register_bean(declaration)
+        if declaration is _ApplicationPortComponent:
+            # What scanning the component does: it is bound to the port it implements.
+            ctx.container.bind(TransactionalPersistencePort, _ApplicationPortComponent)  # type: ignore[type-abstract]
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            assert isinstance(port, _ApplicationPort | _ApplicationPortComponent)
+            assert ctx.get_bean(SagaEngine)._persistence_port is port
+            assert ctx.get_bean(TccEngine)._persistence_port is port
+            assert ctx.get_bean(SagaRecoveryService)._persistence_port is port
+            assert not [reg for reg in ctx.container._all.values() if isinstance(reg.instance, ProviderPersistencePort)]
+        finally:
+            await ctx.stop()
+
+    async def test_the_admin_dashboard_counts_the_in_flight_executions_of_the_engines_port(self) -> None:
+        """The dashboard counted the legacy in-memory adapter's executions, which the engines no longer use."""
+        from pyfly.admin.providers.transactions_provider import TransactionsProvider
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.core.config import Config
+
+        ctx = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+        await ctx.start()
+        try:
+            port = ctx.get_bean(TransactionalPersistencePort)  # type: ignore[type-abstract]
+            await port.persist_state({"saga_name": "order", "correlation_id": "in-flight"})
+
+            assert (await TransactionsProvider(ctx).get_transactions())["in_flight"] == 1
+        finally:
+            await ctx.stop()

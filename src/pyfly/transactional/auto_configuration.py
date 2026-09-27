@@ -27,7 +27,7 @@ from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
-from pyfly.context.conditions import auto_configuration, conditional_on_property
+from pyfly.context.conditions import auto_configuration, conditional_on_missing_bean, conditional_on_property
 from pyfly.core.config import Config
 
 # core/
@@ -263,10 +263,12 @@ class TransactionalEngineAutoConfiguration:
     # -- Saga and TCC persistence --------------------------------------------
 
     @bean
+    @conditional_on_missing_bean(TransactionalPersistencePort)
     def transactional_persistence_port(self, persistence: ExecutionPersistenceProvider) -> TransactionalPersistencePort:
         """The persistence port of the saga engine, the TCC engine and ``SagaRecoveryService``: the configured
         :class:`ExecutionPersistenceProvider`, so ``pyfly.transactional.persistence.provider`` makes saga and
-        TCC state as durable as workflow state (audit C079: they always used the in-memory adapter)."""
+        TCC state as durable as workflow state (audit C079: they always used the in-memory adapter). An
+        application's own ``TransactionalPersistencePort`` bean replaces it."""
         return ProviderPersistencePort(persistence)
 
     # -- Legacy infrastructure adapters (kept for back-compat) --------------
