@@ -598,8 +598,9 @@ A repository call resolves its session when it runs:
   server-side cursors need one), and owns that connection until the iterator is exhausted or
   `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`: closing it early closes its
   cursor at once (on MySQL and MariaDB that reads the rest of its rows and drops them, as the
-  connection requires). A stream still open when its unit completes, or when the `NESTED` step or
-  savepoint block it was opened in ends, is closed first.
+  connection requires). A stream left open (a `break` out of the loop does not close it) is closed
+  before its unit's `COMMIT` or `ROLLBACK`, and before the `NESTED` step or savepoint block it was
+  opened in ends.
 
 Every `asyncio` task created inside a transaction inherits its unit. That is made safe:
 
@@ -652,8 +653,8 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
   `IllegalTransactionStateError` naming the stream, before it reaches the server (asyncmy would corrupt
   the connection instead). The stream goes on, and the unit stays usable. Collect the rows first, close
   the stream early, or give the other work a unit of its own (`Propagation.REQUIRES_NEW`, `detached()`).
-  PostgreSQL and SQLite run other statements beside an open stream, and nothing changes there
-  (`DataSource.capabilities.multiple_active_results`).
+  PostgreSQL and SQLite run other statements beside an open stream
+  (`DataSource.capabilities.multiple_active_results` tells which kind a datasource is).
 
   ```python
   @transactional
