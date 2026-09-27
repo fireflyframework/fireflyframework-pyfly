@@ -23,8 +23,10 @@ from typing import Any, Protocol, runtime_checkable
 class CacheAdapter(Protocol):
     """Abstract cache interface.
 
-    All cache backends (Redis, in-memory, etc.) must implement this protocol. The contract every built-in
-    adapter keeps, and a custom one should keep:
+    All cache backends (Redis, in-memory, etc.) must implement this protocol. The contract the built-in
+    adapters keep, and a custom one should keep (the PostgreSQL adapter does not keep the own-namespace
+    ``clear()``, expiry and named-cache rules yet: its ``clear()`` empties the cache table, it leaves expired
+    rows in it, and it has no ``with_namespace``):
 
     - **Values are copies.** ``put`` stores a copy of the value and ``get`` returns a value of the caller's
       own: changing either never changes the entry, whatever the backend.

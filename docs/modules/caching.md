@@ -101,6 +101,16 @@ Every built-in adapter keeps these rules, and a custom adapter should too:
   from this one, which this cache's `clear()` never touches. See
   [Named Caches](#named-caches-regions-and-dedicated-caches).
 
+> **The PostgreSQL adapter does not keep the last three rules yet.** Its
+> `clear()` deletes every row of the cache table, and it has no
+> `with_namespace()`: a dedicated cache on it falls back to a region of the same
+> table (a `cache_not_dedicated` warning says so), so a root `clear()` also
+> deletes idempotency records and orchestration state kept there. Clear its
+> regions instead (`clear_all_cache()` on the query bus clears the `:cqrs:`
+> region only), or use the in-memory or Redis adapter for durable consumers. It
+> also never deletes an expired row: expired rows are ignored when read, but
+> they stay in the table until the key is written again.
+
 ### Method Reference
 
 | Method                           | Return Type   | Description |
@@ -128,6 +138,12 @@ handle it, for example an instance of a class defined inside a function), and
 every `get` returns a new copy. Two requests never share one cached object, and
 the in-memory cache behaves like the Redis and PostgreSQL ones. A live ORM
 object is refused with `CacheValueError`.
+
+The copies cost time on every call: a hit unpickles the entry, and a put
+pickles it. For a page of 50 small Pydantic DTOs that is about 25 µs per hit and
+40 µs per put, against a few microseconds for a shared reference. That is still
+far below a database round trip, but cache small, flat DTOs rather than large
+object graphs.
 
 ```python
 from datetime import timedelta
