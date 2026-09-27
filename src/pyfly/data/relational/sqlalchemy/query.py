@@ -877,7 +877,8 @@ class CompiledQuery:
         if options.flush_automatically:
             await _flush_pending(session)
         result = await session.execute(statement)
-        count = int(getattr(result, "rowcount", -1))
+        rowcount = getattr(result, "rowcount", None)
+        count = int(rowcount) if rowcount is not None else -1
         if count < 0 and dialect.name == "sqlite":
             # Python's sqlite3 counts the rows of a statement that starts with INSERT, UPDATE, DELETE or REPLACE
             # only: SQLite itself knows how many rows a WITH ... UPDATE changed.
