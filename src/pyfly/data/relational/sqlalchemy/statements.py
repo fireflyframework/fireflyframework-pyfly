@@ -43,17 +43,34 @@ from __future__ import annotations
 
 import enum
 import sqlite3
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, TypeVar
 
-from sqlalchemy import ARRAY, Select, and_, any_, bindparam, case, func, literal_column, or_, select, tuple_
+from sqlalchemy import (
+    ARRAY,
+    Select,
+    and_,
+    any_,
+    asc,
+    bindparam,
+    case,
+    desc,
+    func,
+    literal_column,
+    nulls_first,
+    nulls_last,
+    or_,
+    select,
+    tuple_,
+)
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapper, QueryableAttribute, RelationshipProperty, Session, defaultload, selectinload
 from sqlalchemy.orm.interfaces import MANYTOONE
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.base import ExecutableOption
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.elements import ColumnElement, UnaryExpression
 
 from pyfly.data.pageable import NullHandling, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
@@ -66,10 +83,13 @@ __all__ = [
     "backend_name",
     "bulk_delete_safe",
     "chunked",
+    "distinct_entity_count",
+    "distinct_entity_page",
     "exists",
     "exists_probe",
     "in_criteria",
     "in_list_limit",
+    "joins_rows",
     "loader_options",
     "order_expressions",
     "padded",
@@ -203,10 +223,104 @@ async def exists(session: AsyncSession, probe: Select[tuple[int]]) -> bool:
     return (await session.execute(probe)).scalar() is not None
 
 
-def unique_entities(result: Any) -> list[Any]:
-    """The entities of an ORM result, each once (``unique()``: required by joined eager loads of collections,
-    harmless otherwise)."""
-    return list(result.unique().scalars().all())
+def unique_entities(result: Any, *, distinct: bool = False) -> list[Any]:
+    """The entities of an ORM result, each once.
+
+    The result goes through ``unique()`` when a joined eager load of a collection repeats its entities (the ORM
+    requires it then), or when *distinct* says the statement's own joins may repeat them (:func:`joins_rows`);
+    otherwise every row is a different entity and the rows are read as they are, which spares hashing each
+    one.
+    """
+    # The ORM marks a result that needs unique() (joined eager loads of collections) with a filter that
+    # raises until unique() is called; a result without it has one row per entity.
+    if distinct or getattr(result, "_unique_filter_state", None) is not None:
+        return list(result.unique().scalars().all())
+    return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Entities a join repeats
+# ---------------------------------------------------------------------------------------------------------
+
+
+_ORDER_MODIFIERS: dict[Any, Callable[[Any], Any]] = {
+    operators.asc_op: asc,
+    operators.desc_op: desc,
+    operators.nulls_first_op: nulls_first,
+    operators.nulls_last_op: nulls_last,
+}
+
+
+def joins_rows(statement: Select[Any], entity: type) -> bool:
+    """Whether *statement*, a ``SELECT`` of *entity*, reads rows of other tables beside the entity's own (a join
+    or another FROM a specification added), so one entity can come back on several rows.
+
+    A ``LIMIT`` on such a statement counts rows, not entities: page it with :func:`distinct_entity_page` and
+    count it with :func:`distinct_entity_count`.
+    """
+    own = set(select(entity).get_final_froms())
+    return any(source not in own for source in statement.get_final_froms())
+
+
+def distinct_entity_page(
+    statement: Select[Any], entity: type, *, offset: int | None = None, limit: int | None = None
+) -> Select[Any]:
+    """The entities *statement* selects, each once, in its ORDER BY, with *offset* and *limit* counting entities.
+
+    The page is cut from the distinct primary keys of the matching rows (with the ORDER BY keys beside them,
+    since a ``DISTINCT`` may only order by what it selects), and the entities are selected by joining those
+    keys, in the same order: ``SELECT e.* FROM e JOIN (SELECT DISTINCT e.pk, <keys> ... ORDER BY ... LIMIT
+    ...) AS page ON e.pk = page.pk ORDER BY page.<keys>``. Portable (SQL Server 2012 and later included), and one
+    statement. Order *statement* by the entity's own properties: ordering by a joined row's column repeats an
+    entity once per distinct value. Loader options go on the returned statement.
+    """
+    mapper: Mapper[Any] = sa_inspect(entity)
+    key_columns = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
+    orders = [_split_order(clause) for clause in statement._order_by_clauses]
+    keys = [column.label(f"pyfly_k{index}") for index, column in enumerate(key_columns)]
+    sort_keys = [key.label(f"pyfly_o{index}") for index, (key, _modifiers) in enumerate(orders)]
+    inner = statement.with_only_columns(*keys, *sort_keys, maintain_column_froms=True).order_by(None).distinct()
+    if offset or limit is not None:
+        # SQL Server refuses an ORDER BY in a derived table without OFFSET or TOP: order only a cut page.
+        inner = inner.order_by(
+            *(_directed(label, modifiers) for label, (_key, modifiers) in zip(sort_keys, orders, strict=True))
+        )
+        if offset:
+            inner = inner.offset(offset)
+        if limit is not None:
+            inner = inner.limit(limit)
+    page = inner.subquery("pyfly_page")
+    matched = and_(*(column == page.c[f"pyfly_k{index}"] for index, column in enumerate(key_columns)))
+    return (
+        select(entity)
+        .join(page, matched)
+        .order_by(*(_directed(page.c[f"pyfly_o{index}"], modifiers) for index, (_key, modifiers) in enumerate(orders)))
+    )
+
+
+def distinct_entity_count(statement: Select[Any], entity: type) -> Select[tuple[int]]:
+    """``SELECT count(*)`` of the distinct *entity* primary keys *statement* matches (its ORDER BY dropped)."""
+    mapper: Mapper[Any] = sa_inspect(entity)
+    key_columns = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
+    keys = statement.with_only_columns(*key_columns, maintain_column_froms=True).order_by(None).distinct()
+    return select(func.count()).select_from(keys.subquery())
+
+
+def _split_order(clause: Any) -> tuple[Any, list[Any]]:
+    """An ORDER BY clause as its key expression and its modifiers (direction, NULL placement), outermost first."""
+    modifiers: list[Any] = []
+    element = clause
+    while isinstance(element, UnaryExpression) and element.modifier in _ORDER_MODIFIERS:
+        modifiers.append(element.modifier)
+        element = element.element
+    return element, modifiers
+
+
+def _directed(expression: Any, modifiers: Sequence[Any]) -> Any:
+    """*expression* with the ORDER BY *modifiers* of :func:`_split_order` applied again."""
+    for modifier in reversed(modifiers):
+        expression = _ORDER_MODIFIERS[modifier](expression)
+    return expression
 
 
 def stream_safe(statement: Select[Any], entity: type) -> Select[Any]:

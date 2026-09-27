@@ -66,9 +66,12 @@ Spring Data semantics, at the minimum statement count:
 - ``exists_by_id`` answers from the unit's identity map, else with ``SELECT 1 ... LIMIT 1``.
 - Every paging path orders by the primary key after the requested orders (deterministic pages, and what
   SQL Server requires for ``OFFSET``); ``find_all(Pageable)`` skips the ``COUNT`` when the page gives the
-  total; ``find_slice`` sends no ``COUNT`` at all; ``scroll`` pages by keyset.
+  total; ``find_slice`` sends no ``COUNT`` at all; ``scroll`` pages by keyset. Pages, slices and windows
+  count entities: when a specification joins rows (a collection), the page is cut from the distinct primary
+  keys and the ``COUNT`` counts those, so each entity comes once and every one is reachable.
 - Id lists are chunked to the dialect's limit and padded (one ``= ANY`` bind on PostgreSQL), composite keys
-  included; entity results go through ``unique()``, so a ``lazy="joined"`` collection works everywhere.
+  included; entity results are made unique when a ``lazy="joined"`` collection or a specification's join
+  repeats their rows, so each list holds each entity once.
 - Sort and filter names are validated against the entity (``InvalidPropertyError``, a 400), optionally
   narrowed by the class attributes ``__sortable__`` and ``__filterable__``.
 - Read methods take a fetch plan, ``load=`` (relationship names, attributes or loader options; the class
@@ -105,9 +108,12 @@ from pyfly.data.relational.sqlalchemy.statements import (
     LockMode,
     bulk_delete_safe,
     dialect_of,
+    distinct_entity_count,
+    distinct_entity_page,
     exists,
     exists_probe,
     in_criteria,
+    joins_rows,
     loader_options,
     order_expressions,
     primary_key_orders,
@@ -1002,8 +1008,7 @@ class Repository(Generic[T, ID]):
                 raise ValueError(f"The scroll position lacks the key {missing} (it needs {properties})") from None
             stmt = stmt.where(self._after(orders, values))
         stmt = stmt.order_by(*order_expressions(self._model, Sort(tuple(orders)), dialect_of(session)))
-        stmt = stmt.limit(size + 1).options(*self._load_options(load))
-        items = unique_entities(await session.execute(stmt))
+        items = await self._entities(session, stmt, self._load_options(load), limit=size + 1)
         has_next = len(items) > size
         items = items[:size]
         after = KeysetPosition({name: getattr(items[-1], name) for name in properties}) if items else None
@@ -1071,28 +1076,66 @@ class Repository(Generic[T, ID]):
     async def _page(
         self, session: AsyncSession, base: Select[Any], pageable: Pageable, load: FetchPlan | None
     ) -> Page[T]:
-        content = base.order_by(*self._orders(session, pageable.sort)).options(*self._load_options(load))
+        ordered = base.order_by(*self._orders(session, pageable.sort))
+        options = self._load_options(load)
+        repeats = joins_rows(base, self._model)
         if pageable.is_paged:
-            content = content.order_by(*primary_key_orders(self._model, pageable.sort))
-            content = content.offset(pageable.offset).limit(pageable.size)
-        items = unique_entities(await session.execute(content))
+            ordered = ordered.order_by(*primary_key_orders(self._model, pageable.sort))
+            items = await self._entities(
+                session, ordered, options, offset=pageable.offset, limit=pageable.size, repeats=repeats
+            )
+        else:
+            items = await self._entities(session, ordered, options, repeats=repeats)
         total = _total_from_content(pageable, len(items))
         if total is None:
-            total = int((await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one())
+            count = (
+                distinct_entity_count(base, self._model)
+                if repeats
+                else select(func.count()).select_from(base.subquery())
+            )
+            total = int((await session.execute(count)).scalar_one())
         return Page(items=items, total=total, page=pageable.page, size=pageable.size)
 
     async def _slice(
         self, session: AsyncSession, base: Select[Any], pageable: Pageable, load: FetchPlan | None
     ) -> Slice[T]:
-        content = base.order_by(*self._orders(session, pageable.sort)).options(*self._load_options(load))
+        ordered = base.order_by(*self._orders(session, pageable.sort))
+        options = self._load_options(load)
         if not pageable.is_paged:
-            items = unique_entities(await session.execute(content))
+            items = await self._entities(session, ordered, options)
             return Slice(items=items, page=pageable.page, size=pageable.size, has_next=False)
-        content = content.order_by(*primary_key_orders(self._model, pageable.sort))
-        items = unique_entities(await session.execute(content.offset(pageable.offset).limit(pageable.size + 1)))
+        ordered = ordered.order_by(*primary_key_orders(self._model, pageable.sort))
+        items = await self._entities(session, ordered, options, offset=pageable.offset, limit=pageable.size + 1)
         return Slice(
             items=items[: pageable.size], page=pageable.page, size=pageable.size, has_next=len(items) > pageable.size
         )
+
+    async def _entities(
+        self,
+        session: AsyncSession,
+        statement: Select[Any],
+        options: Sequence[Any],
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+        repeats: bool | None = None,
+    ) -> list[T]:
+        """The entities *statement* selects, each once and in its order, *offset* and *limit* counting entities.
+
+        When a specification's join repeats an entity on several rows (*repeats*, found out when ``None``), a
+        ``LIMIT`` on the rows would cut a page short and hide the entities after it: the page is then cut from
+        the distinct keys (``statements.distinct_entity_page``).
+        """
+        if repeats is None:
+            repeats = joins_rows(statement, self._model)
+        if repeats and (offset or limit is not None):
+            statement = distinct_entity_page(statement, self._model, offset=offset, limit=limit)
+        else:
+            if offset is not None:
+                statement = statement.offset(offset)
+            if limit is not None:
+                statement = statement.limit(limit)
+        return unique_entities(await session.execute(statement.options(*options)), distinct=repeats)
 
     # ------------------------------------------------------------------
     # Specification extensions (PyFly)
@@ -1102,7 +1145,7 @@ class Repository(Generic[T, ID]):
         """Find all entities matching the specification."""
         session = self._session
         stmt = spec.to_predicate(self._model, select(self._model).where(*self._criteria()))
-        return unique_entities(await session.execute(stmt.options(*self._load_options(load))))
+        return await self._entities(session, stmt, self._load_options(load))
 
     async def find_all_by_spec_paged(
         self, spec: Specification[T], pageable: Pageable, *, load: FetchPlan | None = None

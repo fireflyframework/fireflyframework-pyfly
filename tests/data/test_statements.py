@@ -30,6 +30,7 @@ a SQL Server or Oracle defect is caught without those servers (the audit's compi
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -48,9 +49,12 @@ from pyfly.data.relational.sqlalchemy.statements import (
     backend_name,
     bulk_delete_safe,
     chunked,
+    distinct_entity_count,
+    distinct_entity_page,
     exists_probe,
     in_criteria,
     in_list_limit,
+    joins_rows,
     loader_options,
     order_expressions,
     padded,
@@ -284,6 +288,86 @@ class TestOrdering:
         assert sql.endswith("ORDER BY contract_line.order_code ASC, contract_line.line_no ASC")
         assert primary_key_orders(ContractLine, Sort.by("line_no", "order_code")) == []
         assert len(primary_key_orders(ContractLine, Sort.by(Order.desc("line_no")))) == 1
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Entities a join repeats
+# ---------------------------------------------------------------------------------------------------------
+
+
+class StStaff(Base):
+    __tablename__ = "st_staff"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(10))
+    __mapper_args__ = {"polymorphic_on": "kind", "polymorphic_identity": "staff"}
+
+
+class StManager(StStaff):
+    __tablename__ = "st_manager"
+
+    id: Mapped[int] = mapped_column(ForeignKey("st_staff.id"), primary_key=True)
+    __mapper_args__ = {"polymorphic_identity": "manager"}
+
+
+def _joined_parents() -> Select[Any]:
+    return select(ContractParent).join(ContractParent.children).where(ContractChild.label == "hit")
+
+
+class TestDistinctEntities:
+    def test_a_join_or_another_from_repeats_entities(self) -> None:
+        assert joins_rows(_joined_parents(), ContractParent)
+        assert joins_rows(select(ContractParent).where(ContractChild.parent_id == ContractParent.id), ContractParent)
+        assert joins_rows(select(ContractLine).where(ContractLine.sku == ContractChild.label), ContractLine)
+
+    def test_criteria_subqueries_and_inheritance_do_not(self) -> None:
+        assert not joins_rows(select(ContractParent).where(ContractParent.name == "a"), ContractParent)
+        hit = ContractParent.children.any(ContractChild.label == "hit")
+        assert not joins_rows(select(ContractParent).where(hit), ContractParent)
+        assert not joins_rows(
+            select(ContractParent).where(ContractParent.id.in_(select(ContractChild.parent_id))), ContractParent
+        )
+        assert not joins_rows(select(StManager).where(StManager.id > 0), StManager)  # its own two tables
+
+    @pytest.mark.parametrize("name", ["postgresql", "sqlite", "mysql", "mariadb", "oracle"])
+    def test_a_page_is_cut_from_the_distinct_keys_with_their_order_keys(self, name: str) -> None:
+        dialect = DIALECTS[name]
+        ordered = _joined_parents().order_by(
+            *order_expressions(ContractParent, Sort.by(Order.desc("name").ignoring_case().nulls_last()), dialect),
+            *primary_key_orders(ContractParent, Sort.unsorted()),
+        )
+        sql = _sql(distinct_entity_page(ordered, ContractParent, offset=4, limit=2), dialect)
+        assert "JOIN (SELECT DISTINCT contract_parent.id AS pyfly_k0, " in sql
+        assert "lower(contract_parent.name) AS pyfly_o" in sql  # the order keys the DISTINCT selects
+        # The outer query orders by the same keys, read from the page: the name descending, then the key.
+        outer = sql.split("ON contract_parent.id = pyfly_page.pyfly_k0 ORDER BY ")[1]
+        last = len(outer.split(", ")) - 1
+        assert re.search(r"pyfly_page\.pyfly_o\d DESC", outer) and outer.endswith(f"pyfly_page.pyfly_o{last} ASC")
+
+    def test_sql_server_orders_the_derived_table_only_when_it_is_cut(self) -> None:
+        server = mssql.dialect()
+        server._supports_offset_fetch = True  # type: ignore[attr-defined]  # SQL Server 2012 and later
+        ordered = _joined_parents().order_by(ContractParent.name.asc(), ContractParent.id.asc())
+        cut = _sql(distinct_entity_page(ordered, ContractParent, offset=2, limit=2), server)
+        assert (
+            "ORDER BY pyfly_o0 ASC, pyfly_o1 ASC OFFSET :param_1 ROWS FETCH FIRST :param_2 ROWS ONLY) AS pyfly_page"
+            in cut
+        )
+        whole = _sql(distinct_entity_page(ordered, ContractParent), server)
+        assert "ORDER BY" not in whole.split(") AS pyfly_page")[0]
+        assert whole.endswith("ORDER BY pyfly_page.pyfly_o0 ASC, pyfly_page.pyfly_o1 ASC")
+
+    def test_composite_keys_join_on_every_key_column(self) -> None:
+        statement = select(ContractLine).where(ContractLine.sku == ContractChild.label).order_by(ContractLine.sku)
+        sql = _sql(distinct_entity_page(statement, ContractLine, limit=5), DIALECTS["sqlite"])
+        assert "contract_line.order_code = pyfly_page.pyfly_k0 AND contract_line.line_no = pyfly_page.pyfly_k1" in sql
+
+    def test_the_count_counts_distinct_keys(self) -> None:
+        sql = _sql(
+            distinct_entity_count(_joined_parents().order_by(ContractParent.name), ContractParent), DIALECTS["mssql"]
+        )
+        assert sql.startswith("SELECT count(*) AS count_1 FROM (SELECT DISTINCT contract_parent.id AS id FROM")
+        assert "ORDER BY" not in sql
 
 
 # ---------------------------------------------------------------------------------------------------------

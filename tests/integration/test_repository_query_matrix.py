@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import ForeignKey, Integer, String, event, insert
-from sqlalchemy.dialects import mssql
+from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
@@ -252,6 +252,90 @@ async def test_a_keyset_scroll_visits_every_row_once_in_order(relational_backend
             await scores.scroll(Sort.by("name"), KeysetPosition.of(name="b"))
         with pytest.raises(ValueError, match="null handling"):
             await scores.scroll(Sort.by(Order.asc("name").nulls_last()))
+
+
+HAS_A_HIT = Specification[ContractParent](
+    lambda root, q: q.join(ContractParent.children).where(ContractChild.label == "hit")
+)
+"""A specification that joins a collection: the join repeats a parent once per matching child."""
+
+
+async def _hits(parents: ParentRepository) -> None:
+    """Parents a, b and c with 3, 2 and 1 children labeled 'hit', and d with none; each has one 'miss'."""
+    families = []
+    for name, hits in (("a", 3), ("b", 2), ("c", 1), ("d", 0)):
+        parent = ContractParent(name=name)
+        parent.children.extend(ContractChild(label="hit", position=k) for k in range(hits))
+        parent.children.append(ContractChild(label="miss", position=9))
+        families.append(parent)
+    await parents.save_all(families)
+
+
+def _names(items: list[ContractParent]) -> list[str]:
+    return [item.name for item in items]
+
+
+async def test_a_specification_that_joins_a_collection_pages_each_entity_once(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Pages, slices and windows count entities, not joined rows: cut on joined rows, the first page of three
+    held only 'a' (its three rows), its total said 1, and paging never reached 'b' or 'c'."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        parents = ParentRepository()
+        await _hits(parents)
+        by_name = Sort.by("name")
+
+        with datasources.counter() as counter:
+            first = await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.of(1, 2, by_name), load="children")
+        assert (_names(first.items), first.total, first.total_pages) == (["a", "b"], 3, 2)
+        assert [len(parent.children) for parent in first.items] == [4, 3]
+        assert dml(counter) == {"SELECT": 3}  # the page, its children, and the COUNT of distinct parents
+        last = await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.of(2, 2, by_name))
+        assert (_names(last.items), last.total) == (["c"], 3)
+        with datasources.counter() as counter:
+            whole = await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.of(1, 3, Sort.by(Order.desc("name"))))
+        assert (_names(whole.items), whole.total, dml(counter)) == (["c", "b", "a"], 3, {"SELECT": 2})
+        folded = Sort.by(Order.desc("name").ignoring_case().nulls_last())
+        assert _names((await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.of(1, 2, folded))).items) == ["c", "b"]
+        unpaged = await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.unpaged())
+        assert (sorted(_names(unpaged.items)), unpaged.total) == (["a", "b", "c"], 3)
+
+        head = await parents.find_slice_by_spec(HAS_A_HIT, Pageable.of(1, 2, by_name))
+        assert (_names(head.items), head.has_next) == (["a", "b"], True)
+        tail = await parents.find_slice_by_spec(HAS_A_HIT, Pageable.of(2, 2, by_name))
+        assert (_names(tail.items), tail.has_next) == (["c"], False)
+
+        window = await parents.scroll(by_name, size=2, spec=HAS_A_HIT)
+        assert (_names(window.items), window.has_next) == (["a", "b"], True)
+        window = await parents.scroll(by_name, window.next_position, size=2, spec=HAS_A_HIT)
+        assert (_names(window.items), window.has_next) == (["c"], False)
+
+        assert sorted(_names(await parents.find_all_by_spec(HAS_A_HIT))) == ["a", "b", "c"]
+
+
+async def test_distinct_entity_pages_compile_on_sql_server_and_oracle(relational_backend: RelationalBackend) -> None:
+    """The statements a joining specification's page, slice and window really ran, compiled for SQL Server
+    2012+ and Oracle: the page is taken over the distinct keys, with the ORDER BY those need for OFFSET."""
+    async with repository_datasources(relational_backend, *MODELS):
+        parents = ParentRepository()
+        await _hits(parents)
+        ran: list[Any] = []
+
+        def record(state: Any) -> None:
+            if state.is_select:
+                ran.append(state.statement)
+
+        with _listening(Session, "do_orm_execute", record):
+            await parents.find_all_by_spec_paged(HAS_A_HIT, Pageable.of(2, 1, Sort.by(Order.desc("name"))))
+            await parents.find_slice_by_spec(HAS_A_HIT, Pageable.of(1, 2))
+            await parents.scroll(Sort.by("name"), size=2, spec=HAS_A_HIT)
+        server = mssql.dialect()
+        server._supports_offset_fetch = True  # what its first connection to SQL Server 2012 or later sets
+        for dialect in (server, oracle.dialect()):
+            compiled = [" ".join(str(statement.compile(dialect=dialect)).split()) for statement in ran]
+            paged = [sql for sql in compiled if "SELECT DISTINCT" in sql and " JOIN (" in sql]
+            assert len(paged) == 3, compiled
+            assert all(("FETCH" in sql or "SELECT DISTINCT TOP" in sql) and " ORDER BY " in sql for sql in paged)
 
 
 # ---------------------------------------------------------------------------------------------------------
