@@ -81,6 +81,14 @@ def test_not_retryable_types_skip_the_remaining_attempts_unless_the_failure_is_t
     assert policy.retry_delay(KeyError("x"), 1) == 1.0
 
 
+def test_a_transient_failure_uses_up_the_same_attempts() -> None:
+    """Every failure counts: a lost connection on the last attempt is dead-lettered like any other, so a
+    database outage longer than the back-off dead-letters what is consumed meanwhile."""
+    policy = RetryPolicy(max_attempts=3)
+    assert policy.retry_delay(ConnectionResetError("db restarting"), 2) == 2.0
+    assert policy.retry_delay(ConnectionResetError("db restarting"), 3) is None
+
+
 def test_a_listener_s_options_override_the_policy() -> None:
     policy = RetryPolicy(max_attempts=5, backoff=ExponentialBackOff())
     assert policy.with_options(None) is policy

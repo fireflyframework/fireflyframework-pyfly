@@ -17,19 +17,24 @@ The Kafka and RabbitMQ adapters of :mod:`pyfly.messaging` and the Kafka and Rabb
 :mod:`pyfly.eda` consume through the two containers of this module, so every consumer in the framework
 gives the same guarantees (at-least-once, Spring Kafka and Spring AMQP semantics):
 
-- **Each delivery runs in a unit of work the container opens** (``REQUIRED`` on the configured
-  datasource, the default one unless ``listener.datasource`` names another). The handler's
-  ``@transactional`` joins it, and so do its repository calls. The delivery is acknowledged (the Kafka
-  offset committed, the AMQP message acked) only once that unit has committed. An application without a
-  data layer runs its handlers without a unit, and acknowledges once they return.
+- **Each delivery runs in a unit of work the container opens**, and is acknowledged (the Kafka offset
+  committed, the AMQP message acked) only once that unit has committed. The unit takes the settings of
+  the listener's own ``@transactional`` (isolation, read-only, timeout, rollback rules, datasource), which
+  joins it, and so do its repository calls; a listener without ``@transactional`` gets ``REQUIRED`` on the
+  configured datasource (the default one unless ``listener.datasource`` names another). A listener
+  declared ``REQUIRES_NEW``, ``NESTED``, ``SUPPORTS``, ``NOT_SUPPORTED`` or ``NEVER`` runs as declared with
+  no unit of the container's around it, and so do the listeners of a delivery that cannot share one unit
+  (see :meth:`ListenerInvoker.plan`); the delivery is then acknowledged once they returned. An application
+  without a data layer runs its handlers without a unit, and acknowledges once they return.
 - **A failed delivery is attempted again** after a back-off whose default is not zero (1 s, doubling, at
   most 30 s, 5 attempts in all). Kafka seeks the partition back to the record and pauses it for the
   delay, so the record is fetched again and the partition keeps its order; RabbitMQ holds the message for
   the delay and republishes it to its queue with the attempt count in the ``x-pyfly-delivery-attempt``
-  header, then acks the original. A message the adapter cannot read (:class:`PoisonMessageError`), and
-  an exception type the policy lists as not retryable, skip the remaining attempts; a transient failure
-  (:func:`is_transient_failure`: a lost connection, a timeout, a lock or serialization conflict) is always
-  attempted again.
+  header, then acks the original. Every failure counts against the same attempts, a transient one
+  (:func:`is_transient_failure`: a lost connection, a timeout, a lock or serialization conflict)
+  included: a database outage longer than the back-off dead-letters what is consumed meanwhile. A message
+  the adapter cannot read (:class:`PoisonMessageError`), and an exception type the policy lists as not
+  retryable (unless the failure is transient), skip the remaining attempts.
 - **After the last attempt the delivery is dead-lettered** (``<topic>.DLT`` on Kafka, an exchange the
   adapter declares on RabbitMQ) and only then acknowledged. When the dead-letter publish fails, nothing
   is acknowledged: the delivery comes back and is dead-lettered again. Switching dead-lettering off
@@ -37,7 +42,8 @@ gives the same guarantees (at-least-once, Spring Kafka and Spring AMQP semantics
 - **Bounded concurrency.** Kafka runs one record at a time per consumer. RabbitMQ sets a prefetch per
   consumer channel (``basic.qos``, 20 by default), and all the consumers of one adapter share a
   concurrency limit sized from the datasource's connection pool (one handler at a time on SQLite), so a
-  backlog never becomes more handlers than connections.
+  backlog never becomes more handlers than connections. A handler that needs a second connection (a
+  ``REQUIRES_NEW`` service call, another datasource on the same pool) can still wait for the pool.
 - **Graceful stop.** ``stop()`` stops fetching, waits for the deliveries in flight for
   ``listener.shutdown-timeout`` (10 s), then cancels the rest: a cancelled delivery is not acknowledged
   (its offset is not committed, its message goes back to the queue), unless its unit had committed
@@ -49,7 +55,7 @@ gives the same guarantees (at-least-once, Spring Kafka and Spring AMQP semantics
 Configuration, under ``pyfly.messaging.listener.*`` and ``pyfly.eda.listener.*`` (see
 :meth:`ListenerContainerSettings.from_config`): ``transactional``, ``datasource``, ``shutdown-timeout``,
 ``concurrency``, ``retry.max-attempts``, ``retry.initial-delay``, ``retry.multiplier``,
-``retry.max-delay``; and ``<prefix>.rabbitmq.prefetch``.
+``retry.max-delay``; and ``<prefix>.rabbitmq.prefetch`` and ``<prefix>.kafka.max-poll-records``.
 """
 
 from __future__ import annotations
@@ -164,10 +170,11 @@ def failure_cause(error: BaseException) -> BaseException:
 class RetryPolicy:
     """How many times a delivery is attempted, and how long the container waits in between.
 
-    *max_attempts* counts every delivery, the first included (``1`` dead-letters at the first failure).
-    *not_retryable* names exception types that are dead-lettered at the first failure, because another
-    attempt cannot succeed (a validation error, a missing reference); a transient failure is attempted
-    again even when its type is listed (:func:`is_transient_failure`).
+    *max_attempts* counts every delivery, the first included (``1`` dead-letters at the first failure),
+    whatever the failure: a transient one uses up the same attempts. *not_retryable* names exception types
+    that are dead-lettered at the first failure, because another attempt cannot succeed (a validation
+    error, a missing reference); a transient failure (:func:`is_transient_failure`) keeps its remaining
+    attempts even when its type is listed.
     """
 
     max_attempts: int = 5

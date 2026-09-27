@@ -17,6 +17,7 @@ runtime.
 4. [MessageHandler Callable](#messagehandler-callable)
 5. [The @message_listener Decorator](#the-message_listener-decorator)
 6. [Delivery Guarantees](#delivery-guarantees)
+   - [Listener Transactions](#listener-transactions)
 7. [Adapters](#adapters)
    - [InMemoryMessageBroker](#inmemorymessagebroker)
    - [KafkaAdapter](#kafkaadapter)
@@ -291,24 +292,26 @@ Kafka and RabbitMQ listeners consume through one **listener container**
 `pyfly.eda`. Delivery is **at-least-once**, with the semantics of Spring Kafka and
 Spring AMQP:
 
-* **Each delivery runs in a unit of work the container opens**, `REQUIRED` on the
-  default datasource (`pyfly.messaging.listener.datasource` names another). The
-  listener's `@transactional` joins it, and so do its repository calls, so everything
-  one delivery writes commits together or not at all. The message is acknowledged
-  only after that unit committed: the Kafka offset is committed, the AMQP message is
-  acked. An application without a data layer runs its listeners without a unit and
-  acknowledges once they return; `pyfly.messaging.listener.transactional: false`
-  does the same with one. On a SQLite file database the unit holds the single write
-  lock for the whole delivery, so a `REQUIRES_NEW` write inside a listener raises
-  `IllegalTransactionStateError` there: join the delivery's unit, or switch the
-  container's unit off.
+* **Each delivery runs in a unit of work the container opens, and is acknowledged
+  only after that unit committed**: the Kafka offset is committed, the AMQP message is
+  acked. The listener's repository calls run in the unit, so everything one delivery
+  writes commits together or not at all. The unit takes the settings of the listener's
+  own `@transactional` (see [Listener Transactions](#listener-transactions)). An
+  application without a data layer runs its listeners without a unit and acknowledges
+  once they return; `pyfly.messaging.listener.transactional: false` does the same with
+  one.
 * **A failure is attempted again, after a back-off.** Kafka seeks the partition back
   to the record and pauses it for the delay, so the record is fetched again and the
   records after it keep their order. RabbitMQ holds the message for the delay, then
   republishes it to its own queue with the attempt count in the
-  `x-pyfly-delivery-attempt` header and acks the original. A transient failure (a lost
-  connection, a pool or statement timeout, a deadlock, a lock or serialization
-  conflict) is always attempted again.
+  `x-pyfly-delivery-attempt` header and acks the original. Every failure counts against
+  the same `retry.max-attempts`, a transient one (a lost connection, a pool or statement
+  timeout, a deadlock, a lock or serialization conflict) included. With the defaults (5
+  attempts, with 1 + 2 + 4 + 8 = 15 s of back-off between them), a database outage or
+  failover longer than about 15 s dead-letters every delivery consumed during it (on
+  RabbitMQ, every prefetched message runs through its attempts): size
+  `pyfly.messaging.listener.retry.max-attempts` and `retry.max-delay` to outlast the
+  failover you expect. A message the adapter cannot read is dead-lettered at once.
 * **After the last attempt, the message is dead-lettered, then acknowledged.** When
   the dead-letter publish fails, nothing is acknowledged: the offset stays where it
   was, the AMQP message is requeued, and the dead letter is published again later.
@@ -319,7 +322,10 @@ Spring AMQP:
   (`pyfly.messaging.rabbitmq.prefetch`), and the adapter's consumers share a limit on
   the handlers running at once, sized from the datasource's connection pool (one on
   SQLite; `pyfly.messaging.listener.concurrency` sets it). A backlog therefore never
-  becomes more handlers than connections, and never times out on the pool.
+  becomes more handlers than connections. A handler that needs a second connection
+  while its delivery holds one (a `REQUIRES_NEW` service it calls, another datasource
+  on the same pool) can still wait for the pool, up to the pool's timeout: set
+  `concurrency` below the pool size for such listeners.
 * **Stopping is graceful.** The adapters are
   [`CONSUMER_PHASE`](dependency-injection.md#lifecycle-phases) lifecycle beans: the application context
   stops them before any `@pre_destroy`. `stop()` stops fetching, waits for the
@@ -333,14 +339,61 @@ Spring AMQP:
 
 What this does *not* give you is exactly-once processing. A message whose unit
 committed can still be delivered again: the process can stop between the commit and
-the acknowledgement, and a Kafka rebalance can hand a partition over while its offsets
-wait for the end of a poll. A listener with side effects that must not happen twice
-keys them on `Message.offset` (with `topic` and `partition`) or `Message.message_id`,
-or records what it applied in the same unit of work. Without a consumer `group`, a
-Kafka listener commits no offset at all, so a restart delivers nothing again; the
-container warns about it.
+the acknowledgement, a Kafka rebalance can hand a partition over while its offsets
+wait for the end of a poll, and a crash in the middle of a poll delivers again the
+records of that poll that were done (at most `pyfly.messaging.kafka.max-poll-records`,
+100, per partition). A listener with side effects that must not happen twice keys them
+on `Message.offset` (with `topic` and `partition`) or `Message.message_id`, or records
+what it applied in the same unit of work. Without a consumer `group`, a Kafka listener
+commits no offset at all, so a restart delivers nothing again; the container warns
+about it.
 
-Until 26.09.08 none of this held. The Kafka adapter kept aiokafka's auto-commit and
+### Listener Transactions
+
+The unit the container opens for a delivery takes the settings the listener's own
+`@transactional` declares, so a listener runs as it would outside a container:
+
+| The listener is declared                 | Its delivery runs |
+|------------------------------------------|-------------------|
+| without `@transactional`                 | in a `REQUIRED` unit on `pyfly.messaging.listener.datasource` (the default datasource unless it names another). |
+| `@transactional` (`REQUIRED`, `MANDATORY`) | in a unit with the listener's isolation, read-only flag, timeout, rollback rules and datasource; the listener joins it. |
+| `REQUIRES_NEW` or `NESTED`               | in the unit the listener's `@transactional` begins itself; the container opens none. |
+| `SUPPORTS`, `NOT_SUPPORTED` or `NEVER`   | without a unit: each repository call gets a short one of its own. |
+
+The message is acknowledged after the listener returned, so after its unit committed,
+in every case. A `SERIALIZABLE` listener runs at `SERIALIZABLE`, a `timeout` rolls the
+delivery back when it runs over (and the delivery is attempted again), and a
+`read_only=True` listener cannot write.
+
+Listeners that share a delivery (several `@message_listener` methods on one Kafka topic
+and group, several `@event_listener` patterns that match one event) share its unit when
+each of them would run in it with its own settings. When they cannot (one is
+`SERIALIZABLE` and another is not, one is `REQUIRES_NEW` or `NEVER`), the container
+opens none and logs `listener_units_differ` naming them (at subscription for a Kafka
+topic and group, at the first event that reaches them on an EDA bus). Each then runs as
+its own `@transactional` declares, and the delivery is no longer one unit: when a later
+listener fails, the message is delivered again to the listeners whose work committed.
+
+A `@transactional` service the listener calls joins the delivery's unit too. When such
+a service fails, it marks the unit rollback-only, whether or not the listener catches
+its exception: the unit rolls back at the end (`UnexpectedRollbackError`), and the
+delivery is attempted again, then dead-lettered. For a best-effort step (an audit
+record, a notification), declare the service
+`@transactional(propagation=Propagation.NESTED)`: its failure rolls back to its own
+savepoint, and the delivery commits.
+
+On a SQLite file database the unit holds the single write lock for the whole delivery,
+work that is not database work (an HTTP call) included, so the application's other
+writes wait for it, and a `REQUIRES_NEW` write from a service the listener calls raises
+`IllegalTransactionStateError`. Keep slow work out of such listeners, declare the
+listener itself `REQUIRES_NEW` (it then runs in its own unit only), or set
+`pyfly.messaging.listener.transactional: false`.
+
+Each delivery opens and commits a unit (a connection checkout, `BEGIN`, `COMMIT`) even
+when the listener never touches the database. A high-throughput listener that does not
+can save that with `pyfly.messaging.listener.transactional: false`.
+
+Before 26.09.08 none of this held. The Kafka adapter kept aiokafka's auto-commit and
 skipped a failed record, and `stop()` committed the offset of a handler it had just
 cancelled. The RabbitMQ adapter rejected a failed message without requeue into a queue
 with no dead-letter exchange, and ran a whole backlog at once with no prefetch. A
@@ -567,11 +620,12 @@ pyfly:
 | `pyfly.messaging.rabbitmq.url`        | `"amqp://guest:guest@localhost/"`  | AMQP connection URL for RabbitMQ. |
 | `pyfly.messaging.rabbitmq.prefetch`   | `20`                               | `basic.qos` prefetch of each consumer channel. |
 | `pyfly.messaging.rabbitmq.dead-letter-exchange` | `"pyfly.dlx"`            | The exchange a message goes to after its last attempt (into `<queue>.dlq`). |
-| `pyfly.messaging.listener.transactional` | `true`                          | Run each delivery in a unit of work the container opens. |
-| `pyfly.messaging.listener.datasource` | *(default datasource)*             | The datasource of that unit. |
+| `pyfly.messaging.kafka.max-poll-records` | `100`                          | The most records one poll returns; their offsets are committed when they are all done. |
+| `pyfly.messaging.listener.transactional` | `true`                          | Run each delivery in a unit of work the container opens (see [Listener Transactions](#listener-transactions)). |
+| `pyfly.messaging.listener.datasource` | *(default datasource)*             | The datasource of that unit, for a listener without `@transactional`. |
 | `pyfly.messaging.listener.shutdown-timeout` | `10`                         | Seconds `stop()` waits for the deliveries in flight before it cancels them. |
-| `pyfly.messaging.listener.concurrency` | *(pool size; 1 on SQLite)*        | The most RabbitMQ deliveries the adapter runs at once, never more than the prefetch. |
-| `pyfly.messaging.listener.retry.max-attempts` | `5`                        | Deliveries of a failing message, the first included. |
+| `pyfly.messaging.listener.concurrency` | *(pool size; 1 on SQLite)*        | The most RabbitMQ deliveries the adapter runs at once. Unset, it is sized from the datasource's pool, at most the prefetch; a value set here is used as it is. |
+| `pyfly.messaging.listener.retry.max-attempts` | `5`                        | Deliveries of a failing message, the first included, whatever the failure (a transient one too). |
 | `pyfly.messaging.listener.retry.initial-delay` | `1.0`                     | Seconds before the second attempt. |
 | `pyfly.messaging.listener.retry.multiplier` | `2.0`                        | Factor each later delay grows by. |
 | `pyfly.messaging.listener.retry.max-delay` | `30.0`                        | The longest delay between two attempts. |
