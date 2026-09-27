@@ -41,8 +41,10 @@ from pyfly.data.relational.datasource_registry import DataSourceRegistry, dataso
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator  # noqa: E402
 from pyfly.data.relational.routing import RoutingSessionFactory  # noqa: E402
 
-pymongo = pytest.importorskip("pymongo")
-AsyncMongoClient = pymongo.AsyncMongoClient
+try:
+    from pymongo import AsyncMongoClient
+except ImportError:  # only the Mongo test needs the driver, and it skips itself without it
+    AsyncMongoClient = None  # type: ignore[assignment,misc]
 
 _URLS: dict[str, str] = {}
 _DISPOSED: list[str] = []
@@ -220,6 +222,7 @@ class _UserMongo:
 
 
 async def test_a_user_mongo_client_replaces_the_auto_configured_one() -> None:
+    pytest.importorskip("pymongo")
     pytest.importorskip("beanie")
     from pyfly.data.document.mongodb.initializer import BeanieInitializer
 

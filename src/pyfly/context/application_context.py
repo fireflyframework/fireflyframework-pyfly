@@ -188,6 +188,8 @@ class ApplicationContext:
         #: Non-singleton instances the container created during start() before the batched
         #: post-processing passes (step 5), which process them; ``None`` outside that window.
         self._startup_created: list[tuple[Any, Registration]] | None = None
+        #: The (class, method) of each async @post_construct a synchronous creation skipped and reported.
+        self._skipped_async_post_construct: set[tuple[type, str]] = set()
 
         # Register config and container as singleton beans (injectable like Spring's ApplicationContext)
         self._container.register_instance(Config, config)
@@ -1829,28 +1831,34 @@ class ApplicationContext:
 
     def _call_post_construct_sync(self, instance: Any) -> None:
         """Synchronous @post_construct for lazily-created beans. Async @post_construct
-        cannot be awaited in the sync resolution path, so it is skipped with a warning
-        (use an eager bean if you need an async @post_construct)."""
+        cannot be awaited in the sync resolution path, so it is skipped with a warning, once per
+        class and method (use an eager bean if you need an async @post_construct)."""
         for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
             if inspect.iscoroutinefunction(method):
-                logger.warning(
-                    "async_post_construct_skipped_on_lazy_bean",
-                    extra={"bean": type(instance).__qualname__, "method": attr_name},
-                )
+                self._warn_async_post_construct_skipped(instance, attr_name)
                 continue
             try:
                 result = method()
                 if inspect.isawaitable(result):
-                    logger.warning(
-                        "async_post_construct_skipped_on_lazy_bean",
-                        extra={"bean": type(instance).__qualname__, "method": attr_name},
-                    )
+                    self._warn_async_post_construct_skipped(instance, attr_name)
             except Exception as exc:
                 raise BeanCreationException(
                     subsystem="lifecycle",
                     provider=type(instance).__qualname__,
                     reason=f"@post_construct method '{attr_name}' failed: {exc}",
                 ) from exc
+
+    def _warn_async_post_construct_skipped(self, instance: Any, attr_name: str) -> None:
+        """Warn that an async ``@post_construct`` was skipped: once per class and method, since a
+        transient or request-scoped bean is created again and again."""
+        key = (type(instance), attr_name)
+        if key in self._skipped_async_post_construct:
+            return
+        self._skipped_async_post_construct.add(key)
+        logger.warning(
+            "async_post_construct_skipped_on_lazy_bean",
+            extra={"bean": type(instance).__qualname__, "method": attr_name},
+        )
 
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""

@@ -275,3 +275,29 @@ async def test_a_singletons_only_post_processor_is_given_singletons_only() -> No
         ("_Listener", Scope.TRANSIENT),  # the one resolved after start
         ("_PerRequest", Scope.REQUEST),
     ]
+
+
+class _AsyncReady:
+    @post_construct
+    async def ready(self) -> None:
+        _CALLS.append("async-ready")
+
+
+async def test_a_skipped_async_post_construct_is_reported_once_per_class(caplog: pytest.LogCaptureFixture) -> None:
+    """A synchronous resolution cannot await it; saying so at every transient creation flooded the log."""
+    import logging
+
+    _CALLS.clear()
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_AsyncReady, scope=Scope.TRANSIENT)
+    await ctx.start()
+    try:
+        with caplog.at_level(logging.WARNING, logger="pyfly.context.application_context"):
+            for _ in range(3):
+                ctx.get_bean(_AsyncReady)
+    finally:
+        await ctx.stop()
+
+    warning = "async_post_construct_skipped_on_lazy_bean"
+    assert len([record for record in caplog.records if record.getMessage() == warning]) == 1
+    assert _CALLS == []
