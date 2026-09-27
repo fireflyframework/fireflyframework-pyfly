@@ -784,7 +784,12 @@ command's unit of work commits**: through an `after_commit` synchronization
 fails after the command publishes nothing. A publisher that joins transactions
 (`joins_transactions`: an `EdaCommandEventPublisher` over the `postgres` or
 `database` outbox bus) publishes at once instead, inside the unit, which
-commits or rolls back the events with it. Deferred to the commit, a publication
+commits or rolls back the events with it. That takes a unit that is still open
+when the bus publishes, on the outbox's datasource: a wider unit around the
+`send()` (a `@transactional` caller). A handler whose own `@transactional`
+unit has committed by the time it returns has its events written afterwards,
+in a unit of their own (two writes: a failure between them loses the events),
+and so does an outbox on another datasource. Deferred to the commit, a publication
 failure is logged and counted by the unit (`pyfly.tx.synchronization.failures`)
 instead of raised: `EventFailureStrategy.RAISE` applies when the bus publishes
 at once. Before 26.09.08 the events reached the broker before the wider unit

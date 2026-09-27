@@ -118,8 +118,9 @@ class Shipping:
 Do not publish the events yourself before the unit of work commits: a rollback
 would leave them published and the change undone. Code that publishes by hand
 drains them with `clear_events()` *inside* the unit and hands them to a
-publisher that joins it (`DomainEventPublisher.publish(order)`, an outbox bus),
-or registers the publication with `pyfly.data.transaction.after_commit`.
+publisher that joins it (`DomainEventPublisher.publish(order)`, an outbox bus on
+the unit's datasource), or registers the publication with
+`pyfly.data.transaction.after_commit`.
 
 An aggregate may also be an ORM-mapped entity (`class Order(Base,
 AggregateRoot[int])`): an instance the ORM loads without running

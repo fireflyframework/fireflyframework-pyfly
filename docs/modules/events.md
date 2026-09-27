@@ -258,7 +258,7 @@ property. All keys are optional; the defaults work for local development.
 |---|---|---|---|
 | `pyfly.eda.provider` | `str` | `auto` | `auto \| memory \| kafka \| redis \| postgres \| database \| rabbitmq`. When `auto`, the strongest available broker library wins (kafka > postgres > redis > rabbitmq > memory). |
 | `pyfly.eda.destinations` | `str` | `pyfly.events` | Comma-separated list of topics / streams / routing keys to consume from. |
-| `pyfly.eda.group` | `str` | `pyfly-default` | Consumer group name (used as Kafka group ID, Redis consumer group, Postgres cursor name, or RabbitMQ queue prefix). |
+| `pyfly.eda.group` | `str` | `pyfly-default` | Consumer group name (used as Kafka group ID, Redis consumer group, the outbox buses' consumer group, or RabbitMQ queue prefix). |
 | `pyfly.eda.serialization-format` | `str` | `json` | Serialization format: `json`, `firefly-json`, `avro`, or `protobuf`. `firefly-json` writes the LaraFly (PHP) envelope shape for topics shared with a PHP service; both JSON serializers read both shapes. |
 | `pyfly.eda.kafka.bootstrap-servers` | `str` | `localhost:9092` | Kafka bootstrap server list. |
 | `pyfly.eda.kafka.partition-key-header` | `str` | `partition_key` | Envelope header consulted first for the record key; then `x-correlation-id`, then the event type (the rule every Firefly Kafka publisher applies). |
@@ -273,8 +273,8 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | `true` | Create the outbox tables when they are missing. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all (the tables are only checked). |
 | `pyfly.eda.outbox.poll-interval` | duration | `5s` | How often an idle relay polls (seconds, or `500ms`, `90s`, `5m`, `2h`). |
 | `pyfly.eda.outbox.batch-size` | `int` | `100` | Deliveries claimed per round. |
-| `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. |
-| `pyfly.eda.outbox.handler-timeout` | duration | `60s` | How long one handler may run before it is cancelled and the attempt counts as failed (`none`: no limit). Must be shorter than `claim-timeout`. |
+| `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. A relay extends the lease before it runs a delivery that could outlast it (see below), so such a delivery waits up to its worst case plus `claim-timeout`. |
+| `pyfly.eda.outbox.handler-timeout` | duration | `60s` | How long one handler may run before it is cancelled and the attempt counts as failed (`none`: no limit, and a handler that outlasts the lease may run twice at once). Must be shorter than `claim-timeout`. A delivery runs every matching handler of the group in turn, so its worst case is `handler-timeout` times their number; when that is longer than what is left of the lease, the relay extends the lease first, and the delivery runs. |
 | `pyfly.eda.outbox.start` | `str` | `latest` | Where a consumer group that registers for the first time starts: `latest` (the events published from then on) or `earliest` (every event the outbox still holds for its destinations). |
 | `pyfly.eda.outbox.error-strategy` | `str` | `DEAD_LETTER` | See [ErrorStrategy](#errorstrategy-enum). |
 | `pyfly.eda.outbox.retention.delivered` | duration | `1h` | An event every group handled is deleted once older than this (`none`: kept). |
@@ -288,7 +288,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.rabbitmq.prefetch` | `int` | `20` | `basic.qos` prefetch of each consumer channel. |
 | `pyfly.eda.rabbitmq.dead-letter-exchange` | `str` | `<exchange-name>.dlx` | The exchange an event goes to after its last attempt, into the queue `<group>.<destination>.dlq`. |
 | `pyfly.eda.kafka.max-poll-records` | `int` | `100` | The most records one poll of the Kafka bus returns; their offsets are committed when they are all done. |
-| `pyfly.eda.listener.*` | | | The Kafka, RabbitMQ and outbox buses' listener container, with the keys and defaults of `pyfly.messaging.listener.*`: `transactional`, `datasource`, `shutdown-timeout`, `concurrency`, `retry.max-attempts` (5), `retry.initial-delay` (1.0), `retry.multiplier` (2.0), `retry.max-delay` (30.0). See [Delivery Guarantees](messaging.md#delivery-guarantees). |
+| `pyfly.eda.listener.*` | | | The Kafka, RabbitMQ and outbox buses' listener container, with the keys and defaults of `pyfly.messaging.listener.*`: `transactional`, `datasource`, `shutdown-timeout`, `concurrency`, `retry.max-attempts` (5), `retry.initial-delay` (1.0), `retry.multiplier` (2.0), `retry.max-delay` (30.0). `concurrency` applies to the Kafka and RabbitMQ buses: an outbox relay handles its deliveries one at a time (run more processes of the group to handle more at once). See [Delivery Guarantees](messaging.md#delivery-guarantees). |
 
 ### Example configuration
 
@@ -366,6 +366,9 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
 - **A publish is part of the publisher's unit of work.** `publish()` writes the event into
   `pyfly_outbox_events` in the unit bound for the outbox's datasource (a short unit of its own outside one):
   a `@transactional` method that rolls back published nothing, and one that commits cannot lose its event.
+  That holds when the outbox is on the datasource of the business unit (the default: the primary
+  datasource). An outbox on another datasource (`pyfly.eda.outbox.datasource`) is written in a unit of that
+  datasource, which commits on its own: the event and the business changes are then two writes again.
   The event is owed to every consumer group registered for its destination (a row in
   `pyfly_outbox_deliveries` per group). On PostgreSQL a publish is one statement, `NOTIFY` included, and
   the server delivers the notification only if the unit commits. A publish never starts the bus: after
@@ -376,7 +379,18 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
   when it becomes visible; several processes of one group share the deliveries without taking one twice; the
   deliveries of a process that dies are claimed again when their lease ends. At-least-once: a handler may see
   an event twice (after a crash between its commit and the settling), so deduplicate on
-  `envelope.event_id`.
+  `envelope.event_id`. A relay settles the deliveries it handled together, in one statement per batch
+  (`batch-size`), so a relay that dies in the middle of a batch has that batch handled again.
+- **The lease covers what a delivery may take.** A delivery runs every matching handler of the group in turn,
+  each for at most `handler-timeout`. The first delivery of a batch always runs: when its worst case is longer
+  than what is left of the lease, the relay first extends the lease of the batch to `claim-timeout` past that
+  worst case. A later delivery that no longer fits in the lease is given back with the rest of the batch, where
+  each was, for a fresh claim (this relay's or another's). No delivery runs past its lease while its relay
+  lives, and none is held back: a group with many handlers for one event type (six under the default timeouts)
+  used to stall on that event, and on every event behind it.
+- **No order guarantee.** A relay handles a batch in publication order, but a failed delivery is attempted
+  again after later events, and the processes of a group claim side by side: consume events as independent
+  facts, or order them yourself (a version number in the payload).
 - **Each subscription is settled on its own.** A delivery runs every handler of the group whose pattern
   matches; the ones that succeed are recorded, and a failing one is attempted again alone, after the retry
   policy's back-off, then dead-lettered ([ErrorStrategy](#errorstrategy-enum)). The group's other events go on
@@ -385,16 +399,24 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
 - **Consumer groups.** A process's group is registered (for `pyfly.eda.destinations`) once a handler
   subscribes: a process that only publishes owes nothing to its own group. A new group starts at
   `pyfly.eda.outbox.start` (`latest`). Every process of a group must subscribe the same handlers: each event
-  goes to one of them.
+  goes to one of them. A group registered for every destination is never given the events of the event
+  sourcing `TransactionalOutbox` (destinations `eventsourcing.outbox:<name>`), which share the tables.
 - **Retention.** The relays delete, in batches, the events every group handled (`retention.delivered`), and
   with `retention.max-age` the older ones whatever is still owed for them.
-- **Lifecycle and health.** `start()` checks (and creates) the tables, opens the LISTEN connection and starts
-  the relay, serialized and idempotent; a failed start closes what it opened. The relay is a
-  `CONSUMER_PHASE` lifecycle bean: the context stops it before any `@pre_destroy`, after the delivery in
-  flight (`pyfly.eda.listener.shutdown-timeout`). The LISTEN connection is kept alive by the relay's polls and
-  reopened when it is lost; meanwhile the relay polls every `poll-interval` and the EDA health indicator is
-  `DOWN` (`"listener": "reconnecting"`). It is also `DOWN` when the bus is not running or its database does
-  not answer.
+- **Lifecycle and health.** `start()` checks (and creates) the tables, opens the LISTEN connection when a
+  handler is subscribed, and starts the relay, serialized and idempotent; a failed start closes what it
+  opened. A bus that only publishes opens no LISTEN connection; one whose handlers subscribe after it started
+  opens it from its relay. The relay is a `CONSUMER_PHASE` lifecycle bean: the context stops it before any
+  `@pre_destroy`, after the delivery in flight (`pyfly.eda.listener.shutdown-timeout`). The LISTEN connection
+  is kept alive by the relay's polls and reopened when it is lost; meanwhile the relay polls every
+  `poll-interval`, and the EDA health indicator stays `UP` (the events are still delivered, and a `DOWN` would
+  pull a serving process out of its readiness and liveness probes) with `"listener": "reconnecting"` and a
+  `degraded` detail saying since when. It is `DOWN` when the bus is not running or its database does not
+  answer. The LISTEN connection uses asyncpg's listener API: on a datasource with another driver (psycopg)
+  the bus polls, with a warning, unless `pyfly.eda.postgres.listen-dsn` gives it a connection of its own
+  (`pyfly.eda.outbox.notify: true` then refuses to start). A publish after `stop()` on a `PostgresEventBus`
+  given a URL outside an application context builds its private registry for that publish and closes it
+  again.
 
 Before 26.09.08 the Postgres bus wrote on a pool of its own, outside the business transaction, and consumed
 by an id cursor: an event that committed after a higher id had been consumed was skipped for good (about 0.2 %
@@ -825,15 +847,20 @@ commits, by the `DomainEventPublisher` the EDA auto-configuration registers
   commits; one with a phase runs at that phase;
 - with `pyfly.eda.domain-events.destination`, through the EDA event publisher too, as
   `publish(destination, event.event_type, event.to_payload(), headers)` with the headers
-  `x-pyfly-event-id`, `x-pyfly-aggregate-type` and `x-pyfly-aggregate-id`. An outbox bus writes them in the
-  committing unit itself, so they are published exactly when the aggregate's changes are; a broker bus gets
-  them after the commit.
+  `x-pyfly-event-id`, `x-pyfly-aggregate-type` and `x-pyfly-aggregate-id`. An outbox bus on the aggregate's
+  datasource writes them in the committing unit itself, so they are published exactly when the aggregate's
+  changes are (an outbox on another datasource commits them in a unit of its own, just before); a broker bus
+  gets them after the commit.
 
 It collects every event an aggregate raises inside a unit of work, and the pending events of an aggregate a
 relational unit of work saves (`Repository.save` of a new or detached aggregate: events raised in a factory,
 before any unit existed). A unit that rolls back publishes nothing. Raise the events on the instance the unit
-holds (the one `save()` returns). `DomainEventPublisher.publish(*aggregates)` publishes by hand, inside the
-unit; without the EDA auto-configuration, register a `DomainEventPublisher(ApplicationEventPublisher)` bean.
+holds (the one `save()` returns): events raised outside a unit on a detached copy that `save()` merges into an
+instance the unit already holds stay pending on the copy (a DEBUG record, `domain_event_pending_outside_unit`,
+is logged when an event is raised outside a unit). `DomainEventPublisher.publish(*aggregates)` publishes by
+hand, inside the unit; without the EDA auto-configuration, register a
+`DomainEventPublisher(ApplicationEventPublisher)` bean (an application's own `DomainEventPublisher` bean
+replaces the auto-configured one).
 
 ---
 
