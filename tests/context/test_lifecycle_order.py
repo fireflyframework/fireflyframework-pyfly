@@ -47,6 +47,7 @@ from pyfly.context.lifecycle import pre_destroy  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
 from pyfly.data.relational.datasource_registry import DataSourceRegistry  # noqa: E402
 from pyfly.data.relational.sqlalchemy.entity import Base  # noqa: E402
+from pyfly.kernel.lifecycle import CONSUMER_PHASE  # noqa: E402
 
 EVENTS: list[str] = []
 
@@ -327,3 +328,60 @@ async def test_a_scanned_component_with_start_and_stop_is_started_and_stopped() 
     await ctx.stop()
 
     assert EVENTS == ["poller.start", "poller.stop"]
+
+
+# ---------------------------------------------------------------------------
+# A declared phase orders lifecycle beans before creation order does.
+# ---------------------------------------------------------------------------
+
+
+class _Phased:
+    def __init__(self, name: str, phase: int) -> None:
+        self.name = name
+        self.phase = phase
+
+    async def start(self) -> None:
+        EVENTS.append(f"{self.name}.start")
+
+    async def stop(self) -> None:
+        EVENTS.append(f"{self.name}.stop")
+
+    @pre_destroy
+    def destroyed(self) -> None:
+        EVENTS.append(f"{self.name}.pre_destroy")
+
+
+@configuration
+class _PhasedConfiguration:
+    @bean
+    def late(self) -> _Phased:
+        return _Phased("late", CONSUMER_PHASE)
+
+    @bean
+    def default(self) -> _Phased:
+        return _Phased("default", 0)
+
+    @bean
+    def early(self) -> _Phased:
+        return _Phased("early", -10)
+
+
+async def test_lifecycle_beans_start_by_ascending_phase_and_stop_by_descending_phase() -> None:
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_PhasedConfiguration)
+    await ctx.start()
+    assert EVENTS == ["early.start", "default.start", "late.start"]
+    EVENTS.clear()
+
+    await ctx.stop()
+
+    # The consumer-phase bean stops before any @pre_destroy (which runs in reverse creation order:
+    # the methods are processed alphabetically), the others after all of them.
+    assert EVENTS == [
+        "late.stop",
+        "late.pre_destroy",
+        "early.pre_destroy",
+        "default.pre_destroy",
+        "default.stop",
+        "early.stop",
+    ]

@@ -52,7 +52,14 @@ from pyfly.kernel.exceptions import (
     UnsupportedMediaTypeException,
     ValidationException,
 )
-from pyfly.kernel.lifecycle import Lifecycle
+from pyfly.kernel.lifecycle import (
+    CONSUMER_PHASE,
+    DEFAULT_PHASE,
+    Lifecycle,
+    ResourceRegistry,
+    SmartLifecycle,
+    lifecycle_phase,
+)
 from pyfly.kernel.types import (
     ErrorCategory,
     ErrorResponse,
@@ -62,7 +69,12 @@ from pyfly.kernel.types import (
 
 __all__ = [
     # Lifecycle
+    "CONSUMER_PHASE",
+    "DEFAULT_PHASE",
     "Lifecycle",
+    "ResourceRegistry",
+    "SmartLifecycle",
+    "lifecycle_phase",
     # Types
     "ErrorCategory",
     "ErrorSeverity",
