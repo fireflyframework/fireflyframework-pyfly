@@ -44,6 +44,11 @@ Completion rules:
   the boundary raises ``IllegalTransactionStateError``. A ``NESTED`` scope whose unit completed under it
   raises ``IllegalTransactionStateError`` whether its body returned or raised: its work went with the
   unit, not with its savepoint.
+- A write auto unit (the unit a repository write method opens outside a transaction) counts as the unit bound
+  for its datasource: a boundary inside that repository call joins it (``REQUIRED``, ``SUPPORTS``,
+  ``MANDATORY``), takes a savepoint on it (``NESTED``), suspends it (``REQUIRES_NEW``, ``NOT_SUPPORTED``) or is
+  refused (``NEVER``), as inside a Spring Data repository method. A read auto unit does not count: it is not a
+  transaction.
 - ``timeout`` bounds a new unit's body with ``asyncio.timeout``; on expiry the unit rolls back and
   :class:`~pyfly.data.transaction.errors.TransactionTimedOutError` is raised.
 - A persistence failure of the commit, or of the flush the commit (or a ``NESTED`` savepoint release) runs,
@@ -494,6 +499,13 @@ class TransactionBoundary:
         state = current_state()
         bound = state.binding(datasource)
         existing = bound if isinstance(bound, UnitOfWork) else None
+        if existing is None:
+            # A write auto unit is the transaction of the repository call that opened it (Spring Data's write
+            # methods are @Transactional): a boundary inside that call joins it, nests in it or suspends it. A read
+            # auto unit is not a transaction (it may run on an AUTOCOMMIT connection): a boundary sees none there.
+            scoped = state.scope(datasource)
+            if scoped is not None and scoped.auto and not scoped.read_only:
+                existing = scoped
         propagation = definition.propagation
         if existing is not None and existing.completed:
             if propagation in _JOINING:
@@ -791,9 +803,10 @@ def _driver_error(error: BaseException | None) -> bool:
 class AutoUnit:
     """The short unit a call gets outside a transaction, as an async context manager yielding the unit.
 
-    It binds a repository operation scope (not a transactional unit: ``MANDATORY`` does not see it), so
-    nested repository calls and synchronizations share it. A write unit commits, a read unit ends without
-    committing anything; both run their synchronizations as a committed unit's.
+    It binds a repository operation scope, so nested repository calls and synchronizations share it. A write
+    unit commits, and a boundary inside it treats it as the unit bound for its datasource (it joins it, nests
+    in it, suspends it, or refuses it for ``NEVER``); a read unit ends without committing anything and is not
+    a transaction to a boundary. Both run their synchronizations as a committed unit's.
     """
 
     __slots__ = ("_autocommit", "_manager", "_read_only", "_since", "_token", "_unit")

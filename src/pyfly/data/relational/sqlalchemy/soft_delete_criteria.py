@@ -59,9 +59,9 @@ The block lifts these criteria only: ``SoftDeleteRepository``'s own reads (``fin
 **Hard deletes.** Deleting a row for good must reach the soft-deleted rows that depend on it: a
 ``cascade="all, delete-orphan"`` child that was soft-deleted has to be deleted with its parent, and one
 without a delete cascade has its foreign key set to ``NULL``, or the parent's ``DELETE`` violates the
-foreign key. The repositories' hard deletes (``Repository.delete``, ``delete_by_id`` and
-``delete_all(entities)``, ``SoftDeleteRepository.hard_delete``) do that through :func:`hard_delete`, which
-loads what the cascades reach with the deleted rows, even for a root and collections loaded (filtered)
+foreign key. The repositories' hard deletes (``Repository.delete``, ``delete_by_id``, ``delete_all_by_id``
+and ``delete_all`` through the ORM, ``SoftDeleteRepository.hard_delete``) do that through :func:`hard_delete`,
+which loads what the cascades reach with the deleted rows, even for a root and collections loaded (filtered)
 earlier in the session. A ``session.delete()`` of your own needs the same: call :func:`hard_delete`, or let
 the database do it (``passive_deletes=True`` on the relationship and ``ON DELETE CASCADE`` on the foreign
 key).

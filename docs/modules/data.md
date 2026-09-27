@@ -19,6 +19,8 @@
   - [CrudRepository\[T, ID\]](#crudrepositoryt-id)
   - [ReactiveSortingRepository\[T, ID\]](#reactivesortingrepositoryt-id)
   - [PagingAndSortingRepository\[T, ID\]](#pagingandsortingrepositoryt-id)
+  - [BatchRepository\[T, ID\]](#batchrepositoryt-id)
+  - [Persistable](#persistable)
   - [Hexagonal Usage Pattern](#hexagonal-usage-pattern)
 - [Derived Query Methods](#derived-query-methods)
   - [QueryMethodParser](#querymethodparser)
@@ -34,6 +36,7 @@
   - [Pageable](#pageable)
   - [Sort and Order](#sort-and-order)
   - [Page\[T\]](#paget)
+  - [Slice\[T\] and Window\[T\]](#slicet-and-windowt)
 - [Entity Mapping](#entity-mapping)
   - [Basic Mapping](#basic-mapping)
   - [Custom Field Mapping](#custom-field-mapping)
@@ -290,8 +293,9 @@ class PagingAndSortingRepository(ReactiveSortingRepository[T, ID], Protocol[T, I
     async def find_all(self, pageable: Pageable) -> Page[T]: ...
 ```
 
-`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`,
-and returns a `Page[T]`. Pageables are **1-based** (`page >= 1`):
+`find_all(pageable)` applies the `Pageable`'s sort (then the primary key, so pages are deterministic),
+slices with `LIMIT`/`OFFSET`, counts the total when the page does not give it, and returns a `Page[T]`.
+Pageables are **1-based** (`page >= 1`):
 
 ```python
 from pyfly.data import Pageable, Sort
@@ -299,9 +303,31 @@ from pyfly.data import Pageable, Sort
 page = await repo.find_all(Pageable.of(page=1, size=20, sort=Sort.by("created_at").descending()))
 ```
 
+### BatchRepository[T, ID]
+
+Extends `PagingAndSortingRepository` with bulk deletes and count-free paging (Spring `JpaRepository`'s
+`deleteAllInBatch` and `deleteAllByIdInBatch`, and `Slice`):
+
+```python
+class BatchRepository(PagingAndSortingRepository[T, ID], Protocol[T, ID]):
+    async def delete_all_in_batch(self, entities: list[T] | None = None) -> None: ...
+    async def delete_all_by_id_in_batch(self, ids: list[ID]) -> None: ...
+    async def find_slice(self, pageable: Pageable, **filters: Any) -> Slice[T]: ...
+```
+
+`delete_all`/`delete_all_by_id` delete entity by entity, so the backend's cascades, version checks and
+delete hooks run; the `*_in_batch` forms are one bulk statement per chunk that bypasses them, by design.
+
+### Persistable
+
+`save()` persists a new entity and merges any other (Spring's `save`). An entity is new when its
+`is_new()` hook says so (the `Persistable` protocol), else when its version is `None`, else when its
+primary key is `None`. Implement `is_new` on an entity whose key the application assigns, so saving it is
+one insert with no merge lookup.
+
 The full protocol hierarchy is therefore:
-`CrudRepository[T, ID]` → `ReactiveSortingRepository[T, ID]` → `PagingAndSortingRepository[T, ID]`,
-with `RepositoryPort` as an alias of `CrudRepository`.
+`CrudRepository[T, ID]` → `ReactiveSortingRepository[T, ID]` → `PagingAndSortingRepository[T, ID]` →
+`BatchRepository[T, ID]`, with `RepositoryPort` as an alias of `CrudRepository`.
 
 The `find_all` overloads across the chain are:
 
@@ -311,6 +337,7 @@ The `find_all` overloads across the chain are:
 | `find_all(**filters)`   | `list[T]`            | `CrudRepository`                 |
 | `find_all(sort)`        | `list[T]`            | `ReactiveSortingRepository`      |
 | `find_all(pageable)`    | `Page[T]`            | `PagingAndSortingRepository`     |
+| `find_slice(pageable)`  | `Slice[T]`           | `BatchRepository`                |
 | `stream_all(sort)`      | `AsyncIterator[T]`   | `ReactiveSortingRepository`      |
 
 ### Hexagonal Usage Pattern
@@ -579,12 +606,29 @@ sort = Sort.unsorted()
 reversed_sort = sort.descending()  # All orders become desc
 ```
 
-`Order` is a single sort directive:
+`Order` is a single sort directive: a property, a direction, a `NullHandling` and an `ignore_case` flag.
 
 ```python
 order_asc = SortOrder.asc("name")       # Order(property="name", direction="asc")
 order_desc = SortOrder.desc("created_at") # Order(property="created_at", direction="desc")
+
+scored = SortOrder.desc("score").nulls_last()      # NULLs after every value, on every backend
+named = SortOrder.asc("name").ignoring_case()      # orders a string property by its lower-cased value
+sort = Sort.by(scored, named, "id")                # Sort.by takes orders and property names
 ```
+
+NULL placement differs by database (PostgreSQL and Oracle put NULLs last in ascending order, SQLite, MySQL,
+MariaDB, SQL Server and MongoDB first), so an order over a nullable property should name it with
+`nulls_first()` or `nulls_last()` (`NullHandling.NATIVE` keeps the database's own). Collation and the order
+of native enum values still follow the database. The flips `descending()`/`ascending()` keep each order's
+NULL handling and case.
+
+Sort and filter property names are validated against the entity by `PropertyResolver`
+(`pyfly.data.PropertyResolver`): a name that is not one of the entity's mapped properties (a relationship,
+a Python `@property`, a typo, an operator key such as `$where`) raises `InvalidPropertyError`, an
+`InvalidRequestException` the web layer answers with 400. `PropertyResolver.for_entity(Model,
+allowed=("name", "created_at"))` narrows the names to an allow-list; repositories take theirs from
+`__sortable__` and `__filterable__`.
 
 ### Page[T]
 
@@ -612,9 +656,25 @@ dto_page: Page[OrderDTO] = page.map(
 )
 ```
 
+A repository counts the total only when the page cannot tell it: a first page shorter than its size is the
+whole result, and a short page after it gives the total too.
+
+### Slice[T] and Window[T]
+
+`Slice[T]` is a page that knows whether another one follows, but not the total, so it needs no `COUNT`
+(`repo.find_slice(pageable)`): `items`, `page`, `size`, `has_next`, `has_previous`, `is_first`, `is_last`
+and `map()`.
+
+`Window[T]` is a keyset scroll's result (`repo.scroll(sort, position, size=...)`): `items`, `has_next` and
+`next_position`, the `KeysetPosition` after its last item (the values of the sort properties and the
+primary key). Pass it back to continue; `KeysetPosition.of(name="m", id=42)` rebuilds one from a cursor
+token. A position is a value (equal positions hash alike, so one can be a cache key). A keyset scroll's cost
+does not grow with the depth, as an `OFFSET` does.
+
 Source files:
-- `src/pyfly/data/pageable.py` — `Pageable`, `Sort`, `Order`
-- `src/pyfly/data/page.py` — `Page[T]`
+- `src/pyfly/data/pageable.py` — `Pageable`, `Sort`, `Order`, `NullHandling`, `KeysetPosition`
+- `src/pyfly/data/page.py` — `Page[T]`, `Slice[T]`, `Window[T]`
+- `src/pyfly/data/property_resolver.py` — `PropertyResolver`, `InvalidPropertyError`
 
 ---
 

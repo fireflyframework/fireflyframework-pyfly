@@ -221,3 +221,68 @@ applies to a streamed result read row by row) with one guarded fetch per batch.
 Rows read by the consumer are still yielded one by one, and the stream still owns its connection until it
 is exhausted or closed. The batching is what makes it faster than the baseline: one greenlet switch per
 batch instead of one per row.
+
+## Re-run after the repository semantics (WP03)
+
+`save` persists without a `refresh()` (server-generated values come back through `RETURNING`, or one
+targeted `SELECT` of those columns on MySQL), `exists_by_id` is a `SELECT 1 ... LIMIT 1` probe, and id lists
+are padded to powers of two (one `= ANY` array bind on PostgreSQL).
+
+- **Date:** 2026-09-27, same machine and servers as the baseline (the VM shared with other running lanes).
+- **Code:** branch `fix/orm-wp03`.
+- **Command:** `--scenario p7 save exists in_padding` once per backend (PostgreSQL also with `stream read
+  tx`, and `tx exists save` twice more; MySQL `tx save` twice more); `--scenario stream` three times on
+  `sqlite-file`.
+
+| Measure | SQLite file | PostgreSQL | MySQL | MariaDB |
+| --- | --- | --- | --- | --- |
+| `save(1)` statements | `['BEGIN', 'INSERT']` | `['INSERT']` | `['INSERT']` | `['INSERT']` |
+| `save_all(100)` statements | `{'BEGIN': 1, 'INSERT': 100}` | `{'INSERT': 1}` | `{'INSERT': 100}` | `{'INSERT': 1}` |
+| `save_all(100)` in `@transactional`, median (baseline) | 12.49 ms (32.54) | 3.65 to 3.97 ms (49.53) | 40.30 to 55.83 ms (70.75) | 4.74 ms (39.76) |
+| `save(1)` in `@transactional`, median (baseline) | 0.499 ms (0.791) | 1.38 to 1.69 ms (1.680) | 1.74 to 2.42 ms (1.814) | 2.011 ms (1.851) |
+| `exists_by_id` SQL | `SELECT 1 ... LIMIT ? OFFSET ?` | `SELECT 1 ... LIMIT $2` | `SELECT 1 ... LIMIT %s` | `SELECT 1 ... LIMIT %s` |
+| `find_all_by_id(1..64)`: distinct SQL texts (baseline 64) | 7 | 1 | 7 | 7 |
+| `stream_all()` over 5,000 rows, median | 7.8 / 8.2 / 8.1 ms | 15.5 ms | | |
+
+Every `save` is one statement and no `save_all` sends a per-entity `SELECT`. SQLite and MySQL still send one
+`INSERT` per row for an autoincrement key (SQLite's `RETURNING` order is not guaranteed and MySQL has no
+`RETURNING`, so SQLAlchemy inserts row by row to learn each key), but without the 100 `SELECT`s. The single-
+row `save` latency moves with the unit of work around it (WP01) more than with the statement it saved: it is
+within the run-to-run noise of the shared VM (the same MySQL `@transactional count()` measured 1.28 and 1.91
+ms in two runs a minute apart). `exists_by_id` in `@transactional` costs what the unit of work's own
+`count()` costs (1.26 / 1.34 ms against 1.30 / 1.22 ms on PostgreSQL). The derived `exists_by_name` still
+counts every match: the query compiler adopts the probe in WP04.
+
+### After the first review of WP03
+
+- **Date:** 2026-09-27, same machine (the VM shared with other running lanes).
+- **Command:** the reviewer's PostgreSQL probe (`find_all()` over 5,000 rows, 15 runs, median), twice.
+
+`unique()` now runs only when a result needs it (a joined collection, or a specification's join).
+`find_all()` over 5,000 rows measured 28.1 to 29.5 ms on PostgreSQL, back in the base's range (27.4 to 29.0
+ms); with `unique()` on every list it measured 30.6 to 33.3 ms. A `save()` of an entity whose mapping loads a
+collection with `selectin` and another with a join costs `{'INSERT': 1, 'SELECT': 2}`, what the base's
+`refresh()` cost; a mapping without eager relationships stays at `{'INSERT': 1}`.
+
+### After the second review of WP03
+
+- **Date:** 2026-09-27, same machine (the VM shared with other running lanes).
+- **Command:** a statement-count probe through the repository harness, run on the SQLite file and
+  PostgreSQL lanes against this branch and against the base's `src/pyfly` (`75112cc`); latencies are the
+  median of 400 calls, each in its own write auto unit.
+
+| Measure | Base, SQLite file | This branch, SQLite file | Base, PostgreSQL | This branch, PostgreSQL |
+| --- | --- | --- | --- | --- |
+| `delete(detached)`, no cascade | `{'DELETE': 1}`, 544 µs | `{'SELECT': 1, 'DELETE': 1}`, 693 µs | `{'DELETE': 1}`, 2.11 ms | `{'SELECT': 1, 'DELETE': 1}`, 2.49 ms |
+| `delete(detached)`, two cascaded children | `{'SELECT': 1, 'DELETE': 2}` | `{'SELECT': 2, 'DELETE': 2}` | same as SQLite | same as SQLite |
+| `delete_all(6 held parents)`, children not loaded | `{'SELECT': 6, 'DELETE': 12}` | `{'SELECT': 2, 'DELETE': 2}` | same as SQLite | same as SQLite |
+| page of a specification joined to a many-to-one | n/a | `{'SELECT': 2}`, no `DISTINCT` | n/a | same as SQLite |
+
+`delete(entity)` of a detached entity reads the row before it deletes it, as Spring's `delete` finds the
+entity first: that read is what makes a missing row a no-op and a stale version a `StaleDataError` for an
+entity of any session, and it costs one round trip (about 0.15 ms on the SQLite file, 0.4 ms on PostgreSQL).
+The base re-attached the detached instance and sent the `DELETE` alone. The cascaded collections of the
+entities a delete needs are loaded once for all of them, the unit's own included: deleting six parents the
+unit read without their children went from one lazy `SELECT` per parent to two statements. A specification
+that joins a many-to-one pages with a plain `LIMIT` and `COUNT` (after the first review it paid the distinct
+keys and a `DISTINCT` count).

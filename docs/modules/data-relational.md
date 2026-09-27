@@ -41,6 +41,9 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
 - [FilterUtils: Query by Example](#filterutils-query-by-example)
 - [Pagination](#pagination)
   - [Paginated Queries](#paginated-queries)
+  - [Slices and keyset scrolling](#slices-and-keyset-scrolling)
+  - [Portable ordering](#portable-ordering)
+  - [Validated sort and filter names](#validated-sort-and-filter-names)
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
   - [Unit of Work](#unit-of-work)
@@ -337,7 +340,7 @@ order = await repo.save(Order(customer_id="abc", status="PENDING"))
 found = await repo.find_by_id(order.id)
 ```
 
-`Repository[T, ID]` satisfies the [`RepositoryPort[T, ID]`](data.md#repository-ports) protocol, enabling hexagonal architecture where your service layer depends on the port, not the adapter. The port hierarchy is `CrudRepository[T, ID]` -> `ReactiveSortingRepository[T, ID]` -> `PagingAndSortingRepository[T, ID]` (mirroring Spring Data WebFlux's `ReactiveCrudRepository` -> `ReactiveSortingRepository` + paging), and `RepositoryPort` is an alias of `CrudRepository`.
+`Repository[T, ID]` satisfies the [`RepositoryPort[T, ID]`](data.md#repository-ports) protocol, enabling hexagonal architecture where your service layer depends on the port, not the adapter. The port hierarchy is `CrudRepository[T, ID]` -> `ReactiveSortingRepository[T, ID]` -> `PagingAndSortingRepository[T, ID]` -> `BatchRepository[T, ID]` (mirroring Spring Data WebFlux's `ReactiveCrudRepository` -> `ReactiveSortingRepository` + paging, plus `JpaRepository`'s `deleteAllInBatch`/`deleteAllByIdInBatch` and `Slice`), and `RepositoryPort` is an alias of `CrudRepository`.
 
 ### Creating a Repository
 
@@ -364,34 +367,76 @@ class ProductRepository(Repository[Product, int]):
 
 **How it works:**
 
-1. `__init_subclass__` inspects `__orig_bases__` to extract the entity type (`Order`) and ID type (`UUID`) from the generic parameters at class definition time. It works for a subclass of `SoftDeleteRepository[T, ID]` too.
+1. `__init_subclass__` walks the generic bases to extract the entity type (`Order`) and ID type (`UUID`) at class definition time, substituting type variables on the way: `SoftDeleteRepository[Order, UUID]`, an application's own generic base (`class TenantRepository(Repository[E, K])`, then `class OrderRepository(TenantRepository[Order, UUID])`), and a base that declares its parameters in another order all resolve. A repository that binds no concrete entity raises `TypeError` when it is built, naming the fix.
 2. The container never injects a session into a repository: the `session` parameter is `Annotated[AsyncSession | None, NoAutowire]`. A DI-built repository is therefore in **managed mode** and resolves its session per call (see [Unit of Work](#unit-of-work)). `Repository(Order, session)` with an explicit session is **manual mode**: the caller owns that session, and the repository uses it as is.
 3. The entity type is used internally for all query operations — no need to pass it manually.
 4. `__datasource__ = "reporting"` on the class (or `Repository(Order, datasource="reporting")`) gives the repository its datasource; the default is the primary.
+5. `__load__ = ("lines",)` is the default [fetch plan](#fetch-plans-and-locks) of the read methods, and `__sortable__` / `__filterable__` are allow-lists of the properties a `Sort` may name and `find_all(**filters)` may filter on (see [Validated sort and filter names](#validated-sort-and-filter-names)).
 
-Custom methods keep working: `self._session` and `self._require_session()` return the session of the current call. Every public `async def` of a subclass is wrapped like the inherited methods, so a custom method is one operation: inside a unit it joins, outside one it runs in an auto unit (a read unit when its name starts with `find`, `count`, `exists`, `stream` or `get`; a write unit that commits otherwise).
+Custom methods keep working: `self._session` and `self._require_session()` return the session of the current call. Every public `async def` of a subclass is wrapped like the inherited methods, so a custom method is one operation: inside a unit it joins, outside one it runs in an auto unit. It is a read unit when its name starts with `find`, `count`, `exists`, `stream`, `get` or `scroll` and no write verb (`create`, `save`, `insert`, `update`, `upsert`, `delete`, `remove`, `merge`, `persist`, `store`, `lock`, `modify`, `replace`, `increment`, `decrement`, `set` or `claim`) follows an `and` or an `or` in the name before its criteria (`_by_...`): `get_or_create`, `find_or_create_by_email`, `find_and_update` and `find_and_lock_by_id` write, while `find_by_update_time`, `get_store_by_code` and `get_lock_by_name` read; otherwise it is a write unit that commits. A custom method decorated with `@transactional` opens no auto unit: its own boundary begins (or joins) the unit it runs in.
+
+A write auto unit is the transaction of the repository call that opened it, as a Spring Data repository method is `@Transactional`: a `@transactional` service that a custom write method calls joins it (`REQUIRED`, `SUPPORTS`, `MANDATORY`), takes a savepoint on it (`NESTED`), suspends it (`REQUIRES_NEW`, `NOT_SUPPORTED`) or is refused (`NEVER`), so the method and the service commit or roll back together. A read auto unit is not a transaction (on PostgreSQL it runs on an `AUTOCOMMIT` connection): a boundary inside a read method sees none, and a `REQUIRED` write there commits in a unit of its own.
 
 ### CRUD Methods Reference
 
-| Method                                           | Return Type         | Description                                              |
-|--------------------------------------------------|---------------------|---------------------------------------------------------|
-| `save(entity)`                                   | `T`                 | Insert or update; flushes and refreshes                 |
-| `find_by_id(id: ID)`                             | `T \| None`         | Find by primary key                                     |
-| `find_all(**filters)`                             | `list[T]`           | Find all, optionally filtered by column values          |
-| `find_all(sort: Sort)`                            | `list[T]`           | Fetch all, applying the `Sort` order                    |
-| `find_all(pageable: Pageable)`                    | `Page[T]`           | Paginated query: counts total, applies sort, slices     |
-| `find_all_by_id(ids)`                            | `list[T]`           | Find all entities whose IDs are in `ids`                |
-| `stream_all(criteria: Sort \| None, **filters)`  | `AsyncIterator[T]`  | Stream all (the `Flux[T]` analogue); optional `Sort`    |
-| `delete(entity: T)`                              | `None`              | Delete the given entity                                 |
-| `delete_by_id(id: ID)`                           | `None`              | Delete by primary key (no-op if not found)              |
-| `delete_all(entities=None)`                      | `None`              | Delete the given entities; with no args, truncate all   |
-| `delete_all_by_id(ids)`                          | `None`              | Delete all entities whose IDs are in `ids`              |
-| `count()`                                         | `int`               | Count all entities in the table                         |
-| `exists_by_id(id: ID)`                           | `bool`              | Check if an entity with this ID exists                  |
-| `find_all_by_spec(spec)`                          | `list[T]`           | Find all matching a Specification                       |
-| `find_all_by_spec_paged(spec, pageable)`          | `Page[T]`           | Paginated query with Specification + sorting            |
+| Method                                                   | Return Type         | Description                                                   |
+|----------------------------------------------------------|---------------------|---------------------------------------------------------------|
+| `save(entity)`                                           | `T`                 | Persist a new entity or merge an existing one; returns the managed instance |
+| `save_all(entities)`                                     | `list[T]`           | `save` for each, one flush, one lookup for all the merges     |
+| `find_by_id(id, *, load=None, lock=None)`                | `T \| None`         | Find by primary key (a tuple for a composite key)             |
+| `find_all(**filters, load=None)`                         | `list[T]`           | Find all, optionally filtered by column values                |
+| `find_all(sort: Sort, load=None)`                        | `list[T]`           | Fetch all, applying the `Sort` order                          |
+| `find_all(pageable: Pageable, load=None)`                | `Page[T]`           | A page and the total (counted only when the page cannot tell) |
+| `find_slice(pageable, **filters, load=None)`             | `Slice[T]`          | A page and whether another follows, with no `COUNT`           |
+| `scroll(sort, position=None, *, size, spec, load)`       | `Window[T]`         | Keyset paging after `position`                                |
+| `find_all_by_id(ids, *, load=None)`                      | `list[T]`           | Find all entities whose IDs are in `ids` (chunked)            |
+| `stream_all(criteria=None, **filters, load, chunk_size)` | `AsyncIterator[T]`  | Stream all (the `Flux[T]` analogue); optional `Sort`          |
+| `delete(entity)`                                         | `None`              | Delete the entity (cascades; a stale version raises)          |
+| `delete_by_id(id)`                                       | `None`              | Delete by primary key (no-op if not found)                    |
+| `delete_all(entities=None)`                              | `None`              | Delete the given entities, or every row, entity by entity     |
+| `delete_all_by_id(ids)`                                  | `None`              | Delete all entities whose IDs are in `ids`, entity by entity  |
+| `delete_all_in_batch(entities=None)`                     | `None`              | Bulk `DELETE` of the given entities, or of every row          |
+| `delete_all_by_id_in_batch(ids)`                         | `None`              | Bulk `DELETE` of the rows with these ids                      |
+| `count()`                                                | `int`               | Count all entities in the table                               |
+| `exists_by_id(id)`                                       | `bool`              | `SELECT 1 ... LIMIT 1`, or no statement when the unit holds it |
+| `find_all_by_spec(spec, *, load=None)`                   | `list[T]`           | Find all matching a Specification                             |
+| `find_all_by_spec_paged(spec, pageable, *, load=None)`   | `Page[T]`           | Paginated query with Specification + sorting                  |
+| `find_slice_by_spec(spec, pageable, *, load=None)`       | `Slice[T]`          | A slice of the entities matching a Specification              |
 
-**save()** calls `session.add()`, then `session.flush()` and `session.refresh()` to ensure the returned entity has all database-generated values (ID, defaults, etc.).
+#### save: persist or merge
+
+`save()` follows Spring Data's `save`: a **new** entity is persisted, and any other is **merged**. An entity
+is new when its `is_new()` hook says so (the `Persistable` port: a method or a property the entity class
+defines), else when its version is `None` (a `VersionedMixin` entity), else when its primary key is `None`:
+
+- A new entity is one `INSERT`. There is no `refresh()` after it: server-generated values (an identity key,
+  a `server_default`) come back through `RETURNING` on PostgreSQL, SQLite and MariaDB, and through one
+  `SELECT` of just those columns on MySQL; values the model generates in Python need nothing at all.
+  `save_all(n)` sends no per-entity `SELECT` (PostgreSQL and MariaDB batch the `INSERT` too).
+- The relationships the mapping loads eagerly (`lazy="selectin"`, `"joined"`, `"subquery"`, `"immediate"`)
+  are loaded on the returned entity, as a read would load them: one `SELECT` of the keys for every saved
+  entity at once, plus one per `selectin` relationship, and nothing for a collection the entity was saved
+  with. Any other relationship it was not saved with is not loaded (the returned entity is detached outside
+  a transaction): read it again with a [fetch plan](#fetch-plans-and-locks), `find_by_id(id, load=...)`.
+- A detached entity (every entity a repository call returns outside a transaction is detached) is
+  re-attached: what changed since it was loaded is one `UPDATE`, checked against its version.
+- An entity built from a DTO with an existing id is merged: one `SELECT` finds the row, and an `UPDATE`
+  writes what the DTO carries (an id that is not in the table is inserted). A DTO that carries a version
+  must carry the current one, or `OptimisticLockingFailureException` is raised, from `StaleDataError`
+  (optimistic locking across the request boundary). `save_all` looks up every such DTO with one `SELECT`.
+- An entity attached to another session (another unit) is copied into this one.
+
+Use the returned instance: for a merged entity it is the unit's own copy.
+
+```python
+class Ticket(Base):
+    __tablename__ = "tickets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)   # assigned by the application
+    imported: Mapped[bool] = mapped_column(default=False)
+
+    def is_new(self) -> bool:            # Persistable: saved as one INSERT, with no merge lookup
+        return not self.imported
+```
 
 **find_all()** accepts keyword arguments that are translated into equality filters:
 
@@ -400,9 +445,96 @@ orders = await repo.find_all(status="PENDING", customer_id="abc")
 # Equivalent to: SELECT * FROM orders WHERE status = 'PENDING' AND customer_id = 'abc'
 ```
 
-**delete_by_id()** looks up the entity first and deletes it if found. If not found, it is a no-op. **delete(entity)** removes the given entity directly. The `delete_all(entities)` form deletes each given entity, while `delete_all()` with no arguments truncates the whole table; both return `None`. `delete_all_by_id(ids)` deletes every entity whose ID is in `ids`.
+A relationship to one entity filters by the entity it refers to: `find_all(customer=customer)` is
+`customer_id = :id` (and `customer=None` is `customer_id IS NULL`); any other value, such as a key straight
+from a request, raises `InvalidPropertyError`. A collection cannot be compared that way; filter through it
+with a [Specification](#specifications). A read method's `load` (and `find_by_id`'s `lock`)
+keyword is never a filter: filter on a column with one of those names through a Specification.
 
-**find_all(pageable)** counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. **find_all(sort)** fetches every row in the given `Sort` order, and **stream_all(criteria=Sort.by(...))** yields entities one at a time as an `AsyncIterator[T]` (the `Flux[T]` analogue):
+#### Deletes
+
+The delete family follows Spring Data: `delete(entity)`, `delete_by_id(id)`, `delete_all(entities)`,
+`delete_all()` and `delete_all_by_id(ids)` delete **entity by entity through the ORM**, so relationship
+cascades (`cascade="all, delete-orphan"`), version checks and `before_delete`/`after_delete` listeners run,
+the same on every backend. They load the entities first (one `SELECT` per id chunk; the unit's own
+entities need none), with the collections the flush cascades to or nulls out (one `SELECT` per collection
+for all of them, also for the unit's own entities that have not loaded them), and send the `DELETE`s in one
+flush. When the mapper has no cascade, no version column, no inheritance and no delete listener, a bulk
+`DELETE` does the same work, and that is what `delete_all_by_id(ids)` (one `DELETE ... WHERE id IN (...)` per
+id chunk) and `delete_all()` (one for every row) send; `delete(entity)`, `delete_by_id(id)` and
+`delete_all(entities)` always go through the ORM.
+
+Deleting a detached entity (every entity a call outside a transaction returns) reads its row first, as
+Spring's `delete` finds the entity before it removes it: a `SELECT` (plus one per collection the delete
+cascades to or nulls out) and the `DELETE`, where earlier releases re-attached the detached instance and
+sent the `DELETE` alone. The read is what lets a missing row be ignored and a stale version be reported for
+any entity, whichever session it came from.
+
+A new entity is ignored, and so is an entity whose row is gone; a detached entity whose version is stale
+raises `OptimisticLockingFailureException` (from `StaleDataError`). The ORM deletes reach soft-deleted
+dependents, as [hard deletes](#softdeletemixin) must: a cascade deletes the soft-deleted children too.
+`delete_all_in_batch()` and `delete_all_by_id_in_batch(ids)` are the explicit bulk forms (Spring's
+`deleteAllInBatch`): one `DELETE` per id chunk that bypasses cascades on purpose, so the database's foreign
+keys decide. Every form expunges an entity that is only pending in the unit (never flushed) instead:
+deleting it means not inserting it.
+
+A session with a flush listener (`before_flush`, `after_flush`, `after_flush_postexec`, a common way to
+audit `session.deleted`) or a delete lifecycle listener always deletes entity by entity, since a bulk
+`DELETE` would bypass it.
+
+#### Existence, composite keys and long id lists
+
+`exists_by_id()` answers from the unit's identity map when the unit holds the entity (no statement), and
+otherwise sends `SELECT 1 FROM ... WHERE id = :id LIMIT 1` (`TOP 1` on SQL Server, `FETCH FIRST` on Oracle)
+instead of loading the row.
+
+A composite key is a tuple in key order, or a mapping by attribute name:
+`find_by_id(("A-17", 2))`, `find_all_by_id([("A-17", 1), ("A-17", 2)])`. The id methods match the whole key
+(row values, or an OR of ANDs on SQL Server); a scalar id for a composite key raises `TypeError`.
+
+Id lists of any length work: `find_all_by_id`, `delete_all_by_id` and the batch deletes send one statement
+per chunk of the dialect's limit (Oracle takes 1000 values per list, SQL Server about 2100 parameters,
+SQLite 32766), inside the same unit, and pad each list to the next power of two with its last value, so a
+few statement texts cover every length. Where the limit counts every parameter of a statement (SQLite, SQL
+Server), each chunk leaves room for the statement's other binds: the criteria, and the values a soft
+delete's `UPDATE` sets (`statements.in_criteria(..., reserved=)`). On PostgreSQL a single-column list is one `= ANY(:ids)` array
+bind: one statement text whatever the length, which asyncpg's prepared-statement cache keeps.
+
+#### Fetch plans and locks
+
+Entities a repository call returns outside a transaction are detached, and an async session never loads a
+relationship lazily, so a read method takes a **fetch plan**, `load=`: relationship names (a dotted path
+loads a chain), relationship attributes, or loader options.
+
+```python
+order = await orders.find_by_id(order_id, load="lines")              # selectin: one more statement
+recent = await orders.find_all(Pageable.of(1, 20), load=[Order.lines, "customer.address"])
+async for order in orders.stream_all(load=joinedload(Order.customer)):
+    ...
+```
+
+Names and attributes load with `selectin` (one more statement per relationship, whatever the number of
+rows, and correct under `LIMIT`). `__load__` on the repository class is the plan of every read method that
+passes none. Inside a unit, `AsyncAttrs.awaitable_attrs` also loads one relationship on demand
+(`await order.awaitable_attrs.lines`).
+
+`find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE)` reads the row with `SELECT ... FOR UPDATE` and holds the
+lock until the unit ends (`PESSIMISTIC_READ` is `FOR SHARE`; `PESSIMISTIC_WRITE_NOWAIT` and
+`PESSIMISTIC_WRITE_SKIP_LOCKED` add `NOWAIT` and `SKIP LOCKED`). A lock needs a read-write transaction:
+outside one (a read method's auto unit) or in `@transactional(read_only=True)` it raises
+`IllegalTransactionStateError`. SQLite has no row locks (its one writer takes the database at `BEGIN
+IMMEDIATE`), so there the clause is not rendered.
+
+```python
+from pyfly.data.relational.sqlalchemy import LockMode
+
+@transactional
+async def withdraw(self, account_id: UUID, amount: Decimal) -> None:
+    account = await self.accounts.find_by_id(account_id, lock=LockMode.PESSIMISTIC_WRITE)
+    account.balance -= amount          # no other unit changes the row until this one ends
+```
+
+**find_all(sort)** fetches every row in the given `Sort` order, and **stream_all(criteria=Sort.by(...))** yields entities one at a time as an `AsyncIterator[T]` (the `Flux[T]` analogue), fetching them in batches (growing up to 1000 rows, or `chunk_size` rows at a time):
 
 ```python
 from pyfly.data import Sort
@@ -410,6 +542,15 @@ from pyfly.data import Sort
 async for order in repo.stream_all(Sort.by("name")):
     process(order)
 ```
+
+A `lazy="joined"` collection works in every list method (results are made unique) and in `stream_all`,
+which loads such collections with `selectin` per batch. A fetch plan that itself joins a collection
+(`load=joinedload(Order.lines)`) spreads each order over several rows, which make it whole only when they are
+read together: that stream reads its result in full first, on every backend (`load="lines"` loads the lines
+per batch instead). On MySQL and MariaDB, where nothing else runs on a connection while its cursor is open, a
+stream that loads relationships with statements of their own per batch (a fetch plan, a `selectin`,
+`subquery` or `immediate` relationship, a joined collection) is read in full first; a joined many-to-one
+comes with its row and is streamed from the cursor.
 
 ---
 
@@ -701,7 +842,97 @@ pageable = Pageable.of(page=2, size=10, sort=Sort.by("name"))
 page = await repo.find_all(pageable)
 ```
 
-`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. `Pageable` is 1-based, so `page=1` is the first page.
+`Pageable` is 1-based, so `page=1` is the first page. Every paging path (`find_all(pageable)`,
+`find_all_by_spec_paged`, `find_slice`, `scroll`) orders by the primary key after the requested orders: a
+page is deterministic even when the sort has ties (or there is no sort), and SQL Server, which rejects
+`OFFSET` without `ORDER BY`, gets one.
+
+`find_all(pageable)` runs the page query first and counts only when the page cannot tell the total (Spring's
+`PageableExecutionUtils`): a first page shorter than its size is the whole result, and any short page after
+it gives the total too; an unpaged request is never counted.
+
+Pages, slices and windows count **entities**, not rows. A [Specification](#specifications) that joins a
+collection (`q.join(Order.lines).where(Line.sku == sku)`) repeats an order once per matching line; a
+`LIMIT` on those rows would cut a page short and hide the orders after it. When a specification's
+statement may repeat an entity (a join other than along a many-to-one, or another `FROM`), the page is cut
+from the distinct primary keys instead, in the page's order, and the entities are read by the
+specification's own statement joined to those keys (one statement, portable to SQL Server 2012 and later
+and to Oracle); the `COUNT` counts the distinct keys. A join along a many-to-one
+(`q.join(Order.customer).where(Customer.country == "ES")`) matches one row per order, so it pages with a
+plain `LIMIT` and `COUNT`. Order such a page by the entity's own properties: an order on a joined row's
+column repeats the entity once per value. An `EXISTS` predicate (`Order.lines.any(Line.sku == sku)`) needs
+none of this and is often the cheaper query.
+
+What a specification asks of the entities it reads applies on every path. The page's entities are read
+through its own joins and criteria, so its loader options (a fetch plan, `with_loader_criteria`), its
+execution options, and a `contains_eager` of the rows its join matched apply to them:
+`q.join(Order.lines).where(Line.sku == sku).options(contains_eager(Order.lines))` pages the orders with
+just their matching lines. Its loader criteria and execution options apply to the `COUNT` too. Its own
+`distinct()`, `group_by()` and `having()` decide which entities the page's keys hold. A lock
+(`with_for_update`) takes the rows of the entities the page reads, or those of the tables it names
+(`with_for_update(of=Line)` locks the matching lines), with `FOR UPDATE OF` where the database names tables
+(MariaDB does not, and locks every row the statement reads); the distinct keys are read unlocked, since
+PostgreSQL and Oracle refuse `FOR UPDATE` on a `DISTINCT`, and a `COUNT` locks nothing.
+
+### Slices and keyset scrolling
+
+When the total is not needed, `find_slice` returns a `Slice[T]` (the items and `has_next`) with one query and
+no `COUNT` (`LIMIT size + 1`). For deep paging, `scroll` pages by **keyset**: each `Window[T]` holds the
+position after its last item, whose cost does not grow with the depth as an `OFFSET` does:
+
+```python
+from pyfly.data import KeysetPosition, Sort
+
+window = await repo.scroll(Sort.by("placed_at"), size=50)
+while window.has_next:
+    window = await repo.scroll(Sort.by("placed_at"), window.next_position, size=50)
+
+cursor = KeysetPosition.of(placed_at=last_placed_at, id=last_id)   # rebuilt from an API cursor token
+```
+
+A `KeysetPosition` is a value: equal positions are equal and hash alike, so one can be a cache key.
+
+The primary key breaks ties, so a scroll never skips or repeats a row. The sort properties must not hold
+NULLs, and their orders must use native NULL handling and no case folding; `spec=` narrows the rows.
+
+### Portable ordering
+
+NULL placement differs by database (PostgreSQL and Oracle put NULLs last in ascending order; SQLite, MySQL,
+MariaDB, SQL Server and MongoDB first), so an order over a nullable property should name it. `ignore_case`
+orders a string property by its lower-cased value (like Spring's `QueryUtils`, any other property orders as
+it is):
+
+```python
+from pyfly.data import Order, Pageable, Sort
+
+sort = Sort.by(Order.desc("score").nulls_last(), Order.asc("name").ignoring_case())
+page = await repo.find_all(Pageable.of(1, 20, sort))
+```
+
+`NULLS FIRST`/`NULLS LAST` render natively on PostgreSQL, SQLite and Oracle, and as an `IS NULL` key first
+on MySQL, MariaDB and SQL Server. Collation (accents, upper against lower case) and the order of native enum
+values still follow the database (PostgreSQL, MySQL and MariaDB order an enum by its declaration, SQLite by
+its text).
+
+### Validated sort and filter names
+
+Sort orders and `find_all(**filters)` keys often come from a request, so they are validated against the
+entity's mapped columns by `PropertyResolver`: a relationship (a filter may name a relationship to one
+entity), a Python `@property`, a private name, a typo or an operator key (`$where`) raises
+`InvalidPropertyError`, an `InvalidRequestException` the web layer answers with 400. Allow-lists keep hidden
+columns out:
+
+```python
+class UserRepository(Repository[User, UUID]):
+    __sortable__ = ("name", "created_at")
+    __filterable__ = ("name", "status")      # password_hash can be neither sorted nor filtered on
+```
+
+A name in an allow-list that is not a property of the entity raises `ValueError` when the repository is
+built, so the application context fails at start rather than on the first request.
+
+A custom query orders with the repository's helper, `self._apply_orders(statement, sort)`, which validates
+the names and renders NULL placement, case folding and the primary-key tie-break as the paging paths do.
 
 ### Paginated Specification Queries
 
@@ -715,9 +946,10 @@ page = await repo.find_all_by_spec_paged(spec, pageable)
 
 The implementation:
 1. Applies the specification's predicate to get the filtered query.
-2. Counts total matching rows via a subquery.
-3. Applies sort orders from `Pageable.sort`.
-4. Applies `offset` and `limit` for pagination.
+2. Applies sort orders from `Pageable.sort`, then the primary key.
+3. Applies `offset` and `limit` for pagination (to the distinct keys when the specification joins rows, whose
+   entities are then read through the specification's own joins).
+4. Counts the matching entities via a subquery, when the page does not give the total.
 
 ---
 
@@ -748,15 +980,19 @@ A repository call resolves its session when it runs:
     connection, so pool pre-ping is not needed. An ORM write, or a Core `insert()`/`update()`/`delete()`,
     inside a read unit is refused before it reaches the database. A raw `text()` statement is not
     inspected: on PostgreSQL a read unit's `AUTOCOMMIT` connection would commit it at once, and on SQLite
-    its unit would roll it back, so give a method that writes a name that is not a read name. The rule
-    is the prefix alone: `get_or_create`, `find_or_create` and `find_and_update` are read methods too,
-    and their writes are refused outside a transaction. Call such a method inside `@transactional`, or
-    name it `create_if_missing`, `upsert` or similar.
-  - any **other** method gets a write unit that commits (on SQLite, it starts with `BEGIN IMMEDIATE`).
+    its unit would roll it back, so give a method that writes a name that is not a read name. A write
+    verb after an `and`/`or` in the name before its criteria makes it a write method (`get_or_create`,
+    `find_or_create_by_email`, `find_and_update`; see [Creating a Repository](#creating-a-repository)),
+    and a method decorated with `@transactional` runs in its own boundary.
+  - any **other** method gets a write unit that commits (on SQLite, it starts with `BEGIN IMMEDIATE`). A
+    write unit is the transaction of its repository call: a `@transactional` boundary inside the call
+    joins it, nests in it or suspends it (`NEVER` is refused), and `is_transaction_active()` is true
+    there. A read unit is not a transaction.
 
   Either way the connection goes back to the pool when the call returns. Entities returned from an auto
-  unit are detached with their loaded state intact (`expire_on_commit=False`); lazy relationships need an
-  explicit fetch.
+  unit are detached with their loaded state intact: an auto unit's session never expires on commit, even
+  when the application's session factory says `expire_on_commit=True` (a `@transactional` unit follows the
+  factory). A relationship that was not loaded needs a [fetch plan](#fetch-plans-and-locks).
 - `stream_all` captures the unit at its first step, or opens its own read unit (always a transaction:
   server-side cursors need one), and owns that connection until the iterator is exhausted or
   `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`: closing it early closes its
@@ -769,7 +1005,7 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
 
 - Operations on a unit's session run under the unit's **operation guard**, a lock that is reentrant per
   task. `asyncio.gather()` fan-out inside `@transactional` is serialized, and the framework's repository
-  methods are atomic (`save` is add, flush and refresh as one step). An atomic method never calls a
+  methods are atomic (`save` is add or merge and flush as one step). An atomic method never calls a
   method a subclass may override while it holds the guard (`exists_by_id` does not go through
   `find_by_id`), so an override that fans out cannot wait for its own caller.
 - Savepoints do not fan out. They are a stack on the unit's one connection, and the guard does not span
@@ -1726,6 +1962,9 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
 | `MANDATORY` | join it | `IllegalTransactionStateError` |
 | `NEVER` | `IllegalTransactionStateError` | run without one |
 
+The write auto unit of a repository call counts as a bound unit for a boundary inside that call (a
+`@transactional` service a custom repository write method calls); a read auto unit does not.
+
 #### Rollback rules and rollback-only
 
 - Any `Exception` rolls back by default; a `BaseException` that is not an `Exception` (cancellation)
@@ -1908,20 +2147,31 @@ class OrderRepository(SoftDeleteRepository[Order, UUID]):
     pass  # delete_by_id()/delete() set deleted_at, find methods exclude deleted entities
 ```
 
+A soft delete is one `UPDATE ... SET deleted_at = :now WHERE <primary key> AND deleted_at IS NULL`, by
+primary key, so it works for any entity: one the unit holds, a detached one, or one of another session. It
+bumps the version of a `VersionedMixin` entity (a stale copy can no longer be saved over the deleted row),
+checks the version the entity carries (`OptimisticLockingFailureException`, from `StaleDataError`, when it is
+stale), stamps `updated_at` and `updated_by` where the entity has them as the auditing listener stamps an
+update (the `DateTimeProvider`'s time and the `AuditorAware`'s auditor, `None` when there is none), and leaves a row that is already deleted alone (its `deleted_at`
+keeps the time it was first deleted). The entity passed in, and the unit's own copies, are kept in step:
+where the database has `UPDATE ... RETURNING` (PostgreSQL, SQLite) exactly the copies of the rows the
+`UPDATE` changed; on MySQL and MariaDB the copies of the requested keys that are active in memory, which is
+wrong only for a copy whose row another transaction deleted after it was read. An id list goes one `UPDATE`
+per chunk, and each chunk leaves room for the values the `UPDATE` sets. A soft delete of every active row
+inside a unit that holds entities of the model updates the rows of the held keys first, returning their
+keys, and then every other active row without `RETURNING`, so what it returns does not grow with the table.
+
 | Method | Behavior |
 |--------|----------|
-| `delete_by_id(id)` | Sets `deleted_at` (soft delete); returns `None` |
-| `delete(entity)` | Sets `deleted_at` on the given entity (soft delete); returns `None` |
-| `find_by_id(id)` | Excludes soft-deleted entities |
-| `find_all()` | Excludes soft-deleted entities |
-| `find_all(pageable)` | Excludes soft-deleted entities; counts total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, returns `Page[T]` |
-| `find_all_by_id(ids)` | Excludes soft-deleted entities |
-| `find_all_by_spec(spec)` | Applies spec predicate AND excludes soft-deleted entities |
-| `find_all_by_spec_paged(spec, pageable)` | Applies spec predicate AND excludes soft-deleted entities |
-| `find_all_including_deleted()` | Includes soft-deleted entities |
-| `restore(id)` | Clears `deleted_at` |
-| `hard_delete(id)` | Permanently removes from DB, a soft-deleted row included |
-| `count()` | Counts only non-deleted entities |
+| `delete_by_id(id)` | Soft delete by key: one `UPDATE`, no `SELECT`; a missing id is ignored |
+| `delete(entity)` | Soft delete by the entity's key, checking its version; a new entity is ignored |
+| `delete_all_by_id(ids)` | Soft delete by key, one `UPDATE` per id chunk |
+| `delete_all(entities=None)` | Soft delete the given entities (each version checked), or every active row |
+| `delete_all_in_batch(entities=None)` / `delete_all_by_id_in_batch(ids)` | Bulk soft deletes, no version check (an entity only pending in the unit is not inserted) |
+| `find_by_id(id)`, `find_all(...)`, `find_slice`, `scroll`, `stream_all`, `find_all_by_id`, `exists_by_id`, `count()`, `find_all_by_spec*` | Exclude soft-deleted entities |
+| `find_all_including_deleted(**filters)` | Includes soft-deleted entities |
+| `restore(id)` | Clears `deleted_at` through the ORM (the version is bumped, the audit columns stamped); `None` for a missing id |
+| `hard_delete(id)` | Permanently removes from DB, a soft-deleted row included (cascades run, and reach soft-deleted dependents) |
 
 **Deleted rows are invisible to every ORM load, not only to the repository's own reads.** Like Hibernate's
 `@SoftDelete`, the mixin installs loader criteria (`deleted_at IS NULL`) on every ORM `SELECT` of every
@@ -1973,16 +2223,19 @@ the session already holds (a collection loaded before the block, an object in th
 reloaded until it is expired.
 
 A plain `Repository` over a soft-delete entity sees live rows only: its `delete_by_id` of a soft-deleted
-row deletes nothing (as Spring Data's `deleteById` of a row the `@SQLRestriction` hides), and a retention
+row deletes nothing (as Spring Data's `deleteById` of a row the `@SQLRestriction` hides), and neither does
+`delete_all_by_id` when it deletes through the ORM (a bulk `DELETE` is not filtered), and a retention
 query such as `find_by_deleted_at_less_than(cutoff)` returns nothing unless it runs inside
-`including_deleted()`. Use `SoftDeleteRepository.hard_delete(id)` and `find_all_including_deleted()` for
+`including_deleted()`. An entity named explicitly (`delete(entity)`, `delete_all(entities)`) is deleted
+even when its row is soft-deleted, and `delete_all()` deletes every row, soft-deleted ones included. Use `SoftDeleteRepository.hard_delete(id)` and `find_all_including_deleted()` for
 those, or opt the call out.
 
 **Hard deletes reach soft-deleted children.** Deleting a row for good has to delete the soft-deleted
 children its `cascade="all, delete-orphan"` relationships hold, and set the foreign key of the ones a
 relationship without a delete cascade points at to `NULL`, or the parent's `DELETE` violates the foreign
-key. The repositories' hard deletes (`Repository.delete`, `delete_by_id` and `delete_all(entities)`,
-`SoftDeleteRepository.hard_delete`) load what those relationships reach with the deleted rows, even when
+key. The repositories' hard deletes (`Repository.delete`, `delete_by_id`, `delete_all_by_id` and
+`delete_all` through the ORM, `SoftDeleteRepository.hard_delete`) load what those relationships reach with
+the deleted rows, even when
 the root and its collections were loaded (without them) earlier in the session. A `session.delete()` of
 your own needs the same treatment: call `hard_delete`, or let the database cascade
 (`passive_deletes=True` on the relationship and `ON DELETE CASCADE` on the foreign key).
