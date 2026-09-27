@@ -36,6 +36,11 @@ Table                          Used by
 ``pyfly_cache_entries``        ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
 ``pyfly_locks``                ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
 ``pyfly_users``                ``SqlUserDetailsService``
+``pyfly_outbox_events``        The transactional outbox (``pyfly.eda.outbox``): the event bus of the
+                               ``postgres`` and ``database`` providers, ``TransactionalOutbox``
+``pyfly_outbox_deliveries``    The outbox: one row per consumer group an event is still owed to
+``pyfly_outbox_consumers``     The outbox: the consumer groups, and the destinations each consumes
+``pyfly_outbox_dead_letters``  The outbox: the deliveries that failed on every attempt
 =============================  ====================================================================
 
 A store that is configured with another table name declares that table here too, through the table's
@@ -64,6 +69,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -93,6 +99,10 @@ __all__ = [
     "LOCKS",
     "NAMING_CONVENTION",
     "ORCHESTRATION_STATE",
+    "OUTBOX_CONSUMERS",
+    "OUTBOX_DEAD_LETTERS",
+    "OUTBOX_DELIVERIES",
+    "OUTBOX_EVENTS",
     "USERS",
     "FrameworkSchemaError",
     "KeyString",
@@ -112,6 +122,14 @@ __all__ = [
     "module_datasource",
     "orchestration_state",
     "orchestration_state_table",
+    "outbox_consumers",
+    "outbox_consumers_table",
+    "outbox_dead_letters",
+    "outbox_dead_letters_table",
+    "outbox_deliveries",
+    "outbox_deliveries_table",
+    "outbox_events",
+    "outbox_events_table",
     "users",
     "users_table",
 ]
@@ -139,6 +157,10 @@ ORCHESTRATION_STATE = "pyfly_orchestration_state"
 CACHE_ENTRIES = "pyfly_cache_entries"
 LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
+OUTBOX_EVENTS = "pyfly_outbox_events"
+OUTBOX_DELIVERIES = "pyfly_outbox_deliveries"
+OUTBOX_CONSUMERS = "pyfly_outbox_consumers"
+OUTBOX_DEAD_LETTERS = "pyfly_outbox_dead_letters"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -348,6 +370,96 @@ def users_table(name: str = USERS) -> Table:
     return _declare("users", name, build)
 
 
+def outbox_events_table(name: str = OUTBOX_EVENTS) -> Table:
+    """The transactional outbox: one row per published event, written in the publisher's unit of work.
+
+    ``id`` is the outbox's own key, which the deliveries refer to; ``event_id`` is the envelope's id, the one
+    a consumer deduplicates on. ``payload`` and ``headers`` are JSON text.
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("id", BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True),
+            Column("event_id", key_string(64), nullable=False),
+            Column("destination", key_string(), nullable=False),
+            Column("event_type", key_string(), nullable=False),
+            Column("payload", long_text(), nullable=False),
+            Column("headers", long_text(), nullable=False),
+            Column("created_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("outbox_events", name, build)
+
+
+def outbox_deliveries_table(name: str = OUTBOX_DELIVERIES) -> Table:
+    """What the outbox still owes: one row per consumer group and event, deleted once the group handled it.
+
+    A row is claimed when ``available_at`` has passed: the claim moves it a lease ahead and records the claim
+    in ``claimed_by``, a failure moves it to the next attempt's time. ``done`` lists (JSON) the subscriptions
+    of the group that handled the event already, ``last_error`` is the last failure.
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("consumer_group", key_string(), primary_key=True),
+            Column("outbox_id", BigInteger(), primary_key=True, index=True),
+            Column("available_at", UtcTimestamp(), nullable=False),
+            Column("attempts", Integer(), nullable=False),
+            Column("claimed_by", key_string(), nullable=True),
+            Column("done", long_text(), nullable=True),
+            Column("last_error", long_text(), nullable=True),
+            Index(None, "consumer_group", "available_at"),
+        )
+
+    return _declare("outbox_deliveries", name, build)
+
+
+def outbox_consumers_table(name: str = OUTBOX_CONSUMERS) -> Table:
+    """The consumer groups of the outbox, one row per destination a group consumes (``*``: every one): a
+    published event gets a delivery row for each group registered for its destination."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("consumer_group", key_string(), primary_key=True),
+            Column("destination", key_string(), primary_key=True),
+            Column("registered_at", UtcTimestamp(), nullable=False),
+        )
+
+    return _declare("outbox_consumers", name, build)
+
+
+def outbox_dead_letters_table(name: str = OUTBOX_DEAD_LETTERS) -> Table:
+    """The events a subscription failed to handle on every attempt, with a copy of the event (the outbox
+    row may be pruned since) and the last failure. Kept until someone deletes them."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("id", key_string(64), primary_key=True),
+            Column("consumer_group", key_string(), nullable=True, index=True),
+            Column("subscription", long_text(), nullable=True),
+            Column("event_id", key_string(64), nullable=False),
+            Column("destination", key_string(), nullable=False),
+            Column("event_type", key_string(), nullable=False),
+            Column("payload", long_text(), nullable=False),
+            Column("headers", long_text(), nullable=False),
+            Column("occurred_at", UtcTimestamp(), nullable=False),
+            Column("error_type", key_string(), nullable=False),
+            Column("error_message", long_text(), nullable=False),
+            Column("attempts", Integer(), nullable=False),
+            Column("failed_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("outbox_dead_letters", name, build)
+
+
 orchestration_state = orchestration_state_table()
 """``pyfly_orchestration_state`` (:func:`orchestration_state_table`)."""
 
@@ -359,6 +471,18 @@ locks = locks_table()
 
 users = users_table()
 """``pyfly_users`` (:func:`users_table`)."""
+
+outbox_events = outbox_events_table()
+"""``pyfly_outbox_events`` (:func:`outbox_events_table`)."""
+
+outbox_deliveries = outbox_deliveries_table()
+"""``pyfly_outbox_deliveries`` (:func:`outbox_deliveries_table`)."""
+
+outbox_consumers = outbox_consumers_table()
+"""``pyfly_outbox_consumers`` (:func:`outbox_consumers_table`)."""
+
+outbox_dead_letters = outbox_dead_letters_table()
+"""``pyfly_outbox_dead_letters`` (:func:`outbox_dead_letters_table`)."""
 
 
 # ---------------------------------------------------------------------------------------------------------
