@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, inspect, select, text
+from sqlalchemy import Column, ColumnElement, Integer, MetaData, String, Table, insert, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
@@ -185,6 +185,72 @@ async def test_a_purge_cutoff_with_an_offset_skips_rows_deleted_seconds_ago(
         stmt = select(TimestampedEvent).where(TimestampedEvent.deleted_at < cutoff)
         rows = (await session.execute(stmt.execution_options(include_deleted=True))).scalars().all()
     assert rows == []
+
+
+async def _insert_created(factory: async_sessionmaker[AsyncSession], created: dict[str, datetime]) -> None:
+    """One row per label, created at its instant. Written with Core, so no auditing hook re-stamps it."""
+    async with factory() as session, session.begin():
+        await session.execute(
+            insert(TimestampedEvent.__table__),
+            [{"label": label, "created_at": at, "updated_at": at} for label, at in created.items()],
+        )
+
+
+async def _labels(factory: async_sessionmaker[AsyncSession], condition: ColumnElement[bool]) -> list[str]:
+    async with factory() as session:
+        stmt = select(TimestampedEvent.label).where(condition).order_by(TimestampedEvent.label)
+        return list((await session.execute(stmt)).scalars().all())
+
+
+async def _two_days_and_ten_minutes_ago(
+    relational_backend: RelationalBackend,
+) -> tuple[async_sessionmaker[AsyncSession], datetime]:
+    """Rows created two days and ten minutes ago, and the current instant written in +02:00."""
+    factory = await _sessions(relational_backend)
+    now = datetime.now(UTC)
+    await _insert_created(
+        factory, {"two days ago": now - timedelta(days=2), "ten minutes ago": now - timedelta(minutes=10)}
+    )
+    return factory, now.astimezone(PLUS_TWO)
+
+
+@pytest.mark.backends("pg")
+async def test_interval_arithmetic_on_a_timestamp_compares_instants(relational_backend: RelationalBackend) -> None:
+    """``created_at + timedelta(days=1) > now``, typical of expiry and retention queries: the timedelta is
+    bound as an ``INTERVAL``, as it is beside a plain ``DateTime``. Bound as a ``UtcDateTime`` it made
+    ``timestamptz + timestamptz``, which PostgreSQL rejects. SQLite, MySQL and MariaDB have no interval
+    arithmetic in SQLAlchemy: the next test is the portable form."""
+    factory, now = await _two_days_and_ten_minutes_ago(relational_backend)
+    created_at = TimestampedEvent.created_at
+
+    assert await _labels(factory, created_at + timedelta(days=1) > now) == ["ten minutes ago"]
+    assert await _labels(factory, created_at + timedelta(hours=1) < now) == ["two days ago"]
+    assert await _labels(factory, created_at - timedelta(hours=1) > now - timedelta(hours=3)) == ["ten minutes ago"]
+    assert await _labels(factory, created_at.between(now - timedelta(hours=1), now)) == ["ten minutes ago"]
+
+
+async def test_a_shifted_bound_compares_instants_on_every_backend(relational_backend: RelationalBackend) -> None:
+    """The portable form of the queries above shifts the parameter, not the column: the bound is a datetime,
+    normalized like any other, and the column stays bare, so an index on it can serve the query. SQLAlchemy
+    compiles ``created_at + timedelta(...)`` on SQLite, MySQL and MariaDB to a numeric addition, which
+    matches the wrong rows (it always has, with a plain ``DateTime`` too)."""
+    factory, now = await _two_days_and_ten_minutes_ago(relational_backend)
+    created_at = TimestampedEvent.created_at
+
+    assert await _labels(factory, created_at > now - timedelta(days=1)) == ["ten minutes ago"]
+    assert await _labels(factory, created_at < now - timedelta(hours=1)) == ["two days ago"]
+    assert await _labels(factory, created_at.between(now - timedelta(hours=1), now)) == ["ten minutes ago"]
+
+
+@pytest.mark.backends("sqlite-file", "mysql", "mariadb")
+async def test_a_string_compared_with_a_timestamp_is_bound_as_a_string(relational_backend: RelationalBackend) -> None:
+    """``created_at > '2020-01-01'`` is bound as a string, as it is beside a plain ``DateTime``, and the backend
+    compares it. Bound as a ``UtcDateTime`` it raised ``TypeError`` on SQLite. (asyncpg refuses a string for a
+    PostgreSQL timestamp either way.)"""
+    factory, _ = await _two_days_and_ten_minutes_ago(relational_backend)
+
+    assert await _labels(factory, TimestampedEvent.created_at > "2020-01-01") == ["ten minutes ago", "two days ago"]
+    assert await _labels(factory, TimestampedEvent.created_at < "2020-01-01") == []
 
 
 async def test_two_instants_milliseconds_apart_stay_distinct_and_ordered(relational_backend: RelationalBackend) -> None:

@@ -33,9 +33,15 @@ created_at`` raises ``TypeError`` wherever one side was loaded and the other sta
   ``DATETIME`` on SQLite (all unchanged from ``DateTime(timezone=True)``, except Oracle, which got a
   ``DATE`` without fractional seconds), and ``DATETIME(6)`` on MySQL and MariaDB (microseconds).
 
-Query parameters compared with a ``UtcDateTime`` column go through the same bind processing, so a
-derived ``find_by_created_at_between(lo, hi)`` with ``+02:00`` parameters compares instants on every
-backend. Raw ``text()`` SQL does not know the column type and gets no normalization.
+A ``datetime`` compared with a ``UtcDateTime`` column goes through the same bind processing, so a derived
+``find_by_created_at_between(lo, hi)`` with ``+02:00`` parameters compares instants on every backend. Any
+other value is bound as it is beside a plain ``DateTime``: the ``timedelta`` of ``created_at +
+timedelta(days=1)`` as an ``Interval``, a string as a string. That SQL interval arithmetic runs on
+PostgreSQL, where the ``Interval`` is native. SQLAlchemy has no date arithmetic for SQLite, MySQL and
+MariaDB: there ``created_at + timedelta(days=1) > now`` compiles to a numeric addition and matches the
+wrong rows. Shift the parameter instead, ``created_at > now - timedelta(days=1)``: it is portable, and it
+leaves the column bare for an index. Raw ``text()`` SQL does not know the column type and gets no
+normalization.
 
 ``BaseEntity.created_at``/``updated_at`` and ``SoftDeleteMixin.deleted_at`` use it. Declare it on your own
 columns (``mapped_column(UtcDateTime())``), or make it the type of every ``Mapped[datetime]`` of your
@@ -62,6 +68,7 @@ from typing import Any
 
 from sqlalchemy import DateTime
 from sqlalchemy.engine import Dialect
+from sqlalchemy.sql.operators import OperatorType
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 _NATIVE_TIME_ZONE_DIALECTS = frozenset({"postgresql", "oracle", "mssql"})
@@ -114,6 +121,16 @@ class UtcDateTime(TypeDecorator[datetime]):
 
             return dialect.type_descriptor(oracle.TIMESTAMP(timezone=True))
         return dialect.type_descriptor(DateTime(timezone=True))
+
+    def coerce_compared_value(self, op: OperatorType | None, value: Any) -> Any:
+        """The type a literal beside the column is bound with: this type for a ``datetime`` (so a ``+02:00``
+        parameter is normalized like a written value), and the plain ``DateTime``'s choice for anything else:
+        an ``Interval`` for the ``timedelta`` of ``created_at + timedelta(days=1)``, a ``String`` for a string,
+        a ``Date`` for a date. Bound as this type, a ``timedelta`` made ``timestamptz + timestamptz`` on
+        PostgreSQL and a string raised ``TypeError`` on SQLite."""
+        if isinstance(value, datetime):
+            return self
+        return self.impl_instance.coerce_compared_value(op, value)
 
     def process_bind_param(self, value: Any, dialect: Dialect) -> Any:
         if not isinstance(value, datetime):

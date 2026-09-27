@@ -213,9 +213,19 @@ whole seconds only. `UtcDateTime` behaves the same everywhere:
   `UtcDateTime(strict=True)` to reject it with `ValueError` instead.
 - **Reads.** Every value comes back aware, in UTC, with its microseconds, after `save()` and after a
   reload. `entity.updated_at - entity.created_at` works on every backend.
-- **Queries.** Parameters compared with the column are normalized too, so a derived
-  `find_by_created_at_between(lo, hi)` given `+02:00` values compares instants on every backend. Raw
-  `text()` SQL does not know the column type and is not normalized.
+- **Queries.** A `datetime` compared with the column is normalized too, so a derived
+  `find_by_created_at_between(lo, hi)` given `+02:00` values compares instants on every backend. Other
+  values are bound as they are beside a plain `DateTime`: a `timedelta` as an interval, a string as a
+  string. Raw `text()` SQL does not know the column type and is not normalized.
+- **Date arithmetic.** `created_at + timedelta(days=1) > now` runs on PostgreSQL, whose `INTERVAL`
+  SQLAlchemy binds natively. SQLAlchemy has no date arithmetic for SQLite, MySQL and MariaDB: there the
+  expression compiles to a numeric addition and matches the wrong rows, as it always has with a plain
+  `DateTime`. Shift the parameter instead, which is portable and leaves the column bare for an index:
+
+  ```python
+  recent = select(Order).where(Order.created_at > datetime.now(UTC) - timedelta(days=1))
+  # not: Order.created_at + timedelta(days=1) > datetime.now(UTC)
+  ```
 - **DDL.** `TIMESTAMP WITH TIME ZONE` on PostgreSQL and Oracle, `DATETIMEOFFSET` on SQL Server, `DATETIME`
   on SQLite, and `DATETIME(6)` on MySQL and MariaDB.
 
