@@ -418,3 +418,36 @@ async def test_a_stop_that_cancels_a_delivery_gives_it_back(relational_backend: 
 
     pending = await bus.outbox.pending("slow")
     assert [(p.attempts, p.available_at <= bus.outbox.now()) for p in pending] == [(0, True)]
+
+
+async def test_the_sql_dead_letter_store_keeps_entries_durably(relational_backend: RelationalBackend) -> None:
+    """``SqlEdaDeadLetterStore``: the durable store the Kafka and RabbitMQ buses can record into."""
+    from pyfly.eda.dlq import EdaDeadLetterEntry, SqlEdaDeadLetterStore
+
+    engine = relational_backend.create_engine()
+    store = SqlEdaDeadLetterStore(engine)
+    await store.start()
+    first = EdaDeadLetterEntry(
+        event=EventEnvelope("order.created", {"id": 1, "note": "é"}, "orders", headers={"k": "v"}),
+        error_type="ValueError",
+        error_message="bad order",
+        attempts=5,
+    )
+    second = EdaDeadLetterEntry(
+        event=EventEnvelope("order.paid", {"id": 2}, "orders"), error_type="E", attempts=1, group="billing"
+    )
+    await store.add(first)
+    await store.add(second)
+
+    listed = await store.list(limit=10)
+    assert {entry.id for entry in listed} == {first.id, second.id}
+    stored = next(entry for entry in listed if entry.id == first.id)
+    assert stored.event.payload == {"id": 1, "note": "é"}
+    assert stored.event.headers == {"k": "v"}
+    assert (stored.error_type, stored.error_message, stored.attempts) == ("ValueError", "bad order", 5)
+    assert stored.event.timestamp.tzinfo is not None
+    assert [entry.id for entry in await store.list(group="billing")] == [second.id]
+
+    assert await store.delete(first.id) is True
+    assert await store.delete(first.id) is False
+    assert [entry.id for entry in await store.list()] == [second.id]

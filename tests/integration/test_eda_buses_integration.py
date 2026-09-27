@@ -443,3 +443,47 @@ async def test_rabbitmq_event_bus_round_trip(amqp_url: str) -> None:
     assert len(received) == 1
     assert received[0].event_type == "order.created"
     assert received[0].payload == {"id": 1}
+
+
+@pytest.mark.backends(PG)
+async def test_the_auto_configured_bus_runs_on_the_primary_datasource(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """provider=postgres needs no DSN of its own: the bus is on the registry's primary datasource, and a
+    ``pyfly.eda.postgres.dsn`` equal to the primary URL reuses it (no second connection pool)."""
+    from pyfly.container.stereotypes import service
+    from pyfly.context.application_context import ApplicationContext
+    from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+    from pyfly.eda.auto_configuration import EdaAutoConfiguration
+    from pyfly.eda.decorators import event_listener
+    from pyfly.eda.ports.outbound import EventPublisher
+
+    @service
+    class OrderEvents:
+        def __init__(self) -> None:
+            self.seen: list[str] = []
+
+        @event_listener(["order.*"])
+        async def on_order(self, envelope: EventEnvelope) -> None:
+            self.seen.append(envelope.event_type)
+
+    for overrides in ({}, {"pyfly.eda.postgres.dsn": relational_backend.url}):
+        config = relational_backend.config({"pyfly.eda.provider": "postgres", "pyfly.eda.group": "orders", **overrides})
+        ctx = ApplicationContext(config)
+        for bean in (RelationalAutoConfiguration, EdaAutoConfiguration, OrderEvents):
+            ctx.register_bean(bean)
+        await ctx.start()
+        try:
+            bus = ctx.get_bean(EventPublisher)
+            assert isinstance(bus, PostgresEventBus)
+            registry = ctx.get_bean(DataSourceRegistry)
+            assert bus.outbox.datasource is registry.primary
+            assert registry.names() == ["primary"]
+            await bus.publish("pyfly.events", "order.created", {"id": 1})
+            seen = ctx.get_bean(OrderEvents).seen
+            await _wait_for(lambda seen=seen: seen == ["order.created"])
+        finally:
+            await ctx.stop()
+        assert await _listening(admin) == 0
