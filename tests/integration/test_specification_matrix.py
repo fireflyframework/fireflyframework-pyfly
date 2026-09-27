@@ -194,3 +194,70 @@ async def test_combined_specifications_grow_the_sql_linearly(relational_backend:
         (statement,) = [text_ for text_ in sql if "sp_member" in text_]
         assert statement.count("deleted_at IS NULL") <= 2  # the repository's and the global criteria, once each
         assert len(statement) < 2000
+
+
+# ---------------------------------------------------------------------------------------------------------
+# FilterOperator and FilterUtils (C131, C111)
+# ---------------------------------------------------------------------------------------------------------
+
+
+class SpItem(Base):
+    __tablename__ = "sp_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(40))
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("sp_author.id"), nullable=True)
+    owner: Mapped[SpAuthor | None] = relationship()
+    code: Mapped[str | None] = mapped_column("item_code", String(20), nullable=True)
+
+    @property
+    def label(self) -> str:
+        return self.name.upper()
+
+
+class ItemRepository(Repository[SpItem, int]):
+    pass
+
+
+async def _items(datasources: Datasources) -> ItemRepository:
+    await _library(datasources)
+    rows = [
+        {"id": 1, "name": "discount 50% off", "owner_id": 1, "item_code": "c1"},
+        {"id": 2, "name": "discount 500 off", "owner_id": 2, "item_code": None},
+        {"id": 3, "name": "a_b", "owner_id": None, "item_code": "c3"},
+        {"id": 4, "name": "axb", "owner_id": 1, "item_code": None},
+    ]
+    async with datasources.engine.begin() as conn:
+        await conn.execute(insert(SpItem.__table__), rows)
+    return ItemRepository()
+
+
+def _ids(items: list[Any]) -> list[int]:
+    return sorted(item.id for item in items)
+
+
+async def test_filter_contains_matches_the_value_as_it_is(relational_backend: RelationalBackend) -> None:
+    async with repository_datasources(relational_backend, *MODELS, SpItem) as datasources:
+        items = await _items(datasources)
+        assert _ids(await items.find_all_by_spec(FilterOperator.contains("name", "50%"))) == [1]
+        assert _ids(await items.find_all_by_spec(FilterOperator.contains("name", "a_b"))) == [3]
+        assert _ids(await items.find_all_by_spec(FilterOperator.contains("name", "%"))) == [1]
+        # like() takes a pattern: its wildcards stay wildcards.
+        assert _ids(await items.find_all_by_spec(FilterOperator.like("name", "a_b"))) == [3, 4]
+
+
+async def test_query_by_example_with_an_entity(relational_backend: RelationalBackend) -> None:
+    async with repository_datasources(relational_backend, *MODELS, SpItem) as datasources:
+        items = await _items(datasources)
+        # A transient probe: its non-None attributes, by attribute name (code is the item_code column).
+        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpItem(name="a_b")))) == [3]
+        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(SpItem(code="c1")))) == [1]
+        # A loaded probe matches its own row (every loaded attribute, the key included).
+        loaded = await items.find_by_id(4)
+        assert loaded is not None
+        assert _ids(await items.find_all_by_spec(FilterUtils.from_example(loaded))) == [4]
+        # A relationship to one entity compares with an instance.
+        authors = AuthorRepository()
+        ann = await authors.find_by_id(1)
+        assert _ids(await items.find_all_by_spec(FilterOperator.eq("owner", ann))) == [1, 4]
+        assert _ids(await items.find_all_by_spec(FilterUtils.by(owner=ann, name="axb"))) == [4]

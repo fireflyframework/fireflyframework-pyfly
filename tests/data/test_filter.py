@@ -16,15 +16,19 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.filter import FilterOperator, FilterUtils
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -40,6 +44,10 @@ class User(BaseEntity):
     active: Mapped[bool] = mapped_column(default=True)
     bio: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
 
+    @property
+    def greeting(self) -> str:
+        return f"Hi {self.name}"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -47,8 +55,10 @@ class User(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -328,3 +338,55 @@ class TestFilterUtilsEmpty:
         spec = FilterUtils.from_example(UserFilter())
         names = await _names(seeded_session, spec)
         assert names == ["Alice", "Bob", "Charlie", "Diana"]
+
+
+# ---------------------------------------------------------------------------
+# Names are validated, and entities are probes (C111)
+# ---------------------------------------------------------------------------
+
+
+class TestFilterNames:
+    """Every name is validated against the entity when the specification is applied (a 400 for a request's
+    filter), instead of reaching getattr."""
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            FilterOperator.eq("nmae", "x"),
+            FilterOperator.contains("_sa_instance_state", "x"),
+            FilterUtils.from_dict({"__class__": "x"}),
+            FilterUtils.by(**{"role$ne": "x"}),
+        ],
+        ids=["typo", "private", "dunder", "operator"],
+    )
+    async def test_an_unknown_name_raises_invalid_property(self, seeded_session: AsyncSession, spec: Any):
+        with pytest.raises(InvalidPropertyError) as raised:
+            await _names(seeded_session, spec)
+        assert raised.value.usage == "filter"
+
+    async def test_a_python_property_is_not_a_filter(self, seeded_session: AsyncSession):
+        with pytest.raises(InvalidPropertyError, match="no filter property 'greeting'"):
+            await _names(seeded_session, FilterOperator.eq("greeting", "Hi Alice"))
+
+
+class TestFromExampleEntities:
+    async def test_a_transient_entity_probe(self, seeded_session: AsyncSession):
+        assert await _names(seeded_session, FilterUtils.from_example(User(role="admin", age=40))) == ["Charlie"]
+
+    async def test_a_loaded_entity_probe_matches_its_own_row(self, seeded_session: AsyncSession):
+        diana = (await seeded_session.execute(select(User).where(User.name == "Diana"))).scalar_one()
+        assert await _names(seeded_session, FilterUtils.from_example(diana)) == ["Diana"]
+
+    async def test_attributes_that_are_not_loaded_are_left_out(self, seeded_session: AsyncSession):
+        bob = (await seeded_session.execute(select(User).where(User.name == "Bob"))).scalar_one()
+        seeded_session.expire(bob, ["name", "age", "id", "created_at", "updated_at"])
+        # role, active and bio stay loaded: role 'user' and active True match only Bob.
+        assert await _names(seeded_session, FilterUtils.from_example(bob)) == ["Bob"]
+
+    async def test_private_attributes_of_a_plain_probe_are_left_out(self, seeded_session: AsyncSession):
+        class Probe:
+            def __init__(self) -> None:
+                self.role = "user"
+                self._cache = {"anything": 1}
+
+        assert await _names(seeded_session, FilterUtils.from_example(Probe())) == ["Bob", "Diana"]
