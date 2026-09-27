@@ -14,14 +14,15 @@
 """``ProjectionRunner`` over the in-memory adapters (C066, C068, C179).
 
 The relational lanes are in ``tests/integration/test_projection_matrix.py``; these runs cover the in-memory
-store and checkpoints, the runner's paging and failure policy, and an event store written against the SPI of
-earlier releases.
+store and checkpoints, the runner's paging and failure policy, its lease and its ``stop()``, and an event store
+written against the SPI of earlier releases.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -32,6 +33,7 @@ from pyfly.eventsourcing.checkpoint import CheckpointStore, InMemoryCheckpointSt
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
 from pyfly.eventsourcing.store import InMemoryEventStore
+from pyfly.scheduling.adapters.lease_lock import LeaseLock
 
 
 def _event(name: str) -> StoredEventEnvelope:
@@ -190,6 +192,90 @@ async def test_the_runner_works_outside_the_transaction_that_started_it() -> Non
         await runner.stop()
         await engine.dispose()
     assert units == [None, None]
+
+
+class _RecordingLease(LeaseLock):
+    """A lease lock on a real table that records what the runner asks of it."""
+
+    def __init__(self, engine: object, owner: str) -> None:
+        super().__init__(engine, owner=owner)
+        self.calls: list[str] = []
+
+    async def try_acquire(self, name: str, ttl: float) -> bool:
+        taken = await super().try_acquire(name, ttl)
+        self.calls.append(f"try_acquire:{taken}")
+        return taken
+
+    async def extend(self, name: str, ttl: float) -> bool:
+        extended = await super().extend(name, ttl)
+        self.calls.append(f"extend:{extended}")
+        return extended
+
+    async def release(self, name: str) -> None:
+        self.calls.append("release")
+        await super().release(name)
+
+
+async def test_a_runner_that_loses_its_lease_lets_go_of_that_acquisition(tmp_path: Path) -> None:
+    """The lease lock keeps each acquisition until it is released: a runner whose lease ran out while a batch was
+    in flight (another node took it) now releases that acquisition instead of keeping one per lease it lost."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'leases.db'}")
+    mine, other = _RecordingLease(engine, "node-a"), LeaseLock(engine, owner="node-b")
+    store = InMemoryEventStore()
+    await _append(store, 1)
+    in_batch, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow(event: StoredEventEnvelope) -> None:
+        in_batch.set()
+        await finish.wait()
+
+    runner = ProjectionRunner(
+        FunctionProjection("p", slow),
+        store,
+        checkpoints=InMemoryCheckpointStore(),
+        lease=mine,
+        lease_ttl_s=0.2,
+        poll_interval_s=0.01,
+    )
+    try:
+        await runner.start()
+        await asyncio.wait_for(in_batch.wait(), 5)
+        deadline = time.monotonic() + 5
+        while not await other.try_acquire("pyfly.projection.p", 30):  # once the runner's lease has run out
+            assert time.monotonic() < deadline, "the runner's lease never ran out"
+            await asyncio.sleep(0.05)
+        finish.set()
+        while "extend:False" not in mine.calls:
+            assert time.monotonic() < deadline, "the runner never found its lease gone"
+            await asyncio.sleep(0.01)
+        while mine.calls[-1] == "extend:False":
+            await asyncio.sleep(0.01)
+    finally:
+        await runner.stop()
+        await engine.dispose()
+
+    lost = mine.calls.index("extend:False")
+    assert mine.calls[lost + 1] == "release", mine.calls
+
+
+async def test_stop_lets_a_cancellation_of_its_caller_through() -> None:
+    store = InMemoryEventStore()
+    await _append(store, 1)
+    in_batch = asyncio.Event()
+
+    async def stuck(event: StoredEventEnvelope) -> None:
+        in_batch.set()
+        await asyncio.Event().wait()
+
+    runner = ProjectionRunner(FunctionProjection("p", stuck), store, poll_interval_s=0.01)
+    await runner.start()
+    await asyncio.wait_for(in_batch.wait(), 5)
+    stopping = asyncio.create_task(runner.stop())
+    await asyncio.sleep(0.02)  # stop() is waiting for the batch in flight
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    await runner.stop()  # nothing left to stop
 
 
 class _LegacyStore(InMemoryEventStore):

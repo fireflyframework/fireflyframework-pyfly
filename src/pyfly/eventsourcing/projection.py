@@ -170,14 +170,22 @@ class ProjectionRunner:
         self._task = detached(self._loop(), name=f"pyfly-projection-{self.name}")
 
     async def stop(self) -> None:
-        """Let the batch in flight finish, stop, and release the lease (idempotent)."""
+        """Let the batch in flight finish, stop, and release the lease (idempotent).
+
+        A cancellation of the caller goes through: the runner's task is cancelled with it (its batch rolls back)
+        and the lease ends at its ttl."""
         task = self._task
         if task is None:
             return
         self._stop.set()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await task
-        self._task = None
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise  # the caller of stop() is cancelled, not only the runner's task
+        finally:
+            self._task = None
         await self._release_lease()
 
     # ------------------------------------------------------------------
@@ -314,8 +322,8 @@ class ProjectionRunner:
             if await lease.extend(self._lease_name, self._lease_ttl):
                 self._renew_at = now + self._lease_ttl / 3
                 return True
-            self._lease_held = False
             _logger.warning("projection_lease_lost", extra={"projection": self.name, "lease": self._lease_name})
+            await self._release_lease()  # the acquisition has ended: the lease need not keep it
         if await lease.try_acquire(self._lease_name, self._lease_ttl):
             self._lease_held = True
             self._renew_at = now + self._lease_ttl / 3
