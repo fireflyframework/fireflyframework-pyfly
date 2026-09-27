@@ -193,6 +193,9 @@ class Container:
         # singleton first resolved while the context starts, get the BeanPostProcessors and
         # @post_construct like any eager singleton. None for a bare container.
         self._post_create_hook: Callable[[Any, Registration], Any] | None = None
+        # The scoped proxy of each proxied registration, by registration identity (the registration
+        # is kept with it, so a recycled id never hands out another registration's proxy).
+        self._scoped_proxies: dict[int, tuple[Registration, Any]] = {}
         # Why the container builds no bean at the moment, or None while it may. ApplicationContext
         # sets it when stop() starts destroying beans and clears it when start() begins, so a
         # stopped context never rebuilds a singleton it released (an engine nobody would dispose).
@@ -249,13 +252,19 @@ class Container:
         name: str = "",
     ) -> None:
         """Register a class for injection."""
+        from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME
+
         bean_name = name or getattr(cls, "__pyfly_bean_name__", "")
         bean_scope = getattr(cls, "__pyfly_scope__", None) or scope
+        if getattr(cls, "__pyfly_refresh_scope__", False):
+            # @refresh_scope survives a stereotype applied after it (which resets __pyfly_scope__).
+            bean_scope = REFRESH_SCOPE_NAME
         reg = Registration(
             impl_type=cls,
             scope=bean_scope,
             condition=condition,
             name=bean_name,
+            scoped_proxy=bool(getattr(cls, "__pyfly_scoped_proxy__", False)),
         )
         self._registrations[cls] = reg
         self._all[(cls, bean_name)] = reg
@@ -458,6 +467,23 @@ class Container:
                 self._ensure_metrics(reg.impl_type).resolution_count += 1
                 return instance
 
+        if reg.scoped_proxy and reg.scope != Scope.TRANSIENT:
+            return self._scoped_proxy(reg)
+        return self._resolve_scoped(reg)
+
+    def _scoped_proxy(self, reg: Registration) -> Any:
+        """The one :class:`~pyfly.container.scoped_proxy.ScopedProxy` of *reg* (built on first use)."""
+        from pyfly.container.scoped_proxy import ScopedProxy
+
+        proxy = self._scoped_proxies.get(id(reg))
+        if proxy is None or proxy[0] is not reg:
+            target_type = reg.impl_type if isinstance(reg.impl_type, type) else object
+            proxy = (reg, ScopedProxy(lambda: self._resolve_scoped(reg), target_type))
+            self._scoped_proxies[id(reg)] = proxy
+        return proxy[1]
+
+    def _resolve_scoped(self, reg: Registration) -> Any:
+        """The instance a non-singleton registration's scope holds now (created when it holds none)."""
         if reg.scope == Scope.REQUEST:
             instance = self._resolve_request_scoped(reg)
             self._ensure_metrics(reg.impl_type).resolution_count += 1

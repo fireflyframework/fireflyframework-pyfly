@@ -176,7 +176,10 @@ class ApplicationContext:
         refresh_scope = RefreshScope()
         self._container.register_scope(REFRESH_SCOPE_NAME, refresh_scope)
         self._container.register_instance(
-            ContextRefresher, ContextRefresher(self._container, refresh_scope, self._event_bus, self._config)
+            ContextRefresher,
+            ContextRefresher(
+                self._container, refresh_scope, self._event_bus, self._config, destroy=self._destroy_scoped_instance
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -522,7 +525,15 @@ class ApplicationContext:
                 await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
         # 3. Destroy. From here on nothing is created: a singleton resolved now would outlive the stop.
+        # The instances the custom scopes hold (refresh-scoped datasources) go first: nothing a
+        # singleton holds depends on them except through a proxy or a Provider.
         self._container.refuse_creation("the application context is stopping")
+        for handler in list(self._container._custom_scopes.values()):
+            evict_all = getattr(handler, "evict_all", None)
+            if not callable(evict_all):
+                continue
+            for scoped in list(evict_all().values()):
+                await self._destroy_scoped_instance(scoped, timeout=shutdown_timeout)
         live = self._live_instances_in_destroy_order()
         for instance in live:
             try:
@@ -591,6 +602,14 @@ class ApplicationContext:
         self._wiring_counts = {}
         self._container.refuse_creation("the application context is stopped; start it again to use its beans")
         self._started = False
+
+    async def _destroy_scoped_instance(self, instance: Any, *, timeout: float | None = None) -> None:
+        """Destroy an instance a scope evicted (a refresh) or still held at stop: its ``@pre_destroy``."""
+        limit = float(self._config.get("pyfly.context.shutdown-timeout", 30)) if timeout is None else timeout
+        try:
+            await asyncio.wait_for(self._call_pre_destroy(instance), timeout=limit)
+        except TimeoutError:
+            logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": limit})
 
     async def _stop_lifecycle_bean(self, bean: Any, timeout: float) -> None:
         """Stop one lifecycle bean within *timeout*; a failure is logged and does not stop the others."""
@@ -870,6 +889,7 @@ class ApplicationContext:
         registration = self._container._registrations[declared]
         registration.scope = bean_scope  # the method's scope, even when the class carries a stereotype's
         registration.factory = self._bean_factory(config_instance, method)
+        registration.scoped_proxy = bool(getattr(method, "__pyfly_scoped_proxy__", False))
         if getattr(method, "__pyfly_bean_primary__", False):
             registration.primary = True
         return True
