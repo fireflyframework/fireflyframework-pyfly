@@ -613,7 +613,7 @@ order_asc = SortOrder.asc("name")       # Order(property="name", direction="asc"
 order_desc = SortOrder.desc("created_at") # Order(property="created_at", direction="desc")
 
 scored = SortOrder.desc("score").nulls_last()      # NULLs after every value, on every backend
-named = SortOrder.asc("name").ignoring_case()      # orders by the lower-cased value
+named = SortOrder.asc("name").ignoring_case()      # orders a string property by its lower-cased value
 sort = Sort.by(scored, named, "id")                # Sort.by takes orders and property names
 ```
 
@@ -668,7 +668,8 @@ and `map()`.
 `Window[T]` is a keyset scroll's result (`repo.scroll(sort, position, size=...)`): `items`, `has_next` and
 `next_position`, the `KeysetPosition` after its last item (the values of the sort properties and the
 primary key). Pass it back to continue; `KeysetPosition.of(name="m", id=42)` rebuilds one from a cursor
-token. A keyset scroll's cost does not grow with the depth, as an `OFFSET` does.
+token. A position is a value (equal positions hash alike, so one can be a cache key). A keyset scroll's cost
+does not grow with the depth, as an `OFFSET` does.
 
 Source files:
 - `src/pyfly/data/pageable.py` — `Pageable`, `Sort`, `Order`, `NullHandling`, `KeysetPosition`
