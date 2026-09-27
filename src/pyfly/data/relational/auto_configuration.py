@@ -54,6 +54,7 @@ try:
 
     from pyfly.data.relational.datasource_registry import PRIMARY, DataSourceRegistry, datasource_of
     from pyfly.data.relational.schema import SCHEMA_PHASE, SchemaInitializer
+    from pyfly.data.relational.sqlalchemy.repository import Repository
     from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
     from pyfly.data.relational.sqlalchemy.transaction_manager import (
         SqlAlchemyTransactionManager,
@@ -67,12 +68,14 @@ except ImportError:
     DataSourceRegistry = object  # type: ignore[misc,assignment]
     SCHEMA_PHASE = 0
     SchemaInitializer = object  # type: ignore[misc,assignment]
+    Repository = object  # type: ignore[misc,assignment]
     SessionProvider = object  # type: ignore[misc,assignment]
     SqlAlchemyTransactionManager = object  # type: ignore[misc,assignment]
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
-from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
+from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError, NoUniqueBeanError
+from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.container.provider import Provider
 from pyfly.container.types import Scope, ScopeSpec, scope_name
 from pyfly.context.conditions import (
@@ -507,6 +510,40 @@ class DataSourceSpiRegistrar:
             )
 
 
+@order(HIGHEST_PRECEDENCE + 200)
+class RepositoryWiringCheck:
+    """``BeanPostProcessor`` that fails the start on a relational repository the relational data layer did not wire.
+
+    The repository post-processor of :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled``)
+    compiles a repository's derived and ``@query`` methods and binds its calls to the context's transaction
+    managers. Without it the stubs keep their ``...`` bodies and answer ``None`` (``exists_by_*`` a falsy
+    ``None``), with or without a database. A repository that got a session of its own (manual mode) is left
+    alone. It runs right after the repository post-processors, before the AOP one.
+    """
+
+    def before_init(self, bean: Any, bean_name: str) -> Any:
+        """Pass through."""
+        return bean
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        """Refuse *bean* when it is a relational repository that no post-processor wired."""
+        if (
+            isinstance(bean, Repository)
+            and bean._manual_session is None
+            and getattr(bean, "_transaction_managers", None) is None
+        ):
+            raise BeanCreationException(
+                subsystem="data",
+                provider=type(bean).__name__,
+                reason=(
+                    f"{type(bean).__name__} ({bean_name}) is a relational repository, and the relational data layer "
+                    "is not enabled: its derived and @query methods would never be compiled. Set "
+                    "pyfly.data.relational.enabled=true (with pyfly.data.relational.url)."
+                ),
+            )
+        return bean
+
+
 @auto_configuration
 @conditional_on_class("sqlalchemy")
 class DataSourceAutoConfiguration:
@@ -532,6 +569,12 @@ class DataSourceAutoConfiguration:
     def datasource_spi_registrar(self, datasource_registry: DataSourceRegistry) -> DataSourceSpiRegistrar:
         """Registers ``AfterBeginCustomizer`` and ``DataSourceCredentialsProvider`` beans."""
         return DataSourceSpiRegistrar(datasource_registry)
+
+    @bean
+    def repository_wiring_check(self) -> RepositoryWiringCheck:
+        """Fails the start on a relational repository the relational data layer did not wire
+        (:class:`RepositoryWiringCheck`)."""
+        return RepositoryWiringCheck()
 
     @bean
     def transaction_manager_registry(

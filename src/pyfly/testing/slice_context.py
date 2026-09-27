@@ -58,7 +58,7 @@ async def _build_slice(
 ) -> ApplicationContext:
     """Register *beans* (+ ``overrides``) into a fresh context and start it.
 
-    The started context is stopped again when a bean cannot be resolved or a repository is not wired.
+    The context is stopped again when its start fails, a bean cannot be resolved or a repository is not wired.
     """
     context = ApplicationContext(config or Config({}))
     for cls in beans:
@@ -73,8 +73,8 @@ async def _build_slice(
         else:
             # A pre-built instance / mock: install it directly under the interface.
             context.container.register_instance(interface, impl)
-    await context.start()
     try:
+        await context.start()
         # Fail fast: resolve each slice bean now so a missing collaborator surfaces at build
         # time (matching Spring slice startup) rather than silently on first use.
         for cls in beans:
