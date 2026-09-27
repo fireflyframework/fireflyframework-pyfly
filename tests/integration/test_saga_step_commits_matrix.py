@@ -26,6 +26,8 @@ thing happen:
   outlives it and nothing commits after it (the step tasks used to be orphaned and commit afterwards).
 - C081: a step's timeout fires while its ``COMMIT`` is in flight. The step is not retried (a retry committed
   the debit twice) and is compensated; a step whose failed attempt committed nothing is still retried.
+- A step whose connection dies while its ``COMMIT`` is in flight (``CommitOutcomeUnknownError``, PostgreSQL)
+  is never retried, and is compensated: it may have committed.
 
 After each, no pooled connection is checked out.
 """
@@ -48,11 +50,12 @@ from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.transaction import CommitOutcomeUnknownError
 from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
 from pyfly.transactional.saga.annotations import saga, saga_step
 from pyfly.transactional.saga.engine.saga_engine import SagaEngine
 from pyfly.transactional.shared.types import StepStatus
-from tests.support.backend_matrix import SQLITE_FILE, RelationalBackend
+from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 from tests.support.commit_gate import GATED_LANES, SQLITE_OVERRIDES, CommitGate
 
 pytestmark = pytest.mark.backends(*GATED_LANES)
@@ -172,6 +175,23 @@ class SlowDebit:
         await self.ledger.record("REFUND")
 
 
+@saga(name="wp13-unknown-debit")
+class UnknownDebit:
+    """A debit with retries, whose connection the test kills while its COMMIT waits behind the gate."""
+
+    def __init__(self, ledger: SagaLedger) -> None:
+        self.ledger = ledger
+        self.script = Script()
+
+    @saga_step(id="debit", compensate="refund", retry=3)
+    async def debit(self) -> None:
+        self.script.debit_attempts += 1
+        await self.ledger.record("DEBIT")
+
+    async def refund(self) -> None:
+        await self.ledger.record("REFUND")
+
+
 class Harness:
     def __init__(self, backend: RelationalBackend, ctx: ApplicationContext) -> None:
         self.backend = backend
@@ -214,6 +234,7 @@ async def harness(relational_backend: RelationalBackend) -> AsyncIterator[Harnes
         ParallelTransfer,
         CancelledTransfer,
         SlowDebit,
+        UnknownDebit,
     ):
         ctx.register_bean(bean)
     await ctx.start()
@@ -324,3 +345,39 @@ async def test_an_attempt_that_committed_nothing_is_still_retried(harness: Harne
     assert saga_bean.script.debit_attempts == 2
     assert result.steps["debit"].attempts == 2
     assert await harness.committed() == ["DEBIT"]
+
+
+@pytest.mark.backends(PG)
+async def test_a_commit_whose_outcome_is_unknown_is_never_retried_and_is_compensated(harness: Harness) -> None:
+    saga_bean = harness.ctx.get_bean(UnknownDebit)
+    async with harness.gate() as gate:
+        await gate.close()
+        running = asyncio.create_task(harness.engine.execute("wp13-unknown-debit"))
+        await gate.wait_for_commit()
+        # The committing backend waits on the gate's advisory lock: kill it while its COMMIT is in flight.
+        admin = create_async_engine(harness.backend.url, poolclass=NullPool)
+        killed: list[object] = []
+        try:
+            async with admin.connect() as conn:
+                for _ in range(500):
+                    rows = await conn.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() "
+                            "AND wait_event_type = 'Lock' AND wait_event = 'advisory'"
+                        )
+                    )
+                    killed = list(rows.all())
+                    if killed:
+                        break
+                    await asyncio.sleep(0.01)
+        finally:
+            await admin.dispose()
+        await gate.open()  # the compensation writes to the gated table too
+        assert killed
+        result = await asyncio.wait_for(running, 10)
+
+    assert saga_bean.script.debit_attempts == 1  # an unknown outcome is never retried
+    assert result.success is False
+    assert isinstance(result.error, CommitOutcomeUnknownError)
+    assert result.steps["debit"].compensated  # it may have committed
+    assert await harness.committed() == ["REFUND"]  # the server rolled the killed COMMIT back
