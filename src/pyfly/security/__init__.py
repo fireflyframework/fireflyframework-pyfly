@@ -23,6 +23,7 @@ extras.
 """
 
 from pyfly.security.context import SecurityContext
+from pyfly.security.context_holder import SecurityContextHolder
 from pyfly.security.decorators import secure
 from pyfly.security.expression import (
     get_permission_evaluator,
@@ -42,6 +43,7 @@ __all__ = [
     "PermissionEvaluator",
     "RoleHierarchy",
     "SecurityContext",
+    "SecurityContextHolder",
     "SecurityRule",
     "get_permission_evaluator",
     "get_role_hierarchy",
