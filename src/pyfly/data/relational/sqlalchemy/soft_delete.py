@@ -284,18 +284,27 @@ class SoftDeleteRepository(Repository[T, ID]):
         the dialect has ``UPDATE ... RETURNING`` and there is a copy to bring in step, the ``UPDATE`` returns the
         keys it changed and exactly those copies are stamped; elsewhere (MySQL, MariaDB) the copies of the
         requested keys (of every row, without *identities*) that are active in memory are, which is wrong only
-        for a copy whose row another transaction deleted since it was read. A version SQL cannot compute (not a
-        plain counter) is left to the ORM, which runs the generator: those rows are loaded and updated there.
+        for a copy whose row another transaction deleted since it was read. Every active row (no *identities*)
+        is updated in two steps there, so what it returns does not grow with the table: the rows of the keys
+        the unit holds first, returning their keys, then all the others, returning nothing. A version SQL cannot
+        compute (not a plain counter) is left to the ORM, which runs the generator: those rows are loaded and
+        updated there.
         """
         version_key = self._version_key
         if version_key is not None and self._counts_versions() and not _increments(self._mapper):
             return await self._soft_delete_through_orm(session, criteria, stamps, version, version_key, entities)
         returning = dialect_of(session).update_returning and bool(entities or self._holds_entities(session))
+        returns = [returning] * len(criteria)  # which UPDATE returns the keys it changed
+        if returning and identities is None:
+            held = self._held_identities(session, entities)
+            first = self._soft_delete_criteria(dialect_of(session), held, stamps)
+            criteria = [*first, *criteria]
+            returns = [True] * len(first) + [False] * (len(criteria) - len(first))
         changed: set[tuple[Any, ...]] = set()
         updated = 0
-        for criterion in criteria:
+        for criterion, returned in zip(criteria, returns, strict=True):
             statement = self._soft_delete_update([criterion], stamps, version)
-            if returning:
+            if returned:
                 rows = (await session.execute(statement.returning(*self._pk_attributes))).all()
                 changed.update(tuple(row) for row in rows)
                 updated += len(rows)
@@ -309,6 +318,12 @@ class SoftDeleteRepository(Repository[T, ID]):
             else:
                 self._mark_deleted(session, changed, entities, stamps)
         return updated
+
+    def _held_identities(self, session: AsyncSession, entities: Sequence[Any]) -> list[tuple[Any, ...]]:
+        """The keys of the unit's persistent copies of the model and of *entities*, each once."""
+        held = (entity for entity in session.sync_session.identity_map.values() if isinstance(entity, self._model))
+        keys = (self._identity_of(entity) for entity in (*held, *entities))
+        return list(dict.fromkeys(key for key in keys if key is not None))
 
     async def _soft_delete_through_orm(
         self,

@@ -42,7 +42,7 @@ from pyfly.data.relational.sqlalchemy.entity import BaseEntity, SoftDeleteMixin,
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.security.context import SecurityContext
-from tests.integration._repository_harness import Datasources, dml, repository_datasources
+from tests.integration._repository_harness import Datasources, dml, repository_datasources, sql_of
 from tests.support.backend_matrix import RelationalBackend
 from tests.support.contract_models import ContractSoftItem
 
@@ -369,3 +369,33 @@ async def test_only_the_rows_the_update_changed_are_stamped_in_the_unit(relation
         held_gone, held_live = await delete_both()
         assert held_gone.deleted_at is None and held_gone.version == gone.version + 1  # the rename's own bump
         assert held_live.deleted_at is not None and held_live.version == live.version + 1
+
+
+@pytest.mark.backends("sqlite-file", "pg")
+async def test_a_soft_delete_of_every_row_returns_only_the_keys_the_unit_holds(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``delete_all()`` returned the key of every row it changed, to find the unit's copies among them, so the
+    memory it took grew with the table: the rows of the keys the unit holds are updated first, returning
+    their keys, and every other active row by an ``UPDATE`` that returns nothing."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        items = VersionedItems()
+        gone, live, *_rest = await items.save_all([SdVersioned(name=f"n{n}") for n in range(30)])
+
+        @transactional
+        async def delete_everything() -> tuple[SdVersioned, SdVersioned, list[str]]:
+            held_gone, held_live = await items.find_by_id(gone.id), await items.find_by_id(live.id)
+            assert held_gone is not None and held_live is not None
+            behind = update(SdVersioned).where(SdVersioned.id == gone.id).values(deleted_at=func.now())
+            await items._session.execute(behind.execution_options(synchronize_session=False))
+            with datasources.counter() as counter:
+                await items.delete_all()
+            return held_gone, held_live, sql_of(counter, "UPDATE")
+
+        held_gone, held_live, updates = await delete_everything()
+        returning = [sql for sql in updates if "RETURNING" in sql]
+        assert len(updates) == 2 and len(returning) == 1
+        assert "ANY" in returning[0] or " IN (" in returning[0]  # only the held keys
+        assert held_gone.deleted_at is None and held_gone.version == gone.version  # its row was not changed
+        assert held_live.deleted_at is not None and held_live.version == live.version + 1
+        assert await items.count() == 0
