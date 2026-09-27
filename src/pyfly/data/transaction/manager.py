@@ -97,7 +97,14 @@ class TransactionManager(Protocol):
         ...
 
     async def create_savepoint(self, unit: UnitOfWork) -> Any:
-        """Open a savepoint in *unit* and return a handle for it."""
+        """Open a savepoint in *unit* and return a handle for it.
+
+        Open it under the unit's operation guard (``async with unit.operation():``), which refuses it while
+        another task holds the unit's innermost savepoint, and record it there with
+        ``unit.savepoint_opened(handle)``, so no other task's statement lands in it before it is recorded.
+        Report each savepoint that ends, however it ends, with ``unit.savepoint_closed(handle)``. The
+        template records a ``NESTED`` scope's savepoint and forgets it at the scope's end itself when a
+        manager does not."""
         ...
 
     async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:

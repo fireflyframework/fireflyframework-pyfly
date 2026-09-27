@@ -231,6 +231,12 @@ The `TransactionTemplate` (behind `@transactional`) drives it: propagation, roll
 synchronizations and cancellation are implemented once, for every backend. See
 [Transaction Management](data-relational.md#transaction-management).
 
+A backend with savepoints opens each one under the unit's operation guard (`async with
+unit.operation():`), records it there with `unit.savepoint_opened(handle)` and reports its end with
+`unit.savepoint_closed(handle)`, including a savepoint that ends along with an enclosing one. The unit then
+refuses any other task's statement or savepoint while that savepoint is open: savepoints are a stack on
+one connection.
+
 ### CrudRepository[T, ID]
 
 The Spring Data-style CRUD interface with type parameters for both entity and ID. It is the root of
