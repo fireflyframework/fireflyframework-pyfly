@@ -137,3 +137,30 @@ def test_optional_generic_without_a_candidate_still_receives_none() -> None:
     container.register(_TakesMissingOptionalGeneric)
 
     assert container.resolve(_TakesMissingOptionalGeneric).repo is None
+
+
+class _TakesProviders:
+    def __init__(
+        self,
+        factories: Provider[async_sessionmaker[AsyncSession]],
+        repos: Provider[_Repo[_User, int]],
+        missing: Provider[_Repo[_Widget, int] | None],
+    ) -> None:
+        self.factories = factories
+        self.repos = repos
+        self.missing = missing
+
+
+def test_a_provider_of_a_parametrized_generic_resolves_like_the_parameter() -> None:
+    """``Provider[async_sessionmaker[AsyncSession]].get()`` raised NoSuchBeanError for a registered bean."""
+    container = Container()
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker()
+    container.register_instance(async_sessionmaker, factory)
+    container.register(_UserRepo)
+    container.bind(_Repo, _UserRepo)
+    container.register(_TakesProviders)
+
+    providers = container.resolve(_TakesProviders)
+    assert providers.factories.get() is factory
+    assert isinstance(providers.repos.get(), _UserRepo)
+    assert providers.missing.get() is None

@@ -785,8 +785,11 @@ During `ApplicationContext.start()`, the context:
    `@bean` method ran once at startup whatever its scope, so a refresh-scoped or transient factory
    built an object for nothing (an extra engine per scoped datasource) and a request-scoped
    factory ran outside any request. A non-singleton is therefore resolvable by its declared
-   return type, not by the concrete class it returns (as in Spring). A hint that declares no
-   single class (`A | B`) still makes the method run once at startup to learn the type.
+   return type, not by the concrete class it returns (as in Spring). A parametrized hint declares
+   its origin class: `-> async_sessionmaker[AsyncSession]` (or `... | None`) registers
+   `async_sessionmaker`, which is what a parameter or a `Provider` of
+   `async_sessionmaker[AsyncSession]` resolves. A hint that declares no single class (`A | B`,
+   `list[X]`) still makes the method run once at startup to learn the type.
 
 ### @bean Parameters
 
@@ -1959,7 +1962,10 @@ class Worker:
 ```
 
 `Provider` is exported from `pyfly.container`. It exposes `.get()` and is also callable
-(`provider()` is equivalent to `provider.get()`).
+(`provider()` is equivalent to `provider.get()`). `T` can be anything a constructor parameter can
+be: `Provider[async_sessionmaker[AsyncSession]]` resolves the `async_sessionmaker` bean, and
+`Provider[X | None]` answers `None` when there is no `X` (until 26.09.07 a parametrized `T` raised
+`NoSuchBeanError` even when the bean existed).
 
 ### Map injection — dict[str, T]
 

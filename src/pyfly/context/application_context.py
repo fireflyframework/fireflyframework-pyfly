@@ -942,6 +942,32 @@ class ApplicationContext:
                 return members[0]
         return None
 
+    @classmethod
+    def _declared_scoped_bean_type(cls, return_type: Any) -> type | None:
+        """The class a non-singleton ``@bean`` is registered under without calling it.
+
+        As :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
+        ``-> async_sessionmaker[AsyncSession]`` (the idiomatic hint), and ``... | None``, declare
+        ``async_sessionmaker``. That is what an injection of the parametrized type resolves (the
+        container falls back to the origin), so the factory need not run at startup to be found. A
+        builtin container (``list[X]``, ``dict[K, V]``) or ``type[X]`` declares nothing: those are not
+        bean keys. Singletons keep :meth:`_declared_bean_type`, since their factory runs anyway and
+        registers the concrete class it returns.
+        """
+        declared = cls._declared_bean_type(return_type)
+        if declared is not None:
+            return declared
+        hint = return_type
+        if typing.get_origin(hint) in (typing.Union, types.UnionType):
+            members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+            if len(members) != 1:
+                return None
+            hint = members[0]
+        origin = typing.get_origin(hint)
+        if isinstance(origin, type) and origin not in (list, dict, set, frozenset, tuple, type):
+            return origin
+        return None
+
     def _process_configurations(self, *, auto: bool = False) -> None:
         """Find @configuration beans, call their @bean methods, register results.
 
@@ -1024,12 +1050,13 @@ class ApplicationContext:
         """Register a non-singleton ``@bean`` method under its declared class without calling it.
 
         Returns ``False`` for a singleton, and for a non-singleton whose return hint declares no single
-        class (``A | B``): that one is still called once at startup to learn its concrete type.
+        class (``A | B``, ``list[X]``): that one is still called once at startup to learn its concrete
+        type. A parametrized hint (``-> async_sessionmaker[AsyncSession]``) declares its origin class.
         """
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         if bean_scope == Scope.SINGLETON:
             return False
-        declared = self._declared_bean_type(return_type)
+        declared = self._declared_scoped_bean_type(return_type)
         if declared is None:
             return False
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name

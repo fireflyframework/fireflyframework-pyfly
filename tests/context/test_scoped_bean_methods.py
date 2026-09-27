@@ -31,7 +31,7 @@ import pytest
 pytest.importorskip("sqlalchemy")
 
 from sqlalchemy import text  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 
 from pyfly.container import NoSuchBeanError, Provider, bean, configuration, service  # noqa: E402
 from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME  # noqa: E402
@@ -193,3 +193,141 @@ async def test_a_scoped_factory_that_declines_is_no_bean() -> None:
     finally:
         await ctx.stop()
     assert _CALLS == ["port", "port", "port"]
+
+
+# ---------------------------------------------------------------------------
+# The idiomatic hint is parametrized: ``-> async_sessionmaker[AsyncSession]``. It is not a class, and
+# a factory declared with it was still called at startup (a REQUEST-scoped one outside any request).
+# It declares its origin class, which is what an injection of the parametrized type resolves.
+# ---------------------------------------------------------------------------
+
+
+async def _owner(url: str, name: str) -> None:
+    """Create database *url* holding one row that names it."""
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE wp07_owner (name VARCHAR(20))"))
+            await conn.execute(text("INSERT INTO wp07_owner (name) VALUES (:name)"), {"name": name})
+    finally:
+        await engine.dispose()
+
+
+async def _owner_of(sessions: async_sessionmaker[AsyncSession]) -> str:
+    async with sessions() as session:
+        return str((await session.execute(text("SELECT name FROM wp07_owner"))).scalar_one())
+
+
+def _sessions(url: str) -> async_sessionmaker[AsyncSession]:
+    engine = create_async_engine(url)
+    _BUILT.append(engine)
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+@configuration
+class _TenantSessionFactories:
+    @bean(scope=Scope.REQUEST)
+    def tenant_sessions(self, config: Config) -> async_sessionmaker[AsyncSession]:
+        _CALLS.append("tenant_sessions")
+        context = RequestContext.current()
+        assert context is not None, "a REQUEST-scoped factory ran outside a request"
+        return _sessions(str(config.get(f"tenants.{context.get('tenant')}")))
+
+
+class _TenantReader:
+    """Takes the request's session factory by its parametrized type."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.sessions = sessions
+
+
+async def test_a_request_scoped_factory_with_a_parametrized_hint_runs_only_inside_a_request(tmp_path: Path) -> None:
+    _BUILT.clear()
+    urls = {tenant: f"sqlite+aiosqlite:///{tmp_path / f'{tenant}.db'}" for tenant in ("acme", "globex")}
+    for tenant, url in urls.items():
+        await _owner(url, tenant)
+    ctx = ApplicationContext(Config({"tenants": urls}))
+    ctx.register_bean(_TenantSessionFactories)
+    ctx.register_bean(_TenantReader, scope=Scope.REQUEST)
+    await ctx.start()
+    try:
+        assert _CALLS == [], "start() called a REQUEST-scoped factory"
+        for tenant in ("acme", "globex"):
+            RequestContext.init().set("tenant", tenant)
+            reader = ctx.get_bean(_TenantReader)
+            assert await _owner_of(reader.sessions) == tenant
+            assert ctx.get_bean(async_sessionmaker) is reader.sessions  # one per request
+        assert _CALLS == ["tenant_sessions", "tenant_sessions"]
+    finally:
+        await ctx.stop()
+        for each in _BUILT:
+            await each.dispose()
+        _BUILT.clear()
+
+
+@configuration
+class _ReportingSessionFactories:
+    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def reporting_sessions(self, config: Config) -> async_sessionmaker[AsyncSession]:
+        _CALLS.append("reporting_sessions")
+        return _sessions(str(config.get("reporting.url")))
+
+
+@service
+class _ReportQueries:
+    """A singleton that follows the refresh through a ``Provider`` of the parametrized type."""
+
+    def __init__(self, sessions: Provider[async_sessionmaker[AsyncSession]]) -> None:
+        self.sessions = sessions
+
+
+async def test_a_refresh_scoped_factory_with_a_parametrized_hint_builds_nothing_until_it_is_resolved(
+    tmp_path: Path,
+) -> None:
+    _BUILT.clear()
+    url = f"sqlite+aiosqlite:///{tmp_path / 'reporting.db'}"
+    await _owner(url, "reporting")
+    ctx = ApplicationContext(Config({"reporting": {"url": url}}))
+    ctx.register_bean(_ReportingSessionFactories)
+    ctx.register_bean(_ReportQueries)
+    await ctx.start()
+    try:
+        assert _CALLS == [], "start() called a refresh-scoped factory"
+        queries = ctx.get_bean(_ReportQueries)
+        before = queries.sessions.get()
+        assert await _owner_of(before) == "reporting"
+        assert queries.sessions.get() is before
+
+        await ctx.get_bean(ContextRefresher).refresh()
+
+        after = queries.sessions.get()
+        assert after is not before
+        assert await _owner_of(after) == "reporting"
+        assert _CALLS == ["reporting_sessions", "reporting_sessions"]
+    finally:
+        await ctx.stop()
+        for each in _BUILT:
+            await each.dispose()
+        _BUILT.clear()
+
+
+@configuration
+class _AuditSessionFactories:
+    @bean(scope=Scope.TRANSIENT)
+    def audit_sessions(self) -> async_sessionmaker[AsyncSession] | None:
+        _CALLS.append("audit_sessions")
+        return None  # auditing is off
+
+
+async def test_a_transient_factory_with_an_optional_parametrized_hint_is_asked_only_on_resolution() -> None:
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_AuditSessionFactories)
+    await ctx.start()
+    try:
+        assert _CALLS == []
+        with pytest.raises(NoSuchBeanError, match="returned None"):
+            ctx.get_bean(async_sessionmaker)
+        assert ctx.container._resolve_param(async_sessionmaker[AsyncSession] | None) is None
+        assert _CALLS == ["audit_sessions", "audit_sessions"]
+    finally:
+        await ctx.stop()
