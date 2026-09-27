@@ -11,7 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Workflow engine — public entry point for starting workflows."""
+"""Workflow engine — public entry point for starting workflows.
+
+An ASYNC workflow (and :meth:`WorkflowEngine.start_async`) runs in a background task started with the
+transaction state cleared (:func:`pyfly.data.transaction.detached`): it never joins, nor outlives, the
+caller's unit of work. :class:`WorkflowRuns` is the lifecycle bean of those runs, in
+:data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE`: when the application context stops,
+:meth:`WorkflowEngine.drain` refuses new background runs and waits for the runs (and the fire-and-forget
+``async_`` steps) in flight before any bean they use is destroyed, so a run a one-shot shell command started
+right before shutdown completes. When the context's ``pyfly.context.shutdown-timeout`` cuts the wait short,
+the runs still in flight are cancelled (their committed steps are compensated) and awaited.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +31,9 @@ import logging
 import time
 from typing import Any
 
+from pyfly.data.transaction import detached
+from pyfly.data.transaction.template import run_shielded
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
 from pyfly.transactional.core.context import ExecutionContext
 from pyfly.transactional.core.dlq import DeadLetterService
 from pyfly.transactional.core.events import LoggerOrchestrationEvents, OrchestrationEvents
@@ -80,6 +93,36 @@ class WorkflowEngine:
         # Strong references to fire-and-forget run tasks so the event loop does
         # not GC-cancel an ASYNC workflow mid-flight (audit #62).
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._stopping = False
+
+    # --- background runs ------------------------------------------------
+
+    def accept_background_runs(self) -> None:
+        """Start ASYNC workflows again after :meth:`drain`."""
+        self._stopping = False
+
+    async def drain(self) -> None:
+        """Refuse new background runs, then wait for the ones in flight (and the ``async_`` steps).
+
+        When the wait is cut short (the caller is cancelled: the context's shutdown timeout), the runs still in
+        flight are cancelled and awaited before the cancellation propagates; each compensates what it committed.
+        """
+        self._stopping = True
+        pending = self._in_flight()
+        if not pending:
+            return
+        try:
+            await asyncio.wait(pending)
+        except asyncio.CancelledError:
+            for task in pending:
+                task.cancel()
+            await run_shielded(asyncio.wait(pending))
+            raise
+
+    def _in_flight(self) -> set[asyncio.Task[Any]]:
+        tasks = set(self._background_tasks)
+        tasks.update(getattr(self._executor, "background_tasks", ()))
+        return {task for task in tasks if not task.done()}
 
     @property
     def signals(self) -> SignalService:
@@ -152,10 +195,14 @@ class WorkflowEngine:
         return True
 
     async def _start_async(self, definition: Any, input: Any) -> WorkflowResult:
+        if self._stopping:
+            msg = f"workflow '{definition.id}' not started: the workflow engine is stopping"
+            raise OrchestrationError(msg)
         ctx = ExecutionContext(name=definition.id, pattern=ExecutionPattern.WORKFLOW, input=input)
         await ctx.set_status(ExecutionStatus.PENDING)
         await self._persistence.save(ExecutionState.from_context(ctx))
-        task = asyncio.create_task(self._run(definition, input, preset_ctx=ctx))
+        # Detached: the run is not part of the caller's unit of work, which may end before it does.
+        task = detached(self._run(definition, input, preset_ctx=ctx), name=f"workflow-run-{ctx.correlation_id}")
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return WorkflowResult(
@@ -209,6 +256,11 @@ class WorkflowEngine:
         except TimeoutError as exc:
             original_error = exc
             await ctx.set_status(ExecutionStatus.TIMED_OUT, exc)
+        except asyncio.CancelledError:
+            # Cancelled (shutdown cut a background run short, the caller gave up): its committed steps are
+            # compensated by now, and the persisted state says so instead of RUNNING.
+            await ctx.set_status(ExecutionStatus.CANCELLED)
+            raise
         except Exception as exc:  # noqa: BLE001
             original_error = exc
             if self._should_suppress(definition, exc):
@@ -252,3 +304,25 @@ class WorkflowEngine:
             variables=ctx.get_all_variables(),
             error=ctx.error,
         )
+
+
+class WorkflowRuns:
+    """The lifecycle of a :class:`WorkflowEngine`'s background runs (see the module documentation).
+
+    It stops before any ``@pre_destroy`` (:data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE`), draining the ASYNC
+    workflow runs in flight while the beans their steps use still work. Starting and stopping it twice is
+    harmless.
+    """
+
+    phase = CONSUMER_PHASE
+
+    def __init__(self, engine: WorkflowEngine) -> None:
+        self._engine = engine
+
+    async def start(self) -> None:
+        """Let the engine start background runs."""
+        self._engine.accept_background_runs()
+
+    async def stop(self) -> None:
+        """Refuse new background runs and wait for the ones in flight."""
+        await self._engine.drain()

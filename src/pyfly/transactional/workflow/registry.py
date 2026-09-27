@@ -126,10 +126,7 @@ class WorkflowRegistry:
         # Wire compensation methods into step definitions; propagate the
         # workflow-level retry policy to steps that declare none (audit #61).
         for step_id, step in definition.steps.items():
-            if step.compensation_method_name and step.compensation_method_name in compensation_methods:
-                step.compensation_method = compensation_methods[step.compensation_method_name]
-            elif step_id in compensation_methods:
-                step.compensation_method = compensation_methods[step_id]
+            step.compensation_method = self._compensation_for(cls, step_id, step, compensation_methods)
 
             if step.max_retries == 0 and definition.max_retries > 0:
                 step.max_retries = definition.max_retries
@@ -152,6 +149,21 @@ class WorkflowRegistry:
 
         self._definitions[definition.id] = definition
         return definition
+
+    @staticmethod
+    def _compensation_for(
+        cls: type, step_id: str, step: WorkflowStepDefinition, compensation_methods: dict[str, Any]
+    ) -> Any:
+        """The compensation of *step*: the method ``@workflow_step(compensation_method=...)`` names, else the
+        ``@compensation_step`` declared for that name or for the step's id."""
+        name = step.compensation_method_name
+        if name:
+            method = getattr(cls, name, None)
+            if callable(method):
+                return method
+            if name in compensation_methods:
+                return compensation_methods[name]
+        return compensation_methods.get(step_id)
 
     def get(self, workflow_id: str) -> WorkflowDefinition | None:
         return self._definitions.get(workflow_id)
