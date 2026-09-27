@@ -298,8 +298,43 @@ async def test_a_second_node_runs_a_job_whose_holder_hung_once_its_ttl_passes(
         await node_b.stop()
 
 
+async def test_a_node_that_does_not_hold_the_lease_pays_one_statement_per_tick(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A failed take-over forgot the lease row, so every tick of every node that did not hold the lease sent
+    an ``INSERT`` and then an ``UPDATE``. On PostgreSQL and SQLite the acquisition is now one statement that
+    inserts the row, takes an ended lease over, or does nothing; on MySQL and MariaDB a node keeps the row it
+    found and sends the ``INSERT`` only every other tick, in case the row was deleted meanwhile."""
+    node_a = await _lease(relational_backend)
+    engine = relational_backend.create_engine()
+    node_b = await _lease(relational_backend, engine)
+    assert await node_a.try_acquire("nightly", 30.0) is True
+    statements: list[str] = []
+    event.listen(engine.sync_engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    for _ in range(4):
+        assert await node_b.try_acquire("nightly", 30.0) is False
+
+    one_statement = relational_backend.dialect in ("postgresql", "sqlite")
+    assert len(statements) == (4 if one_statement else 6)
+
+
+async def test_a_lease_row_deleted_by_hand_is_inserted_again(relational_backend: RelationalBackend) -> None:
+    node_a, node_b = await _lease(relational_backend), await _lease(relational_backend)
+    assert await node_a.try_acquire("nightly", 30.0) is True
+    assert await node_b.try_acquire("nightly", 30.0) is False  # node B found the row, held
+    await node_a.release("nightly")
+    async with relational_backend.create_engine().begin() as connection:
+        await connection.execute(locks.delete())
+
+    taken = [await node_b.try_acquire("nightly", 30.0) for _ in range(2)]
+
+    assert True in taken  # at the latest on the second tick
+    assert await node_a.try_acquire("nightly", 30.0) is False
+
+
 @pytest.mark.backends(PG)
-async def test_taking_a_known_lease_is_one_statement_and_one_round_trip(relational_backend: RelationalBackend) -> None:
+async def test_taking_a_lease_is_one_statement_and_one_round_trip(relational_backend: RelationalBackend) -> None:
     engine = relational_backend.create_engine()
     wire: list[str] = []
 
@@ -318,7 +353,7 @@ async def test_taking_a_known_lease_is_one_statement_and_one_round_trip(relation
     await node.release("nightly")
 
     # asyncpg's query logger sees BEGIN/COMMIT/ROLLBACK, not prepared statements: the cursor event counts those.
-    assert [statement.split()[0].upper() for statement in statements] == ["UPDATE", "UPDATE"]
+    assert [statement.split()[0].upper() for statement in statements] == ["INSERT", "UPDATE"]
     assert not [query for query in wire if query.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))]
 
 

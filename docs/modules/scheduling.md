@@ -627,9 +627,13 @@ pyfly:
   (`pyfly_locks`: `name`, `lock_until`, `locked_at`, `locked_by`, `fence`) on
   the datasource named by `pyfly.scheduling.lock.datasource` (or given by
   `pyfly.scheduling.lock.url`), by default the primary. Taking a lock is one
-  conditional `UPDATE ... WHERE lock_until <= now` (an `INSERT` the first time),
-  in a short unit of its own that commits at once (an autocommit statement on
-  PostgreSQL); releasing it sets `lock_until` to now. It works on every backend,
+  statement on PostgreSQL and SQLite, `INSERT ... ON CONFLICT (name) DO UPDATE
+  ... WHERE lock_until <= now` (it inserts the row, takes an ended lease over,
+  or leaves a live one alone); on MySQL and MariaDB a conditional `UPDATE ...
+  WHERE lock_until <= now`, after an `INSERT IGNORE` when the node has not
+  found the row yet. Each runs in a short unit of its own that commits at once
+  (an autocommit statement on PostgreSQL); releasing it sets `lock_until` to
+  now. It works on every backend,
   holds **no connection** while the job runs, and honors `lock_ttl`: a hung job
   blocks its schedule for at most `lock_ttl`. When the hung job finally ends,
   it does not release the lease another node took since, and a WARNING

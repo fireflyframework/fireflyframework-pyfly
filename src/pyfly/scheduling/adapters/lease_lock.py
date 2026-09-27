@@ -15,10 +15,12 @@
 
 A named lock is a row of the framework table ``pyfly_locks``
 (:func:`~pyfly.data.relational.framework_schema.locks_table`): who holds it (``locked_by``), until when
-(``lock_until``), and a fencing token (``fence``) that grows at every acquisition. Taking the lock is a
-conditional ``UPDATE ... WHERE lock_until <= now`` (the first time, an ``INSERT`` of the row), releasing it
-sets ``lock_until`` to now. Each is one statement in a short unit of its own, committed at once (on
-PostgreSQL an autocommit statement, one round trip), and never part of the caller's transaction.
+(``lock_until``), and a fencing token (``fence``) that grows at every acquisition. Taking the lock is one
+statement on PostgreSQL and SQLite, ``INSERT ... ON CONFLICT (name) DO UPDATE ... WHERE lock_until <= now``
+(it inserts the row, takes an ended lease over, or leaves a live one alone); on other backends a conditional
+``UPDATE ... WHERE lock_until <= now``, after an ``INSERT`` of the row when this instance has not found it
+yet. Releasing it sets ``lock_until`` to now. Each statement runs in a short unit of its own, committed at
+once (on PostgreSQL an autocommit statement, one round trip), and never part of the caller's transaction.
 
 Compared with holding a session-level advisory lock for the whole job:
 
@@ -117,7 +119,10 @@ class LeaseLock:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._table_object: Table | None = None
         self._started = False
-        self._known: set[str] = set()  # lock rows this instance took last: taking them again is one UPDATE
+        # Whether an acquisition is one statement (PostgreSQL, SQLite), resolved at the first one; elsewhere
+        # the lock rows this instance found: taking them is one UPDATE, without the INSERT that creates them.
+        self._one_statement: bool | None = None
+        self._known: set[str] = set()
         # name -> the acquisitions this instance holds, innermost last: (task, locked_by)
         self._held: dict[str, list[tuple[asyncio.Task[Any] | None, str]]] = {}
 
@@ -272,33 +277,43 @@ class LeaseLock:
 
     async def _take(self, name: str, ttl: float) -> str | None:
         """One acquisition attempt; returns its ``locked_by`` when it took the lease."""
-        from pyfly.data.relational.upsert import insert_if_absent, take_over
+        from pyfly.data.relational.framework_schema import framework_engine
+        from pyfly.data.relational.upsert import backend_name, insert_if_absent, native_conditional_insert, take_over
 
         self._check_name(name)
         if not self._started:
             await self.start()
+        if self._one_statement is None:
+            self._one_statement = native_conditional_insert(backend_name(framework_engine(self._target)))
 
         table = self._table
         now = self._clock()
         locked_by = f"{self._owner}/{uuid.uuid4().hex[:8]}"
         values = {"name": name, "lock_until": now + timedelta(seconds=ttl), "locked_at": now, "locked_by": locked_by}
+        inserted = {**values, "fence": 1}
+        taken_over = {"fence": table.c.fence + 1}
+        ended = table.c.lock_until <= now
         taken = False
-        if name not in self._known:
+        if self._one_statement:
+            # PostgreSQL and SQLite: insert the row, take an ended lease over, or leave a live one alone.
             async with self._unit() as unit:
-                taken = await insert_if_absent(unit.resource, table, {**values, "fence": 1}, key=["name"])
-            self._known.add(name)
-        if not taken:
-            async with self._unit() as unit:
-                taken = await take_over(
-                    unit.resource,
-                    table,
-                    {**values, "fence": table.c.fence + 1},
-                    key=["name"],
-                    where=table.c.lock_until <= now,
+                taken = await insert_if_absent(
+                    unit.resource, table, inserted, key=["name"], replace_where=ended, replace_with=taken_over
                 )
+        else:
+            known = name in self._known
+            if not known:
+                async with self._unit() as unit:
+                    taken = await insert_if_absent(unit.resource, table, inserted, key=["name"])
+            if not taken:
+                async with self._unit() as unit:
+                    taken = await take_over(unit.resource, table, {**values, **taken_over}, key=["name"], where=ended)
+            if taken or not known:
+                self._known.add(name)  # the row is there: the next attempt is one UPDATE
+            else:
+                # Held elsewhere, or its row is gone (deleted by hand): the next attempt inserts it first again.
+                self._known.discard(name)
         if not taken:
-            # Held elsewhere, or its row is gone (deleted by hand): the next attempt inserts it first again.
-            self._known.discard(name)
             return None
         self._held.setdefault(name, []).append((asyncio.current_task(), locked_by))
         return locked_by

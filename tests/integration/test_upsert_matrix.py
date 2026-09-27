@@ -165,6 +165,37 @@ async def test_insert_if_absent_replaces_a_row_the_condition_lets_go(
     assert await _rows(engine) == {"expired": (2, "new"), "live": (1, "old"), "free": (2, "new")}
 
 
+@pytest.mark.parametrize("helper", [insert_if_absent, portable_insert_if_absent], ids=["native", "portable"])
+async def test_a_replaced_row_can_take_values_of_its_own_computed_from_the_old_row(
+    relational_backend: RelationalBackend, helper: InsertIfAbsent
+) -> None:
+    """A lease's fencing token: a new row starts at 1, a replaced row continues from the old one's."""
+    engine = await _engine(relational_backend)
+    expired = snapshots.c.expires_at <= NOW
+    async with engine.begin() as connection:
+        await connection.execute(
+            snapshots.insert(),
+            [_row("expired", 7, "old", NOW - timedelta(seconds=1)), _row("live", 7, "old", NOW + timedelta(hours=1))],
+        )
+
+    took = []
+    async with engine.begin() as connection:
+        for aggregate_id in ("expired", "live", "free"):
+            took.append(
+                await helper(
+                    connection,
+                    snapshots,
+                    _row(aggregate_id, 1, "new", NOW + timedelta(hours=1)),
+                    key=["aggregate_id"],
+                    replace_where=expired,
+                    replace_with={"sequence": snapshots.c.sequence + 1},
+                )
+            )
+
+    assert took == [True, False, True]
+    assert await _rows(engine) == {"expired": (8, "new"), "live": (7, "old"), "free": (1, "new")}
+
+
 async def test_the_portable_insert_raises_an_integrity_failure_that_is_no_duplicate(
     relational_backend: RelationalBackend,
 ) -> None:

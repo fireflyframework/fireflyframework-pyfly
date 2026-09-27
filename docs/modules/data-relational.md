@@ -1160,7 +1160,8 @@ await ensure_tables(registry.primary, locks, create=False)   # check only: migra
 Stores write with `pyfly.data.relational.upsert`, which sends each dialect its own statement:
 `upsert(executor, table, values, key=[...], where=...)` (`ON CONFLICT ... DO UPDATE` on PostgreSQL and
 SQLite, `ON DUPLICATE KEY UPDATE` on MySQL and MariaDB, `UPDATE` then `INSERT` in a savepoint elsewhere),
-`insert_if_absent(executor, table, values, key=[...], replace_where=...)` (returns whether it wrote), and
+`insert_if_absent(executor, table, values, key=[...], replace_where=..., replace_with=...)` (returns whether it
+wrote; `replace_with` gives a replaced row values of its own, such as `{"fence": table.c.fence + 1}`), and
 `take_over(...)`. The executor is a unit of work's session (from `infrastructure_unit()`) or a connection.
 
 ### After-Begin Customizers

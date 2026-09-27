@@ -169,12 +169,15 @@ async def insert_if_absent(
     *,
     key: Sequence[str],
     replace_where: ColumnElement[bool] | None = None,
+    replace_with: Mapping[str, Any] | None = None,
 ) -> bool:
     """Insert *values* unless a row with the same *key* exists; return whether this call wrote the row.
 
     With *replace_where* (a condition on *table*'s columns, the existing row's), an existing row for which
     it holds is replaced by *values* instead: ``table.c.expires_at <= now`` lets an expired entry be taken
-    again. The native form is one statement (PostgreSQL, SQLite: :func:`native_conditional_insert`).
+    again. *replace_with* overrides some of *values* for that replacement, and may hold SQL expressions over
+    the existing row (``{"fence": table.c.fence + 1}``). The native form is one statement (PostgreSQL,
+    SQLite: :func:`native_conditional_insert`).
     """
     dialect = backend_name(executor)
     if dialect in _ON_CONFLICT:
@@ -184,10 +187,11 @@ async def insert_if_absent(
             result = await executor.execute(statement.on_conflict_do_nothing(index_elements=targets))
         else:
             columns = _update_columns(values, key, None) or list(key)
+            overrides = replace_with or {}
             result = await executor.execute(
                 statement.on_conflict_do_update(
                     index_elements=targets,
-                    set_={name: statement.excluded[name] for name in columns},
+                    set_={name: overrides[name] if name in overrides else statement.excluded[name] for name in columns},
                     where=replace_where,
                 )
             )
@@ -195,11 +199,15 @@ async def insert_if_absent(
     if dialect in _ON_DUPLICATE_KEY:
         from sqlalchemy.dialects.mysql import insert as mysql_insert
 
-        if replace_where is not None and await take_over(executor, table, values, key=key, where=replace_where):
+        if replace_where is not None and await take_over(
+            executor, table, {**values, **(replace_with or {})}, key=key, where=replace_where
+        ):
             return True
         result = await executor.execute(mysql_insert(table).values(dict(values)).prefix_with("IGNORE"))
         return _rowcount(result) == 1
-    return await portable_insert_if_absent(executor, table, values, key=key, replace_where=replace_where)
+    return await portable_insert_if_absent(
+        executor, table, values, key=key, replace_where=replace_where, replace_with=replace_with
+    )
 
 
 async def take_over(
@@ -270,10 +278,14 @@ async def portable_insert_if_absent(
     *,
     key: Sequence[str],
     replace_where: ColumnElement[bool] | None = None,
+    replace_with: Mapping[str, Any] | None = None,
 ) -> bool:
     """:func:`insert_if_absent` with plain statements: the :func:`take_over` of a row *replace_where* lets
-    go, then ``INSERT`` in a savepoint, where a duplicate key means the row was there."""
-    if replace_where is not None and await take_over(executor, table, values, key=key, where=replace_where):
+    go (with *values* and *replace_with* over them), then ``INSERT`` in a savepoint, where a duplicate key
+    means the row was there."""
+    if replace_where is not None and await take_over(
+        executor, table, {**values, **(replace_with or {})}, key=key, where=replace_where
+    ):
         return True
     return await _insert_unless_duplicate(executor, table, values, key)
 
