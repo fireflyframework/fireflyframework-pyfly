@@ -832,7 +832,9 @@ class OwnerFilteredShopRepository(Repository[RqShop, int]):
 
 async def test_a_many_to_one_filters_by_the_entity_it_refers_to(relational_backend: RelationalBackend) -> None:
     """``find_all(owner=owner)`` compares a many-to-one with an entity (``owner_id = :id``), as it did before names
-    were validated; a collection cannot be compared that way, and a relationship still cannot be sorted by."""
+    were validated; any other value (a key straight from a request) is an ``InvalidPropertyError``, a 400, where
+    the ORM raised ``ArgumentError``, a 500. A collection cannot be compared that way, and a relationship still
+    cannot be sorted by."""
     async with repository_datasources(relational_backend, *MODELS) as datasources:
         await _shops(datasources)
         spanish = await OwnerRepository().find_by_id(1)
@@ -841,6 +843,9 @@ async def test_a_many_to_one_filters_by_the_entity_it_refers_to(relational_backe
         assert _names((await shops.find_all(Pageable.of(1, 2, Sort.by("name")), owner=spanish)).items) == ["s1", "s3"]
         assert _names([shop async for shop in shops.stream_all(Sort.by("name"), owner=spanish)]) == ["s1", "s3", "s5"]
         assert await shops.find_all(owner=None) == []
+        for value in ("1", 1, RqShop(id=1, name="s1", owner_id=1)):  # a request's value, or another entity
+            with pytest.raises(InvalidPropertyError, match="owner"):
+                await shops.find_all(owner=value)
         with pytest.raises(InvalidPropertyError):
             await shops.find_all(items=[])
         with pytest.raises(InvalidPropertyError):

@@ -104,7 +104,7 @@ from sqlalchemy.orm.interfaces import MANYTOONE
 from pyfly.container.types import NoAutowire
 from pyfly.data.page import Page, Slice, Window
 from pyfly.data.pageable import KeysetPosition, NullHandling, Order, Pageable, Sort
-from pyfly.data.property_resolver import PropertyResolver
+from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.statements import (
@@ -625,12 +625,28 @@ class Repository(Generic[T, ID]):
         return self._sort_names
 
     def _filtered_select(self, **filters: Any) -> Select[Any]:
-        """A ``SELECT`` of the model with the read criteria and equality *filters* (names validated)."""
+        """A ``SELECT`` of the model with the read criteria and equality *filters* (see :meth:`_filter_criteria`)."""
+        return select(self._model).where(*self._criteria(), *self._filter_criteria(filters))
+
+    def _filter_criteria(self, filters: dict[str, Any]) -> list[Any]:
+        """The equality criteria of *filters*: names validated, and a relationship to one entity compared with an
+        instance of that entity or ``None`` (any other value, such as a key straight from a request, raises
+        ``InvalidPropertyError``, a 400, where the ORM would raise ``ArgumentError``)."""
         resolver = self._filter_resolver()
-        stmt = select(self._model).where(*self._criteria())
+        criteria: list[Any] = []
         for key, value in filters.items():
-            stmt = stmt.where(getattr(self._model, resolver.resolve(key, usage="filter")) == value)
-        return stmt
+            name = resolver.resolve(key, usage="filter")
+            relationship = self._mapper.relationships.get(name)
+            if relationship is not None and value is not None and not isinstance(value, relationship.mapper.class_):
+                raise InvalidPropertyError(
+                    f"{self._model.__name__}.{name} is compared with a {relationship.mapper.class_.__name__} or None, "
+                    f"not a {type(value).__name__}: filter by its key through a Specification",
+                    entity=self._model.__name__,
+                    property=name,
+                    usage="filter",
+                )
+            criteria.append(getattr(self._model, name) == value)
+        return criteria
 
     def _orders(self, session: AsyncSession, sort: Sort) -> list[Any]:
         """The ORDER BY expressions of *sort* (names validated, NULL placement and case rendered)."""

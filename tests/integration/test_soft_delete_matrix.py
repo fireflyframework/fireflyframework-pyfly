@@ -38,6 +38,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from pyfly.context.request_context import RequestContext
 from pyfly.data import transactional
 from pyfly.data.pageable import KeysetPosition, Pageable, Sort
+from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity, SoftDeleteMixin, VersionedMixin
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.specification import Specification
@@ -280,6 +281,9 @@ async def test_every_read_excludes_deleted_rows(relational_backend: RelationalBa
         assert len(await items.find_all_by_spec(every)) == 1
         assert (await items.find_all_by_spec_paged(every, Pageable.of(1, 5))).total == 1
         assert sorted(item.label for item in await items.find_all_including_deleted()) == ["alive", "gone"]
+        assert [item.label for item in await items.find_all_including_deleted(label="gone")] == ["gone"]
+        with pytest.raises(InvalidPropertyError):  # its filters are validated as the other reads' are
+            await items.find_all_including_deleted(nope=1)
         window = await items.scroll(Sort.by("label"), KeysetPosition.of(label="a", id=uuid.UUID(int=0)))
         assert [item.label for item in window.items] == ["alive"]
 

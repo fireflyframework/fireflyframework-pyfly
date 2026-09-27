@@ -178,10 +178,7 @@ class SoftDeleteRepository(Repository[T, ID]):
     async def find_all_including_deleted(self, **filters: Any) -> list[T]:
         """Find all entities INCLUDING soft-deleted ones."""
         session = self._session
-        resolver = self._filter_resolver()
-        stmt = select(self._model)
-        for key, value in filters.items():
-            stmt = stmt.where(getattr(self._model, resolver.resolve(key, usage="filter")) == value)
+        stmt = select(self._model).where(*self._filter_criteria(filters))
         return unique_entities(await session.execute(stmt))
 
     # ------------------------------------------------------------------
