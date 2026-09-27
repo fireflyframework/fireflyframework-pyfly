@@ -11,21 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Spring-like Pageable and Sort types for pagination requests."""
+"""Spring-like Pageable and Sort types for pagination requests.
+
+An :class:`Order` is a property, a direction, a :class:`NullHandling` and an ``ignore_case`` flag, so the same
+``Pageable`` returns the same page on every backend: NULL placement differs by database (PostgreSQL and
+Oracle put NULLs last in ascending order, SQLite, MySQL, MariaDB, SQL Server and MongoDB first), so an order
+that pages over a nullable property should name it (``Order.asc("score").nulls_last()``). ``ignore_case``
+compares lower-cased values. Collation (accents, the order of upper and lower case) and the order of enum
+values still follow the database: PostgreSQL, MySQL and MariaDB order a native enum by its declaration,
+SQLite and MongoDB by its text.
+
+:class:`KeysetPosition` is where a keyset scroll resumes (``Repository.scroll``): the values of the sort
+properties (and the primary key) of the last row read.
+"""
 
 from __future__ import annotations
 
+import dataclasses
+import enum
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
+
+
+class NullHandling(enum.Enum):
+    """Where an :class:`Order` puts NULL values (Spring's ``Sort.NullHandling``)."""
+
+    NATIVE = "NATIVE"
+    """Whatever the database does (see the module documentation: it differs by backend)."""
+    NULLS_FIRST = "NULLS_FIRST"
+    """NULL values before every other value, whatever the direction."""
+    NULLS_LAST = "NULLS_LAST"
+    """NULL values after every other value, whatever the direction."""
 
 
 @dataclass(frozen=True)
 class Order:
-    """A single sort order: property name + direction."""
+    """A single sort order: property name, direction, NULL placement and case sensitivity."""
 
     property: str
     direction: Literal["asc", "desc"] = "asc"
+    null_handling: NullHandling = NullHandling.NATIVE
+    ignore_case: bool = False
 
     @staticmethod
     def asc(property: str) -> Order:
@@ -37,6 +65,26 @@ class Order:
         """Create a descending order for the given property."""
         return Order(property=property, direction="desc")
 
+    def with_null_handling(self, null_handling: NullHandling) -> Order:
+        """This order with *null_handling*."""
+        return dataclasses.replace(self, null_handling=null_handling)
+
+    def nulls_first(self) -> Order:
+        """This order with NULL values first."""
+        return self.with_null_handling(NullHandling.NULLS_FIRST)
+
+    def nulls_last(self) -> Order:
+        """This order with NULL values last."""
+        return self.with_null_handling(NullHandling.NULLS_LAST)
+
+    def nulls_native(self) -> Order:
+        """This order with the database's own NULL placement."""
+        return self.with_null_handling(NullHandling.NATIVE)
+
+    def ignoring_case(self) -> Order:
+        """This order comparing lower-cased values."""
+        return dataclasses.replace(self, ignore_case=True)
+
 
 @dataclass(frozen=True)
 class Sort:
@@ -45,26 +93,31 @@ class Sort:
     orders: tuple[Order, ...] = ()
 
     @staticmethod
-    def by(*properties: str) -> Sort:
-        """Create ascending sort by properties."""
-        return Sort(orders=tuple(Order.asc(p) for p in properties))
+    def by(*properties: str | Order) -> Sort:
+        """Create a sort from property names (ascending) and :class:`Order` objects, in that order."""
+        return Sort(orders=tuple(item if isinstance(item, Order) else Order.asc(item) for item in properties))
 
     @staticmethod
     def unsorted() -> Sort:
         """No sorting."""
         return Sort()
 
+    @property
+    def is_sorted(self) -> bool:
+        """Whether this sort has at least one order."""
+        return bool(self.orders)
+
     def and_then(self, other: Sort) -> Sort:
         """Combine sorts, appending *other*'s orders after this sort's orders."""
         return Sort(orders=self.orders + other.orders)
 
     def descending(self) -> Sort:
-        """Return same sort but all directions flipped to desc."""
-        return Sort(orders=tuple(Order(property=o.property, direction="desc") for o in self.orders))
+        """Return same sort but all directions flipped to desc (NULL handling and case kept)."""
+        return Sort(orders=tuple(dataclasses.replace(o, direction="desc") for o in self.orders))
 
     def ascending(self) -> Sort:
-        """Return same sort but all directions flipped to asc."""
-        return Sort(orders=tuple(Order(property=o.property, direction="asc") for o in self.orders))
+        """Return same sort but all directions flipped to asc (NULL handling and case kept)."""
+        return Sort(orders=tuple(dataclasses.replace(o, direction="asc") for o in self.orders))
 
 
 _UNPAGED_SENTINEL_SIZE = sys.maxsize
@@ -112,3 +165,20 @@ class Pageable:
     def previous(self) -> Pageable:
         """Return Pageable for previous page (min page 1)."""
         return Pageable(page=max(1, self.page - 1), size=self.size, sort=self.sort)
+
+
+@dataclass(frozen=True)
+class KeysetPosition:
+    """Where a keyset scroll resumes: the sort-property (and primary-key) values of the last row read.
+
+    A :class:`~pyfly.data.page.Window` gives the position after its last item (``window.next_position``);
+    pass it back to continue. ``keys`` maps property names to values, so a web API can serialize it into a
+    cursor token and build it again with :meth:`of`.
+    """
+
+    keys: Mapping[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def of(**keys: Any) -> KeysetPosition:
+        """A position from property values (``KeysetPosition.of(name="m", id=42)``)."""
+        return KeysetPosition(keys=dict(keys))
