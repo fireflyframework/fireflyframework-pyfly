@@ -1836,6 +1836,31 @@ with including_deleted():
     everything = await orders.find_all()
 ```
 
+Inside `including_deleted()` the lazy loads of objects loaded before the block see deleted rows too; what
+the session already holds (a collection loaded before the block, an object in the identity map) is not
+reloaded until it is expired.
+
+A plain `Repository` over a soft-delete entity sees live rows only: its `delete_by_id` of a soft-deleted
+row deletes nothing (as Spring Data's `deleteById` of a row the `@SQLRestriction` hides), and a retention
+query such as `find_by_deleted_at_less_than(cutoff)` returns nothing unless it runs inside
+`including_deleted()`. Use `SoftDeleteRepository.hard_delete(id)` and `find_all_including_deleted()` for
+those, or opt the call out.
+
+**Hard deletes reach soft-deleted children.** Deleting a row for good has to delete the soft-deleted
+children its `cascade="all, delete-orphan"` relationships hold, and set the foreign key of the ones a
+relationship without a delete cascade points at to `NULL`, or the parent's `DELETE` violates the foreign
+key. The repositories' hard deletes (`Repository.delete`, `delete_by_id` and `delete_all(entities)`,
+`SoftDeleteRepository.hard_delete`) load what those relationships reach with the deleted rows, even when
+the root and its collections were loaded (without them) earlier in the session. A `session.delete()` of
+your own needs the same treatment: call `hard_delete`, or let the database cascade
+(`passive_deletes=True` on the relationship and `ON DELETE CASCADE` on the foreign key).
+
+```python
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete
+
+await hard_delete(session, post)  # deletes post, its comments (soft-deleted ones too), and flushes
+```
+
 #### VersionedMixin (Optimistic Locking)
 
 ```python
