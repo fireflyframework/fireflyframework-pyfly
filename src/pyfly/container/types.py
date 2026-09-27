@@ -56,3 +56,29 @@ class ScopeHandler(Protocol):
     def remove(self, name: str) -> Any | None:
         """Evict *name* from the scope, returning the removed instance or ``None``."""
         ...
+
+
+class NoAutowire:
+    """Marker: the container never injects a parameter annotated ``Annotated[T, NoAutowire]``.
+
+    The parameter keeps its default, even when a bean of type ``T`` exists. Use it for a constructor
+    argument that callers may pass by hand but that dependency injection must leave alone::
+
+        class Repository(Generic[T, ID]):
+            def __init__(self, model=None, session: Annotated[AsyncSession | None, NoAutowire] = None): ...
+
+    A DI-built ``Repository`` therefore never receives the transient ``AsyncSession`` bean, while
+    ``Repository(Order, session)`` in a test still works. The marker is used as the class itself
+    (``NoAutowire``) or as an instance (``NoAutowire()``). A marked parameter without a default cannot be
+    built by the container, which reports it as a missing dependency.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NoAutowire"
+
+
+def is_no_autowire(metadata: object) -> bool:
+    """Whether *metadata* (an ``Annotated`` extra) is the :class:`NoAutowire` marker."""
+    return metadata is NoAutowire or isinstance(metadata, NoAutowire)

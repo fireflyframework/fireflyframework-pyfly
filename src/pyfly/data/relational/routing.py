@@ -15,8 +15,11 @@
 
 A :class:`RoutingSessionFactory` picks the primary or the read-replica session maker
 based on a context "lookup key": whether the current block is marked read-only via
-:func:`read_only`. Routing is opt-in — with no replica configured, the factory always
-uses the primary (current behavior).
+:func:`read_only`, or runs inside ``@transactional(read_only=True)``. Routing is opt-in —
+with no replica configured, the factory always uses the primary (current behavior).
+
+``@transactional(read_only=True)`` itself routes a new unit to the datasource's replica through the
+transaction manager, so a service needs neither this factory nor :func:`read_only` for that.
 
 Usage::
 
@@ -42,8 +45,13 @@ _read_only: ContextVar[bool] = ContextVar("pyfly_db_read_only", default=False)
 
 
 def is_read_only() -> bool:
-    """Whether the current context is marked read-only (routes to the replica)."""
-    return _read_only.get()
+    """Whether the current context is marked read-only (routes to the replica): inside a :func:`read_only`
+    block, or inside a read-only transactional boundary."""
+    if _read_only.get():
+        return True
+    from pyfly.data.transaction.context import is_current_transaction_read_only
+
+    return is_current_transaction_read_only()
 
 
 @contextlib.contextmanager
@@ -77,6 +85,11 @@ class RoutingSessionFactory:
     @property
     def has_replica(self) -> bool:
         return self._replica is not None
+
+    @property
+    def primary_factory(self) -> Callable[[], AsyncSession]:
+        """The primary's session factory (the ``async_sessionmaker`` the transaction manager maps)."""
+        return self._primary
 
     def primary(self) -> AsyncSession:
         """Force a primary (read/write) session regardless of context."""

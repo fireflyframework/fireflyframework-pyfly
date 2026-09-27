@@ -20,8 +20,10 @@ from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostPr
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query
 from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.relational.sqlalchemy.transactional import (
     Isolation,
     Propagation,
@@ -42,9 +44,12 @@ __all__ = [
     "QueryMethodCompiler",
     "Repository",
     "RepositoryBeanPostProcessor",
+    "ScopedAsyncSession",
+    "SessionProvider",
     "SoftDeleteMixin",
     "SoftDeleteRepository",
     "Specification",
+    "SqlAlchemyTransactionManager",
     "VersionedMixin",
     "_active_session_var",
     "query",

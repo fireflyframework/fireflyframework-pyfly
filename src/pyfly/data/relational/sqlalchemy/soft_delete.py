@@ -24,7 +24,7 @@ from sqlalchemy import update as sa_update
 
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
-from pyfly.data.relational.sqlalchemy.repository import ID, Repository
+from pyfly.data.relational.sqlalchemy.repository import ID, STREAM_BATCH_SIZE, STREAM_FIRST_BATCH, Repository
 from pyfly.data.relational.sqlalchemy.specification import Specification
 
 T = TypeVar("T")
@@ -35,7 +35,14 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     Entities must use :class:`SoftDeleteMixin` to have a ``deleted_at`` column.
     All find methods automatically exclude soft-deleted entities.
+
+    Like :class:`Repository`, it resolves its session per call: every method joins the current unit of
+    work, or runs in an auto unit of its own (a read unit for ``find*``/``count*``/``exists*``/``stream*``,
+    a write unit that commits for the soft-delete writes and ``restore``).
     """
+
+    # Its methods, like Repository's, are framework operations: atomic for a task that shares the unit.
+    _pyfly_framework_repository = True
 
     @property
     def _active(self) -> Any:
@@ -106,15 +113,19 @@ class SoftDeleteRepository(Repository[T, ID]):
 
     async def find_by_id(self, id: ID) -> T | None:
         """Find by ID, excluding soft-deleted entities."""
+        return await self._select_active_by_id(id)
+
+    async def exists_by_id(self, id: ID) -> bool:
+        """Check existence, excluding soft-deleted entities (without calling the overridable ``find_by_id``
+        while it holds the unit's operation guard, as :meth:`Repository.exists_by_id`)."""
+        return await self._select_active_by_id(id) is not None
+
+    async def _select_active_by_id(self, id: ID) -> T | None:
         session = self._require_session()
         entity = await session.get(self._model, id)
         if entity is not None and hasattr(entity, "deleted_at") and entity.deleted_at is not None:
             return None
         return entity
-
-    async def exists_by_id(self, id: ID) -> bool:
-        """Check existence, excluding soft-deleted entities."""
-        return await self.find_by_id(id) is not None
 
     @overload
     async def find_all(self, criteria: None = ..., **filters: Any) -> list[T]: ...
@@ -137,13 +148,16 @@ class SoftDeleteRepository(Repository[T, ID]):
         return list((await session.execute(stmt)).scalars().all())
 
     async def stream_all(self, criteria: Sort | None = None, **filters: Any) -> AsyncIterator[T]:
-        """Stream non-deleted entities lazily."""
+        """Stream non-deleted entities lazily (in growing batches, as :meth:`Repository.stream_all`)."""
         stmt = self._active_select(**filters)
         if criteria is not None:
             stmt = self._apply_orders(stmt, criteria)
         result = await self._require_session().stream_scalars(stmt)
-        async for row in result:
-            yield row
+        size = STREAM_FIRST_BATCH
+        while batch := await result.fetchmany(size):
+            for row in batch:
+                yield row
+            size = min(size * 5, STREAM_BATCH_SIZE)
 
     async def find_all_including_deleted(self, **filters: Any) -> list[T]:
         """Find all entities INCLUDING soft-deleted ones."""

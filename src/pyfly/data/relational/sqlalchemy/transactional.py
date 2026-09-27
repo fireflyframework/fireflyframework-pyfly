@@ -11,27 +11,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SQLAlchemy (relational) execution for the unified ``@transactional`` decorator.
+"""SQLAlchemy entry points of the unified transaction management.
 
-The public ``@transactional`` annotation is the backend-neutral one in
-:mod:`pyfly.data.transactional` (re-exported here for backward compatibility). This module
-provides the relational *runner* it dispatches to (``run_relational_transaction``) plus
-``reactive_transactional`` for explicit-session use. ``Propagation`` / ``Isolation`` are
-re-exported from the core module.
+``@transactional``, ``Propagation`` and ``Isolation`` are the backend-neutral ones of
+:mod:`pyfly.data.transaction`, re-exported here for backward compatibility. This module adds:
+
+- :func:`reactive_transactional`, the explicit-session decorator: the function receives the unit's
+  ``AsyncSession`` as its first argument. It is a thin wrapper over the
+  :class:`~pyfly.data.transaction.template.TransactionTemplate`, so it binds its unit: ``@transactional``
+  code called inside it joins, and ``MANDATORY``/``NEVER`` see it.
+- ``_active_session_var``, kept as a compatible read-only view of the unit bound to the running task (it
+  was the ``ContextVar`` the previous implementation bound a session in);
+- :func:`run_relational_transaction`, the previous implementation's relational runner, kept as a deprecated
+  entry point over the same machinery.
 """
 
 from __future__ import annotations
 
-import contextlib
 import functools
-from collections.abc import Callable
-from contextvars import ContextVar
+import inspect
+import warnings
+from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from pyfly.data.relational.routing import read_only as _read_only_scope
-from pyfly.data.transactional import Isolation, Propagation, transactional
+from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+from pyfly.data.transaction.context import current_state
+from pyfly.data.transaction.decorator import transactional
+from pyfly.data.transaction.definition import Isolation, Propagation, TransactionDefinition
+from pyfly.data.transaction.errors import IllegalTransactionStateError
+from pyfly.data.transaction.registry import resolve_manager
+from pyfly.data.transaction.template import TransactionBoundary, execute_in_transaction
+from pyfly.data.transaction.unit_of_work import UnitOfWork
 
 __all__ = [
     "Isolation",
@@ -43,123 +55,48 @@ __all__ = [
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-_active_session_var: ContextVar[AsyncSession | None] = ContextVar(
-    "_active_session_var",
-    default=None,
-)
 
+class _ActiveSessionView:
+    """The ``AsyncSession`` of the innermost relational unit bound to the running task, read like the
+    ``ContextVar`` it replaces (``_active_session_var.get()``). Binding goes through the unit of work now, so
+    ``set``/``reset`` are refused."""
 
-def _patch_repositories(self_arg: Any, session: AsyncSession) -> None:
-    from pyfly.data.relational.sqlalchemy.repository import Repository
+    name = "_active_session_var"
 
-    for value in vars(self_arg).values():
-        if isinstance(value, Repository):
-            value._session = session
-        elif hasattr(value, "__dict__"):
-            # Patch nested services' repositories (one level deep)
-            for nested_val in vars(value).values():
-                if isinstance(nested_val, Repository):
-                    nested_val._session = session
+    def get(self, default: AsyncSession | None = None) -> AsyncSession | None:
+        """The session of the innermost transactional relational unit, or *default*."""
+        for _datasource, bound in reversed(current_state().units):
+            if isinstance(bound, UnitOfWork) and not bound.completed and isinstance(bound.resource, AsyncSession):
+                return bound.resource
+        return default
 
-
-def _resolve_session_factory(self_arg: Any) -> async_sessionmaker[AsyncSession] | None:
-    factory: async_sessionmaker[AsyncSession] | None = getattr(self_arg, "_session_factory", None)
-    return factory
-
-
-async def run_relational_transaction(
-    func: Callable[..., Any],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    *,
-    propagation: Propagation = Propagation.REQUIRED,
-    isolation: Isolation = Isolation.DEFAULT,
-    read_only: bool = False,
-    rollback_for: tuple[type[BaseException], ...] = (Exception,),
-    no_rollback_for: tuple[type[BaseException], ...] = (),
-) -> Any:
-    """Execute *func* inside a SQLAlchemy transaction (the relational arm of ``@transactional``).
-
-    Resolves ``async_sessionmaker`` from ``self._session_factory`` and uses a ``ContextVar`` for
-    propagation semantics modelled after Spring's ``@Transactional``.
-    """
-    self_arg = args[0] if args else None
-    existing: AsyncSession | None = _active_session_var.get()
-
-    if propagation is Propagation.NEVER:
-        if existing is not None:
-            raise RuntimeError("Propagation.NEVER — active transaction exists")
-        return await func(*args, **kwargs)
-
-    if propagation is Propagation.NOT_SUPPORTED:
-        token = _active_session_var.set(None)
-        try:
-            return await func(*args, **kwargs)
-        finally:
-            _active_session_var.reset(token)
-
-    if propagation is Propagation.SUPPORTS:
-        return await func(*args, **kwargs)
-
-    if propagation is Propagation.MANDATORY:
-        if existing is None:
-            raise RuntimeError("Propagation.MANDATORY — no active transaction")
-        return await func(*args, **kwargs)
-
-    if propagation is Propagation.REQUIRED and existing is not None:
-        return await func(*args, **kwargs)
-
-    session_factory = _resolve_session_factory(self_arg) if self_arg is not None else None
-    if session_factory is None:
-        raise RuntimeError(
-            "No _session_factory available on self — ensure the service has an injected async_sessionmaker"
+    def set(self, value: object) -> Any:
+        """Refused: bind a unit with ``@transactional`` or a ``TransactionTemplate`` instead."""
+        raise IllegalTransactionStateError(
+            "_active_session_var is a read-only view now; bind a unit with @transactional or "
+            "TransactionTemplate(...).transaction()"
         )
 
-    execution_options: dict[str, Any] = {}
-    if isolation is not Isolation.DEFAULT:
-        execution_options["isolation_level"] = isolation.value
+    def reset(self, token: object) -> None:
+        """Refused, like :meth:`set`."""
+        self.set(token)
 
-    # read_only routes to the replica when the session factory is a RoutingSessionFactory
-    # (pyfly.data.relational.routing) and flags the session.
-    ro_scope = _read_only_scope() if read_only else contextlib.nullcontext()
-    with ro_scope:
-        async with session_factory() as session:
-            if read_only:
-                session.info["read_only"] = True
-            if execution_options:
-                session = session.execution_options(**execution_options)  # type: ignore[attr-defined]
-            await session.begin()
-            token = _active_session_var.set(session)
-            if self_arg is not None:
-                _patch_repositories(self_arg, session)
-            try:
-                result = await func(*args, **kwargs)
-                await session.commit()
-                return result
-            except BaseException as exc:
-                # A BaseException that is not an Exception (CancelledError, KeyboardInterrupt,
-                # SystemExit) always rolls back, regardless of rollback_for.
-                if not isinstance(exc, Exception):
-                    await session.rollback()
-                elif isinstance(exc, tuple(no_rollback_for)):
-                    await session.commit()
-                elif isinstance(exc, tuple(rollback_for)):
-                    await session.rollback()
-                else:
-                    await session.commit()
-                raise
-            finally:
-                _active_session_var.reset(token)
+    def __repr__(self) -> str:
+        return "<_active_session_var view of the bound unit of work>"
+
+
+_active_session_var = _ActiveSessionView()
 
 
 def reactive_transactional(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Callable[[F], F]:
-    """Decorator for declarative async transaction management with an explicit session factory.
+    """Run the decorated coroutine function in a unit of work on *session_factory*'s datasource, passing the
+    unit's ``AsyncSession`` as its first argument.
 
-    Wraps an async function in a database transaction. The decorated function receives an
-    ``AsyncSession`` as its first argument. On success the transaction is committed; on exception
-    it is rolled back and the exception re-raised.
+    It is a ``REQUIRED`` boundary: inside a unit on the same datasource it joins (and receives that unit's
+    session); otherwise it begins a unit that commits on success and rolls back on an exception. The unit
+    is bound, so ``@transactional`` methods called inside it join it.
 
     Usage::
 
@@ -171,12 +108,59 @@ def reactive_transactional(
     """
 
     def decorator(func: F) -> F:
-        @functools.wraps(func)
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError(
+                f"@reactive_transactional needs an `async def` function, and "
+                f"{getattr(func, '__qualname__', func)!r} is not a coroutine function"
+            )
+        coroutine: Callable[..., Coroutine[Any, Any, Any]] = func
+        definition = TransactionDefinition(propagation=Propagation.REQUIRED)
+
+        @functools.wraps(coroutine)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            async with session_factory() as session, session.begin():
-                result = await func(session, *args, **kwargs)
-                return result
+            manager = SqlAlchemyTransactionManager.for_sessionmaker(session_factory)
+            async with TransactionBoundary(manager, definition) as unit:
+                assert unit is not None  # REQUIRED always runs in a unit
+                return await coroutine(unit.resource, *args, **kwargs)
 
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+async def run_relational_transaction(
+    func: Callable[..., Coroutine[Any, Any, Any]],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    propagation: Propagation = Propagation.REQUIRED,
+    isolation: Isolation = Isolation.DEFAULT,
+    read_only: bool = False,
+    rollback_for: tuple[type[BaseException], ...] = (Exception,),
+    no_rollback_for: tuple[type[BaseException], ...] = (),
+) -> Any:
+    """Deprecated: await ``func(*args, **kwargs)`` in one transactional boundary, as ``@transactional``
+    does. Use ``@transactional`` or :class:`~pyfly.data.transaction.template.TransactionTemplate`.
+
+    The boundary runs on the datasource of ``args[0]._session_factory`` when the first argument has one,
+    and on the default datasource otherwise. The rollback rules are ``@transactional``'s (additive).
+    """
+    warnings.warn(
+        "run_relational_transaction() is deprecated; use @transactional or TransactionTemplate",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    definition = TransactionDefinition(
+        propagation=propagation,
+        isolation=isolation,
+        read_only=read_only,
+        rollback_for=tuple(rollback_for),
+        no_rollback_for=tuple(no_rollback_for),
+    )
+    factory = getattr(args[0], "_session_factory", None) if args else None
+    manager = (
+        SqlAlchemyTransactionManager.for_sessionmaker(factory)
+        if isinstance(factory, async_sessionmaker)
+        else resolve_manager(None)
+    )
+    return await execute_in_transaction(manager, definition, func, args, kwargs)

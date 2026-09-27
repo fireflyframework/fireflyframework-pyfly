@@ -198,3 +198,26 @@ These are the acceptance points in the spec ("Acceptance and verification"):
 A package that re-runs the harness gets every scenario it can run, even if one breaks. A scenario that
 raises appears in the report as `{"error": "..."}`, its traceback goes to stderr, the `--json` file is
 still written, and the exit status is 1.
+
+## Re-run of `stream` after the unit of work (WP01)
+
+The unit of work guards every fetch of a unit's streamed result and binds the stream's unit around each
+step of `stream_all`. Its first version guarded each row twice (`AsyncSession.stream_scalars()` goes
+through `stream()`, and both were wrapped) and rebuilt the transaction state for every row. `stream_all`
+now opens the stream once under the guard, guards its scalars once, binds a state built once per
+stream, and fetches in growing batches (5, 25, 125, 625, then 1,000 rows, the buffering SQLAlchemy
+applies to a streamed result read row by row) with one guarded fetch per batch.
+
+- **Date:** 2026-09-27, same machine and servers as the baseline.
+- **Code:** the WP01 base (`1572191`), the first WP01 version (`1ef867b`), and the fix on branch
+  `fix/orm-wp01`.
+- **Command:** `--scenario stream`, three runs on `sqlite-file` and two or three on `pg`.
+
+| `stream_all()` over 5,000 rows, median | WP01 base | First WP01 version | After the fix |
+| --- | ---: | ---: | ---: |
+| SQLite file | 18.2 / 18.9 / 18.5 ms | 27.5 / 27.6 / 29.0 ms | 8.5 / 7.6 / 7.5 ms |
+| PostgreSQL | 24.5 / 24.4 / 23.4 ms | 36.2 / 36.6 ms | 14.9 / 16.8 / 20.8 ms |
+
+Rows read by the consumer are still yielded one by one, and the stream still owns its connection until it
+is exhausted or closed. The batching is what makes it faster than the baseline: one greenlet switch per
+batch instead of one per row.

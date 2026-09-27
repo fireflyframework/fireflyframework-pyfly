@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Outbound ports: the Spring-parity repository hierarchy and session interface.
+"""Outbound ports: the Spring-parity repository hierarchy and the (deprecated) session port.
 
 The repository protocols mirror Spring Data's reactive lineage, adapted to
 asyncio (``async def`` returning materialised values + an ``AsyncIterator``
@@ -32,6 +32,7 @@ from typing import Any, Protocol, TypeVar, overload, runtime_checkable
 
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.transaction.manager import TransactionManager
 
 T = TypeVar("T")
 ID = TypeVar("ID")
@@ -98,12 +99,8 @@ class PagingAndSortingRepository(ReactiveSortingRepository[T, ID], Protocol[T, I
 RepositoryPort = CrudRepository
 
 
-@runtime_checkable
-class SessionPort(Protocol):
-    """Abstract session interface for transaction management."""
-
-    async def begin(self) -> Any: ...
-
-    async def commit(self) -> None: ...
-
-    async def rollback(self) -> None: ...
+# Deprecated: nothing implemented the old three-method SessionPort. Transactions are driven through the
+# TransactionManager SPI of the unit of work (begin/commit/rollback per datasource, savepoints, auto units),
+# which every backend adapter implements.
+SessionPort = TransactionManager
+"""Deprecated alias of :class:`pyfly.data.transaction.manager.TransactionManager`."""

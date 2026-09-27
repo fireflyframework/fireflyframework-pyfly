@@ -205,14 +205,37 @@ RepositoryPort = CrudRepository  # alias
 
 ### SessionPort
 
-Abstract session interface for transaction management:
+**Deprecated.** `SessionPort` is an alias of `pyfly.data.transaction.TransactionManager`, the SPI a
+backend implements so the unit of work can run on it (the old three-method protocol was implemented by
+nothing). A transaction manager serves one datasource:
 
 ```python
-class SessionPort(Protocol):
-    async def begin(self) -> Any: ...
-    async def commit(self) -> None: ...
-    async def rollback(self) -> None: ...
+class TransactionManager(Protocol):
+    datasource: str                      # the name units are bound under
+    capabilities: TransactionCapabilities  # savepoints, isolation levels, fast autocommit reads
+
+    async def begin(self, definition: TransactionDefinition) -> UnitOfWork: ...
+    async def open_auto_unit(self, *, read_only: bool, autocommit: bool | None = None) -> UnitOfWork: ...
+    async def commit(self, unit: UnitOfWork) -> None: ...
+    async def rollback(self, unit: UnitOfWork) -> None: ...
+    async def release(self, unit: UnitOfWork) -> None: ...
+    async def create_savepoint(self, unit: UnitOfWork) -> Any: ...
+    async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+    async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+    def resource_active(self, unit: UnitOfWork) -> bool: ...
+    def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool: ...
+    def is_disconnect(self, error: BaseException) -> bool: ...
 ```
+
+The `TransactionTemplate` (behind `@transactional`) drives it: propagation, rollback rules,
+synchronizations and cancellation are implemented once, for every backend. See
+[Transaction Management](data-relational.md#transaction-management).
+
+A backend with savepoints opens each one under the unit's operation guard (`async with
+unit.operation():`), records it there with `unit.savepoint_opened(handle)` and reports its end with
+`unit.savepoint_closed(handle)`, including a savepoint that ends along with an enclosing one. The unit then
+refuses any other task's statement or savepoint while that savepoint is open: savepoints are a stack on
+one connection.
 
 ### CrudRepository[T, ID]
 
@@ -1148,7 +1171,7 @@ Some capabilities are **backend-specific** today:
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
 | Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ❌ not yet |
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
-| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ propagation / isolation / read-only / `rollback_for` | ✅ commit/abort + `rollback_for` (replica set; propagation/isolation are relational-only) |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ⚠️ commit/abort per call (replica set); the unit-of-work manager for MongoDB is still to come |
 
 **Not yet implemented on either backend** (so you don't reach for them): `@Modifying`-style
 declarative bulk `UPDATE`/`DELETE`; `Slice` (count-less paging) and streaming/reactive result

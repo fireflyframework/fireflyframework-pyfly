@@ -41,7 +41,7 @@ from pyfly.container.metrics import BeanMetrics
 from pyfly.container.ordering import get_order
 from pyfly.container.provider import Provider
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope, ScopeHandler, ScopeSpec, scope_name
+from pyfly.container.types import Scope, ScopeHandler, ScopeSpec, is_no_autowire, scope_name
 
 T = TypeVar("T")
 
@@ -71,6 +71,11 @@ def _coerce_value(resolved: Any, base_type: Any) -> Any:
         except (TypeError, ValueError):
             return resolved
     return resolved
+
+
+def _never_autowired(param_type: Any) -> bool:
+    """Whether *param_type* is ``Annotated[T, NoAutowire]`` (the container leaves the parameter alone)."""
+    return get_origin(param_type) is Annotated and any(is_no_autowire(extra) for extra in get_args(param_type)[1:])
 
 
 def _safe_issubclass(impl: Any, origin: Any) -> bool:
@@ -813,6 +818,8 @@ class Container:
         for param_name, param_type in hints.items():
             param = sig.parameters.get(param_name)
             has_default = param is not None and param.default is not inspect.Parameter.empty
+            if has_default and _never_autowired(param_type):
+                continue  # Annotated[T, NoAutowire]: the parameter keeps its default
             plan.append((param_name, param_type, has_default))
         return plan
 
@@ -842,6 +849,8 @@ class Container:
             args = get_args(param_type)
             base_type = args[0]
             for metadata in args[1:]:
+                if is_no_autowire(metadata):
+                    raise NoSuchBeanError(bean_type=None)
                 if isinstance(metadata, Qualifier):
                     return self.resolve_by_name(metadata.name, expected_type=base_type)
                 if isinstance(metadata, Value):
