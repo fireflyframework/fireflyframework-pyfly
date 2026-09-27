@@ -31,6 +31,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from pyfly.admin.data.identifiers import EditTokens, decode_id, encode_id, json_value
 from pyfly.admin.data.models import AdminField, AdminOperationContext, AdminPage, AdminQuery, AdminRecord, ModelAdmin
 from pyfly.data.relational.dialect_customizers import begin_immediate
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete
 from pyfly.kernel.exceptions import (
     ConflictException,
     ForbiddenException,
@@ -297,7 +298,9 @@ class SqlAlchemyAdminProvider:
                         if "deleted_at" in snapshot:
                             instance.deleted_at = datetime.now(UTC)
                         else:
-                            await session.delete(instance)
+                            # Soft-deleted dependents are hidden from the loads session.delete() issues;
+                            # hard_delete() reaches them, so the DELETE does not violate their foreign keys.
+                            await hard_delete(session, instance)
                         record = None
                     else:
                         clean = await self._validate(resource, values, instance)

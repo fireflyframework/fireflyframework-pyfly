@@ -56,8 +56,10 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyfly.container.types import NoAutowire
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import hard_delete
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.transaction.context import bind_state, current_state, reset_state
 from pyfly.data.transaction.errors import IllegalTransactionStateError
@@ -95,11 +97,21 @@ def repository_operation(
     *read* selects a read auto unit outside a transaction. *atomic* holds the unit's operation guard for the
     whole call: the framework's own methods are atomic (``save`` is add, flush and refresh as one step for a
     task that shares the unit), while a subclass method is not, since it may await anything.
+
+    A persistence exception leaves the call translated to the kernel's (``DataIntegrityException``,
+    ``OptimisticLockingFailureException``; :mod:`pyfly.data.exception_translation`), raised from the
+    backend's, once the unit of work has seen the original.
     """
 
     @functools.wraps(function)
     async def operation(self: Repository[Any, Any], *args: Any, **kwargs: Any) -> Any:
-        return await self._pyfly_run(function, args, kwargs, read=read, atomic=atomic)
+        try:
+            return await self._pyfly_run(function, args, kwargs, read=read, atomic=atomic)
+        except Exception as error:
+            translated = translate_exception(error)
+            if translated is error:
+                raise
+            raise translated from error
 
     operation.__pyfly_repository_operation__ = True  # type: ignore[attr-defined]
     return operation
@@ -420,18 +432,19 @@ class Repository(Generic[T, ID]):
         return result.scalar_one()
 
     async def delete(self, entity: T) -> None:
-        """Delete a managed entity instance (Spring ``delete(entity)``)."""
-        session = self._require_session()
-        await session.delete(entity)
-        await session.flush()
+        """Delete a managed entity instance (Spring ``delete(entity)``).
+
+        The delete cascades reach soft-deleted children too (``soft_delete_criteria.hard_delete``).
+        """
+        await hard_delete(self._require_session(), entity)
 
     async def delete_by_id(self, id: ID) -> None:
-        """Delete an entity by its primary key (Spring ``deleteById``)."""
+        """Delete an entity by its primary key (Spring ``deleteById``); an id that is not found, or is
+        soft-deleted, deletes nothing. The delete cascades reach soft-deleted children too."""
         session = self._require_session()
         entity = await session.get(self._model, id)
         if entity is not None:
-            await session.delete(entity)
-            await session.flush()
+            await hard_delete(session, entity)
 
     async def delete_all_by_id(self, ids: list[ID]) -> None:
         """Delete all entities whose ids are in ``ids`` (Spring ``deleteAllById``)."""
@@ -446,10 +459,9 @@ class Repository(Generic[T, ID]):
         session = self._require_session()
         if entities is None:
             await session.execute(sa_delete(self._model))
+            await session.flush()
         else:
-            for entity in entities:
-                await session.delete(entity)
-        await session.flush()
+            await hard_delete(session, *entities)
 
     # ------------------------------------------------------------------
     # ReactiveSortingRepository + PagingAndSortingRepository

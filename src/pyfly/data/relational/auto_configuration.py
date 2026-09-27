@@ -80,6 +80,7 @@ from pyfly.context.conditions import (
 )
 from pyfly.context.events import RefreshScopeRefreshedEvent, app_event_listener
 from pyfly.core.config import Config
+from pyfly.data.auditing import AuditorAware, DateTimeProvider
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 from pyfly.data.relational.metrics import SqlAlchemyPoolMetrics, SqlAlchemyQueryMetrics
 from pyfly.data.relational.migrations import MigrationRunner
@@ -729,9 +730,18 @@ class RelationalAutoConfiguration:
         return SqlAlchemyHealthIndicator(async_engine, registry=registry, timeout=timeout)
 
     @bean
-    def auditing_entity_listener(self) -> AuditingEntityListener:
-        """Registers SQLAlchemy ORM events for automatic audit field population."""
-        listener = AuditingEntityListener()
+    @conditional_on_missing_bean(AuditingEntityListener)
+    @conditional_on_property("pyfly.data.auditing.enabled", having_value="true", match_if_missing=True)
+    def auditing_entity_listener(
+        self, auditor_aware: AuditorAware | None = None, date_time_provider: DateTimeProvider | None = None
+    ) -> AuditingEntityListener:
+        """Stamps ``BaseEntity`` audit columns with the ``AuditorAware`` and ``DateTimeProvider`` beans.
+
+        Registered once per process however many contexts start (the hooks are shared), and unregistered
+        when this context stops. An application's own ``AuditingEntityListener`` bean replaces it, and
+        ``pyfly.data.auditing.enabled=false`` switches it off.
+        """
+        listener = AuditingEntityListener(auditor_aware, date_time_provider)
         listener.register()
         return listener
 

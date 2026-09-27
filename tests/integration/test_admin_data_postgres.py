@@ -58,7 +58,9 @@ async def test_postgres_uuid_locking_and_soft_delete(pg_url):
         async with async_sessionmaker(engine)() as session:
             from uuid import UUID
 
-            item = await session.get(AdminPgItem, UUID(created.id))
+            # A soft-deleted row is invisible to ORM loads unless the statement opts in (C057).
+            assert await session.get(AdminPgItem, UUID(created.id)) is None
+            item = await session.get(AdminPgItem, UUID(created.id), execution_options={"include_deleted": True})
             assert item is not None and item.deleted_at is not None
     finally:
         async with engine.begin() as connection:

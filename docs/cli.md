@@ -814,6 +814,9 @@ pyfly db init
 3. **Overwrites `alembic/env.py`** with a PyFly-customized template that includes:
    - `async_engine_from_config` for async database support (asyncpg, aiosqlite)
    - `Base.metadata` from `pyfly.data.relational.sqlalchemy` as the target metadata for autogeneration
+   - The `render_item` hook of `pyfly.data.relational.sqlalchemy.types`, so a revision that renders a
+     `UtcDateTime` column (every `BaseEntity` table) imports its module
+     ([Migrations](modules/data-relational.md#utcdatetime-one-instant-on-every-backend))
    - Support for both offline (SQL script) and online (async connection) migration modes
 
 **Error handling:** If an `alembic/` directory already exists, the command exits with an error rather than overwriting.

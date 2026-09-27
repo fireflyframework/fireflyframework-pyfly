@@ -25,6 +25,7 @@ from sqlalchemy import update as sa_update
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.relational.sqlalchemy.repository import ID, STREAM_BATCH_SIZE, STREAM_FIRST_BATCH, Repository
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
 
 T = TypeVar("T")
@@ -93,13 +94,14 @@ class SoftDeleteRepository(Repository[T, ID]):
         await session.flush()
 
     async def hard_delete(self, id: ID) -> None:
-        """Permanently delete an entity (bypass soft delete)."""
-        await super().delete_by_id(id)
+        """Permanently delete an entity (bypass soft delete), a soft-deleted one included."""
+        with including_deleted():
+            await super().delete_by_id(id)
 
     async def restore(self, id: ID) -> T | None:
         """Restore a soft-deleted entity by clearing ``deleted_at``."""
         session = self._require_session()
-        entity = await session.get(self._model, id)
+        entity = await session.get(self._model, id, execution_options={"include_deleted": True})
         if entity is not None and hasattr(entity, "deleted_at"):
             entity.deleted_at = None
             await session.flush()
@@ -162,7 +164,7 @@ class SoftDeleteRepository(Repository[T, ID]):
     async def find_all_including_deleted(self, **filters: Any) -> list[T]:
         """Find all entities INCLUDING soft-deleted ones."""
         session = self._require_session()
-        stmt = self._filtered_select(**filters)
+        stmt = self._filtered_select(**filters).execution_options(include_deleted=True)
         return list((await session.execute(stmt)).scalars().all())
 
     async def find_all_by_id(self, ids: list[ID]) -> list[T]:

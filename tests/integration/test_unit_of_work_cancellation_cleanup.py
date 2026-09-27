@@ -20,7 +20,8 @@ still being cancelled (``Task.cancelling() > 0`` inside ``except CancelledError:
 and anyio's ``with CancelScope(shield=True):``), and the compensation, audit and lock-release work done
 there must see its ordinary failures as themselves. Here:
 
-- a duplicate saved in a native ``except CancelledError:`` handler raises ``IntegrityError``;
+- a duplicate saved in a native ``except CancelledError:`` handler raises ``DuplicateKeyException`` (the
+  repository's translation of the ``IntegrityError``, raised from it);
 - a ``@transactional`` call that raises a business exception in such a handler, or in anyio's shielded
   ``finally:`` cleanup, raises that exception, and the rest of the cleanup runs;
 - a participant that fails in its own unit's cancellation handler raises its own exception there;
@@ -28,14 +29,16 @@ there must see its ordinary failures as themselves. Here:
 - a unit whose body swallowed its own deadline's cancellation (``Task.uncancel()``) and then raised a
   business exception raises that exception, not ``TransactionTimedOutError``;
 - a ``@transactional`` body whose own ``finally:`` cleanup (native, or anyio's shielded scope) saves a
-  duplicate while its unit is being cancelled raises ``IntegrityError``: the statement's own operation
-  judged that failure, so the unit never mistakes it for a driver's stand-in for the cancellation;
+  duplicate while its unit is being cancelled raises ``DuplicateKeyException``: the statement's own
+  operation judged that failure (the translation is raised from it), so the unit never mistakes it for a
+  driver's stand-in for the cancellation;
 - a business exception such a body raises there ends the unit as cancelled, because the unit cannot tell
   it from a driver error raised outside a guarded statement, and it is logged at WARNING with its
   traceback instead of disappearing;
 - a business exception raised there *from* a statement's failure (``raise DomainError() from error``)
   keeps its type, since the judgment follows ``__cause__``; raised while merely handling that failure
-  (``except IntegrityError: raise DomainError()``) it ends the unit as cancelled and is logged at WARNING.
+  (``except DataIntegrityException: raise DomainError()``) it ends the unit as cancelled and is logged at
+  WARNING.
 
 A test cancels a unit's body once the body says it has done its work and waits (``CcService.working``), never
 after a fixed delay: on a loaded machine a cancel after a delay lands in the work itself, before the cleanup
@@ -68,6 +71,7 @@ from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transaction import infrastructure_unit
+from pyfly.kernel.exceptions import DataIntegrityException, DuplicateKeyException
 from tests.support.backend_matrix import MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL)
@@ -167,7 +171,7 @@ class CcService:
         finally:
             try:
                 await self.items.save(CcItem(id=1, name="duplicate"))  # while this unit is being cancelled
-            except IntegrityError as error:
+            except DataIntegrityException as error:
                 if chained:
                     raise DuplicateItemError("item 1 exists") from error
                 raise DuplicateItemError("item 1 exists")  # noqa: B904 — the unchained form is the point
@@ -275,14 +279,14 @@ async def test_a_duplicate_saved_in_an_except_cancelled_handler_raises_integrity
         except asyncio.CancelledError:
             try:
                 await cleanup.items.save(CcItem(id=1, name="duplicate"))
-            except IntegrityError:
-                seen.append("IntegrityError")
+            except DuplicateKeyException:
+                seen.append("DuplicateKeyException")
             seen.append("rest of the cleanup ran")
             raise
 
     opened = cleanup.connections_opened
     await _cancel_soon(asyncio.create_task(worker()))
-    assert seen == ["IntegrityError", "rest of the cleanup ran"]
+    assert seen == ["DuplicateKeyException", "rest of the cleanup ran"]
     assert cleanup.checked_out() == 0
     assert cleanup.connections_opened == opened  # the failed unit's connection was not discarded
     assert await cleanup.committed() == ["first"]
@@ -369,7 +373,7 @@ async def test_a_duplicate_saved_in_the_cancelled_units_own_cleanup_raises_integ
     task = await _cancel_once_working(
         cleanup, asyncio.create_task(cleanup.service.work_then_save_a_duplicate_in_its_own_cleanup())
     )
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DuplicateKeyException):
         await task
     assert cleanup.connections_opened == opened  # a failed statement leaves a healthy connection
     assert await cleanup.committed() == ["first"]
@@ -378,7 +382,7 @@ async def test_a_duplicate_saved_in_the_cancelled_units_own_cleanup_raises_integ
 async def test_a_duplicate_saved_in_the_cancelled_units_own_shielded_cleanup_raises_integrity_error(
     cleanup: Cleanup,
 ) -> None:
-    with pytest.raises(IntegrityError), anyio.CancelScope() as scope:
+    with pytest.raises(DuplicateKeyException), anyio.CancelScope() as scope:
         # anyio's level-triggered cancellation, delivered once the body has done its work.
         watcher = asyncio.ensure_future(cleanup.service.working.wait())
         watcher.add_done_callback(lambda _done: scope.cancel())
@@ -416,7 +420,8 @@ async def test_a_business_exception_raised_from_a_failed_statement_in_the_units_
         pytest.raises(DuplicateItemError) as raised,
     ):
         await task
-    assert isinstance(raised.value.__cause__, IntegrityError)
+    assert isinstance(raised.value.__cause__, DuplicateKeyException)
+    assert isinstance(raised.value.__cause__.__cause__, IntegrityError)
     assert not [r for r in caplog.records if r.getMessage() == "transaction_error_replaced_by_cancellation"]
     assert await cleanup.committed() == ["first"]
 
@@ -433,7 +438,7 @@ async def test_a_business_exception_raised_while_handling_a_failed_statement_end
     ):
         await task
     assert isinstance(raised.value.__cause__, DuplicateItemError)
-    assert isinstance(raised.value.__cause__.__context__, IntegrityError)  # linked, but not raised from it
+    assert isinstance(raised.value.__cause__.__context__, DuplicateKeyException)  # linked, not raised from it
     replaced = [r for r in caplog.records if r.getMessage() == "transaction_error_replaced_by_cancellation"]
     assert len(replaced) == 1 and replaced[0].levelno == logging.WARNING
     assert await cleanup.committed() == ["first"]

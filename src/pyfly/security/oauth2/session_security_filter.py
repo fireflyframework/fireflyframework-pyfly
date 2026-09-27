@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
+from pyfly.context.request_context import RequestContext
 from pyfly.security.context import SecurityContext
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
@@ -38,8 +39,11 @@ class OAuth2SessionSecurityFilter(OncePerRequestFilter):
     session-based authentication takes priority over symmetric-token auth.
 
     If a ``SECURITY_CONTEXT`` attribute is found in the session, it is set on
-    ``request.state.security_context``.  Otherwise an anonymous context is
-    set so downstream filters and handlers always have a context available.
+    ``request.state.security_context`` and on the current
+    :class:`~pyfly.context.request_context.RequestContext`, as every other
+    authenticating filter does, so method security and auditing see the session's
+    principal (form login, OAuth2 login, switch-user).  Otherwise an anonymous
+    context is set so downstream filters and handlers always have a context available.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE + 225
@@ -51,6 +55,9 @@ class OAuth2SessionSecurityFilter(OncePerRequestFilter):
             stored_ctx = session.get_attribute(_SECURITY_CONTEXT_KEY)
             if isinstance(stored_ctx, SecurityContext) and stored_ctx.is_authenticated:
                 request.state.security_context = stored_ctx
+                request_context = RequestContext.current()
+                if request_context is not None:
+                    request_context.security_context = stored_ctx
                 logger.debug("Restored SecurityContext from session for user: %s", stored_ctx.user_id)
                 return await call_next(request)
 

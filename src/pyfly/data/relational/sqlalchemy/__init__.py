@@ -22,6 +22,7 @@ from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.relational.sqlalchemy.transactional import (
@@ -31,6 +32,7 @@ from pyfly.data.relational.sqlalchemy.transactional import (
     reactive_transactional,
     transactional,
 )
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
 __all__ = [
     "AuditingEntityListener",
@@ -50,8 +52,10 @@ __all__ = [
     "SoftDeleteRepository",
     "Specification",
     "SqlAlchemyTransactionManager",
+    "UtcDateTime",
     "VersionedMixin",
     "_active_session_var",
+    "including_deleted",
     "query",
     "reactive_transactional",
     "transactional",

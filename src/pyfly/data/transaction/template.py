@@ -46,6 +46,10 @@ Completion rules:
   unit, not with its savepoint.
 - ``timeout`` bounds a new unit's body with ``asyncio.timeout``; on expiry the unit rolls back and
   :class:`~pyfly.data.transaction.errors.TransactionTimedOutError` is raised.
+- A persistence failure of the commit, or of the flush the commit (or a ``NESTED`` savepoint release) runs,
+  is raised translated to the kernel's exceptions (``DataIntegrityException``,
+  ``OptimisticLockingFailureException``; :mod:`pyfly.data.exception_translation`), from the backend's; the
+  unit completes on the original first.
 - Commit, rollback, savepoint release and session close are shielded: they run in their own task,
   awaited under ``asyncio`` and ``anyio`` shields until done, and a cancellation that arrived meanwhile is
   re-raised afterwards. A client disconnect in mid-transaction never returns a poisoned or leaked
@@ -58,8 +62,8 @@ Completion rules:
   statement's failure keeps its type in the cancelled unit's own cleanup too (its guarded operation judged
   it), and so does an exception raised from it (``raise DomainError() from error``: the judgment follows
   ``__cause__``); any other exception raised there, one raised while merely handling that failure
-  included (``except IntegrityError: raise DomainError()``), ends the unit as cancelled and is logged at
-  WARNING.
+  included (``except DataIntegrityException: raise DomainError()`` around a repository call, which raises
+  the translated kernel exception), ends the unit as cancelled and is logged at WARNING.
 """
 
 from __future__ import annotations
@@ -74,6 +78,7 @@ from contextvars import Token
 from types import TracebackType
 from typing import Any, TypeVar
 
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.transaction.context import (
     EMPTY,
     Suspended,
@@ -343,7 +348,7 @@ async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
     await _before_completion(unit, outcome)
     _result, error, cancelled = await run_shielded(_commit_and_release(unit))
     outcome.cancelled = outcome.cancelled or cancelled
-    outcome.error = error
+    outcome.error = None if error is None else translate_exception(error)
     if error is None:
         outcome.status = CompletionStatus.COMMITTED
     elif isinstance(error, CommitOutcomeUnknownError):
@@ -655,7 +660,7 @@ class TransactionBoundary:
                 exc_info=(type(error), error, error.__traceback__),
             )
             release_error.__context__ = error
-        raise release_error
+        raise translate_exception(release_error)
 
     async def _roll_back_to_savepoint(self, unit: UnitOfWork, depth: int, failure: BaseException | None) -> bool:
         """``ROLLBACK TO SAVEPOINT`` of this ``NESTED`` scope, shielded: it forgets a rollback-only mark set

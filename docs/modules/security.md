@@ -16,6 +16,7 @@ The PyFly security module is a full Spring-Security-style stack for async Python
   - [Permission Checking](#permission-checking)
   - [Anonymous Context](#anonymous-context)
   - [Full API Reference](#securitycontext-api-reference)
+  - [SecurityContextHolder](#securitycontextholder)
 - [JWT Authentication](#jwt-authentication)
   - [JWTService](#jwtservice)
   - [Encoding Tokens](#encoding-tokens)
@@ -233,6 +234,33 @@ The `anonymous()` class method creates a context with all defaults, representing
 | `has_any_role(roles)`      | `bool`      | `True` if the user has any of the given roles    |
 | `has_permission(permission)` | `bool`    | `True` if the user has the specified permission  |
 | `anonymous()` (classmethod)| `SecurityContext` | Create an anonymous (unauthenticated) context |
+
+### SecurityContextHolder
+
+`pyfly.security.SecurityContextHolder` (Spring's `SecurityContextHolder`) answers "who is doing this?" for
+code that is not handed the request: services, auditing (`AuditorAware`), background work.
+`SecurityContextHolder.get_context()` returns, in this order:
+
+1. a context set on the holder for the running task (`SecurityContextHolder.using(ctx)`,
+   `set_context`/`reset_context`, or `pyfly.data.auditing.run_as(...)`);
+2. inside an HTTP request, the context the security filters established (`request.state.security_context`),
+   read live, whichever filter authenticated the request: a bearer token, HTTP Basic, X.509, or the session
+   a form login, OAuth2 login or switch-user stored (restored by `OAuth2SessionSecurityFilter`);
+3. `RequestContext.current().security_context`, which also wins over an anonymous
+   `request.state.security_context` (what `SecurityFilter` sets when it authenticated nobody) when it holds
+   an authenticated principal.
+
+```python
+from pyfly.security import SecurityContext, SecurityContextHolder
+
+user_id = SecurityContextHolder.get_authenticated_user_id()    # None when anonymous
+
+with SecurityContextHolder.using(SecurityContext(user_id="system:reindex")):
+    await reindexer.run()                                      # tasks started here inherit it
+```
+
+`OAuth2SessionSecurityFilter` also copies the session's principal into `RequestContext`, as the token
+filters do, so `@pre_authorize` sees a session-authenticated user.
 
 ---
 
