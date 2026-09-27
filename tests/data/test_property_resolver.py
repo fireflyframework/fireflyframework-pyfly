@@ -26,8 +26,9 @@ from collections.abc import Iterator, Mapping
 
 import pytest
 from pydantic import BaseModel, Field
-from sqlalchemy import ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import ColumnElement, ForeignKey, Integer, String, func
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from pyfly.data.pageable import NullHandling, Order, Sort
 from pyfly.data.property_resolver import (
@@ -51,6 +52,25 @@ class PrAccount(Base):
     @property
     def display_name(self) -> str:
         return self.name.title()
+
+
+class PrAliased(Base):
+    """Synonyms and hybrid properties are part of the mapping: they sort and filter like columns."""
+
+    __tablename__ = "pr_aliased"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(64))
+    title = synonym("full_name")
+
+    @hybrid_property
+    def shout(self) -> str:
+        return self.full_name.upper()
+
+    @shout.inplace.expression
+    @classmethod
+    def _shout_expression(cls) -> ColumnElement[str]:
+        return func.upper(cls.full_name)
 
 
 class PrTag(Base):
@@ -104,6 +124,12 @@ class TestSqlAlchemyEntity:
         assert resolver.resolve_sort(sort) == sort
         with pytest.raises(InvalidPropertyError):
             resolver.resolve_sort(Sort.by("tags"))
+
+    def test_synonyms_and_hybrid_properties_resolve(self) -> None:
+        resolver = PropertyResolver.for_entity(PrAliased)
+        assert resolver.resolve("title") == "title"
+        assert resolver.resolve("shout") == "shout"
+        assert set(resolver.properties) == {"id", "full_name", "title", "shout"}
 
     def test_resolve_all_reports_the_first_bad_name(self) -> None:
         with pytest.raises(InvalidPropertyError, match="'nope'"):

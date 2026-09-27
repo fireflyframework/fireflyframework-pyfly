@@ -81,15 +81,25 @@ def unregister_property_introspector(introspector: PropertyIntrospector) -> None
 
 
 def _sqlalchemy_properties(entity: type) -> Mapping[str, str] | None:
+    """A mapped class's public columns, synonyms and hybrid properties (not its relationships or composites;
+    a name with a leading underscore is private)."""
     try:
         from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy.ext.hybrid import HybridExtensionType
         from sqlalchemy.orm import Mapper
     except ImportError:  # pragma: no cover — the relational extra is not installed
         return None
     mapper: Any = sa_inspect(entity, raiseerr=False)
     if not isinstance(mapper, Mapper):
         return None
-    return {attribute.key: attribute.key for attribute in mapper.column_attrs}
+    names = [attribute.key for attribute in mapper.column_attrs]
+    names += [synonym.key for synonym in mapper.synonyms]
+    names += [
+        key
+        for key, descriptor in mapper.all_orm_descriptors.items()
+        if getattr(descriptor, "extension_type", None) is HybridExtensionType.HYBRID_PROPERTY
+    ]
+    return {name: name for name in names if not name.startswith("_")}
 
 
 def _pydantic_properties(entity: type) -> Mapping[str, str] | None:
