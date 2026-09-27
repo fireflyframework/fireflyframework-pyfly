@@ -168,7 +168,8 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     def _process_query_decorated(self, bean: Any, cls: type, attr_name: str, attr: Any, entity: Any) -> bool:
         """Compile a ``@query`` method (:mod:`~pyfly.data.relational.sqlalchemy.query`) into a repository
         operation that binds its arguments by the stub's signature, by position or by keyword: a read for a
-        query, a write for a ``@modifying`` statement."""
+        ``SELECT`` that changes nothing, a write for any other statement (``@modifying``, ``CALL``, a ``WITH``
+        clause that changes rows)."""
         if not hasattr(attr, "__pyfly_query__"):
             return False
         method = describe_method(cls, attr_name, attr, entity, resolve=False)  # the query reads its annotations
@@ -181,23 +182,8 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         queried.__qualname__ = f"{cls.__qualname__}.{attr_name}"
         queried.__doc__ = method.function.__doc__
         queried.__module__ = method.function.__module__
-        read = not getattr(compiled, "is_modifying", False)
-        setattr(bean, attr_name, repository_operation(queried, read=read, atomic=True).__get__(bean, cls))
+        setattr(bean, attr_name, repository_operation(queried, read=compiled.reads, atomic=True).__get__(bean, cls))
         return True
-
-    # ------------------------------------------------------------------
-    # Wrapper factories
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _wrap_query_method(compiled_fn: Any, *, read: bool = False) -> Any:
-        """Wrap a ``@query``-compiled function as a repository operation on ``bean._session`` (keyword
-        arguments only; the post-processor binds positional ones by the method's signature first)."""
-
-        async def wrapper(self_arg: Any, **kwargs: Any) -> Any:
-            return await compiled_fn(self_arg._session, **kwargs)
-
-        return repository_operation(wrapper, read=read, atomic=True)
 
 
 def _special_parameters(method: QueryMethod, query: DerivedQuery) -> dict[str, type]:

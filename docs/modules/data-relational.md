@@ -723,7 +723,7 @@ async def find_by_status_native(self, status: str) -> list[Order]: ...
 
 ### Query Results by Return Type
 
-The result's shape comes from the method's return annotation, never from the SQL's text (a list query with an `EXISTS` subquery returns a list):
+The result's shape comes from the method's return annotation, never from the SQL's text (a list query with an `EXISTS` subquery returns a list). Each annotation resolves on its own: one that does not resolve at runtime (a name imported only for type checking) is logged at WARNING and read as absent, and the others still count.
 
 | Annotation | Result |
 |---|---|
@@ -735,13 +735,13 @@ The result's shape comes from the method's return annotation, never from the SQL
 | `list[SomeClass]` | `SomeClass(**row)` for any other class (a DTO) |
 | none | the entities, or the value of a query that starts with `SELECT COUNT` or `SELECT EXISTS` |
 
-**Entity results** run as `select(Order).from_statement(text(sql))`: the rows are the unit of work's identity-mapped entities, so a change to one inside `@transactional` is flushed with the unit, `save()` updates it, and `find_by_id` returns the same object. They are typed and mapped by attribute through the entity's columns (a `UUID` is a `UUID` on SQLite too, and an attribute whose column is named differently maps), their relationships load as any read loads them (one the mapping loads with a join, `lazy="joined"`, by one more statement, since a text statement cannot be joined), and the unit's pending changes are flushed before the query runs. The query must select the entity's columns (`SELECT o` in JPQL, `SELECT *` or the column list in native SQL). A query that returns other values also flushes the pending changes first.
+**Entity results** run as `select(Order).from_statement(text(sql))`: the rows are the unit of work's identity-mapped entities, so a change to one inside `@transactional` is flushed with the unit, `save()` updates it, and `find_by_id` returns the same object. They are typed and mapped by attribute through the entity's columns (a `UUID` is a `UUID` on SQLite too, and an attribute whose column is named differently maps), their relationships load as any read loads them (one the mapping loads from the statement itself, `lazy="joined"` or `lazy="subquery"`, by one more statement, since a text statement can be neither joined nor nested), and the unit's pending changes are flushed before the query runs. The query must select the entity's columns (`SELECT o` in JPQL, `SELECT *` or the column list in native SQL). A query that returns other values also flushes the pending changes first.
 
 A `@query` does not see the soft-delete criteria: its SQL runs as written, as a native query does in Spring. Add `deleted_at IS NULL` where you need it.
 
 ### Modifying Queries
 
-A statement that changes rows (`UPDATE`, `DELETE`, `INSERT`) is marked `@modifying` (Spring's `@Modifying`) and returns the number of rows it changed (`None` with `-> None`); it runs in a write unit of work:
+A statement that changes rows (`UPDATE`, `DELETE`, `INSERT`, after a `WITH` clause too) is marked `@modifying` (Spring's `@Modifying`) and returns the number of rows it changed (`None` with `-> None`); it runs in a write unit of work:
 
 ```python
 @modifying
@@ -755,6 +755,10 @@ async def purge(self, status: str) -> int: ...
 
 It flushes the unit's pending changes before the statement (`flush_automatically=True`, the default). The entities the unit holds are not refreshed: `clear_automatically=True` detaches them all afterwards, so the next read loads the rows as the statement left them. Without `@modifying`, a changing statement fails at startup, and `@modifying` on a `SELECT` does too. A persistence failure is raised translated (`DataIntegrityException`, `DuplicateKeyException`...), as for every repository method.
 
+The statement's verb, read after a `WITH` clause, decides the unit of work a call outside a transaction runs in: a read unit for a `SELECT` (or `VALUES`) that changes nothing, a write unit for any other statement: a `@modifying` one, a `CALL` (which may return `None`), a PostgreSQL `SELECT` whose `WITH` clause changes rows (`WITH gone AS (DELETE ... RETURNING id) SELECT id FROM gone`, which returns what it selects). A read unit is `READ ONLY` on PostgreSQL, MySQL and MariaDB.
+
+Two backend limits apply to modifying statements: MySQL refuses an `UPDATE` or a `DELETE` whose subquery reads its own table (error 1093, raised as the driver's error; MariaDB accepts it), and MariaDB accepts a `WITH` clause before a `SELECT` only.
+
 ### JPQL Transpilation Details
 
 The transpiler rewrites the query token by token, for the dialect the query runs on; string literals, quoted identifiers and comments are never rewritten, and a name that is not an entity (a table in a subquery, `schema.table`) is left as it is:
@@ -763,7 +767,9 @@ The transpiler rewrites the query token by token, for the dialect the query runs
 2. `SELECT alias` selects the entity's columns (`alias.col1, alias.col2, ...`); `COUNT(alias)` becomes `COUNT(*)` and `COUNT(DISTINCT alias)` counts its key.
 3. `alias.attribute` names the attribute's column (`alias.column`). A name that is neither an attribute nor a column of the entity fails at startup.
 4. The literals `true` and `false` are rendered as the dialect accepts them (`true`/`false` on PostgreSQL, `1`/`0` where booleans are integers); `IS TRUE` and `IS NOT FALSE` are left as written.
-5. `UPDATE` and `DELETE` drop the alias: the `SET` targets are bare columns (PostgreSQL requires it) and the other references are qualified with the table.
+5. The target of an `UPDATE` or a `DELETE` drops its alias (MySQL before 8.0.16 accepts none): its `SET` targets are bare columns (PostgreSQL requires it) and its other references are qualified with the table. Every other alias stays, the one of a subquery over the target's own entity included, so that subquery stays correlated with the row being changed: `DELETE FROM Node n WHERE NOT EXISTS (SELECT 1 FROM Node c WHERE c.parent_id = n.id)` becomes `DELETE FROM node WHERE NOT EXISTS (SELECT 1 FROM node c WHERE c.parent_id = node.id)`, and deletes the leaves.
+
+Aliases are scoped as SQL scopes them: inside a subquery that declares an alias again, the alias names the subquery's own entity.
 
 Example transpilation:
 
@@ -773,7 +779,7 @@ PostgreSQL:  SELECT u.id, u.email, u.active, ... FROM users u WHERE u.email LIKE
 SQLite:      SELECT u.id, u.email, u.active, ... FROM users u WHERE u.email LIKE :pattern AND u.active = 1
 ```
 
-Colons inside string literals are escaped, so `'10:30'` or `'a:b'` never become parameters. `pyfly.data.relational.sqlalchemy.query.transpile_jpql(jpql, Entity, dialect)` shows what a query becomes.
+String literals are read as the dialect reads them: a backslash escapes a quote on MySQL and MariaDB (`'it\'s'`), a doubled quote everywhere (`'it''s'`), and PostgreSQL's `E'...'` and dollar-quoted (`$$...$$`) bodies are literals. In JPQL and native SQL alike, the colons of string literals, quoted identifiers and comments are escaped, so `'10:30'`, `'a :b'` or `-- see :x` never become parameters. A colon already escaped the way `text()` documents (`'10\:30'`, which queries written before this release carry) is escaped once, not twice, and matches `10:30` as before. `pyfly.data.relational.sqlalchemy.query.transpile_jpql(jpql, Entity, dialect)` shows what a query becomes.
 
 > **Before 26.09.08** the transpiler was regular-expression substitution: it stripped `alias.` everywhere (inside string literals and identifiers too, which de-correlated subqueries), rewrote `= true` to `= 1` (an error on PostgreSQL), and built transient copies of the entities from the raw rows.
 
@@ -2577,7 +2583,7 @@ The `after_init(bean, bean_name)` method:
 3. Walks the repository class's MRO up to the framework's repository classes: the methods the class declares, and those it inherits from an intermediate base or a mixin (the most derived definition of a name wins).
 4. For `@query`-decorated methods: compiles them via `QueryExecutor.compile_query_method()` and replaces the stub with a wrapper that runs on `bean._session`.
 5. For derived query methods (`find_by_*`, `count_by_*`, `exists_by_*`, `delete_by_*`) whose body is a stub: parses the method name against the entity's properties via `QueryMethodParser.parse(name, properties=...)`, compiles it via `QueryMethodCompiler.compile()` (once per repository class), and replaces the stub with a wrapper.
-6. Every compiled wrapper is a repository operation like the inherited methods: it joins the current unit of work or runs in an auto unit (a read unit for `find_by_`, `count_by_`, `exists_by_` and queries, a write unit for `delete_by_` and `@modifying` statements), raises the kernel's translated persistence exceptions, and takes its arguments by position or by keyword.
+6. Every compiled wrapper is a repository operation like the inherited methods: it joins the current unit of work or runs in an auto unit (a read unit for `find_by_`, `count_by_`, `exists_by_` and `SELECT` queries that change nothing, a write unit for `delete_by_`, `@modifying` statements and any other statement), raises the kernel's translated persistence exceptions, and takes its arguments by position or by keyword.
 7. Binds the repository to the application context's transaction managers, so two contexts in one process never share units.
 
 A method that cannot be implemented as declared (a property the entity does not have, parameters that do not match the name or the query, an unsupported return type, a changing statement without `@modifying`) raises `InvalidQueryMethodError` here, so the context fails to start.

@@ -40,6 +40,7 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
@@ -211,27 +212,45 @@ class QueryMethod:
         return values
 
 
+def resolved_annotations(
+    function: Callable[..., Any], localns: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], dict[str, Exception]]:
+    """*function*'s annotations evaluated as :func:`typing.get_type_hints` evaluates them, each on its own: the
+    ones that resolve, by name (``"return"`` for the return annotation), and the error of each one that does not
+    (a name imported only for type checking), so one unresolved annotation never hides the others."""
+    try:
+        return get_type_hints(function, localns=localns), {}
+    except Exception:  # noqa: BLE001 — one annotation (at least) does not resolve: read them one by one
+        pass
+    globalns = getattr(function, "__globals__", {})
+    hints: dict[str, Any] = {}
+    unresolved: dict[str, Exception] = {}
+    for name, annotation in getattr(function, "__annotations__", {}).items():
+        try:
+            hints.update(get_type_hints(SimpleNamespace(__annotations__={name: annotation}), globalns, localns))
+        except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation
+            unresolved[name] = error
+    return hints, unresolved
+
+
 def describe_method(
     owner: type, name: str, method: Any, entity: type | None = None, *, resolve: bool = True
 ) -> QueryMethod:
     """The :class:`QueryMethod` of *owner*'s method *name* (*method* is the class attribute): its unwrapped
     stub and its signature with the annotations resolved (the entity's name resolves too, for a module that
     imports it only for type checking). An annotation that does not resolve raises
-    :class:`~pyfly.data.query_parser.InvalidQueryMethodError`; with *resolve* false, the signature keeps the
-    annotations as written instead (for a caller that needs only the parameters)."""
+    :class:`~pyfly.data.query_parser.InvalidQueryMethodError` naming it; with *resolve* false, the signature keeps
+    the annotations that do not resolve as written instead (for a caller that needs only the parameters)."""
     function = method.__func__ if isinstance(method, (staticmethod, classmethod)) else method
     function = inspect.unwrap(function)
     localns = {entity.__name__: entity} if entity is not None else None
-    try:
-        hints = get_type_hints(function, localns=localns)
-    except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation is a declaration error
-        if not resolve:
-            hints = {}
-        else:
-            raise InvalidQueryMethodError(
-                f"{owner.__name__}.{name}: its annotations do not resolve ({type(error).__name__}: {error}); import "
-                "the types they name at runtime"
-            ) from error
+    hints, unresolved = resolved_annotations(function, localns)
+    if unresolved and resolve:
+        reasons = "; ".join(f"{key}: {type(error).__name__}: {error}" for key, error in unresolved.items())
+        raise InvalidQueryMethodError(
+            f"{owner.__name__}.{name}: its annotations do not resolve ({reasons}); import the types they name at "
+            "runtime (a derived query's annotations decide its result and its Pageable or Sort parameter)"
+        ) from next(iter(unresolved.values()))
     signature = inspect.signature(function)
     parameters = list(signature.parameters.values())
     if not isinstance(method, staticmethod) and parameters:

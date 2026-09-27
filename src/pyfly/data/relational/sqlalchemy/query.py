@@ -42,13 +42,15 @@ Usage::
         async def deactivate_idle(self, cutoff: datetime) -> int: ...
 
 **Results** follow the method's return annotation, never the SQL's text (an annotation that does not resolve at
-runtime, a name imported only for type checking, is logged at WARNING and read as no annotation):
+runtime, a name imported only for type checking, is logged at WARNING and read as absent; the others still
+count):
 
 - the entity (``list[User]``, ``User | None``): the query runs as ``select(User).from_statement(text(sql))``,
   so its rows are the unit of work's own entities (identity-mapped: a change to one is flushed with the unit,
   ``save()`` updates it), typed and mapped by attribute through the entity's columns, their relationships
-  loaded as any read loads them (one loaded with a join, ``lazy="joined"``, by one more statement instead, since
-  a text statement cannot be joined), and the unit's pending changes are flushed before it runs;
+  loaded as any read loads them (one loaded from the statement itself, ``lazy="joined"`` or
+  ``lazy="subquery"``, by one more statement instead, since a text statement can be neither joined nor nested),
+  and the unit's pending changes are flushed before it runs;
 - a scalar (``int``, ``bool``, ``str``, ``list[str]``...), a row (``tuple``), a row by column name (``dict``),
   a :func:`~pyfly.data.projection.projection` or any other class built from the row's columns by name: the
   statement runs as it is, after the unit's pending changes are flushed;
@@ -57,30 +59,41 @@ runtime, a name imported only for type checking, is logged at WARNING and read a
 - an unannotated method returns the entities, or the value of a query that starts with ``SELECT COUNT`` or
   ``SELECT EXISTS``.
 
-**Statements that change rows** (``UPDATE``, ``DELETE``, ``INSERT``) need :func:`~pyfly.data.query.modifying`
-and return the number of rows they changed (``None`` for ``-> None``); without it the repository fails to
-build. **Arguments** bind by name (``:name``, a parameter of the method) and, in JPQL, by position (``?1`` is
-the first parameter after ``self``); the method takes them by position or by keyword. ``IN (:ids)`` (or
-``IN :ids``) binds a collection, one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an
-aware ``datetime`` as ``UtcDateTime``, as entity columns of those types store them; other values bind as the
-driver takes them.
+**Statements that change rows** (``UPDATE``, ``DELETE``, ``INSERT``, after a ``WITH`` clause too) need
+:func:`~pyfly.data.query.modifying` and return the number of rows they changed (``None`` for ``-> None``);
+without it the repository fails to build. The statement's verb decides the unit a call outside a transaction runs
+in: a read unit for a ``SELECT`` (or ``VALUES``) that changes nothing, a write unit for any other statement (a
+``@modifying`` one, a ``CALL``, which may return ``None``, a ``SELECT`` whose ``WITH`` clause deletes). MySQL
+refuses an ``UPDATE`` or a ``DELETE`` whose subquery reads its own table (error 1093; MariaDB accepts it), and
+MariaDB a ``WITH`` clause before one.
+
+**Arguments** bind by name (``:name``, a parameter of the method) and, in JPQL, by position (``?1`` is the first
+parameter after ``self``); the method takes them by position or by keyword. ``IN (:ids)`` (or ``IN :ids``) binds
+a collection, one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an aware ``datetime`` as
+``UtcDateTime``, as entity columns of those types store them; other values bind as the driver takes them.
 
 **JPQL** (``native=False``, the default) is rewritten token by token, for the dialect the query runs on:
 
 1. ``FROM Entity alias`` (and ``JOIN``, ``UPDATE``) names the entity's table (quoted where the dialect needs it);
-   the alias stays, so correlated subqueries keep their correlation;
+   the alias stays, so correlated subqueries keep their correlation. Aliases are scoped as SQL scopes them: a
+   subquery that declares an alias again names its own entity with it;
 2. ``SELECT alias`` selects the entity's columns (``alias.col1, alias.col2, ...``); ``COUNT(alias)`` is
    ``COUNT(*)``;
 3. ``alias.attribute`` names the attribute's column (``alias.column``); a name that is neither an attribute nor a
    column of the entity fails when the repository is built;
 4. the literals ``true`` and ``false`` are what the dialect accepts (``true``/``false``, or ``1``/``0`` where
    booleans are integers); ``IS TRUE`` and ``IS FALSE`` are left as written;
-5. ``UPDATE`` and ``DELETE`` drop the alias, and qualify a reference with the table (the ``SET`` targets stay
-   bare, as PostgreSQL requires).
+5. the target of an ``UPDATE`` or a ``DELETE`` drops its alias (MySQL before 8.0.16 accepts none), and a
+   reference to it names the table (the ``SET`` targets stay bare, as PostgreSQL requires); every other alias
+   stays, the one of a subquery over the target's own entity included, so that subquery stays correlated with
+   the row being changed.
 
-String literals, quoted identifiers and comments are never rewritten. A name that is not an entity (a table in a
-subquery, ``schema.table``) is left as it is. The query's colons inside string literals are escaped, so
-``'10:30'`` or ``'a:b'`` never become parameters.
+String literals, quoted identifiers and comments are never rewritten; they are read as the dialect reads them
+(a backslash escapes a quote on MySQL and MariaDB; PostgreSQL's ``E'...'`` and ``$$...$$`` are literals). A name
+that is not an entity (a table in a subquery, ``schema.table``) is left as it is. In JPQL and native SQL alike,
+the colons of literals, quoted identifiers and comments are escaped, so ``'10:30'``, ``'a :b'`` or
+``-- see :x`` never become parameters; a colon already escaped the way ``text()`` documents (``'10\\:30'``) is
+escaped once, not twice.
 """
 
 from __future__ import annotations
@@ -90,11 +103,11 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, TypeVar, get_type_hints
+from typing import Any, TypeVar
 
 from sqlalchemy import Uuid, bindparam, column, select, text
 from sqlalchemy import inspect as sa_inspect
@@ -103,6 +116,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ColumnProperty, Mapper, selectinload
 from sqlalchemy.types import NullType
 
+from pyfly.data.post_processor import resolved_annotations
 from pyfly.data.projection import projection_fields
 from pyfly.data.query import ModifyingOptions, query
 from pyfly.data.query_parser import (
@@ -128,21 +142,41 @@ __all__ = ["CompiledQuery", "QueryExecutor", "TranspiledQuery", "query", "tokeni
 # Tokens
 # ---------------------------------------------------------------------------------------------------------
 
-_TOKENS = re.compile(
-    r"""
-      (?P<space>\s+)
-    | (?P<comment>--[^\n]*|/\*.*?\*/)
-    | (?P<string>'(?:[^']|'')*')
-    | (?P<quoted>"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\])
-    | (?P<cast>::)
-    | (?P<bind>:[A-Za-z_][A-Za-z0-9_]*)
-    | (?P<positional>\?[0-9]+)
-    | (?P<word>[A-Za-z_][A-Za-z0-9_$]*)
-    | (?P<number>[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)
-    | (?P<other>.)
-    """,
-    re.VERBOSE | re.DOTALL,
-)
+
+def _token_pattern(string: str, quoted: str) -> re.Pattern[str]:
+    """The token pattern whose string literals are *string* and double-quoted names *quoted*."""
+    return re.compile(
+        rf"""
+          (?P<space>\s+)
+        | (?P<comment>--[^\n]*|/\*.*?\*/)
+        | (?P<escape_string>[Ee]'(?:[^'\\]|\\.|'')*')
+        | (?P<dollar_string>\$(?P<tag>(?:[A-Za-z_][A-Za-z0-9_]*)?)\$.*?\$(?P=tag)\$)
+        | (?P<string>{string})
+        | (?P<quoted>{quoted}|`(?:[^`]|``)*`|\[[^\]]*\])
+        | (?P<cast>::)
+        | (?P<bind>:[A-Za-z_][A-Za-z0-9_]*)
+        | (?P<positional>\?[0-9]+)
+        | (?P<word>[A-Za-z_][A-Za-z0-9_$]*)
+        | (?P<number>[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)
+        | (?P<other>.)
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+_STANDARD_TOKENS = _token_pattern(r"'(?:[^']|'')*'", r'"(?:[^"]|"")*"')
+"""String literals as the SQL standard writes them: a quote inside one is doubled (PostgreSQL, SQLite...)."""
+
+_BACKSLASH_TOKENS = _token_pattern(r"'(?:[^'\\]|\\.|'')*'", r'"(?:[^"\\]|\\.|"")*"')
+"""String literals as MySQL and MariaDB read them: a backslash escapes the character after it, a quote too."""
+
+_STRING_KINDS = {"escape_string": "string", "dollar_string": "string"}
+"""PostgreSQL's ``E'...'`` and ``$tag$...$tag$`` literals are string tokens like the others."""
+
+_OPAQUE = frozenset({"string", "quoted", "comment"})
+"""The tokens whose text is never rewritten (their colons are escaped, so ``text()`` binds none of them)."""
+
+_UNESCAPED_COLON = re.compile(r"(?<!\\):")
 
 _CLAUSE_KEYWORDS = frozenset(
     {
@@ -176,6 +210,8 @@ _CLAUSE_KEYWORDS = frozenset(
 """Words that follow a table in a ``FROM`` clause and so are never its alias."""
 
 _DML = frozenset({"UPDATE", "DELETE", "INSERT", "MERGE", "REPLACE", "UPSERT"})
+_READS = frozenset({"SELECT", "VALUES", "TABLE"})
+_VERBS = _DML | _READS
 _BOOLEANS = {"true": True, "false": False}
 
 
@@ -192,16 +228,35 @@ class Token:
         return self.text.upper()
 
 
-def tokenize(sql: str) -> list[Token]:
-    """The tokens of *sql* (their texts concatenate back to it). An unterminated string literal or quoted
-    identifier raises :class:`~pyfly.data.query_parser.InvalidQueryMethodError`."""
+def tokenize(sql: str, dialect: Dialect | None = None) -> list[Token]:
+    """The tokens of *sql* (their texts concatenate back to it), its string literals read as *dialect* reads
+    them: MySQL and MariaDB escape a quote inside one with a backslash (``'it\\'s'``), the others only by
+    doubling it (``'it''s'``). A query that reads only the other way is read that way (a MySQL server in
+    ``NO_BACKSLASH_ESCAPES`` mode; a query checked before its dialect is known, ``dialect=None``). PostgreSQL's
+    ``E'...'`` and dollar-quoted (``$$...$$``, ``$tag$...$tag$``) literals are strings on every dialect.
+
+    An unterminated string literal or quoted identifier raises
+    :class:`~pyfly.data.query_parser.InvalidQueryMethodError`.
+    """
+    backslash = dialect is not None and dialect.name in ("mysql", "mariadb")
+    patterns = (_BACKSLASH_TOKENS, _STANDARD_TOKENS) if backslash else (_STANDARD_TOKENS, _BACKSLASH_TOKENS)
+    try:
+        return _tokens(sql, patterns[0])
+    except InvalidQueryMethodError as error:
+        try:
+            return _tokens(sql, patterns[1])
+        except InvalidQueryMethodError:
+            raise error from None
+
+
+def _tokens(sql: str, pattern: re.Pattern[str]) -> list[Token]:
     tokens: list[Token] = []
-    for match in _TOKENS.finditer(sql):
+    for match in pattern.finditer(sql):
         kind = match.lastgroup or "other"
         value = match.group()
         if kind == "other" and value in ("'", '"', "`"):
             raise InvalidQueryMethodError(f"Unterminated {value} in the query: {sql}")
-        tokens.append(Token(kind, value))
+        tokens.append(Token(_STRING_KINDS.get(kind, kind), value))
     return tokens
 
 
@@ -209,15 +264,47 @@ def _significant(tokens: Sequence[Token]) -> list[int]:
     return [index for index, token in enumerate(tokens) if token.kind not in ("space", "comment")]
 
 
-def _statement_kind(tokens: Sequence[Token]) -> str:
-    """The query's first keyword, upper-cased (``SELECT``, ``WITH``, ``UPDATE``...), past leading parentheses."""
-    for index in _significant(tokens):
+def _verb(tokens: Sequence[Token], significant: Sequence[int]) -> int | None:
+    """The index of the statement's verb: its first keyword past leading parentheses (``SELECT``, ``UPDATE``...),
+    or, after a ``WITH`` clause, the keyword at the ``WITH``'s depth that starts the statement it introduces."""
+    depth = level = 0
+    first: int | None = None
+    for index in significant:
         token = tokens[index]
-        if token.kind == "word":
-            return token.upper
-        if token.text != "(":
-            break
-    return ""
+        if first is None:
+            if token.text == "(":
+                depth += 1
+                continue
+            if token.kind != "word":
+                return None
+            if token.upper != "WITH":
+                return index
+            first, level = index, depth
+            continue
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        elif depth == level and token.kind == "word" and token.upper in _VERBS:
+            return index
+    return first
+
+
+def _writes(tokens: Sequence[Token], significant: Sequence[int], kind: str) -> bool:
+    """Whether the statement may change rows: any statement but a read (``SELECT``, ``VALUES``, ``TABLE``), and
+    a read whose ``WITH`` clause changes rows (PostgreSQL's ``WITH gone AS (DELETE ... RETURNING id) SELECT``)."""
+    if kind not in _READS:
+        return True
+    for position in range(1, len(significant) - 1):
+        token = tokens[significant[position]]
+        if (
+            token.kind == "word"
+            and token.upper in _DML
+            and tokens[significant[position - 1]].text == "("
+            and tokens[significant[position + 1]].kind == "word"  # DELETE FROM, not the REPLACE(...) function
+        ):
+            return True
+    return False
 
 
 def _binds(tokens: Sequence[Token]) -> list[str]:
@@ -255,11 +342,13 @@ def _expanding(tokens: list[Token]) -> set[str]:
     return expanding
 
 
-def _escaped_literals(tokens: Sequence[Token]) -> None:
-    """Escape the colons of string literals in place, so ``text()`` never reads one as a parameter."""
+def _escaped_colons(tokens: Sequence[Token]) -> None:
+    """Escape the colons of string literals, quoted names and comments in place, so ``text()`` never reads one
+    as a parameter. A colon the query already escapes (``\\:``, the escape ``text()`` documents) stays escaped
+    once: ``text()`` turns each ``\\:`` back into ``:``."""
     for token in tokens:
-        if token.kind == "string" and ":" in token.text:
-            token.text = token.text.replace(":", "\\:")
+        if token.kind in _OPAQUE and ":" in token.text:
+            token.text = _UNESCAPED_COLON.sub(r"\\:", token.text)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -273,41 +362,63 @@ class TranspiledQuery:
 
     sql: str
     kind: str
-    """The statement's first keyword (``SELECT``, ``WITH``, ``UPDATE``, ``DELETE``, ``INSERT``...)."""
+    """The statement's verb (``SELECT``, ``UPDATE``, ``DELETE``, ``INSERT``, ``CALL``...): its first keyword, or
+    after a ``WITH`` clause the keyword of the statement the clause introduces."""
     binds: tuple[str, ...]
     """The named parameters it binds, in order of appearance (with repeats)."""
     expanding: frozenset[str]
     """The parameters that bind a collection (``IN :name``)."""
     columns: tuple[tuple[str, Any], ...] = ()
     """The result columns' labels and SQL types, when the select list names entity attributes only."""
+    writes: bool = False
+    """Whether the statement may change rows: any statement but a ``SELECT`` (or ``VALUES``, ``TABLE``), and a
+    ``SELECT`` whose ``WITH`` clause changes rows."""
 
     @property
     def is_dml(self) -> bool:
-        """Whether the statement changes rows."""
+        """Whether the statement changes rows and counts them (``UPDATE``, ``DELETE``, ``INSERT``...)."""
         return self.kind in _DML
 
 
 class _Jpql:
-    """The token rewrite of one JPQL query for one dialect (module documentation)."""
+    """The token rewrite of one JPQL query for one dialect (module documentation).
+
+    An alias is scoped as SQL scopes it: a reference names the alias the innermost enclosing query declares, so a
+    subquery that declares the target's alias again names its own entity with it. Only the target of an
+    ``UPDATE`` or a ``DELETE`` loses its alias; every other alias stays, the target's own table in a subquery
+    included, which keeps the subquery correlated with the row being changed.
+    """
 
     def __init__(self, jpql: str, entity: type, dialect: Dialect | None, positional: Sequence[str]) -> None:
         self._jpql = jpql
         self._entity = entity
         self._dialect = dialect
         self._positional = positional
-        self._tokens = tokenize(jpql)
+        self._tokens = tokenize(jpql, dialect)
         self._significant = _significant(self._tokens)
+        self._positions = {index: position for position, index in enumerate(self._significant)}
+        self._scopes = self._enclosing()
         self._mappers = _entities_of(entity)
         self._aliases: dict[str, Mapper[Any]] = {}
         self._tables: dict[int, Mapper[Any]] = {}
         self._alias_tokens: set[int] = set()
-        self.kind = _statement_kind(self._tokens)
+        self._declared: dict[str, set[int]] = {}
+        """Alias -> the scopes (:meth:`_scope`) that declare it."""
+        self._declared_by: dict[int, tuple[str, list[int]]] = {}
+        """Entity token -> its alias and the tokens that declare it (``AS`` included)."""
+        self._target: int | None = None
+        self._target_alias: str | None = None
+        self._dropped: set[int] = set()
+        self._verb = _verb(self._tokens, self._significant)
+        self.kind = self._tokens[self._verb].upper if self._verb is not None else ""
 
     def transpile(self) -> TranspiledQuery:
+        writes = _writes(self._tokens, self._significant, self.kind)
         self._declarations()
+        self._dml_target()
         columns = self._typed_columns()
         self._rewrite()
-        _escaped_literals(self._tokens)
+        _escaped_colons(self._tokens)
         expanding = _expanding(self._tokens)
         return TranspiledQuery(
             sql="".join(token.text for token in self._tokens),
@@ -315,6 +426,7 @@ class _Jpql:
             binds=tuple(_binds(self._tokens)),
             expanding=frozenset(expanding),
             columns=columns,
+            writes=writes,
         )
 
     # -- helpers ------------------------------------------------------------------------------------------
@@ -322,13 +434,17 @@ class _Jpql:
     def _fail(self, message: str) -> InvalidQueryMethodError:
         return InvalidQueryMethodError(f"{message} (in the query {self._jpql!r})")
 
-    def _next(self, index: int) -> int | None:
+    def _next(self, index: int | None) -> int | None:
         """The index of the significant token after *index*, or ``None``."""
-        position = self._significant.index(index) + 1
+        if index is None:
+            return None
+        position = self._positions[index] + 1
         return self._significant[position] if position < len(self._significant) else None
 
-    def _previous(self, index: int) -> int | None:
-        position = self._significant.index(index) - 1
+    def _previous(self, index: int | None) -> int | None:
+        if index is None:
+            return None
+        position = self._positions[index] - 1
         return self._significant[position] if position >= 0 else None
 
     def _text(self, index: int | None) -> str:
@@ -346,6 +462,24 @@ class _Jpql:
             return str(self._dialect.identifier_preparer.format_table(table))
         return f"{table.schema}.{table.name}" if table.schema else str(table.name)
 
+    def _enclosing(self) -> dict[int, tuple[int, ...]]:
+        """Each significant token's enclosing parentheses (the indexes of their ``(``), outermost first."""
+        scopes: dict[int, tuple[int, ...]] = {}
+        stack: list[int] = []
+        for index in self._significant:
+            text_ = self._tokens[index].text
+            if text_ == ")" and stack:
+                stack.pop()
+            scopes[index] = tuple(stack)
+            if text_ == "(":
+                stack.append(index)
+        return scopes
+
+    def _scope(self, index: int) -> int:
+        """The query a token belongs to: its innermost enclosing ``(``, or ``-1`` for the statement itself."""
+        enclosing = self._scopes[index]
+        return enclosing[-1] if enclosing else -1
+
     # -- pass 1: FROM Entity alias ------------------------------------------------------------------------
 
     def _declarations(self) -> None:
@@ -358,10 +492,12 @@ class _Jpql:
             if self._upper(before) not in ("FROM", "JOIN", "UPDATE") and self._text(before) != ",":
                 continue
             self._tables[index] = mapper
+            declaring: list[int] = []
             alias = self._next(index)
-            if self._upper(alias) == "AS":
-                self._alias_tokens.add(cast_index(alias))
-                alias = self._next(cast_index(alias))
+            if alias is not None and self._upper(alias) == "AS":
+                declaring.append(alias)
+                self._alias_tokens.add(alias)
+                alias = self._next(alias)
             if alias is None or self._tokens[alias].kind != "word" or self._upper(alias) in _CLAUSE_KEYWORDS:
                 continue
             name = self._tokens[alias].text.lower()
@@ -370,17 +506,47 @@ class _Jpql:
                 raise self._fail(f"the alias {self._tokens[alias].text!r} names two entities")
             self._aliases[name] = mapper
             self._alias_tokens.add(alias)
+            declaring.append(alias)
+            self._declared.setdefault(name, set()).add(self._scope(index))
+            self._declared_by[index] = (name, declaring)
+
+    def _dml_target(self) -> None:
+        """Find the entity an ``UPDATE`` or a ``DELETE`` changes (right after ``UPDATE``, or ``DELETE FROM``), and
+        drop its alias: the one alias the statement loses."""
+        if self.kind not in ("UPDATE", "DELETE"):
+            return
+        target = self._next(self._verb)
+        if self.kind == "DELETE" and self._upper(target) == "FROM":
+            target = self._next(target)
+        if target is None or target not in self._tables:
+            return  # a table that is not an entity keeps its alias, as written
+        self._target = target
+        declared = self._declared_by.get(target)
+        if declared is not None:
+            self._target_alias, declaring = declared
+            self._dropped.update(declaring)
+
+    def _names_target(self, index: int, alias: str) -> bool:
+        """Whether *alias* at *index* names the target of the ``UPDATE`` or ``DELETE``: the innermost query around
+        it that declares the alias is the statement itself."""
+        if self._target is None or alias != self._target_alias:
+            return False
+        declared = self._declared.get(alias, set())
+        for scope in reversed((-1, *self._scopes[index])):
+            if scope in declared:
+                return scope == self._scope(self._target)
+        return False
 
     # -- the select list's types --------------------------------------------------------------------------
 
     def _typed_columns(self) -> tuple[tuple[str, Any], ...]:
         """The labels and types of the outermost select list when it names entity attributes only
         (``a.name``, ``a.name AS label``), so SQLite returns them typed too; ``()`` otherwise."""
-        if self.kind != "SELECT":
+        if self.kind != "SELECT" or self._verb is None:
             return ()
         items: list[list[int]] = [[]]
         depth = 0
-        for index in self._significant[1:]:  # after SELECT
+        for index in self._significant[self._positions[self._verb] + 1 :]:  # after SELECT
             text_ = self._tokens[index].text
             if depth == 0 and self._tokens[index].upper == "FROM":
                 break
@@ -417,10 +583,9 @@ class _Jpql:
     # -- pass 2: the rewrite ------------------------------------------------------------------------------
 
     def _rewrite(self) -> None:
-        dml = self.kind in ("UPDATE", "DELETE")
         in_set = False
         depth = 0
-        for index in list(self._significant):
+        for index in self._significant:
             token = self._tokens[index]
             if token.text == "(":
                 depth += 1
@@ -431,7 +596,7 @@ class _Jpql:
             if index in self._tables:
                 token.text = self._table(self._tables[index])
                 continue
-            if dml and index in self._alias_tokens:
+            if index in self._dropped:
                 token.text = ""
                 if self._tokens[index - 1].kind == "space":
                     self._tokens[index - 1].text = ""
@@ -442,8 +607,9 @@ class _Jpql:
             if token.kind == "word" and token.text.lower() in _BOOLEANS:
                 self._boolean(index, token)
                 continue
-            if token.kind == "word" and token.text.lower() in self._aliases and index not in self._alias_tokens:
-                self._reference(index, token, dml=dml, in_set=in_set and depth == 0)
+            alias = token.text.lower()
+            if token.kind == "word" and alias in self._aliases and index not in self._alias_tokens:
+                self._reference(index, token, target=self._names_target(index, alias), in_set=in_set and depth == 0)
 
     def _positional_bind(self, token: Token) -> None:
         position = int(token.text[1:])
@@ -457,26 +623,28 @@ class _Jpql:
         before, after = self._previous(index), self._next(index)
         if self._text(before) == "." or self._text(after) in (".", "("):
             return  # a column or a function called true/false
-        negated = self._upper(before) == "NOT" and before is not None
-        if self._upper(before) == "IS" or (negated and self._upper(self._previous(cast_index(before))) == "IS"):
+        negated = self._upper(before) == "NOT"
+        if self._upper(before) == "IS" or (negated and self._upper(self._previous(before)) == "IS"):
             return  # IS TRUE, IS NOT FALSE: a predicate of its own
         if self._dialect is not None and not self._dialect.supports_native_boolean:
             token.text = "1" if _BOOLEANS[token.text.lower()] else "0"
 
-    def _reference(self, index: int, token: Token, *, dml: bool, in_set: bool) -> None:
+    def _reference(self, index: int, token: Token, *, target: bool, in_set: bool) -> None:
+        """Rewrite ``alias.attribute`` to ``alias.column``; the target of an ``UPDATE`` or a ``DELETE``, which has
+        no alias, is named by its table instead (bare as a ``SET`` target, as PostgreSQL requires)."""
         mapper = self._aliases[token.text.lower()]
         dot = self._next(index)
-        if self._text(dot) == ".":
-            target = self._next(cast_index(dot))
-            if target is None:
+        if dot is not None and self._text(dot) == ".":
+            attribute = self._next(dot)
+            if attribute is None:
                 raise self._fail(f"{token.text}. names nothing")
-            if self._text(target) == "*":
+            if self._text(attribute) == "*":
                 return
-            name = self._column(mapper, self._tokens[target].text)
-            self._tokens[target].text = self._quote(name)
-            if dml:
-                if in_set and self._text(self._next(target)) == "=":
-                    token.text, self._tokens[cast_index(dot)].text = "", ""  # SET col = ...: the target stays bare
+            name = self._column(mapper, self._tokens[attribute].text)
+            self._tokens[attribute].text = self._quote(name)
+            if target:
+                if in_set and self._text(self._next(attribute)) == "=":
+                    token.text, self._tokens[dot].text = "", ""  # SET col = ...: the target stays bare
                 else:
                     token.text = self._table(mapper)
             return
@@ -497,7 +665,7 @@ class _Jpql:
         before = self._previous(index)
         after = self._next(index)
         counted = self._text(before) == "(" and self._text(after) == ")"
-        if counted and self._upper(self._previous(cast_index(before))) == "COUNT":
+        if counted and self._upper(self._previous(before)) == "COUNT":
             token.text = "*"
             return
         if self._upper(before) == "DISTINCT" and self._text(after) == ")":
@@ -514,13 +682,6 @@ class _Jpql:
             f"the alias {token.text!r} is used as a value; compare one of its attributes instead "
             f"({token.text}.{mapper.get_property_by_column(list(mapper.primary_key)[0]).key})"
         )
-
-
-def cast_index(index: int | None) -> int:
-    """*index*, known not to be ``None`` here."""
-    if index is None:  # pragma: no cover — callers check the token exists first
-        raise AssertionError("missing token")
-    return index
 
 
 def _entities_of(entity: type) -> dict[str, Mapper[Any]]:
@@ -549,16 +710,22 @@ def transpile_jpql(
     return _Jpql(jpql, entity, dialect, positional).transpile()
 
 
-def _native(sql: str) -> TranspiledQuery:
-    tokens = tokenize(sql)
-    kind = _statement_kind(tokens)
-    _escaped_literals(tokens)
+def _native(sql: str, dialect: Dialect | None = None) -> TranspiledQuery:
+    """A native query as *dialect* reads it: its colons in literals, quoted names and comments escaped, and its
+    ``IN (:name)`` lists expanding; nothing else is rewritten."""
+    tokens = tokenize(sql, dialect)
+    significant = _significant(tokens)
+    verb = _verb(tokens, significant)
+    kind = tokens[verb].upper if verb is not None else ""
+    writes = _writes(tokens, significant, kind)
+    _escaped_colons(tokens)
     expanding = _expanding(tokens)
     return TranspiledQuery(
         sql="".join(token.text for token in tokens),
         kind=kind,
         binds=tuple(_binds(tokens)),
         expanding=frozenset(expanding),
+        writes=writes,
     )
 
 
@@ -593,6 +760,7 @@ class CompiledQuery:
         self._lock = threading.Lock()
         described = self._transpile(None)  # checks the query once, at startup, whatever the dialect
         self._kind = described.kind
+        self._writes = described.writes
         self._check(described)
         self._shape = self._shape_of(described, return_type)
 
@@ -602,6 +770,12 @@ class CompiledQuery:
     def is_modifying(self) -> bool:
         """Whether the statement changes rows (``@modifying``)."""
         return self._modifying is not None
+
+    @property
+    def reads(self) -> bool:
+        """Whether the statement only reads, so it may run in a read unit: a ``SELECT`` (or ``VALUES``) whose
+        ``WITH`` clause changes nothing. Any other statement, a ``CALL`` included, runs in a write unit."""
+        return not self._writes
 
     @property
     def shape(self) -> ResultShape:
@@ -614,7 +788,7 @@ class CompiledQuery:
     def _transpile(self, dialect: Dialect | None) -> TranspiledQuery:
         try:
             if self._native:
-                return _native(self._query)
+                return _native(self._query, dialect)
             return transpile_jpql(self._query, self._entity, dialect, positional=self._parameters)
         except InvalidQueryMethodError as error:
             raise self._fail(str(error)) from None
@@ -643,9 +817,10 @@ class CompiledQuery:
                 )
             raise self._fail(f"a @modifying query returns int (the row count) or None, not {return_type}")
         if return_type is None or return_type is Any:
-            if _LEGACY_SCALAR.match(described.sql):
-                kind = _LEGACY_SCALAR.match(described.sql).group(1).upper()  # type: ignore[union-attr]
-                return ResultShape(ResultKind.ONE, ElementKind.SCALAR, int if kind == "COUNT" else bool)
+            legacy = _LEGACY_SCALAR.match(described.sql)
+            if legacy is not None:
+                scalar = int if legacy.group(1).upper() == "COUNT" else bool
+                return ResultShape(ResultKind.ONE, ElementKind.SCALAR, scalar)
             return ResultShape(ResultKind.LIST, ElementKind.ENTITY, self._entity)
         try:
             shape = result_shape(return_type, self._entity)
@@ -653,7 +828,7 @@ class CompiledQuery:
             raise self._fail(str(error)) from None
         if shape.kind in (ResultKind.PAGE, ResultKind.SLICE):
             raise self._fail("a @query method returns a list or one result, not a Page or Slice; page a derived query")
-        if shape.kind is ResultKind.NONE:
+        if shape.kind is ResultKind.NONE and not described.writes:
             raise self._fail("a query that is not @modifying returns what it selects, not None")
         if shape.element is ElementKind.OBJECT and _is_mapped(shape.type):
             return ResultShape(shape.kind, ElementKind.ENTITY, shape.type)
@@ -684,21 +859,30 @@ class CompiledQuery:
             values[name] = arguments[name]
         bound = _bound(clause, values, described.expanding) if values else clause
         if self._modifying is not None:
-            return await self._modify(session, bound)
+            return await self._modify(session, bound, dialect)
+        if self._shape.kind is ResultKind.NONE:  # a statement run for what it does (a CALL): nothing to read
+            await _flush_pending(session)
+            await session.execute(bound)
+            return None
         if self._shape.element is ElementKind.ENTITY:
             entity = self._shape.type or self._entity
-            statement = select(entity).from_statement(bound).options(*_joined_as_selectin(entity))
+            statement = select(entity).from_statement(bound).options(*_eager_as_selectin(entity))
             return self._shaped(unique_entities(await session.execute(statement)))
         await _flush_pending(session)
         result = await session.execute(bound)
         return self._shaped(self._rows(result))
 
-    async def _modify(self, session: AsyncSession, statement: Any) -> Any:
+    async def _modify(self, session: AsyncSession, statement: Any, dialect: Dialect) -> Any:
         options = self._modifying or ModifyingOptions()
         if options.flush_automatically:
             await _flush_pending(session)
         result = await session.execute(statement)
-        count = int(getattr(result, "rowcount", 0) or 0)
+        count = int(getattr(result, "rowcount", -1))
+        if count < 0 and dialect.name == "sqlite":
+            # Python's sqlite3 counts the rows of a statement that starts with INSERT, UPDATE, DELETE or REPLACE
+            # only: SQLite itself knows how many rows a WITH ... UPDATE changed.
+            count = int((await session.execute(text("SELECT changes()"))).scalar_one())
+        count = max(count, 0)
         if options.clear_automatically:
             session.expunge_all()
         return None if self._shape.kind is ResultKind.NONE else count
@@ -760,15 +944,20 @@ async def _flush_pending(session: AsyncSession) -> None:
         await session.flush()
 
 
-def _joined_as_selectin(entity: type) -> list[Any]:
-    """``selectin`` loads of the relationships *entity*'s mapping loads with a join (``lazy="joined"``): a text
-    statement cannot be joined to them, so each is loaded with one more statement instead, and is there on the
-    results as a read of the entity has it."""
+_EAGER_FROM_THE_STATEMENT: tuple[Any, ...] = ("joined", False, "subquery")
+"""The loading strategies that load a relationship from the statement itself: with a join, or with a subquery of
+it (``lazy="subquery"``)."""
+
+
+def _eager_as_selectin(entity: type) -> list[Any]:
+    """``selectin`` loads of the relationships *entity*'s mapping loads from the statement itself (``lazy="joined"``
+    or ``lazy="subquery"``): a text statement can be neither joined nor nested, so each is loaded with one more
+    statement instead, and is there on the results as a read of the entity has it."""
     mapper: Mapper[Any] = sa_inspect(entity)
     return [
         selectinload(getattr(entity, relationship.key))
         for relationship in mapper.relationships
-        if relationship.lazy in ("joined", False)
+        if relationship.lazy in _EAGER_FROM_THE_STATEMENT
     ]
 
 
@@ -792,7 +981,7 @@ class QueryExecutor:
         entity: type[T],
         *,
         name: str | None = None,
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
+    ) -> CompiledQuery:
         """Compile a ``@query``-decorated method into an executable async function.
 
         Args:
@@ -814,16 +1003,19 @@ class QueryExecutor:
             raise AttributeError(f"{method} is not decorated with @query (missing __pyfly_query__)")
         function = inspect.unwrap(method)
         described: str = name or str(getattr(function, "__qualname__", repr(function)))
-        try:
-            hints = get_type_hints(function, localns={entity.__name__: entity})
-        except Exception as error:  # noqa: BLE001 — any failure to evaluate an annotation
-            # A name imported only for type checking: the query runs as an unannotated one (as it did before its
-            # result followed the annotation), and the log says why.
+        hints, unresolved = resolved_annotations(function, {entity.__name__: entity})
+        if unresolved:
+            # A name imported only for type checking: that annotation is read as absent (an unresolved return
+            # annotation runs the query as an unannotated one, as before its result followed the annotation), the
+            # others still count, and the log says which did not resolve and why.
             _logger.warning(
                 "query_method_annotations_unresolved",
-                extra={"method": described, "error": f"{type(error).__name__}: {error}"},
+                extra={
+                    "method": described,
+                    "annotations": ", ".join(unresolved),
+                    "error": "; ".join(f"{type(error).__name__}: {error}" for error in unresolved.values()),
+                },
             )
-            hints = {}
         signature = inspect.signature(function)
         parameters = list(signature.parameters.values())[1:]  # after self
         for parameter in parameters:

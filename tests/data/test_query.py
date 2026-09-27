@@ -20,7 +20,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import Integer, String
+from sqlalchemy import Integer, String, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -31,7 +31,7 @@ from pyfly.data.query import modifying
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
-from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, transpile_jpql
+from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, tokenize, transpile_jpql
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
@@ -165,6 +165,17 @@ class QGroup(Base):
     active: Mapped[bool] = mapped_column(default=True)
 
 
+class QNode(Base):
+    """A tree: a node's parent is another node of the same table."""
+
+    __tablename__ = "q_node"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    children: Mapped[int] = mapped_column(Integer, default=0)
+    leaf: Mapped[bool] = mapped_column(default=False)
+
+
 ITEM_COLUMNS = (
     "i.name, i.email, i.role, i.active, i.score, i.id, i.created_at, i.updated_at, i.created_by, i.updated_by"
 )
@@ -172,6 +183,11 @@ ITEM_COLUMNS = (
 
 def _sql(jpql: str, entity: type = Item, dialect: Any = None, **kwargs: Any) -> str:
     return transpile_jpql(jpql, entity, dialect, **kwargs).sql
+
+
+def _rendered(sql: str) -> str:
+    """*sql* as ``text()`` sends it to PostgreSQL (its ``\\:`` escapes resolved)."""
+    return str(text(sql).compile(dialect=postgresql.dialect()))
 
 
 class TestJpqlTranspiler:
@@ -247,6 +263,23 @@ class TestJpqlTranspiler:
         assert transpiled.binds == ("email",)
         assert "'a\\:b'" in transpiled.sql
 
+    @pytest.mark.parametrize("literal", ["'10:30'", "'10\\:30'", "'a :b'", "'a \\:b'"])
+    def test_a_colon_escaped_or_not_reaches_the_database_as_a_colon(self, literal: str):
+        """``\\:`` was the documented way to keep a colon out of the parameters of ``text()``, so queries written
+        before carry it: it is escaped once, never twice (a doubled escape left a backslash in the literal)."""
+        expected = literal.replace("\\", "")
+        jpql = transpile_jpql(f"SELECT i.id FROM Item i WHERE i.name = {literal}", Item)
+        assert _rendered(jpql.sql) == f"SELECT i.id FROM q_items i WHERE i.name = {expected}"
+
+    def test_colons_in_comments_and_quoted_names_are_not_parameters(self):
+        transpiled = transpile_jpql(
+            'SELECT i.id AS "id:label" FROM Item i -- :unused is not a parameter\nWHERE i.role = :role', Item
+        )
+        assert transpiled.binds == ("role",)
+        rendered = text(transpiled.sql).compile(dialect=postgresql.dialect())
+        assert set(rendered.params) == {"role"}
+        assert '"id:label"' in str(rendered) and "-- :unused is not a parameter" in str(rendered)
+
     def test_update_and_delete_drop_the_alias(self):
         update = "UPDATE Item i SET i.active = false, i.score = i.score + 1 WHERE i.role = :role"
         assert _sql(update, dialect=postgresql.dialect()) == (
@@ -254,6 +287,50 @@ class TestJpqlTranspiler:
         )
         delete = "DELETE FROM QGroup AS g WHERE g.label = :label"
         assert _sql(delete, QGroup, postgresql.dialect()) == 'DELETE FROM "group" WHERE "group".title = :label'
+
+    def test_update_and_delete_keep_the_alias_of_a_subquery_over_their_own_entity(self):
+        """Only the target's alias is dropped: a subquery over the same entity keeps its own, so the subquery stays
+        correlated with the row being changed (dropping every alias made ``c.parent_id = n.id`` compare a row with
+        itself, and changed every row that has a child instead of the leaves)."""
+        dialect = postgresql.dialect()
+        delete = "DELETE FROM QNode n WHERE NOT EXISTS (SELECT 1 FROM QNode c WHERE c.parent_id = n.id)"
+        assert _sql(delete, QNode, dialect) == (
+            "DELETE FROM q_node WHERE NOT EXISTS (SELECT 1 FROM q_node c WHERE c.parent_id = q_node.id)"
+        )
+        update = (
+            "UPDATE QNode AS n SET n.leaf = true WHERE NOT EXISTS (SELECT 1 FROM QNode AS c WHERE c.parent_id = n.id)"
+        )
+        assert _sql(update, QNode, dialect) == (
+            "UPDATE q_node SET leaf = true WHERE NOT EXISTS (SELECT 1 FROM q_node AS c WHERE c.parent_id = q_node.id)"
+        )
+        counted = "UPDATE QNode n SET n.children = (SELECT COUNT(c) FROM QNode c WHERE c.parent_id = n.id)"
+        assert _sql(counted, QNode, dialect) == (
+            "UPDATE q_node SET children = (SELECT COUNT(*) FROM q_node c WHERE c.parent_id = q_node.id)"
+        )
+
+    def test_an_alias_a_subquery_declares_again_names_the_subquerys_entity_inside_it(self):
+        """``n`` inside the subquery is the subquery's ``n``, as SQL scopes it; outside, the target's."""
+        shadowed = "DELETE FROM QNode n WHERE n.id IN (SELECT n.parent_id FROM QNode n WHERE n.children > :floor)"
+        assert _sql(shadowed, QNode, postgresql.dialect()) == (
+            "DELETE FROM q_node WHERE q_node.id IN (SELECT n.parent_id FROM q_node n WHERE n.children > :floor)"
+        )
+
+    def test_a_with_clause_introduces_the_statement(self):
+        """The statement's kind is the verb after its ``WITH`` clause, and its target is found there too."""
+        transpiled = transpile_jpql(
+            "WITH roots AS (SELECT r.id FROM QNode r WHERE r.parent_id IS NULL) "
+            "DELETE FROM QNode n WHERE n.parent_id IN (SELECT roots.id FROM roots)",
+            QNode,
+            postgresql.dialect(),
+        )
+        assert (transpiled.kind, transpiled.is_dml) == ("DELETE", True)
+        assert transpiled.sql == (
+            "WITH roots AS (SELECT r.id FROM q_node r WHERE r.parent_id IS NULL) "
+            "DELETE FROM q_node WHERE q_node.parent_id IN (SELECT roots.id FROM roots)"
+        )
+        selected = transpile_jpql("WITH x AS (SELECT 1 AS one) SELECT n.id FROM QNode n", QNode)
+        assert (selected.kind, selected.is_dml) == ("SELECT", False)
+        assert [label for label, _type in selected.columns] == ["id"]  # the select list after the WITH clause
 
     def test_an_unknown_attribute_or_an_unterminated_literal_fails(self):
         with pytest.raises(InvalidQueryMethodError, match="no attribute or column 'nmae'"):
@@ -321,6 +398,9 @@ class _Unresolved(Repository[Item, UUID]):
     @query("SELECT i FROM Item i WHERE i.role = :role")
     async def by_role(self, role: str) -> list[OnlyForTypeChecking]: ...  # type: ignore[name-defined]  # noqa: F821
 
+    @query("SELECT i.name FROM Item i WHERE i.role = :role ORDER BY i.name")
+    async def names_by_role(self, role: RoleOnlyForTypeChecking) -> list[str]: ...  # type: ignore[name-defined]  # noqa: F821
+
 
 class TestAnUnresolvedAnnotation:
     async def test_the_query_runs_as_an_unannotated_one(
@@ -334,6 +414,112 @@ class TestAnUnresolvedAnnotation:
     async def test_the_repository_builds(self, seeded_session: AsyncSession):
         repo = RepositoryBeanPostProcessor().after_init(_Unresolved(Item, seeded_session), "unresolved")
         assert sorted(item.name for item in await repo.by_role("user")) == ["Bob", "Dave"]
+
+    async def test_an_unresolved_parameter_annotation_leaves_the_return_annotation_in_force(
+        self, executor: QueryExecutor, seeded_session: AsyncSession, caplog: pytest.LogCaptureFixture
+    ):
+        """Each annotation resolves on its own: a parameter's that does not resolve no longer turns a query of
+        names into an entity query."""
+        with caplog.at_level("WARNING", logger="pyfly.data.relational.sqlalchemy.query"):
+            compiled = executor.compile_query_method(_Unresolved.names_by_role, Item)
+        unresolved = [
+            record for record in caplog.records if record.getMessage() == "query_method_annotations_unresolved"
+        ]
+        assert [record.annotations for record in unresolved] == ["role"]  # type: ignore[attr-defined]
+        assert await compiled(seeded_session, role="admin") == ["Alice", "Carol"]
+
+
+class _Statements(Repository[Item, UUID]):
+    """Statements of each verb, for what they read and write."""
+
+    @modifying
+    @query(
+        "WITH low AS (SELECT id FROM q_items WHERE score < :floor) "
+        "DELETE FROM q_items WHERE id IN (SELECT id FROM low)",
+        native=True,
+    )
+    async def purge_below(self, floor: int) -> int: ...
+
+    @query("CALL archive_items(:floor)", native=True)
+    async def archive(self, floor: int) -> None: ...
+
+    @query("WITH gone AS (DELETE FROM q_items WHERE score < :floor RETURNING id) SELECT id FROM gone", native=True)
+    async def take_below(self, floor: int) -> list[UUID]: ...
+
+    @query(
+        "WITH top AS (SELECT i.id FROM Item i WHERE i.score > :floor) "
+        "SELECT i FROM Item i WHERE i.id IN (SELECT id FROM top)"
+    )
+    async def above(self, floor: int) -> list[Item]: ...
+
+    @query("SELECT i FROM Item i WHERE i.name = REPLACE(:name, '-', ' ')")
+    async def named(self, name: str) -> list[Item]: ...
+
+    @query("ANALYZE q_items", native=True)
+    async def analyze(self) -> None: ...
+
+
+class TestWhatAStatementDoes:
+    """The verb after a ``WITH`` clause decides whether a statement is ``@modifying``; only a statement that
+    changes nothing runs in a read unit."""
+
+    @pytest.mark.parametrize(
+        ("method", "modifying", "reads"),
+        [
+            ("purge_below", True, False),
+            ("archive", False, False),
+            ("take_below", False, False),
+            ("above", False, True),
+            ("named", False, True),
+        ],
+    )
+    def test_what_each_statement_does(self, method: str, modifying: bool, reads: bool):
+        compiled = QueryExecutor().compile_query_method(getattr(_Statements, method), Item)
+        assert (compiled.is_modifying, compiled.reads) == (modifying, reads)
+
+    async def test_a_statement_run_for_what_it_does_returns_none(
+        self, executor: QueryExecutor, seeded_session: AsyncSession
+    ):
+        compiled = executor.compile_query_method(_Statements.analyze, Item)
+        assert await compiled(seeded_session) is None
+
+    async def test_a_with_clause_before_a_modifying_statement_counts_its_rows_on_sqlite(
+        self, executor: QueryExecutor, seeded_session: AsyncSession
+    ):
+        """Python's sqlite3 reports no row count for a statement that starts with ``WITH``: SQLite's does."""
+        compiled = executor.compile_query_method(_Statements.purge_below, Item)
+        assert await compiled(seeded_session, floor=80) == 2  # Bob (70) and Dave (60)
+
+
+class TestLiteralsAsEachDialectReadsThem:
+    """MySQL and MariaDB escape a quote with a backslash; PostgreSQL has ``E'...'`` and dollar-quoted literals."""
+
+    def test_a_backslash_escaped_quote_is_a_mysql_literal(self):
+        sql = "SELECT id FROM q_items WHERE name = 'it\\'s :x' AND role = :role"
+        strings = [token.text for token in tokenize(sql, mysql.dialect()) if token.kind == "string"]
+        assert strings == ["'it\\'s :x'"]
+
+        @query(sql, native=True)
+        async def mysql_query(self, role: str) -> list[int]: ...
+
+        compiled = QueryExecutor().compile_query_method(mysql_query, Item)  # read as MySQL reads it: no error
+        assert compiled.reads is True
+
+    def test_the_standard_reading_comes_first_elsewhere(self):
+        sql = "SELECT id FROM q_items WHERE name = 'C:\\' AND role = :role"
+        strings = [token.text for token in tokenize(sql, postgresql.dialect()) if token.kind == "string"]
+        assert strings == ["'C:\\'"]
+        assert [token.text for token in tokenize(sql, mysql.dialect()) if token.kind == "bind"] == [":role"]
+
+    def test_postgresql_escape_strings_and_dollar_quotes_are_literals(self):
+        sql = "SELECT E'it\\'s :a', $$ it's :b $$, $body$ :c $body$, :d"
+        tokens = tokenize(sql, postgresql.dialect())
+        assert [token.text for token in tokens if token.kind == "string"] == [
+            "E'it\\'s :a'",
+            "$$ it's :b $$",
+            "$body$ :c $body$",
+        ]
+        assert [token.text for token in tokens if token.kind == "bind"] == [":d"]
 
 
 class TestQueryMethodsAreCheckedAtStartup:
