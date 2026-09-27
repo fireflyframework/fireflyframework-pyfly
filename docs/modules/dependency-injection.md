@@ -209,7 +209,7 @@ Resolves an instance of the given type. The resolution order is:
 1. **Direct registration** -- if `cls` is registered, resolve it. When several beans share that
    exact class (two `@bean` methods that both return `AsyncEngine`), the one marked `@primary`
    (or `@bean(primary=True)`) answers; without exactly one primary the lookup raises
-   `NoUniqueBeanError`, naming the beans. Until 26.09.07 the bean registered **last** answered
+   `NoUniqueBeanError`, naming the beans (and, when several are `@primary`, those). Until 26.09.07 the bean registered **last** answered
    silently. Resolve one of them by name or `Qualifier`, or all of them with `list[T]`.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
 3. **Multiple bindings** -- pick the implementation marked `@primary`.
@@ -1366,8 +1366,10 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
    a client pool) is **deferred** rather than failed: its declared return type is registered now,
    so `@conditional_on_missing_bean` in step 2b still sees it, and the factory runs in step 2d.
    Parameters are resolved before the factory runs, so a deferred factory never starts twice.
-   The declared type is the class the hint names: `-> Port | None` claims `Port`, a two-class
-   union claims nothing, and a factory that answers `None` registers nothing.
+   The declared type is the class the hint names: `-> Port | None` claims `Port`, a parametrized
+   hint claims its origin class (`-> async_sessionmaker[AsyncSession]` claims `async_sessionmaker`,
+   so the auto-configured session factory backs off), a two-class union claims nothing, and a
+   factory that answers `None` registers nothing.
 2b. **Evaluate conditions (pass 2)** -- removes beans that fail bean-dependent conditions
     (`@conditional_on_bean`, `@conditional_on_missing_bean`).
 2c. **Process `@auto_configuration` classes** -- resolves auto-configuration `@bean` methods
