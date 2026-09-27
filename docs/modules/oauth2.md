@@ -840,7 +840,11 @@ a revocation is one `UPDATE` of the family and one `DELETE` of its tokens, whate
 the family's length. A refresh costs two pool checkouts and one commit. No
 operation joins a unit of work of its caller: a grant is a security decision the
 client acts on at once, so a caller's rollback must not resurrect a used code or a
-revoked family. Records that expired more than `purge_grace` (one hour) ago are
+revoked family. On SQLite, which allows one writer at a time, a grant called
+inside a unit of work that has written on the store's datasource raises
+`IllegalTransactionStateError` (the grant's own unit would wait for the caller's
+write lock): call the token endpoint outside that unit, or give the store a
+datasource of its own (`token-store.datasource`). Records that expired more than `purge_grace` (one hour) ago are
 purged, a batch at a time, by writes at most once a minute, and by
 `purge_expired()`. The datasource is resolved in the context's
 `DataSourceRegistry`: `token-store.datasource` names one, `token-store.url` is an
@@ -850,8 +854,9 @@ server starts if `pyfly.data.relational.ddl-auto` allows it, otherwise checked
 (list `framework_metadata` in Alembic's `target_metadata` to migrate them).
 
 **The Redis store** keeps a record as a hash at `<key_prefix><kind>:<id>` and a
-family as a hash at `<key_prefix>family:<id>` with the set of its tokens; every
-key expires at its record's expiry plus `purge_grace`. A revocation or replay
+family as a hash at `<key_prefix>family:<id>` with the set of its unused tokens (a
+rotation removes the token it used, so the set does not grow with the family's
+length); every key expires at its record's expiry plus `purge_grace`. A revocation or replay
 reaches keys the presented token does not name, so on Redis Cluster the store
 needs its keys on one shard.
 
@@ -861,8 +866,15 @@ needs its keys on one shard.
 > SQL table (a JSON blob per key, with a family blob growing per rotation) was
 > never purged. The SQL store's old table, `pyfly_oauth2_tokens`, is not read:
 > refresh tokens issued before the upgrade are refused (clients authenticate
-> again); drop that table afterwards. The Redis and SQL adapters no longer offer
-> the key-value `store`/`find`/`revoke` operations.
+> again); drop that table afterwards. The Redis store no longer reads its old
+> layout either (a JSON string per key at `<key_prefix><id>`,
+> `<key_prefix>authcode:<code>`, `<key_prefix>par:<request_uri>` and
+> `<key_prefix>family:<id>`): refresh tokens, codes and pushed requests written
+> before the upgrade are refused, and clients authenticate again. Those keys expire
+> with the `ttl` they were written with; without one, delete the keys of type
+> `string` under the prefix (the new layout writes hashes and sets only). The Redis
+> and SQL adapters no longer offer the key-value `store`/`find`/`revoke`
+> operations.
 
 ### Signing-secret hardening
 

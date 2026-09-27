@@ -119,3 +119,24 @@ async def test_records_load_by_kind_and_exact_id(redis_store: tuple[RedisTokenSt
     assert record is not None and record.client_id == "svc" and not record.used and record.family_active
     assert await store.load(AUTHORIZATION_CODE, token) is None
     assert await store.load(REFRESH_TOKEN, token.swapcase()) is None
+
+
+@requires_docker
+async def test_a_family_keeps_only_its_unused_token(redis_store: tuple[RedisTokenStore, Any]) -> None:
+    """C072 (review): each rotation added its token to the family's set and never removed the one it used, so
+    the set grew for as long as the family rotated, and a revocation deleted every member in one script."""
+    store, client = redis_store
+    authorization_server = grants.server(store)
+    first = token = await grants.issue(authorization_server)
+    for _rotation in range(25):
+        token = (await grants.refresh(authorization_server, token))["refresh_token"]
+
+    record = await store.load(REFRESH_TOKEN, token)
+    assert record is not None and record.family_id is not None
+    members = f"{store.key_prefix}family:{record.family_id}:tokens"
+    assert [member.decode() for member in await client.smembers(members)] == [token]
+
+    # A used token is still there to be replayed, and its replay still revokes the family.
+    assert isinstance(await grants.attempt(grants.refresh(authorization_server, first)), SecurityException)
+    assert not await grants.is_active(authorization_server, token)
+    assert await client.exists(members) == 0

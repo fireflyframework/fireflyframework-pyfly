@@ -22,8 +22,10 @@ deletes the family's tokens) is never undone by a rotation in flight.
 
 Layout, under *key_prefix*: a record is a hash at ``<prefix><kind>:<id>`` (``client_id``, ``expires_at``,
 ``used``, ``family_id``, ``data``); a family is a hash at ``<prefix>family:<id>`` (``client_id``,
-``active``, ``expires_at``) with the set of its refresh tokens at ``<prefix>family:<id>:tokens``. Every key
-expires at its record's expiry plus *purge_grace*, so nothing is kept forever. A revocation and a replay
+``active``, ``expires_at``) with the set of its unused refresh tokens at ``<prefix>family:<id>:tokens`` (a
+rotation removes the token it used, so a revocation deletes the live ones only; a used token stays until it
+expires, for a late replay to revoke the family). Every key expires at its record's expiry plus
+*purge_grace*, so nothing is kept forever. A revocation and a replay
 reach keys the presented token does not name, so on Redis Cluster the store needs all of its keys on one
 shard (a single-shard deployment).
 
@@ -128,7 +130,7 @@ return 'granted'
 )
 
 # KEYS: presented token, family, members, new token.
-# ARGV: prefix, now, token_id, client_id, expires_at, family_id, data, expire_at.
+# ARGV: prefix, now, token_id, client_id, expires_at, family_id, data, expire_at, presented token_id.
 _ROTATE = (
     _REVOKE
     + _STORE_TOKEN
@@ -149,6 +151,8 @@ if tonumber(redis.call('HGET', presented, 'expires_at')) < tonumber(ARGV[2]) the
 end
 redis.call('HSET', presented, 'used', '1')
 store_token(KEYS[4], KEYS[3], KEYS[2], ARGV[3], ARGV[4], ARGV[5], ARGV[6], ARGV[7], ARGV[8])
+-- After the new token joined the set: an emptied set would be deleted, and recreated without its expiry.
+redis.call('SREM', KEYS[3], ARGV[9])
 return 'granted'
 """
 )
@@ -298,7 +302,7 @@ class RedisTokenStore:
     async def rotate(self, token_id: str, token: TokenRecord, *, now: int) -> GrantOutcome:
         family, members = self._family_keys(str(token.family_id))
         keys = [self._key(token.kind, token_id), family, members, self._key(token.kind, token.token_id)]
-        outcome = await self._run("rotate", keys, [self._prefix, now, *self._token_args(token)])
+        outcome = await self._run("rotate", keys, [self._prefix, now, *self._token_args(token), token_id])
         return GrantOutcome(_text(outcome))
 
     async def take(self, kind: str, token_id: str, *, client_id: str, now: int) -> TokenRecord | None:

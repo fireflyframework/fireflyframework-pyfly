@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 from collections.abc import Iterator
 from contextvars import ContextVar
@@ -92,7 +93,7 @@ async def test_grant_semantics(relational_backend: RelationalBackend, scenario: 
 
 
 async def test_two_servers_on_one_database_redeem_a_code_once(relational_backend: RelationalBackend) -> None:
-    """Two replicas (two engines, two stores) behind a load balancer honour one code once."""
+    """Two replicas (two engines, two stores) behind a load balancer honor one code once."""
     async with _store(relational_backend) as (store, _engine):
         other = PostgresTokenStore(relational_backend.create_engine())
         first, second = grants.server(store), grants.server(other)
@@ -260,6 +261,22 @@ async def test_a_refresh_is_two_checkouts_and_one_writing_unit(relational_backen
 
         assert len(checkouts) == 2
         assert [verb for verb in counter.verbs() if verb in _WRITES] == ["UPDATE", "UPDATE", "INSERT"]
+
+
+async def test_boolean_columns_are_compared_with_equality(relational_backend: RelationalBackend) -> None:
+    """``used IS 0`` / ``active IS 1`` (what ``is_(False)`` renders without a native boolean) is not valid SQL
+    on SQL Server; ``= 0`` / ``= false`` is, on every backend."""
+    async with _store(relational_backend) as (store, engine):
+        authorization_server = grants.server(store)
+        with StatementCounter(engine) as counter:
+            token = await grants.issue(authorization_server)
+            rotated = (await grants.refresh(authorization_server, token))["refresh_token"]
+            await grants.attempt(grants.refresh(authorization_server, token))
+            await grants.redeem(authorization_server, await grants.code_for(authorization_server))
+            await authorization_server.revoke(rotated)
+
+        boolean_is = re.compile(r"\bIS\s+(?:NOT\s+)?(?:0|1|TRUE|FALSE)\b", re.IGNORECASE)
+        assert [statement.sql for statement in counter.statements if boolean_is.search(statement.sql)] == []
 
 
 @pytest.mark.backends(PG, MYSQL, MARIADB)

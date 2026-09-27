@@ -247,7 +247,7 @@ class PostgresTokenStore:
     async def redeem(self, code: str, token: TokenRecord, *, now: int) -> GrantOutcome:
         """Consume *code* with one conditional ``UPDATE`` (which records the family it issues), then open the
         family and store *token*, in one unit. A code consumed already revokes that family."""
-        from sqlalchemy import insert, select, update
+        from sqlalchemy import false, insert, select, update
 
         grants, families = self._both()
         async with self._unit() as session:
@@ -256,7 +256,7 @@ class PostgresTokenStore:
                 .where(
                     grants.c.token_id == code,
                     grants.c.kind == AUTHORIZATION_CODE,
-                    grants.c.used.is_(False),
+                    grants.c.used == false(),
                     grants.c.expires_at >= _instant(now),
                 )
                 .values(used=True, family_id=token.family_id)
@@ -287,7 +287,7 @@ class PostgresTokenStore:
     async def rotate(self, token_id: str, token: TokenRecord, *, now: int) -> GrantOutcome:
         """Lock the family while it is active (extending its expiry), consume *token_id* with one conditional
         ``UPDATE``, and store *token*, in one unit. A token consumed already revokes the family."""
-        from sqlalchemy import case, insert, select, update
+        from sqlalchemy import case, false, insert, select, true, update
 
         grants, families = self._both()
         family_id = token.family_id
@@ -296,7 +296,7 @@ class PostgresTokenStore:
             # The family's row first: rotations and revocations of one family queue on it.
             locked = await session.execute(
                 update(families)
-                .where(families.c.family_id == family_id, families.c.active.is_(True))
+                .where(families.c.family_id == family_id, families.c.active == true())
                 .values(expires_at=case((families.c.expires_at < until, until), else_=families.c.expires_at))
             )
             if _rowcount(locked) != 1:
@@ -307,7 +307,7 @@ class PostgresTokenStore:
                     grants.c.token_id == token_id,
                     grants.c.kind == REFRESH_TOKEN,
                     grants.c.family_id == family_id,
-                    grants.c.used.is_(False),
+                    grants.c.used == false(),
                     grants.c.expires_at >= _instant(now),
                 )
                 .values(used=True)
