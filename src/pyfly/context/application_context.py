@@ -405,7 +405,7 @@ class ApplicationContext:
         # instance has no alias: nothing caches it on a registration.
         units: list[tuple[str, Any, list[Registration]]] = []
         groups_by_id: dict[int, list[Registration]] = {}
-        for reg in self._container._registrations.values():
+        for reg in self._all_registrations():
             if reg.instance is None:
                 continue
             grp = groups_by_id.get(id(reg.instance))
@@ -1271,11 +1271,12 @@ class ApplicationContext:
         """Registrations with a resolved instance, de-duplicated by identity.
 
         An interface-typed @bean is registered under two keys sharing one
-        instance; wiring passes must visit each instance once (audit #113).
+        instance; wiring passes must visit each instance once (audit #113). Two beans of one
+        class share a by-type slot, so every registration is visited, not only the slots.
         """
         seen: set[int] = set()
         out: list[Registration] = []
-        for reg in self._container._registrations.values():
+        for reg in self._all_registrations():
             if reg.instance is None or id(reg.instance) in seen:
                 continue
             seen.add(id(reg.instance))
@@ -1412,7 +1413,9 @@ class ApplicationContext:
             from pyfly.scheduling.task_scheduler import TaskScheduler
         except ImportError:
             return
-        beans = [reg.instance for reg in self._container._registrations.values() if reg.instance is not None]
+        # Each bean once: a @bean declared as a port is registered under two keys, and scanning both
+        # scheduled its methods twice.
+        beans = [reg.instance for reg in self._unique_live_instances()]
 
         # Prefer a container-managed TaskScheduler bean (from auto-config)
         scheduler = None

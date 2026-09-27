@@ -27,7 +27,9 @@ application, on a SQLite file database.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +45,12 @@ from pyfly.container import bean, component, configuration, service  # noqa: E40
 from pyfly.container.exceptions import BeanCreationNotAllowedError  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.context.events import ContextClosedEvent, app_event_listener  # noqa: E402
-from pyfly.context.lifecycle import pre_destroy  # noqa: E402
+from pyfly.context.lifecycle import post_construct, pre_destroy  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
 from pyfly.data.relational.datasource_registry import DataSourceRegistry  # noqa: E402
 from pyfly.data.relational.sqlalchemy.entity import Base  # noqa: E402
 from pyfly.kernel.lifecycle import CONSUMER_PHASE  # noqa: E402
+from pyfly.scheduling.decorators import scheduled  # noqa: E402
 
 EVENTS: list[str] = []
 
@@ -410,3 +413,61 @@ async def test_the_registry_closes_last_whatever_the_registration_order(
     assert "adapter_stop_failed" not in caplog.text
     with pytest.raises(Exception, match="no such table"):
         await _bodies(url)
+
+
+# ---------------------------------------------------------------------------
+# Every bean is post-processed, wired and scheduled once, including a second bean of one class and
+# a @bean registered under its port.
+# ---------------------------------------------------------------------------
+
+
+class _Beeper:
+    """A port."""
+
+
+class _ScheduledBeeper(_Beeper):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @post_construct
+    def ready(self) -> None:
+        EVENTS.append(f"{self.name}.post_construct")
+
+    @scheduled(fixed_rate=timedelta(seconds=60))
+    async def beep(self) -> None:
+        EVENTS.append(f"{self.name}.beep")
+
+
+@configuration
+class _BeeperConfiguration:
+    @bean
+    def port_beeper(self) -> _Beeper:
+        return _ScheduledBeeper("port")
+
+    @bean
+    def first_beeper(self) -> _ScheduledBeeper:
+        return _ScheduledBeeper("first")
+
+    @bean
+    def second_beeper(self) -> _ScheduledBeeper:
+        return _ScheduledBeeper("second")
+
+
+async def test_every_bean_is_initialized_and_scheduled_once() -> None:
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_BeeperConfiguration)
+    await ctx.start()
+    try:
+        for _ in range(50):  # the fixed-rate loops fire once right away
+            if len([event for event in EVENTS if event.endswith(".beep")]) >= 3:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await ctx.stop()
+
+    assert sorted(event for event in EVENTS if event.endswith(".post_construct")) == [
+        "first.post_construct",
+        "port.post_construct",
+        "second.post_construct",
+    ]
+    assert sorted(event for event in EVENTS if event.endswith(".beep")) == ["first.beep", "port.beep", "second.beep"]
