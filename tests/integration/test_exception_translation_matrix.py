@@ -125,6 +125,23 @@ async def test_a_duplicate_key_is_a_duplicate_key_exception(relational_backend: 
     _assert_sanitized(error)
 
 
+async def test_a_duplicate_value_that_quotes_a_key_does_not_name_the_constraint(
+    relational_backend: RelationalBackend,
+) -> None:
+    """MySQL/MariaDB report "Duplicate entry '<value>' for key '<key>'": the key named last is the constraint,
+    whatever the duplicated value says."""
+    decoy = "bob' for key 'decoy.example.org"
+    factory = await _sessions(relational_backend)
+    async with factory() as session:
+        await TranslationAccountRepository(session=session).save(_account(email=decoy))
+        await session.commit()
+
+    error = await _failed_save(factory, _account(email=decoy, nickname="again"))
+
+    assert isinstance(error, DuplicateKeyException)
+    assert error.context == {"violation": "unique", "constraint": UNIQUE_EMAIL}
+
+
 async def test_a_foreign_key_violation(relational_backend: RelationalBackend) -> None:
     factory = await _sessions(relational_backend)
 

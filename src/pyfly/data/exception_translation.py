@@ -245,10 +245,12 @@ def _postgresql_constraint(driver_error: Any) -> str | None:
 
 def _mysql_constraint(message: str) -> str | None:
     for pattern in (_MYSQL_KEY, _MYSQL_CONSTRAINT, _MYSQL_CHECK):
-        found = pattern.search(message)
-        if found is not None:
-            # MySQL 8 names a unique key 'table.key'.
-            return found.group(1).rsplit(".", 1)[-1]
+        found = pattern.findall(message)
+        if found:
+            # The last match: "Duplicate entry '<value>' for key '<key>'" quotes the duplicated value first,
+            # and that value may read like a key. MySQL 8 names a unique key 'table.key'.
+            name: str = found[-1]
+            return name.rsplit(".", 1)[-1]
     return None
 
 
