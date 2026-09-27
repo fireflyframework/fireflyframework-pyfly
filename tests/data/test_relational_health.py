@@ -615,6 +615,22 @@ class TestCheckoutEntry:
             await registry.close()
             await other.close()
 
+    async def test_an_observer_that_raises_leaves_the_entry_in_the_pool(self, tmp_path: Path) -> None:
+        registry = _sqlite_registry(tmp_path / "raising.db")
+        engine = registry.primary.engine
+
+        def _raising(_entry: Any) -> None:
+            raise LookupError("observer failed")
+
+        try:
+            await _raw_connection(engine)
+            with observing_checkouts(_raising), pytest.raises(LookupError):
+                await _raw_connection(engine)
+            assert engine.pool.checkedout() == 0
+            assert await _raw_connection(engine) is not None  # the entry went back and serves the next checkout
+        finally:
+            await registry.close()
+
     async def test_a_task_started_during_the_checks_pre_ping_leaves_its_entry_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

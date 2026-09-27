@@ -181,7 +181,8 @@ def observing_checkouts(observer: Callable[[ConnectionPoolEntry], None], *, pool
     Only the checkouts of the task that entered the block are reported, and only from *pool* when it
     is given. A task created inside the block copies the context variable that carries the observer,
     but its checkouts are not reported, and neither are those made in a thread the context was copied
-    to; outside a task nothing is. Other pool classes report nothing.
+    to; outside a task nothing is. Other pool classes report nothing. When *observer* raises, the entry
+    goes back to the pool and the checkout fails with that exception.
     """
     task = _current_task()
     token = _CHECKOUT_OBSERVER.set((task, pool, observer) if task is not None else None)
@@ -230,7 +231,11 @@ class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
             task, pool, observer = observing
             # Not a task, or a thread, that merely inherited the context; not a checkout of another pool.
             if _current_task() is task and (pool is None or pool is self):
-                observer(entry)
+                try:
+                    observer(entry)
+                except BaseException:
+                    self._do_return_conn(entry)  # no fairy holds it yet: nothing else would give it back
+                    raise
         return entry
 
     def recreate(self) -> MeteredAsyncQueuePool:
