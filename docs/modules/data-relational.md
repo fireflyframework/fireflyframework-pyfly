@@ -819,7 +819,10 @@ The beans you already inject keep their names and types, and each is now a view 
 - `named_data_sources` is a live view;
 - `db_health_indicator` checks every datasource;
 - `query_metrics` covers every engine;
-- `engine_lifecycle` leaves disposal to the registry.
+- `engine_lifecycle` leaves disposal to the registry;
+- `primary_transaction_manager` (new) is the primary's `SqlAlchemyTransactionManager`, on the
+  `async_session_factory` bean: the `transaction_manager_registry` serves the `primary` datasource with
+  it (see **Overriding the beans** below).
 
 A relational application with no `pyfly.data.relational.url` **fails at startup**. Before 26.09.08
 it silently opened `./app.db` in the working directory. With the `dev` profile active, it falls back
@@ -830,24 +833,51 @@ to `sqlite+aiosqlite:///./app.db` and logs a warning.
 own **singleton** `AsyncEngine`, `async_sessionmaker`, `RoutingSessionFactory` or
 `DataSourceRegistry` bean and the framework's backs off (the beans that take them, such as the
 health indicator and the engine lifecycle, use yours, and the engine lifecycle disposes an engine
-that is not a registry engine). Such a bean replaces the application's **primary**. When several
-beans share a class, the `@primary` one is injected, and a lookup by that class raises
-`NoUniqueBeanError` when none is primary. Named and module datasources are still built by the
-registry.
+that is not a registry engine). When several beans share a class, the `@primary` one is injected,
+and a lookup by that class raises `NoUniqueBeanError` when none is primary. Named and module
+datasources are still built by the registry.
+
+Such a bean replaces the application's **primary everywhere**, as a `DataSource` or an
+`EntityManagerFactory` bean does in Spring Boot. The `primary_transaction_manager` bean serves the
+`primary` datasource on the primary `async_sessionmaker` bean (yours, the one over your engine, or
+your registry's), so every unit of work runs on it: `@transactional`, repository calls outside a
+transaction, `SessionProvider`, `infrastructure_unit()`, the `AsyncSession` bean, and what maps your
+factory to its manager (`reactive_transactional(factory)`, a `_session_factory` attribute). A
+`DataSourceRegistry` bean gives `async_engine` and the other relational beans their engine too.
+
+- A session factory over the registry's primary engine (other session options: a session class,
+  `expire_on_commit`) keeps the primary's replica, begin options and after-begin customizers; a
+  read-only unit on the replica gets your session options there.
+- A session factory over an engine of its own, or the factory over your `AsyncEngine` bean, gets
+  the capabilities and begin options of that engine's dialect and no after-begin customizers: the
+  registry applies those to the datasources it builds.
+- The framework disposes what it disposed before: the registry's engines, and an `AsyncEngine`
+  bean the registry does not own (through the engine lifecycle). The engine under your session
+  factory bean stays yours to dispose.
+- Beside a `DataSourceRegistry` bean, the modules that look the registry up by configuration (event
+  store, snapshots, saga persistence, the PostgreSQL cache) keep the configuration's registry; the
+  context closes both when it stops.
+- `primary_transaction_manager` itself is not a replacement point: replace the session factory,
+  the engine or the registry.
 
 **Never declare a singleton `AsyncEngine` or `async_sessionmaker` bean for a second database**: it
 takes over the primary. Declare the database under `pyfly.data.relational.datasources.<name>` (see
 [Multiple Named Datasources](#multiple-named-datasources)) and use `registry.engine("<name>")`,
-`registry.session_factory("<name>")` or `NamedDataSources`. An engine bean the registry does not own,
-or a session factory bean over an engine of its own, also splits the primary while
-`pyfly.data.relational.url` is configured: the session factory, the `AsyncSession` bean and the
-repositories use that engine, and `DataSourceRegistry.primary`, with every module that looks the
-registry up, the URL. A `relational_engine_not_in_registry` WARNING says so, once per engine and
-run. A session factory bean over a named datasource or a replica of the registry splits it the same
-way and logs `relational_primary_on_named_datasource`; one over the registry's own primary engine
-(other session options) is no split.
-Driver arguments, pool settings and the credentials provider are all configurable on the registry's
-own primary, so an engine bean is rarely needed.
+`registry.session_factory("<name>")` or `NamedDataSources`. Two configurations still **split** the
+primary, and a WARNING says so, once per engine and run:
+
+- An engine bean the registry does not own, or a session factory bean over an engine of its own,
+  while `pyfly.data.relational.url` is configured: every unit of work runs on your engine, and
+  `DataSourceRegistry.primary` keeps the URL for the modules that look the registry up (event store,
+  snapshots, saga persistence, the PostgreSQL cache) and for health and pool metrics. It logs
+  `relational_engine_not_in_registry`. Leave the URL unset when your engine is the only primary.
+- A session factory bean over a named datasource or a replica of the registry: the `primary` units
+  and the units that name that datasource are two units on one database, and
+  `DataSourceRegistry.primary` keeps the URL. It logs `relational_primary_on_named_datasource`.
+
+A session factory over the registry's own primary engine is no split. Driver arguments, pool
+settings and the credentials provider are all configurable on the registry's own primary, so an
+engine bean is rarely needed.
 
 A request- or refresh-scoped bean of one of these types is a **second database**, not a
 replacement: the auto-configured beans stay, and they are the `@primary` candidates of their type.
@@ -1077,7 +1107,9 @@ class TenantGuc:
 ```
 
 The transaction manager runs the customizers right after `BEGIN` in every unit it opens:
-`@transactional` units, repository auto units, `SessionProvider` and `infrastructure_unit()` units. A
+`@transactional` units, repository auto units, `SessionProvider` and `infrastructure_unit()` units,
+also when an application's session factory bean over the registry's engine is the primary. A session
+factory over an engine the registry did not build has none. A
 datasource with customizers gets transactional read auto units on PostgreSQL instead of `AUTOCOMMIT`
 ones, so a transaction-local setting applies to the read. A transaction you open yourself runs them with
 `await datasource.run_after_begin(session)` (or `run_after_begin(datasource, session)`).
