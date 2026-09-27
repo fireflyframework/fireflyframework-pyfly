@@ -30,6 +30,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy.types import render_item
 
 config = context.config
 if config.config_file_name is not None:
@@ -46,6 +47,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         render_as_batch=True,  # Required for SQLite ALTER TABLE support
+        render_item=render_item,  # Imports the module of PyFly column types (UtcDateTime) in revisions
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -57,6 +59,7 @@ def do_run_migrations(connection):
         connection=connection,
         target_metadata=target_metadata,
         render_as_batch=True,  # Required for SQLite ALTER TABLE support
+        render_item=render_item,  # Imports the module of PyFly column types (UtcDateTime) in revisions
     )
     with context.begin_transaction():
         context.run_migrations()

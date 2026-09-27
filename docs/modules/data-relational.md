@@ -251,6 +251,25 @@ class Shipment(BaseEntity):
 `ALTER TABLE orders MODIFY created_at DATETIME(6) NOT NULL` (and `updated_at`, `deleted_at`). The values
 the framework stamped there are already UTC wall times, so they read back correctly as they are.
 
+**Migrations.** `pyfly db migrate` renders the type as `pyfly.data.relational.sqlalchemy.types.UtcDateTime()`.
+It stays `UtcDateTime`, so MySQL and MariaDB get `DATETIME(6)`, but Alembic imports nothing for a type from
+outside SQLAlchemy. The `env.py` that `pyfly db init` generates passes Alembic the `render_item` hook of
+`pyfly.data.relational.sqlalchemy.types`, which adds `import pyfly.data.relational.sqlalchemy.types` to
+the revision. An `env.py` generated earlier, or written by hand, needs the same in both
+`context.configure` calls:
+
+```python
+from pyfly.data.relational.sqlalchemy.types import render_item
+
+context.configure(connection=connection, target_metadata=target_metadata, render_item=render_item)
+```
+
+An `env.py` with a `render_item` of its own calls PyFly's from it first (it only adds the import and
+returns `False`). Adding `import pyfly.data.relational.sqlalchemy.types` to `script.py.mako` works too.
+Without either, the revision of every `BaseEntity` or `SoftDeleteMixin` table fails in `pyfly db upgrade`
+with `NameError: name 'pyfly' is not defined`; a revision already generated that way needs that import line
+added.
+
 **PostgreSQL `timestamp without time zone` columns** are not `UtcDateTime`'s type (it expects
 `timestamptz`, which `BaseEntity` has always created). One that adopts it, for example through the
 `update_type_annotation_map` line above, reads back its wall times as UTC, but PostgreSQL converts the
