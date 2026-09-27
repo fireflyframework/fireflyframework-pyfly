@@ -337,6 +337,69 @@ class TestDecoratorRegionsAndFailures:
         assert calls == []
 
 
+class TestNamespaces:
+    """Clears are scoped to their cache; durable consumers get caches of their own (C034)."""
+
+    async def test_a_dedicated_cache_is_disjoint_from_its_source(self) -> None:
+        from pyfly.cache.namespaces import dedicated_cache
+
+        root = InMemoryCache()
+        idempotency = dedicated_cache(root, "idempotency")
+        assert dedicated_cache(root, "idempotency") is idempotency
+        await root.put("user:1", "evictable")
+        await idempotency.put("idem:POST:/pay:k1", "durable")
+
+        await root.clear()  # the admin's "evict all", @cache_evict(all_entries=True) on the root
+        assert await root.exists("user:1") is False
+        assert await idempotency.get("idem:POST:/pay:k1") == "durable"
+        assert await root.exists("idem:POST:/pay:k1") is False
+
+        await idempotency.clear()
+        assert await idempotency.exists("idem:POST:/pay:k1") is False
+
+    async def test_a_region_clears_its_prefix_only(self) -> None:
+        from pyfly.cache.namespaces import cache_region
+
+        root = InMemoryCache()
+        users = cache_region(root, "users")
+        await users.put("1", "alice")
+        await root.put("orders::1", "order")
+        assert await root.get("users::1") == "alice"
+        assert await users.get_keys() == ["1"]
+        await users.clear()
+        assert root.get_keys() == ["orders::1"]
+
+    async def test_orchestration_state_survives_clearing_the_cache(self) -> None:
+        from datetime import UTC, datetime
+
+        from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
+        from pyfly.transactional.core.persistence import ExecutionState
+        from pyfly.transactional.persistence.cache_adapter import CachePersistenceProvider
+
+        root = InMemoryCache()
+        provider = CachePersistenceProvider(root)
+        now = datetime.now(UTC)
+        state = ExecutionState(
+            correlation_id="saga-42",
+            name="payment",
+            pattern=ExecutionPattern.SAGA,
+            status=ExecutionStatus.RUNNING,
+            started_at=now,
+            updated_at=now,
+            completed_at=None,
+            payload={"correlation_id": "saga-42", "name": "payment", "pattern": "SAGA", "status": "RUNNING"},
+        )
+        await provider.save(state)
+        await root.put("product:1", "cached")
+
+        await root.clear()
+        found = await CachePersistenceProvider(root).find("saga-42")
+        assert found is not None
+        assert found.status is ExecutionStatus.RUNNING
+        assert [s.correlation_id for s in await provider.find_all()] == ["saga-42"]
+        assert await root.exists("product:1") is False
+
+
 class TestCacheDecorator:
     @pytest.mark.asyncio
     async def test_caches_result(self):

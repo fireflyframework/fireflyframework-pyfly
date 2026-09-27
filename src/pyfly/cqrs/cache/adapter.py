@@ -14,13 +14,24 @@
 """Query cache adapter — bridges pyfly.cache with CQRS.
 
 Mirrors Java's ``QueryCacheAdapter`` with the `:cqrs:` key prefix.
+
+The query cache is the ``:cqrs:`` region of the application's cache
+(:class:`~pyfly.cache.namespaces.PrefixedCache`): :meth:`QueryCacheAdapter.clear` evicts that prefix and
+nothing else, so resetting the query cache never drops the orchestration state, idempotency records or
+``@cacheable`` entries that share the cache bean. It is transaction-aware
+(:class:`~pyfly.cache.transaction.TransactionAwareCache`): inside a unit of work, puts and evictions wait
+for the commit and are dropped on rollback. A cache failure is logged and never fails the query or the
+command that caused it.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any
+
+from pyfly.cache.namespaces import PrefixedCache
+from pyfly.cache.transaction import TransactionAwareCache
 
 _logger = logging.getLogger(__name__)
 
@@ -35,51 +46,44 @@ class QueryCacheAdapter:
 
     def __init__(self, cache: Any = None) -> None:
         self._cache = cache
+        self._region: TransactionAwareCache | None = None
+        if cache is not None:
+            self._region = TransactionAwareCache(PrefixedCache(cache, CQRS_CACHE_PREFIX), on_write_error="log")
 
     # ── read ───────────────────────────────────────────────────
 
     async def get(self, cache_key: str) -> Any | None:
-        if self._cache is None:
+        if self._region is None:
             return None
-        prefixed = f"{CQRS_CACHE_PREFIX}{cache_key}"
         try:
-            return await self._cache.get(prefixed)
+            return await self._region.get(cache_key)
         except Exception as exc:
-            _logger.warning("CQRS cache get failed for key '%s': %s", prefixed, exc)
+            _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
             return None
 
     # ── write ──────────────────────────────────────────────────
 
     async def put(self, cache_key: str, value: Any, ttl: timedelta | None = None) -> None:
-        if self._cache is None:
+        """Store *value* (after the commit inside a unit of work); a failure is logged, never raised."""
+        if self._region is None:
             return
-        prefixed = f"{CQRS_CACHE_PREFIX}{cache_key}"
-        try:
-            await self._cache.put(prefixed, value, ttl=ttl)
-        except Exception as exc:
-            _logger.warning("CQRS cache put failed for key '%s': %s", prefixed, exc)
+        await self._region.put(cache_key, value, ttl=ttl)
 
     # ── evict ──────────────────────────────────────────────────
 
     async def evict(self, cache_key: str) -> bool:
-        if self._cache is None:
+        """Evict *cache_key* (after the commit inside a unit of work, where it returns ``False``)."""
+        if self._region is None:
             return False
-        prefixed = f"{CQRS_CACHE_PREFIX}{cache_key}"
-        try:
-            return cast(bool, await self._cache.evict(prefixed))
-        except Exception as exc:
-            _logger.warning("CQRS cache evict failed for key '%s': %s", prefixed, exc)
-            return False
+        return await self._region.evict(cache_key)
 
     # ── clear ──────────────────────────────────────────────────
 
     async def clear(self) -> None:
-        if self._cache is None:
+        """Evict every query-cache entry (the ``:cqrs:`` prefix) and nothing else in the cache."""
+        if self._region is None:
             return
-        try:
-            await self._cache.clear()
-        except Exception as exc:
-            _logger.warning("CQRS cache clear failed: %s", exc)
+        await self._region.clear()
 
     @property
     def is_available(self) -> bool:
