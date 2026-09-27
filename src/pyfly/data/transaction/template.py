@@ -733,10 +733,16 @@ class TransactionTemplate:
     """Programmatic transactions, with the same semantics as ``@transactional``.
 
     *manager* is a :class:`~pyfly.data.transaction.manager.TransactionManager`, a datasource name, a
-    resource the application built (an ``async_sessionmaker``) or ``None`` for the default datasource;
-    it is resolved at each use. *settings* are :class:`~pyfly.data.transaction.definition.TransactionDefinition`
-    fields (``propagation``, ``isolation``, ``read_only``, ``timeout``, ``rollback_for``,
-    ``no_rollback_for``, ``name``), overridable per call.
+    resource the application built (an ``async_sessionmaker``) or ``None``; it is resolved at each use.
+    *settings* are :class:`~pyfly.data.transaction.definition.TransactionDefinition` fields
+    (``propagation``, ``isolation``, ``read_only``, ``timeout``, ``rollback_for``, ``no_rollback_for``,
+    ``datasource``, ``name``), overridable per call.
+
+    The datasource can be named either way: ``TransactionTemplate("reporting")``,
+    ``TransactionTemplate(datasource="reporting")`` or ``template.transaction(datasource="reporting")``.
+    With neither, the template runs on the default datasource. A *manager* and a ``datasource`` setting
+    that name different datasources raise
+    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` when the template is used.
     """
 
     def __init__(self, manager: object = None, **settings: Any) -> None:
@@ -750,7 +756,20 @@ class TransactionTemplate:
 
     def manager(self) -> TransactionManager:
         """The transaction manager this template runs on, resolved now."""
-        return resolve_manager(self._target)
+        return self._manager_for(self._definition)
+
+    def _manager_for(self, definition: TransactionDefinition) -> TransactionManager:
+        name = definition.datasource
+        if self._target is None:
+            return resolve_manager(name)
+        manager = resolve_manager(self._target)
+        if name is not None and manager.datasource != name:
+            raise IllegalTransactionStateError(
+                f"TransactionTemplate runs on datasource {manager.datasource!r} (its manager argument) but its "
+                f"definition names datasource {name!r}; name the datasource once.",
+                datasource=name,
+            )
+        return manager
 
     def _definition_with(self, overrides: dict[str, Any]) -> TransactionDefinition:
         if not overrides:
@@ -759,7 +778,8 @@ class TransactionTemplate:
 
     def transaction(self, **overrides: Any) -> TransactionBoundary:
         """An ``async with`` block that runs as one boundary; it yields the unit (``None`` without one)."""
-        return TransactionBoundary(self.manager(), self._definition_with(overrides))
+        definition = self._definition_with(overrides)
+        return TransactionBoundary(self._manager_for(definition), definition)
 
     async def execute(self, function: Callable[..., Coroutine[Any, Any, T]], /, *args: Any, **kwargs: Any) -> T:
         """Await ``function(*args, **kwargs)`` inside one boundary and return its result."""

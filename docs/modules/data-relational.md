@@ -642,6 +642,12 @@ async with template.transaction(propagation=Propagation.REQUIRES_NEW):
     ...
 ```
 
+The datasource is named once, in any of three places: the first argument (`TransactionTemplate("reporting")`),
+the `datasource=` setting (`TransactionTemplate(datasource="reporting")`), or a per-call override
+(`template.transaction(datasource="reporting")`). With none, the template runs on the default datasource.
+A manager argument and a `datasource=` that name different datasources raise
+`IllegalTransactionStateError` instead of one of them winning.
+
 For custom data access code, inject `SessionProvider`: `current()` is the session of the current unit
 (or `None`), and `async with provider.unit(read_only=...)` joins the bound unit or opens a short one.
 Framework adapters use `infrastructure_unit(datasource)` from `pyfly.data.transaction`, the same
