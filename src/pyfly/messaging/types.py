@@ -20,7 +20,20 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Message:
+    """One message, as a handler receives it.
+
+    Delivery is at-least-once: a message whose handler failed or was interrupted is delivered again, so
+    a handler that must not apply a message twice keys its work on where the message came from:
+    *partition* and *offset* on Kafka, *message_id* on RabbitMQ (every message the adapter publishes gets
+    one, and a redelivery keeps it). *delivery_attempt* counts the deliveries of this message, the first
+    being 1.
+    """
+
     topic: str
     value: bytes
     key: bytes | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    partition: int | None = None
+    offset: int | None = None
+    message_id: str | None = None
+    delivery_attempt: int = 1
