@@ -20,8 +20,10 @@ coroutines (the committed-work side runs on real databases in
 
 - a failure cancels the siblings still running and waits for them before it is raised;
 - a cancellation of the layer cancels and awaits every sibling before it propagates;
-- the ASYNC runs of a :class:`WorkflowEngine` are awaited by :class:`WorkflowRuns` on stop, cancelled and
-  awaited when the stop is cut short, and no new one starts while it drains.
+- the ASYNC runs of a :class:`WorkflowEngine` (and the ``async_`` steps they spawn meanwhile) are awaited by
+  :class:`WorkflowRuns` on stop, cancelled and awaited when the stop is cut short, and no new one starts while
+  it drains;
+- a cancelled run records its final state even when it is cancelled again meanwhile.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from pyfly.transactional.core.backpressure import (
 )
 from pyfly.transactional.core.exceptions import OrchestrationError
 from pyfly.transactional.core.model import ExecutionStatus, TriggerMode
+from pyfly.transactional.core.persistence import ExecutionState, InMemoryPersistenceProvider
 from pyfly.transactional.workflow.annotations import workflow, workflow_step
 from pyfly.transactional.workflow.engine import WorkflowEngine, WorkflowRuns
 from pyfly.transactional.workflow.registry import WorkflowRegistry
@@ -187,3 +190,82 @@ async def test_no_background_run_starts_while_the_engine_drains_and_one_does_aft
     await runs.stop()
     state = await engine.get_execution(started.correlation_id)
     assert state is not None and state.status is ExecutionStatus.COMPLETED
+
+
+@workflow(id="notifying", trigger_mode=TriggerMode.ASYNC)
+class Notifying:
+    """Its run spawns a fire-and-forget ``async_`` step once the drain has started."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.ran: list[str] = []
+
+    @workflow_step(id="load")
+    async def load(self) -> None:
+        await self.release.wait()
+        self.ran.append("loaded")
+
+    @workflow_step(id="notify", depends_on=["load"], async_=True)
+    async def notify(self) -> None:
+        await asyncio.sleep(0.05)
+        self.ran.append("notified")
+
+
+async def test_stopping_the_runs_waits_for_the_async_steps_a_run_spawns_while_it_drains() -> None:
+    bean = Notifying()
+    engine = _engine(bean)
+    runs = WorkflowRuns(engine)
+    await runs.start()
+    await engine.start("notifying")
+
+    stopping = asyncio.create_task(runs.stop())
+    await asyncio.sleep(0.02)  # the drain waits for the run; the run has not spawned its async step yet
+    bean.release.set()
+    await asyncio.wait_for(stopping, 5)
+
+    assert bean.ran == ["loaded", "notified"]
+
+
+class SlowFinalSave(InMemoryPersistenceProvider):
+    """Its save of a finished run's state takes a while (a database round trip)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saving_final = asyncio.Event()
+
+    async def save(self, state: ExecutionState) -> None:
+        if state.status is ExecutionStatus.CANCELLED:
+            self.saving_final.set()
+            await asyncio.sleep(0.05)
+        await super().save(state)
+
+
+@workflow(id="cancelled-twice")
+class CancelledTwice:
+    def __init__(self) -> None:
+        self.running = asyncio.Event()
+
+    @workflow_step(id="wait")
+    async def wait(self) -> None:
+        self.running.set()
+        await asyncio.sleep(30)
+
+
+async def test_a_cancelled_run_records_its_final_state_even_when_cancelled_again_meanwhile() -> None:
+    """A cancel scope delivers its cancellation again at every await: the final state is still saved."""
+    bean = CancelledTwice()
+    registry = WorkflowRegistry()
+    registry.register_from_bean(bean)
+    persistence = SlowFinalSave()
+    engine = WorkflowEngine(registry=registry, persistence=persistence)
+
+    run = asyncio.create_task(engine.start("cancelled-twice"))
+    await bean.running.wait()
+    run.cancel()
+    await asyncio.wait_for(persistence.saving_final.wait(), 5)
+    run.cancel()  # again, while the final state is being saved
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    [state] = await persistence.find_all()
+    assert state.status is ExecutionStatus.CANCELLED

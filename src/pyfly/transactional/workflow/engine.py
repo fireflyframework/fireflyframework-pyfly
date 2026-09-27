@@ -102,21 +102,21 @@ class WorkflowEngine:
         self._stopping = False
 
     async def drain(self) -> None:
-        """Refuse new background runs, then wait for the ones in flight (and the ``async_`` steps).
+        """Refuse new background runs, then wait for the ones in flight (and the ``async_`` steps, those the runs
+        spawn meanwhile included).
 
         When the wait is cut short (the caller is cancelled: the context's shutdown timeout), the runs still in
         flight are cancelled and awaited before the cancellation propagates; each compensates what it committed.
         """
         self._stopping = True
-        pending = self._in_flight()
-        if not pending:
-            return
         try:
-            await asyncio.wait(pending)
+            while pending := self._in_flight():
+                await asyncio.wait(pending)
         except asyncio.CancelledError:
-            for task in pending:
-                task.cancel()
-            await run_shielded(asyncio.wait(pending))
+            while pending := self._in_flight():
+                for task in pending:
+                    task.cancel()
+                await run_shielded(asyncio.wait(pending))
             raise
 
     def _in_flight(self) -> set[asyncio.Task[Any]]:
@@ -230,6 +230,7 @@ class WorkflowEngine:
         await self._persistence.save(ExecutionState.from_context(ctx))
 
         success = False
+        cancelled = False
         original_error: BaseException | None = None  # actual error → drives the callback
         try:
             if definition.timeout_ms > 0:
@@ -259,6 +260,7 @@ class WorkflowEngine:
         except asyncio.CancelledError:
             # Cancelled (shutdown cut a background run short, the caller gave up): its committed steps are
             # compensated by now, and the persisted state says so instead of RUNNING.
+            cancelled = True
             await ctx.set_status(ExecutionStatus.CANCELLED)
             raise
         except Exception as exc:  # noqa: BLE001
@@ -284,16 +286,19 @@ class WorkflowEngine:
                         await cb_result
             except Exception as cb_exc:  # noqa: BLE001
                 _logger.warning("workflow callback raised: %s", cb_exc)
-            await self._persistence.save(ExecutionState.from_context(ctx))
-            await self._events.on_completed(
-                name=definition.id,
-                pattern=ExecutionPattern.WORKFLOW,
-                correlation_id=ctx.correlation_id,
-                success=success,
-                duration_ms=duration_ms,
+            # The final state is recorded to completion even when the run is cancelled (again) meanwhile, as a
+            # cancel scope does at every await; a cancellation that arrives then is raised once it is recorded.
+            _result, finish_error, finish_cancelled = await run_shielded(
+                self._finish(definition, ctx, success=success, duration_ms=duration_ms)
             )
-            await self._signals.unregister(ctx.correlation_id)
-            await self._queries.unregister(ctx.correlation_id)
+            if finish_error is not None:
+                if not (cancelled or finish_cancelled):
+                    raise finish_error
+                _logger.warning(
+                    "recording the final state of cancelled workflow %s raised: %s", definition.id, finish_error
+                )
+            if finish_cancelled and not cancelled:
+                raise asyncio.CancelledError
 
         return WorkflowResult(
             workflow_id=definition.id,
@@ -304,6 +309,19 @@ class WorkflowEngine:
             variables=ctx.get_all_variables(),
             error=ctx.error,
         )
+
+    async def _finish(self, definition: Any, ctx: ExecutionContext, *, success: bool, duration_ms: float) -> None:
+        """Persist a run's final state, emit ``on_completed`` and stop routing its signals and queries."""
+        await self._persistence.save(ExecutionState.from_context(ctx))
+        await self._events.on_completed(
+            name=definition.id,
+            pattern=ExecutionPattern.WORKFLOW,
+            correlation_id=ctx.correlation_id,
+            success=success,
+            duration_ms=duration_ms,
+        )
+        await self._signals.unregister(ctx.correlation_id)
+        await self._queries.unregister(ctx.correlation_id)
 
 
 class WorkflowRuns:

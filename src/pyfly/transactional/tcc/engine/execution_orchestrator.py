@@ -20,11 +20,15 @@ Knowing what committed: every phase attempt runs inside :func:`pyfly.data.transa
   ``COMMIT`` is in flight lets the commit finish (commits are shielded) and then fails the attempt.
 - A participant whose TRY failed that way reserved something all the same: it takes part in the CANCEL
   phase with the participants whose TRY succeeded.
+- A CONFIRM attempt that failed that way is a failed CONFIRM like any other (whether its work is complete
+  cannot be told): the TCC fails, and every participant that tried is cancelled, the confirmed ones included.
 - A caller that cancels the TCC (a timeout, a disconnect, shutdown) gets ``CancelledError`` once the CANCEL
   phase has run, to completion, for every participant that tried (the one whose TRY was cancelled after it
   committed included).
 
-Participants run in the caller's task. Only units of work the framework manages are seen
+Participants run in the caller's task: inside the caller's ``@transactional`` their units of work join the
+caller's unit, whose commit happens outside the TCC and is not seen (start a TCC outside a transaction, or
+give the phase methods ``REQUIRES_NEW``). Only units of work the framework manages are seen
 (``@transactional``, repositories, ``TransactionTemplate``).
 """
 

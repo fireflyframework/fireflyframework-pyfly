@@ -330,7 +330,18 @@ commits behind the engine's back:
   twice. An attempt that committed nothing is retried as configured. In TCC, a
   TRY that failed after committing is cancelled with the participants that tried
   (an optional one at once) and is not retried; neither is a CONFIRM or CANCEL
-  attempt that committed.
+  attempt that committed. A CONFIRM attempt whose timeout fired after a unit of
+  it committed is therefore a failed CONFIRM, as any other: the TCC fails and
+  runs CANCEL for every participant that tried, the ones already confirmed
+  included (the engine cannot tell whether the CONFIRM's work is complete), so
+  make CANCEL undo a confirmed reservation too, or give CONFIRM a timeout it
+  never reaches.
+- **TCC participants run in the caller's task.** Unlike saga and workflow steps,
+  the TRY, CONFIRM and CANCEL methods are not detached: called inside the
+  caller's `@transactional`, their units of work join the caller's unit (they
+  commit or roll back with it), and the TCC cannot see what they committed.
+  Start a TCC outside a transaction, or give its phase methods units of their own
+  (`@transactional(propagation=Propagation.REQUIRES_NEW)`).
 - **Only the framework's units of work are seen**: `@transactional`, repository
   calls, `TransactionTemplate`, `SessionProvider.unit()`. A step that opens a
   session from the `async_sessionmaker` and commits it by hand is invisible to
@@ -1952,10 +1963,12 @@ started with the transaction state cleared, so it never joins, nor outlives, the
 caller's unit of work. The auto-configured `WorkflowRuns` bean (a lifecycle bean
 of `CONSUMER_PHASE`) drains those runs when the application context stops,
 before any `@pre_destroy`: a run started just before shutdown (by a one-shot
-shell command, say) completes. When `pyfly.context.shutdown-timeout` cuts the
+shell command, say) completes, and so do the fire-and-forget `async_` steps the
+runs spawn meanwhile. When `pyfly.context.shutdown-timeout` cuts the
 wait short, the runs still in flight are cancelled (each compensates what it
 committed) and awaited, and while it drains the engine refuses new ASYNC
-starts with `OrchestrationError`. `@workflow_step(compensation_method="name")`
+starts with `OrchestrationError`. A cancelled run records its final state
+(`CANCELLED`) to completion, even when it is cancelled again meanwhile. `@workflow_step(compensation_method="name")`
 names the compensating method directly; `@compensation_step(for_step=...)` still
 works.
 
