@@ -56,6 +56,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyfly.container.types import NoAutowire
+from pyfly.data.exception_translation import translate_exception
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.relational.sqlalchemy.specification import Specification
@@ -95,11 +96,21 @@ def repository_operation(
     *read* selects a read auto unit outside a transaction. *atomic* holds the unit's operation guard for the
     whole call: the framework's own methods are atomic (``save`` is add, flush and refresh as one step for a
     task that shares the unit), while a subclass method is not, since it may await anything.
+
+    A persistence exception leaves the call translated to the kernel's (``DataIntegrityException``,
+    ``OptimisticLockingFailureException``; :mod:`pyfly.data.exception_translation`), raised from the
+    backend's, once the unit of work has seen the original.
     """
 
     @functools.wraps(function)
     async def operation(self: Repository[Any, Any], *args: Any, **kwargs: Any) -> Any:
-        return await self._pyfly_run(function, args, kwargs, read=read, atomic=atomic)
+        try:
+            return await self._pyfly_run(function, args, kwargs, read=read, atomic=atomic)
+        except Exception as error:
+            translated = translate_exception(error)
+            if translated is error:
+                raise
+            raise translated from error
 
     operation.__pyfly_repository_operation__ = True  # type: ignore[attr-defined]
     return operation

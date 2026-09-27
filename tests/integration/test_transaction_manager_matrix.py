@@ -52,7 +52,7 @@ import anyio
 import pytest
 from sqlalchemy import Identity, Integer, String, event, insert, text, update
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -74,6 +74,7 @@ from pyfly.data.transaction import (
     infrastructure_unit,
     register_synchronization,
 )
+from pyfly.kernel.exceptions import DataIntegrityException
 from pyfly.resilience.retry import retry
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 from tests.support.partition_proxy import PartitionProxy
@@ -203,7 +204,7 @@ class Outer:
             raise ConnectionError("transient")
 
     @transactional
-    @retry(max_attempts=3, exceptions=(IntegrityError,))
+    @retry(max_attempts=3, exceptions=(DataIntegrityException,))  # what the repository raises for it
     async def duplicate_then_fixed(self) -> None:
         self.attempts += 1
         await self.items.save(MxItem(name="taken" if self.attempts == 1 else "free"))

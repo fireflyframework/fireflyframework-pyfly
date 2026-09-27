@@ -75,6 +75,7 @@ from pyfly.data.transaction import (
     register_synchronization,
     rollback_on,
 )
+from pyfly.kernel.exceptions import DataIntegrityException
 
 # ---------------------------------------------------------------------------------------------------------
 # Model, repositories and services
@@ -191,7 +192,7 @@ class Orders:
     @transactional
     async def place_catching_db_error(self) -> None:
         await self.items.save(TxItem(name="dup"))
-        with contextlib.suppress(IntegrityError):
+        with contextlib.suppress(DataIntegrityException):  # repositories raise the kernel's exception
             await self.items.save(TxItem(name="dup"))
 
     @transactional
@@ -204,7 +205,7 @@ class Orders:
     @transactional
     async def place_with_nested_db_error(self) -> None:
         await self.items.save(TxItem(name="taken"))
-        with contextlib.suppress(IntegrityError):
+        with contextlib.suppress(DataIntegrityException):
             await self.inventory.try_step("taken")
         await self.items.save(TxItem(name="after"))
 
@@ -223,7 +224,7 @@ class Orders:
         await self.items.save(TxItem(name="specific"))
         raise error
 
-    @transactional(no_rollback_for=(IntegrityError,))
+    @transactional(no_rollback_for=(DataIntegrityException,))
     async def tolerated_db_error(self) -> None:
         await self.items.save(TxItem(name="good"))
         await self.items.save(TxItem(name="seed"))
@@ -513,8 +514,9 @@ class TestRollbackRules:
 
     async def test_no_rollback_for_on_a_dead_transaction_reraises_the_original(self, app: App) -> None:
         await app.bean(LegacyOrders).place("seed")
-        with pytest.raises(IntegrityError):
+        with pytest.raises(DataIntegrityException) as raised:
             await app.bean(Orders).tolerated_db_error()
+        assert isinstance(raised.value.__cause__, IntegrityError)
         assert await app.items() == ["seed"]
 
     async def test_cancellation_rolls_back(self, app: App) -> None:

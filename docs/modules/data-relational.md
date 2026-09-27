@@ -62,6 +62,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Who Is the Current User](#who-is-the-current-user)
   - [Your Own Auditor or Clock](#your-own-auditor-or-clock)
   - [AuditingEntityListener](#auditingentitylistener)
+- [Persistence Exception Translation](#persistence-exception-translation)
 - [RepositoryBeanPostProcessor](#repositorybeanpostprocessor)
   - [How It Works](#how-it-works)
   - [Stub Detection](#stub-detection)
@@ -710,7 +711,7 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
       for row in rows:  # one after another: not asyncio.gather()
           try:
               await self.importer.import_row(row)  # @transactional(propagation=Propagation.NESTED)
-          except IntegrityError:
+          except DataIntegrityException:  # a duplicate, translated (see Persistence Exception Translation)
               rejected.append(row)  # rolled back to its savepoint; the rest of the unit goes on
       return rejected
   ```
@@ -1699,7 +1700,7 @@ own `timeout` raises `TransactionTimedOutError`.
 Cleanup code that runs outside the cancelled unit is not affected: a task stays "being cancelled"
 (`Task.cancelling() > 0`) throughout `except CancelledError:`, `finally:` and anyio's
 `with CancelScope(shield=True):` cleanup, and the data access done there only counts cancel requests that
-arrive after it started. A duplicate saved in a compensation handler raises `IntegrityError`, a
+arrive after it started. A duplicate saved in a compensation handler raises `DuplicateKeyException`, a
 `@transactional` audit call that raises a business exception in shielded cleanup raises that exception,
 and the rest of the cleanup runs:
 
@@ -1717,7 +1718,8 @@ async def handle(self, request: Request) -> None:
 ```
 
 Cleanup inside the cancelled unit itself (a `finally:` block in the `@transactional` body) keeps the
-failures of its statements: a duplicate saved there raises `IntegrityError`, because the operation that
+failures of its statements: a duplicate saved there raises `DuplicateKeyException` (raised from the
+`IntegrityError`), because the operation that
 ran the statement judged it after the cancel request had arrived. Any other exception raised there while
 the unit is being cancelled ends the unit as cancelled instead, with `CancelledError` chained from it
 (`__cause__`): the unit cannot tell it from a driver error raised outside a guarded statement (on a raw
@@ -1733,9 +1735,9 @@ chain reaches the failure the operation judged) keeps its type, and one raised w
 finally:
     try:
         await self.holds.save(Hold(order_id))
-    except IntegrityError as error:
+    except DuplicateKeyException as error:
         raise HoldExistsError(order_id) from error   # raised as HoldExistsError
-    # except IntegrityError:
+    # except DuplicateKeyException:
     #     raise HoldExistsError(order_id)            # ends as CancelledError, logged at WARNING
 ```
 
@@ -1824,7 +1826,10 @@ class Order(BaseEntity, VersionedMixin):
     name: Mapped[str] = mapped_column(String(255))
 ```
 
-This adds a `version` column. SQLAlchemy automatically appends `WHERE version = :old` to every UPDATE and raises `StaleDataError` on concurrent modification — the equivalent of JPA's `@Version`.
+This adds a `version` column. SQLAlchemy automatically appends `WHERE version = :old` to every UPDATE and
+raises `StaleDataError` on concurrent modification — the equivalent of JPA's `@Version`. A repository call,
+or the commit of a unit of work, raises it as `OptimisticLockingFailureException` (HTTP 409); see
+[Persistence Exception Translation](#persistence-exception-translation).
 
 The entity may declare its own `__mapper_args__`, as the root of an inheritance hierarchy must
 (`polymorphic_on`): the mixin merges `version_id_col` into them, and subclasses share the root's version
@@ -1841,6 +1846,61 @@ class Payment(BaseEntity, VersionedMixin):
 class CardPayment(Payment):
     __mapper_args__ = {"polymorphic_identity": "card"}  # versioned through payments.version
 ```
+
+---
+
+## Persistence Exception Translation
+
+Services handle one backend-neutral exception hierarchy, as Spring's `@Repository` translation gives them:
+every repository call, and the commit of a unit of work (`@transactional`, `TransactionTemplate`, a
+`NESTED` savepoint release, the auto unit of a repository call), raises the kernel's exceptions instead of
+SQLAlchemy's, raised *from* the driver's error (`__cause__`):
+
+| Backend error | Kernel exception | HTTP |
+|---|---|---|
+| unique or primary key violation | `DuplicateKeyException` (a `DataIntegrityException`) | 409 |
+| foreign key, not-null, check, exclusion violation | `DataIntegrityException` | 409 |
+| optimistic-locking conflict (`StaleDataError`; MariaDB's "record has changed since last read") | `OptimisticLockingFailureException` (a `ConcurrencyException`) | 409 |
+
+All of them are `ConflictException`s (`pyfly.kernel.exceptions`). The integrity exceptions carry
+`context["violation"]` (`unique`, `foreign_key`, `not_null`, `check`, `exclusion`) and
+`context["constraint"]`, the violated constraint's name, the same on every backend thanks to the
+[naming convention](#constraint-naming-convention) (SQLite does not report which foreign key failed). Their
+message names the constraint and never includes the SQL statement or its bound values, which may be
+personal data: a duplicate e-mail answers
+
+```json
+{"error": {"message": "Duplicate key: unique constraint 'uq_users_email' violated", "code": "INTEGRITY_ERROR",
+           "status": 409, "context": {"violation": "unique", "constraint": "uq_users_email"}}}
+```
+
+The full driver message is logged at `DEBUG` by `pyfly.data.exception_translation`, and stays on the
+exception's `__cause__`.
+
+```python
+from pyfly.kernel.exceptions import DuplicateKeyException, OptimisticLockingFailureException
+
+
+@transactional
+async def register(self, email: str) -> User:
+    try:
+        return await self.users.save(User(email=email))
+    except DuplicateKeyException:
+        raise EmailTakenError(email) from None
+
+
+@retry(max_attempts=3, exceptions=(OptimisticLockingFailureException,))   # outside the unit of work
+@transactional
+async def add_stock(self, sku: str, quantity: int) -> None: ...
+```
+
+Other errors (a lost connection, a deadlock, a serialization failure) keep their SQLAlchemy type, so retry
+rules that name them keep working. Code that uses an `AsyncSession` directly gets SQLAlchemy's exceptions
+from its own statements; the web layer still answers 409 without SQL for them (`PersistenceExceptionConverter`,
+`SQLAlchemyIntegrityExceptionConverter`). Another backend plugs its translations in with
+`pyfly.data.exception_translation.register_exception_translator(translator)`.
+
+**Source:** `src/pyfly/data/exception_translation.py`
 
 ---
 

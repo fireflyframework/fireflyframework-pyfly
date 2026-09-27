@@ -55,6 +55,7 @@ from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.session import SessionProvider
 from pyfly.data.transaction import TransactionTemplate, UnexpectedRollbackError
+from pyfly.kernel.exceptions import DataIntegrityException
 from tests.support.backend_matrix import MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG, MYSQL)
@@ -180,7 +181,7 @@ class SpService:
                         item = await session.scalar(select(SpItem).where(SpItem.name == "b"))
                         assert item is not None
                         item.name = "a"
-        except IntegrityError:
+        except DataIntegrityException:  # the release failure, translated
             pass  # the NESTED scope rolled back to its savepoint; the outer unit goes on
         await self.items.save(SpItem(name="c"))
 

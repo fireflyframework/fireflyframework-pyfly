@@ -174,7 +174,8 @@ class VersionedMixin:
 
     SQLAlchemy will automatically increment the version on every flush
     and raise :class:`sqlalchemy.orm.exc.StaleDataError` when a
-    concurrent modification is detected.
+    concurrent modification is detected; a repository call, or the commit of a unit
+    of work, raises it as :class:`~pyfly.kernel.exceptions.OptimisticLockingFailureException`.
 
     The entity may declare its own ``__mapper_args__`` (a dict, or a ``declared_attr``): ``version_id_col``
     is merged into them. Declaring ``version_id_col`` there as well is a conflict, and mapping the class
