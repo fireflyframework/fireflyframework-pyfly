@@ -281,6 +281,10 @@ def pyfly_config_for(container: Any) -> dict[str, Any]:
     ``mysql+asyncmy://`` (or ``mariadb+asyncmy://`` for a MariaDB image) for MySQL containers. The
     MySQL driver is asyncmy, which the ``mysql`` extra installs; when only aiomysql is installed, the
     URL uses aiomysql instead.
+
+    A database container also enables its data layer (``pyfly.data.relational.enabled``,
+    ``pyfly.data.document.enabled``): with the URL alone the repositories were never wired, and their
+    derived queries answered ``None`` without touching the database.
     """
     name = type(container).__name__
     if "Postgres" in name:
@@ -292,7 +296,7 @@ def pyfly_config_for(container: Any) -> dict[str, Any]:
                 "postgresql://": "postgresql+asyncpg://",
             },
         )
-        return {"pyfly.data.relational.url": url}
+        return {"pyfly.data.relational.enabled": "true", "pyfly.data.relational.url": url}
     if "MySql" in name or "MySQL" in name:
         backend = "mariadb" if "mariadb" in str(getattr(container, "image", "")).lower() else "mysql"
         async_prefix = f"{backend}+{_mysql_async_driver()}://"
@@ -300,14 +304,14 @@ def pyfly_config_for(container: Any) -> dict[str, Any]:
             container.get_connection_url(),
             {"mysql+pymysql://": async_prefix, "mysql://": async_prefix},
         )
-        return {"pyfly.data.relational.url": url}
+        return {"pyfly.data.relational.enabled": "true", "pyfly.data.relational.url": url}
     if "Redis" in name:
         host = container.get_container_host_ip()
         port = container.get_exposed_port(6379)
         url = f"redis://{host}:{port}/0"
         return {"pyfly.cache.redis.url": url, "pyfly.session.redis.url": url}
     if "Mongo" in name:
-        return {"pyfly.data.document.uri": container.get_connection_url()}
+        return {"pyfly.data.document.enabled": "true", "pyfly.data.document.uri": container.get_connection_url()}
     if "Kafka" in name:
         return {"pyfly.eda.kafka.bootstrap-servers": container.get_bootstrap_server()}
     if "RabbitMq" in name or "RabbitMQ" in name:

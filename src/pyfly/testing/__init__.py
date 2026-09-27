@@ -18,6 +18,7 @@ from pyfly.testing.client import PyFlyTestClient, TestResponse
 from pyfly.testing.containers import create_test_container
 from pyfly.testing.fixtures import PyFlyTestCase
 from pyfly.testing.mock import mock_bean
+from pyfly.testing.rollback import RollbackTransaction
 from pyfly.testing.slice_context import data_slice, service_slice, slice_context, web_slice
 from pyfly.testing.slices import DataTest, ServiceTest, WebTest, get_test_slice
 from pyfly.testing.statement_counter import RecordedStatement, StatementCounter
@@ -43,6 +44,7 @@ __all__ = [
     "PyFlyTestCase",
     "PyFlyTestClient",
     "RecordedStatement",
+    "RollbackTransaction",
     "ServiceTest",
     "StatementCounter",
     "TestResponse",

@@ -254,6 +254,10 @@ resilience = "pyfly.resilience.auto_configuration:ResilienceAutoConfiguration"
 [project.scripts]
 pyfly = "pyfly.cli.main:cli"
 
+# PyFly's pytest plugin: the @DataTest data slices and their per-test rollback transaction.
+[project.entry-points.pytest11]
+pyfly = "pyfly.testing.pytest_plugin"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyfly"]
 

@@ -74,16 +74,25 @@ class _FakeKafka:
 
 
 def test_postgres_mapping_to_async_url() -> None:
-    assert pyfly_config_for(_FakePostgres()) == {"pyfly.data.relational.url": "postgresql+asyncpg://u:p@h:5432/test"}
+    assert pyfly_config_for(_FakePostgres()) == {
+        "pyfly.data.relational.enabled": "true",
+        "pyfly.data.relational.url": "postgresql+asyncpg://u:p@h:5432/test",
+    }
 
 
 def test_mysql_mapping_to_async_url() -> None:
     # asyncmy is the driver the ``mysql`` extra installs (it replaced aiomysql in the rewrite, C089).
-    assert pyfly_config_for(_FakeMySql()) == {"pyfly.data.relational.url": "mysql+asyncmy://u:p@h:3306/test"}
+    assert pyfly_config_for(_FakeMySql()) == {
+        "pyfly.data.relational.enabled": "true",
+        "pyfly.data.relational.url": "mysql+asyncmy://u:p@h:3306/test",
+    }
 
 
 def test_mariadb_image_maps_to_the_mariadb_dialect() -> None:
-    assert pyfly_config_for(_FakeMariaDbMySql()) == {"pyfly.data.relational.url": "mariadb+asyncmy://u:p@h:3306/test"}
+    assert pyfly_config_for(_FakeMariaDbMySql()) == {
+        "pyfly.data.relational.enabled": "true",
+        "pyfly.data.relational.url": "mariadb+asyncmy://u:p@h:3306/test",
+    }
 
 
 def test_mysql_mapping_falls_back_to_aiomysql_when_only_it_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,12 +102,18 @@ def test_mysql_mapping_falls_back_to_aiomysql_when_only_it_is_installed(monkeypa
         return None if name == "asyncmy" else real_find_spec(name, *args)
 
     monkeypatch.setattr(testcontainers_module.importlib.util, "find_spec", without_asyncmy)
-    assert pyfly_config_for(_FakeMySql()) == {"pyfly.data.relational.url": "mysql+aiomysql://u:p@h:3306/test"}
+    assert pyfly_config_for(_FakeMySql()) == {
+        "pyfly.data.relational.enabled": "true",
+        "pyfly.data.relational.url": "mysql+aiomysql://u:p@h:3306/test",
+    }
 
 
 def test_mysql_mapping_names_asyncmy_when_no_driver_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(testcontainers_module.importlib.util, "find_spec", lambda name, *args: None)
-    assert pyfly_config_for(_FakeMySql()) == {"pyfly.data.relational.url": "mysql+asyncmy://u:p@h:3306/test"}
+    assert pyfly_config_for(_FakeMySql()) == {
+        "pyfly.data.relational.enabled": "true",
+        "pyfly.data.relational.url": "mysql+asyncmy://u:p@h:3306/test",
+    }
 
 
 def test_redis_mapping_to_cache_and_session() -> None:
@@ -108,7 +123,10 @@ def test_redis_mapping_to_cache_and_session() -> None:
 
 
 def test_mongo_and_kafka_mappings() -> None:
-    assert pyfly_config_for(_FakeMongoDb()) == {"pyfly.data.document.uri": "mongodb://h:27017"}
+    assert pyfly_config_for(_FakeMongoDb()) == {
+        "pyfly.data.document.enabled": "true",
+        "pyfly.data.document.uri": "mongodb://h:27017",
+    }
     assert pyfly_config_for(_FakeKafka()) == {"pyfly.eda.kafka.bootstrap-servers": "127.0.0.1:55002"}
 
 
@@ -118,7 +136,8 @@ def test_replica_set_container_maps_to_the_document_uri() -> None:
     container.get_container_host_ip = lambda: "127.0.0.1"
     container.get_exposed_port = lambda port: 55003
     assert pyfly_config_for(container) == {
-        "pyfly.data.document.uri": "mongodb://127.0.0.1:55003/?directConnection=true"
+        "pyfly.data.document.enabled": "true",
+        "pyfly.data.document.uri": "mongodb://127.0.0.1:55003/?directConnection=true",
     }
 
 
@@ -160,6 +179,8 @@ def test_unmapped_container_raises() -> None:
 
 def test_pyfly_config_builds_nested_config() -> None:
     cfg = pyfly_config(_FakePostgres(), _FakeRedis())
+    # C138: the relational layer is enabled with the URL, or its repositories stay unwired.
+    assert cfg.get("pyfly.data.relational.enabled") == "true"
     assert cfg.get("pyfly.data.relational.url") == "postgresql+asyncpg://u:p@h:5432/test"
     assert cfg.get("pyfly.cache.redis.url") == "redis://127.0.0.1:55001/0"
 
