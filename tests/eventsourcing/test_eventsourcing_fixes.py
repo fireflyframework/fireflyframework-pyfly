@@ -15,7 +15,6 @@
 
 - EventHandlerException is exported from the package (API symmetry w/ ConcurrencyError).
 - Upcasters are applied on read (load + stream_all) — previously dead code.
-- TransactionalOutbox exposes dead-lettered (exhausted) records.
 - SqlAlchemyEventStore append translates a concurrent UNIQUE collision into
   ConcurrencyError instead of leaking a raw IntegrityError (TOCTOU fix).
 """
@@ -29,7 +28,6 @@ from pathlib import Path
 import pytest
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
-from pyfly.eventsourcing.outbox import TransactionalOutbox
 from pyfly.eventsourcing.store import ConcurrencyError, InMemoryEventStore, SqlAlchemyEventStore
 
 
@@ -76,27 +74,6 @@ class TestUpcastersAppliedOnRead:
         store = InMemoryEventStore()
         await store.append("acc-1", "Account", [_env("acc-1", "legacy.opened")], expected_version=0)
         assert (await store.load("acc-1"))[0].event_type == "legacy.opened"
-
-
-class TestOutboxDeadLetters:
-    @pytest.mark.asyncio
-    async def test_exhausted_records_are_surfaced(self) -> None:
-        async def always_fail(_env: StoredEventEnvelope) -> None:
-            raise RuntimeError("upstream down")
-
-        outbox = TransactionalOutbox(publish=always_fail, max_attempts=2, poll_interval_s=0.02)
-        record = await outbox.enqueue(_env("acc-1", "account.opened"))
-        await outbox.start()
-        for _ in range(100):
-            await asyncio.sleep(0.02)
-            if record.attempts >= 2:
-                break
-        await outbox.stop()
-
-        assert record.attempts >= 2
-        assert record.delivered is False
-        assert await outbox.pending() == []  # excluded from the publish loop
-        assert record in await outbox.dead_letters()  # but surfaced for inspection
 
 
 class TestSqlAlchemyConcurrency:

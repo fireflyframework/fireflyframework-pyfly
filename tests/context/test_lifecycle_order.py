@@ -55,6 +55,7 @@ from pyfly.eventsourcing.outbox import TransactionalOutbox  # noqa: E402
 from pyfly.eventsourcing.projection import ProjectionRunner  # noqa: E402
 from pyfly.eventsourcing.store import InMemoryEventStore  # noqa: E402
 from pyfly.kernel.lifecycle import CONSUMER_PHASE  # noqa: E402
+from pyfly.messaging.listener_container import FixedBackOff  # noqa: E402
 from pyfly.scheduling.decorators import scheduled  # noqa: E402
 from pyfly.transactional.core.recovery import RecoveryService  # noqa: E402
 from pyfly.transactional.core.scheduling import OrchestrationScheduler, ScheduledTask  # noqa: E402
@@ -829,7 +830,14 @@ class _PollerConfiguration:
             mailer.touch("outbox")
             await broker.publish(envelope)
 
-        return _recording_stop(TransactionalOutbox(relay, max_attempts=10_000, poll_interval_s=0.01), "outbox")
+        outbox = TransactionalOutbox(
+            relay,
+            datasource=_OUTBOX_DATABASE["engine"],  # the outbox is a table now
+            max_attempts=10_000,
+            poll_interval_s=0.01,
+            backoff=FixedBackOff(0.01),
+        )
+        return _recording_stop(outbox, "outbox")
 
     @bean
     def mail_projection(self, mailer: _Mailer) -> ProjectionRunner:
@@ -837,10 +845,22 @@ class _PollerConfiguration:
         return _recording_stop(runner, "projection")
 
 
-async def test_framework_schedulers_and_pollers_drain_before_any_pre_destroy() -> None:
+_OUTBOX_DATABASE: dict[str, AsyncEngine] = {}
+
+
+async def test_framework_schedulers_and_pollers_drain_before_any_pre_destroy(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'outbox.db'}")
+    _OUTBOX_DATABASE["engine"] = engine
     ctx = ApplicationContext(Config({}))
     ctx.register_bean(_Mailer)
     ctx.register_bean(_PollerConfiguration)
+    try:
+        await _drain_before_pre_destroy(ctx)
+    finally:
+        await engine.dispose()
+
+
+async def _drain_before_pre_destroy(ctx: ApplicationContext) -> None:
     await ctx.start()
     await ctx.get_bean(TransactionalOutbox).enqueue(StoredEventEnvelope(event_type="Sent"))
     for _ in range(100):  # every poller has run at least once
