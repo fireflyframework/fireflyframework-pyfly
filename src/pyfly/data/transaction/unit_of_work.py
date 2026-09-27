@@ -403,8 +403,9 @@ class UnitOfWork:
         return any(entry.handle is handle for entry in self._savepoints)
 
     def savepoint_holder_above(self, handle: object) -> asyncio.Task[Any] | None:
-        """The task that holds an open savepoint above the savepoint *handle* and is neither the running task
-        nor one it started it from (a child task that outlived the scope that started it), if any.
+        """A live task, other than the running one, that holds an open savepoint above the savepoint *handle*
+        (typically a child task that outlived the ``NESTED`` scope that started it), if any. A savepoint the
+        running task was started inside does not count.
 
         Releasing or rolling back *handle*'s savepoint would end that task's savepoint too, under it.
         """
