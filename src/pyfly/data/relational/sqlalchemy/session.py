@@ -19,8 +19,9 @@
   ``ROLLBACK TO SAVEPOINT`` of ``begin_nested()``, and every fetch of a streamed result
   (:class:`GuardedResult`). On MySQL and MariaDB, whose connection has one active result at a time, an open
   streamed result holds the unit until it is exhausted or closed: every other operation raises
-  ``IllegalTransactionStateError`` meanwhile, and a stream still open when its unit completes is closed
-  first (:func:`close_open_stream`). In a read-only unit (``read_only=True``, or the read
+  ``IllegalTransactionStateError`` meanwhile, and a stream still open when its unit completes, or when the
+  savepoint it was opened in ends, is closed first (:func:`close_open_stream`). In a read-only unit
+  (``read_only=True``, or the read
   auto unit of a ``find*``/``count*``/``exists*``/``stream*``/``get*`` repository method) a Core
   ``INSERT``/``UPDATE``/``DELETE`` is refused before it is sent, on every backend, as the ORM flush guard
   refuses ORM writes (a raw ``text()`` statement is not inspected). ``commit``, ``rollback`` and ``close``
@@ -247,8 +248,9 @@ def _opened(result: Any, unit: UnitOfWork, args: tuple[Any, ...], kwargs: dict[s
 
 
 async def close_open_stream(unit: UnitOfWork) -> None:
-    """Close the streamed result that holds *unit* (``UnitOfWork.stream_opened``), if one is open; the
-    transaction manager calls it under the unit's guard before it commits or rolls back.
+    """Close the streamed result that holds *unit* (``UnitOfWork.stream_opened``), if one is open; it runs
+    under the unit's guard before the unit commits or rolls back, and before a savepoint ends (a stream open
+    then was opened inside that savepoint: no savepoint opens while a stream is open).
 
     On MySQL and MariaDB a ``COMMIT`` or ``ROLLBACK`` cannot run while a result is open on the connection:
     closing it reads the rows not fetched yet and drops them (what the driver does before any other
@@ -417,7 +419,8 @@ class UnitSession(AsyncSession):
 class UnitSavepoint(AsyncSessionTransaction):
     """A savepoint the application opens on a unit's session (``session.begin_nested()``): its
     ``SAVEPOINT``, ``RELEASE SAVEPOINT`` and ``ROLLBACK TO SAVEPOINT`` run under the unit's operation guard,
-    like every other statement of the unit, and never across the code inside the block.
+    like every other statement of the unit, and never across the code inside the block. A streamed result
+    the block left open is closed before its savepoint ends (:func:`close_open_stream`).
 
     Releasing it flushes what the block left pending (``session.add()`` or ``merge()`` with no flush inside
     the block). When that flush fails, SQLAlchemy rolls the savepoint back, and at the end of an ``async
@@ -442,25 +445,30 @@ class UnitSavepoint(AsyncSessionTransaction):
         unit = self._pyfly_unit
         marker = (asyncio.current_task(), self.sync_transaction)
         try:
-            async with unit.operation():
+            async with unit.operation(stream=unit.open_stream):
+                await close_open_stream(unit)  # one the block left open (no savepoint opens beside a stream)
                 unit.attributes[RELEASING_SAVEPOINT] = marker
                 await super().commit()
         finally:
             _released(unit, marker)
 
     async def rollback(self) -> None:
-        async with self._pyfly_unit.operation():
+        unit = self._pyfly_unit
+        async with unit.operation(stream=unit.open_stream):
+            await close_open_stream(unit)
             await super().rollback()
 
     async def __aexit__(self, type_: Any, value: Any, traceback: Any) -> None:
         unit = self._pyfly_unit
         if type_ is not None:
-            async with unit.operation():
+            async with unit.operation(stream=unit.open_stream):
+                await close_open_stream(unit)
                 await super().__aexit__(type_, value, traceback)
             return
         marker = (asyncio.current_task(), self.sync_transaction)
         try:
-            async with unit.operation():
+            async with unit.operation(stream=unit.open_stream):
+                await close_open_stream(unit)
                 unit.attributes[RELEASING_SAVEPOINT] = marker
                 await super().__aexit__(type_, value, traceback)
         finally:

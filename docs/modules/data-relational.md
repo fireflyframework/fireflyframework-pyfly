@@ -598,7 +598,8 @@ A repository call resolves its session when it runs:
   server-side cursors need one), and owns that connection until the iterator is exhausted or
   `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`: closing it early closes its
   cursor at once (on MySQL and MariaDB that reads the rest of its rows and drops them, as the
-  connection requires). A stream still open when its unit completes is closed first.
+  connection requires). A stream still open when its unit completes, or when the `NESTED` step or
+  savepoint block it was opened in ends, is closed first.
 
 Every `asyncio` task created inside a transaction inherits its unit. That is made safe:
 

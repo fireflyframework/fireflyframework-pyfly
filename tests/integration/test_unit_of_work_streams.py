@@ -52,7 +52,7 @@ from sqlalchemy.pool import NullPool
 
 from pyfly.container.stereotypes import repository, service
 from pyfly.context.application_context import ApplicationContext
-from pyfly.data import transactional
+from pyfly.data import Propagation, transactional
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
@@ -90,6 +90,18 @@ class StItemRepository(Repository[StItem, int]):
                 fetched.set()
         finally:
             await result.close()
+        return streamed
+
+    async def first_ten_in_a_savepoint_block(self) -> int:
+        """The savepoint idiom around a stream left open (a break out of the loop) as the block ends."""
+        session = self._session
+        streamed = 0
+        async with session.begin_nested():
+            await self.save(StItem(name="in-the-block"))
+            async for _item in self.stream_all():
+                streamed += 1
+                if streamed == 10:
+                    break
         return streamed
 
 
@@ -144,6 +156,33 @@ class StService:
                 break  # the stream is left open: nothing closes it before the unit completes
         if then_fail:
             raise ValueError("the unit failed after abandoning its stream")
+        return streamed
+
+    @transactional(propagation=Propagation.NESTED)
+    async def first_ten_in_a_nested_step(self, then_fail: bool) -> int:
+        await self.items.save(StItem(name="in-the-step"))
+        streamed = 0
+        async for _item in self.items.stream_all():
+            streamed += 1
+            if streamed == 10:
+                break  # the stream is left open as the NESTED step ends
+        if then_fail:
+            raise ValueError("the step failed after abandoning its stream")
+        return streamed
+
+    @transactional
+    async def a_nested_step_abandons_its_stream(self, then_fail: bool) -> object:
+        try:
+            outcome: object = await self.first_ten_in_a_nested_step(then_fail)
+        except ValueError as error:
+            outcome = error
+        await self.items.save(StItem(name="after-the-step"))
+        return outcome
+
+    @transactional
+    async def a_savepoint_block_abandons_its_stream(self) -> int:
+        streamed = await self.items.first_ten_in_a_savepoint_block()
+        await self.items.save(StItem(name="after-the-block"))
         return streamed
 
     @transactional
@@ -294,6 +333,24 @@ async def test_a_stream_of_its_own_closed_early_frees_its_connection(
     assert not [record for record in caplog.records if record.getMessage() == "unit_of_work_rollback_failed"]
 
 
+@pytest.mark.parametrize("then_fail", [False, True], ids=["step-returns", "step-raises"])
+async def test_a_nested_step_that_leaves_its_stream_open_still_ends_at_its_savepoint(
+    harness: Harness, then_fail: bool
+) -> None:
+    outcome = await bounded(harness.service.a_nested_step_abandons_its_stream(then_fail))
+    if then_fail:
+        assert isinstance(outcome, ValueError), repr(outcome)
+        assert await harness.extra_rows() == ["after-the-step"]  # rolled back to its savepoint, stream and all
+    else:
+        assert outcome == 10
+        assert await harness.extra_rows() == ["after-the-step", "in-the-step"]
+
+
+async def test_a_savepoint_block_that_leaves_its_stream_open_still_ends(harness: Harness) -> None:
+    assert await bounded(harness.service.a_savepoint_block_abandons_its_stream()) == 10
+    assert await harness.extra_rows() == ["after-the-block", "in-the-block"]
+
+
 @pytest.mark.backends(MYSQL, MARIADB)
 async def test_a_stream_cancelled_in_mid_fetch_ends_as_the_cancellation_at_once(harness: Harness) -> None:
     fetched = asyncio.Event()
@@ -328,6 +385,10 @@ async def _cancelled_read(harness: Harness, kind: str, delay: float) -> str:
     return "completed"
 
 
+# A cancelled unit discards its connection with the unbuffered result still open on it; when the garbage
+# collector later reaches that result, asyncmy's MySQLResult.__del__ calls _finish_unbuffered_query()
+# without awaiting it. Nothing is sent (the coroutine never runs), and the connection is gone already.
+@pytest.mark.filterwarnings("ignore:coroutine 'MySQLResult._finish_unbuffered_query' was never awaited")
 @pytest.mark.parametrize("kind", ["anyio", "wait_for"])
 async def test_a_cancel_anywhere_in_a_stream_ends_as_the_cancellation_and_leaves_nothing_behind(
     harness: Harness, kind: str

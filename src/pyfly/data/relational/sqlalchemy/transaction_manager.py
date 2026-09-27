@@ -37,8 +37,8 @@ unless the datasource has after-begin customizers: their transaction-local setti
 their own statement there. A write auto unit commits.
 
 A streamed result still open when a unit completes is closed before its ``COMMIT`` or ``ROLLBACK`` on a
-dialect whose connection has one active result at a time (MySQL, MariaDB): nothing else can run on that
-connection until it is.
+dialect whose connection has one active result at a time (MySQL, MariaDB), and so is one still open when the
+savepoint it was opened in ends: nothing else can run on that connection until it is.
 
 A commit whose connection fails while ``COMMIT`` is in flight raises
 :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`. A unit whose operation was cancelled in
@@ -537,16 +537,20 @@ class SqlAlchemyTransactionManager:
         """``RELEASE SAVEPOINT``, flushing what the nested scope left pending first.
 
         When that flush fails, SQLAlchemy rolls the savepoint back on the connection and leaves it open and
-        deactivated: it stays the ``NESTED`` scope's until ``rollback_to_savepoint`` closes it.
+        deactivated: it stays the ``NESTED`` scope's until ``rollback_to_savepoint`` closes it. A streamed
+        result the scope left open on a connection that has one active result at a time is closed first
+        (``close_open_stream``): no savepoint opens while a stream is open, so it was opened inside the scope.
         """
-        async with unit.operation():
+        async with unit.operation(stream=unit.open_stream):
+            await close_open_stream(unit)
             await savepoint.commit()
         _forget_template_savepoint(unit, savepoint)
 
     async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None:
-        """``ROLLBACK TO SAVEPOINT``."""
+        """``ROLLBACK TO SAVEPOINT``; a streamed result the scope left open is closed first, as on release."""
         try:
-            async with unit.operation():
+            async with unit.operation(stream=unit.open_stream):
+                await close_open_stream(unit)
                 await savepoint.rollback()
         finally:
             _forget_template_savepoint(unit, savepoint)
