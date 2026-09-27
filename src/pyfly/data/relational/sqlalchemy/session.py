@@ -174,12 +174,16 @@ class GuardedResult:
     async def close(self) -> None:
         """Close the result; the rows not fetched yet are dropped (on MySQL and MariaDB they are read first,
         as the connection requires). Nothing is left to close once the rows are exhausted, or once the unit
-        completed (its end closed the result along with its connection)."""
+        completed (its end closed the result along with its connection). Nothing is sent on a connection in
+        an unknown state either (a cancellation, or a driver error, interrupted a fetch): the stream keeps
+        holding the unit until the unit ends and its connection is rolled back or discarded."""
         unit = self._unit
         stream = self._stream
         if unit.completed or _cursor_released(self._result):
             if stream is not None:
                 unit.stream_closed(stream)
+            return
+        if unit.poisoned or (stream is not None and stream.failed):
             return
         async with unit.operation(stream=stream):
             try:

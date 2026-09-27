@@ -29,6 +29,7 @@ from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTrans
 from pyfly.data.transaction import TransactionCapabilities
 from tests.integration.test_unit_of_work_streams import (  # noqa: F401 — the tests and fixtures run here too
     harness,
+    test_a_cancel_anywhere_in_a_stream_ends_as_the_cancellation_and_leaves_nothing_behind,
     test_a_sibling_write_beside_an_open_stream,
     test_a_statement_between_two_fetches_of_the_same_task,
     test_a_stream_abandoned_open_does_not_break_the_commit,

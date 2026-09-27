@@ -22,7 +22,9 @@ wrong``, a rollback that fails, a MariaDB connection that hangs). The unit refus
 with ``IllegalTransactionStateError`` naming the stream, before anything reaches the server; the stream
 itself goes on, and the unit stays usable. A stream that is exhausted, or closed early
 (``contextlib.aclosing``), frees the connection; one abandoned open (a ``break`` out of the loop) is
-closed when its unit completes, so the unit still commits or rolls back cleanly.
+closed when its unit completes, so the unit still commits or rolls back cleanly. A cancellation anywhere in
+a stream (a fetch in flight, the close of a stream ended early) ends as the cancellation and leaves no
+connection behind.
 
 The fast suite runs the single-result rules on SQLite too, with the capability turned off
 (``TransactionCapabilities.multiple_active_results``): see ``test_unit_of_work_streams_single_result``.
@@ -36,9 +38,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable
 from typing import TypeVar
 
+import anyio
 import pytest
 from sqlalchemy import Identity, Integer, String, text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -72,7 +77,20 @@ class StItem(Base):
 
 @repository
 class StItemRepository(Repository[StItem, int]):
-    pass
+    async def stream_slowly(self, fetched: asyncio.Event) -> int:
+        """A stream whose every row takes the server 0.1 s (MySQL and MariaDB ``SLEEP``), closed on the way out.
+        Each row outgrows the server's network buffer, so it is sent as soon as it is computed."""
+        result = await self._session.stream(
+            text("SELECT id, REPEAT('x', 40000) AS pad, SLEEP(0.1) FROM st_item ORDER BY id")
+        )
+        streamed = 0
+        try:
+            async for _row in result:
+                streamed += 1
+                fetched.set()
+        finally:
+            await result.close()
+        return streamed
 
 
 @service
@@ -138,6 +156,14 @@ class StService:
                     break
         await self.items.save(StItem(name="after-close"))
         return streamed
+
+    @transactional
+    async def stream_slowly(self, fetched: asyncio.Event) -> int:
+        return await self.items.stream_slowly(fetched)
+
+    @transactional
+    async def read_everything(self) -> int:
+        return len([item async for item in self.items.stream_all()])
 
     @transactional
     async def write_after_exhausting_a_stream(self) -> int:
@@ -266,3 +292,61 @@ async def test_a_stream_of_its_own_closed_early_frees_its_connection(
         assert await bounded(read_ten()) == 10
     assert harness.checked_out() == 0
     assert not [record for record in caplog.records if record.getMessage() == "unit_of_work_rollback_failed"]
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_a_stream_cancelled_in_mid_fetch_ends_as_the_cancellation_at_once(harness: Harness) -> None:
+    fetched = asyncio.Event()
+    call = asyncio.create_task(harness.service.stream_slowly(fetched))
+    await bounded(fetched.wait())
+    call.cancel()  # lands in a fetch: the server spends 0.1 s on every row
+    cancelled_at = time.perf_counter()
+    done, _pending = await asyncio.wait({call}, timeout=BOUND)
+    if not done:
+        call.cancel()
+        pytest.fail(f"the cancelled stream did not end within {BOUND} s")
+    with pytest.raises(asyncio.CancelledError):
+        call.result()
+    # Its connection is in an unknown state: nothing more is read from it (not the ~30 s of rows left, nor
+    # anything else), and the unit discards it.
+    assert time.perf_counter() - cancelled_at < 5
+    assert harness.checked_out() == 0
+
+
+STEPS = 24
+
+
+async def _cancelled_read(harness: Harness, kind: str, delay: float) -> str:
+    if kind == "anyio":  # level-triggered, as under Starlette: every await of the task is cancelled again
+        with anyio.move_on_after(delay) as scope:
+            await harness.service.read_everything()
+        return "cancelled" if scope.cancelled_caught else "completed"
+    try:
+        await asyncio.wait_for(harness.service.read_everything(), delay)
+    except TimeoutError:
+        return "cancelled"
+    return "completed"
+
+
+@pytest.mark.parametrize("kind", ["anyio", "wait_for"])
+async def test_a_cancel_anywhere_in_a_stream_ends_as_the_cancellation_and_leaves_nothing_behind(
+    harness: Harness, kind: str
+) -> None:
+    started = time.perf_counter()
+    assert await bounded(harness.service.read_everything()) == ROWS
+    full = time.perf_counter() - started
+    outcomes: Counter[str] = Counter()
+    for step in range(STEPS):
+        delay = full * 1.3 * step / STEPS
+        where = f"{kind} step {step} ({delay * 1000:.3f} ms of a {full * 1000:.3f} ms unit)"
+        call = asyncio.ensure_future(_cancelled_read(harness, kind, delay))
+        done, _pending = await asyncio.wait({call}, timeout=BOUND)
+        if not done:
+            call.cancel()
+            pytest.fail(f"{where}: the cancelled stream did not end within {BOUND} s")
+        try:
+            outcomes[call.result()] += 1
+        except Exception as error:  # noqa: BLE001 — the assertion reports it
+            pytest.fail(f"{where}: ended with {error!r} instead of completing or being cancelled")
+        assert harness.checked_out() == 0, f"{where}: a pooled connection is still checked out"
+    assert outcomes["cancelled"] > 0, outcomes
