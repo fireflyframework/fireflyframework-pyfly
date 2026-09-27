@@ -598,9 +598,9 @@ A repository call resolves its session when it runs:
   server-side cursors need one), and owns that connection until the iterator is exhausted or
   `aclose()`d. Close an abandoned stream with `contextlib.aclosing(...)`: closing it early closes its
   cursor at once (on MySQL and MariaDB that reads the rest of its rows and drops them, as the
-  connection requires). A stream left open (a `break` out of the loop does not close it) is closed
-  before its unit's `COMMIT` or `ROLLBACK`, and before the `NESTED` step or savepoint block it was
-  opened in ends.
+  connection requires). A `break` out of the loop does not close the stream: Python closes an abandoned
+  async generator later, in a task of its own. A stream still open is closed before its unit's `COMMIT`
+  or `ROLLBACK`, and before the `NESTED` step or savepoint block it was opened in ends.
 
 Every `asyncio` task created inside a transaction inherits its unit. That is made safe:
 
@@ -653,8 +653,11 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
   `IllegalTransactionStateError` naming the stream, before it reaches the server (asyncmy would corrupt
   the connection instead). The stream goes on, and the unit stays usable. Collect the rows first, close
   the stream early, or give the other work a unit of its own (`Propagation.REQUIRES_NEW`, `detached()`).
-  PostgreSQL and SQLite run other statements beside an open stream
-  (`DataSource.capabilities.multiple_active_results` tells which kind a datasource is).
+  After a `break`, close the stream with `contextlib.aclosing` before anything else in the unit: the
+  stream a `break` abandons is closed later, in a task of its own, so a statement right after the loop
+  is refused, while one after an unrelated `await` may find it closed already. PostgreSQL and SQLite
+  run other statements beside an open stream (`DataSource.capabilities.multiple_active_results` tells
+  which kind a datasource is).
 
   ```python
   @transactional
@@ -662,6 +665,17 @@ Every `asyncio` task created inside a transaction inherits its unit. That is mad
       stale = [product async for product in self.products.stream_all() if product.stale]
       for product in stale:  # after the stream: on MySQL a save inside the loop above is refused
           await self.products.save(product.repriced())
+
+  @transactional
+  async def reprice_the_first_stale(self) -> None:
+      first = None
+      async with contextlib.aclosing(self.products.stream_all()) as products:
+          async for product in products:
+              if product.stale:
+                  first = product
+                  break
+      if first is not None:  # the stream is closed here, on every backend
+          await self.products.save(first.repriced())
   ```
 - A task that uses a unit after it completed gets `IllegalTransactionStateError` naming the unit,
   instead of writing into a transaction nobody will commit. So does a `NESTED` step whose unit ended
