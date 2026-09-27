@@ -959,3 +959,16 @@ class TestCancellation:
         await self._cancel_when(log, "first:confirm", task)
 
         assert log[-2:] == ["second:cancel", "first:cancel"]
+
+    @pytest.mark.anyio
+    async def test_the_callers_own_cancellation_is_re_raised(self) -> None:
+        log: list[str] = []
+        engine = self._engine(self._registry(log, hang_in="second:try"))
+        task = asyncio.create_task(engine.execute("cancel-me"))
+        while "second:try" not in log:
+            await asyncio.sleep(0.001)
+        task.cancel("caller gave up")
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("caller gave up",)
+        assert log[-1] == "first:cancel"

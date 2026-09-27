@@ -739,3 +739,57 @@ class TestJitter:
         # With jitter_factor=0.5, delay is 100 * (1 + uniform(-0.5, 0.5))
         # So range is 50..150 ms — just verify it's in a reasonable range
         assert 30 <= gap_ms <= 200
+
+
+# ── Cancelled saga engine ─────────────────────────────────────
+
+
+class TestCancelledSagaEngine:
+    @pytest.mark.anyio
+    async def test_the_callers_own_cancellation_is_re_raised_after_compensation(self) -> None:
+        """The cancellation that reaches the caller is the one it issued (a cancel scope recognizes its own)."""
+        from pyfly.transactional.saga.engine.argument_resolver import ArgumentResolver
+        from pyfly.transactional.saga.engine.compensator import SagaCompensator
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+        from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
+
+        compensated: list[str] = []
+        waiting = asyncio.Event()
+
+        class Bean:
+            async def first(self) -> str:
+                return "done"
+
+            async def undo_first(self) -> None:
+                compensated.append("first")
+
+            async def second(self) -> None:
+                waiting.set()
+                await asyncio.sleep(30)
+
+        saga_def = _make_saga(
+            {
+                "first": StepDefinition(id="first", step_method=Bean.first, compensate_method=Bean.undo_first),
+                "second": StepDefinition(id="second", step_method=Bean.second, depends_on=["first"]),
+            },
+            name="cancelled",
+        )
+        saga_def.bean = Bean()
+        registry = SagaRegistry()
+        registry._sagas["cancelled"] = saga_def
+        invoker = StepInvoker(ArgumentResolver())
+        engine = SagaEngine(
+            registry=registry,
+            step_invoker=invoker,
+            execution_orchestrator=SagaExecutionOrchestrator(invoker),
+            compensator=SagaCompensator(invoker),
+        )
+
+        task = asyncio.create_task(engine.execute("cancelled"))
+        await waiting.wait()
+        task.cancel("caller gave up")
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+
+        assert raised.value.args == ("caller gave up",)
+        assert compensated == ["first"]

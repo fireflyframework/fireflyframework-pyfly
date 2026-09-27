@@ -112,6 +112,7 @@ class TccEngine:
                 }
             )
 
+        cancellation: asyncio.CancelledError | None = None  # re-raised as is: a cancel scope knows its own
         try:
             # 5. Execute via orchestrator.
             success, failed_participant_id = await self._orchestrator.execute(
@@ -119,6 +120,9 @@ class TccEngine:
                 ctx,
                 input_data=input_data,
             )
+        except asyncio.CancelledError as exc:
+            # The caller cancelled the TCC: the orchestrator ran the CANCEL phase before re-raising.
+            cancellation = exc
         except Exception as exc:
             error = exc
             logger.debug(
@@ -129,12 +133,14 @@ class TccEngine:
             )
         finally:
             # 6-7. Emit on_completed and persist the final state, to completion even when the caller cancelled
-            # the TCC (the orchestrator has run its CANCEL phase by then).
-            _result, finish_error, cancelled = await run_shielded(self._finish(tcc_name, ctx, success))
-            if cancelled:
-                raise asyncio.CancelledError
-            if finish_error is not None:
+            # the TCC.
+            _result, finish_error, finish_cancelled = await run_shielded(self._finish(tcc_name, ctx, success))
+            if finish_error is not None and cancellation is None and not finish_cancelled:
                 raise finish_error
+        if cancellation is not None:
+            raise cancellation
+        if finish_cancelled:
+            raise asyncio.CancelledError
 
         # 8. Build and return TccResult.
         return self._build_result(

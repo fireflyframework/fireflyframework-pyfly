@@ -138,6 +138,7 @@ class SagaEngine:
             )
 
         cancelled = False
+        cancellation: asyncio.CancelledError | None = None  # re-raised as is: a cancel scope knows its own
         try:
             try:
                 # 5a. Execute via orchestrator.
@@ -147,10 +148,11 @@ class SagaEngine:
                     step_input=input_data,
                 )
                 success = True
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 # The caller cancelled the saga (a timeout, a disconnect, shutdown). Every step task has ended:
                 # undo the steps that committed, then let the cancellation propagate.
                 cancelled = True
+                cancellation = exc
                 logger.debug(
                     "Saga '%s' (correlation_id=%s) cancelled. Running compensation.",
                     saga_name,
@@ -174,6 +176,8 @@ class SagaEngine:
             cancelled |= finish_cancelled
             if finish_error is not None and not cancelled:
                 raise finish_error
+        if cancellation is not None:
+            raise cancellation
         if cancelled:
             raise asyncio.CancelledError
 
