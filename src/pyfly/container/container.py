@@ -19,12 +19,13 @@ import contextlib
 import difflib
 import inspect
 import logging
+import sys
 import threading
 import time
 import types
 import typing
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, TypeVar, Union, cast, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
@@ -80,17 +81,52 @@ def _safe_issubclass(impl: Any, origin: Any) -> bool:
         return False
 
 
+if sys.version_info >= (3, 14):
+    import annotationlib
+
+    def _own_annotations(klass: type) -> Mapping[str, Any]:
+        """The annotations *klass* itself declares, unevaluated where they cannot be evaluated.
+
+        Python 3.14 evaluates annotations lazily (PEP 649/749): a class defined without
+        ``from __future__ import annotations`` keeps no ``__annotations__`` in its ``__dict__``. The
+        ``FORWARDREF`` format evaluates what it can and leaves a forward reference for the rest (a
+        ``TYPE_CHECKING``-only import), so one such name does not hide the others.
+        """
+        try:
+            return annotationlib.get_annotations(klass, format=annotationlib.Format.FORWARDREF)
+        except Exception:  # noqa: BLE001 — annotations that cannot even be listed declare nothing to read
+            return {}
+
+else:
+
+    def _own_annotations(klass: type) -> Mapping[str, Any]:
+        """The annotations *klass* itself declares (Python 3.12 and 3.13 keep them in the class dictionary)."""
+        annotations: Mapping[str, Any] = klass.__dict__.get("__annotations__", {})
+        return annotations
+
+
+#: The raw annotation of a field that has none.
+_UNANNOTATED: Any = object()
+
 # The Autowired/Value fields of each class, found once per class (weakly keyed, so classes defined
 # at runtime, in tests for instance, are not kept alive by the cache).
-_FIELD_CACHE: weakref.WeakKeyDictionary[type, tuple[tuple[str, type, Any], ...]] = weakref.WeakKeyDictionary()
+_FIELD_CACHE: weakref.WeakKeyDictionary[type, tuple[tuple[str, type | None, Any, Any], ...]] = (
+    weakref.WeakKeyDictionary()
+)
+
+# The resolved annotation of each field, by the class that declares it and the field name. Only a
+# resolution that succeeded is kept: a forward reference to a class defined later resolves next time.
+_HINT_CACHE: weakref.WeakKeyDictionary[type, dict[str, Any]] = weakref.WeakKeyDictionary()
 
 
-def _injected_fields(cls: type) -> tuple[tuple[str, type, Any], ...]:
-    """``(name, declaring class, descriptor)`` for every annotated ``Autowired``/``Value`` field of *cls*.
+def _injected_fields(cls: type) -> tuple[tuple[str, type | None, Any, Any], ...]:
+    """``(name, declaring class, descriptor, raw annotation)`` for every ``Autowired``/``Value`` field of *cls*.
 
-    Only the class dictionaries are read, so a class without such fields costs a few dictionary
-    lookups and no annotation is evaluated. The declaring class is the first class in the MRO that
-    annotates the name; its module is where the annotation is resolved.
+    The fields are the ``Autowired``/``Value`` objects the classes of the MRO hold, so finding them
+    evaluates no annotation, and a class without such fields (every third-party ``@bean`` product) is
+    left alone. The declaring class is the first class in the MRO that annotates the name; its module
+    is where the annotation is resolved. A field nobody annotates has no declaring class and the raw
+    annotation :data:`_UNANNOTATED`.
     """
     try:
         return _FIELD_CACHE[cls]
@@ -98,35 +134,47 @@ def _injected_fields(cls: type) -> tuple[tuple[str, type, Any], ...]:
         pass
     from pyfly.core.value import Value
 
-    fields: list[tuple[str, type, Any]] = []
-    seen: set[str] = set()
+    names: dict[str, None] = {}
     for klass in cls.__mro__:
-        annotations = klass.__dict__.get("__annotations__", {})
-        for name in annotations:
-            if name in seen:
-                continue
-            seen.add(name)
+        for name, value in vars(klass).items():
+            if isinstance(value, (Autowired, Value)):
+                names.setdefault(name)
+    fields: list[tuple[str, type | None, Any, Any]] = []
+    if names:
+        annotations_by_class = [(klass, _own_annotations(klass)) for klass in cls.__mro__]
+        for name in names:
             default = getattr(cls, name, None)
-            if isinstance(default, (Autowired, Value)):
-                fields.append((name, klass, default))
+            if not isinstance(default, (Autowired, Value)):  # a subclass replaced the field
+                continue
+            owner, raw = next(
+                ((klass, annotations[name]) for klass, annotations in annotations_by_class if name in annotations),
+                (None, _UNANNOTATED),
+            )
+            fields.append((name, owner, default, raw))
     result = tuple(fields)
     with contextlib.suppress(TypeError):  # a class that cannot be weakly referenced is not cached
         _FIELD_CACHE[cls] = result
     return result
 
 
-def _field_hint(owner: type, name: str) -> Any:
-    """The resolved annotation of *name*, evaluated alone in the module and namespace of *owner*.
+def _field_hint(owner: type, name: str, raw: Any) -> Any:
+    """The resolved annotation *raw* of field *name*, evaluated alone in the module and namespace of *owner*.
 
     ``typing.get_type_hints`` on the whole class fails as soon as ANY annotation of ANY class in the
-    MRO cannot be resolved; a probe class that carries just this one annotation does not.
+    MRO cannot be resolved; a probe class that carries just this one annotation does not. The result
+    is cached per field, so a transient bean does not build a probe class on every creation.
     """
-    raw = owner.__dict__["__annotations__"][name]
+    cached = _HINT_CACHE.get(owner)
+    if cached is not None and name in cached:
+        return cached[name]
     probe = types.new_class(
         f"{owner.__name__}_{name}_hint",
         exec_body=lambda namespace: namespace.update({"__annotations__": {name: raw}, "__module__": owner.__module__}),
     )
-    return typing.get_type_hints(probe, localns=dict(vars(owner)), include_extras=True)[name]
+    hint = typing.get_type_hints(probe, localns=dict(vars(owner)), include_extras=True)[name]
+    with contextlib.suppress(TypeError):  # a class that cannot be weakly referenced is not cached
+        _HINT_CACHE.setdefault(owner, {})[name] = hint
+    return hint
 
 
 def _collect_generic_args(cls: Any) -> set[type]:
@@ -816,13 +864,14 @@ class Container:
         Only the annotations of those fields are read, each on its own. A class that declares none
         (every third-party @bean product, such as ``AsyncSession``) is left alone, and an annotation
         elsewhere in the class that cannot be resolved (a ``TYPE_CHECKING``-only import) no longer
-        disables the injection of the others. A required ``Autowired`` field whose own annotation
-        cannot be resolved fails the creation instead of keeping its sentinel.
+        disables the injection of the others. A required ``Autowired`` field whose type cannot be
+        known (its annotation cannot be resolved, or it has none and no qualifier) fails the creation
+        instead of keeping its sentinel.
         """
         from pyfly.core.value import Value
 
         cls = type(instance)
-        for attr_name, owner, default in _injected_fields(cls):
+        for attr_name, owner, default, raw in _injected_fields(cls):
             # Handle @Value("${key}") field descriptors: the expression, not the annotation, decides.
             if isinstance(default, Value):
                 from pyfly.core.config import Config
@@ -835,26 +884,18 @@ class Container:
                 setattr(instance, attr_name, default.resolve(config_reg.instance))
                 continue
 
-            try:
-                attr_type = _field_hint(owner, attr_name)
-            except Exception as exc:  # noqa: BLE001 — any failure to evaluate the annotation
-                if default.required:
-                    raise BeanCreationException(
-                        subsystem="injection",
-                        provider=f"{cls.__qualname__}.{attr_name}",
-                        reason=(
-                            f"the annotation of the Autowired field {cls.__qualname__}.{attr_name} "
-                            f"cannot be resolved ({type(exc).__name__}: {exc}); import the type at runtime"
-                        ),
-                    ) from exc
-                logging.getLogger(__name__).warning(
-                    "The annotation of the optional Autowired field %s.%s cannot be resolved (%s: %s); it is left None",
-                    cls.__qualname__,
-                    attr_name,
-                    type(exc).__name__,
-                    exc,
-                )
-                setattr(instance, attr_name, None)
+            attr_type: Any = None
+            if owner is not None:
+                try:
+                    attr_type = _field_hint(owner, attr_name, raw)
+                except Exception as exc:  # noqa: BLE001 — any failure to evaluate the annotation
+                    self._untyped_autowired_field(
+                        instance, attr_name, default, f"cannot be resolved ({type(exc).__name__}: {exc})", exc
+                    )
+                    continue
+            elif not default.qualifier:
+                # The bean name would decide without a type; with neither, nothing tells what to inject.
+                self._untyped_autowired_field(instance, attr_name, default, "is missing", None)
                 continue
 
             try:
@@ -875,6 +916,26 @@ class Container:
                 value = None
 
             setattr(instance, attr_name, value)
+
+    @staticmethod
+    def _untyped_autowired_field(
+        instance: Any, attr_name: str, field: Autowired, problem: str, cause: Exception | None
+    ) -> None:
+        """An ``Autowired`` field whose type cannot be known: a required one fails, an optional one is ``None``."""
+        owner = type(instance).__qualname__
+        if field.required:
+            raise BeanCreationException(
+                subsystem="injection",
+                provider=f"{owner}.{attr_name}",
+                reason=(
+                    f"the annotation of the Autowired field {owner}.{attr_name} {problem}; "
+                    "annotate it with a type imported at runtime, or name the bean with a qualifier"
+                ),
+            ) from cause
+        logging.getLogger(__name__).warning(
+            "The annotation of the optional Autowired field %s.%s %s; it is left None", owner, attr_name, problem
+        )
+        setattr(instance, attr_name, None)
 
     def _ensure_metrics(self, cls: type) -> BeanMetrics:
         """Return the metrics for *cls*, creating a new entry if needed."""

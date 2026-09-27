@@ -954,23 +954,31 @@ class OrderService:
 ### How It Works
 
 1. The container creates the instance via constructor injection (as before).
-2. It finds the annotated class attributes (across the MRO) whose class-level default is an
-   `Autowired()` or `Value()` instance. A class without any (every third-party `@bean` product,
-   such as SQLAlchemy's `AsyncSession`) is left alone: no annotation is evaluated.
+2. It finds the class attributes (across the MRO) that hold an `Autowired()` or `Value()`
+   instance. A class without any (every third-party `@bean` product, such as SQLAlchemy's
+   `AsyncSession`) is left alone: no annotation is evaluated.
 3. For each such field it resolves **that field's annotation only**, in the module of the class
-   that declares it:
-   - If `qualifier` is set, resolve by name via `resolve_by_name()`.
+   that declares it (the result is cached per field, so a transient bean does not pay for it on
+   every creation):
+   - A `Value()` field needs no annotation: its expression decides.
+   - If `qualifier` is set, resolve by name via `resolve_by_name()` (the annotation, when there is
+     one, must match the bean).
    - Otherwise the annotation is resolved like a constructor parameter: a class,
      `Annotated[T, Qualifier("name")]`, `T | None`, `list[T]`, `Provider[T]` and generics all work.
    - If resolution fails and `required=False`, set the field to `None`.
 4. The resolved value is injected via `setattr()`.
 
 An annotation elsewhere in the class that cannot be resolved at runtime (a name imported under
-`TYPE_CHECKING`) no longer matters. If the annotation of a **required** `Autowired` field itself
-cannot be resolved, the creation fails with a `BeanCreationException` naming the field; an optional
-one is set to `None` with a warning. Until 26.09.07 any unresolvable annotation made the container
-log one warning and skip every `Autowired` field of the class, which left required fields holding
-the `Autowired` sentinel (and every transient `AsyncSession` logged that warning).
+`TYPE_CHECKING`) no longer matters. If the type of a **required** `Autowired` field cannot be known
+(its annotation cannot be resolved, or it has no annotation and no `qualifier`), the creation fails
+with a `BeanCreationException` naming the field; an optional one is set to `None` with a warning.
+Until 26.09.07 any unresolvable annotation made the container log one warning and skip every
+`Autowired` field of the class, which left required fields holding the `Autowired` sentinel (and
+every transient `AsyncSession` logged that warning).
+
+The annotations are read through the annotation API of the running Python, so field injection works
+the same with and without `from __future__ import annotations`, including on Python 3.14, where a
+class keeps no `__annotations__` in its dictionary (PEP 649/749).
 
 ### Mixing Constructor and Field Injection
 
