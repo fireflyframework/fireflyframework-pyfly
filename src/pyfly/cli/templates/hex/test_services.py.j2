@@ -78,7 +78,7 @@ def repository() -> AsyncMock:
 
 @pytest.fixture
 def service(repository: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> TodoService:
-    # Stub document construction: no Beanie initialisation / MongoDB needed for these unit tests.
+    # Stub document construction: no Beanie initialization / MongoDB needed for these unit tests.
     monkeypatch.setattr(services_module, "TodoDocument", lambda **kw: SimpleNamespace(id=None, **kw))
     return TodoService(repository)
 
