@@ -246,6 +246,7 @@ class KafkaEventBus:
                 settings=self._settings,
                 auto_offset_reset="earliest",
                 name=f"eda:{','.join(self._topics)}",
+                listeners=self._matching,
             )
             await self._container.start()
 
@@ -289,11 +290,14 @@ class KafkaEventBus:
     def _envelope_of(self, record: Any, _attempt: int) -> EventEnvelope:
         return self._serializer.deserialize(record.value)
 
+    def _matching(self, envelope: EventEnvelope) -> list[EventHandler]:
+        """The handlers whose pattern matches *envelope*'s event type."""
+        return [handler for pattern, handler in list(self._handlers) if fnmatch.fnmatch(envelope.event_type, pattern)]
+
     async def _dispatch(self, envelope: EventEnvelope) -> None:
         """Every matching handler, in the record's unit of work: one failure fails the record."""
-        for pattern, handler in list(self._handlers):
-            if fnmatch.fnmatch(envelope.event_type, pattern):
-                await handler(envelope)
+        for handler in self._matching(envelope):
+            await handler(envelope)
 
     async def _dead_letter(self, record: Any, error: BaseException, attempts: int) -> None:
         """Republish ``record`` verbatim to ``<topic><dlt_suffix>`` with the reason and origin, and record a

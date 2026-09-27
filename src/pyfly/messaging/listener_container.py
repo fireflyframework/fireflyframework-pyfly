@@ -59,14 +59,16 @@ import contextlib
 import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from pyfly.config.properties.data import parse_bool, parse_float, parse_int
 from pyfly.data.transaction import (
     CommitOutcomeUnknownError,
     IllegalTransactionStateError,
+    Isolation,
     Propagation,
+    TransactionDefinition,
     TransactionManager,
     TransactionTemplate,
     TransactionTimedOutError,
@@ -423,24 +425,116 @@ class DeliveryState:
         self.committed = False
 
 
+_JOINING = frozenset({Propagation.REQUIRED, Propagation.MANDATORY})
+"""A listener declared with one of these joins the unit the container opens, which takes its settings."""
+
+_SHARING = frozenset({Propagation.REQUIRED, Propagation.MANDATORY, Propagation.SUPPORTS, Propagation.NESTED})
+"""Beside a listener that joins the container's unit, a listener declared with one of these runs in that
+unit too (``NESTED`` in a savepoint of it): it keeps its settings only when they are the unit's."""
+
+
+def listener_target(listener: object) -> object:
+    """The function behind *listener*, a :class:`ListenerEndpoint` and a :func:`functools.partial` looked
+    through."""
+    target = listener
+    while True:
+        if isinstance(target, ListenerEndpoint):
+            target = target.handler
+        elif isinstance(target, functools.partial):
+            target = target.func
+        else:
+            return target
+
+
+def transaction_definition_of(listener: object) -> TransactionDefinition | None:
+    """The settings *listener*'s ``@transactional`` declares (on its method, or on its class), or ``None``."""
+    definition = getattr(listener_target(listener), "__pyfly_transaction_definition__", None)
+    return definition if isinstance(definition, TransactionDefinition) else None
+
+
+@dataclass(frozen=True)
+class _UnitSettings:
+    """What a delivery's unit is opened with: *definition* (``REQUIRED``, unnamed) on *manager* (the
+    :class:`TransactionManager` a listener's ``manager=`` names), else on ``definition.datasource``."""
+
+    definition: TransactionDefinition
+    manager: object = None
+
+    @property
+    def named(self) -> bool:
+        """Whether a datasource or a manager is named, which must exist, rather than the default one."""
+        return self.manager is not None or self.definition.datasource is not None
+
+
+def _unit_settings(listener: object, definition: TransactionDefinition) -> _UnitSettings:
+    """The unit *listener*'s ``@transactional`` (*definition*) would open, as the container opens it."""
+    options = getattr(listener_target(listener), "__pyfly_transaction_options__", None)
+    manager = options.get("manager") if isinstance(options, dict) else None
+    datasource = definition.datasource
+    if isinstance(manager, str):
+        datasource, manager = datasource or manager, None
+    normalized = replace(definition, propagation=Propagation.REQUIRED, name=None, datasource=datasource)
+    return _UnitSettings(normalized, manager)
+
+
+def _listener_label(listener: object) -> str:
+    """*listener*'s name and ``@transactional`` settings, for logs."""
+    target = listener_target(listener)
+    name = getattr(target, "__qualname__", None) or repr(target)
+    definition = transaction_definition_of(listener)
+    if definition is None:
+        return f"{name} (no @transactional)"
+    parts = [f"propagation={definition.propagation.value}"]
+    if definition.isolation is not Isolation.DEFAULT:
+        parts.append(f"isolation={definition.isolation.value}")
+    if definition.read_only:
+        parts.append("read_only=True")
+    if definition.timeout is not None:
+        parts.append(f"timeout={definition.timeout:g}")
+    if definition.datasource is not None:
+        parts.append(f"datasource={definition.datasource}")
+    if definition.rollback_for or definition.no_rollback_for:
+        parts.append("rollback rules")
+    return f"{name} ({', '.join(parts)})"
+
+
+class _Plan:
+    """The unit the deliveries to one set of listeners run in: *template* (``None``: none of the
+    container's), and whether it names its datasource. *listeners* keeps them alive, so the ids that key
+    the plan are not reused."""
+
+    __slots__ = ("listeners", "named", "template")
+
+    def __init__(self, listeners: tuple[object, ...], template: TransactionTemplate | None, *, named: bool) -> None:
+        self.listeners = listeners
+        self.template = template
+        self.named = named
+
+
 class ListenerInvoker:
     """Runs a delivery's handler in the unit of work the container opens for it.
 
-    The unit is ``REQUIRED`` on the settings' datasource: the handler's ``@transactional`` joins it, its
-    repository calls run in it, and :meth:`invoke` returns only once it committed. When no transaction
-    manager serves the default datasource (the application has no data layer, or none is running), the
-    handler runs without a unit; a datasource the settings name must exist.
+    The unit takes the settings of the listeners' own ``@transactional``, which joins it, and their
+    repository calls run in it; :meth:`invoke` returns only once it committed. :meth:`plan` says which
+    unit a delivery gets. When no transaction manager serves the default datasource (the application has
+    no data layer, or none is running), the handler runs without a unit; a datasource the settings or a
+    listener name must exist.
     """
 
     def __init__(self, settings: ListenerContainerSettings, *, name: str) -> None:
         self._transactional = settings.transactional
         self._datasource = settings.datasource
+        self._name = name
         self._template = TransactionTemplate(
             datasource=settings.datasource, propagation=Propagation.REQUIRED, name=f"listener {name}"
         )
+        self._default = _UnitSettings(TransactionDefinition(datasource=settings.datasource))
+        self._default_plan = _Plan((), self._template, named=settings.datasource is not None)
+        self._plans: dict[tuple[int, ...], _Plan] = {}
 
     def manager(self) -> TransactionManager | None:
-        """The transaction manager deliveries run on now, or ``None`` when they run without a unit."""
+        """The transaction manager of the container's default unit now, or ``None`` when deliveries run
+        without a unit."""
         if not self._transactional:
             return None
         try:
@@ -455,15 +549,99 @@ class ListenerInvoker:
         if self._transactional and self._datasource is not None:
             self.manager()
 
-    def _boundary(self) -> TransactionBoundary | None:
-        manager = self.manager()
-        if manager is None:
-            return None
-        return TransactionBoundary(manager, self._template.definition)
+    def plan(self, listeners: Sequence[object]) -> TransactionDefinition | None:
+        """The definition of the unit a delivery to *listeners* runs in, or ``None`` when the container
+        opens none and each listener runs as its own ``@transactional`` declares.
 
-    async def invoke(self, call: Callable[[], Awaitable[None]], state: DeliveryState) -> None:
-        """Await *call* inside the delivery's unit; *state* records whether that unit committed."""
-        boundary = self._boundary()
+        - A listener without ``@transactional``, or declared ``REQUIRED`` or ``MANDATORY``, joins the
+          delivery's unit, and the container opens it with that listener's settings: isolation, read-only,
+          timeout, rollback rules and datasource (``manager=`` included). Without ``@transactional`` it is
+          ``REQUIRED`` on ``listener.datasource``.
+        - A listener declared ``REQUIRES_NEW``, ``NESTED``, ``SUPPORTS``, ``NOT_SUPPORTED`` or ``NEVER``
+          needs no unit of the container's: when every listener of the delivery is one of those, the
+          container opens none and each runs as declared, with no unit bound (``REQUIRES_NEW`` and
+          ``NESTED`` begin their own). The delivery is acknowledged after they returned, so after their
+          own units committed.
+        - The listeners of one delivery share its unit only when each runs in it with its own settings:
+          beside a listener that joins it, a ``SUPPORTS`` or ``NESTED`` listener (which would join it, or
+          take a savepoint of it) must declare the same settings, and a ``REQUIRES_NEW``, ``NOT_SUPPORTED``
+          or ``NEVER`` listener never does (a second unit or connection beside the delivery's, or a
+          refusal). When they cannot share one, the container opens none, and logs a WARNING naming them
+          the first time: each runs as its own ``@transactional`` declares (a listener without one gets a
+          short unit per repository call), and a later listener's failure delivers the message again to
+          the ones whose work committed.
+
+        The plan is worked out once per set of listeners. With ``listener.transactional`` off there is
+        never a unit of the container's.
+        """
+        found = self._plan_for(listeners)
+        if not self._transactional or found.template is None:
+            return None
+        return found.template.definition
+
+    def _plan_for(self, listeners: Sequence[object]) -> _Plan:
+        key = tuple(id(listener) for listener in listeners)
+        found = self._plans.get(key)
+        if found is None:
+            found = self._plans[key] = self._work_out(tuple(listeners))
+        return found
+
+    def _work_out(self, listeners: tuple[object, ...]) -> _Plan:
+        declared = [(listener, transaction_definition_of(listener)) for listener in listeners]
+        joining = [
+            self._default if definition is None else _unit_settings(listener, definition)
+            for listener, definition in declared
+            if definition is None or definition.propagation in _JOINING
+        ]
+        if not joining:
+            return _Plan(listeners, None, named=False)
+        chosen = joining[0]
+        misfits = [
+            listener
+            for listener, definition in declared
+            if not (
+                chosen == self._default
+                if definition is None
+                else definition.propagation in _SHARING and _unit_settings(listener, definition) == chosen
+            )
+        ]
+        if misfits:
+            if self._transactional:
+                logger.warning(
+                    "listener_units_differ container=%s listeners=%s: they cannot share one unit of work, so "
+                    "the container opens none; each runs as its own @transactional declares (without one, a "
+                    "short unit per repository call), and when one fails the message is delivered again to "
+                    "the others as well, whose work committed",
+                    self._name,
+                    [_listener_label(listener) for listener in listeners],
+                )
+            return _Plan(listeners, None, named=False)
+        if chosen == self._default:
+            return _Plan(listeners, self._template, named=self._default_plan.named)
+        definition = replace(chosen.definition, name=f"listener {self._name}")
+        settings = {field_.name: getattr(definition, field_.name) for field_ in fields(definition) if field_.init}
+        return _Plan(listeners, TransactionTemplate(chosen.manager, **settings), named=chosen.named)
+
+    def _boundary(self, listeners: Sequence[object] | None) -> TransactionBoundary | None:
+        if not self._transactional:
+            return None
+        found = self._default_plan if listeners is None else self._plan_for(listeners)
+        if found.template is None:
+            return None
+        try:
+            manager = found.template.manager()
+        except IllegalTransactionStateError:
+            if found.named:
+                raise
+            return None  # no data layer: a listener's own @transactional fails as it would anyway
+        return TransactionBoundary(manager, found.template.definition)
+
+    async def invoke(
+        self, call: Callable[[], Awaitable[None]], state: DeliveryState, listeners: Sequence[object] | None = None
+    ) -> None:
+        """Await *call* inside the unit a delivery to *listeners* runs in (see :meth:`plan`; the container's
+        default unit when ``None``); *state* records whether that unit committed."""
+        boundary = self._boundary(listeners)
         if boundary is None:
             await call()
             state.committed = True
@@ -593,6 +771,9 @@ async def _wait_or_cancel(tasks: set[asyncio.Task[Any]], timeout: float, *, cont
 KafkaDeadLetter = Callable[[Any, BaseException, int], Awaitable[None]]
 """Publishes a record to its dead-letter topic: ``(record, error, attempts)``; raising keeps it unacknowledged."""
 
+ListenerLookup = Callable[[Any], Sequence[object]]
+"""The listeners a delivery's payload reaches, whose ``@transactional`` settings shape its unit of work."""
+
 
 class KafkaListenerContainer(Generic[T]):
     """Consumes *topics* in one Kafka consumer and runs each record through the container's guarantees
@@ -603,6 +784,8 @@ class KafkaListenerContainer(Generic[T]):
     - *convert* turns a record and its attempt number into what *handler* takes, outside the unit; an
       exception there makes the record a :class:`PoisonMessageError`;
     - *handler* runs inside the delivery's unit of work;
+    - *listeners* returns the listeners a payload reaches (``None``: *handler* itself), whose
+      ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`);
     - *dead_letter* publishes a record that ran out of attempts; ``None`` logs it and skips it.
 
     Offsets are committed after each poll's records are done, and before a partition is sought back, and
@@ -624,6 +807,7 @@ class KafkaListenerContainer(Generic[T]):
         retry: RetryPolicy | None = None,
         auto_offset_reset: str = "latest",
         name: str | None = None,
+        listeners: ListenerLookup | None = None,
     ) -> None:
         self._topics = list(topics)
         self._group = group
@@ -635,6 +819,7 @@ class KafkaListenerContainer(Generic[T]):
         self._policy = retry or settings.retry
         self._auto_offset_reset = auto_offset_reset
         self.name = name or ",".join(self._topics)
+        self._listeners = listeners
         self._invoker = ListenerInvoker(settings, name=self.name)
         self._consumer: Any = None
         self._task: asyncio.Task[None] | None = None
@@ -668,6 +853,11 @@ class KafkaListenerContainer(Generic[T]):
     def running(self) -> bool:
         """Whether the consume loop is running."""
         return self._task is not None and not self._task.done()
+
+    def check_listeners(self, listeners: Sequence[object]) -> None:
+        """Work out now the unit of work the deliveries to *listeners* run in, so that listeners that
+        cannot share one are logged at subscription rather than at the first delivery."""
+        self._invoker.plan(listeners)
 
     async def start(self) -> None:
         """Create, subscribe and start the consumer, then the consume loop (in a detached task)."""
@@ -774,7 +964,7 @@ class KafkaListenerContainer(Generic[T]):
             return await self._recover(consumer, tp, record, PoisonMessageError(error), attempt)
         state = DeliveryState()
         try:
-            await self._invoker.invoke(functools.partial(self._handler, payload), state)
+            await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
         except asyncio.CancelledError:
             if state.committed:
                 self._completed(tp, record.offset)
@@ -801,6 +991,9 @@ class KafkaListenerContainer(Generic[T]):
             return False
         self._completed(tp, record.offset)
         return True
+
+    def _targets(self, payload: T) -> Sequence[object]:
+        return self._listeners(payload) if self._listeners is not None else (self._handler,)
 
     async def _recover(self, consumer: Any, tp: Any, record: Any, error: BaseException, attempts: int) -> bool:
         """Dead-letter a record that ran out of attempts, then count it done; ``False`` when the publish failed
@@ -1014,7 +1207,9 @@ class RabbitListenerContainer(Generic[T]):
       exception there makes it a :class:`PoisonMessageError`;
     - *dead_letters* are tried in order for a delivery that ran out of attempts: the first publish the
       broker routes wins; with none, the message is logged and rejected without requeue;
-    - *limit* is the adapter's :class:`ConcurrencyLimit`, shared by its consumers.
+    - *limit* is the adapter's :class:`ConcurrencyLimit`, shared by its consumers;
+    - *listeners* returns the listeners a payload reaches (``None``: *handler* itself), whose
+      ``@transactional`` settings the delivery's unit takes (see :meth:`ListenerInvoker.plan`).
 
     The consumer channel has publisher confirms and ``on_return_raises``: a republished or dead-lettered
     copy that no queue takes raises instead of vanishing, and the original stays unacknowledged.
@@ -1034,6 +1229,7 @@ class RabbitListenerContainer(Generic[T]):
         retry: RetryPolicy | None = None,
         after_dead_letter: RabbitDeadLetterHook | None = None,
         name: str | None = None,
+        listeners: ListenerLookup | None = None,
     ) -> None:
         self._connection = connection
         self._queue_name = queue
@@ -1046,6 +1242,7 @@ class RabbitListenerContainer(Generic[T]):
         self._policy = retry or settings.retry
         self._after_dead_letter = after_dead_letter
         self.name = name or queue
+        self._listeners = listeners
         self._invoker = ListenerInvoker(settings, name=self.name)
         self._channel: Any = None
         self._queue: Any = None
@@ -1152,7 +1349,7 @@ class RabbitListenerContainer(Generic[T]):
                 return
             state = DeliveryState()
             try:
-                await self._invoker.invoke(functools.partial(self._handler, payload), state)
+                await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
             except asyncio.CancelledError:
                 await _shielded(self._ack(message) if state.committed else self._release(message))
                 raise
@@ -1176,6 +1373,9 @@ class RabbitListenerContainer(Generic[T]):
             failure,
         )
         await self._retry_later(message, attempt, delay)
+
+    def _targets(self, payload: T) -> Sequence[object]:
+        return self._listeners(payload) if self._listeners is not None else (self._handler,)
 
     async def _retry_later(self, message: Any, attempt: int, delay: float) -> None:
         """Hold the message for *delay* (a stop cuts the wait short), then republish it to its queue with
@@ -1324,6 +1524,7 @@ __all__ = [
     "ListenerContainerSettings",
     "ListenerEndpoint",
     "ListenerInvoker",
+    "ListenerLookup",
     "ListenerOptions",
     "PoisonMessageError",
     "RabbitDeadLetter",
@@ -1334,5 +1535,7 @@ __all__ = [
     "failure_cause",
     "is_transient_failure",
     "listener_options",
+    "listener_target",
     "manages_listener_errors",
+    "transaction_definition_of",
 ]

@@ -15,7 +15,8 @@
 
 Each (topic, group) pair is consumed by one
 :class:`~pyfly.messaging.listener_container.KafkaListenerContainer`: auto-commit is off, every record
-runs in a unit of work the container opens, and its offset is committed only after that unit committed.
+runs in a unit of work the container opens with the listeners' ``@transactional`` settings, and its
+offset is committed only after that unit committed.
 A failed record is sought back and attempted again after a back-off, then published to its dead-letter
 topic (``<topic>.DLT`` unless the listener names another) and committed. ``stop()`` waits for the record
 in flight and never commits the offset of one it had to cancel.
@@ -117,7 +118,6 @@ class KafkaAdapter:
         self._consumer_factory = consumer_factory
         self._producer_factory = producer_factory
         self._producer: Any = None
-        self._handlers: list[tuple[str, MessageHandler, str | None]] = []
         self._containers: dict[tuple[str, str | None], KafkaListenerContainer[Message]] = {}
         self._container_options: dict[tuple[str, str | None], ListenerOptions | None] = {}
         self._dispatch: dict[tuple[str, str | None], list[MessageHandler]] = {}
@@ -143,21 +143,24 @@ class KafkaAdapter:
         """Register *handler* for *topic* in *group*.
 
         The handlers of one (topic, group) share one consumer, and each record goes to all of them in one
-        unit of work. PyFly's ApplicationContext starts adapter beans BEFORE ``@message_listener`` wiring
-        calls ``subscribe()``, so a subscription that arrives after ``start()`` joins the running consumer
-        of its (topic, group), or starts one.
+        unit of work, when their ``@transactional`` settings let them share one (a WARNING names them when
+        they do not; see :meth:`~pyfly.messaging.listener_container.ListenerInvoker.plan`). PyFly's
+        ApplicationContext starts adapter beans BEFORE ``@message_listener`` wiring calls ``subscribe()``,
+        so a subscription that arrives after ``start()`` joins the running consumer of its (topic, group),
+        or starts one.
         """
-        self._handlers.append((topic, handler, group))
         key = (topic, group)
         self._dispatch.setdefault(key, []).append(handler)
         if not self._started:
             return
-        if key not in self._containers:
+        container = self._containers.get(key)
+        if container is None:
             await self._start_container(topic, group)
             return
         options = listener_options(handler)
         if options is not None and options != self._container_options.get(key):
             self._warn_options_differ(key)
+        container.check_listeners(self._dispatch[key])
 
     async def start(self) -> None:
         if self._started:
@@ -232,13 +235,19 @@ class KafkaAdapter:
             retry=self._settings.retry.with_options(options),
             auto_offset_reset=self._auto_offset_reset,
             name=f"{topic}[{group or '-'}]",
+            listeners=functools.partial(self._listeners, key),
         )
+        container.check_listeners(self._dispatch[key])
         self._containers[key] = container
         try:
             await container.start()
         except BaseException:
             self._containers.pop(key, None)
             raise
+
+    def _listeners(self, key: tuple[str, str | None], _message: Message) -> list[MessageHandler]:
+        """The handlers a record of the (topic, group) goes to."""
+        return self._dispatch.get(key, [])
 
     async def _deliver(self, key: tuple[str, str | None], message: Message) -> None:
         """Every handler of the (topic, group), in the delivery's unit of work: one failure fails them all."""

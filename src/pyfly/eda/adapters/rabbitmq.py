@@ -224,6 +224,7 @@ class RabbitMqEventBus:
             limit=self._limit,
             after_dead_letter=self._record_dead_letter if self._dead_letter_store is not None else None,
             name=f"eda:{queue}",
+            listeners=self._matching,
         )
         self._containers.append(container)
         await container.start()
@@ -231,11 +232,14 @@ class RabbitMqEventBus:
     def _envelope_of(self, message: Any, _attempt: int) -> EventEnvelope:
         return self._serializer.deserialize(message.body)
 
+    def _matching(self, envelope: EventEnvelope) -> list[EventHandler]:
+        """The handlers whose pattern matches *envelope*'s event type."""
+        return [handler for pattern, handler in list(self._handlers) if fnmatch.fnmatch(envelope.event_type, pattern)]
+
     async def _dispatch(self, envelope: EventEnvelope) -> None:
         """Every matching handler, in the delivery's unit of work: one failure fails the delivery."""
-        for pattern, handler in list(self._handlers):
-            if fnmatch.fnmatch(envelope.event_type, pattern):
-                await handler(envelope)
+        for handler in self._matching(envelope):
+            await handler(envelope)
 
     async def _record_dead_letter(self, message: Any, error: BaseException, attempts: int) -> None:
         if self._dead_letter_store is None or isinstance(error, PoisonMessageError):

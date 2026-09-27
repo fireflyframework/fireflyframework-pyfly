@@ -30,7 +30,10 @@ work of its own and acknowledging it only after that unit committed):
   and loses nothing;
 - C065 and the dead-letter paths: a listener that keeps failing is attempted ``max-attempts`` times with a
   delay, then dead-lettered (``<topic>.DLT`` on Kafka, ``<queue>.dlq`` behind ``<exchange>.dlx`` on
-  RabbitMQ), and acknowledged.
+  RabbitMQ), and acknowledged;
+- the delivery's unit takes the listener's ``@transactional`` settings: PostgreSQL runs a ``SERIALIZABLE``
+  read-only listener at ``SERIALIZABLE``, read-only, and a ``REQUIRES_NEW`` listener runs in its own unit
+  only, so a backlog on a two-connection pool needs one connection per delivery.
 
 Gated by ``@requires_docker``; collected only under ``-m integration``.
 """
@@ -58,6 +61,7 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.transaction import Isolation, Propagation, current_unit_of_work
 from pyfly.data.transactional import transactional
 from pyfly.eda.decorators import event_listener
 from pyfly.eda.dlq import EdaDeadLetterStore, InMemoryEdaDeadLetterStore
@@ -963,6 +967,108 @@ async def test_eda_rabbitmq_failure_is_retried_with_a_bound_and_dead_lettered(
         assert (entry.event.payload, entry.error_type, entry.attempts) == ({"body": "poison"}, "RuntimeError", 3)
     finally:
         await _rabbit_delete(amqp_url, queue, f"{queue}.dlq")
+
+
+# -- the listener's own @transactional settings shape the delivery's unit ----------------------------------
+
+UNIT_SETTINGS: list[tuple[str, str, str]] = []
+
+
+def _reporting_listener(topic: str, group: str) -> type:
+    @service
+    class ReportingListener:
+        @message_listener(topic, group=group)
+        @transactional(isolation=Isolation.SERIALIZABLE, read_only=True)
+        async def on_report(self, message: Message) -> None:
+            unit = current_unit_of_work()
+            assert unit is not None
+            isolation = (await unit.resource.execute(text("SHOW transaction_isolation"))).scalar_one()
+            read_only = (await unit.resource.execute(text("SHOW transaction_read_only"))).scalar_one()
+            UNIT_SETTINGS.append((message.value.decode(), str(isolation), str(read_only)))
+
+    return ReportingListener
+
+
+@requires_docker
+@pytest.mark.backends(PG)
+async def test_kafka_listener_s_isolation_and_read_only_reach_the_postgresql_transaction(
+    relational_backend: RelationalBackend, kafka_url: str
+) -> None:
+    """A unit with the default settings ran this listener at READ COMMITTED, read-write: the listener's
+    SERIALIZABLE and read-only were dropped when it joined."""
+    UNIT_SETTINGS.clear()
+    await relational_backend.create_tables(BrokerOrder)
+    topic, group = _names("kafka-settings")
+    await _kafka_sender(kafka_url, topic)("report")
+    ctx = await _boot(relational_backend, _kafka_messaging(kafka_url), _reporting_listener(topic, group))
+    try:
+
+        async def handled() -> bool:
+            return bool(UNIT_SETTINGS)
+
+        await _eventually(handled, timeout=45, what="the report handled")
+        log_end = await _kafka_log_end(kafka_url, topic)
+
+        async def committed() -> bool:
+            return await _kafka_committed(kafka_url, group, topic) == log_end
+
+        await _eventually(committed, what="the report's offset committed")
+    finally:
+        await ctx.stop()
+    assert UNIT_SETTINGS == [("report", "serializable", "on")]
+
+
+def _requires_new_listener(topic: str, group: str, scenario: Scenario, attempts: list[int]) -> type:
+    @service
+    class IndependentListener:
+        def __init__(self, repo: BrokerOrderRepository) -> None:
+            self.repo = repo
+
+        @message_listener(topic, group=group)
+        @transactional(propagation=Propagation.REQUIRES_NEW)
+        async def on_order(self, message: Message) -> None:
+            attempts.append(message.delivery_attempt)
+            await scenario.handle(self.repo, message.value.decode())
+
+    return IndependentListener
+
+
+@requires_docker
+@pytest.mark.backends(PG)
+async def test_rabbitmq_requires_new_listener_needs_one_connection_per_delivery(
+    relational_backend: RelationalBackend, amqp_url: str
+) -> None:
+    """Two handlers at once on a two-connection pool, each inside its transaction longer than the pool
+    waits. Had the container opened a unit around the listener's REQUIRES_NEW, a delivery would hold both
+    connections, and the next one would time out on the pool and be attempted again."""
+    await relational_backend.create_tables(BrokerOrder)
+    topic, group = _names("rabbit-requires-new")
+    bodies = [f"n{i}" for i in range(6)]
+    await _rabbit_backlog(amqp_url, group, topic, bodies)
+    scenario = Scenario(work=1.0)
+    attempts: list[int] = []
+    config = {
+        **_rabbit_messaging(amqp_url),
+        "pyfly.data.relational.pool.size": "2",
+        "pyfly.data.relational.pool.max-overflow": "0",
+        "pyfly.data.relational.pool.timeout": "0.5",
+    }
+    ctx = await _boot(relational_backend, config, _requires_new_listener(topic, group, scenario, attempts))
+    try:
+
+        async def all_rows() -> bool:
+            return len(await _bodies(relational_backend)) == len(bodies)
+
+        await _eventually(all_rows, timeout=60, what="the whole backlog committed")
+    finally:
+        await ctx.stop()
+    try:
+        assert await _bodies(relational_backend) == bodies
+        assert scenario.peak == 2  # both connections in use, one per delivery
+        assert attempts == [1] * len(bodies)  # no pool timeout, so no retry
+        assert await _rabbit_depth(amqp_url, f"{group}.dlq") == 0
+    finally:
+        await _rabbit_delete(amqp_url, group, f"{group}.dlq")
 
 
 # -- transient failures on real servers --------------------------------------------------------------------

@@ -58,8 +58,7 @@ class TestKafkaAdapter:
             pass
 
         await adapter.subscribe("orders", handler, group="g1")
-        assert len(adapter._handlers) == 1
-        assert adapter._handlers[0] == ("orders", handler, "g1")
+        assert adapter._dispatch == {("orders", "g1"): [handler]}
 
     def test_is_a_consumer_phase_bean_whose_container_handles_errors(self) -> None:
         from pyfly.kernel.lifecycle import CONSUMER_PHASE, lifecycle_phase

@@ -30,9 +30,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from pyfly.container.stereotypes import service
 from pyfly.core.config import Config
+from pyfly.data.transaction import Isolation, UnitOfWork, current_unit_of_work
+from pyfly.data.transactional import transactional
 from pyfly.eda.adapters.rabbitmq import RabbitMqEventBus
 from pyfly.eda.auto_configuration import EdaAutoConfiguration
+from pyfly.eda.decorators import event_listener
 from pyfly.eda.dlq import InMemoryEdaDeadLetterStore
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.serializers import JsonEventSerializer
@@ -42,6 +46,8 @@ from pyfly.messaging.listener_container import ATTEMPT_HEADER, FixedBackOff, Lis
 from tests.messaging.brokers import FakeAmqpBroker
 from tests.messaging.listener_app import (
     Behavior,
+    Delivered,
+    DeliveredRepository,
     boot,
     committed_bodies,
     event_bus_bean,
@@ -366,3 +372,37 @@ async def test_deliveries_do_not_inherit_the_transaction_of_the_publisher(
     [handler_unit] = behavior.units
     assert handler_unit is not None and handler_unit != request_units[0]
     assert await committed_bodies(relational_backend) == ["late"]
+
+
+SERIALIZABLE_UNITS: list[UnitOfWork | None] = []
+
+
+@service
+class SerializableEvents:
+    def __init__(self, repo: DeliveredRepository) -> None:
+        self.repo = repo
+
+    @event_listener(["order.*"])
+    @transactional(isolation=Isolation.SERIALIZABLE)
+    async def on_event(self, envelope: EventEnvelope) -> None:
+        SERIALIZABLE_UNITS.append(current_unit_of_work())
+        await self.repo.save(Delivered(body=str(envelope.payload["body"])))
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_an_event_listener_s_transactional_settings_shape_the_delivery_s_unit(
+    relational_backend: RelationalBackend,
+) -> None:
+    SERIALIZABLE_UNITS.clear()
+    units = SERIALIZABLE_UNITS
+    broker = FakeAmqpBroker()
+    bus = _bus(broker, settings=ListenerContainerSettings(retry=FAST.retry))
+    ctx = await boot(relational_backend, event_bus_bean(bus), SerializableEvents)
+    try:
+        broker.publish_to("pyfly", "orders", _envelope(body="e1"))
+        await eventually(lambda: len(units) == 1 and _settled(broker), what="the delivery")
+    finally:
+        await ctx.stop()
+    [unit] = units
+    assert unit is not None and unit.isolation is Isolation.SERIALIZABLE and unit.suspended is None
+    assert await committed_bodies(relational_backend) == ["e1"]
