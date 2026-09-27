@@ -70,9 +70,9 @@ class _DeferredBeanMethod:
     #: The one factory closure shared by the provisional and the completed registration.
     factory: Callable[[], Any]
     #: The most recent reason it could not be called; raised if it never can be.
-    cause: NoSuchBeanError
+    cause: NoSuchBeanError | NoUniqueBeanError
 
-    def with_cause(self, cause: NoSuchBeanError) -> _DeferredBeanMethod:
+    def with_cause(self, cause: NoSuchBeanError | NoUniqueBeanError) -> _DeferredBeanMethod:
         return dataclasses.replace(self, cause=cause)
 
 
@@ -1056,7 +1056,9 @@ class ApplicationContext:
                 # bean that declared it.
                 try:
                     kwargs = self._bean_method_kwargs(config_instance, method)
-                except NoSuchBeanError as exc:
+                except (NoSuchBeanError, NoUniqueBeanError) as exc:
+                    # An ambiguous parameter is deferred too: an auto-configuration may register the
+                    # @primary candidate that settles it.
                     if auto:
                         raise
                     self._defer_bean_method(config_instance, attr_name, method, return_type, cause=exc)
@@ -1195,7 +1197,7 @@ class ApplicationContext:
         method: Any,
         return_type: Any,
         *,
-        cause: NoSuchBeanError,
+        cause: NoSuchBeanError | NoUniqueBeanError,
     ) -> None:
         """Park a user @bean method until the auto-configurations have registered their beans.
 
@@ -1257,7 +1259,7 @@ class ApplicationContext:
                 else:
                     try:
                         kwargs = self._bean_method_kwargs(entry.config_instance, entry.method)
-                    except NoSuchBeanError as exc:
+                    except (NoSuchBeanError, NoUniqueBeanError) as exc:
                         still_pending.append(entry.with_cause(exc))
                         continue
                     result = entry.method(**kwargs)
@@ -1301,6 +1303,9 @@ class ApplicationContext:
 
         Kept apart from the call so a factory whose dependencies are not registered yet can be
         deferred (see :meth:`_process_configurations`) without its body ever having started.
+
+        A parameter that several beans match, none of them ``@primary``, raises
+        :class:`NoUniqueBeanError` naming the candidates; it used to be reported as a missing bean.
         """
         hints = typing.get_type_hints(method)
         hints.pop("return", None)
@@ -1312,7 +1317,17 @@ class ApplicationContext:
             has_default = param is not None and param.default is not inspect.Parameter.empty
             try:
                 kwargs[param_name] = self._container._resolve_param(param_type)
-            except (NoSuchBeanError, NoUniqueBeanError):
+            except NoUniqueBeanError as exc:
+                if has_default:
+                    continue
+                raise NoUniqueBeanError(
+                    bean_type=exc.bean_type,
+                    candidates=exc.candidates,
+                    candidate_names=exc.candidate_names,
+                    required_by=f"{type(config_instance).__qualname__}.{method.__name__}()",
+                    parameter=f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}",
+                ) from None
+            except NoSuchBeanError:
                 if has_default:
                     continue
                 raise NoSuchBeanError(
