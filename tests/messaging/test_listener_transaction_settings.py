@@ -54,6 +54,7 @@ from pyfly.messaging.listener_container import (
     transaction_definition_of,
 )
 from pyfly.messaging.types import Message
+from pyfly.resilience.retry import retry
 from tests.messaging.brokers import FakeKafkaCluster
 from tests.messaging.listener_app import (
     Delivered,
@@ -206,6 +207,42 @@ async def test_a_requires_new_listener_runs_in_one_unit_of_its_own(relational_ba
     assert cluster.records(f"{TOPIC}.DLT") == []
 
 
+RETRIED: list[tuple[int, UnitOfWork | None]] = []
+
+
+@service
+class RetryingListener:
+    """Retries its own transaction in process: each attempt must run in a fresh unit."""
+
+    def __init__(self, repo: DeliveredRepository) -> None:
+        self.repo = repo
+
+    @message_listener(TOPIC, group=GROUP)
+    @retry(max_attempts=2)
+    @transactional
+    async def on_message(self, message: Message) -> None:
+        RETRIED.append((message.delivery_attempt, current_unit_of_work()))
+        await self.repo.save(Delivered(body=f"try {len(RETRIED)}"))
+        if len(RETRIED) == 1:
+            raise RuntimeError("fails once")
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_a_listener_that_retries_in_process_gets_a_fresh_unit_per_attempt(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Inside a unit of the container's, the first failure left the unit rollback-only and @retry stopped:
+    the in-process retry never ran and the broker delivered the record again."""
+    RETRIED.clear()
+    cluster = FakeKafkaCluster()
+    cluster.append(TOPIC, b"m")
+    await _run(relational_backend, cluster, RetryingListener, what="committed")
+    assert [attempt for attempt, _unit in RETRIED] == [1, 1]  # both in the first delivery
+    first, second = (unit for _attempt, unit in RETRIED)
+    assert first is not None and second is not None and first is not second
+    assert await committed_bodies(relational_backend) == ["try 2"]
+
+
 # -- a caught failure of a joined @transactional -----------------------------------------------------------
 
 
@@ -355,6 +392,13 @@ class Listeners:
     @transactional(manager="reporting", read_only=True)
     async def reporting(self, message: Message) -> None: ...
 
+    @retry(max_attempts=2)
+    @transactional
+    async def retried(self, message: Message) -> None: ...
+
+    @retry(max_attempts=2)
+    async def retried_plain(self, message: Message) -> None: ...
+
 
 def test_the_settings_of_a_listener_are_found_through_its_endpoint() -> None:
     listeners = Listeners()
@@ -380,7 +424,9 @@ def test_the_unit_takes_the_settings_of_the_listener_that_joins_it() -> None:
     assert reporting is not None and (reporting.datasource, reporting.read_only) == ("reporting", True)
 
 
-@pytest.mark.parametrize("name", ["supports", "requires_new", "not_supported", "never", "serializable_nested"])
+@pytest.mark.parametrize(
+    "name", ["supports", "requires_new", "not_supported", "never", "serializable_nested", "retried", "retried_plain"]
+)
 def test_a_listener_that_needs_no_unit_of_the_container_s_gets_none(name: str) -> None:
     invoker = ListenerInvoker(ListenerContainerSettings(), name="t")
     assert invoker.plan([getattr(Listeners(), name)]) is None
@@ -407,6 +453,7 @@ def test_listeners_with_the_same_settings_share_the_unit(caplog: pytest.LogCaptu
         ("required", "never"),
         ("required", "reporting"),
         ("serializable", "supports"),
+        ("plain", "retried"),
     ],
 )
 def test_listeners_that_cannot_share_a_unit_get_none_and_are_named_once(

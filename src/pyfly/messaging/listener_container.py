@@ -474,6 +474,12 @@ def transaction_definition_of(listener: object) -> TransactionDefinition | None:
     return definition if isinstance(definition, TransactionDefinition) else None
 
 
+def _retries_in_process(listener: object) -> bool:
+    """Whether *listener* is wrapped in ``@retry``: each of its attempts needs a unit of its own, which a
+    unit around it would not give (the first failure leaves that unit rollback-only, and ``@retry`` stops)."""
+    return getattr(listener_target(listener), "__pyfly_retry__", None) is not None
+
+
 @dataclass(frozen=True)
 class _UnitSettings:
     """What a delivery's unit is opened with: *definition* (``REQUIRED``, unnamed) on *manager* (the
@@ -504,8 +510,9 @@ def _listener_label(listener: object) -> str:
     target = listener_target(listener)
     name = getattr(target, "__qualname__", None) or repr(target)
     definition = transaction_definition_of(listener)
+    retried = ", @retry" if _retries_in_process(listener) else ""
     if definition is None:
-        return f"{name} (no @transactional)"
+        return f"{name} (no @transactional{retried})"
     parts = [f"propagation={definition.propagation.value}"]
     if definition.isolation is not Isolation.DEFAULT:
         parts.append(f"isolation={definition.isolation.value}")
@@ -517,7 +524,7 @@ def _listener_label(listener: object) -> str:
         parts.append(f"datasource={definition.datasource}")
     if definition.rollback_for or definition.no_rollback_for:
         parts.append("rollback rules")
-    return f"{name} ({', '.join(parts)})"
+    return f"{name} ({', '.join(parts)}{retried})"
 
 
 class _Plan:
@@ -580,18 +587,18 @@ class ListenerInvoker:
           timeout, rollback rules and datasource (``manager=`` included). Without ``@transactional`` it is
           ``REQUIRED`` on ``listener.datasource``.
         - A listener declared ``REQUIRES_NEW``, ``NESTED``, ``SUPPORTS``, ``NOT_SUPPORTED`` or ``NEVER``
-          needs no unit of the container's: when every listener of the delivery is one of those, the
-          container opens none and each runs as declared, with no unit bound (``REQUIRES_NEW`` and
-          ``NESTED`` begin their own). The delivery is acknowledged after they returned, so after their
-          own units committed.
+          needs no unit of the container's, and neither does one wrapped in ``@retry`` (each attempt needs
+          a unit of its own): when every listener of the delivery is one of those, the container opens
+          none and each runs as declared, with no unit bound (``REQUIRES_NEW`` and ``NESTED`` begin their
+          own). The delivery is acknowledged after they returned, so after their own units committed.
         - The listeners of one delivery share its unit only when each runs in it with its own settings:
           beside a listener that joins it, a ``SUPPORTS`` or ``NESTED`` listener (which would join it, or
-          take a savepoint of it) must declare the same settings, and a ``REQUIRES_NEW``, ``NOT_SUPPORTED``
-          or ``NEVER`` listener never does (a second unit or connection beside the delivery's, or a
-          refusal). When they cannot share one, the container opens none, and logs a WARNING naming them
-          the first time: each runs as its own ``@transactional`` declares (a listener without one gets a
-          short unit per repository call), and a later listener's failure delivers the message again to
-          the ones whose work committed.
+          take a savepoint of it) must declare the same settings, and a ``REQUIRES_NEW``, ``NOT_SUPPORTED``,
+          ``NEVER`` or ``@retry`` listener never does (a second unit or connection beside the delivery's, a
+          refusal, or a retry that stops at the first failure). When they cannot share one, the container
+          opens none, and logs a WARNING naming them the first time: each runs as its own
+          ``@transactional`` declares (a listener without one gets a short unit per repository call), and a
+          later listener's failure delivers the message again to the ones whose work committed.
 
         The plan is worked out once per set of listeners. With ``listener.transactional`` off there is
         never a unit of the container's.
@@ -609,7 +616,11 @@ class ListenerInvoker:
         return found
 
     def _work_out(self, listeners: tuple[object, ...]) -> _Plan:
-        declared = [(listener, transaction_definition_of(listener)) for listener in listeners]
+        declared = [
+            (listener, transaction_definition_of(listener))
+            for listener in listeners
+            if not _retries_in_process(listener)
+        ]
         joining = [
             self._default if definition is None else _unit_settings(listener, definition)
             for listener, definition in declared
@@ -618,7 +629,7 @@ class ListenerInvoker:
         if not joining:
             return _Plan(listeners, None, named=False)
         chosen = joining[0]
-        misfits = [
+        misfits = [listener for listener in listeners if _retries_in_process(listener)] + [
             listener
             for listener, definition in declared
             if not (

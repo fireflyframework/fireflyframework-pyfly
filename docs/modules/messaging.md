@@ -359,6 +359,7 @@ The unit the container opens for a delivery takes the settings the listener's ow
 | `@transactional` (`REQUIRED`, `MANDATORY`) | in a unit with the listener's isolation, read-only flag, timeout, rollback rules and datasource; the listener joins it. |
 | `REQUIRES_NEW` or `NESTED`               | in the unit the listener's `@transactional` begins itself; the container opens none. |
 | `SUPPORTS`, `NOT_SUPPORTED` or `NEVER`   | without a unit: each repository call gets a short one of its own. |
+| wrapped in `@retry` (an in-process retry) | each attempt in a unit of its own, as it would outside a container; the container opens none (a unit around the retry would be left rollback-only by the first failure, and `@retry` would stop). |
 
 The message is acknowledged after the listener returned, so after its unit committed,
 in every case. A `SERIALIZABLE` listener runs at `SERIALIZABLE`, a `timeout` rolls the
@@ -368,7 +369,7 @@ delivery back when it runs over (and the delivery is attempted again), and a
 Listeners that share a delivery (several `@message_listener` methods on one Kafka topic
 and group, several `@event_listener` patterns that match one event) share its unit when
 each of them would run in it with its own settings. When they cannot (one is
-`SERIALIZABLE` and another is not, one is `REQUIRES_NEW` or `NEVER`), the container
+`SERIALIZABLE` and another is not, one is `REQUIRES_NEW`, `NEVER` or `@retry`), the container
 opens none and logs `listener_units_differ` naming them (at subscription for a Kafka
 topic and group, at the first event that reaches them on an EDA bus). Each then runs as
 its own `@transactional` declares, and the delivery is no longer one unit: when a later
