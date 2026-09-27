@@ -316,6 +316,56 @@ async def test_ctx_stop_ends_on_time_when_the_database_black_holes_the_pool(
         await proxy.close()
 
 
+class _AppRegistry(DataSourceRegistry):
+    """The application's own registry bean: the modules still build in the configuration's registry."""
+
+
+@configuration
+class _AppRegistryConfiguration:
+    @bean
+    def app_registry(self, config: Config) -> DataSourceRegistry:
+        return _AppRegistry(config)
+
+
+@pytest.mark.backends(PG)
+async def test_a_cancelled_dispose_closes_the_configurations_registry_too(
+    relational_backend: RelationalBackend,
+) -> None:
+    """With its own registry bean, the application has two: the bean and the configuration's, which the
+    auto-configured engine comes from. A shutdown timeout that cancelled the bean's close used to leave
+    the configuration's registry open, its connections stuck on the silent database."""
+    app_name = f"pyfly-tworeg-{uuid.uuid4().hex[:8]}"
+    proxy, port = await _proxy(relational_backend)
+    context = ApplicationContext(
+        relational_backend.config(
+            {
+                "pyfly.app.name": app_name,
+                "pyfly.data.relational.url": _proxied(relational_backend, port),
+                "pyfly.context.shutdown-timeout": "1",
+            }
+        )
+    )
+    context.register_bean(_AppRegistryConfiguration)
+    await context.start()
+    try:
+        registry = context.get_bean(DataSourceRegistry)
+        shared = DataSourceRegistry.for_config(context.config)
+        assert isinstance(registry, _AppRegistry) and shared is not registry
+        await _touch(registry.primary.engine, 2)
+        await _touch(context.get_bean(AsyncEngine), 2)
+        assert await _server_connections(relational_backend, app_name) == 4
+
+        proxy.black_hole_established()
+        started = time.monotonic()
+        await asyncio.wait_for(context.stop(), 15)
+        assert time.monotonic() - started < 10
+
+        assert registry.closed and shared.closed
+        assert await _settles_at_zero(relational_backend, app_name) == 0
+    finally:
+        await proxy.close()
+
+
 # ---------------------------------------------------------------------------
 # Refresh: each POST /actuator/refresh destroys the evicted datasource (C099), two refresh-scoped
 # datasources of one type keep their own database (C030), and a proxied one follows the refresh (C031).

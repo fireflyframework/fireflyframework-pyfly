@@ -800,13 +800,14 @@ class DataSourceRegistry:
         The context calls it last when it stops (a :class:`~pyfly.kernel.lifecycle.ResourceRegistry`).
         When the application declares its own ``DataSourceRegistry`` bean, the modules that look the
         registry up with :meth:`for_config` still build their engines in the configuration's registry;
-        nothing else would close that one, so it is closed here too.
+        nothing else would close that one, so it is closed here too, at the same time: a caller that
+        cancels the wait (a short ``pyfly.context.shutdown-timeout``) cancels both closes, and each
+        terminates its stuck connections on the way out, instead of leaving the second never started.
         """
-        await self.close(timeout=timeout)
         with DataSourceRegistry._instances_lock:
             shared = DataSourceRegistry._instances.get(self._config)
-        if shared is not None and shared is not self:
-            await shared.close(timeout=timeout)
+        registries = [self] if shared is None or shared is self else [self, shared]
+        await asyncio.gather(*(registry.close(timeout=timeout) for registry in registries))
 
     # -- building -------------------------------------------------------------------------------------
 
