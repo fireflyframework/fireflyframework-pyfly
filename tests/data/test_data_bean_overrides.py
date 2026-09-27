@@ -48,7 +48,7 @@ _URLS: dict[str, str] = {}
 _DISPOSED: list[str] = []
 
 
-def _config(tmp_path: Path, **relational: str) -> Config:
+def _config(tmp_path: Path) -> Config:
     _URLS.update(
         {
             "auto": f"sqlite+aiosqlite:///{tmp_path / 'auto.db'}",
@@ -56,9 +56,7 @@ def _config(tmp_path: Path, **relational: str) -> Config:
             "other": f"sqlite+aiosqlite:///{tmp_path / 'other.db'}",
         }
     )
-    return Config(
-        {"pyfly": {"data": {"relational": {"enabled": "true", "url": _URLS["auto"], "ddl-auto": "none", **relational}}}}
-    )
+    return Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": _URLS["auto"], "ddl-auto": "none"}}}})
 
 
 def _engine(name: str) -> AsyncEngine:
