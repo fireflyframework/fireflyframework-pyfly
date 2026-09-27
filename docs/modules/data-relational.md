@@ -1318,6 +1318,9 @@ unit on `primary` begins `reporting`'s own unit (there is no two-phase commit be
   unit rolls back with `UnexpectedRollbackError`). Inside `NESTED`, it rolls the `NESTED` scope back to
   its own savepoint instead. A savepoint's `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` run under the unit's
   operation guard.
+- A failure that leaves the transaction healthy (a `before_flush` hook that refuses a flush before it
+  writes anything, caught by the application) does not mark the unit, and its connection goes back to the
+  pool as usual.
 - A `no_rollback_for` exception on a unit whose transaction is already dead rolls back and re-raises the
   original exception (never `PendingRollbackError`).
 

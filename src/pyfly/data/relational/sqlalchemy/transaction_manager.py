@@ -64,7 +64,7 @@ from typing import Any
 
 from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -88,7 +88,7 @@ from pyfly.data.relational.sqlalchemy import sqlite_discard
 from pyfly.data.relational.sqlalchemy.session import UnitSession, unit_session_class
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.definition import TransactionDefinition
-from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError, TransactionError
+from pyfly.data.transaction.errors import CommitOutcomeUnknownError, IllegalTransactionStateError
 from pyfly.data.transaction.manager import TransactionCapabilities
 from pyfly.data.transaction.registry import (
     PRIMARY,
@@ -532,13 +532,10 @@ class SqlAlchemyTransactionManager:
         savepoint when the savepoint is released, and it marks the unit when the savepoint is still open as
         the unit completes (``resource_active``).
 
-        An error that is neither SQLAlchemy's nor the unit of work's also poisons the unit: a raw driver
-        error (aiosqlite's "Connection closed" once its thread stopped), or what SQLAlchemy raised in place
-        of a cancellation that hit its own cleanup, leaves the connection in an unknown state, so it is
-        discarded instead of being awaited again.
+        A failure does not poison the unit (its connection is healthy, and a rollback that fails discards it
+        anyway): a driver error raised in place of a cancellation is handled by the operation guard, which
+        poisons the unit and raises the cancellation instead.
         """
-        if not isinstance(error, (SQLAlchemyError, TransactionError)):
-            unit.poisoned = True
         marks = isinstance(error, DBAPIError) or not _transaction_active(unit)
         if marks and not unit.poisoned and not self.is_disconnect(error):
             savepoint = _application_savepoint(unit)

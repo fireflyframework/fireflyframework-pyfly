@@ -26,6 +26,8 @@
   the customizer's transaction-local GUC is visible to the read (WP01-03).
 - Retries around a transaction, in both decorator orders, never commit a failed attempt's writes and
   never retry an unknown commit outcome (WP01-17).
+- A failure that leaves the transaction healthy (a ``before_flush`` hook that rejects a flush, caught by
+  the application) neither dooms the unit nor discards its connection (WP01-04).
 - PostgreSQL only: a cancel in the middle of a statement, two cancels during a rollback held back by a
   partitioned network, a commit whose backend is terminated in flight, and the statement timeout that
   cancels a unit's statement on the server (WP01-12, WP01-13).
@@ -138,6 +140,12 @@ class Inner:
         await self._write(fail)
 
 
+def _reject_the_rejected(session: Any, _flush_context: Any, _instances: Any) -> None:
+    """A ``before_flush`` hook that validates new items (it raises before the flush writes anything)."""
+    if any(isinstance(item, MxItem) and item.name == "rejected" for item in session.new):
+        raise ValueError("the before_flush hook rejects this item")
+
+
 @service
 class Outer:
     def __init__(self, items: MxItemRepository, inner: Inner) -> None:
@@ -203,6 +211,18 @@ class Outer:
     @transactional
     async def place(self, name: str) -> None:
         await self.items.save(MxItem(name=name))
+
+    @transactional
+    async def save_around_a_flush_a_hook_rejects(self) -> None:
+        session = self.items._session
+        event.listen(session.sync_session, "before_flush", _reject_the_rejected)
+        await self.items.save(MxItem(name="kept"))
+        rejected = MxItem(name="rejected")
+        try:
+            await self.items.save(rejected)
+        except ValueError:
+            session.expunge(rejected)  # the application drops what its hook refused
+        await self.items.save(MxItem(name="kept-too"))
 
     @transactional
     async def sleep_in_database(self, seconds: float) -> None:
@@ -565,6 +585,17 @@ async def test_retry_outside_the_unit_commits_only_the_successful_attempt(matrix
 async def test_retry_written_inside_still_runs_outside(matrix: Matrix) -> None:
     await matrix.outer.flaky_retry_written_inside()
     assert await matrix.committed() == ["attempt-2"]
+
+
+async def test_a_hook_rejecting_a_flush_neither_dooms_the_unit_nor_discards_its_connection(matrix: Matrix) -> None:
+    connects: list[object] = []
+    event.listen(matrix.engine.sync_engine, "connect", lambda connection, _record: connects.append(connection))
+    await matrix.outer.place("warm")  # the pool holds a connection now
+    opened = len(connects)
+    await matrix.outer.save_around_a_flush_a_hook_rejects()
+    await matrix.outer.place("after")
+    assert len(connects) == opened  # the unit's connection went back to the pool, healthy
+    assert await matrix.committed() == ["warm", "kept", "kept-too", "after"]
 
 
 async def test_a_retried_db_error_surfaces_as_itself_and_the_next_attempt_commits(matrix: Matrix) -> None:
