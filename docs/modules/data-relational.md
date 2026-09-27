@@ -1122,8 +1122,8 @@ datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-featur
 ### Framework Tables
 
 The tables the framework keeps in an application's database (`pyfly_orchestration_state`,
-`pyfly_cache_entries`, `pyfly_locks`, `pyfly_users`, and the other `pyfly_*` tables) are SQLAlchemy Core
-tables on one `MetaData`, `pyfly.data.relational.framework_schema.framework_metadata`, with portable
+`pyfly_cache_entries`, `pyfly_locks` and `pyfly_users`) are SQLAlchemy Core tables on one `MetaData`,
+`pyfly.data.relational.framework_schema.framework_metadata`, with portable
 types: bounded `Unicode` keys, `UtcTimestamp` instants (UTC with microseconds on every backend, aware in
 Python: `TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), `LONGTEXT`/`LONGBLOB` payloads on
 MySQL and MariaDB, and a naming convention for indexes.

@@ -1039,18 +1039,25 @@ workflows. (Before 26.09.08 the saga and TCC engines always used an in-memory
 adapter, whatever the provider.) An application's own
 `TransactionalPersistencePort` bean replaces `transactional_persistence_port`.
 
-The port serializes the updates of one execution (`update_step_status`,
-`mark_completed`: the parallel steps of a layer each keep their status), and
-executions never wait for one another.
+The engines record when an execution starts (`persist_state`, its
+`IN_FLIGHT` row) and how it ends (`mark_completed`); they do not persist step
+statuses (the `SagaResult` carries them). The port's `update_step_status` is
+there for callers that record step progress themselves. The port serializes
+the updates of one execution (`update_step_status`, `mark_completed`: two
+updates that run together each keep the other's change), and executions never
+wait for one another.
 
 With the `sqlalchemy` provider, saga and TCC state is written through the unit
 of work bound for the provider's datasource, like any other state: a saga run
-inside a `@transactional` method writes its `IN_FLIGHT` row, its step statuses
-and its completion in the caller's transaction. Two consequences follow. Until
-the caller commits, no other process sees the saga, so a crash mid-saga leaves
-nothing to recover; and when the caller rolls back, the record of the saga
-(including the remote steps it already ran) is rolled back with it. Start a
-saga outside the business transaction when its log must outlive it.
+inside a `@transactional` method writes its `IN_FLIGHT` row and its completion
+in the caller's transaction. Three consequences follow. Until the caller
+commits, no other process sees the saga, so a crash mid-saga leaves nothing to
+recover; when the caller rolls back, the record of the saga (including the
+remote steps it already ran) is rolled back with it; and when a step left that
+transaction unusable (on PostgreSQL, a failed statement aborts it), the
+engine's final `mark_completed` fails on it and its error replaces the
+`SagaResult` (the `memory` provider has no such failure). Start a saga outside
+the business transaction when its log must outlive it.
 
 #### Redis provider
 

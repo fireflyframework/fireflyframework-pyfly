@@ -39,11 +39,14 @@ the whole state                  ``payload`` (JSON-safe: instants as ISO-8601 st
 Only saga and TCC executions are the port's: a workflow execution of the same provider is never returned
 or cleaned up through it.
 
+The engines write an execution's start (``persist_state``) and its end (``mark_completed``); they do not
+record step statuses, which ``update_step_status`` offers to callers that track step progress.
 ``update_step_status`` and ``mark_completed`` read the execution, change it and save it. They are serialized
-per execution (the steps of one layer finish together, and each must keep the others' statuses), never
-across executions: a lock shared by every execution, held across the database I/O, deadlocked with the
-connection pool when completions inside business transactions (each holding its unit's connection) waited
-for it while its holder, a completion outside any transaction, waited for a connection.
+per execution (two updates of one execution that run together, such as the statuses of parallel steps, must
+each keep the other's change), never across executions: a lock shared by every execution, held across the
+database I/O, deadlocked with the connection pool when completions inside business transactions (each
+holding its unit's connection) waited for it while its holder, a completion outside any transaction, waited
+for a connection.
 """
 
 from __future__ import annotations
