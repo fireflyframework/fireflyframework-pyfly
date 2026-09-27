@@ -115,6 +115,7 @@ from pyfly.data.page import Page, Slice, Window
 from pyfly.data.pageable import KeysetPosition, NullHandling, Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
+from pyfly.data.relational.sqlalchemy.entity import SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.statements import (
@@ -618,6 +619,12 @@ class Repository(Generic[T, ID]):
             return state.dict.get(version_key) is None
         return all(state.dict.get(key) is None for key in self._pk_keys)
 
+    @property
+    def _soft_deletes(self) -> bool:
+        """Whether the entity is a :class:`~pyfly.data.relational.sqlalchemy.entity.SoftDeleteMixin` entity,
+        whose soft-deleted rows the ORM's reads hide (``soft_delete_criteria``)."""
+        return issubclass(self._model, SoftDeleteMixin)
+
     def _criteria(self) -> tuple[Any, ...]:
         """Criteria every read applies (``SoftDeleteRepository``: the row is not deleted)."""
         return ()
@@ -779,8 +786,14 @@ class Repository(Generic[T, ID]):
         case. Generated columns alone cost one ``SELECT`` of just those columns per key chunk; an eager
         relationship costs one ``SELECT`` of the keys (and those columns) per chunk, with the eager loads a
         read of the entities runs (one more statement per ``selectin`` relationship), for every entity at once.
+
         A soft-deleted entity's row, which the soft-delete criteria hide from ORM reads, is read back all the
-        same (``include_deleted``, as ``find_all_including_deleted`` reads it).
+        same: the columns with ``include_deleted`` always (no relationship is loaded with them), the entities
+        with ``include_deleted`` only for the soft-deleted ones (as ``find_all_including_deleted`` reads them),
+        so a live entity's eager collections never get deleted rows. Which ones are soft-deleted is read from
+        the state, never from the attribute, which would load an expired row outside the unit's greenlet; an
+        entity whose ``deleted_at`` is not loaded is read as a live one, and again with ``include_deleted``
+        only when its row did not come back.
         """
         mapper = self._mapper
         columns = {attribute.key for attribute in mapper.column_attrs}
@@ -803,22 +816,15 @@ class Repository(Generic[T, ID]):
         if not stale:
             return
         keys = sorted(set().union(*(expired for _entity, expired in stale.values())))
-        hidden = any(getattr(entity, "deleted_at", None) is not None for entity, _expired in stale.values())
-        options: dict[str, Any] = {INCLUDE_DELETED: True} if hidden else {}
         if unloaded:
-            # The entities are in the unit's identity map: the rows fill in only what they lack, and the
-            # mapping's eager loaders run for the relationships they lack, as for any read.
-            only = load_only(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
-            for criterion in self._in_ids(session, list(stale)):
-                statement = select(self._model).where(criterion).options(only).execution_options(**options)
-                unique_entities(await session.execute(statement))
+            await self._load_entities_back(session, stale, keys)
             return
         width = len(self._pk_keys)
         for criterion in self._in_ids(session, list(stale)):
             statement = (
                 select(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
                 .where(criterion)
-                .execution_options(**options)
+                .execution_options(**{INCLUDE_DELETED: True})
             )
             for row in (await session.execute(statement)).all():
                 entry = stale.get(tuple(row[:width]))
@@ -828,6 +834,35 @@ class Repository(Generic[T, ID]):
                 for key, value in zip(keys, row[width:], strict=True):
                     if key in expired:
                         set_committed_value(entity, key, value)
+
+    async def _load_entities_back(
+        self, session: AsyncSession, stale: dict[tuple[Any, ...], tuple[Any, set[str]]], keys: Sequence[str]
+    ) -> None:
+        """:meth:`_load_generated` when an entity lacks an eager relationship. The entities are in the unit's
+        identity map: their rows fill in only what they lack (the expired columns *keys*), and the mapping's
+        eager loaders run for the relationships they lack, as for any read. The soft-deleted entities are read
+        apart from the others, with ``include_deleted``."""
+        only = load_only(*self._pk_attributes, *(getattr(self._model, key) for key in keys))
+        deleted: list[tuple[Any, ...]] = []
+        live: list[tuple[Any, ...]] = []
+        unknown: set[tuple[Any, ...]] = set()
+        for identity, (entity, _expired) in stale.items():
+            loaded = _state(entity).dict
+            if loaded.get("deleted_at") is not None:
+                deleted.append(identity)
+                continue
+            live.append(identity)
+            if self._soft_deletes and "deleted_at" not in loaded:
+                unknown.add(identity)
+        found: set[tuple[Any, ...]] = set()
+        for criterion in self._in_ids(session, live):
+            statement = select(self._model).where(criterion).options(only)
+            found.update(_identity_key(entity) for entity in unique_entities(await session.execute(statement)))
+        # An entity that did not know it was soft-deleted: the criteria hid its row from the read above.
+        deleted += [identity for identity in live if identity in unknown and identity not in found]
+        for criterion in self._in_ids(session, deleted):
+            statement = select(self._model).where(criterion).options(only).execution_options(**{INCLUDE_DELETED: True})
+            unique_entities(await session.execute(statement))
 
     async def find_by_id(self, id: ID, *, load: FetchPlan | None = None, lock: LockMode | None = None) -> T | None:
         """Find an entity by its primary key (a tuple for a composite key).

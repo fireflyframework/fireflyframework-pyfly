@@ -25,6 +25,7 @@ integration suite.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -33,7 +34,7 @@ import pytest
 from sqlalchemy import ForeignKey, String, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload
+from sqlalchemy.orm import Mapped, Session, joinedload, lazyload, mapped_column, relationship, selectinload
 
 from pyfly.container import bean, configuration, repository, service
 from pyfly.context.application_context import ApplicationContext
@@ -44,6 +45,8 @@ from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.soft_delete_criteria import INCLUDE_DELETED, hard_delete, including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from pyfly.data.transaction import Propagation
+from tests.integration._repository_harness import repository_datasources
 from tests.support.backend_matrix import RelationalBackend
 
 
@@ -230,6 +233,90 @@ async def test_saving_a_soft_deleted_entity_returns_it_loaded(
         archived = await authors.save(SoftAuthor(name="archived", deleted_at=datetime.now(UTC)))
         await session.commit()
     assert archived.books == []  # loaded by save: the session is closed, so a lazy load would raise
+
+
+@pytest.mark.parametrize("repository", [AuthorArchive, SoftAuthorRepository])
+@pytest.mark.parametrize("expired", ["every_attribute", "deleted_at"])
+async def test_saving_an_expired_entity_reads_it_back_in_the_unit(
+    relational_backend: RelationalBackend, repository: type[Repository[SoftAuthor, uuid.UUID]], expired: str
+) -> None:
+    """``save`` tells a soft-deleted entity from a live one by the state it holds: reading ``deleted_at`` on an
+    entity that expired it would load the row outside the unit's greenlet (``MissingGreenlet``, a 500). An
+    entity whose ``deleted_at`` is not loaded is read back as a live one."""
+    factory, library = await _library(relational_backend)
+    async with factory() as session:
+        authors = repository(session=session)
+        alice = await authors.find_by_id(library.alice.id)
+        assert alice is not None
+        session.expire(alice, None if expired == "every_attribute" else ["deleted_at"])
+        saved = await authors.save(alice)
+        assert saved is alice and saved.name == "alice" and saved.deleted_at is None
+        assert _titles(saved.books) == ["a-live"]
+
+
+@pytest.mark.parametrize("repository", [AuthorArchive, SoftAuthorRepository])
+async def test_saving_a_detached_entity_of_a_session_that_expires_on_commit(
+    relational_backend: RelationalBackend, repository: type[Repository[SoftAuthor, uuid.UUID]]
+) -> None:
+    """An application's session factory may expire on commit: the entity it returns is detached with nothing
+    loaded, and saving it unchanged in the next session reads it back there."""
+    factory, library = await _library(relational_backend)
+    expiring = async_sessionmaker(factory.kw["bind"], expire_on_commit=True)
+    async with expiring() as session:
+        alice = await repository(session=session).find_by_id(library.alice.id)
+        assert alice is not None
+        await session.commit()
+    async with expiring() as session:
+        saved = await repository(session=session).save(alice)
+        assert saved.name == "alice" and _titles(saved.books) == ["a-live"]
+        await session.commit()
+
+
+class _StepFailed(Exception):
+    pass
+
+
+class _RenamingService:
+    def __init__(self, authors: SoftAuthorRepository) -> None:
+        self._authors = authors
+
+    @transactional(propagation=Propagation.NESTED)
+    async def risky_rename(self, author: SoftAuthor) -> None:
+        author.name = "risky"
+        await self._authors.save(author)
+        raise _StepFailed
+
+    @transactional
+    async def create_with_a_fallback(self) -> tuple[str, list[str]]:
+        author = await self._authors.save(SoftAuthor(name="first"))
+        with contextlib.suppress(_StepFailed):  # the savepoint rolled back, expiring what it changed
+            await self.risky_rename(author)
+        saved = await self._authors.save(author)
+        return saved.name, _titles(saved.books)
+
+
+async def test_saving_after_a_nested_step_rolled_back(relational_backend: RelationalBackend) -> None:
+    """A ``NESTED`` step that fails rolls its savepoint back, which expires the entities it changed; saving
+    such an entity again in the outer unit reads it back there."""
+    async with repository_datasources(relational_backend, SoftAuthor, SoftBook):
+        assert await _RenamingService(SoftAuthorRepository()).create_with_a_fallback() == ("first", [])
+
+
+async def test_saving_a_live_and_a_soft_deleted_entity_together(relational_backend: RelationalBackend) -> None:
+    """``save_all`` reads a soft-deleted entity back with its deleted rows, and only that one: the live entity
+    beside it gets its eager collection without the soft-deleted children."""
+    factory, library = await _library(relational_backend)
+    async with factory() as session:
+        stmt = select(SoftAuthor).where(SoftAuthor.id == library.alice.id).options(lazyload(SoftAuthor.books))
+        detached = (await session.execute(stmt)).scalar_one()
+    assert "books" not in detached.__dict__
+    async with factory() as session:
+        alice, archived = await AuthorArchive(session=session).save_all(
+            [detached, SoftAuthor(name="archived", deleted_at=datetime.now(UTC))]
+        )
+        await session.commit()
+    assert _titles(alice.books) == ["a-live"]
+    assert archived.books == []
 
 
 async def test_soft_delete_repository_still_reaches_deleted_rows_where_it_must(
