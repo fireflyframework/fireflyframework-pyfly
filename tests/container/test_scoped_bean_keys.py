@@ -46,6 +46,7 @@ from pyfly.context.application_context import ApplicationContext  # noqa: E402
 from pyfly.context.refresh import ContextRefresher  # noqa: E402
 from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
+from pyfly.data.relational.routing import RoutingSessionFactory  # noqa: E402
 from pyfly.session.session import HttpSession  # noqa: E402
 
 _ENGINES: dict[str, AsyncEngine] = {}
@@ -111,6 +112,77 @@ async def test_two_refresh_scoped_factories_of_one_type_keep_their_own_database(
         # After the refresh the order of the first resolution must not decide the mapping.
         await _write(ctx.get_bean_by_name("analytics_sessions"), "r2-analytics")
         await _write(ctx.get_bean_by_name("reporting_sessions"), "r2-reporting")
+    finally:
+        await ctx.stop()
+
+    assert await _rows(databases["reporting"]) == ["r1-reporting", "r2-reporting"]
+    assert await _rows(databases["analytics"]) == ["r1-analytics", "r2-analytics"]
+
+
+def _relational(tmp_path: Path) -> Config:
+    """An application with the relational auto-configuration on its own primary database."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'primary.db'}"
+    return Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": url, "ddl-auto": "none"}}}})
+
+
+async def _database_of(session: AsyncSession) -> str:
+    async with session:
+        rows = (await session.execute(text("PRAGMA database_list"))).all()
+    return Path(rows[0][2]).name
+
+
+async def test_two_refresh_scoped_factories_keep_their_database_beside_the_relational_primary(
+    databases: dict[str, AsyncEngine], tmp_path: Path
+) -> None:
+    """The C030 scenario as an application writes it: the relational auto-configuration is on, so the
+    two scoped factories share their class with the primary ``async_session_factory``. start() used to
+    fail on the ambiguous primary, or the primary was replaced by a scoped factory."""
+    ctx = ApplicationContext(_relational(tmp_path))
+    ctx.register_bean(_RefreshScopedFactories)
+    await ctx.start()
+    try:
+        assert await _database_of(ctx.get_bean(AsyncSession)) == "primary.db"
+        assert await _database_of(ctx.get_bean(RoutingSessionFactory).primary()) == "primary.db"
+        await _write(ctx.get_bean_by_name("reporting_sessions"), "r1-reporting")
+        await _write(ctx.get_bean_by_name("analytics_sessions"), "r1-analytics")
+
+        await ctx.get_bean(ContextRefresher).refresh()
+
+        await _write(ctx.get_bean_by_name("analytics_sessions"), "r2-analytics")
+        await _write(ctx.get_bean_by_name("reporting_sessions"), "r2-reporting")
+        assert await _database_of(ctx.get_bean(AsyncSession)) == "primary.db"
+    finally:
+        await ctx.stop()
+
+    assert await _rows(databases["reporting"]) == ["r1-reporting", "r2-reporting"]
+    assert await _rows(databases["analytics"]) == ["r1-analytics", "r2-analytics"]
+
+
+@configuration
+class _RefreshScopedEngines:
+    @bean(name="reporting_engine", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def reporting_engine(self) -> AsyncEngine:
+        return create_async_engine(_ENGINES["reporting"].url)
+
+    @bean(name="analytics_engine", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def analytics_engine(self) -> AsyncEngine:
+        return create_async_engine(_ENGINES["analytics"].url)
+
+
+async def test_two_refresh_scoped_engines_keep_their_database_beside_the_relational_primary(
+    databases: dict[str, AsyncEngine], tmp_path: Path
+) -> None:
+    ctx = ApplicationContext(_relational(tmp_path))
+    ctx.register_bean(_RefreshScopedEngines)
+    await ctx.start()
+    try:
+        assert ctx.get_bean(AsyncEngine).url.database == str(tmp_path / "primary.db")
+        assert await _database_of(ctx.get_bean(AsyncSession)) == "primary.db"
+        for cycle in ("r1", "r2"):
+            for name in ("analytics", "reporting"):
+                engine = ctx.get_bean_by_name(f"{name}_engine")
+                await _write(async_sessionmaker(engine), f"{cycle}-{name}")
+            await ctx.get_bean(ContextRefresher).refresh()
     finally:
         await ctx.stop()
 

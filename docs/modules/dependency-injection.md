@@ -1650,10 +1650,34 @@ class InMemoryCacheFallback:
 The bean is only registered if **no** other bean of the specified type (or a subclass)
 exists. This is the key mechanism for "default with override" patterns: auto-configuration
 provides a default that is automatically skipped when the user provides their own
-implementation. The data auto-configurations follow it for the beans an application replaces:
+implementation.
+
+A bean of any scope counts, as in Spring. `singletons_only=True` counts only singletons: a
+`TRANSIENT`, `REQUEST`, `SESSION` or custom-scoped (`"refresh"`) bean of the type is an
+additional bean, and the default is registered beside it.
+
+```python
+@auto_configuration
+class ReportingAutoConfiguration:
+    @bean(primary=True)
+    @conditional_on_missing_bean(ReportingClient, singletons_only=True)
+    def reporting_client(self, config: Config) -> ReportingClient:
+        # replaced by a singleton ReportingClient bean; kept beside a request-scoped one
+        return ReportingClient(str(config.get("reporting.url")))
+```
+
+Mark such a default `primary=True` as above: when a scoped bean of the type exists beside it, an
+injection by type is ambiguous without a primary, and the default is the one the rest of the
+application means.
+
+The data auto-configurations follow this pattern for the beans an application replaces:
 `AsyncEngine` (`async_engine`), `async_sessionmaker` (`async_session_factory`),
-`RoutingSessionFactory`, `DataSourceRegistry` and the Mongo `AsyncMongoClient` (until 26.09.07 a
-user engine or session factory, even `primary=True`, was shadowed by the framework's).
+`RoutingSessionFactory`, `DataSourceRegistry` and the Mongo `AsyncMongoClient`. A **singleton**
+bean of one of these types replaces the application's **primary**. A request- or refresh-scoped
+one is a second database: the auto-configured primary stays, and it is the `@primary` candidate,
+so an injection by type (`AsyncEngine`, `async_sessionmaker[AsyncSession]`) receives the primary.
+Inject the scoped bean by name (`Annotated[AsyncEngine, Qualifier("reporting_engine")]`). Until
+26.09.07 a user engine or session factory, even `primary=True`, was shadowed by the framework's.
 
 ### @conditional_on_single_candidate
 

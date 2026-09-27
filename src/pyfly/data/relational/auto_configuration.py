@@ -285,13 +285,14 @@ class DataSourceSpiRegistrar:
 class DataSourceAutoConfiguration:
     """The application's datasource registry, its lifecycle, and its SPI registrar."""
 
-    @bean
-    @conditional_on_missing_bean(DataSourceRegistry)
+    @bean(primary=True)
+    @conditional_on_missing_bean(DataSourceRegistry, singletons_only=True)
     def datasource_registry(self, config: Config) -> DataSourceRegistry:
         """The registry of this configuration (:meth:`DataSourceRegistry.for_config`).
 
         Every module that needs SQL resolves its datasource here; it is the same object whichever
-        auto-configuration asks first.
+        auto-configuration asks first. A singleton ``DataSourceRegistry`` bean of the application
+        replaces it; a scoped one does not, and this one stays the ``@primary`` candidate.
         """
         return DataSourceRegistry.for_config(config)
 
@@ -313,8 +314,15 @@ class RelationalAutoConfiguration:
     """Auto-configures the SQLAlchemy engine, sessions and repository post-processor as views over the
     :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry`."""
 
-    @bean
-    @conditional_on_missing_bean(AsyncEngine)
+    # The primary data beans back off for a SINGLETON of their type only, and are the @primary
+    # candidates of their type. A singleton AsyncEngine or async_sessionmaker bean replaces the
+    # application's primary; a request- or refresh-scoped one is a second database beside it.
+    # Counting a scoped one switched the primary off: start() failed (a request-scoped factory has
+    # no request at startup, two scoped factories are ambiguous) or every session, the routing
+    # factory and each repository moved to the scoped database.
+
+    @bean(primary=True)
+    @conditional_on_missing_bean(AsyncEngine, singletons_only=True)
     def async_engine(self, config: Config) -> AsyncEngine:
         """The primary datasource's engine.
 
@@ -323,8 +331,8 @@ class RelationalAutoConfiguration:
         """
         return DataSourceRegistry.for_config(config).primary.engine
 
-    @bean
-    @conditional_on_missing_bean(async_sessionmaker)
+    @bean(primary=True)
+    @conditional_on_missing_bean(async_sessionmaker, singletons_only=True)
     def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
         """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``)."""
         datasource = datasource_of(async_engine)
@@ -341,8 +349,8 @@ class RelationalAutoConfiguration:
         """
         return NamedDataSources.of_registry(DataSourceRegistry.for_config(config))
 
-    @bean
-    @conditional_on_missing_bean(RoutingSessionFactory)
+    @bean(primary=True)
+    @conditional_on_missing_bean(RoutingSessionFactory, singletons_only=True)
     def routing_session_factory(
         self, async_session_factory: async_sessionmaker[AsyncSession], config: Config
     ) -> RoutingSessionFactory:

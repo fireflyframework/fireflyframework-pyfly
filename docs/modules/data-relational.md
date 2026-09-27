@@ -680,12 +680,35 @@ it silently opened `./app.db` in the working directory. With the `dev` profile a
 to `sqlite+aiosqlite:///./app.db` and logs a warning.
 
 **Overriding the beans.** `async_engine`, `async_session_factory`, `routing_session_factory` and
-`datasource_registry` carry `@conditional_on_missing_bean`: declare your own `AsyncEngine`,
-`async_sessionmaker`, `RoutingSessionFactory` or `DataSourceRegistry` bean and the framework's backs
-off (the beans that take them, such as the health indicator and the engine lifecycle, use yours, and
-the engine lifecycle disposes an engine that is not a registry engine). When several beans share a
-class, the `@primary` one is injected, and a lookup by that class raises `NoUniqueBeanError` when
-none is primary. Named and module datasources are still built by the registry.
+`datasource_registry` carry `@conditional_on_missing_bean(..., singletons_only=True)`: declare your
+own **singleton** `AsyncEngine`, `async_sessionmaker`, `RoutingSessionFactory` or
+`DataSourceRegistry` bean and the framework's backs off (the beans that take them, such as the
+health indicator and the engine lifecycle, use yours, and the engine lifecycle disposes an engine
+that is not a registry engine). Such a bean replaces the application's **primary**. When several
+beans share a class, the `@primary` one is injected, and a lookup by that class raises
+`NoUniqueBeanError` when none is primary. Named and module datasources are still built by the
+registry.
+
+A request- or refresh-scoped bean of one of these types is a **second database**, not a
+replacement: the auto-configured beans stay, and they are the `@primary` candidates of their type.
+An injection by type (`AsyncEngine`, `async_sessionmaker[AsyncSession]`), the `AsyncSession` bean,
+the routing factory and the repositories keep the primary; inject the scoped bean by name:
+
+```python
+@configuration
+class TenantSessions:
+    @bean(scope=Scope.REQUEST)
+    def tenant_sessions(self, registry: DataSourceRegistry) -> async_sessionmaker[AsyncSession]:
+        # one named datasource per tenant: pyfly.data.relational.datasources.<tenant>
+        return registry.session_factory(str(RequestContext.current().get("tenant")))
+
+
+class TenantReader:
+    def __init__(
+        self, sessions: Annotated[async_sessionmaker[AsyncSession], Qualifier("tenant_sessions")]
+    ) -> None:
+        self.sessions = sessions
+```
 
 **Closing.** The context closes the registry **last** when it stops: after the consumers drained,
 after every `@pre_destroy` and after every lifecycle bean stopped, so the last writes of the

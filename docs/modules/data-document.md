@@ -736,7 +736,7 @@ class DocumentAutoConfiguration:
 
 The detection is purely library-based: if Beanie is installed in your Python environment, the MongoDB adapter is available. You still need to set `pyfly.data.document.enabled: true` in config to activate it.
 
-The client bean (`mongo_client`, a pymongo `AsyncMongoClient`) carries `@conditional_on_missing_bean(AsyncMongoClient)`: declare your own `AsyncMongoClient` bean (TLS, a credentials callback, read preferences) and the auto-configured one backs off; the `BeanieInitializer` then uses yours and closes it at stop. Until 26.09.07 the framework's client silently shadowed it.
+The client bean (`mongo_client`, a pymongo `AsyncMongoClient`) carries `@conditional_on_missing_bean(AsyncMongoClient, singletons_only=True)`: declare your own singleton `AsyncMongoClient` bean (TLS, a credentials callback, read preferences) and the auto-configured one backs off; the `BeanieInitializer` then uses yours and closes it at stop. Until 26.09.07 the framework's client silently shadowed it. A request- or refresh-scoped `AsyncMongoClient` bean is a second client: the auto-configured one stays, as the `@primary` candidate that an injection by type receives.
 
 ### Beanie Initialization
 

@@ -25,21 +25,29 @@ two beans share picks the ``@primary`` one or fails instead of returning the las
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from sqlalchemy import event, text  # noqa: E402
+from sqlalchemy import Integer, String, event, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.orm import Mapped, mapped_column  # noqa: E402
 
-from pyfly.container import NoUniqueBeanError, bean, configuration  # noqa: E402
+from pyfly.container import NoUniqueBeanError, Qualifier, bean, configuration, repository  # noqa: E402
+from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME, scoped_proxy  # noqa: E402
+from pyfly.container.types import Scope  # noqa: E402
 from pyfly.context.application_context import ApplicationContext  # noqa: E402
+from pyfly.context.refresh import ContextRefresher  # noqa: E402
+from pyfly.context.request_context import RequestContext  # noqa: E402
 from pyfly.core.config import Config  # noqa: E402
 from pyfly.data.relational.auto_configuration import EngineLifecycle  # noqa: E402
 from pyfly.data.relational.datasource_registry import DataSourceRegistry, datasource_of  # noqa: E402
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator  # noqa: E402
 from pyfly.data.relational.routing import RoutingSessionFactory  # noqa: E402
+from pyfly.data.relational.sqlalchemy.entity import Base  # noqa: E402
+from pyfly.data.relational.sqlalchemy.repository import Repository  # noqa: E402
 
 try:
     from pymongo import AsyncMongoClient
@@ -235,5 +243,174 @@ async def test_a_user_mongo_client_replaces_the_auto_configured_one() -> None:
         assert ("user-mongo.invalid", 27017) in client.topology_description.server_descriptions()
         assert len(ctx.get_beans_of_type(AsyncMongoClient)) == 1
         assert ctx.get_bean(BeanieInitializer)._motor_client is client
+    finally:
+        await ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# A request- or refresh-scoped bean of a data type is a SECOND database, never a replacement for the
+# primary. The back-off counted registrations of every scope, so the application's own patterns (two
+# refresh-scoped session factories, a request-scoped tenant factory, a proxied refresh-scoped engine)
+# switched the primary beans off in a relational application: start() failed ("No matching bean is
+# registered", "No active request context") or every session, the routing factory and each repository
+# silently moved to the secondary database. Only a singleton replaces a data bean now, and the
+# auto-configured beans are the primary candidates of their type.
+# ---------------------------------------------------------------------------
+
+
+class _DatabaseOwner(Base):
+    __tablename__ = "wp07_database_owner"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(20))
+
+
+@repository
+class _DatabaseOwnerRepository(Repository[_DatabaseOwner, int]):
+    pass
+
+
+async def _own(tmp_path: Path, name: str, owner: str) -> str:
+    """Create database ``<name>.db`` holding one owner row, and return its URL."""
+    url = f"sqlite+aiosqlite:///{tmp_path / f'{name}.db'}"
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(_DatabaseOwner.__table__.create)
+            await conn.execute(_DatabaseOwner.__table__.insert().values(id=1, name=owner))
+    finally:
+        await engine.dispose()
+    _URLS[name] = url
+    return url
+
+
+async def _relational_app(tmp_path: Path, *secondaries: str) -> Config:
+    """A relational application on ``auto.db`` (owner "primary"), plus one database per secondary."""
+    config = _config(tmp_path)
+    await _own(tmp_path, "auto", "primary")
+    for name in secondaries:
+        await _own(tmp_path, name, name)
+    return config
+
+
+async def _session_database(session: AsyncSession) -> str:
+    async with session:
+        rows = (await session.execute(text("PRAGMA database_list"))).all()
+    return Path(rows[0][2]).name
+
+
+async def _assert_the_primary_stays(ctx: ApplicationContext) -> None:
+    """Every primary data bean, and a repository, still use ``pyfly.data.relational.url``."""
+    assert str(ctx.get_bean(AsyncEngine).url) == _URLS["auto"]
+    assert await _database_of(ctx.get_bean(async_sessionmaker)) == "auto.db"
+    assert await _session_database(ctx.get_bean(AsyncSession)) == "auto.db"
+    assert await _session_database(ctx.get_bean(RoutingSessionFactory).primary()) == "auto.db"
+    assert ctx.get_bean(EngineLifecycle)._engine is ctx.get_bean(AsyncEngine)
+    owners = await ctx.get_bean(_DatabaseOwnerRepository).find_all()
+    assert [owner.name for owner in owners] == ["primary"]
+
+
+_SCOPED_ENGINES: list[AsyncEngine] = []
+
+
+def _scoped_sessions(name: str) -> async_sessionmaker[AsyncSession]:
+    engine = create_async_engine(_URLS[name])
+    _SCOPED_ENGINES.append(engine)
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _owner_of(sessions: async_sessionmaker[AsyncSession]) -> str:
+    async with sessions() as session:
+        return str((await session.execute(text("SELECT name FROM wp07_database_owner"))).scalar_one())
+
+
+async def _engine_owner(engine: AsyncEngine) -> str:
+    async with engine.connect() as conn:
+        return str((await conn.execute(text("SELECT name FROM wp07_database_owner"))).scalar_one())
+
+
+@configuration
+class _TenantSessions:
+    """The request-scoped tenant factory of the scoped ``@bean`` guide, by its parametrized hint."""
+
+    @bean(scope=Scope.REQUEST)
+    def tenant_sessions(self) -> async_sessionmaker[AsyncSession]:
+        context = RequestContext.current()
+        assert context is not None, "a REQUEST-scoped factory ran outside a request"
+        return _scoped_sessions(str(context.get("tenant")))
+
+
+class _TenantReader:
+    def __init__(self, sessions: Annotated[async_sessionmaker[AsyncSession], Qualifier("tenant_sessions")]) -> None:
+        self.sessions = sessions
+
+
+async def test_a_request_scoped_session_factory_leaves_the_primary_in_place(tmp_path: Path) -> None:
+    _SCOPED_ENGINES.clear()
+    RequestContext.clear()
+    ctx = ApplicationContext(await _relational_app(tmp_path, "acme", "globex"))
+    ctx.register_bean(_TenantSessions)
+    ctx.register_bean(_TenantReader, scope=Scope.REQUEST)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        await _assert_the_primary_stays(ctx)
+        for tenant in ("acme", "globex"):
+            RequestContext.init().set("tenant", tenant)
+            assert await _owner_of(ctx.get_bean(_TenantReader).sessions) == tenant
+            assert await _owner_of(ctx.get_bean(async_sessionmaker)) == "primary"  # by type: the primary
+    finally:
+        RequestContext.clear()
+        await ctx.stop()
+        for engine in _SCOPED_ENGINES:
+            await engine.dispose()
+
+
+@configuration
+class _AuditSessions:
+    @bean(name="audit_sessions", scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def audit_sessions(self) -> async_sessionmaker[AsyncSession]:
+        return _scoped_sessions("audit")
+
+
+async def test_a_refresh_scoped_session_factory_leaves_the_primary_in_place(tmp_path: Path) -> None:
+    _SCOPED_ENGINES.clear()
+    ctx = ApplicationContext(await _relational_app(tmp_path, "audit"))
+    ctx.register_bean(_AuditSessions)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        await _assert_the_primary_stays(ctx)
+        assert await _owner_of(ctx.get_bean_by_name("audit_sessions")) == "audit"
+        await ctx.get_bean(ContextRefresher).refresh()
+        await _assert_the_primary_stays(ctx)
+        assert await _owner_of(ctx.get_bean_by_name("audit_sessions")) == "audit"
+    finally:
+        await ctx.stop()
+        for engine in _SCOPED_ENGINES:
+            await engine.dispose()
+
+
+@configuration
+class _ReportingEngine:
+    @scoped_proxy
+    @bean(scope=REFRESH_SCOPE_NAME)  # type: ignore[arg-type]
+    def reporting_engine(self) -> AsyncEngine:
+        return create_async_engine(_URLS["reporting"])
+
+
+async def test_a_proxied_refresh_scoped_engine_leaves_the_primary_in_place(tmp_path: Path) -> None:
+    ctx = ApplicationContext(await _relational_app(tmp_path, "reporting"))
+    ctx.register_bean(_ReportingEngine)
+    ctx.register_bean(_DatabaseOwnerRepository)
+    await ctx.start()
+    try:
+        await _assert_the_primary_stays(ctx)
+        assert (await ctx.get_bean(SqlAlchemyHealthIndicator).health()).status == "UP"
+        reporting = ctx.get_bean_by_name("reporting_engine")
+        assert await _engine_owner(reporting) == "reporting"
+        await ctx.get_bean(ContextRefresher).refresh()
+        assert await _engine_owner(reporting) == "reporting"  # the proxy follows the refresh
+        await _assert_the_primary_stays(ctx)
     finally:
         await ctx.stop()
