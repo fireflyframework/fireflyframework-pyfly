@@ -31,10 +31,11 @@ from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.post_processor import is_stub
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy import post_processor as post_processor_module
-from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
+from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 from pyfly.data.relational.sqlalchemy.query import query
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
 from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 from tests.support.backend_matrix import RelationalBackend, enable_sqlite_foreign_keys
 
@@ -651,6 +652,37 @@ class TestArgumentBinding:
         assert await repo.count_by_name_or_owner_id("MixedCase", "o2") == 2
         assert await repo.exists_by_name() is True
         assert await repo.exists_by_name("nothing") is False
+
+
+class HookedOrder(SoftDeleteMixin, Base):
+    __tablename__ = "pp_hooked_order"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    status: Mapped[str] = mapped_column(String(20))
+
+
+class HookedOrderRepository(SoftDeleteRepository[HookedOrder, int]):
+    pass
+
+
+@pytest.mark.backends("sqlite-file")
+class TestLegacyHooks:
+    """``_compile_derived`` and ``_wrap_derived_method`` still give a working method, for the repository the call is
+    made on."""
+
+    async def test_the_hooks_compile_a_soft_delete(self, relational_backend: RelationalBackend):
+        await relational_backend.create_tables(HookedOrder)
+        engine = relational_backend.create_engine()
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add_all([HookedOrder(id=1, status="open"), HookedOrder(id=2, status="done")])
+            await session.flush()
+            processor = RepositoryBeanPostProcessor()
+            repo = HookedOrderRepository(HookedOrder, session)
+            parsed = processor._query_parser.parse("delete_by_status")
+            method = processor._wrap_derived_method(processor._compile_derived(parsed, HookedOrder, repo))
+            assert await method(repo, "open") == 1
+            rows = (await session.execute(text("SELECT id, deleted_at FROM pp_hooked_order ORDER BY id"))).all()
+            assert [(row[0], row[1] is not None) for row in rows] == [(1, True), (2, False)]
 
 
 class TestIsStub:

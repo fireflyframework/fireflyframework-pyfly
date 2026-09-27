@@ -152,9 +152,15 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         return compiled
 
     def _wrap_derived_method(self, compiled_fn: Any) -> Any:
-        """Wrap a derived-query-compiled function as a repository operation on ``bean._session``."""
+        """Wrap a derived-query-compiled function as a repository operation on ``bean._session`` (for the
+        repository the call is made on: its soft delete, read criteria and paging)."""
 
         async def wrapper(self_arg: Any, *args: Any) -> Any:
+            if isinstance(compiled_fn, DerivedQuery):
+                pageable = next((arg for arg in args if isinstance(arg, Pageable)), None)
+                sort = next((arg for arg in args if isinstance(arg, Sort)), None)
+                values = [arg for arg in args if not isinstance(arg, (Pageable, Sort))]
+                return await compiled_fn.run(self_arg, self_arg._session, values, pageable=pageable, sort=sort)
             return await compiled_fn(self_arg._session, *args)
 
         return repository_operation(wrapper, read=bool(getattr(compiled_fn, _READ_FLAG, False)), atomic=True)
