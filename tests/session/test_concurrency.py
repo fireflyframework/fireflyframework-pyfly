@@ -16,16 +16,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from pyfly.session.adapters.memory import InMemorySessionStore
+from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.concurrency import (
     ConcurrencyControlPolicy,
     InMemorySessionRegistry,
     SessionConcurrencyController,
 )
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 
 @pytest.mark.asyncio
@@ -204,3 +209,66 @@ async def test_register_limited_is_atomic_in_memory() -> None:
     assert (first.accepted, second.accepted, third.accepted, again.accepted) == (True, False, True, True)
     assert third.evicted == ("s1",) and again.evicted == ()
     assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s3"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_login_still_deletes_the_session_it_evicted() -> None:
+    """The registry commits the eviction before the session is deleted from the store: a login cancelled in
+    between (the client went away) left the evicted session usable and no longer counted."""
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry()
+    deleting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _delete(session_id: str) -> None:
+        deleting.set()
+        await release.wait()
+        await store.delete(session_id)
+
+    ctl = SessionConcurrencyController(
+        reg,
+        ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest"),
+        session_deleter=_delete,
+        session_store=store,
+    )
+    await _live(store, "s1", "s2")
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    login = asyncio.create_task(ctl.on_login("alice", "s2", 2.0))
+    await deleting.wait()
+
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+    release.set()
+    await ctl.stop()  # waits for the evictions in flight
+
+    assert await store.get("s1") is None
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s2"]
+
+
+@pytest.mark.asyncio
+async def test_a_login_checks_a_bounded_batch_of_registrations(tmp_path: Path) -> None:
+    """A login ran a whole purge batch inline (500 liveness checks and a unit per dead session): it now checks
+    a small batch, and the next logins take the rest of a backlog."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'registry.db'}")
+    enable_sqlite_foreign_keys(engine)
+    now = [datetime.now(UTC)]
+    registry = PostgresSessionRegistry(engine, ttl=timedelta(seconds=60), clock=lambda: now[0])
+    store = InMemorySessionStore()
+    ctl = SessionConcurrencyController(
+        registry, ConcurrencyControlPolicy(), session_store=store, purge_interval=timedelta(0)
+    )
+    try:
+        for index in range(120):
+            await registry.register("alice", f"dead-{index}", float(index))
+        now[0] = now[0] + timedelta(seconds=61)
+
+        remaining = []
+        for login in range(3):
+            await _live(store, f"live-{login}")
+            assert await ctl.on_login("alice", f"live-{login}", 1000.0 + login)
+            remaining.append(sum(sid.startswith("dead-") for sid, _ in await registry.list_sessions("alice")))
+
+        assert remaining == [70, 20, 0]
+    finally:
+        await engine.dispose()

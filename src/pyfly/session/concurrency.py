@@ -179,14 +179,17 @@ class SessionConcurrencyController:
             by several instances, a store each instance keeps to itself takes the others' live sessions for
             dead ones. Without it every registered session counts until it logs out or is evicted.
         purge_interval: How often a login also purges the registrations of dead sessions from a registry
-            that supports it (``None``: only :meth:`purge_expired` does).
+            that supports it, :attr:`LOGIN_PURGE_BATCH` of them at a time (``None``: only :meth:`purge_expired`
+            does).
 
     A session must be in the store before its login registers it (the OAuth2 login handler saves it first),
     or a concurrent login of the same principal takes it for a dead one.
     """
 
-    #: How many registrations one purge step checks.
+    #: How many registrations one step of :meth:`purge_expired` checks.
     PURGE_BATCH = 500
+    #: How many registrations a login's own purge checks (a backlog goes to the next logins).
+    LOGIN_PURGE_BATCH = 50
 
     def __init__(
         self,
@@ -205,6 +208,7 @@ class SessionConcurrencyController:
         self._purge_interval = purge_interval.total_seconds() if purge_interval is not None else None
         self._last_purge = time.monotonic()
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._evictions: set[asyncio.Task[None]] = set()
 
     @property
     def registry(self) -> SessionRegistry:
@@ -223,7 +227,9 @@ class SessionConcurrencyController:
             await start()
 
     async def stop(self) -> None:
-        """Stop the registry (idempotent)."""
+        """Wait for the evicted sessions still being deleted, then stop the registry (idempotent)."""
+        if self._evictions:
+            await asyncio.gather(*self._evictions, return_exceptions=True)
         stop = getattr(self._registry, "stop", None)
         if callable(stop):
             await stop()
@@ -250,8 +256,8 @@ class SessionConcurrencyController:
                 "Rejected login for %r: max concurrent sessions (%d) reached", principal, self._policy.max_sessions
             )
             return False
-        for evicted in result.evicted:
-            await self._delete_evicted(principal, evicted)
+        if result.evicted and self._delete is not None:
+            await self._delete_all_evicted(principal, result.evicted)
         await self._purge_if_due()
         return True
 
@@ -264,7 +270,7 @@ class SessionConcurrencyController:
         (otherwise it does nothing)."""
         purged = 0
         while True:
-            dropped, checked = await self._purge_batch()
+            dropped, checked = await self._purge_batch(self.PURGE_BATCH)
             purged += dropped
             if checked < self.PURGE_BATCH:
                 return purged
@@ -301,22 +307,37 @@ class SessionConcurrencyController:
             await self._registry.register(principal, session_id, created_at)
             return SessionRegistration(True, tuple(evicted))
 
-    async def _delete_evicted(self, principal: str, session_id: str) -> None:
-        """Delete an evicted session from the store. The registry no longer holds it, so a failure is logged
-        and the login goes on: the session lives on until it expires."""
-        if self._delete is None:
-            return
-        try:
-            await self._delete(session_id)
-        except Exception:  # noqa: BLE001 — the login was admitted; a stray session outlives it at worst
-            logger.warning("session_eviction_failed", extra={"principal": principal}, exc_info=True)
+    async def _delete_all_evicted(self, principal: str, evicted: Sequence[str]) -> None:
+        """Delete the evicted sessions from the store, shielded from the login's cancellation: the registry
+        committed their eviction already, so a deletion abandoned halfway would leave a session usable and no
+        longer counted. The deletion runs outside the caller's unit of work, as the registry's eviction did,
+        and :meth:`stop` waits for the deletions still in flight."""
+        from pyfly.data.transaction import detached
 
-    async def _purge_batch(self) -> tuple[int, int]:
+        task = detached(self._delete_evicted(principal, evicted), name="session-eviction")
+        self._evictions.add(task)
+        task.add_done_callback(self._evictions.discard)
+        await asyncio.shield(task)
+
+    async def _delete_evicted(self, principal: str, evicted: Sequence[str]) -> None:
+        """Delete each evicted session from the store. The registry no longer holds them, so a failure is
+        logged (``session_eviction_failed``) and the login goes on: that session stays usable until it expires
+        or is invalidated, beside the sessions the cap counts."""
+        delete = self._delete
+        if delete is None:
+            return
+        for session_id in evicted:
+            try:
+                await delete(session_id)
+            except Exception:  # noqa: BLE001 — the login was admitted; a stray session outlives it at worst
+                logger.warning("session_eviction_failed", extra={"principal": principal}, exc_info=True)
+
+    async def _purge_batch(self, limit: int) -> tuple[int, int]:
         registry = self._registry
         store = self._store
         if store is None or not isinstance(registry, ExpiringSessionRegistry):
             return 0, 0
-        due = await registry.expired_sessions(limit=self.PURGE_BATCH)
+        due = await registry.expired_sessions(limit=limit)
         live: list[str] = []
         dropped = 0
         for principal, session_id in due:
@@ -335,11 +356,11 @@ class SessionConcurrencyController:
             return
         self._last_purge = time.monotonic()
         try:
-            dropped, checked = await self._purge_batch()
+            dropped, checked = await self._purge_batch(self.LOGIN_PURGE_BATCH)
         except Exception:  # noqa: BLE001 — a failed purge must never fail a login
             logger.warning("session_registry_purge_failed", exc_info=True)
             return
-        if checked >= self.PURGE_BATCH:
+        if checked >= self.LOGIN_PURGE_BATCH:
             self._last_purge = float("-inf")  # a backlog: the next login checks the next batch
         if dropped:
             logger.debug("session_registrations_purged", extra={"count": dropped})

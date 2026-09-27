@@ -64,7 +64,7 @@ class PostgresSessionRegistry:
         table: The table of registrations.
         principals_table: The table of principals (the rows a capped login locks).
         ttl: How long a registration goes before its liveness is checked again (the session timeout, by
-            default ``pyfly.session.ttl``); seconds or a ``timedelta``.
+            default ``pyfly.session.ttl``); seconds or a ``timedelta``, positive (``ValueError`` otherwise).
         create_table: Create the tables at :meth:`start` when they are missing (otherwise only check them).
         clock: The current UTC instant (tests pass their own).
     """
@@ -89,6 +89,9 @@ class PostgresSessionRegistry:
         self._principals_table_name = principals_table
         self._tables: tuple[Table, Table] | None = None
         self._ttl = ttl if isinstance(ttl, timedelta) else timedelta(seconds=float(ttl))
+        if self._ttl <= timedelta(0):
+            # A renewal would leave the registration due: the purge would check the same batch forever.
+            raise ValueError(f"The session-registry ttl must be positive, got {self._ttl}")
         self._create_table = create_table
         self._clock = clock or (lambda: datetime.now(UTC))
         self._dialect: str | None = None

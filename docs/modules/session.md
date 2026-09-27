@@ -249,6 +249,11 @@ pyfly:
 
 - `evict-oldest` — the new login succeeds; the oldest session(s) for that
   principal are removed from the registry and deleted from the session store.
+  The registry commits the eviction first; the deletion then runs outside the
+  caller's unit of work and is shielded from the login's cancellation (the
+  controller's `stop()` waits for deletions in flight). A deletion that fails is
+  logged as `session_eviction_failed` and the login goes on: that session is no
+  longer counted and stays usable until it expires or is invalidated.
 - `reject-new` — the new login is refused. The handler invalidates the
   pending session and responds with HTTP `401` and body
   `{"error": "max_sessions", ...}`.
@@ -270,8 +275,10 @@ pyfly:
   script on Redis, one lock in memory. Concurrent logins of one principal, on one instance or several, never
   exceed the cap. A custom registry without that method is serialized per principal within the process.
 - The SQL registry is purged when the controller has the store: a registration comes due for a liveness
-  check one session TTL after it was registered or renewed; a login (at most once a minute) or
-  `controller.purge_expired()` drops the due registrations whose session is gone and renews the others.
+  check one session TTL after it was registered or renewed; `controller.purge_expired()` drops the due
+  registrations whose session is gone and renews the others. A login also checks up to
+  `LOGIN_PURGE_BATCH` (50) due registrations, at most once a minute per instance, and the next logins take the
+  rest of a backlog; schedule `purge_expired()` to keep a large registry clean without them.
 
 > **Before 26.09.08** the cap was a list and a register in separate transactions (max-sessions=1 let
 > concurrent logins all in), and no registration was ever removed but by logout or eviction: with
@@ -444,9 +451,13 @@ when `registry=redis`.
 stores sessions in SQL tables. `engine_factory` is the datasource (an
 `AsyncEngine`, a registry `DataSource`, a datasource name, or a callable
 returning one, resolved on first use); the table names are validated as SQL
-identifiers; `ttl` (the session timeout) is how long a registration goes before
-its liveness is checked again. Its operations never join a unit of work of the
-caller. Used when `registry=postgres`.
+identifiers; `ttl` (the session timeout, positive: anything else raises
+`ValueError`) is how long a registration goes before its liveness is checked
+again. Its operations never join a unit of work of the caller. On SQLite, which
+allows one writer at a time, an operation called inside a unit of work that has
+written on the registry's datasource raises `IllegalTransactionStateError` (its
+own unit would wait for the caller's write lock): call it outside that unit, or
+give the registry a datasource of its own. Used when `registry=postgres`.
 
 You may still provide your own `SessionRegistry` bean to override the
 auto-configured one entirely.

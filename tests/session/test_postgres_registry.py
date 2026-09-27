@@ -19,6 +19,7 @@ sqlite-file lane is part of this fast suite.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,13 @@ def test_rejects_invalid_table_names() -> None:
         PostgresSessionRegistry(lambda: object(), table="bad; DROP TABLE users")
     with pytest.raises(ValueError, match="table name"):
         PostgresSessionRegistry(lambda: object(), principals_table="bad; DROP TABLE users")
+
+
+@pytest.mark.parametrize("ttl", [0, -5, timedelta(0)])
+def test_rejects_a_ttl_that_is_not_positive(ttl: float | timedelta) -> None:
+    """A registration renewed by a ttl of zero stays due: the purge would check the same batch forever."""
+    with pytest.raises(ValueError, match="ttl"):
+        PostgresSessionRegistry(lambda: object(), ttl=ttl)
 
 
 def test_satisfies_the_registry_protocols() -> None:
