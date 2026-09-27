@@ -128,8 +128,9 @@ class Base(DeclarativeBase):
 
     Its ``metadata`` names every unnamed constraint with :data:`NAMING_CONVENTION`. A
     :class:`VersionedMixin` entity that declares its own ``__mapper_args__`` (``polymorphic_on`` on an
-    inheritance root, ``eager_defaults``) keeps its optimistic locking: the mixin's ``version_id_col`` is
-    merged into the entity's arguments.
+    inheritance root, ``eager_defaults``), or inherits them from an abstract base or another mixin, keeps
+    its optimistic locking whatever the order of its bases: the declarations are merged and the mixin's
+    ``version_id_col`` is added.
     """
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
@@ -178,9 +179,10 @@ class VersionedMixin:
     concurrent modification is detected; a repository call, or the commit of a unit
     of work, raises it as :class:`~pyfly.kernel.exceptions.OptimisticLockingFailureException`.
 
-    The entity may declare its own ``__mapper_args__`` (a dict, or a ``declared_attr``): ``version_id_col``
-    is merged into them. Declaring ``version_id_col`` there as well is a conflict, and mapping the class
-    raises ``TypeError``. Subclasses in an inheritance hierarchy share the root's version column.
+    The entity, and its abstract bases or other mixins, may declare their own ``__mapper_args__`` (a dict,
+    or a ``declared_attr``), in any base order: they are merged, the first in the MRO winning a key, and
+    ``version_id_col`` is added. Declaring ``version_id_col`` there as well is a conflict, and mapping the
+    class raises ``TypeError``. Subclasses in an inheritance hierarchy share the root's version column.
     """
 
     __abstract__ = True
@@ -192,31 +194,69 @@ class VersionedMixin:
         return {"version_id_col": cls.version}
 
 
-def _keep_version_id_col(cls: type[Base]) -> None:
-    """Merge :class:`VersionedMixin`'s ``version_id_col`` into the entity's own ``__mapper_args__``.
+_OWN_MAPPER_ARGS = "__pyfly_own_mapper_args__"
+"""Where the merged ``__mapper_args__`` directive installed on a class keeps what that class itself
+declared, so a subclass merging again sees the original."""
 
-    The entity's own attribute shadows the mixin's, so without this the mapper got no version column and
-    optimistic locking was silently off (C123). A class whose mapped ancestor is versioned already is left
-    alone: its mapper inherits the ancestor's version column.
+
+def _keep_version_id_col(cls: type[Base]) -> None:
+    """Merge :class:`VersionedMixin`'s ``version_id_col`` into the ``__mapper_args__`` the entity gets from
+    itself and its bases.
+
+    Declarative takes ``__mapper_args__`` from the first class of the MRO that has it, so an entity's own
+    arguments, or an abstract base's placed before the mixin, shadowed the mixin's and the mapper got no
+    version column: optimistic locking was silently off (C123). And with the mixin first, the abstract
+    base's arguments were lost instead. Every declaration in the MRO is merged, the first in MRO order
+    winning a key, as attribute lookup would; a mapped (non-abstract) base's plain dict is left out, since
+    declarative does not inherit it. A class whose mapped ancestor is versioned already is left alone: its
+    mapper inherits the ancestor's version column.
     """
-    if not issubclass(cls, VersionedMixin) or "__mapper_args__" not in vars(cls):
+    if not issubclass(cls, VersionedMixin):
         return
     if any(issubclass(base, VersionedMixin) and "__mapper__" in vars(base) for base in cls.__mro__[1:]):
         return
-    own = vars(cls)["__mapper_args__"]
-    produce = getattr(own, "fget", None)
-    if produce is None:
-        if not isinstance(own, Mapping):
-            raise TypeError(f"{cls.__name__}.__mapper_args__ must be a dict or a declared_attr, got {own!r}")
-        _refuse_own_version_id_col(cls.__name__, own)
+    declared = _declared_mapper_args(cls)
+    if not declared:
+        return  # only the mixin's own
+    for owner, args in declared:
+        if getattr(args, "fget", None) is None:
+            if not isinstance(args, Mapping):
+                raise TypeError(f"{owner.__name__}.__mapper_args__ must be a dict or a declared_attr, got {args!r}")
+            _refuse_own_version_id_col(cls.__name__, args)
 
     def mapper_args(entity: type[Base]) -> dict[str, Any]:
-        args = dict(produce(entity) if produce is not None else own)
-        _refuse_own_version_id_col(entity.__name__, args)
-        args["version_id_col"] = entity.version  # type: ignore[attr-defined]
-        return args
+        merged: dict[str, Any] = {}
+        for _owner, args in reversed(declared):
+            produce = getattr(args, "fget", None)
+            merged.update(produce(entity) if produce is not None else args)
+        _refuse_own_version_id_col(entity.__name__, merged)
+        merged["version_id_col"] = entity.version  # type: ignore[attr-defined]
+        return merged
 
+    setattr(mapper_args, _OWN_MAPPER_ARGS, vars(cls).get("__mapper_args__"))
     cls.__mapper_args__ = declared_attr.directive(mapper_args)
+
+
+def _declared_mapper_args(cls: type) -> list[tuple[type, Any]]:
+    """Every ``__mapper_args__`` declared along *cls*'s MRO other than :class:`VersionedMixin`'s, in MRO
+    order: ``(declaring class, dict or declared_attr)``."""
+    declared: list[tuple[type, Any]] = []
+    for base in cls.__mro__:
+        if base is VersionedMixin or "__mapper_args__" not in vars(base):
+            continue
+        args = vars(base)["__mapper_args__"]
+        produce = getattr(args, "fget", None)
+        if produce is not None and hasattr(produce, _OWN_MAPPER_ARGS):
+            # A merged directive this hook installed on an abstract base: what that base declared itself
+            # (its own bases come next in the MRO anyway).
+            args = getattr(produce, _OWN_MAPPER_ARGS)
+            if args is None:
+                continue
+            produce = getattr(args, "fget", None)
+        if base is not cls and "__mapper__" in vars(base) and produce is None:
+            continue  # a mapped class's plain dict is its own; declarative does not inherit it
+        declared.append((base, args))
+    return declared
 
 
 def _refuse_own_version_id_col(name: str, args: Mapping[str, Any]) -> None:

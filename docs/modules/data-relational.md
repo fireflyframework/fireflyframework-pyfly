@@ -1852,9 +1852,10 @@ or the commit of a unit of work, raises it as `OptimisticLockingFailureException
 [Persistence Exception Translation](#persistence-exception-translation).
 
 The entity may declare its own `__mapper_args__`, as the root of an inheritance hierarchy must
-(`polymorphic_on`): the mixin merges `version_id_col` into them, and subclasses share the root's version
-column. Declaring `version_id_col` in the entity's own arguments as well is a conflict that fails when the
-class is mapped.
+(`polymorphic_on`), and so may its abstract bases and other mixins, in any base order: every declaration
+along the MRO is merged (the first in the MRO wins a key, as attribute lookup would), the mixin adds
+`version_id_col`, and subclasses share the root's version column. Declaring `version_id_col` anywhere in
+those arguments as well is a conflict that fails when the class is mapped.
 
 ```python
 class Payment(BaseEntity, VersionedMixin):
@@ -1865,6 +1866,15 @@ class Payment(BaseEntity, VersionedMixin):
 
 class CardPayment(Payment):
     __mapper_args__ = {"polymorphic_identity": "card"}  # versioned through payments.version
+
+
+class AppEntity(BaseEntity):
+    __abstract__ = True
+    __mapper_args__ = {"eager_defaults": True}
+
+
+class Invoice(AppEntity, VersionedMixin):  # versioned, and eager_defaults kept
+    __tablename__ = "invoices"
 ```
 
 ---
