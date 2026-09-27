@@ -596,6 +596,11 @@ TTL, which costs one extra miss and never serves a stale value.
   type `R`, so a Redis or PostgreSQL cache returns the DTO, not a `dict`: models
   with aliases or computed fields included (see
   [Return Types, Hits and Failures](caching.md#return-types-hits-and-failures)).
+  `R` is resolved through your own generic bases and subclasses too: with
+  `class PagedHandler(QueryHandler[Q, Page[T]], Generic[Q, T])`, a
+  `PagedHandler[ListItemsQuery, ItemDto]` returns `Page[ItemDto]`, and a
+  handler that subclasses a concrete handler inherits its query and result
+  types.
   An entry that does not fit `R` is a miss, with one warning per handler. A
   result type that is an ORM-mapped class or a Beanie document is never cached
   (a `query_cache_disabled` warning names the handler once): return a DTO.

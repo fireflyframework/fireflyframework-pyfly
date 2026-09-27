@@ -15,10 +15,11 @@
 
 import fnmatch
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -31,7 +32,7 @@ from pyfly.cache.adapters.redis import RedisCacheAdapter
 from pyfly.cache.decorators import cache, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.ports.outbound import CacheAdapter
-from pyfly.cache.serialization import CacheValueError
+from pyfly.cache.serialization import CacheValueError, restore
 from pyfly.data.relational.sqlalchemy.entity import Base
 
 
@@ -95,6 +96,23 @@ class TeamDto(BaseModel):
     team_name: str
     members: list[CamelDto]
     lines: list[PricedLineDto] = []
+
+
+class Priced(Protocol):
+    """A structural return type: ``isinstance`` refuses a protocol that is not runtime-checkable."""
+
+    price: int
+
+
+@runtime_checkable
+class Named(Protocol):
+    name: str
+
+
+@dataclass
+class PricedItem:
+    price: int
+    name: str = "item"
 
 
 class RedisBytesStub:
@@ -330,6 +348,57 @@ class TestDecoratorTypes:
         assert calls == [7]
         assert isinstance(second, ProductDto)
         assert second == ProductDto(id=7, name="gadget")
+
+    @pytest.mark.parametrize("protocol", [Priced, Named], ids=["protocol", "runtime_checkable_protocol"])
+    @pytest.mark.parametrize("json", [False, True], ids=["in_memory", "json"])
+    async def test_a_protocol_return_type_keeps_its_hits(
+        self, protocol: Any, json: bool, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend: CacheAdapter = RedisCacheAdapter(RedisBytesStub()) if json else InMemoryCache()
+        calls: list[int] = []
+
+        @cacheable(backend, key="item:{n}")
+        async def get_item(n: int) -> protocol:  # type: ignore[valid-type]
+            calls.append(n)
+            return PricedItem(price=n)
+
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        results = [await get_item(1) for _ in range(3)]
+        assert calls == [1]  # a structural type cannot be rebuilt: the hit is served as stored
+        assert [r.getMessage() for r in caplog.records if "cache_hit_discarded" in r.getMessage()] == []
+        if not json:
+            assert results == [PricedItem(price=1)] * 3
+
+    async def test_an_iterable_return_type_hit_is_the_list_that_was_stored(self) -> None:
+        backend = RedisCacheAdapter(RedisBytesStub())
+        calls: list[int] = []
+
+        @cacheable(backend, key="catalog")
+        async def catalog() -> Iterable[ProductDto]:
+            calls.append(1)
+            return [ProductDto(id=1, name="gadget"), ProductDto(id=2, name="gizmo")]
+
+        await catalog()
+        hit = await catalog()
+        assert calls == [1]
+        assert isinstance(hit, list)
+        assert list(hit) == list(hit) == [ProductDto(id=1, name="gadget"), ProductDto(id=2, name="gizmo")]
+
+
+class TestRestore:
+    """:func:`restore` rebuilds what it can and never refuses a value because of an unusable annotation."""
+
+    def test_a_protocol_annotation_returns_the_value_as_stored(self) -> None:
+        item = PricedItem(price=3)
+        assert restore(item, Priced) is item
+        assert restore({"price": 3}, Priced) == {"price": 3}
+        assert restore(item, Named) is item
+        assert restore({"name": "x"}, Named) == {"name": "x"}
+
+    def test_an_iterable_annotation_is_rebuilt_as_a_list(self) -> None:
+        restored = restore([{"id": 1, "name": "gadget"}], Iterable[ProductDto])
+        assert restored == [ProductDto(id=1, name="gadget")]
+        assert isinstance(restored, list)
 
 
 _ALIASED_VALUES = [

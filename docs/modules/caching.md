@@ -726,7 +726,10 @@ async def purge_all_users() -> None:
   a string. The JSON encoder stores a model's field names and leaves computed
   fields out; the hit is validated by field name and by alias, so models with
   camelCase aliases (`alias_generator=to_camel`), `Field(alias=...)` or a
-  `computed_field` on an `extra="forbid"` model come back as they went in.
+  `computed_field` on an `extra="forbid"` model come back as they went in. An
+  `Iterable[X]` comes back as the `list[X]` that was stored. A structural type
+  (a `typing.Protocol`) cannot be rebuilt, so its hit is returned as stored: the
+  copy on the in-memory cache, plain JSON types on Redis or PostgreSQL.
 * **A hit is validated against the annotation.** It is coerced like any Pydantic
   input: a method declared `-> int` that returned `"42"` gets `42` from a hit. An
   entry that does not fit the type is treated as a miss and overwritten, with one

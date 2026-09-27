@@ -33,6 +33,7 @@ entity return type when the method is decorated, before any call writes anything
 
 from __future__ import annotations
 
+import collections.abc
 import copy
 import dataclasses
 import datetime
@@ -320,12 +321,24 @@ def restore(value: Any, annotation: Any) -> Any:
     not fit the type: an entry written by an older version of the model, a function that returns something
     other than its declared type, or a model field declared ``Field(exclude=True)`` without a default (the
     encoder leaves it out).
+
+    A structural type (a ``typing.Protocol``) cannot be rebuilt: the value is returned as stored. An
+    ``Iterable[X]`` is rebuilt as the ``list[X]`` that was stored (Pydantic would return a one-shot lazy
+    iterator).
     """
     if value is None or annotation is typing.Any or annotation is object or annotation in (None, type(None)):
         return value
     plain_class = isinstance(annotation, type) and not isinstance(annotation, types.GenericAlias)
-    if plain_class and isinstance(value, annotation):
-        return value  # already the declared type (an in-memory hit): nothing to rebuild
+    if plain_class:
+        if getattr(annotation, "_is_protocol", False):
+            return value  # a Protocol describes a shape, not a type a value can be rebuilt as
+        try:
+            if isinstance(value, annotation):
+                return value  # already the declared type (an in-memory hit): nothing to rebuild
+        except TypeError:  # a class whose instance check refuses to run: no fast path
+            pass
+    if typing.get_origin(annotation) is collections.abc.Iterable:
+        annotation = list[typing.get_args(annotation) or (typing.Any,)]  # type: ignore[misc]
     adapter = _type_adapter(annotation)
     if adapter is None:
         return value
