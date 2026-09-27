@@ -26,7 +26,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -313,6 +315,44 @@ def test_the_scope_encoding_is_unambiguous() -> None:
     assert scope_digest((("tenant", None),)) != scope_digest((("tenant", "None"),))
     assert scope_digest((("tenant", None),)) != scope_digest((("tenant", ""),))
     assert scope_digest((("tenant", "x"),)) != scope_digest((("tenantx", None),))
+
+
+async def test_an_identity_that_is_not_a_string_is_keyed_by_its_text(
+    bus: DefaultQueryBus, handlers: tuple[MyOrdersHandler, TenantPlansHandler, CountriesHandler]
+) -> None:
+    # An application may build its ExecutionContext with a UUID: the cache never fails the query for it.
+    orders = handlers[0]
+    alice: Any = uuid.UUID(int=7)
+    bob: Any = uuid.UUID(int=8)
+    as_alice = ExecutionContextBuilder().with_tenant_id("acme").with_user_id(alice).build()
+    assert await bus.query_with_context(MyOrders(), as_alice) == ["order 1"]
+    assert await bus.query_with_context(MyOrders(), as_alice) == ["order 1"]
+    assert await bus.query_with_context(MyOrders(), _ctx(tenant="acme", user=str(alice))) == ["order 1"]
+    assert await bus.query_with_context(MyOrders(), _ctx(tenant="acme", user=str(bob))) == ["order 2"]
+    assert orders.calls == 2
+
+
+class _Opaque:
+    """An identity with no text: the cache cannot key a call by it."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("no text")
+
+
+async def test_an_identity_the_cache_cannot_key_is_not_cached_and_never_fails_the_query(
+    bus: DefaultQueryBus,
+    handlers: tuple[MyOrdersHandler, TenantPlansHandler, CountriesHandler],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    orders = handlers[0]
+    opaque: Any = _Opaque()
+    context = ExecutionContextBuilder().with_tenant_id("acme").with_user_id(opaque).build()
+    caplog.set_level(logging.WARNING, logger="pyfly.cqrs.query.bus")
+    assert await bus.query_with_context(MyOrders(), context) == ["order 1"]
+    assert await bus.query_with_context(MyOrders(), context) == ["order 2"]  # not cached: it fails closed
+    assert orders.calls == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1 and "MyOrdersHandler" in messages[0] and "RuntimeError" in messages[0]
 
 
 async def test_callers_that_differ_only_in_the_tenant_header_or_the_principal_get_entries_of_their_own(

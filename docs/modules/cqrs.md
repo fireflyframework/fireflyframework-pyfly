@@ -545,7 +545,10 @@ can trust it (an empty identifier counts as none):
 The key carries the full SHA-256 of that identity (64 hex characters, each
 name and value length-prefixed before hashing), never a truncated digest: a
 client that chooses its `X-Tenant-Id` cannot search offline for a value whose
-digest collides with another caller's and be served that caller's entry.
+digest collides with another caller's and be served that caller's entry. An
+identifier that is not a string (a `UUID`) is keyed by its `str()`; one that
+cannot be turned into text is not cached (a `query_cache_skipped` warning names
+the handler once), and the query still runs.
 
 A handler's cache scope decides who shares an entry, and which identity it
 needs:

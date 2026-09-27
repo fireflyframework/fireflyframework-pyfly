@@ -125,6 +125,7 @@ class DefaultQueryBus:
         self._uncacheable: dict[type, bool] = {}
         self._misfits: set[type] = set()
         self._unidentified: set[type] = set()
+        self._unkeyable: set[type] = set()
 
     # ── QueryBus protocol ──────────────────────────────────────
 
@@ -235,7 +236,25 @@ class DefaultQueryBus:
         if caller is None:
             self._report_unidentified(handler, scope)
             return None  # fail closed: the entry would be shared by every caller the cache cannot tell apart
-        return await self._cache.entry_key(query_cache_key(handler, raw), scope_digest(caller), ttl=self._ttl(handler))
+        try:
+            digest = scope_digest(caller)
+        except Exception as error:  # noqa: BLE001 — a cache problem never fails the query: fail closed
+            self._report_unkeyable(handler, error)
+            return None
+        return await self._cache.entry_key(query_cache_key(handler, raw), digest, ttl=self._ttl(handler))
+
+    def _report_unkeyable(self, handler: QueryHandler[Any, Any], error: Exception) -> None:
+        handler_type = type(handler)
+        if handler_type in self._unkeyable:
+            return
+        self._unkeyable.add(handler_type)
+        _logger.warning(
+            "query_cache_skipped handler=%s: the caller's identity cannot be keyed (%s: %s), so the result is not "
+            "cached; pass the tenant and user as strings in the ExecutionContext",
+            handler_type.__qualname__,
+            type(error).__name__,
+            error,
+        )
 
     def _report_unidentified(self, handler: QueryHandler[Any, Any], scope: QueryCacheScope) -> None:
         handler_type = type(handler)

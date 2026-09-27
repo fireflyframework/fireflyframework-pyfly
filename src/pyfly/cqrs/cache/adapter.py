@@ -153,10 +153,11 @@ def scope_digest(scope: Scope) -> str | None:
     not scoped).
 
     It is the full SHA-256 of the scope's names and values, each length-prefixed
-    (:func:`~pyfly.cqrs.types.cache_key_digest`): the digest is all that separates one caller's entry from
-    another's under a key's generation, and the scope holds the ``X-Tenant-Id`` header, which the client
-    chooses. A truncated digest would let a client search offline for a header value that collides with
-    another caller's scope.
+    (:func:`~pyfly.cqrs.types.cache_key_digest`; an identifier that is not a ``str``, such as a UUID, counts as
+    its ``str()``): the digest is all that separates one caller's entry from another's under a key's
+    generation, and the scope holds the ``X-Tenant-Id`` header, which the client chooses. A truncated digest
+    would let a client search offline for a header value that collides with another caller's scope. It raises
+    what ``str()`` of an identifier raises; the query bus then does not cache the call.
     """
     if not scope:
         return None

@@ -36,14 +36,15 @@ from pyfly.cqrs.validation.types import ValidationResult
 R = TypeVar("R")
 
 
-def cache_key_digest(*components: str | None) -> str:
+def cache_key_digest(*components: object) -> str:
     """The SHA-256 digest of *components*, in full: 64 hex characters.
 
     Each component is encoded on its own before hashing, as a netstring of its UTF-8 bytes
-    (``<length>:<bytes>,``), and ``None`` as ``-``, which no netstring starts with. Two different sequences
-    therefore never hash the same bytes: ``("a|b", "c")`` and ``("a", "b|c")`` differ, and so do ``None``,
-    ``""`` and ``"None"``. The encoding does not depend on ``repr()``, so a digest is the same in every
-    process and on every Python version.
+    (``<length>:<bytes>,``), and ``None`` as ``-``, which no netstring starts with. Two different sequences of
+    strings therefore never hash the same bytes: ``("a|b", "c")`` and ``("a", "b|c")`` differ, and so do
+    ``None``, ``""`` and ``"None"``. A component that is not a ``str`` (a UUID, a number) counts as its
+    ``str()``: ``7`` and ``"7"`` get the same digest. The encoding does not depend on ``repr()``, so the same
+    components give the same digest in every process and on every Python version.
 
     The digest is never truncated. The query cache keys entries by digests of values a client chooses (the
     fields of a query, the ``X-Tenant-Id`` header): against a 64-bit digest a client could search offline for
@@ -55,7 +56,8 @@ def cache_key_digest(*components: str | None) -> str:
         if component is None:
             encoded += b"-"
             continue
-        data = component.encode("utf-8", "surrogatepass")
+        text = component if isinstance(component, str) else str(component)
+        data = text.encode("utf-8", "surrogatepass")
         encoded += b"%d:%b," % (len(data), data)
     return hashlib.sha256(encoded).hexdigest()
 
