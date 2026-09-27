@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import inspect
 import logging
@@ -22,12 +23,14 @@ import threading
 import time
 import types
 import typing
+import weakref
 from collections.abc import Callable
 from typing import Annotated, Any, TypeVar, Union, cast, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
 from pyfly.container.bean import Qualifier
 from pyfly.container.exceptions import (
+    BeanCreationException,
     BeanCurrentlyInCreationError,
     NoSuchBeanError,
     NoUniqueBeanError,
@@ -74,6 +77,55 @@ def _safe_issubclass(impl: Any, origin: Any) -> bool:
         return isinstance(impl, type) and issubclass(impl, origin)
     except TypeError:
         return False
+
+
+# The Autowired/Value fields of each class, found once per class (weakly keyed, so classes defined
+# at runtime, in tests for instance, are not kept alive by the cache).
+_FIELD_CACHE: weakref.WeakKeyDictionary[type, tuple[tuple[str, type, Any], ...]] = weakref.WeakKeyDictionary()
+
+
+def _injected_fields(cls: type) -> tuple[tuple[str, type, Any], ...]:
+    """``(name, declaring class, descriptor)`` for every annotated ``Autowired``/``Value`` field of *cls*.
+
+    Only the class dictionaries are read, so a class without such fields costs a few dictionary
+    lookups and no annotation is evaluated. The declaring class is the first class in the MRO that
+    annotates the name; its module is where the annotation is resolved.
+    """
+    try:
+        return _FIELD_CACHE[cls]
+    except (KeyError, TypeError):
+        pass
+    from pyfly.core.value import Value
+
+    fields: list[tuple[str, type, Any]] = []
+    seen: set[str] = set()
+    for klass in cls.__mro__:
+        annotations = klass.__dict__.get("__annotations__", {})
+        for name in annotations:
+            if name in seen:
+                continue
+            seen.add(name)
+            default = getattr(cls, name, None)
+            if isinstance(default, (Autowired, Value)):
+                fields.append((name, klass, default))
+    result = tuple(fields)
+    with contextlib.suppress(TypeError):  # a class that cannot be weakly referenced is not cached
+        _FIELD_CACHE[cls] = result
+    return result
+
+
+def _field_hint(owner: type, name: str) -> Any:
+    """The resolved annotation of *name*, evaluated alone in the module and namespace of *owner*.
+
+    ``typing.get_type_hints`` on the whole class fails as soon as ANY annotation of ANY class in the
+    MRO cannot be resolved; a probe class that carries just this one annotation does not.
+    """
+    raw = owner.__dict__["__annotations__"][name]
+    probe = types.new_class(
+        f"{owner.__name__}_{name}_hint",
+        exec_body=lambda namespace: namespace.update({"__annotations__": {name: raw}, "__module__": owner.__module__}),
+    )
+    return typing.get_type_hints(probe, localns=dict(vars(owner)), include_extras=True)[name]
 
 
 def _collect_generic_args(cls: Any) -> set[type]:
@@ -619,56 +671,68 @@ class Container:
         return self.resolve(param_type)
 
     def _inject_autowired_fields(self, instance: Any) -> None:
-        """Inject dependencies into fields marked with Autowired() or Value()."""
+        """Inject dependencies into fields marked with Autowired() or Value().
+
+        Only the annotations of those fields are read, each on its own. A class that declares none
+        (every third-party @bean product, such as ``AsyncSession``) is left alone, and an annotation
+        elsewhere in the class that cannot be resolved (a ``TYPE_CHECKING``-only import) no longer
+        disables the injection of the others. A required ``Autowired`` field whose own annotation
+        cannot be resolved fails the creation instead of keeping its sentinel.
+        """
         from pyfly.core.value import Value
 
-        try:
-            hints = typing.get_type_hints(type(instance), include_extras=True)
-        except NameError:
-            logging.getLogger(__name__).warning(
-                "Could not resolve type hints for %s — Autowired fields will not be injected. "
-                "Check for unresolved forward references.",
-                type(instance).__qualname__,
-            )
-            return
-
-        for attr_name, attr_type in hints.items():
-            default = getattr(type(instance), attr_name, None)
-
-            # Handle @Value("${key}") field descriptors
+        cls = type(instance)
+        for attr_name, owner, default in _injected_fields(cls):
+            # Handle @Value("${key}") field descriptors: the expression, not the annotation, decides.
             if isinstance(default, Value):
                 from pyfly.core.config import Config
 
                 config_reg = self._registrations.get(Config)
                 if config_reg is None or config_reg.instance is None:
                     raise RuntimeError(
-                        f"Cannot resolve @Value for {type(instance).__qualname__}.{attr_name}: "
-                        f"Config bean not registered"
+                        f"Cannot resolve @Value for {cls.__qualname__}.{attr_name}: Config bean not registered"
                     )
-                resolved = default.resolve(config_reg.instance)
-                setattr(instance, attr_name, resolved)
+                setattr(instance, attr_name, default.resolve(config_reg.instance))
                 continue
 
-            if not isinstance(default, Autowired):
+            try:
+                attr_type = _field_hint(owner, attr_name)
+            except Exception as exc:  # noqa: BLE001 — any failure to evaluate the annotation
+                if default.required:
+                    raise BeanCreationException(
+                        subsystem="injection",
+                        provider=f"{cls.__qualname__}.{attr_name}",
+                        reason=(
+                            f"the annotation of the Autowired field {cls.__qualname__}.{attr_name} "
+                            f"cannot be resolved ({type(exc).__name__}: {exc}); import the type at runtime"
+                        ),
+                    ) from exc
+                logging.getLogger(__name__).warning(
+                    "The annotation of the optional Autowired field %s.%s cannot be resolved (%s: %s); it is left None",
+                    cls.__qualname__,
+                    attr_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                setattr(instance, attr_name, None)
                 continue
 
-            if default.qualifier:
-                base = get_args(attr_type)[0] if get_origin(attr_type) is Annotated else attr_type
-                value = self.resolve_by_name(default.qualifier, expected_type=base)
-            elif get_origin(attr_type) is Annotated:
-                value = self._resolve_param(attr_type)
-            else:
-                try:
-                    value = self.resolve(attr_type)
-                except (NoSuchBeanError, NoUniqueBeanError):
-                    if not default.required:
-                        value = None
-                    else:
-                        raise NoSuchBeanError(
-                            bean_type=attr_type if isinstance(attr_type, type) else None,
-                            required_by=f"{type(instance).__qualname__}.{attr_name}",
-                            parameter=f"{attr_name}: {getattr(attr_type, '__name__', repr(attr_type))} = Autowired()",
-                        ) from None
+            try:
+                if default.qualifier:
+                    base = get_args(attr_type)[0] if get_origin(attr_type) is Annotated else attr_type
+                    value = self.resolve_by_name(default.qualifier, expected_type=base)
+                else:
+                    value = self._resolve_param(attr_type)
+            except (NoSuchBeanError, NoUniqueBeanError):
+                if default.required and default.qualifier:
+                    raise
+                if default.required:
+                    raise NoSuchBeanError(
+                        bean_type=attr_type if isinstance(attr_type, type) else None,
+                        required_by=f"{cls.__qualname__}.{attr_name}",
+                        parameter=f"{attr_name}: {getattr(attr_type, '__name__', repr(attr_type))} = Autowired()",
+                    ) from None
+                value = None
 
             setattr(instance, attr_name, value)
 
