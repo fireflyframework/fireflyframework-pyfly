@@ -277,6 +277,12 @@ def test_scope_of_is_none_when_the_scope_cannot_be_keyed() -> None:
     assert scope_of(QueryCacheScope.USER, _ctx(user="alice")) is not None
 
 
+def test_an_empty_identifier_is_no_identity() -> None:
+    blank = ExecutionContextBuilder().with_user_id("").with_tenant_id("").with_organization_id("").build()
+    assert scope_of(QueryCacheScope.USER, blank) is None
+    assert scope_of(QueryCacheScope.TENANT, blank) is None
+
+
 def test_scope_digest_tells_scopes_apart() -> None:
     alice = scope_of(QueryCacheScope.USER, _ctx(tenant="acme", user="alice"))
     bob = scope_of(QueryCacheScope.USER, _ctx(tenant="acme", user="bob"))

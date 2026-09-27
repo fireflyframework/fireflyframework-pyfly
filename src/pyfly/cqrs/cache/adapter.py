@@ -86,7 +86,7 @@ def _ambient_user() -> str | None:
 
     request = RequestContext.current()
     security = request.security_context if request is not None else None
-    return security.user_id if security is not None and security.is_authenticated else None
+    return (security.user_id or None) if security is not None and security.is_authenticated else None
 
 
 Scope = tuple[tuple[str, str | None], ...]
@@ -104,20 +104,20 @@ def scope_of(scope: QueryCacheScope, context: ExecutionContext | None) -> Scope 
     principal). The ``X-Tenant-Id`` header of the request is client-supplied and never authenticated: its
     value is part of every scoped key, so it can only narrow an entry, but it never identifies a caller.
     Every identity that is visible narrows the key; a ``TENANT`` entry keyed by a trusted tenant leaves
-    the users out, so the users of a tenant share it.
+    the users out, so the users of a tenant share it. An empty identifier counts as none.
     """
     if scope is QueryCacheScope.GLOBAL:
         return ()
-    tenant = context.tenant_id if context is not None else None
-    organization = context.organization_id if context is not None else None
+    tenant = (context.tenant_id if context is not None else None) or None
+    organization = (context.organization_id if context is not None else None) or None
     parts: list[tuple[str, str | None]] = [
         ("tenant", tenant),
         ("organization", organization),
-        ("tenant_header", _ambient_tenant()),
+        ("tenant_header", _ambient_tenant() or None),
     ]
     if scope is QueryCacheScope.TENANT and (tenant is not None or organization is not None):
         return tuple(parts)
-    user = context.user_id if context is not None else None
+    user = (context.user_id if context is not None else None) or None
     principal = _ambient_user()
     if user is None and principal is None:
         return None
