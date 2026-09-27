@@ -708,16 +708,30 @@ swapped the scope's instance inside the block.
 ```python
 from pyfly.container.refresh_scope import scoped_proxy
 
+class ReportingDatabase:
+    """The reporting engine and its sessions, rebuilt on every refresh."""
+
+    def __init__(self, url: str) -> None:
+        self.engine = create_async_engine(url)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
+
+
 @configuration
 class ReportingConfiguration:
     @scoped_proxy
     @bean(scope="refresh")
-    def reporting_engine(self, config: Config) -> AsyncEngine:
-        return create_async_engine(str(config.get("reporting.url")))
+    def reporting_database(self, config: Config) -> ReportingDatabase:
+        return ReportingDatabase(str(config.get("reporting.url")))
 ```
 
-Each refresh disposes the evicted engine through its inferred destroy method (`AsyncEngine.dispose()`),
-and so does `ApplicationContext.stop()` for the live one.
+Each refresh destroys the evicted holder through its inferred destroy method (`dispose()`), and so
+does `ApplicationContext.stop()` for the live one. The holder type keeps the reporting engine apart
+from the application's primary: a refresh-scoped `AsyncEngine` bean does not replace the primary
+either (only a singleton does), but an injection by type (`AsyncEngine`) receives the primary, so
+it has to be injected by name.
 
 #### Triggering a refresh — ContextRefresher
 
@@ -818,11 +832,20 @@ earlier would break that order. Name the method to have a singleton's product de
 
 ```python
 @configuration
-class ArchiveConfiguration:
-    @bean(destroy_method="dispose")
-    def archive_engine(self, config: Config) -> AsyncEngine:
-        return create_async_engine(str(config.get("archive.url")))
+class PartnerApiConfiguration:
+    @bean(destroy_method="aclose")
+    def partner_http(self, config: Config) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=str(config.get("partner.url")))
 ```
+
+**A second database is not an `AsyncEngine` bean.** A singleton `AsyncEngine` or
+`async_sessionmaker` bean **replaces the application's primary**: the relational auto-configuration
+backs off, and the session factory, the `AsyncSession` bean and every repository use it, while
+`DataSourceRegistry.primary` keeps `pyfly.data.relational.url` (a WARNING says so when both exist).
+Declare a second database under `pyfly.data.relational.datasources.<name>` and inject
+`DataSourceRegistry` (`registry.engine("archive")`, `registry.session_factory("archive")`) or
+`NamedDataSources`: the registry builds it with the same pool and dialect setup and disposes it last
+(see the data-relational guide).
 
 ### Injecting Dependencies into @bean Methods
 

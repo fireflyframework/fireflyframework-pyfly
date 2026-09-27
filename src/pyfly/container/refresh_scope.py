@@ -134,7 +134,10 @@ def scoped_proxy(target: T) -> T:
 
         @scoped_proxy
         @bean(scope="refresh")
-        def reporting_engine(self, config: Config) -> AsyncEngine: ...
+        def reporting_database(self, config: Config) -> ReportingDatabase: ...
+
+    (A holder of the engine, not an ``AsyncEngine`` bean: a singleton ``AsyncEngine`` bean replaces
+    the application's primary database, and an injection by type receives the primary.)
 
     Raises ``TypeError`` on a singleton or transient ``@bean`` method, which a proxy cannot serve; a
     class marked with it raises the same when it is registered as a singleton or transient bean.

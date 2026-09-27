@@ -333,11 +333,32 @@ class RelationalAutoConfiguration:
 
     @bean(primary=True)
     @conditional_on_missing_bean(async_sessionmaker, singletons_only=True)
-    def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-        """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``)."""
+    def async_session_factory(
+        self, async_engine: AsyncEngine, config: Config | None = None
+    ) -> async_sessionmaker[AsyncSession]:
+        """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``).
+
+        An ``AsyncEngine`` bean of the application that the registry does not own gets a session
+        factory of its own. While ``pyfly.data.relational.url`` is configured too, that splits the
+        primary in two: the session factory, the ``AsyncSession`` bean and the repositories use the
+        application's engine, and :attr:`DataSourceRegistry.primary` (every module that looks the
+        registry up) the configured URL. A WARNING says so.
+        """
         datasource = datasource_of(async_engine)
         if datasource is not None:
             return datasource.sessionmaker
+        if config is not None and str(config.get("pyfly.data.relational.url", "") or "").strip():
+            _logger.warning(
+                "relational_engine_not_in_registry",
+                extra={
+                    "engine": str(async_engine.url),
+                    "hint": "an AsyncEngine bean replaces the primary of the session factory, the AsyncSession "
+                    "bean and the repositories, while DataSourceRegistry.primary keeps "
+                    "pyfly.data.relational.url; configure the primary under pyfly.data.relational (url, "
+                    "connect-args, pool) and a second database under pyfly.data.relational.datasources.<name> "
+                    "instead of declaring an engine bean",
+                },
+            )
         return async_sessionmaker(async_engine, expire_on_commit=False)
 
     @bean

@@ -24,6 +24,7 @@ two beans share picks the ``@primary`` one or fails instead of returning the las
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -107,6 +108,57 @@ async def test_a_user_engine_replaces_the_auto_configured_one(tmp_path: Path) ->
         await ctx.stop()
 
     assert _DISPOSED == ["user"]  # the application's engine is disposed at stop, once
+
+
+def _split_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.getMessage() == "relational_engine_not_in_registry"]
+
+
+async def test_a_user_engine_beside_a_configured_url_warns_that_the_primary_is_split(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The registry keeps building its primary from the URL for every module that looks it up, while the
+    sessions and repositories use the application's engine: two primaries, and nothing said so."""
+    ctx = ApplicationContext(_config(tmp_path))
+    ctx.register_bean(_UserEngine)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        warnings = _split_warnings(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].engine == _URLS["user"]  # type: ignore[attr-defined]
+        assert "pyfly.data.relational.datasources.<name>" in warnings[0].hint  # type: ignore[attr-defined]
+        # The split it reports.
+        assert str(ctx.get_bean(DataSourceRegistry).primary.engine.url) == _URLS["auto"]
+        assert await _database_of(ctx.get_bean(async_sessionmaker)) == "user.db"
+    finally:
+        await ctx.stop()
+
+
+async def test_a_user_engine_without_a_configured_url_is_the_only_primary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _config(tmp_path)
+    ctx = ApplicationContext(Config({"pyfly": {"data": {"relational": {"enabled": "true", "ddl-auto": "none"}}}}))
+    ctx.register_bean(_UserEngine)
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        assert _split_warnings(caplog) == []
+        assert await _database_of(ctx.get_bean(async_sessionmaker)) == "user.db"
+    finally:
+        await ctx.stop()
+
+
+async def test_the_registry_engine_is_no_split(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    ctx = ApplicationContext(_config(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):
+        await ctx.start()
+    try:
+        assert _split_warnings(caplog) == []
+        assert await _database_of(ctx.get_bean(async_sessionmaker)) == "auto.db"
+    finally:
+        await ctx.stop()
 
 
 _BUILT: list[AsyncEngine] = []

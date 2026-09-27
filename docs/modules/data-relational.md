@@ -689,6 +689,16 @@ beans share a class, the `@primary` one is injected, and a lookup by that class 
 `NoUniqueBeanError` when none is primary. Named and module datasources are still built by the
 registry.
 
+**Never declare an `AsyncEngine` or `async_sessionmaker` bean for a second database**: it takes over
+the primary. Declare the database under `pyfly.data.relational.datasources.<name>` (see
+[Multiple Named Datasources](#multiple-named-datasources)) and use `registry.engine("<name>")`,
+`registry.session_factory("<name>")` or `NamedDataSources`. An engine bean the registry does not own
+also splits the primary while `pyfly.data.relational.url` is configured: the session factory, the
+`AsyncSession` bean and the repositories use the engine bean, and `DataSourceRegistry.primary`, with
+every module that looks the registry up, the URL. `async_session_factory` then logs a
+`relational_engine_not_in_registry` WARNING. Driver arguments, pool settings and the credentials
+provider are all configurable on the registry's own primary, so an engine bean is rarely needed.
+
 A request- or refresh-scoped bean of one of these types is a **second database**, not a
 replacement: the auto-configured beans stay, and they are the `@primary` candidates of their type.
 An injection by type (`AsyncEngine`, `async_sessionmaker[AsyncSession]`), the `AsyncSession` bean,
