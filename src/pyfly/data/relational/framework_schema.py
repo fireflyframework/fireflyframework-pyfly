@@ -55,7 +55,7 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -76,6 +76,10 @@ from sqlalchemy.engine import Connection, Dialect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.types import TypeDecorator, TypeEngine
+
+if TYPE_CHECKING:
+    from pyfly.core.config import Config
+    from pyfly.data.relational.datasource_registry import DataSource, DataSourceRegistry
 
 __all__ = [
     "CACHE_ENTRIES",
@@ -98,6 +102,7 @@ __all__ = [
     "key_string",
     "long_binary",
     "long_text",
+    "module_datasource",
     "orchestration_state",
     "orchestration_state_table",
     "users",
@@ -337,6 +342,30 @@ def creates_tables(ddl_auto: str | None) -> bool:
     tables are never dropped); ``none`` and ``validate`` leave the schema to migrations, and the store
     only checks it."""
     return str(ddl_auto or "").strip().lower() in _CREATING_STRATEGIES
+
+
+def module_datasource(registry: DataSourceRegistry, config: Config, prefix: str, *, name: str) -> DataSource:
+    """The datasource of the framework store configured under *prefix* (``pyfly.cache.postgres``...).
+
+    - ``<prefix>.datasource`` names a datasource of *registry* (``primary`` or a named datasource);
+    - ``<prefix>.url`` is an alias resolved through the registry: the registered datasource with that URL,
+      or a new one registered as *name*, with the registry's pool settings;
+    - with neither, the store is on the primary datasource.
+
+    Setting both raises :class:`~pyfly.data.relational.datasource_registry.DataSourceConfigurationError`,
+    and so does a name the registry does not know (:class:`NoSuchDataSourceError`).
+    """
+    from pyfly.data.relational.datasource_registry import DataSourceConfigurationError
+
+    named = str(config.get(f"{prefix}.datasource", "") or "").strip()
+    url = config.get(f"{prefix}.url")
+    if named and url is not None and str(url).strip():
+        raise DataSourceConfigurationError(
+            f"{prefix}.datasource and {prefix}.url are both set; name the datasource or give its URL, not both"
+        )
+    if named:
+        return registry.get(named)
+    return registry.resolve(url, name=name, url_key=f"{prefix}.url")
 
 
 def framework_engine(target: object) -> AsyncEngine:

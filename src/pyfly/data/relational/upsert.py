@@ -64,6 +64,7 @@ __all__ = [
     "backend_name",
     "insert_if_absent",
     "native_conditional_insert",
+    "native_upsert",
     "portable_insert_if_absent",
     "portable_upsert",
     "take_over",
@@ -93,6 +94,12 @@ def backend_name(bind: AsyncSession | AsyncConnection | AsyncEngine | Connection
     else:
         dialect = bind.dialect
     return "mariadb" if getattr(dialect, "is_mariadb", False) else str(dialect.name)
+
+
+def native_upsert(dialect: str, *, conditional: bool = False) -> bool:
+    """Whether :func:`upsert` is one statement on *dialect* (PostgreSQL and SQLite; MySQL and MariaDB unless
+    it is *conditional*, with a *where*): a caller may then run it as a single-statement unit."""
+    return dialect in _ON_CONFLICT or (dialect in _ON_DUPLICATE_KEY and not conditional)
 
 
 def native_conditional_insert(dialect: str) -> bool:

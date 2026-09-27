@@ -26,6 +26,8 @@ from typing import Any
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
+from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
 from pyfly.context.conditions import auto_configuration, conditional_on_property
 from pyfly.core.config import Config
 
@@ -97,6 +99,19 @@ from pyfly.transactional.workflow.timer_service import TimerService
 _logger = logging.getLogger(__name__)
 
 
+def _datasource_registry(config: Config, container: Container | None) -> Any:
+    """The context's ``DataSourceRegistry`` bean (an application's own replaces the configuration's), or the
+    configuration's registry when there is no container or no such bean."""
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    if container is not None:
+        try:
+            return container.resolve(DataSourceRegistry)
+        except (NoSuchBeanError, NoUniqueBeanError):
+            pass
+    return DataSourceRegistry.for_config(config)
+
+
 @auto_configuration
 @conditional_on_property("pyfly.transactional.enabled", having_value="true")
 class TransactionalEngineAutoConfiguration:
@@ -150,6 +165,7 @@ class TransactionalEngineAutoConfiguration:
         self,
         config: Config,
         cache_adapter: CacheAdapter | None = None,
+        container: Container | None = None,
     ) -> ExecutionPersistenceProvider:
         """Select an :class:`ExecutionPersistenceProvider` from config.
 
@@ -157,7 +173,10 @@ class TransactionalEngineAutoConfiguration:
 
         * ``memory``     — :class:`InMemoryPersistenceProvider` (default, no deps).
         * ``redis``      — :class:`RedisPersistenceProvider`; requires ``redis.asyncio``.
-        * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy.
+        * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy. It runs on the
+                          datasource named by ``pyfly.transactional.persistence.sqlalchemy.datasource``, or
+                          the one whose URL is ``...sqlalchemy.url``, or the primary; it creates its table
+                          at start unless ``pyfly.data.relational.ddl-auto`` is ``none``.
         * ``cache``      — :class:`CachePersistenceProvider`; delegates to the
                           app-configured :class:`CacheAdapter` bean.
         """
@@ -186,18 +205,18 @@ class TransactionalEngineAutoConfiguration:
                     "Install with: pip install sqlalchemy[asyncio] aiosqlite"
                 )
                 raise ValueError(msg)
-            from pyfly.data.relational.datasource_registry import DataSourceRegistry
+            from pyfly.data.relational.framework_schema import creates_tables, module_datasource
             from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
-            # The persistence URL is an alias resolved through the datasource registry: no URL is the
-            # primary datasource (a DataSourceConfigurationError, a ValueError, naming both keys when
-            # there is none), an identical URL reuses that datasource's engine.
-            datasource = DataSourceRegistry.for_config(config).resolve(
-                config.get("pyfly.transactional.persistence.sqlalchemy.url"),
-                name="transactional-persistence",
-                url_key="pyfly.transactional.persistence.sqlalchemy.url",
+            # The datasource is named (...sqlalchemy.datasource) or given by URL, an alias resolved through
+            # the context's datasource registry: no URL is the primary datasource (a
+            # DataSourceConfigurationError, a ValueError, naming both keys when there is none), and an
+            # identical URL reuses that datasource's engine.
+            registry = _datasource_registry(config, container)
+            datasource = module_datasource(
+                registry, config, "pyfly.transactional.persistence.sqlalchemy", name="transactional-persistence"
             )
-            return SqlAlchemyPersistenceProvider(datasource.engine)
+            return SqlAlchemyPersistenceProvider(datasource, create_table=creates_tables(registry.properties.ddl_auto))
 
         if provider == "cache":
             if cache_adapter is None:

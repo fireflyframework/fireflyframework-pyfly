@@ -14,9 +14,11 @@
 """Unit tests for the durable persistence providers.
 
 * CachePersistenceProvider — backed by a real InMemoryCache.
-* SqlAlchemyPersistenceProvider — backed by aiosqlite in-memory DB.
+* SqlAlchemyPersistenceProvider — backed by a SQLite file database (every server backend runs in
+  ``tests/integration/test_orchestration_persistence_integration.py``).
+* ProviderPersistencePort — the saga/TCC port on a real in-memory provider and on the SQL provider.
 * RedisPersistenceProvider — backed by fakeredis if available, else skipped.
-* Provider-selection auto-config — parametrized, mocked client/engine creation.
+* Provider-selection auto-config — parametrized, mocked client creation.
 
 No Docker required; all tests run in the fast suite.
 """
@@ -24,7 +26,9 @@ No Docker required; all tests run in the fast suite.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -233,10 +237,10 @@ class TestCachePersistenceProvider:
 
 
 class TestSqlAlchemyPersistenceProvider:
-    """SqlAlchemyPersistenceProvider backed by an aiosqlite in-memory database."""
+    """SqlAlchemyPersistenceProvider backed by a SQLite file database."""
 
     @pytest.fixture
-    async def provider(self) -> Any:
+    async def provider(self, tmp_path: Path) -> AsyncIterator[Any]:
         try:
             from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found]
         except ImportError:
@@ -246,10 +250,13 @@ class TestSqlAlchemyPersistenceProvider:
             SqlAlchemyPersistenceProvider,
         )
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}", echo=False)
         p = SqlAlchemyPersistenceProvider(engine)
-        await p.initialize()
-        return p
+        await p.start()
+        try:
+            yield p
+        finally:
+            await engine.dispose()
 
     async def test_save_and_find_roundtrip(self, provider: Any) -> None:
         state = _make_state()
@@ -449,7 +456,7 @@ class TestOrchestrationPersistenceProviderSelection:
         try:
             result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
             assert isinstance(result, SqlAlchemyPersistenceProvider)
-            assert result._engine is registry.get("transactional-persistence").engine
+            assert result.engine is registry.get("transactional-persistence").engine
         finally:
             await registry.close()
 
@@ -472,7 +479,7 @@ class TestOrchestrationPersistenceProviderSelection:
         try:
             result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
             assert isinstance(result, SqlAlchemyPersistenceProvider)
-            assert result._engine is registry.primary.engine
+            assert result.engine is registry.primary.engine
         finally:
             await registry.close()
 
@@ -515,3 +522,85 @@ class TestOrchestrationPersistenceProviderSelection:
                 {"pyfly": {"transactional": {"persistence": {"provider": "cache"}}}},
                 cache_adapter=None,
             )
+
+    async def test_sqlalchemy_runs_on_the_datasource_the_datasource_key_names(self, tmp_path: Path) -> None:
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {"persistence": {"provider": "sqlalchemy", "sqlalchemy": {"datasource": "sagas"}}},
+                    "data": {
+                        "relational": {
+                            "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                            "datasources": {"sagas": {"url": f"sqlite+aiosqlite:///{tmp_path / 'sagas.db'}"}},
+                        }
+                    },
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            assert result.engine is registry.get("sagas").engine
+        finally:
+            await registry.close()
+
+    def test_sqlalchemy_refuses_both_a_datasource_and_a_url(self) -> None:
+        from pyfly.data.relational.datasource_registry import DataSourceConfigurationError
+
+        with pytest.raises(DataSourceConfigurationError, match="both set"):
+            self._call_bean(
+                {
+                    "pyfly": {
+                        "transactional": {
+                            "persistence": {
+                                "provider": "sqlalchemy",
+                                "sqlalchemy": {"datasource": "primary", "url": "sqlite+aiosqlite:///:memory:"},
+                            }
+                        }
+                    }
+                }
+            )
+
+    async def test_sqlalchemy_uses_the_context_datasource_registry_bean(self, tmp_path: Path) -> None:
+        """An application's DataSourceRegistry bean is the one the provider runs on, not the configuration's."""
+        from pyfly.container.container import Container
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        app_url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+        cfg = Config({"pyfly": {"transactional": {"persistence": {"provider": "sqlalchemy"}}}})
+        own = DataSourceRegistry(Config({"pyfly": {"data": {"relational": {"url": app_url}}}}))
+        container = Container()
+        container.register_instance(DataSourceRegistry, own)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None, container)
+            assert result.engine is own.primary.engine
+        finally:
+            await own.close()
+
+    async def test_sqlalchemy_only_checks_its_table_when_ddl_auto_is_none(self, tmp_path: Path) -> None:
+        from pyfly.core.config import Config
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+        from pyfly.data.relational.framework_schema import FrameworkSchemaError
+        from pyfly.transactional.auto_configuration import TransactionalEngineAutoConfiguration
+
+        cfg = Config(
+            {
+                "pyfly": {
+                    "transactional": {"persistence": {"provider": "sqlalchemy"}},
+                    "data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}", "ddl-auto": "none"}},
+                }
+            }
+        )
+        registry = DataSourceRegistry.for_config(cfg)
+        try:
+            result = TransactionalEngineAutoConfiguration().orchestration_persistence(cfg, None)
+            with pytest.raises(FrameworkSchemaError, match="pyfly_orchestration_state does not exist"):
+                await result.start()
+        finally:
+            await registry.close()
