@@ -314,6 +314,9 @@ def restore(value: Any, annotation: Any) -> Any:
     """
     if value is None or annotation is typing.Any or annotation is object or annotation in (None, type(None)):
         return value
+    plain_class = isinstance(annotation, type) and not isinstance(annotation, types.GenericAlias)
+    if plain_class and isinstance(value, annotation):
+        return value  # already the declared type (an in-memory hit): nothing to rebuild
     adapter = _type_adapter(annotation)
     if adapter is None:
         return value
