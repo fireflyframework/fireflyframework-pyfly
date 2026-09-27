@@ -92,6 +92,7 @@ from typing import Annotated, Any, ClassVar, Generic, TypeVar, cast, get_args, g
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstanceState, Mapper, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -104,6 +105,7 @@ from pyfly.data.property_resolver import PropertyResolver
 from pyfly.data.relational.datasource_registry import DataSourceCapabilities
 from pyfly.data.relational.sqlalchemy.specification import Specification
 from pyfly.data.relational.sqlalchemy.statements import (
+    RESERVED_BINDS,
     FetchPlan,
     LockMode,
     bulk_delete_safe,
@@ -531,10 +533,18 @@ class Repository(Generic[T, ID]):
     def _pk_equals(self, identity: tuple[Any, ...]) -> list[Any]:
         return [attribute == value for attribute, value in zip(self._pk_attributes, identity, strict=True)]
 
-    def _in_ids(self, session: AsyncSession, identities: Sequence[tuple[Any, ...]]) -> list[Any]:
-        """One IN criterion on the primary key per chunk (``statements.in_criteria``)."""
+    def _in_ids(
+        self, session: AsyncSession, identities: Sequence[tuple[Any, ...]], *, reserved: int = RESERVED_BINDS
+    ) -> list[Any]:
+        """One IN criterion on the primary key per chunk (``statements.in_criteria``: *reserved* is how many
+        binds the statement carries beside the list)."""
+        return self._id_criteria(dialect_of(session), identities, reserved=reserved)
+
+    def _id_criteria(
+        self, dialect: Dialect, identities: Sequence[tuple[Any, ...]], *, reserved: int = RESERVED_BINDS
+    ) -> list[Any]:
         values = [self._key_value(identity) for identity in identities]
-        return in_criteria(self._pk_attributes, values, dialect_of(session))
+        return in_criteria(self._pk_attributes, values, dialect, reserved=reserved)
 
     def _identity_of(self, entity: Any) -> tuple[Any, ...] | None:
         """The primary key of *entity*: its identity when it was persisted, else its key attributes' values
@@ -842,7 +852,8 @@ class Repository(Generic[T, ID]):
         if entities is None:
             await self._bulk_delete(session, [None])
             return
-        identities = [identity for entity in entities if (identity := self._identity_of(entity)) is not None]
+        stored = self._expunge_pending(session, entities)
+        identities = [identity for entity in stored if (identity := self._identity_of(entity)) is not None]
         if identities:
             await self._bulk_delete(session, self._in_ids(session, identities))
 
@@ -863,6 +874,19 @@ class Repository(Generic[T, ID]):
             if criterion is not None:
                 stmt = stmt.where(criterion)
             await session.execute(stmt.execution_options(synchronize_session=synchronize))
+
+    def _expunge_pending(self, session: AsyncSession, entities: Iterable[Any]) -> list[Any]:
+        """*entities* without those only pending in *session*, which are expunged instead: deleting an entity that
+        was never inserted means not inserting it."""
+        sync_session = session.sync_session
+        stored: list[Any] = []
+        for entity in entities:
+            state = _state(entity)
+            if state.session is sync_session and state.key is None:
+                session.expunge(entity)
+            else:
+                stored.append(entity)
+        return stored
 
     def _holds_entities(self, session: AsyncSession) -> bool:
         return any(isinstance(entity, self._model) for entity in session.sync_session.identity_map.values())
@@ -903,13 +927,10 @@ class Repository(Generic[T, ID]):
         sync_session = session.sync_session
         mapper = self._mapper
         others: list[tuple[Any, tuple[Any, ...]]] = []
-        for entity in entities:
+        for entity in self._expunge_pending(session, entities):
             state = _state(entity)
             if state.session is sync_session:
-                if state.key is None:
-                    session.expunge(entity)  # pending: it is simply not inserted
-                else:
-                    await session.delete(entity)
+                await session.delete(entity)
                 continue
             identity = self._identity_of(entity)
             if identity is None or (state.key is None and self._is_new(entity)):

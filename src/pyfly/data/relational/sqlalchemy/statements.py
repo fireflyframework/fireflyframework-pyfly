@@ -20,8 +20,9 @@ not broken, and a PostgreSQL feature is only ever an accelerator.
   ``FETCH FIRST 1 ROWS ONLY`` on Oracle), never a ``COUNT`` over every match and never a bare
   ``SELECT EXISTS``, which Oracle and SQL Server do not accept; :func:`exists` runs one.
 - **IN lists.** :func:`in_criteria` gives one criterion per chunk of the dialect's limit (Oracle takes 1000
-  values per list, SQL Server about 2100 parameters per statement, SQLite 32766, PostgreSQL 32767): run one
-  statement per chunk in the same unit of work and concatenate the rows or add the counts. On PostgreSQL a
+  values per list, SQL Server about 2100 parameters per statement, SQLite 32766, PostgreSQL 32767), leaving
+  room for the statement's other binds where the limit is per statement: run one statement per chunk in the
+  same unit of work and concatenate the rows or add the counts. On PostgreSQL a
   single-column list is one ``= ANY(:array)`` bind, the same statement text for every length, which asyncpg's
   prepared-statement cache keeps; elsewhere a list is padded to the next power of two with its last value
   (Hibernate's ``in_clause_parameter_padding``), so a handful of texts cover every length. Composite keys are
@@ -79,6 +80,7 @@ from pyfly.data.relational.datasource_registry import DataSourceCapabilities
 __all__ = [
     "FetchPlan",
     "FetchStep",
+    "RESERVED_BINDS",
     "LockMode",
     "backend_name",
     "bulk_delete_safe",
@@ -109,6 +111,13 @@ _NO_ROW_VALUE_IN = frozenset({"mssql"})
 """Dialects without ``(a, b) IN ((...), ...)``: composite keys become an OR of ANDs there."""
 
 _IN_LIMITS: dict[str, int] = {}
+
+_PER_LIST_LIMITS = frozenset({"oracle"})
+"""Dialects whose IN limit counts the values of one list (Oracle: 1000 per list), not every bind of a statement."""
+
+RESERVED_BINDS = 32
+"""How many binds :func:`in_criteria` leaves free by default for the rest of the statement (its other criteria)
+where the dialect's limit counts every bind of a statement (SQLite, SQL Server, PostgreSQL, MySQL, MariaDB)."""
 
 _ROW_VALUES_PER_LIST = 1000
 """The most composite keys one IN list holds, whatever the dialect's parameter limit."""
@@ -169,26 +178,33 @@ def in_criteria(
     columns: Sequence[ColumnElement[Any] | QueryableAttribute[Any]],
     values: Sequence[Any],
     dialect: Dialect,
+    *,
+    reserved: int = RESERVED_BINDS,
 ) -> list[ColumnElement[bool]]:
     """Criteria that match rows whose *columns* equal one of *values*, one per chunk (module documentation).
 
     *values* are scalars for one column and tuples (one item per column, in order) for several. Run one
     statement per criterion; an empty *values* gives no criterion at all (nothing to match, nothing to run).
+    *reserved* is how many binds the statement carries beside the list (its other criteria, the values an
+    ``UPDATE`` sets): where the dialect's limit counts every bind of a statement, a chunk, padding included,
+    leaves them room. Pass more than the default when the statement carries more.
     """
     if not values:
         return []
     name = backend_name(dialect)
+    capacity = in_list_limit(dialect) if name in _PER_LIST_LIMITS else in_list_limit(dialect) - max(0, reserved)
+    if capacity < 1:
+        raise ValueError(f"{name} binds {in_list_limit(dialect)} values per statement, and {reserved} are reserved")
     if len(columns) == 1:
         (column,) = columns
         if name == "postgresql":
             array = bindparam(None, list(values), type_=ARRAY(column.type))
             return [column == any_(array)]
-        limit = in_list_limit(dialect)
-        return [column.in_(padded(chunk, limit)) for chunk in chunked(values, limit)]
+        return [column.in_(padded(chunk, capacity)) for chunk in chunked(values, capacity)]
     width = len(columns)
     # A long row-value list is parsed recursively (PostgreSQL runs out of stack depth past a few thousand rows),
     # so row values go 1000 at a time, the smallest per-list limit of any dialect (Oracle's).
-    limit = max(1, min(_ROW_VALUES_PER_LIST, in_list_limit(dialect) // width))
+    limit = max(1, min(_ROW_VALUES_PER_LIST, capacity // width))
     rows = [tuple(value) for value in values]
     if any(len(row) != width for row in rows):
         raise ValueError(f"Each key needs {width} values, one per primary-key column")

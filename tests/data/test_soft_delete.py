@@ -22,6 +22,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import String
+from sqlalchemy.dialects import mssql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -357,3 +358,21 @@ async def test_the_documented_soft_delete_repository_is_a_bean(tmp_path: Path) -
         assert await items.count() == 0
     finally:
         await ctx.stop()
+
+
+@pytest.mark.parametrize(("name", "limit"), [("sqlite", 32766), ("mssql", 2100)])
+def test_a_soft_delete_update_stays_within_the_statement_parameter_limit(name: str, limit: int) -> None:
+    """The id chunks leave room for the stamps the UPDATE sets beside them: SQLite and SQL Server count every
+    parameter of a statement, the IN list's and the SET clause's together."""
+    dialect = {"sqlite": sqlite.dialect(), "mssql": mssql.dialect()}[name]
+    items = SoftItems()
+    identities = [(uuid.uuid4(),) for _ in range(40_000)]
+    stamps = {"deleted_at": None, "updated_at": None, "updated_by": "bob"}
+    statements = [
+        items._soft_delete_update([criterion], stamps)
+        for criterion in items._soft_delete_criteria(dialect, identities, stamps)
+    ]
+    assert len(statements) > 1
+    for statement in statements:
+        compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+        assert len(compiled.positiontup or compiled.params) <= limit

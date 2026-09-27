@@ -45,6 +45,7 @@ from pyfly.data.pageable import Order, Sort
 from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.statements import (
+    RESERVED_BINDS,
     LockMode,
     backend_name,
     bulk_delete_safe,
@@ -209,6 +210,26 @@ class TestInCriteria:
         assert " IN " not in sql
         assert "contract_line.order_code = " in sql and " OR " in sql
         assert all(_binds(select(ContractLine.sku).where(c), dialect) <= 2000 for c in criteria)
+
+    @pytest.mark.parametrize(("name", "limit"), [("sqlite", 32766), ("mssql", 2000), ("mysql", 65535)])
+    def test_a_chunk_leaves_room_for_the_statements_other_binds(self, name: str, limit: int) -> None:
+        """A limit that counts every bind of a statement: the padded chunk plus *reserved* stays within it."""
+        dialect = DIALECTS[name]
+        if name == "sqlite" and in_list_limit(dialect) != limit:
+            pytest.skip("this SQLite library predates the 32766 variable limit")
+        values = list(range(2 * limit + 7))
+        for reserved in (RESERVED_BINDS, 100):
+            criteria = in_criteria([ContractChild.id], values, dialect, reserved=reserved)
+            assert all(_binds(select(ContractChild.id).where(c), dialect) <= limit - reserved for c in criteria)
+            assert len(criteria) == 3
+
+    def test_oracles_limit_is_per_list_so_nothing_is_reserved(self) -> None:
+        criteria = in_criteria([ContractChild.id], list(range(2500)), DIALECTS["oracle"], reserved=100)
+        assert [_binds(select(ContractChild.id).where(c), DIALECTS["oracle"]) for c in criteria] == [1000, 1000, 512]
+
+    def test_reserving_the_whole_limit_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            in_criteria([ContractChild.id], [1, 2], DIALECTS["mssql"], reserved=2000)
 
     def test_an_empty_list_matches_nothing_without_a_statement(self) -> None:
         assert in_criteria([ContractChild.id], [], DIALECTS["sqlite"]) == []

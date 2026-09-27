@@ -317,3 +317,55 @@ async def test_restore_and_hard_delete(relational_backend: RelationalBackend) ->
         await items.hard_delete(saved.id)
         async with datasources.engine.connect() as conn:
             assert (await conn.execute(select(func.count()).select_from(SdVersioned))).scalar_one() == 0
+
+
+# ---------------------------------------------------------------------------------------------------------
+# WP03-13: long id lists leave room for the UPDATE's own binds
+# ---------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.backends("sqlite-file")
+@pytest.mark.parametrize("count", [20_000, 40_000])
+async def test_a_long_id_list_is_soft_deleted_within_the_variable_limit(
+    relational_backend: RelationalBackend, bob: None, count: int
+) -> None:
+    """SQLite's limit counts every variable of a statement: an id chunk padded to the whole limit, plus the
+    stamps the UPDATE sets, failed with 'too many SQL variables' from 16,385 ids."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        items = SoftItems()
+        first, second, kept = await items.save_all([ContractSoftItem(label=f"i{n}") for n in range(3)])
+        await items.delete_all_by_id([first.id, *(uuid.uuid4() for _ in range(count - 1))])
+        await items.delete_all_by_id_in_batch([second.id, *(uuid.uuid4() for _ in range(count - 1))])
+        deleted = await _deleted(datasources)
+        assert deleted["i0"] is not None and deleted["i1"] is not None and deleted["i2"] is None
+        assert len(await items.find_all_by_id([kept.id, *(uuid.uuid4() for _ in range(count - 1))])) == 1
+
+
+# ---------------------------------------------------------------------------------------------------------
+# WP03-07: the unit's copies follow what the UPDATE really changed
+# ---------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.backends("sqlite-file", "pg")
+async def test_only_the_rows_the_update_changed_are_stamped_in_the_unit(relational_backend: RelationalBackend) -> None:
+    """Where ``UPDATE ... RETURNING`` exists, the unit's copy of a row the soft delete did not change (deleted
+    behind the unit's back here) keeps its state: it used to get the stamps and a version bump the row does not
+    have, and the next flush of that copy raised StaleDataError."""
+    async with repository_datasources(relational_backend, *MODELS):
+        items = VersionedItems()
+        gone, live = await items.save_all([SdVersioned(name="gone"), SdVersioned(name="live")])
+
+        @transactional
+        async def delete_both() -> tuple[SdVersioned, SdVersioned]:
+            held_gone, held_live = await items.find_by_id(gone.id), await items.find_by_id(live.id)
+            assert held_gone is not None and held_live is not None
+            behind = update(SdVersioned).where(SdVersioned.id == gone.id).values(deleted_at=func.now())
+            await items._session.execute(behind.execution_options(synchronize_session=False))
+            await items.delete_all_by_id([gone.id, live.id, uuid.uuid4()])
+            held_gone.name = "renamed"
+            await items._session.flush()  # the copy's version is still the row's
+            return held_gone, held_live
+
+        held_gone, held_live = await delete_both()
+        assert held_gone.deleted_at is None and held_gone.version == gone.version + 1  # the rename's own bump
+        assert held_live.deleted_at is not None and held_live.version == live.version + 1

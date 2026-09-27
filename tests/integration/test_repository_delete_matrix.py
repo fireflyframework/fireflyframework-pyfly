@@ -169,6 +169,9 @@ async def test_deleting_a_pending_entity_means_not_inserting_it(relational_backe
             pending = ContractParent(name="pending")
             parents._session.add(pending)  # pending in the unit, never flushed
             await parents.delete(pending)
+            batched = ContractParent(name="batched")
+            parents._session.add(batched)
+            await parents.delete_all_in_batch([batched])  # the bulk form too: it used to be inserted at commit
 
         await add_then_delete()
         assert await _count(datasources, ContractParent) == 0
