@@ -125,7 +125,10 @@ changed a constraint ran only on the backend it was authored on.
 | index (`index=True`) | `ix_<table>_<column>`, as before |
 
 A constraint you name keeps its name. Names are at most 63 characters (PostgreSQL's limit) on every
-backend: a longer one is cut and suffixed with a hash of the full name. A `Table` you declare on
+backend: a longer one is cut and suffixed with a hash of the full name. One exception: the CHECK that a
+`Boolean(create_constraint=True)` or a non-native `Enum(create_constraint=True)` column creates is named by
+SQLAlchemy, not by the convention. It stays unnamed for a `Boolean` and takes the enum type's name for an
+`Enum`; give those types a `name=` when a revision has to refer to their checks. A `Table` you declare on
 `Base.metadata` yourself (an association table) is named the same way; another `MetaData` opts in with
 `use_naming_convention(metadata)`.
 
@@ -1893,12 +1896,17 @@ session (the registry's, your own `async_sessionmaker`, a session you open by ha
 
 - relationship collections (selectin, joined and lazy loads, a refresh, an explicit `selectinload`), so a
   deleted comment is not in `post.comments`;
-- a many-to-one to a deleted parent (`comment.post` is `None`);
+- a many-to-one to a deleted parent (`comment.post` is `None`). Loaded with an inner join
+  (`joinedload(Comment.post, innerjoin=True)`, or `lazy="joined", innerjoin=True` on the relationship), the
+  comment itself drops out of the result instead, as with Hibernate's `@SQLRestriction`;
 - joins in any ORM statement or `Specification`, aliases included;
 - `session.get()`, derived queries, and a plain `Repository` over a soft-delete entity.
 
 What stays visible: an object already in the session's identity map, the refresh of an object you hold,
-and raw `text()` SQL (as native queries in Spring). `UPDATE` and `DELETE` statements are not filtered.
+and raw `text()` SQL (as native queries in Spring). `UPDATE` and `DELETE` statements are not filtered, and
+neither are the `EXISTS` subqueries of `relationship.any()` and `has()`: `Post.comments.any(Comment.text
+== "spam")` matches a post through a deleted comment. Add `Comment.deleted_at.is_(None)` to the criterion
+when that matters.
 
 `session.merge()` loads the row it merges into through the criteria too: merging a detached soft-deleted
 object finds no row, so the merge INSERTs a copy and the flush fails on the primary key. Merge such an

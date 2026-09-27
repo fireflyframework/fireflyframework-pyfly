@@ -115,7 +115,10 @@ An unnamed constraint gets:
 - ``ix_<table>_<column>`` for an index (``index=True``), as SQLAlchemy has always named them.
 
 Names are at most :data:`MAX_CONSTRAINT_NAME_LENGTH` characters on every backend. A constraint the
-application names keeps its name.
+application names keeps its name. The CHECK that a ``Boolean(create_constraint=True)`` or a non-native
+``Enum(create_constraint=True)`` column creates is named by SQLAlchemy, not by the convention: it stays unnamed
+for a ``Boolean``, and takes the enum type's name for an ``Enum``. Name those types (``name=``) when a
+revision has to refer to their checks.
 
 It names the constraints of the *models* (:func:`use_naming_convention`), not the ones Alembic operations
 create: ``Base.metadata.naming_convention``, which Alembic applies to the unnamed constraints of a revision's

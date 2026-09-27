@@ -31,7 +31,13 @@ What it does not filter:
 - an object already in the session's identity map (``session.get()`` returns it without SQL), which is why
   ``SoftDeleteRepository.find_by_id`` still checks ``deleted_at`` itself;
 - the refresh of an object the session holds (``session.refresh()``, an expired attribute);
-- ``UPDATE`` and ``DELETE`` statements, and raw ``text()`` SQL, as native queries in Spring.
+- ``UPDATE`` and ``DELETE`` statements, and raw ``text()`` SQL, as native queries in Spring;
+- the ``EXISTS`` subqueries of ``relationship.any()`` and ``has()``: ``Author.books.any(Book.title == "x")``
+  matches an author through a soft-deleted book. Add ``Book.deleted_at.is_(None)`` to the criterion.
+
+A many-to-one loaded with an inner join (``joinedload(Book.author, innerjoin=True)``, or ``lazy="joined",
+innerjoin=True``) to a soft-deleted parent drops the child row from the result, as Hibernate's
+``@SQLRestriction`` does; the default outer join returns the child with the attribute ``None``.
 
 ``session.merge()`` loads through the criteria: a detached soft-deleted object finds no row, so the merge
 INSERTs a copy that violates the primary key. Merge it inside :func:`including_deleted`.
