@@ -1584,8 +1584,11 @@ run from a plain call. Check `is_transaction_active()` first, or use `after_comm
 
 Commit, rollback and session close run shielded, and a cancellation that arrived meanwhile is re-raised
 afterwards, so a client that disconnects mid-transaction (Starlette cancels the request through an anyio
-scope) never returns a poisoned or leaked connection to the pool. A commit whose connection fails while
-`COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
+scope) never returns a poisoned or leaked connection to the pool. The `after_commit` and
+`after_completion` callbacks run shielded too, each in a task of its own: a cancellation that lands as the
+unit commits interrupts none of them (a cache eviction or an event publication of a committed unit is
+never lost to a client disconnect), and it is re-raised once they all ran. A commit whose connection fails
+while `COMMIT` is in flight raises `CommitOutcomeUnknownError`: the unit may have committed. Never retry it
 blindly; `@retry` does not (see [Resilience](resilience.md#retries-and-transactions)).
 
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
