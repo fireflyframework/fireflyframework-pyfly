@@ -47,6 +47,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Identity, Integer, String, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -61,9 +62,10 @@ from pyfly.eda.decorators import event_listener
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.types import EventEnvelope
 from pyfly.messaging.decorators import message_listener
+from pyfly.messaging.listener_container import is_transient_failure
 from pyfly.messaging.types import Message
 from pyfly.testing import requires_docker
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, RelationalBackend
 
 # ---------------------------------------------------------------------------
 # Kafka
@@ -944,3 +946,55 @@ async def test_eda_rabbitmq_failure_is_retried_with_a_bound_and_dead_lettered(
         assert await _rabbit_depth(amqp_url, queue) == 0
     finally:
         await _rabbit_delete(amqp_url, queue, f"{queue}.dlq")
+
+
+# -- transient failures on real servers --------------------------------------------------------------------
+
+
+@pytest.mark.backends(PG, MYSQL, MARIADB)
+async def test_a_lock_timeout_is_a_transient_failure(relational_backend: RelationalBackend) -> None:
+    """A row lock held by another transaction: PostgreSQL's lock_timeout (55P03) and InnoDB's lock wait
+    timeout (1205) are failures of the moment, attempted again by the listener container."""
+    engine = relational_backend.create_engine(poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE wp12_lock (id INTEGER PRIMARY KEY, n INTEGER)"))
+        await conn.execute(text("INSERT INTO wp12_lock VALUES (1, 0)"))
+    holder = await engine.connect()
+    try:
+        await holder.begin()
+        await holder.execute(text("UPDATE wp12_lock SET n = n + 1 WHERE id = 1"))
+        with pytest.raises(DBAPIError) as caught:
+            async with engine.begin() as conn:
+                if relational_backend.dialect == "postgresql":
+                    await conn.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                else:
+                    await conn.execute(text("SET SESSION innodb_lock_wait_timeout = 1"))
+                await conn.execute(text("UPDATE wp12_lock SET n = n + 1 WHERE id = 1"))
+    finally:
+        await holder.rollback()
+        await holder.close()
+    assert is_transient_failure(caught.value)
+    assert not is_transient_failure(ValueError("a deterministic failure"))
+
+
+@pytest.mark.backends(PG)
+async def test_a_serialization_failure_is_a_transient_failure(relational_backend: RelationalBackend) -> None:
+    engine = relational_backend.create_engine(poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE wp12_serial (id INTEGER PRIMARY KEY, n INTEGER)"))
+        await conn.execute(text("INSERT INTO wp12_serial VALUES (1, 0)"))
+    first = await engine.connect()
+    second = await engine.connect()
+    try:
+        for conn in (first, second):
+            await conn.execute(text("BEGIN ISOLATION LEVEL SERIALIZABLE"))
+            await conn.execute(text("SELECT n FROM wp12_serial WHERE id = 1"))
+        await first.execute(text("UPDATE wp12_serial SET n = 1 WHERE id = 1"))
+        await first.commit()
+        with pytest.raises(DBAPIError) as caught:
+            await second.execute(text("UPDATE wp12_serial SET n = 2 WHERE id = 1"))
+    finally:
+        await first.close()
+        await second.rollback()
+        await second.close()
+    assert is_transient_failure(caught.value)
