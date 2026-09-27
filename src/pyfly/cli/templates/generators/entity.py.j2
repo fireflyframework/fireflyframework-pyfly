@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 {% if has_data %}
-from sqlalchemy import String
+from sqlalchemy import Identity, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy import Base
@@ -26,7 +26,8 @@ class {{ names.pascal }}Response(BaseModel):
 class {{ names.pascal }}(Base):
     __tablename__ = "{{ names.snake_plural }}"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Identity(): an identity column on every backend (Oracle has no implicit autoincrement).
+    id: Mapped[int] = mapped_column(Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
 {% elif has_mongodb %}
 
