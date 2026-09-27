@@ -28,12 +28,24 @@ from typing import Any
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, inspect, select
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    UniqueConstraint,
+    inspect,
+    select,
+)
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy.entity import Base
+from pyfly.data.relational.sqlalchemy.naming import ConstraintRename, rename_constraints_to_convention
 from tests.support.backend_matrix import RelationalBackend
 
 
@@ -69,11 +81,11 @@ INDEX = "ix_nc_account_code"
 
 def _names(sync: Connection) -> dict[str, Any]:
     inspector = inspect(sync)
-    return {
-        "unique": sorted(u["name"] for u in inspector.get_unique_constraints("nc_account")),
-        "foreign_keys": sorted(fk["name"] for fk in inspector.get_foreign_keys("nc_account")),
-        "checks": sorted(ck["name"] for ck in inspector.get_check_constraints("nc_account")),
-        "indexes": sorted(ix["name"] for ix in inspector.get_indexes("nc_account") if not ix.get("unique")),
+    return {  # an unnamed constraint (SQLite before the convention) is ""
+        "unique": sorted(u["name"] or "" for u in inspector.get_unique_constraints("nc_account")),
+        "foreign_keys": sorted(fk["name"] or "" for fk in inspector.get_foreign_keys("nc_account")),
+        "checks": sorted(ck["name"] or "" for ck in inspector.get_check_constraints("nc_account")),
+        "indexes": sorted(ix["name"] or "" for ix in inspector.get_indexes("nc_account") if not ix.get("unique")),
     }
 
 
@@ -141,3 +153,74 @@ async def test_one_batch_migration_runs_on_every_backend(relational_backend: Rel
         await connection.execute(ConventionOwner.__table__.delete())
         remaining = (await connection.execute(select(ConventionAccount.__table__.c.id))).all()
     assert remaining == []
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A database created before the convention adopts it with one revision
+# ---------------------------------------------------------------------------------------------------------
+
+
+def _legacy_metadata() -> MetaData:
+    """The same two tables as the models, as a pre-26.09.08 ``Base`` created them: no naming convention, so
+    every unnamed constraint got its backend's name."""
+    legacy = MetaData()
+    Table("nc_owner", legacy, Column("id", Integer, primary_key=True, autoincrement=False))
+    Table(
+        "nc_account",
+        legacy,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("email", String(100), nullable=False, unique=True),
+        Column("region", String(10), nullable=False),
+        Column("number", Integer, nullable=False),
+        Column("code", String(10), nullable=False, index=True),
+        Column("balance", Integer, nullable=False),
+        Column("owner_id", Integer, ForeignKey("nc_owner.id"), nullable=False),
+        UniqueConstraint("region", "number"),
+        CheckConstraint("balance >= 0"),
+        CheckConstraint("balance < 1000000", name="nc_account_max_balance"),
+    )
+    return legacy
+
+
+def _primary_key_name(sync: Connection) -> str | None:
+    name = inspect(sync).get_pk_constraint("nc_account").get("name")
+    return str(name) if name else None
+
+
+async def test_an_existing_database_adopts_the_convention(relational_backend: RelationalBackend) -> None:
+    engine = relational_backend.create_engine()
+    legacy = _legacy_metadata()
+    async with engine.begin() as connection:
+        await connection.run_sync(legacy.create_all)
+        before = await connection.run_sync(_names)
+    assert UNIQUE_EMAIL not in before["unique"]  # the backend named it (or, on SQLite, nobody did)
+
+    def adopt(sync: Connection) -> list[ConstraintRename]:
+        operations = Operations(MigrationContext.configure(sync))
+        return rename_constraints_to_convention(operations, Base.metadata, tables=["nc_owner", "nc_account"])
+
+    async with engine.begin() as connection:
+        renames = await connection.run_sync(adopt)
+    assert {rename.new for rename in renames} >= {UNIQUE_EMAIL, UNIQUE_REGION_NUMBER, FOREIGN_KEY, _unnamed_check()}
+
+    async with engine.connect() as connection:
+        after = await connection.run_sync(_names)
+        primary_key = await connection.run_sync(_primary_key_name)
+    assert UNIQUE_EMAIL in after["unique"] and UNIQUE_REGION_NUMBER in after["unique"]
+    assert after["foreign_keys"] == [FOREIGN_KEY]
+    assert NAMED_CHECK in after["checks"] and _unnamed_check() in after["checks"]
+    if relational_backend.dialect in ("postgresql", "sqlite"):  # MySQL and MariaDB call it PRIMARY
+        assert primary_key == "pk_nc_account"
+
+    # Adopting twice changes nothing, and a revision written against the convention names now runs.
+    async with engine.begin() as connection:
+        assert await connection.run_sync(adopt) == []
+        await connection.run_sync(_drop_the_email_unique_constraint)
+    async with engine.connect() as connection:
+        assert UNIQUE_EMAIL not in (await connection.run_sync(_names))["unique"]
+
+
+def _drop_the_email_unique_constraint(sync: Connection) -> None:
+    operations = Operations(MigrationContext.configure(sync, opts={"target_metadata": Base.metadata}))
+    with operations.batch_alter_table("nc_account") as batch:
+        batch.drop_constraint(UNIQUE_EMAIL, type_="unique")

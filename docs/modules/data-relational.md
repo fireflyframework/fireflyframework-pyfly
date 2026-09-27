@@ -129,6 +129,26 @@ backend: a longer one is cut and suffixed with a hash of the full name.
 
 **Databases created before 26.09.08** keep the names their backend gave them. Nothing breaks at runtime:
 names matter only to migrations, and a revision written against the convention names needs them in place.
+Opt in once, with one revision that renames the existing constraints:
+
+```python
+# migrations/versions/xxxx_adopt_the_constraint_naming_convention.py
+from alembic import op
+
+import myapp.models  # noqa: F401 — the models whose tables are renamed
+from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy.naming import rename_constraints_to_convention
+
+
+def upgrade() -> None:
+    rename_constraints_to_convention(op, Base.metadata)
+```
+
+It matches each constraint of each existing table to its model (a unique constraint by its columns, a
+foreign key by its columns and referred table, a check by its SQL text, the primary key) and renames the
+ones whose name differs: `ALTER TABLE ... RENAME CONSTRAINT` on PostgreSQL; `RENAME INDEX` for a unique key,
+and a drop and re-create of a foreign key or check, on MySQL and MariaDB; a batch recreate of the table on
+SQLite. Running it again renames nothing. Other dialects raise `NotImplementedError`.
 
 ### BaseEntity: Audit Trail Fields
 

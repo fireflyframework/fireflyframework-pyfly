@@ -102,8 +102,9 @@ An unnamed constraint gets:
 - ``ix_<table>_<column>`` for an index (``index=True``), as SQLAlchemy has always named them.
 
 Names are at most :data:`MAX_CONSTRAINT_NAME_LENGTH` characters on every backend. A constraint the
-application names keeps its name. A table created before 26.09.08 keeps the names its backend gave it: see
-the relational module documentation for the one-time rename migration.
+application names keeps its name. A table created before 26.09.08 keeps the names its backend gave it until
+it adopts the convention with the one-time rename migration
+(:func:`pyfly.data.relational.sqlalchemy.naming.rename_constraints_to_convention`).
 """
 
 
