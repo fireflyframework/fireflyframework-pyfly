@@ -150,11 +150,21 @@ class TestDisposal:
 
     async def test_modules_share_the_primary_and_stop_disposes_every_engine(self, tmp_path: Path) -> None:
         url = _sqlite(tmp_path / "app.db")
-        # ddl-auto=none: the saga store checks its table at start, as a migration would have created it.
-        from pyfly.data.relational.framework_schema import ensure_tables, orchestration_state
+        # ddl-auto=none: the saga and event-sourcing stores check their tables at start, as a migration would have
+        # created them.
+        from pyfly.data.relational.framework_schema import (
+            ensure_tables,
+            event_store,
+            event_store_head,
+            orchestration_state,
+            projection_checkpoints,
+            snapshots,
+        )
 
         migrations = create_async_engine(url)
-        await ensure_tables(migrations, orchestration_state)
+        await ensure_tables(
+            migrations, orchestration_state, event_store, event_store_head, snapshots, projection_checkpoints
+        )
         await migrations.dispose()
         context = await _started(
             _config(
@@ -190,8 +200,8 @@ class TestDisposal:
                 "primary.replica",
                 "reporting",
             ]
-            assert context.get_bean(EventStore)._engine is primary  # type: ignore[attr-defined]
-            assert context.get_bean(SnapshotStore)._engine is primary  # type: ignore[attr-defined]
+            assert context.get_bean(EventStore).engine is primary  # type: ignore[attr-defined]
+            assert context.get_bean(SnapshotStore).engine is primary  # type: ignore[attr-defined]
             assert context.get_bean(ExecutionPersistenceProvider).engine is primary  # type: ignore[attr-defined]
         finally:
             await context.stop()
@@ -199,6 +209,22 @@ class TestDisposal:
         assert registry.closed
 
     async def test_a_module_on_another_database_gets_a_configured_datasource(self, tmp_path: Path) -> None:
+        # ddl-auto=none: the event-sourcing stores check their tables at start, as a migration would have created them.
+        from pyfly.data.relational.framework_schema import (
+            ensure_tables,
+            event_store,
+            event_store_head,
+            projection_checkpoints,
+            snapshots,
+        )
+
+        for database, tables in (
+            ("app.db", [projection_checkpoints]),  # the checkpoints follow the event store's provider, on the primary
+            ("events.db", [event_store, event_store_head, snapshots]),
+        ):
+            migrations = create_async_engine(_sqlite(tmp_path / database))
+            await ensure_tables(migrations, *tables)
+            await migrations.dispose()
         context = await _started(
             _config(
                 {"url": _sqlite(tmp_path / "app.db"), "pool": {"size": 2}},
@@ -216,8 +242,8 @@ class TestDisposal:
         try:
             registry = context.get_bean(DataSourceRegistry)
             events = registry.get("event-store")
-            assert context.get_bean(EventStore)._engine is events.engine  # type: ignore[attr-defined]
-            assert context.get_bean(SnapshotStore)._engine is events.engine  # type: ignore[attr-defined]
+            assert context.get_bean(EventStore).engine is events.engine  # type: ignore[attr-defined]
+            assert context.get_bean(SnapshotStore).engine is events.engine  # type: ignore[attr-defined]
             assert events.engine.pool.size() == 2
             assert events.url_key == "pyfly.eventsourcing.store.url"
             assert await _scalar(events.engine, "PRAGMA foreign_keys") == 1

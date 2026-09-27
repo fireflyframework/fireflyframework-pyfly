@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Integration tests for SqlAlchemyEventStore and SqlAlchemySnapshotStore.
+"""``SqlAlchemyEventStore`` and ``SqlAlchemySnapshotStore`` on PostgreSQL only.
 
-Exercises both adapters against a real Postgres instance (testcontainers).
+What every backend does is in ``test_event_store_matrix.py``, ``test_snapshot_store_matrix.py`` and
+``test_projection_matrix.py``. Here: the ``xid8`` strategy's trade-off (a transaction left open on the server
+holds the stream back, and nothing is skipped when it ends), and upgrading the tables an earlier release created
+(``TIMESTAMP WITHOUT TIME ZONE`` columns, no global position) with the migration the event-sourcing guide gives.
 
-Gated by ``@requires_docker``. Deselected from the fast suite (``-m integration``).
 Run via:
     PYFLY_INTEGRATION_REQUIRE_DOCKER=1 uv run pytest -m integration \\
         tests/integration/test_eventsourcing_postgres_integration.py -q
@@ -23,259 +25,131 @@ Run via:
 
 from __future__ import annotations
 
-import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 
+from pyfly.data.relational.framework_schema import FrameworkSchemaError
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.snapshot import Snapshot, SqlAlchemySnapshotStore
 from pyfly.eventsourcing.store import SqlAlchemyEventStore
-from pyfly.testing import requires_docker
+from tests.support.backend_matrix import PG, RelationalBackend
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.backends(PG)
 
-
-def _envelope(event_type: str = "OrderPlaced", payload: dict | None = None) -> StoredEventEnvelope:
-    return StoredEventEnvelope(
-        event_id=str(uuid.uuid4()),
-        event_type=event_type,
-        payload=payload or {"order_id": str(uuid.uuid4())},
-    )
-
-
-# ===========================================================================
-# SqlAlchemyEventStore — real Postgres
-# ===========================================================================
-
-
-@requires_docker
-@pytest.mark.asyncio
-async def test_event_store_append_and_load(pg_url: str) -> None:
-    """Append events for an aggregate, then load them back in order."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemyEventStore(engine)
-        await store.initialize()
-
-        aggregate_id = f"order-{uuid.uuid4().hex[:8]}"
-        events = [
-            _envelope("OrderPlaced", {"amount": 100}),
-            _envelope("OrderShipped", {"carrier": "ups"}),
-        ]
-        await store.append(aggregate_id, "Order", events, expected_version=0)
-
-        loaded = await store.load(aggregate_id)
-        assert len(loaded) == 2
-        assert loaded[0].event_type == "OrderPlaced"
-        assert loaded[1].event_type == "OrderShipped"
-        assert loaded[0].sequence == 1
-        assert loaded[1].sequence == 2
-        assert loaded[0].aggregate_id == aggregate_id
-    finally:
-        await engine.dispose()
+# The tables as release 26.09.07 created them.
+_EARLIER_EVENT_STORE = """
+CREATE TABLE IF NOT EXISTS pyfly_event_store (
+    event_id        VARCHAR(64) PRIMARY KEY,
+    aggregate_id    VARCHAR(64) NOT NULL,
+    aggregate_type  VARCHAR(255) NOT NULL,
+    sequence        INTEGER NOT NULL,
+    event_type      VARCHAR(255) NOT NULL,
+    payload         TEXT NOT NULL,
+    metadata        TEXT NOT NULL,
+    occurred_at     TIMESTAMP NOT NULL,
+    version         INTEGER NOT NULL,
+    tenant_id       VARCHAR(64) NULL,
+    UNIQUE (aggregate_id, sequence)
+)
+"""
+_EARLIER_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS pyfly_snapshots (
+    aggregate_id   VARCHAR(64) PRIMARY KEY,
+    aggregate_type VARCHAR(255) NOT NULL,
+    sequence       INTEGER NOT NULL,
+    payload        TEXT NOT NULL,
+    created_at     TIMESTAMP NOT NULL
+)
+"""
+# The upgrade, as docs/modules/eventsourcing.md gives it for PostgreSQL.
+_UPGRADE = [
+    "ALTER TABLE pyfly_event_store ADD COLUMN recorded_at TIMESTAMP WITH TIME ZONE NULL",
+    "ALTER TABLE pyfly_event_store ADD COLUMN global_position BIGINT NULL",
+    "ALTER TABLE pyfly_event_store ALTER COLUMN occurred_at TYPE TIMESTAMP WITH TIME ZONE "
+    "USING occurred_at AT TIME ZONE 'UTC'",
+    "ALTER TABLE pyfly_snapshots ALTER COLUMN created_at TYPE TIMESTAMP WITH TIME ZONE "
+    "USING created_at AT TIME ZONE 'UTC'",
+]
 
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_event_store_load_after_sequence(pg_url: str) -> None:
-    """load(after_sequence=n) returns only events with sequence > n."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemyEventStore(engine)
-        await store.initialize()
-
-        aggregate_id = f"order-{uuid.uuid4().hex[:8]}"
-        events = [_envelope(f"Event{i}") for i in range(5)]
-        await store.append(aggregate_id, "Order", events, expected_version=0)
-
-        # Load only events after sequence 3
-        loaded = await store.load(aggregate_id, after_sequence=3)
-        assert len(loaded) == 2
-        assert loaded[0].sequence == 4
-        assert loaded[1].sequence == 5
-    finally:
-        await engine.dispose()
+def _envelope(event_type: str) -> StoredEventEnvelope:
+    return StoredEventEnvelope(event_type=event_type)
 
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_event_store_stream_all_limit(pg_url: str) -> None:
-    """stream_all returns events in occurred_at order, respecting limit."""
-    from sqlalchemy.ext.asyncio import create_async_engine
+async def test_a_transaction_left_open_holds_the_xid8_stream_back_and_nothing_is_skipped(
+    relational_backend: RelationalBackend,
+) -> None:
+    store = SqlAlchemyEventStore(relational_backend.create_engine())
+    await store.start()
+    assert store.position_strategy == "xid8"
+    await store.append("before", "Order", [_envelope("Before")], expected_version=0)
 
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemyEventStore(engine)
-        await store.initialize()
+    idle = relational_backend.create_engine()
+    async with idle.connect() as open_transaction:
+        await open_transaction.execute(text("SELECT pg_current_xact_id()"))  # a transaction with an id, left open
+        await store.append("during", "Order", [_envelope("During")], expected_version=0)
+        seen = await store.stream_all()
+        assert [event.event_type for event in seen] == ["Before"]  # "During" waits for the open transaction
+        assert await store.last_position() == seen[-1].global_position
+        await open_transaction.rollback()
 
-        # Use a unique aggregate per test run to avoid cross-test pollution
-        agg_id = f"order-{uuid.uuid4().hex[:8]}"
-        events = [_envelope(f"EvLimit{i}") for i in range(5)]
-        await store.append(agg_id, "Order", events, expected_version=0)
-
-        first_two = await store.stream_all(limit=2)
-        # We only check that at most 2 events are returned (global stream may
-        # have events from other test runs in this schema).
-        assert len(first_two) <= 2
-    finally:
-        await engine.dispose()
+    later = await store.stream_all(after_position=seen[-1].global_position)
+    assert [event.event_type for event in later] == ["During"]
 
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_event_store_stream_all_after_event_id(pg_url: str) -> None:
-    """stream_all(after_event_id=...) returns only events occurring after the anchor."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemyEventStore(engine)
-        await store.initialize()
-
-        agg_id = f"order-{uuid.uuid4().hex[:8]}"
-        events = [_envelope(f"EvAfter{i}") for i in range(3)]
-        await store.append(agg_id, "Order", events, expected_version=0)
-
-        # Load the first event to use as anchor
-        loaded = await store.load(agg_id)
-        anchor_id = loaded[0].event_id
-
-        after = await store.stream_all(after_event_id=anchor_id, limit=100)
-        returned_ids = {e.event_id for e in after}
-        # Anchor event itself must NOT appear in the result
-        assert anchor_id not in returned_ids
-        # Both subsequent events must appear
-        assert loaded[1].event_id in returned_ids
-        assert loaded[2].event_id in returned_ids
-    finally:
-        await engine.dispose()
-
-
-@requires_docker
-@pytest.mark.asyncio
-async def test_event_store_latest_version(pg_url: str) -> None:
-    """latest_version returns 0 for unknown aggregates and N after N events."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemyEventStore(engine)
-        await store.initialize()
-
-        agg_id = f"order-{uuid.uuid4().hex[:8]}"
-        assert await store.latest_version(agg_id) == 0
-
-        events = [_envelope() for _ in range(3)]
-        await store.append(agg_id, "Order", events, expected_version=0)
-        assert await store.latest_version(agg_id) == 3
-    finally:
-        await engine.dispose()
-
-
-# ===========================================================================
-# SqlAlchemySnapshotStore — real Postgres
-# ===========================================================================
-
-
-@requires_docker
-@pytest.mark.asyncio
-async def test_snapshot_store_save_and_load(pg_url: str) -> None:
-    """Save a snapshot and reload it, verifying all fields."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemySnapshotStore(engine)
-        await store.initialize()
-
-        snap = Snapshot(
-            aggregate_id=f"order-{uuid.uuid4().hex[:8]}",
-            aggregate_type="Order",
-            sequence=10,
-            payload={"total": 999, "status": "shipped"},
+async def test_the_tables_of_an_earlier_release_are_refused_until_migrated_then_their_events_are_placed(
+    relational_backend: RelationalBackend,
+) -> None:
+    engine = relational_backend.create_engine()
+    async with engine.begin() as connection:
+        await connection.execute(text(_EARLIER_EVENT_STORE))
+        await connection.execute(text(_EARLIER_SNAPSHOTS))
+        base = datetime(2026, 1, 1, 12, 0)
+        for index, name in ((2, "Third"), (0, "First"), (1, "Second")):
+            envelope = StoredEventEnvelope(event_type=name, aggregate_id=f"old-{index}", aggregate_type="Order")
+            envelope.sequence = 1
+            envelope.occurred_at = (base + timedelta(minutes=index)).replace(tzinfo=UTC)
+            await connection.execute(
+                text(
+                    "INSERT INTO pyfly_event_store (event_id, aggregate_id, aggregate_type, sequence, event_type, "
+                    "payload, metadata, occurred_at, version, tenant_id) VALUES (:eid, :aid, 'Order', 1, :etype, "
+                    ":payload, '{}', :occurred, 1, NULL)"
+                ),
+                {
+                    "eid": envelope.event_id,
+                    "aid": envelope.aggregate_id,
+                    "etype": name,
+                    "payload": envelope.to_json(),
+                    "occurred": base + timedelta(minutes=index),
+                },
+            )
+        await connection.execute(
+            text(
+                "INSERT INTO pyfly_snapshots (aggregate_id, aggregate_type, sequence, payload, created_at) "
+                "VALUES ('old-0', 'Order', 1, '{\"total\": 5}', :created)"
+            ),
+            {"created": base},
         )
-        await store.save(snap)
 
-        loaded = await store.load(snap.aggregate_id)
-        assert loaded is not None
-        assert loaded.aggregate_id == snap.aggregate_id
-        assert loaded.aggregate_type == "Order"
-        assert loaded.sequence == 10
-        assert loaded.payload == {"total": 999, "status": "shipped"}
-    finally:
-        await engine.dispose()
+    store = SqlAlchemyEventStore(engine)
+    with pytest.raises(FrameworkSchemaError, match="pyfly_event_store.global_position does not exist"):
+        await store.start()
+    snapshots = SqlAlchemySnapshotStore(engine)
+    with pytest.raises(FrameworkSchemaError, match="TIMESTAMP WITHOUT TIME ZONE"):
+        await snapshots.start()
 
+    async with engine.begin() as connection:
+        for statement in _UPGRADE:
+            await connection.execute(text(statement))
+    await store.start()
+    await snapshots.start()
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_snapshot_store_upsert_overwrites(pg_url: str) -> None:
-    """Saving a newer snapshot for the same aggregate_id replaces the old one."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemySnapshotStore(engine)
-        await store.initialize()
-
-        agg_id = f"order-{uuid.uuid4().hex[:8]}"
-        snap_v1 = Snapshot(aggregate_id=agg_id, aggregate_type="Order", sequence=5, payload={"v": 1})
-        await store.save(snap_v1)
-
-        snap_v2 = Snapshot(aggregate_id=agg_id, aggregate_type="Order", sequence=12, payload={"v": 2})
-        await store.save(snap_v2)
-
-        loaded = await store.load(agg_id)
-        assert loaded is not None
-        assert loaded.sequence == 12
-        assert loaded.payload == {"v": 2}
-    finally:
-        await engine.dispose()
-
-
-@requires_docker
-@pytest.mark.asyncio
-async def test_snapshot_store_load_returns_none_when_missing(pg_url: str) -> None:
-    """load() returns None when no snapshot exists for the aggregate."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemySnapshotStore(engine)
-        await store.initialize()
-
-        result = await store.load(f"nonexistent-{uuid.uuid4().hex}")
-        assert result is None
-    finally:
-        await engine.dispose()
-
-
-@requires_docker
-@pytest.mark.asyncio
-async def test_snapshot_store_delete(pg_url: str) -> None:
-    """delete() removes the snapshot and returns True; second call returns False."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(pg_url, echo=False)
-    try:
-        store = SqlAlchemySnapshotStore(engine)
-        await store.initialize()
-
-        agg_id = f"order-{uuid.uuid4().hex[:8]}"
-        snap = Snapshot(aggregate_id=agg_id, aggregate_type="Order", sequence=1, payload={})
-        await store.save(snap)
-
-        deleted = await store.delete(agg_id)
-        assert deleted is True
-        assert await store.load(agg_id) is None
-
-        # Idempotent: second delete returns False
-        deleted_again = await store.delete(agg_id)
-        assert deleted_again is False
-    finally:
-        await engine.dispose()
+    await store.append("new", "Order", [_envelope("New")], expected_version=0)
+    events = await store.stream_all()
+    assert [event.event_type for event in events] == ["First", "Second", "Third", "New"]
+    assert events[0].occurred_at == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    assert await snapshots.load("old-0") == Snapshot("old-0", "Order", 1, {"total": 5})
+    await snapshots.save(Snapshot("old-0", "Order", 2, {"total": 7}))
+    assert await snapshots.load("old-0") == Snapshot("old-0", "Order", 2, {"total": 7})
