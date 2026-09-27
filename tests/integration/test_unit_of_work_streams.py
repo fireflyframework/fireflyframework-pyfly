@@ -365,13 +365,23 @@ async def harness(
             await asyncio.sleep(0)
         gc.collect()
         await asyncio.sleep(0)
-        reported = [f"{c.get('message')}: {c.get('exception')!r}" for c in started.loop_errors]
+        reported = [
+            f"{c.get('message')}: {c.get('exception')!r}"
+            for c in started.loop_errors
+            if not _discarded_asyncpg_connection(c.get("exception"))
+        ]
         assert reported == [], "the event loop reported exceptions nobody retrieved"
         if started.one_active_result is not None:
             assert started.one_active_result.violations == [], "a connection took a statement beside a stream"
     finally:
         loop.set_exception_handler(previous)
         await ctx.stop()
+
+
+def _discarded_asyncpg_connection(error: object) -> bool:
+    """asyncpg's own future of a connection a cancelled unit discarded (terminated with a statement in flight):
+    it fails with ``ConnectionError('unexpected connection_lost() call')``, and nothing awaits it any more."""
+    return isinstance(error, ConnectionError) and "connection_lost" in str(error)
 
 
 async def bounded(call: Awaitable[T]) -> T:
