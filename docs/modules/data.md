@@ -1182,28 +1182,38 @@ The check is bounded:
   and it waits for that one without a timeout.
 - The late check does not keep its connection. The socket of the connection it holds, or is still
   checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
-  `terminate`, which sends nothing and waits for nothing), the check is cancelled, and its pool slot
-  is free again at once. This matters when a firewall, NAT or load balancer silently drops an idle
-  flow (a cloud NAT after its idle timeout): a pooled connection is black-holed while the database
-  still accepts new ones. Without it, the check would sit in the driver's cleanup until the kernel
-  gives up on the socket (about 15 minutes on Linux), or for good with `pool.pre-ping` on: a cancelled
-  asyncpg pre-ping waits for the server's answer on that socket with no timeout. With it, each
-  black-holed connection costs one probe, with pre-ping on or off: that probe answers `DOWN`, and the
-  next one runs on another connection and answers `UP`. A check still in its checkout is reached
+  `terminate`, which sends nothing and waits for nothing), and then the check is cancelled. This
+  matters when a firewall, NAT or load balancer silently forgets idle flows (a cloud NAT after its idle
+  timeout): those pooled connections are black-holed while the database still accepts new ones.
+  Cancelled on one of them without this, asyncpg sends a cancel request and waits for the server's
+  answer on the dead socket with no timeout, even once the connection is lost, so the check would
+  never end and would keep its pool slot. With it, the check usually ends at once and its pool slot is
+  free again. When the driver turns the cancellation into a disconnect error instead (a pre-ping whose
+  rollback fails on the closed socket), SQLAlchemy reconnects, within the connect timeout, and the
+  check runs its `SELECT 1` on the new connection.
+- Each black-holed pooled connection costs one probe, with `pool.pre-ping` on or off: that probe
+  answers `DOWN`, and the next one runs on another connection. When a NAT forgets every idle flow at
+  once, up to one probe per idle connection answers `DOWN`. With the readiness probe's default
+  `failureThreshold` of 3, a pool holding three or more idle connections can therefore take the
+  replica out of rotation until a probe answers `UP` again. A check still in its checkout is reached
   through the pool entry that the registry's pool (`MeteredAsyncQueuePool`) reports, so this holds for
-  every engine the [datasource registry](data-relational.md#datasource-registry) builds. On an engine
-  built outside the registry, a check stuck in the pre-ping cannot be closed and keeps its pool slot;
-  the next point bounds how many can. On a connection the pool shares with the application
-  (`StaticPool`, SQLite `:memory:`) the late check is neither closed nor cancelled, since that would
-  close the application's connection; it runs after the statement ahead of it.
+  every engine the [datasource registry](data-relational.md#datasource-registry) builds.
+- On a connection the pool shares with the application (`StaticPool`, SQLite `:memory:`) the late
+  check is neither closed nor cancelled, since that would close the application's connection; it runs
+  after the statement ahead of it.
 - While a check that missed its deadline is still winding down with its connection, the next probe of
   that datasource answers `DOWN` at once (`previous check still running`) and borrows no connection.
   A late check that never got its connection (stuck connecting or pre-pinging) does not hold the next
-  probes back: they start a new check on another connection, as long as fewer than two late checks of
-  that datasource are still running, and answer `previous check still running` beyond that. Stuck
-  checks therefore cannot pile up. Probes that arrive while a check is running within its deadline
-  share its answer, and a probe whose client hangs up stops the check only when no other probe is
-  waiting for it.
+  probes back: they start a new check on another connection while fewer than two late checks of that
+  datasource are still running, and answer `previous check still running` beyond that. Probes that
+  arrive while a check is running within its deadline share its answer, and a probe whose client hangs
+  up stops the check only when no other probe is waiting for it.
+- That bound matters for an engine the registry did not build (a user-supplied `async_engine` bean)
+  with pre-ping on. Its pool reports no entry, so a check stuck in an asyncpg pre-ping cannot be closed
+  and, once cancelled, never ends, not even when the kernel gives up on the socket. Each silent drop
+  can leave one such check behind, holding a pool slot, two per engine at most. After that the
+  datasource answers `previous check still running` until the application stops, and a pool of two
+  connections or fewer without overflow is starved. Build engines through the registry to avoid it.
 - When the pool has no idle connection and no overflow left, the check does not queue behind the
   application for `pool.timeout`. It answers `UNKNOWN` (validation skipped), which keeps the aggregate
   status `UP`. A pod whose every connection is stuck in application work therefore stays in rotation;
