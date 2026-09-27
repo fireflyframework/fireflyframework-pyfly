@@ -41,11 +41,10 @@ _logger = logging.getLogger(__name__)
 
 async def _run_pre_destroy(key: str, instance: Any) -> None:
     """Call the ``@pre_destroy`` methods of *instance*; a failure is logged, not raised."""
+    from pyfly.context.application_context import _marked_names
+
     del key
-    for attr_name in dir(type(instance)):
-        member = inspect.getattr_static(type(instance), attr_name, None)
-        if not getattr(member, "__pyfly_pre_destroy__", False):
-            continue
+    for attr_name in _marked_names(type(instance), "__pyfly_pre_destroy__"):
         try:
             result = getattr(instance, attr_name)()
             if inspect.isawaitable(result):
