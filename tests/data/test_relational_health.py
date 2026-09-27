@@ -37,6 +37,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.util import await_only
 
 from pyfly.actuator.health import HealthAggregator, HealthStatus, ProbeGroup
 from pyfly.actuator.wiring import install_health_indicators
@@ -44,7 +45,7 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.data.relational.auto_configuration import EngineLifecycle
 from pyfly.data.relational.datasource_registry import DataSourceRegistry, observing_checkouts
-from pyfly.data.relational.health import SqlAlchemyHealthIndicator
+from pyfly.data.relational.health import SqlAlchemyHealthIndicator, _Check, _select_one
 from pyfly.data.relational.sqlalchemy.entity import BaseEntity
 
 
@@ -553,25 +554,28 @@ class TestLateChecks:
         finally:
             engine.release.set()
 
+
+def _sqlite_registry(path: Path, *, pre_ping: bool = False) -> DataSourceRegistry:
+    """A registry whose primary is a SQLite file, on the registry's pool (``MeteredAsyncQueuePool``)."""
+    relational = {"url": f"sqlite+aiosqlite:///{path}", "pool": {"pre-ping": pre_ping}}
+    return DataSourceRegistry(Config({"pyfly": {"data": {"relational": relational}}}))
+
+
+async def _raw_connection(engine: Any) -> Any:
+    """Check a connection out, return its DBAPI connection, and give it back."""
+    async with engine.connect() as conn:
+        return conn.sync_connection.connection.dbapi_connection
+
+
+class TestCheckoutEntry:
+    """The pool entry a check is checking out: the registry's pool reports it, before the pre-ping."""
+
     async def test_the_registry_pool_reports_the_connection_before_its_pre_ping(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A check that hangs in the pre-ping holds no connection yet; the pool entry it is checking out
         # is what lets the late check close the socket the pre-ping waits on.
-        registry = DataSourceRegistry(
-            Config(
-                {
-                    "pyfly": {
-                        "data": {
-                            "relational": {
-                                "url": f"sqlite+aiosqlite:///{tmp_path / 'ping.db'}",
-                                "pool": {"pre-ping": True},
-                            }
-                        }
-                    }
-                }
-            )
-        )
+        registry = _sqlite_registry(tmp_path / "ping.db", pre_ping=True)
         engine = registry.primary.engine
         reported: list[Any] = []
         known_at_ping: list[list[Any]] = []
@@ -583,18 +587,97 @@ class TestLateChecks:
 
         monkeypatch.setattr(engine.dialect, "do_ping", _recording_ping)
         try:
-            async with engine.connect():
-                pass  # the pool now holds an established connection, which the next checkout pre-pings
+            await _raw_connection(engine)  # the pool now holds an established connection, pre-pinged next
             with observing_checkouts(reported.append):
-                async with engine.connect() as conn:
-                    raw = conn.sync_connection.connection.dbapi_connection
+                raw = await _raw_connection(engine)
             assert raw is not None
             assert [entry.dbapi_connection for entry in reported] == [raw]
             assert known_at_ping == [[raw]]
 
-            async with engine.connect():
-                pass  # outside the block nothing is reported
+            await _raw_connection(engine)  # outside the block nothing is reported
             assert len(reported) == 1
+        finally:
+            await registry.close()
+
+    async def test_only_the_observing_tasks_checkouts_of_the_given_pool_are_reported(self, tmp_path: Path) -> None:
+        registry = _sqlite_registry(tmp_path / "own.db")
+        other = _sqlite_registry(tmp_path / "other.db")
+        engine = registry.primary.engine
+        reported: list[Any] = []
+        try:
+            with observing_checkouts(reported.append, pool=engine.sync_engine.pool):
+                own = await _raw_connection(engine)
+                # A task created inside the block copies the context variable that carries the observer.
+                await asyncio.create_task(_raw_connection(engine))
+                await _raw_connection(other.primary.engine)
+            assert [entry.dbapi_connection for entry in reported] == [own]
+        finally:
+            await registry.close()
+            await other.close()
+
+    async def test_a_task_started_during_the_checks_pre_ping_leaves_its_entry_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Application work started while the check pre-pings (by a pool listener, say) inherits the
+        # check's context. The connection it borrows must never become the one a late check closes.
+        registry = _sqlite_registry(tmp_path / "child.db", pre_ping=True)
+        engine = registry.primary.engine
+        loop = asyncio.get_running_loop()
+        check = _Check(engine, loop.time())
+        child_holds, release_child = asyncio.Event(), asyncio.Event()
+        seen: dict[str, Any] = {}
+        ping = engine.dialect.do_ping
+
+        async def _child() -> None:
+            async with engine.connect() as conn:
+                seen["child"] = conn.sync_connection.connection.dbapi_connection
+                child_holds.set()
+                await release_child.wait()
+
+        def _ping_while_a_child_checks_out(dbapi_connection: Any) -> bool:
+            seen["child_task"] = loop.create_task(_child())
+            await_only(child_holds.wait())  # the check waits in its pre-ping while the child checks out
+            seen["pinged"] = dbapi_connection
+            seen["entry"] = check.entry.dbapi_connection if check.entry is not None else None
+            return bool(ping(dbapi_connection))
+
+        monkeypatch.setattr(engine.dialect, "do_ping", _ping_while_a_child_checks_out)
+        try:
+            await _raw_connection(engine)  # an established connection for the check to pre-ping
+            check.task = loop.create_task(_select_one(check))
+            result = await check.task
+            assert result.status == "UP", result.details
+            assert seen["child"] is not seen["pinged"]
+            assert seen["entry"] is seen["pinged"]
+            assert check.entry is None
+        finally:
+            release_child.set()
+            if "child_task" in seen:
+                await seen["child_task"]
+            await registry.close()
+
+    async def test_the_entry_is_dropped_when_the_checkout_fails(self, tmp_path: Path) -> None:
+        registry = _sqlite_registry(tmp_path / "refused.db")
+        engine = registry.primary.engine
+        loop = asyncio.get_running_loop()
+        check = _Check(engine, loop.time())
+        during: list[tuple[Any, Any]] = []
+
+        def _refuse(_dbapi_connection: Any, record: Any, _proxy: Any) -> None:
+            during.append((check.entry, record))
+            raise RuntimeError("checkout refused")
+
+        try:
+            await _raw_connection(engine)
+            event.listen(engine.sync_engine, "checkout", _refuse)
+            check.task = loop.create_task(_select_one(check))
+            result = await check.task
+            assert result.status == "DOWN"
+            assert result.details["error"] == "RuntimeError"
+            assert len(during) == 1
+            assert during[0][0] is during[0][1]  # the check knew the entry it was checking out
+            assert check.entry is None  # and let go of it with the failed checkout
+            assert engine.pool.checkedout() == 0
         finally:
             await registry.close()
 

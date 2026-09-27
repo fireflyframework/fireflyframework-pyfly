@@ -22,11 +22,11 @@ report UP once the network is back.
 
 The same proxy also reproduces a middlebox that forgot an idle flow (a cloud NAT or load balancer after
 its idle timeout): the pooled connection loses every byte while new connections reach the server. The
-check that landed on it answers DOWN, closes that connection's socket instead of waiting for the kernel
-to give up on it, and the next probe answers UP on a fresh connection. That case runs on PostgreSQL,
-MySQL and MariaDB, each with pool pre-ping off and on: with pre-ping on, the check hangs in the
-checkout's pre-ping, before it holds the connection, and asyncpg's cancel protocol would otherwise wait
-on the dead socket for good.
+check that landed on it answers DOWN, closes that connection's socket instead of leaving the check in
+the driver's cleanup, and the next probe answers UP on a fresh connection. That case runs on
+PostgreSQL, MySQL and MariaDB, each with pool pre-ping off and on: with pre-ping on, the check hangs in
+the checkout's pre-ping, before it holds the connection, and asyncpg's cancel protocol would otherwise
+wait on the dead socket for good.
 """
 
 from __future__ import annotations
@@ -176,9 +176,9 @@ async def test_black_holed_pooled_connection_is_down_for_one_probe_only(
         assert first.details["error"] == "TimeoutError"
         assert elapsed >= _TIMEOUT * 0.9
 
-        # The late check's socket is closed rather than left to the kernel's retransmission timeout (or,
-        # after a pre-ping, to asyncpg's cancel protocol, which waits on that socket without a timeout):
-        # the check ends and gives its pool slot back at once, and the next probe finds the database healthy.
+        # The late check's socket is closed before the check is cancelled, so the driver's cleanup does not
+        # wait on it (asyncpg's cancel protocol would wait for the server's answer with no timeout): the
+        # check ends and gives its pool slot back at once, and the next probe finds the database healthy.
         assert await _checks_finished() == [], "the late check is still running"
         assert await _slots_released(engine) == 0, "the late check still holds its pool slot"
         second, _ = await _answer_within(indicator.health(), _TIMEOUT + _SLACK)

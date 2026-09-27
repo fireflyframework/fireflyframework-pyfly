@@ -28,24 +28,35 @@ The indicator is built for the Kubernetes readiness probe, and only for it:
   and waits for it without a timeout);
 - the late check does not keep its connection. The socket of the connection it holds, or is still
   checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
-  ``terminate``, which sends nothing and waits for nothing) and the check is cancelled, so it gives its
-  pool slot back at once. A middlebox that forgot an idle flow (a cloud NAT or load balancer after its
-  idle timeout) black-holes a pooled connection while the database accepts new ones. Without this the
-  check would sit in the driver's cleanup until the kernel gave up on the socket (about 15 minutes on
-  Linux), or for good with pool pre-ping on: cancelled, asyncpg's pre-ping waits for the server's
-  answer on that socket with no timeout. With it, each black-holed connection costs one probe, pre-ping
-  on or off: that probe answers DOWN and the next one runs on another connection. A check still in its
-  checkout is reached through the pool entry that the registry's pool
-  (:class:`~pyfly.data.relational.datasource_registry.MeteredAsyncQueuePool`) reports; on an engine the
-  registry did not build, a check stuck in the pre-ping cannot be closed and keeps its pool slot (the
-  next point bounds that). A check on a connection the pool shares with the application
-  (``StaticPool`` for SQLite ``:memory:``) is neither closed nor cancelled, only no longer waited for:
-  it runs after the application's statement ahead of it;
+  ``terminate``, which sends nothing and waits for nothing), and then the check is cancelled. A
+  middlebox that forgot idle flows (a cloud NAT or load balancer after its idle timeout) black-holes
+  those pooled connections while the database accepts new ones. Cancelled on one of them without
+  this, asyncpg sends a cancel request and waits for the server's answer on the dead socket with no
+  timeout, even once the connection is lost: the check would never end and would keep its pool slot.
+  With it, the check usually ends at once and gives its slot back. When the driver turns the
+  cancellation into a disconnect error instead (a pre-ping whose rollback fails on the closed socket),
+  SQLAlchemy reconnects, within the connect timeout, and the check runs its ``SELECT 1`` on the new
+  connection. Each black-holed pooled connection costs one probe, pre-ping on or off: that probe
+  answers DOWN and the next one runs on another connection. When a NAT forgets every idle flow at
+  once, up to one probe per idle connection answers DOWN, so with the readiness probe's default
+  ``failureThreshold`` of 3 a pool holding three or more idle connections can take the replica out of
+  rotation until a probe answers UP again. A check still in its checkout is reached through the pool
+  entry that the registry's pool
+  (:class:`~pyfly.data.relational.datasource_registry.MeteredAsyncQueuePool`) reports; for an engine
+  the registry did not build, see the next point. A check on a connection the pool shares with the
+  application (``StaticPool`` for SQLite ``:memory:``) is neither closed nor cancelled, only no longer
+  waited for: it runs after the application's statement ahead of it;
 - while a check that missed its deadline is still winding down with its connection, the next probe of
   that datasource answers DOWN at once instead of borrowing another connection. A late check that never
   got its connection (stuck connecting or pre-pinging) does not hold the next probes back: they start a
-  new check, on another connection, as long as fewer than two late checks of that datasource are still
-  running. Stuck checks therefore cannot pile up;
+  new check on another connection while fewer than two late checks of that datasource are still
+  running, and answer DOWN (``previous check still running``) beyond that. This bounds what an engine
+  the registry did not build (a user-supplied ``async_engine`` bean) with pool pre-ping on can lose:
+  its pool reports no entry, so a check stuck in an asyncpg pre-ping cannot be closed and, once
+  cancelled, never ends, not even when the kernel gives up on the socket. Each silent drop can leave
+  one such check behind, holding a pool slot, two per engine at most; after that the datasource answers
+  ``previous check still running`` until the application stops, and a pool of two connections or fewer
+  without overflow is starved;
 - a probe that is itself cancelled (the client hung up) stops the check only when no other probe is
   waiting for it;
 - when the pool has no idle connection and no overflow left, the check does not queue behind the
@@ -97,8 +108,13 @@ class _Check:
         self.waiters = 0
 
     def checking_out(self, entry: ConnectionPoolEntry) -> None:
-        """Remember the pool entry the check is checking out (the registry's pool reports it)."""
-        if self.connection is None:
+        """Remember the pool entry of the check's own checkout, which the registry's pool reports.
+
+        The pool reports only the checkouts the check's task makes on the engine's pool, and only the
+        first counts: a checkout made by another task, or nested in the check's own (a pool listener
+        borrowing a connection), holds an entry the check must never close.
+        """
+        if self.connection is None and self.entry is None and asyncio.current_task() is self.task:
             self.entry = entry
 
 
@@ -244,7 +260,7 @@ async def _select_one(check: _Check) -> HealthStatus:
     engine = check.engine
     dialect = _dialect(engine)
     try:
-        with observing_checkouts(check.checking_out):
+        with observing_checkouts(check.checking_out, pool=getattr(getattr(engine, "sync_engine", None), "pool", None)):
             async with engine.connect() as conn:
                 check.connection = conn.sync_connection.connection
                 check.entry = None

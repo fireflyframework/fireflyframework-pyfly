@@ -76,7 +76,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import AsyncAdaptedQueuePool, ConnectionPoolEntry, PoolProxiedConnection, QueuePool
+from sqlalchemy.pool import AsyncAdaptedQueuePool, ConnectionPoolEntry, Pool, PoolProxiedConnection, QueuePool
 
 from pyfly.config.properties.data import PREFIX, PRIMARY, DataSourceProperties, RelationalProperties
 from pyfly.container.ordering import get_order
@@ -156,23 +156,35 @@ def datasource_of(target: AsyncEngine | async_sessionmaker[AsyncSession]) -> Dat
 # ---------------------------------------------------------------------------
 
 
-_CHECKOUT_OBSERVER: ContextVar[Callable[[ConnectionPoolEntry], None] | None] = ContextVar(
-    "pyfly_checkout_observer", default=None
+_CHECKOUT_OBSERVER: ContextVar[tuple[asyncio.Task[Any], Pool | None, Callable[[ConnectionPoolEntry], None]] | None] = (
+    ContextVar("pyfly_checkout_observer", default=None)
 )
-"""The observer :func:`observing_checkouts` set in the current task, if any."""
+"""The task that entered :func:`observing_checkouts`, the pool it observes (any when None), its observer."""
+
+
+def _current_task() -> asyncio.Task[Any] | None:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:  # no event loop in this thread
+        return None
 
 
 @contextmanager
-def observing_checkouts(observer: Callable[[ConnectionPoolEntry], None]) -> Iterator[None]:
+def observing_checkouts(observer: Callable[[ConnectionPoolEntry], None], *, pool: Pool | None = None) -> Iterator[None]:
     """Hand *observer* the pool entry of each connection the current task checks out inside the block.
 
     A :class:`MeteredAsyncQueuePool` reports the entry as soon as it has it (an idle entry, or a new
     one once connected), before the checkout reconnects, recycles or pre-pings its connection. The
     ``db`` health check needs it: a check that hangs in the pre-ping holds no connection yet, and the
-    entry is how it reaches the socket the pre-ping waits on. The observer is task-local (a context
-    variable), so checkouts other tasks make meanwhile are not reported; other pools report nothing.
+    entry is how it reaches the socket the pre-ping waits on.
+
+    Only the checkouts of the task that entered the block are reported, and only from *pool* when it
+    is given. A task created inside the block copies the context variable that carries the observer,
+    but its checkouts are not reported, and neither are those made in a thread the context was copied
+    to; outside a task nothing is. Other pool classes report nothing.
     """
-    token = _CHECKOUT_OBSERVER.set(observer)
+    task = _current_task()
+    token = _CHECKOUT_OBSERVER.set((task, pool, observer) if task is not None else None)
     try:
         yield
     finally:
@@ -187,8 +199,8 @@ class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
     when the pool grows or recycles one, and the pre-ping when it is on. A checkout that fails (a pool
     timeout) is reported too. The observers carry over to the pool ``engine.dispose()`` creates.
 
-    Inside :func:`observing_checkouts`, it also reports the pool entry of each checkout, before the
-    checkout reconnects, recycles or pre-pings the entry's connection.
+    Inside :func:`observing_checkouts`, it also reports the pool entry of each checkout the observing
+    task makes, before the checkout reconnects, recycles or pre-pings the entry's connection.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -213,9 +225,12 @@ class MeteredAsyncQueuePool(AsyncAdaptedQueuePool):
 
     def _do_get(self) -> ConnectionPoolEntry:
         entry = super()._do_get()
-        observer = _CHECKOUT_OBSERVER.get()
-        if observer is not None:
-            observer(entry)
+        observing = _CHECKOUT_OBSERVER.get()
+        if observing is not None:
+            task, pool, observer = observing
+            # Not a task, or a thread, that merely inherited the context; not a checkout of another pool.
+            if _current_task() is task and (pool is None or pool is self):
+                observer(entry)
         return entry
 
     def recreate(self) -> MeteredAsyncQueuePool:
