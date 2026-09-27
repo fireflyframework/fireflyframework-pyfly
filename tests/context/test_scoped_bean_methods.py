@@ -23,7 +23,7 @@ return class is now registered under that class and built only on resolution, as
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -329,5 +329,31 @@ async def test_a_transient_factory_with_an_optional_parametrized_hint_is_asked_o
             ctx.get_bean(async_sessionmaker)
         assert ctx.container._resolve_param(async_sessionmaker[AsyncSession] | None) is None
         assert _CALLS == ["audit_sessions", "audit_sessions"]
+    finally:
+        await ctx.stop()
+
+
+@configuration
+class _TenantFormatters:
+    @bean(name="tenant_formatter", scope=Scope.REQUEST)
+    def tenant_formatter(self) -> Callable[[str], str]:
+        _CALLS.append("tenant_formatter")
+        context = RequestContext.current()
+        assert context is not None, "a REQUEST-scoped factory ran outside a request"
+        prefix = str(context.get("tenant"))
+        return lambda text: f"{prefix}:{text}"
+
+
+async def test_a_request_scoped_factory_with_an_abstract_collection_hint_runs_only_inside_a_request() -> None:
+    """``-> Callable[[str], str]`` is registered by name without calling the factory at startup, like any
+    scoped ``@bean`` with a parametrized hint (only a deferred singleton's claim ignores such a hint)."""
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_TenantFormatters)
+    await ctx.start()
+    try:
+        assert _CALLS == [], "start() called a REQUEST-scoped factory"
+        RequestContext.init().set("tenant", "acme")
+        assert ctx.get_bean_by_name("tenant_formatter")("x") == "acme:x"
+        assert _CALLS == ["tenant_formatter"]
     finally:
         await ctx.stop()

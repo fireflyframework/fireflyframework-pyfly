@@ -82,10 +82,13 @@ class _DeferredBeanMethod:
 #: ``AsyncEngine`` releases its pool, ``aclose()`` how an async client closes).
 _INFERRED_DESTROY_METHODS: tuple[str, ...] = ("dispose", "aclose", "close")
 
-#: The modules whose generic classes a parametrized ``@bean`` hint never registers under: a builtin
-#: container (``list[X]``, ``type[X]``) or an abstract collection (``Callable[[str], str]``) names what
-#: the product is, not which bean it is.
-_NOT_BEAN_KEY_MODULES = frozenset({"builtins", "collections.abc", "typing"})
+#: The builtin containers a parametrized ``@bean`` hint never registers under (``list[X]``, ``type[X]``).
+_BUILTIN_CONTAINERS: tuple[type, ...] = (list, dict, set, frozenset, tuple, type)
+
+#: The modules whose generic classes a deferred ``@bean`` never claims: a builtin container or an abstract
+#: collection (``Callable[[str], str]``) names what the product is, not which bean it replaces, and a claim
+#: under it would make ``@conditional_on_missing_bean`` and every injection of that type see the product.
+_NOT_CLAIMED_MODULES = frozenset({"builtins", "collections.abc", "typing"})
 
 
 def _takes_no_arguments(member: Any) -> bool:
@@ -990,17 +993,20 @@ class ApplicationContext:
         return None
 
     @classmethod
-    def _declared_registration_type(cls, return_type: Any) -> type | None:
+    def _declared_registration_type(cls, return_type: Any, *, claim: bool = False) -> type | None:
         """The class a ``@bean`` method is registered under before its product exists.
 
-        That is the registration of a non-singleton ``@bean`` (built only when its scope asks) and the
-        provisional claim of a deferred singleton one (completed once its dependencies exist). As
-        :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
+        That is the registration of a non-singleton ``@bean`` (built only when its scope asks) and, with
+        *claim*, the provisional claim of a deferred singleton one (completed once its dependencies
+        exist). As :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
         ``-> async_sessionmaker[AsyncSession]`` (the idiomatic hint), and ``... | None``, declare
         ``async_sessionmaker``. That is what an injection of the parametrized type resolves (the
         container falls back to the origin), and what ``@conditional_on_missing_bean`` asks about. A
         builtin container (``list[X]``, ``dict[K, V]``) or ``type[X]`` declares nothing: those are not
-        bean keys. A singleton whose factory runs at once keeps :meth:`_declared_bean_type`: it is
+        bean keys. A claim also ignores an abstract collection (``Callable[[str], str]``), which names
+        what the product is rather than which bean it replaces; a scoped ``@bean`` with such a hint is
+        still registered under it, so its factory is not called at startup (a REQUEST-scoped one has no
+        request then). A singleton whose factory runs at once keeps :meth:`_declared_bean_type`: it is
         registered under the concrete class it returns.
         """
         declared = cls._declared_bean_type(return_type)
@@ -1013,9 +1019,11 @@ class ApplicationContext:
                 return None
             hint = members[0]
         origin = typing.get_origin(hint)
-        if isinstance(origin, type) and origin.__module__ not in _NOT_BEAN_KEY_MODULES:
-            return origin
-        return None
+        if not isinstance(origin, type) or origin in _BUILTIN_CONTAINERS:
+            return None
+        if claim and origin.__module__ in _NOT_CLAIMED_MODULES:
+            return None
+        return origin
 
     def _process_configurations(self, *, auto: bool = False) -> None:
         """Find @configuration beans, call their @bean methods, register results.
@@ -1270,7 +1278,7 @@ class ApplicationContext:
         # auto-configured bean back off): a request- or refresh-scoped bean of the class is another bean,
         # and whichever came first, the override must still be seen. The claim is found by its class and
         # bean name, never by the by-type slot, which a later scoped registration takes over.
-        declared = self._declared_registration_type(return_type)
+        declared = self._declared_registration_type(return_type, claim=True)
         if declared is not None and not self._singleton_registered(declared):
             self._container.register(declared, scope=bean_scope, name=bean_name)
             provisional = self._container._all[(declared, bean_name)]
@@ -1308,7 +1316,7 @@ class ApplicationContext:
         It is found by its class and bean name (see :meth:`_defer_bean_method`) and recognized by the
         factory closure the deferral created; a call that was not deferred passes no factory.
         """
-        claimed = self._declared_registration_type(return_type)
+        claimed = self._declared_registration_type(return_type, claim=True)
         if claimed is None or factory is None:
             return None
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
