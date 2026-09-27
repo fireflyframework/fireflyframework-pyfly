@@ -73,6 +73,11 @@ cached."""
 DEFAULT_GENERATION_TTL = timedelta(seconds=900)
 """How long a generation lives when the TTL of its entries is unknown: the query bus's default cache TTL."""
 
+EVICTION_CONCURRENCY = 4
+"""How many deletes one eviction (:meth:`QueryCacheAdapter.evict_keys`) runs at a time. A key is deleted
+under every ``cache_key_prefix`` with its generation, and on a database-backed cache each delete checks out
+a pooled connection: unbounded, one command could take the whole pool."""
+
 
 def _ambient_tenant() -> str | None:
     """The ``X-Tenant-Id`` of the running request: client-supplied and never authenticated."""
@@ -276,9 +281,10 @@ class QueryCacheAdapter:
         """Evict each of *cache_keys* for every caller's scope: its unscoped entry, and its scoped entries by
         deleting its generation; how many of the keys had anything cached. Nothing is written.
 
-        The deletes are one step: they run concurrently, after the commit inside a unit of work (``0`` is
-        returned then) and at once outside one, and to completion even when the calling task is cancelled
-        meanwhile. A failing delete is logged once the others have run."""
+        The deletes are one step: they run concurrently (at most :data:`EVICTION_CONCURRENCY` at a time),
+        after the commit inside a unit of work (``0`` is returned then) and at once outside one, outside the
+        caller's unit either way, and to completion even when the calling task is cancelled meanwhile. A
+        failing delete is logged once the others have run."""
         region = self._region
         targets = [key for cache_key in dict.fromkeys(cache_keys) for key in (cache_key, cache_key + GENERATION_SUFFIX)]
         if region is None or not targets:
@@ -286,7 +292,13 @@ class QueryCacheAdapter:
         store = region.delegate
 
         async def evict_every_scope() -> int:
-            outcomes = await asyncio.gather(*(store.evict(key) for key in targets), return_exceptions=True)
+            slots = asyncio.Semaphore(EVICTION_CONCURRENCY)
+
+            async def evict(key: str) -> bool:
+                async with slots:
+                    return await store.evict(key)
+
+            outcomes = await asyncio.gather(*(evict(key) for key in targets), return_exceptions=True)
             for outcome in outcomes:
                 if isinstance(outcome, BaseException):
                     raise outcome

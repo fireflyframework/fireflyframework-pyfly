@@ -503,7 +503,7 @@ adapter = QueryCacheAdapter(cache=my_cache_instance)
 | `entry_key(key, digest, ttl=None)` | The key an entry lives under for a caller's scope digest; `None` when the call is not cached. |
 | `put(key, value, ttl)` | Store with optional `timedelta` TTL; after the commit inside a unit of work. |
 | `evict(key)` | Remove a key for every caller's scope; after the commit inside a unit of work. |
-| `evict_keys(keys)` | `evict` for several keys as one step of concurrent deletes. |
+| `evict_keys(keys)` | `evict` for several keys as one step of concurrent deletes (at most `EVICTION_CONCURRENCY`, 4, at a time). |
 | `evict_prefix(prefix)` | Remove every entry whose key starts with `prefix` (scans the query cache's keys: `SCAN` on Redis). |
 | `clear()` | Remove every query-cache entry (the `:cqrs:` prefix), and nothing else the cache holds. |
 | `is_available` | Whether an underlying cache is configured. |
@@ -597,7 +597,8 @@ of tenants and users: scoped entries live under the key's current generation
 (`<key>|generation`) and the key's unscoped entry. The old entries are
 unreachable from then on and expire with their TTL; the next lookup starts a
 fresh generation. A key that was never cached costs no write, and the deletes of
-one eviction (the key under every `cache_key_prefix`) run concurrently. A scoped
+one eviction (the key under every `cache_key_prefix`) run concurrently, four at
+a time: on a database-backed cache each takes a pooled connection. A scoped
 lookup reads the generation first, one extra round trip.
 
 A generation expires too: it is created with the TTL of the entries looked up

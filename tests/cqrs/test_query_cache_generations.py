@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from pyfly.cache.adapters.memory import InMemoryCache
-from pyfly.cqrs.cache.adapter import GENERATION_SUFFIX, QueryCacheAdapter
+from pyfly.cqrs.cache.adapter import EVICTION_CONCURRENCY, GENERATION_SUFFIX, QueryCacheAdapter
 from pyfly.cqrs.cache.decorators import cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
@@ -122,3 +122,32 @@ async def test_an_expired_generation_never_brings_back_an_evicted_entry() -> Non
     after = await adapter.entry_key("Report:1", "digest", ttl=ttl)
     assert after is not None and after != before
     assert await adapter.lookup(after) == (False, None)
+
+
+class _CountingCache(InMemoryCache):
+    """Counts the deletes in flight at once: on a database-backed cache each one holds a pooled connection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_flight = 0
+        self.most_in_flight = 0
+
+    async def evict(self, key: str) -> bool:
+        self.in_flight += 1
+        self.most_in_flight = max(self.most_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0.001)
+            return await super().evict(key)
+        finally:
+            self.in_flight -= 1
+
+
+async def test_an_eviction_runs_a_bounded_number_of_deletes_at_a_time() -> None:
+    cache = _CountingCache()
+    adapter = QueryCacheAdapter(cache)
+    keys = [f"p{n}:stock:1" for n in range(21)]  # a key under 21 handlers' cache_key_prefix
+    for key in keys:
+        await cache.put(f":cqrs:{key}", 1)
+    assert await adapter.evict_keys(keys) == 21
+    assert cache.get_keys() == []
+    assert 1 < cache.most_in_flight <= EVICTION_CONCURRENCY  # concurrent, but never 42 connections at once
