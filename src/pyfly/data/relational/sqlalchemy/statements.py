@@ -37,7 +37,9 @@ not broken, and a PostgreSQL feature is only ever an accelerator.
   ``OFFSET``.
 - **Entities a join repeats.** :func:`joins_rows` tells whether a specification's join can repeat an entity;
   :func:`distinct_entity_page` then cuts a page from the distinct primary keys, and
-  :func:`distinct_entity_count` counts them, so pages count entities rather than joined rows.
+  :func:`distinct_entity_count` counts them, so pages count entities rather than joined rows;
+  :func:`row_count` counts the rows of any other statement. What a statement asks of the entities it reads
+  (its fetch plan, loader criteria, execution options and lock) goes on the statement that reads them.
 - **Delete strategy.** :func:`bulk_delete_safe` says whether a bulk ``DELETE`` does what deleting entity by
   entity does: no ORM cascade, version column, inheritance or delete listener.
 - **Fetch plans and locks.** :func:`loader_options` turns a repository's ``load=`` argument into loader
@@ -49,7 +51,7 @@ from __future__ import annotations
 import enum
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from sqlalchemy import (
     ARRAY,
@@ -71,7 +73,15 @@ from sqlalchemy import (
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapper, QueryableAttribute, RelationshipProperty, Session, defaultload, selectinload
+from sqlalchemy.orm import (
+    LoaderCriteriaOption,
+    Mapper,
+    QueryableAttribute,
+    RelationshipProperty,
+    Session,
+    defaultload,
+    selectinload,
+)
 from sqlalchemy.orm.interfaces import MANYTOONE
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.base import ExecutableOption
@@ -102,6 +112,7 @@ __all__ = [
     "order_expressions",
     "padded",
     "primary_key_orders",
+    "row_count",
     "stream_safe",
     "unique_entities",
 ]
@@ -278,15 +289,36 @@ def joins_rows(statement: Select[Any], entity: type) -> bool:
     or another FROM a specification added), so one entity can come back on several rows.
 
     A ``LIMIT`` on such a statement counts rows, not entities: page it with :func:`distinct_entity_page` and
-    count it with :func:`distinct_entity_count`. A subquery (``EXISTS``, ``IN (SELECT ...)``) adds no FROM.
+    count it with :func:`distinct_entity_count`. A subquery (``EXISTS``, ``IN (SELECT ...)``) adds no FROM, and
+    a join along a many-to-one relationship (``join(Child.parent)``, from the entity or from a many-to-one
+    joined before it) matches at most one row per entity; any other join, and any FROM the joins did not bring
+    in, may repeat it.
     """
-    if statement._setup_joins:
-        return True
     mapper: Mapper[Any] = sa_inspect(entity)
-    own: set[Any] = set(mapper.tables)
+    covered: set[Any] = set(mapper.tables)
+    for target, onclause, _left, flags in statement._setup_joins:
+        relationship = _relationship_of(onclause) or _relationship_of(target)
+        if (
+            relationship is None
+            or flags.get("full")
+            or relationship.direction is not MANYTOONE
+            or relationship.uselist
+            or relationship.parent.local_table not in covered
+        ):
+            return True
+        # An aliased target (of_type) is not covered: a WHERE on the alias then counts as another FROM.
+        covered.update(
+            relationship.mapper.tables if isinstance(target, QueryableAttribute) else [cast(Any, target)._deannotate()]
+        )
     where = statement.whereclause
     sources = [*statement._from_obj, *(where._from_objects if where is not None else ())]
-    return any(source._deannotate() not in own for source in sources)
+    return any(source._deannotate() not in covered for source in sources)
+
+
+def _relationship_of(element: Any) -> RelationshipProperty[Any] | None:
+    """The relationship *element* is an attribute of (``Child.parent``), or ``None``."""
+    prop = getattr(element, "property", None) if isinstance(element, QueryableAttribute) else None
+    return prop if isinstance(prop, RelationshipProperty) else None
 
 
 def distinct_entity_page(
@@ -299,14 +331,21 @@ def distinct_entity_page(
     keys, in the same order: ``SELECT e.* FROM e JOIN (SELECT DISTINCT e.pk, <keys> ... ORDER BY ... LIMIT
     ...) AS page ON e.pk = page.pk ORDER BY page.<keys>``. Portable (SQL Server 2012 and later included), and one
     statement. Order *statement* by the entity's own properties: ordering by a joined row's column repeats an
-    entity once per distinct value. Loader options go on the returned statement.
+    entity once per distinct value.
+
+    What *statement* asks of the entities it reads goes on the returned statement, which reads them: its loader
+    options (a fetch plan, ``with_loader_criteria``), its execution options, and its lock (``with_for_update``),
+    which PostgreSQL and Oracle refuse on a ``DISTINCT``. The lock takes the entity's rows (``FOR UPDATE OF``
+    its table where the dialect names tables) unless it names what to lock itself; the rows of the tables it
+    joined are read by the key subquery and are not locked. More loader options go on the returned statement.
     """
     mapper: Mapper[Any] = sa_inspect(entity)
     key_columns = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
     orders = [_split_order(clause) for clause in statement._order_by_clauses]
     keys = [column.label(f"pyfly_k{index}") for index, column in enumerate(key_columns)]
     sort_keys = [key.label(f"pyfly_o{index}") for index, (key, _modifiers) in enumerate(orders)]
-    inner = statement.with_only_columns(*keys, *sort_keys, maintain_column_froms=True).order_by(None).distinct()
+    inner = _unlocked(statement.with_only_columns(*keys, *sort_keys, maintain_column_froms=True).order_by(None))
+    inner = inner.distinct()
     if offset or limit is not None:
         # SQL Server refuses an ORDER BY in a derived table without OFFSET or TOP: order only a cut page.
         inner = inner.order_by(
@@ -318,19 +357,67 @@ def distinct_entity_page(
             inner = inner.limit(limit)
     page = inner.subquery("pyfly_page")
     matched = and_(*(column == page.c[f"pyfly_k{index}"] for index, column in enumerate(key_columns)))
-    return (
+    outer: Select[Any] = (
         select(entity)
         .join(page, matched)
         .order_by(*(_directed(page.c[f"pyfly_o{index}"], modifiers) for index, (_key, modifiers) in enumerate(orders)))
     )
+    # A subquery's loader options are never applied (only the top-level statement's are), so a fetch plan
+    # left on the key subquery alone would be silently dropped.
+    if statement._with_options:
+        outer = outer.options(*statement._with_options)
+    execution_options = statement.get_execution_options()
+    if execution_options:
+        outer = outer.execution_options(**execution_options)
+    lock = statement._for_update_arg
+    if lock is not None:
+        # A column names its table on every dialect (Oracle renders OF with columns only).
+        outer = outer.with_for_update(
+            read=lock.read,
+            nowait=lock.nowait,
+            skip_locked=lock.skip_locked,
+            key_share=lock.key_share,
+            of=cast(Any, lock.of) if lock.of else key_columns,
+        )
+    return outer
 
 
 def distinct_entity_count(statement: Select[Any], entity: type) -> Select[tuple[int]]:
-    """``SELECT count(*)`` of the distinct *entity* primary keys *statement* matches (its ORDER BY dropped)."""
+    """``SELECT count(*)`` of the distinct *entity* primary keys *statement* matches (see :func:`row_count` for
+    what the count keeps of *statement*)."""
     mapper: Mapper[Any] = sa_inspect(entity)
     key_columns = [getattr(entity, mapper.get_property_by_column(column).key) for column in mapper.primary_key]
-    keys = statement.with_only_columns(*key_columns, maintain_column_froms=True).order_by(None).distinct()
-    return select(func.count()).select_from(keys.subquery())
+    keys = statement.with_only_columns(*key_columns, maintain_column_froms=True).distinct()
+    return _count(keys, statement)
+
+
+def row_count(statement: Select[Any]) -> Select[tuple[int]]:
+    """``SELECT count(*)`` of the rows *statement* matches.
+
+    The count runs over *statement* as a subquery, without its ORDER BY and its lock (counting locks nothing,
+    and PostgreSQL refuses a lock on a ``DISTINCT``). It keeps the loader criteria of *statement*
+    (``with_loader_criteria``) and its execution options, which the ORM would not apply to a subquery: the
+    count covers what the statement reads.
+    """
+    return _count(statement, statement)
+
+
+def _count(counted: Select[Any], source: Select[Any]) -> Select[tuple[int]]:
+    count: Select[tuple[int]] = select(func.count()).select_from(_unlocked(counted.order_by(None)).subquery())
+    criteria = [option for option in source._with_options if isinstance(option, LoaderCriteriaOption)]
+    if criteria:
+        count = count.options(*criteria)
+    execution_options = source.get_execution_options()
+    return count.execution_options(**execution_options) if execution_options else count
+
+
+def _unlocked(statement: Select[Any]) -> Select[Any]:
+    """*statement* without its ``FOR UPDATE`` (there is no public way to take a lock off a ``SELECT``)."""
+    if statement._for_update_arg is None:
+        return statement
+    copy = statement._generate()
+    copy._for_update_arg = None
+    return copy
 
 
 def _split_order(clause: Any) -> tuple[Any, list[Any]]:

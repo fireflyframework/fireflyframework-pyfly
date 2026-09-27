@@ -38,7 +38,16 @@ import pytest
 from sqlalchemy import ForeignKey, Integer, String, event, select
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 from sqlalchemy.engine import Dialect
-from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload
+from sqlalchemy.orm import (
+    Mapped,
+    Session,
+    aliased,
+    joinedload,
+    mapped_column,
+    relationship,
+    selectinload,
+    with_loader_criteria,
+)
 from sqlalchemy.sql import Select
 
 from pyfly.data.pageable import Order, Sort
@@ -61,6 +70,7 @@ from pyfly.data.relational.sqlalchemy.statements import (
     order_expressions,
     padded,
     primary_key_orders,
+    row_count,
     stream_safe,
 )
 from tests.support.contract_models import ContractChild, ContractLine, ContractParent, ContractVersioned
@@ -382,6 +392,27 @@ class TestDistinctEntities:
         )
         assert not joins_rows(select(StManager).where(StManager.id > 0), StManager)  # its own two tables
 
+    def test_a_join_along_a_many_to_one_does_not(self) -> None:
+        """A many-to-one matches at most one row per entity, so a page of its join needs no DISTINCT."""
+        spanish = ContractParent.name == "a"
+        assert not joins_rows(select(ContractChild).join(ContractChild.parent).where(spanish), ContractChild)
+        assert not joins_rows(select(ContractChild).outerjoin(ContractChild.parent), ContractChild)
+        assert not joins_rows(
+            select(ContractChild).join(ContractParent, ContractChild.parent).where(spanish), ContractChild
+        )
+        assert not joins_rows(select(StCar).join(StCar.owner).where(StOwner.id > 1), StCar)
+        # The shelf's books are a collection: joining them from the book's shelf repeats the book.
+        assert joins_rows(select(StBook).join(StBook.shelf).join(StShelf.books.of_type(aliased(StBook))), StBook)
+
+    def test_a_join_it_cannot_tell_is_taken_to_repeat_entities(self) -> None:
+        """An ON clause of its own, a join from the other side of a many-to-one (one-to-many from the entity), or
+        a WHERE that names a table the joins did not bring in."""
+        by_hand = select(ContractChild).join(ContractParent, ContractChild.parent_id == ContractParent.id)
+        assert joins_rows(by_hand, ContractChild)
+        assert joins_rows(select(ContractParent).join(ContractChild, ContractChild.parent), ContractParent)
+        other = select(ContractChild).join(ContractChild.parent).where(ContractLine.sku == ContractChild.label)
+        assert joins_rows(other, ContractChild)
+
     @pytest.mark.parametrize("name", ["postgresql", "sqlite", "mysql", "mariadb", "oracle"])
     def test_a_page_is_cut_from_the_distinct_keys_with_their_order_keys(self, name: str) -> None:
         dialect = DIALECTS[name]
@@ -421,6 +452,62 @@ class TestDistinctEntities:
         )
         assert sql.startswith("SELECT count(*) AS count_1 FROM (SELECT DISTINCT contract_parent.id AS id FROM")
         assert "ORDER BY" not in sql
+
+    def test_the_statement_that_reads_the_entities_carries_their_plan_and_options(self) -> None:
+        """A subquery's loader options are never applied: the statement's fetch plan and execution options go on
+        the statement that reads the entities, or the plan is silently dropped."""
+        plan = selectinload(ContractParent.children)
+        statement = _joined_parents().options(plan).execution_options(populate_existing=True).order_by("name")
+        page = distinct_entity_page(statement, ContractParent, limit=2)
+        assert plan in page._with_options
+        assert page.get_execution_options()["populate_existing"] is True
+        unplanned = distinct_entity_page(_joined_parents().order_by("name"), ContractParent, limit=2)
+        assert unplanned._with_options == () and "populate_existing" not in unplanned.get_execution_options()
+
+    @pytest.mark.parametrize(
+        ("name", "clause"),
+        [
+            ("postgresql", "FOR UPDATE OF contract_parent NOWAIT"),
+            ("oracle", "FOR UPDATE OF contract_parent.id NOWAIT"),
+            ("mysql", "FOR UPDATE NOWAIT"),  # OF needs MySQL 8, which the dialect learns when it connects
+        ],
+    )
+    def test_a_lock_moves_off_the_distinct_keys_onto_the_entities(self, name: str, clause: str) -> None:
+        """PostgreSQL and Oracle refuse FOR UPDATE on a DISTINCT: the keys are read unlocked, and the lock takes
+        the rows of the entities the page reads (their table, unless the statement named what to lock)."""
+        dialect = DIALECTS[name]
+        locked = _joined_parents().order_by(ContractParent.name).with_for_update(nowait=True)
+        sql = _sql(distinct_entity_page(locked, ContractParent, offset=2, limit=2), dialect)
+        keys, entities = sql.split("pyfly_page ON ")
+        assert "FOR UPDATE" not in keys
+        assert entities.endswith(clause)
+        shared = _joined_parents().order_by(ContractParent.name).with_for_update(read=True, of=ContractChild)
+        sql = _sql(distinct_entity_page(shared, ContractParent, limit=2), DIALECTS["postgresql"])
+        assert sql.endswith("FOR SHARE OF contract_child")  # what the statement named
+        assert "FOR UPDATE" not in _sql(distinct_entity_count(locked, ContractParent), dialect)
+        assert locked._for_update_arg is not None  # the statement itself is unchanged
+
+    @pytest.mark.parametrize("count", [row_count, lambda s: distinct_entity_count(s, ContractParent)])
+    def test_a_count_keeps_the_loader_criteria_and_execution_options_but_no_order_or_lock(self, count: Any) -> None:
+        """The ORM applies no option to a subquery: the loader criteria the counted statement carries go on the
+        COUNT itself, so it counts what the statement reads; its fetch plan does not (the ORM refuses a loader
+        option on a statement without the entity)."""
+        criteria = with_loader_criteria(ContractParent, ContractParent.active.is_(True))
+        statement = (
+            _joined_parents()
+            .options(criteria, selectinload(ContractParent.children))
+            .execution_options(pyfly_probe="spec")
+            .order_by(ContractParent.name)
+            .with_for_update()
+        )
+        counted = count(statement)
+        assert counted._with_options == (criteria,)
+        assert counted.get_execution_options()["pyfly_probe"] == "spec"
+        sql = _sql(counted, DIALECTS["postgresql"])
+        assert sql.startswith("SELECT count(*) AS count_1 FROM (SELECT ")
+        assert "ORDER BY" not in sql and "FOR UPDATE" not in sql
+        plain = count(_joined_parents())
+        assert plain._with_options == () and plain.get_execution_options() == {}
 
 
 # ---------------------------------------------------------------------------------------------------------

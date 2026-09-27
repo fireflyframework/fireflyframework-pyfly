@@ -17,6 +17,9 @@
   an unsorted page compiles on SQL Server, which requires an ORDER BY for OFFSET (C055).
 - ``find_all(Pageable)`` skips the ``COUNT`` when the page proves the total; ``find_slice`` never counts
   (``LIMIT size + 1``); ``scroll`` pages by keyset (C135).
+- A specification whose join repeats entities (a collection) is paged over the distinct keys, and one that
+  joins a many-to-one with a plain ``LIMIT``; either way its own fetch plan, loader criteria, execution
+  options and lock apply to the entities it reads and to its count.
 - NULL placement and case folding come out the same on every backend when an order names them (C112).
 - A ``lazy="joined"`` collection works in every list method and in ``stream_all`` (C140).
 - Read methods take a fetch plan, so relationships are usable on the detached entities they return, and
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import uuid
 from typing import Any
 
@@ -36,7 +40,7 @@ import pytest
 from sqlalchemy import ForeignKey, Integer, String, event, insert
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, joinedload, mapped_column, relationship, selectinload, with_loader_criteria
 
 from pyfly.data import transactional
 from pyfly.data.page import Page
@@ -92,7 +96,38 @@ class RqEntry(Base):
     score: Mapped[RqScore] = relationship(lazy="joined")
 
 
+class RqOwner(Base):
+    __tablename__ = "rq_owner"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    country: Mapped[str] = mapped_column(String(10))
+
+
+class RqShop(Base):
+    """A shop with an owner (a many-to-one) and items (a collection), both loaded lazily unless a plan says."""
+
+    __tablename__ = "rq_shop"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(40))
+    owner_id: Mapped[int] = mapped_column(ForeignKey("rq_owner.id"))
+    owner: Mapped[RqOwner] = relationship()
+    items: Mapped[list[RqItem]] = relationship(order_by="RqItem.id")
+
+
+class RqItem(Base):
+    __tablename__ = "rq_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("rq_shop.id"))
+    label: Mapped[str] = mapped_column(String(40))
+
+
 class EntryRepository(Repository[RqEntry, int]):
+    pass
+
+
+class ShopRepository(Repository[RqShop, int]):
     pass
 
 
@@ -117,7 +152,7 @@ class EagerParentRepository(Repository[ContractParent, uuid.UUID]):
     __load__ = ("children",)
 
 
-MODELS = (*CONTRACT_MODELS, RqScore, RqShelf, RqBook, RqEntry)
+MODELS = (*CONTRACT_MODELS, RqScore, RqShelf, RqBook, RqEntry, RqOwner, RqShop, RqItem)
 
 SCORES = {1: 10, 2: None, 3: 5, 4: None, 5: 7, 6: 3, 7: 1}
 """The audit's probe rows (C112): id -> score, two of them NULL."""
@@ -350,6 +385,130 @@ async def test_distinct_entity_pages_compile_on_sql_server_and_oracle(relational
             paged = [sql for sql in compiled if "SELECT DISTINCT" in sql and " JOIN (" in sql]
             assert len(paged) == 3, compiled
             assert all(("FETCH" in sql or "SELECT DISTINCT TOP" in sql) and " ORDER BY " in sql for sql in paged)
+
+
+async def _shops(datasources: Datasources) -> None:
+    """Owners 1 (ES) and 2 (FR); shops s1..s6, the odd ones Spanish; items 'hit', 'hit', 'miss' in each."""
+    async with datasources.engine.begin() as conn:
+        await conn.execute(insert(RqOwner), [{"id": 1, "country": "ES"}, {"id": 2, "country": "FR"}])
+        await conn.execute(insert(RqShop), [{"id": n, "name": f"s{n}", "owner_id": 2 - n % 2} for n in range(1, 7)])
+        labels = ("hit", "hit", "miss")
+        rows = [{"id": n * 10 + k, "shop_id": n, "label": label} for n in range(1, 7) for k, label in enumerate(labels)]
+        await conn.execute(insert(RqItem), rows)
+
+
+def _spanish_shops(through: str) -> Specification[RqShop]:
+    """The Spanish shops, found through a join to their owner (a many-to-one: one row per shop) or to their
+    items (a collection: two 'hit' rows per shop), with a fetch plan and an execution option of their own."""
+
+    def predicate(root: Any, query: Any) -> Any:
+        if through == "owner":
+            query = query.join(RqShop.owner).where(RqOwner.country == "ES")
+        else:
+            query = query.join(RqShop.items).where(RqItem.label == "hit", RqShop.owner_id == 1)
+        plan = (selectinload(RqShop.items), joinedload(RqShop.owner))
+        return query.options(*plan).execution_options(pyfly_probe="spec")
+
+    return Specification[RqShop](predicate)
+
+
+@pytest.mark.parametrize("through", ["owner", "items"])
+async def test_a_specification_keeps_its_fetch_plan_and_options_on_every_paging_path(
+    relational_backend: RelationalBackend, through: str
+) -> None:
+    """A specification's own loader options and execution options apply to the statement that reads the
+    entities, on every path: when its join repeats entities, the page is cut from the distinct keys by another
+    statement, which dropped them (the detached shops' items raised DetachedInstanceError)."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops = ShopRepository()
+        spec = _spanish_shops(through)
+        by_name = Sort.by("name")
+        options: list[Any] = []
+
+        def record(state: Any) -> None:
+            if state.is_select and not state.is_relationship_load:
+                options.append((str(state.statement), state.execution_options.get("pyfly_probe")))
+
+        with _listening(Session, "do_orm_execute", record):
+            page = await shops.find_all_by_spec_paged(spec, Pageable.of(1, 2, by_name))
+            tail = await shops.find_slice_by_spec(spec, Pageable.of(2, 2, by_name))
+            window = await shops.scroll(by_name, size=2, spec=spec)
+            listed = await shops.find_all_by_spec(spec)
+        assert (_names(page.items), page.total) == (["s1", "s3"], 3)
+        assert (_names(tail.items), tail.has_next) == (["s5"], False)
+        assert (_names(window.items), window.has_next) == (["s1", "s3"], True)
+        assert sorted(_names(listed)) == ["s1", "s3", "s5"]
+        for shop in [*page.items, *tail.items, *window.items, *listed]:
+            assert [item.label for item in shop.items] == ["hit", "hit", "miss"]
+            assert shop.owner.country == "ES"
+        reads = [(sql, probe) for sql, probe in options if "count(" not in sql.lower()]
+        assert len(reads) == 4 and {probe for _sql, probe in reads} == {"spec"}
+        # A many-to-one repeats no shop: its pages are cut by a plain LIMIT, and only the collection needs the keys.
+        paged_by_keys = ["DISTINCT" in sql for sql, _probe in reads]
+        assert paged_by_keys == ([False] * 4 if through == "owner" else [True, True, True, False])
+
+
+@pytest.mark.parametrize("through", ["owner", "items"])
+async def test_a_specification_s_loader_criteria_apply_to_its_page_and_its_count(
+    relational_backend: RelationalBackend, through: str
+) -> None:
+    """``with_loader_criteria`` in a specification narrows the entities it pages and the total it counts alike:
+    the COUNT ran over a subquery, where the ORM applies no option, and counted the shops the criteria hide."""
+
+    def predicate(root: Any, query: Any) -> Any:
+        if through == "owner":
+            query = query.join(RqShop.owner).where(RqOwner.country.in_(["ES", "FR"]))
+        else:
+            query = query.join(RqShop.items).where(RqItem.label == "hit")
+        return query.options(with_loader_criteria(RqShop, RqShop.name != "s1"))
+
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops = ShopRepository()
+        page = await shops.find_all_by_spec_paged(Specification[RqShop](predicate), Pageable.of(1, 2, Sort.by("name")))
+        assert (_names(page.items), page.total) == (["s2", "s3"], 5)
+
+
+@pytest.mark.parametrize("of", [None, RqShop], ids=["every-table", "of-the-entity"])
+async def test_a_locking_specification_pages_over_distinct_entities(
+    relational_backend: RelationalBackend, of: Any
+) -> None:
+    """A specification that locks (``with_for_update``) and joins a collection is paged over the distinct keys:
+    the lock goes on the statement that reads the entities, not on the ``DISTINCT`` keys (which PostgreSQL
+    refuses to lock), and holds the entities' rows until the transaction ends."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        await _shops(datasources)
+        shops = ShopRepository()
+        locking = Specification[RqShop](
+            lambda root, q: (
+                q.join(RqShop.items).where(RqItem.label == "hit", RqShop.owner_id == 1).with_for_update(of=of)
+            )
+        )
+
+        row_locks = datasources.dialect != "sqlite"  # SQLite has no row locks: its writer holds the database
+
+        @transactional(propagation=Propagation.REQUIRES_NEW)
+        async def try_nowait(id: int) -> None:
+            await shops.find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE_NOWAIT)
+
+        @transactional
+        async def lock_page() -> tuple[list[str], list[str]]:
+            with datasources.counter() as counter:
+                page = await shops.find_all_by_spec_paged(locking, Pageable.of(1, 2, Sort.by("name")))
+            if row_locks:
+                with pytest.raises(DBAPIError):  # another transaction cannot take a row of the page
+                    await try_nowait(1)
+            return _names(page.items), sql_of(counter, "SELECT")
+
+        names, statements = await lock_page()
+        assert names == ["s1", "s3"]
+        (read,) = [sql for sql in statements if "pyfly_page" in sql]
+        keys = read.split(") AS pyfly_page")[0]
+        assert "FOR UPDATE" not in keys and "FOR SHARE" not in keys
+        assert not any("FOR UPDATE" in sql for sql in statements if "count(" in sql.lower())  # a COUNT locks nothing
+        if row_locks:
+            assert re.search(r"FOR UPDATE( OF [`\"]?rq_shop[`\"]?)?\s*$", read), read
 
 
 # ---------------------------------------------------------------------------------------------------------

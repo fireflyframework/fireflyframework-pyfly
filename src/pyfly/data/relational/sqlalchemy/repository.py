@@ -122,6 +122,7 @@ from pyfly.data.relational.sqlalchemy.statements import (
     loads_per_batch,
     order_expressions,
     primary_key_orders,
+    row_count,
     stream_safe,
     unique_entities,
 )
@@ -1165,11 +1166,7 @@ class Repository(Generic[T, ID]):
             items = await self._entities(session, ordered, options, repeats=repeats)
         total = _total_from_content(pageable, len(items))
         if total is None:
-            count = (
-                distinct_entity_count(base, self._model)
-                if repeats
-                else select(func.count()).select_from(base.subquery())
-            )
+            count = distinct_entity_count(base, self._model) if repeats else row_count(base)
             total = int((await session.execute(count)).scalar_one())
         return Page(items=items, total=total, page=pageable.page, size=pageable.size)
 
