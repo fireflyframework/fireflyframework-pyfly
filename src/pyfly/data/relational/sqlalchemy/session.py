@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -533,9 +534,25 @@ class SessionProvider:
                     return (await session.execute(text("SELECT ..."))).all()
     """
 
-    def __init__(self, managers: TransactionManagerRegistry | None = None, *, datasource: str = PRIMARY) -> None:
+    def __init__(
+        self,
+        managers: TransactionManagerRegistry | Callable[[], TransactionManagerRegistry | None] | None = None,
+        *,
+        datasource: str = PRIMARY,
+    ) -> None:
+        # A callable is resolved at first use: the session_provider bean is built before the context's
+        # transaction_manager_registry bean may be registered.
         self._managers = managers
         self._datasource = datasource
+
+    def _registry(self) -> TransactionManagerRegistry | None:
+        managers = self._managers
+        if managers is None or isinstance(managers, TransactionManagerRegistry):
+            return managers if managers is not None else installed_registry()
+        resolved = managers()
+        if resolved is not None:
+            self._managers = resolved
+        return resolved if resolved is not None else installed_registry()
 
     def current(self, datasource: str | None = None) -> AsyncSession | None:
         """The session of the unit bound for *datasource* now (a repository's operation scope counts), or
@@ -551,6 +568,6 @@ class SessionProvider:
         """Join the unit bound for *datasource*, or open a short unit that commits (or, read-only, ends
         without writing) when the block exits; yields its session."""
         name = datasource or self._datasource
-        registry = self._managers if self._managers is not None else installed_registry()
+        registry = self._registry()
         manager = registry.get(name) if registry is not None else resolve_manager(name)
         return infrastructure_unit(manager, read_only=read_only, single_statement=single_statement)

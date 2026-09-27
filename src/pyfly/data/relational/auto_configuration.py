@@ -37,6 +37,7 @@ Two auto-configurations live here:
 import inspect
 import logging
 import weakref
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -57,6 +58,8 @@ except ImportError:
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
+from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
+from pyfly.container.provider import Provider
 from pyfly.container.types import Scope, ScopeSpec, scope_name
 from pyfly.context.conditions import (
     auto_configuration,
@@ -281,6 +284,28 @@ class TransactionManagerRegistryLifecycle:
     async def stop(self) -> None:
         """Remove the registry, if it is still the installed one."""
         uninstall_registry(self._registry)
+
+
+def _context_transaction_managers(
+    provider: Provider[TransactionManagerRegistry] | None, config: Config | None
+) -> Callable[[], TransactionManagerRegistry | None]:
+    """The context's ``transaction_manager_registry`` bean, looked up when first needed.
+
+    Auto-configurations are processed in registration order and never deferred, so the bean may not be
+    registered yet when a bean of :class:`RelationalAutoConfiguration` is built. Looked up later, it is the
+    registry ``@transactional`` runs on, including over an application's own ``DataSourceRegistry`` bean;
+    without one, the configuration's registry.
+    """
+
+    def _resolve() -> TransactionManagerRegistry | None:
+        if provider is not None:
+            try:
+                return provider.get()
+            except (NoSuchBeanError, NoUniqueBeanError):
+                pass
+        return transaction_managers_for(DataSourceRegistry.for_config(config)) if config is not None else None
+
+    return _resolve
 
 
 def _defines_coroutine(bean_instance: object, name: str, arity: int) -> bool:
@@ -510,10 +535,13 @@ class RelationalAutoConfiguration:
         return session
 
     @bean
-    def session_provider(self, config: Config) -> SessionProvider:
+    def session_provider(
+        self, config: Config, transaction_managers: Provider[TransactionManagerRegistry] | None = None
+    ) -> SessionProvider:
         """The session of the current unit of work (``current()``) and programmatic short units
-        (``async with provider.unit(read_only=...)``), for custom data access code."""
-        return SessionProvider(transaction_managers_for(DataSourceRegistry.for_config(config)))
+        (``async with provider.unit(read_only=...)``), for custom data access code, on the context's
+        ``transaction_manager_registry`` (the managers ``@transactional`` uses)."""
+        return SessionProvider(_context_transaction_managers(transaction_managers, config))
 
     @bean
     def engine_lifecycle(
@@ -533,12 +561,15 @@ class RelationalAutoConfiguration:
         return EngineLifecycle(async_engine, async_session, ddl_auto=ddl_auto, dispose_engine=registry is None)
 
     @bean
-    def repository_post_processor(self, config: Config | None = None) -> RepositoryBeanPostProcessor:
+    def repository_post_processor(
+        self, config: Config | None = None, transaction_managers: Provider[TransactionManagerRegistry] | None = None
+    ) -> RepositoryBeanPostProcessor:
         """Compiles derived and ``@query`` methods, and binds every repository to the context's
-        transaction managers (without a configuration, repositories use the installed ones)."""
-        if config is None:
+        ``transaction_manager_registry`` (the managers ``@transactional`` uses; without a context,
+        repositories use the installed ones)."""
+        if config is None and transaction_managers is None:
             return RepositoryBeanPostProcessor()
-        return RepositoryBeanPostProcessor(transaction_managers_for(DataSourceRegistry.for_config(config)))
+        return RepositoryBeanPostProcessor(_context_transaction_managers(transaction_managers, config))
 
     @bean
     def db_health_indicator(self, async_engine: AsyncEngine) -> SqlAlchemyHealthIndicator:

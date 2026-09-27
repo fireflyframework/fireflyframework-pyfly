@@ -368,6 +368,57 @@ class TestTheInstalledTransactionManagers:
         await second.stop()
         assert installed_registry() is None
 
+    async def test_repositories_and_the_session_provider_use_the_contexts_managers(self, tmp_path: Path) -> None:
+        """The ``session_provider`` and ``repository_post_processor`` beans take the context's
+        ``TransactionManagerRegistry`` bean, the one ``@transactional`` uses. An application that declares
+        its own ``DataSourceRegistry`` bean moves repository calls outside a transaction and short
+        ``SessionProvider`` units along with ``@transactional``, instead of leaving them on the
+        registry of the configuration."""
+        from pyfly.data.transaction import TransactionManagerRegistry
+
+        def _database(name: str) -> tuple[str, Config]:
+            url = f"sqlite+aiosqlite:///{tmp_path / name}"
+            return url, Config({"pyfly": {"data": {"relational": {"enabled": "true", "url": url, "ddl-auto": "none"}}}})
+
+        configured_url, configured = _database("configured.db")
+        application_url, application = _database("application.db")
+        for url in (configured_url, application_url):
+            engine = create_async_engine(url, poolclass=NullPool)
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all, tables=[ScopeRow.__table__])
+            await engine.dispose()
+
+        @configuration
+        class ApplicationDatabases:
+            @bean(primary=True)
+            def application_datasources(self) -> DataSourceRegistry:
+                return DataSourceRegistry.for_config(application)
+
+        ctx = ApplicationContext(configured)
+        for candidate in (ApplicationDatabases, RelationalAutoConfiguration, ScopeRowRepository):
+            ctx.register_bean(candidate)
+        await ctx.start()
+        try:
+            assert ctx.get_bean(TransactionManagerRegistry).get("primary").engine is (
+                DataSourceRegistry.for_config(application).primary.engine
+            )
+            rows = ctx.get_bean(ScopeRowRepository)
+            await rows.save(ScopeRow(name="auto-unit"))
+            async with ctx.get_bean(SessionProvider).unit() as session:
+                await session.execute(text("INSERT INTO scope_row (name) VALUES ('provider-unit')"))
+
+            @transactional
+            async def inside() -> None:
+                await rows.save(ScopeRow(name="transactional"))
+
+            await inside()
+            assert await _names(application_url) == ["auto-unit", "provider-unit", "transactional"]
+            assert await _names(configured_url) == []
+        finally:
+            await ctx.stop()
+            for config in (configured, application):
+                await DataSourceRegistry.for_config(config).close()
+
     async def test_a_stopped_context_leaves_its_datasources_and_managers_collectable(self, tmp_path: Path) -> None:
         """A restart must reproduce a cold start: no cache of the transaction managers keeps a stopped
         context's registry, its engines or its managers alive."""

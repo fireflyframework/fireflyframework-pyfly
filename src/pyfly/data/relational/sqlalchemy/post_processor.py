@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from pyfly.data.post_processor import BaseRepositoryPostProcessor
@@ -38,20 +39,37 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     Every compiled method is a repository operation like the inherited ones: it joins the current unit of
     work or runs in an auto unit (a read unit for ``find_by_``/``count_by_``/``exists_by_`` and ``SELECT``
     queries, a write unit for the rest). With *transaction_managers*, every repository bean resolves its
-    transaction manager from that registry (the application context's).
+    transaction manager from that registry (the application context's); a callable is asked for it when
+    the first repository is initialized, once every bean of the context is registered.
     """
 
-    def __init__(self, transaction_managers: TransactionManagerRegistry | None = None) -> None:
+    def __init__(
+        self,
+        transaction_managers: TransactionManagerRegistry
+        | Callable[[], TransactionManagerRegistry | None]
+        | None = None,
+    ) -> None:
         super().__init__()
         self._query_executor = QueryExecutor()
         self._query_compiler = QueryMethodCompiler()
         self._transaction_managers = transaction_managers
 
+    def _managers(self) -> TransactionManagerRegistry | None:
+        managers = self._transaction_managers
+        if managers is None or isinstance(managers, TransactionManagerRegistry):
+            return managers
+        resolved = managers()
+        if resolved is not None:
+            self._transaction_managers = resolved
+        return resolved
+
     def after_init(self, bean: Any, bean_name: str) -> Any:
         """Compile the query methods, and bind the transaction managers of the context."""
         bean = super().after_init(bean, bean_name)
-        if isinstance(bean, Repository) and self._transaction_managers is not None:
-            bean._bind_transaction_managers(self._transaction_managers)
+        if isinstance(bean, Repository):
+            managers = self._managers()
+            if managers is not None:
+                bean._bind_transaction_managers(managers)
         return bean
 
     # ------------------------------------------------------------------
