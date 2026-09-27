@@ -118,7 +118,7 @@ class QueryHandler(Generic[Q, R]):
 
     def get_cache_evict_events(self) -> tuple[type, ...]:
         """The event types that invalidate this handler's cached entries (``@cache_evict(...)``)."""
-        return tuple(getattr(type(self), "__pyfly_cache_evict_events__", ()))
+        return tuple(t for t in getattr(type(self), "__pyfly_cache_evict_events__", ()) if isinstance(t, type))
 
     # ── template method ────────────────────────────────────────
 
