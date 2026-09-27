@@ -695,24 +695,29 @@ and `anyio` shields) before the cancellation is re-raised.
 `outside_transaction()` runs a block of the calling task with its units suspended, as `NOT_SUPPORTED`
 suspends one, and starts no task: it is for work the caller waits for that must not be part of its
 transaction. Inside the block `infrastructure_unit()`, repository calls and `REQUIRED` boundaries open short
-units of their own, `after_commit` callbacks run at once, and `is_transaction_active()` is false; the binding
-comes back when the block exits, after an exception or a cancellation too. `TransactionAwareCache` runs its
-immediate operations this way (see [Caching and Transactions](caching.md#caching-and-transactions)).
+units of their own, `after_commit` callbacks run at once, and `is_transaction_active()` and
+`is_current_transaction_read_only()` are false; the binding comes back when the block exits, after an
+exception or a cancellation too. `TransactionAwareCache` runs its immediate operations this way (see
+[Caching and Transactions](caching.md#caching-and-transactions)).
 
 ```python
 from pyfly.data.transaction import outside_transaction
 
 @transactional
-async def import_batch(self, batch_id: str, rows: list[Row]) -> None:
-    with outside_transaction():   # markers: a cache on the database, whose statements join the bound unit
-        first = await self.markers.put_if_absent(f"import:{batch_id}", True)   # committed at once, kept on rollback
-    if first:
-        await self.rows.save_all(rows)
+async def log_in(self, user: str, password: str) -> Session:
+    # throttle: log-in attempt counters in a database-backed cache, whose statements join the bound unit
+    with outside_transaction():
+        attempts = await self.throttle.increment(f"login:{user}")   # committed now: a rollback keeps the count
+    if attempts > 5:
+        raise TooManyAttempts(user)
+    return await self.sessions.open(user, password)   # raises on a bad password: the unit rolls back
 ```
 
-In your own code a boundary is usually what you want (`Propagation.REQUIRES_NEW` on one datasource);
-`outside_transaction()` is for code that joins whatever unit is bound, on any datasource, such as a
-framework adapter that runs through `infrastructure_unit()`.
+Surviving the caller's rollback is the point there: a failed log-in must still count. (On SQLite the counters
+belong on another database: a write beside the caller's write unit is refused, see below.) In your own code a
+boundary is usually what you want (`Propagation.REQUIRES_NEW` on one datasource); `outside_transaction()` is
+for code that joins whatever unit is bound, on any datasource, such as a framework adapter that runs through
+`infrastructure_unit()`.
 
 The caller's units stay open meanwhile, and the task still holds their connections and locks. Each statement
 in the block checks out another pooled connection of its datasource, and the block must not wait for a lock
