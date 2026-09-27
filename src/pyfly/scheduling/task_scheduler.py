@@ -48,7 +48,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from pyfly.data.transaction.template import run_shielded
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.lock import DistributedLock, LocalLock
@@ -302,9 +301,10 @@ class TaskScheduler:
         When *lock* is set, the lock is taken first; if it is held elsewhere the tick is **skipped** (so only
         one instance in a cluster runs the job). The run is time-boxed to *lock_ttl*, when the lock ends
         whatever the run does: a run still going then is cancelled (a synchronous body's thread cannot be, and
-        goes on). The lock is released once the run ends. A failure to take or release the lock is logged like
-        a failure of the run (audit #186: a cron or fixed-rate run is not awaited by its loop, so nothing else
-        would report it).
+        goes on). The lock is released once the run ends, from the run's own task, so the late release of a run
+        whose lock another run took since leaves that lock alone. A failure to take or release the lock is
+        logged like a failure of the run (audit #186: a cron or fixed-rate run is not awaited by its loop, so
+        nothing else would report it).
         """
         name = _job_name(bean, method)
         if lock is not None:
@@ -323,7 +323,7 @@ class TaskScheduler:
         except Exception:
             if deadline is not None and deadline.expired():
                 logger.error(
-                    "scheduled task '%s' ran past the ttl of lock %r (%.1f s) and was cancelled: another instance "
+                    "scheduled task '%s' ran past the ttl of lock %r (%g s) and was cancelled: another instance "
                     "may run it now; raise lock_ttl above the job's longest run",
                     name,
                     lock,
@@ -333,15 +333,15 @@ class TaskScheduler:
                 logger.exception("scheduled task '%s' failed", name)
         finally:
             if lock is not None:
-                # Released even when the run is being cancelled (a stop cut short): shielded, logged on failure.
-                _result, error, _cancelled = await run_shielded(self._lock.release(lock))
-                if error is not None:
-                    logger.error(
-                        "scheduled task '%s': releasing lock %r failed; it ends at its ttl",
-                        name,
-                        lock,
-                        exc_info=(type(error), error, error.__traceback__),
-                    )
+                # Released from the run's own task: the adapters tell holders apart per task (the in-process and
+                # advisory locks) or per acquisition of a task (the lease table), so a run whose lock ended at its
+                # TTL and was taken by the next run since releases nothing of that run's. A run being cancelled
+                # (a stop cut short) still releases: the cancellation was delivered once and does not recur, and
+                # when a second one interrupts the release, the lock ends at its TTL.
+                try:
+                    await self._lock.release(lock)
+                except Exception:
+                    logger.exception("scheduled task '%s': releasing lock %r failed; it ends at its ttl", name, lock)
 
     async def _call(self, method: Callable[..., Any]) -> None:
         if inspect.iscoroutinefunction(method):

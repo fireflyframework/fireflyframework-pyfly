@@ -21,7 +21,9 @@
   short.
 - C152: a failure to take or release the lock escaped the run's error handling (``Task exception was never
   retrieved``, without the job's name). It is logged with the job's name, and the run is skipped.
-- A run that outlives its lock's TTL is cancelled: the lock has ended and another node may run the job.
+- A run that outlives its lock's TTL is cancelled: the lock has ended and another node may run the job. It
+  releases the lock from its own task, so when it ends after the job's next run took the lock, that run keeps
+  it.
 
 The database side (real ``@transactional`` runs, a real lease lock) is in
 ``tests/integration/test_scheduler_units_of_work_matrix.py``.
@@ -288,6 +290,51 @@ async def test_a_run_that_outlives_its_lock_ttl_is_cancelled(caplog: pytest.LogC
     assert bean.probe.cancelled == 1
     assert any("ran past the ttl" in r.getMessage() and "Overrunning.overrun" in r.getMessage() for r in caplog.records)
     assert await lock.try_acquire("overrun", 1.0)  # released
+
+
+class LateEnder:
+    """Its first run is cancelled at its lock's ttl and takes a while to end (its shielded ``COMMIT`` is in
+    flight); its second run holds the lock until told to end."""
+
+    def __init__(self) -> None:
+        self.runs: list[str] = []
+        self.first_cancelled = asyncio.Event()
+        self.first_may_end = asyncio.Event()
+        self.second_holds = asyncio.Event()
+        self.second_may_end = asyncio.Event()
+
+    async def run(self) -> None:
+        self.runs.append(f"run-{len(self.runs) + 1}")
+        if len(self.runs) == 1:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.first_cancelled.set()
+                await asyncio.shield(self.first_may_end.wait())
+                raise
+        elif len(self.runs) == 2:
+            self.second_holds.set()
+            await self.second_may_end.wait()
+
+
+async def test_the_late_release_of_a_run_cancelled_at_its_ttl_leaves_the_next_holders_lock() -> None:
+    """The in-process lock tells holders apart per task: the release must come from the run's own task, or it
+    ends the lock of whichever run took it since, and the job overlaps itself."""
+    job = LateEnder()
+    scheduler = TaskScheduler(lock=InProcessDistributedLock())
+
+    first = asyncio.create_task(scheduler._invoke(job, job.run, lock="late", lock_ttl=0.05))
+    await asyncio.wait_for(job.first_cancelled.wait(), 5)  # its lock ended at the ttl; the run is still ending
+    second = asyncio.create_task(scheduler._invoke(job, job.run, lock="late", lock_ttl=30.0))
+    await asyncio.wait_for(job.second_holds.wait(), 5)  # the next run took the lock
+    job.first_may_end.set()
+    await first  # the first run ends now, and releases its lock late
+
+    await scheduler._invoke(job, job.run, lock="late", lock_ttl=30.0)  # the second run still holds the lock
+    job.second_may_end.set()
+    await second
+
+    assert job.runs == ["run-1", "run-2"]
 
 
 class SyncJob:

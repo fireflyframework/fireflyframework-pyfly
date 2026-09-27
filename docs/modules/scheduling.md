@@ -229,7 +229,10 @@ class ReportService:
   TTL whatever the run does, and another instance may then start the job, so a
   run still going at the TTL is cancelled (its `@transactional` work rolls back)
   and logged at `ERROR` with the job's name. A synchronous job's thread cannot be
-  cancelled and goes on.
+  cancelled and goes on. The run releases its lock from its own task once it has
+  ended: the built-in providers tell holders apart per task (or per acquisition),
+  so a run cancelled at its TTL that ends after the job's next run took the lock
+  leaves that run's lock alone.
 
 A failure to take or release the lock (the lock's database or Redis is down, a
 misconfigured provider) is logged at `ERROR` with the job's name, like a
@@ -269,9 +272,8 @@ function:
 | `__pyfly_scheduled_initial_delay__` | The `timedelta`, or `None` |
 | `__pyfly_scheduled_zone__` | The IANA zone string, or `None` |
 | `__pyfly_scheduled_lock__` | `True`, the lock-name string, or `None` |
-| `__pyfly_scheduled_lock_ttl__` | The TTL in seconds, or `None` |
-| `__pyfly_scheduled_concurrent__` | How many runs may be in flight at once |
 | `__pyfly_scheduled_lock_ttl__` | The TTL in seconds (`float`), or `None` |
+| `__pyfly_scheduled_concurrent__` | How many runs may be in flight at once |
 
 The `TaskScheduler` reads these attributes during its discovery phase. A
 `lock=True` value is resolved to the `"ClassName.method"` name at discovery

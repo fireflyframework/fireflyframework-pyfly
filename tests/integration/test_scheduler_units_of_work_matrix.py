@@ -24,7 +24,8 @@ PostgreSQL:
 - C152: with the lease lock (``pyfly.scheduling.lock.provider=database``) failing at run time, the failure
   is logged with the job's name and the tick is skipped, and nothing escapes as an unretrieved task
   exception;
-- a run that outlives its lock's TTL is cancelled, and its unit of work rolls back.
+- a run that outlives its lock's TTL is cancelled, and its unit of work rolls back; when it ends after the
+  job's next run took the lease, its late release leaves that run's lease alone.
 """
 
 from __future__ import annotations
@@ -49,8 +50,11 @@ from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.framework_schema import locks
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.scheduling.adapters.lease_lock import LeaseLock
 from pyfly.scheduling.auto_configuration import SchedulingAutoConfiguration
 from pyfly.scheduling.decorators import scheduled
+from pyfly.scheduling.lock import DistributedLock
+from pyfly.scheduling.task_scheduler import TaskScheduler
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 
 pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
@@ -157,6 +161,40 @@ class Overrun:
             await asyncio.sleep(5)
         finally:
             self.probe.leave()
+
+
+@service
+class LateEnder:
+    """Not scheduled: the test runs it through the scheduler. Its first run is cancelled at its lock's ttl and
+    takes a while to end (as when its ``COMMIT`` is in flight); its second run holds the lease until told to
+    end, then saves a row.
+
+    It is not ``@transactional``: on SQLite a write unit takes the database's one write lock at its start, so a
+    second run could not even take the lease (a write too) while the first one's unit is ending.
+    """
+
+    def __init__(self, rows: JobRows) -> None:
+        self.rows = rows
+        self.runs: list[str] = []
+        self.first_cancelled = asyncio.Event()
+        self.first_may_end = asyncio.Event()
+        self.second_holds = asyncio.Event()
+        self.second_may_end = asyncio.Event()
+
+    async def work(self) -> None:
+        kind = f"run-{len(self.runs) + 1}"
+        self.runs.append(kind)
+        if kind == "run-1":
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.first_cancelled.set()
+                await asyncio.shield(self.first_may_end.wait())
+                raise
+        elif kind == "run-2":
+            self.second_holds.set()
+            await self.second_may_end.wait()
+        await self.rows.save(JobRow(kind=kind))
 
 
 class Harness:
@@ -283,3 +321,32 @@ async def test_a_run_that_outlives_its_lock_ttl_is_cancelled_and_rolls_back(
 
     assert await harness.committed() == []
     assert any("ran past the ttl" in r.getMessage() and "Overrun.overrun" in r.getMessage() for r in caplog.records)
+
+
+async def test_the_late_release_of_a_run_cancelled_at_its_ttl_leaves_the_next_runs_lease(
+    start: Callable[..., Any],
+) -> None:
+    """The lease lock tells a process's acquisitions apart by the task that took them: the release must come
+    from the run's own task, or it ends the lease of the run that took it since, and the job overlaps itself."""
+    harness: Harness = await start(LateEnder, {"pyfly.scheduling.lock.provider": "database"})
+    job = harness.ctx.get_bean(LateEnder)
+    scheduler = harness.ctx.get_bean(TaskScheduler)
+    lock = harness.ctx.get_bean(DistributedLock)  # type: ignore[type-abstract]
+    assert isinstance(lock, LeaseLock)
+
+    first = asyncio.create_task(scheduler._invoke(job, job.work, lock="late", lock_ttl=0.3))
+    await asyncio.wait_for(job.first_cancelled.wait(), 10)  # its lease ended at the ttl; the run is still ending
+    second = asyncio.create_task(scheduler._invoke(job, job.work, lock="late", lock_ttl=30.0))
+    await asyncio.wait_for(job.second_holds.wait(), 10)  # the next run took the lease
+    holder = await lock.holder("late")
+    job.first_may_end.set()
+    await first  # the first run ends now, and releases its lease late
+
+    assert await lock.holder("late") == holder  # the second run keeps its lease
+    await scheduler._invoke(job, job.work, lock="late", lock_ttl=30.0)  # skipped: the second run holds it
+    job.second_may_end.set()
+    await second
+    await harness.stop()
+
+    assert job.runs == ["run-1", "run-2"]
+    assert await harness.committed() == ["run-2"]
