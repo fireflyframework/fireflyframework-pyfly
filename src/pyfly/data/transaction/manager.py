@@ -21,6 +21,11 @@ completes them (:meth:`commit`, :meth:`rollback`, :meth:`release`), and manages 
 
 The adapters are :class:`pyfly.data.relational.sqlalchemy.transaction_manager.SqlAlchemyTransactionManager`
 (one per registry datasource) and the MongoDB manager of the document module.
+
+A manager whose backend lets the application open savepoints of its own may also define
+``failed_within_savepoint(unit, savepoint) -> bool``: whether a statement failed inside such a savepoint,
+opened within a ``NESTED`` scope's *savepoint* and left open. The template then rolls the ``NESTED`` scope
+back to its savepoint. It is optional, and not part of the protocol.
 """
 
 from __future__ import annotations
