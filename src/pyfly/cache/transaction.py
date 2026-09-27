@@ -35,10 +35,15 @@ in the calling task: a cache on a database that joins the unit bound for its dat
 running through ``infrastructure_unit()``) then gives each statement a short unit of its own. The caller's
 rollback does not undo an immediate write, and no other request waits for the row locks of the caller's unit
 or deadlocks with it on the cache's rows. The cost: during a business unit, each cache statement on a
-database-backed cache checks out one more pooled connection of the cache's datasource. On SQLite, whose
-database has one writer, an immediate write to a cache on the database of the caller's write unit is refused
-at once (``IllegalTransactionStateError``; logged with ``on_write_error="log"``) instead of waiting
-``busy_timeout`` for the lock the caller holds; reads still run.
+database-backed cache checks out one more pooled connection of the cache's datasource.
+
+An immediate write that cannot run beside the caller's unit is refused at once with
+``IllegalTransactionStateError``: on SQLite, whose database has one writer, a write to a cache on the
+database of the caller's write unit would otherwise wait ``busy_timeout`` for the lock the caller holds (reads
+still run). With ``on_write_error="raise"`` the refusal propagates. With ``"log"`` the business call goes on:
+the refusal is logged once per transaction-aware cache (at WARNING; later ones at DEBUG), ``put_if_absent``
+answers ``False``, and a refused ``evict_if_present`` or ``invalidate`` runs after the unit commits instead
+(dropped if it rolls back, when the cached data is still right).
 
 A deferred ``put`` stores a copy of the value taken when it was registered
 (:func:`~pyfly.cache.serialization.copy_value`): changes made to the value before the commit are not
@@ -72,6 +77,7 @@ from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import copy_value
 from pyfly.data.transaction.context import outside_transaction
+from pyfly.data.transaction.errors import IllegalTransactionStateError
 
 _logger = logging.getLogger("pyfly.cache")
 
@@ -79,6 +85,13 @@ T = TypeVar("T")
 
 WriteErrors = Literal["raise", "log"]
 """What a failing write does: propagate (``"raise"``), or get logged and skipped (``"log"``)."""
+
+
+class _Refused:
+    """What an immediate write returns when it was refused beside the caller's unit and logged."""
+
+
+_REFUSED = _Refused()
 
 
 def in_unit_of_work() -> bool:
@@ -93,16 +106,19 @@ class TransactionAwareCache:
 
     Args:
         delegate: The cache to write to.
-        on_write_error: ``"raise"`` (the default) propagates a failing write made outside a unit (a
-            deferred write that fails is logged and counted by the unit, never raised). ``"log"`` logs every
-            failing write at WARNING (an eviction at ERROR: stale data may be served) and carries on: the
-            outcome of the business call never depends on the cache. The declarative decorators and the CQRS
-            query cache use ``"log"``.
+        on_write_error: ``"raise"`` (the default) propagates a failing write that runs at once: outside a
+            unit, or an immediate one (``put_if_absent``, ``evict_if_present``, ``invalidate``). A deferred
+            write that fails is logged and counted by the unit, never raised. ``"log"`` logs every failing
+            write at WARNING (an eviction at ERROR: stale data may be served) and carries on: the outcome of the
+            business call never depends on the cache. An immediate write refused beside the caller's unit is
+            logged once per cache instead (see the module docs). The declarative decorators and the CQRS query
+            cache use ``"log"``.
     """
 
     def __init__(self, delegate: CacheAdapter, *, on_write_error: WriteErrors = "raise") -> None:
         self._delegate = delegate
         self._on_write_error = on_write_error
+        self._refusal_reported = False
 
     @property
     def delegate(self) -> CacheAdapter:
@@ -161,21 +177,26 @@ class TransactionAwareCache:
 
     async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
         """Store *value* at once when *key* is absent: its answer cannot wait for a commit. It runs outside the
-        caller's unit, so the caller's rollback does not undo it."""
-        with outside_transaction():
-            return await self._delegate.put_if_absent(key, value, ttl=ttl)
+        caller's unit, so the caller's rollback does not undo it. With ``on_write_error="log"`` a failure
+        answers ``False``."""
+        stored = await self._immediate("put_if_absent", key, lambda: self._delegate.put_if_absent(key, value, ttl=ttl))
+        return stored is True
 
     async def evict_if_present(self, key: str) -> bool:
         """Evict *key* at once, even inside a unit of work (Spring's ``evictIfPresent``), and outside that
-        unit: the caller's rollback does not undo it."""
-        with outside_transaction():
-            return await self._delegate.evict(key)
+        unit: the caller's rollback does not undo it. With ``on_write_error="log"``, an eviction refused beside
+        the caller's unit runs after its commit instead, and ``False`` is returned."""
+        evicted = await self._immediate("evict_if_present", key, lambda: self._delegate.evict(key))
+        if evicted is _REFUSED:
+            await self.evict(key)
+        return evicted is True
 
     async def invalidate(self) -> None:
         """Clear the cache at once, even inside a unit of work (Spring's ``invalidate``), and outside that
-        unit: the caller's rollback does not undo it."""
-        with outside_transaction():
-            await self._delegate.clear()
+        unit: the caller's rollback does not undo it. With ``on_write_error="log"``, a clear refused beside
+        the caller's unit runs after its commit instead."""
+        if await self._immediate("invalidate", "*", self._delegate.clear) is _REFUSED:
+            await self.clear()
 
     # -- lifecycle and namespaces ---------------------------------------------------------------------------
 
@@ -191,6 +212,41 @@ class TransactionAwareCache:
         return TransactionAwareCache(dedicated_cache(self._delegate, name), on_write_error=self._on_write_error)
 
     # -- internals ------------------------------------------------------------------------------------------
+
+    async def _immediate(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | _Refused | None:
+        """Run *write* at once, outside the caller's unit. With ``on_write_error="log"`` a failure is logged and
+        ``None`` returned, and a refusal beside the caller's unit (``IllegalTransactionStateError``) is reported
+        once per cache and :data:`_REFUSED` returned, when a unit is bound to fall back on."""
+        bound = in_unit_of_work()
+        with outside_transaction():
+            if self._on_write_error == "raise":
+                return await write()
+            try:
+                return await write()
+            except IllegalTransactionStateError as refusal:
+                if not bound:
+                    self._failed(operation, key, refusal)
+                    return None
+                self._refused(operation, key, refusal)
+                return _REFUSED
+            except Exception as error:  # noqa: BLE001 — a cache failure never changes the business outcome
+                self._failed(operation, key, error)
+                return None
+
+    def _refused(self, operation: str, key: str, refusal: IllegalTransactionStateError) -> None:
+        level = logging.DEBUG if self._refusal_reported else logging.WARNING
+        self._refusal_reported = True
+        fallback = "it is skipped" if operation == "put_if_absent" else "it runs after the commit instead"
+        _logger.log(
+            level,
+            "cache_%s_refused key=%r cache=%s: it cannot run beside the caller's unit of work, so %s (later "
+            "refusals of this cache are logged at DEBUG): %s",
+            operation,
+            key,
+            type(self._delegate).__qualname__,
+            fallback,
+            refusal,
+        )
 
     async def _attempt(self, operation: str, key: str, write: Callable[[], Awaitable[T]]) -> T | None:
         if self._on_write_error == "raise":

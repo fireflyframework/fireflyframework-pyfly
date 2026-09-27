@@ -54,6 +54,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from pyfly.cache.decorators import cache_evict
 from pyfly.cache.transaction import TransactionAwareCache
 from pyfly.context.application_context import ApplicationContext
 from pyfly.cqrs.cache.adapter import QueryCacheAdapter
@@ -291,16 +292,13 @@ async def test_a_rolled_back_write_unit_keeps_the_immediate_operations(relationa
 
 @pytest.mark.backends(SQLITE_FILE)
 async def test_on_sqlite_an_immediate_write_beside_the_callers_write_unit_is_refused_at_once(
-    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+    relational_backend: RelationalBackend,
 ) -> None:
     ctx = await _boot(relational_backend)
     try:
         cache = JoiningSqlCache()
         await cache.put("stale", "v")
-        tx_cache = TransactionAwareCache(cache)
-        handler = PriceHandler()
-        bus = _query_bus(cache, handler)
-        caplog.set_level(logging.WARNING, logger="pyfly.cqrs.cache.adapter")
+        tx_cache = TransactionAwareCache(cache)  # on_write_error="raise"
         async with TransactionTemplate().transaction():
             # The unit holds the database's one write lock: a write in a unit of its own would wait busy_timeout
             # (5 s) for a lock this task holds, so it is refused before it starts.
@@ -309,11 +307,88 @@ async def test_on_sqlite_an_immediate_write_beside_the_callers_write_unit_is_ref
                 await tx_cache.evict_if_present("stale")
             assert time.perf_counter() - started < 1.0
             assert await tx_cache.get("stale") == "v"  # reads run beside the writer (WAL)
-            # The query cache logs the refusal and answers the query uncached.
-            assert await bus.query_with_context(PriceQuery(), ALICE) == 42
-        assert any("CQRS cache get failed" in record.getMessage() for record in caplog.records)
-        assert handler.calls == 1
         assert await _stored(relational_backend) == {"stale": "v"}
+    finally:
+        await ctx.stop()
+
+
+def _refusals(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "refused" in record.getMessage()
+    ]
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_on_sqlite_log_mode_reports_a_refused_immediate_write_once_and_carries_on(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        cache = JoiningSqlCache()
+        await cache.put("stale", "v")
+        await cache.put("kept", "v")
+        tx_cache = TransactionAwareCache(cache, on_write_error="log")
+        caplog.set_level(logging.DEBUG, logger="pyfly.cache")
+        for _ in range(3):
+            async with TransactionTemplate().transaction():
+                assert await tx_cache.put_if_absent("generation", "g1") is False  # refused: not stored
+                assert await tx_cache.evict_if_present("stale") is False  # refused: evicted after the commit
+                assert await _stored(relational_backend) == {"stale": "v", "kept": "v"}
+            assert await _stored(relational_backend) == {"kept": "v"}
+            await cache.put("stale", "v")
+        assert len(_refusals(caplog)) == 1  # once per cache, then at DEBUG
+        async with TransactionTemplate().transaction():
+            await tx_cache.invalidate()  # refused: the cache is cleared after the commit
+            assert await _stored(relational_backend) == {"stale": "v", "kept": "v"}
+        assert await _stored(relational_backend) == {}
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_on_sqlite_an_eviction_before_invocation_does_not_stop_the_business_method(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        cache = JoiningSqlCache()
+        await cache.put("price:a", 10)
+        ran: list[str] = []
+
+        @transactional
+        @cache_evict(cache, key="price:{sku}", before_invocation=True)
+        async def reprice(sku: str) -> None:
+            ran.append(sku)
+
+        caplog.set_level(logging.DEBUG, logger="pyfly.cache")
+        await reprice("a")
+        await reprice("a")
+        assert ran == ["a", "a"]
+        assert await _stored(relational_backend) == {}  # the refused eviction ran after the commit
+        assert len(_refusals(caplog)) == 1
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_on_sqlite_the_query_cache_answers_uncached_and_reports_the_refusal_once(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = await _boot(relational_backend)
+    try:
+        cache = JoiningSqlCache()
+        handler = PriceHandler()
+        bus = _query_bus(cache, handler)
+        caplog.set_level(logging.DEBUG)
+        async with TransactionTemplate().transaction():
+            for _ in range(3):
+                assert await bus.query_with_context(PriceQuery(), ALICE) == 42
+        assert handler.calls == 3  # no generation could be started beside the write unit: not cached
+        assert len(_refusals(caplog)) == 1
+        assert not any("CQRS cache get failed" in record.getMessage() for record in caplog.records)
+        assert await _stored(relational_backend) == {}  # no entry under a generation that was never stored
     finally:
         await ctx.stop()
 

@@ -19,7 +19,8 @@ their puts and evictions wait for the commit and are dropped on rollback, see
 
 A cache failure never changes the outcome of the decorated call: the method has run (and may have
 committed), so a put or an eviction that fails is logged (logger ``pyfly.cache``) and the result is
-returned. A failing read, before the method runs, propagates.
+returned. So is an eviction before invocation, and the method runs. A failing read, before the method runs,
+propagates.
 
 The declared return type is checked when the method is decorated: a type the cache cannot hold (an
 ORM-mapped class or a Beanie document, also as ``list[Order]`` or ``Order | None``) raises ``TypeError``
@@ -268,7 +269,9 @@ def cache_evict(
         all_entries: When ``True``, clear the cache after execution: the *cache_name* region when one is
             named, otherwise *backend* itself (its own entries, never a whole shared store).
         before_invocation: Evict at once, before the method runs, even inside a unit of work (Spring's
-            ``beforeInvocation``). A failure then propagates, since nothing has run yet.
+            ``beforeInvocation``). A failure is logged and the method still runs. An eviction that cannot run
+            beside the caller's unit of work (on SQLite, a cache on the database of the caller's write unit)
+            is logged once and runs after the unit commits instead.
         cache_name: A named region of *backend* (see :func:`cache`).
     """
 

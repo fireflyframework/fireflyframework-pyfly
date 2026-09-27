@@ -548,6 +548,48 @@ class TestDecoratorRegionsAndFailures:
         assert any(m.startswith("cache_evict_skipped") for m in messages)
         assert [r.levelname for r in caplog.records if r.getMessage().startswith("cache_evict")] == ["ERROR"]
 
+    async def test_an_immediate_write_that_fails_follows_on_write_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        from pyfly.cache.decorators import cache_evict
+        from pyfly.cache.transaction import TransactionAwareCache
+
+        class _WritesFail(_EvictionFails):
+            async def put_if_absent(self, key: str, value: Any, ttl: timedelta | None = None) -> bool:
+                raise ConnectionError("cache server unreachable")
+
+            async def clear(self) -> None:
+                raise ConnectionError("cache server unreachable")
+
+        backend = _WritesFail()
+        strict = TransactionAwareCache(backend)
+        with pytest.raises(ConnectionError):
+            await strict.put_if_absent("k", 1)
+        with pytest.raises(ConnectionError):
+            await strict.evict_if_present("k")
+        with pytest.raises(ConnectionError):
+            await strict.invalidate()
+
+        lenient = TransactionAwareCache(backend, on_write_error="log")
+        caplog.set_level(logging.WARNING, logger="pyfly.cache")
+        assert await lenient.put_if_absent("k", 1) is False
+        assert await lenient.evict_if_present("k") is False
+        await lenient.invalidate()
+        messages = [record.getMessage() for record in caplog.records]
+        assert [m.split(" ")[0] for m in messages] == [
+            "cache_put_if_absent_skipped",
+            "cache_evict_if_present_skipped",
+            "cache_invalidate_skipped",
+        ]
+
+        # The decorators log: an eviction before invocation that fails no longer stops the method.
+        calls: list[int] = []
+
+        @cache_evict(backend, key="k:{n}", before_invocation=True)
+        async def change(n: int) -> None:
+            calls.append(n)
+
+        await change(1)
+        assert calls == [1]
+
     async def test_a_bad_key_template_fails_before_the_method_runs(self) -> None:
         calls: list[int] = []
 

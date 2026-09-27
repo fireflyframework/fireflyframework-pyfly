@@ -522,8 +522,13 @@ each statement gets a short unit of its own, in the calling task.
   its `BEGIN IMMEDIATE`, so an immediate write to a cache on that same database
   cannot run beside it: it is refused at once with
   `IllegalTransactionStateError` instead of waiting `busy_timeout` for a lock
-  its own task holds. The declarative decorators and the CQRS query cache log
-  it (the query is answered uncached); reads still run.
+  its own task holds; reads still run. With `on_write_error="raise"` (the
+  default of `TransactionAwareCache`) the refusal propagates. With `"log"` (the
+  declarative decorators and the CQRS query cache) the business call goes on:
+  the refusal is logged once per cache (`cache_<operation>_refused` at
+  `WARNING`, later ones at `DEBUG`), `put_if_absent` answers `False` (the query
+  is answered uncached), and a refused `evict_if_present` or `invalidate`
+  (`@cache_evict(before_invocation=True)`) runs after the commit instead.
 
 **Cancellation.** A client disconnect cancels the request's anyio scope, which
 cancels every await that follows, and it often lands just as a `@transactional`
@@ -764,7 +769,7 @@ async def purge_all_users() -> None:
 | `backend`     | `CacheAdapter` | *required* | The cache backend to use. |
 | `key`         | `str`          | `""`       | Key template with `{param}` placeholders. Ignored when `all_entries=True`. |
 | `all_entries` | `bool`         | `False`    | When `True`, clears the `cache_name` region, or `backend` itself (its own entries only) when no region is named. |
-| `before_invocation` | `bool`   | `False`    | Keyword-only. Evict at once, before the method runs, even inside a unit of work (Spring's `beforeInvocation`). A failure then propagates, since nothing has run yet. |
+| `before_invocation` | `bool`   | `False`    | Keyword-only. Evict at once, before the method runs, even inside a unit of work (Spring's `beforeInvocation`). A failure is logged and the method still runs; an eviction that cannot run beside the caller's unit of work (SQLite, a cache on the same database) runs after its commit instead. |
 | `cache_name`  | `str \| None`  | `None`     | Keyword-only. A named region of `backend`. |
 
 ### Return Types, Hits and Failures

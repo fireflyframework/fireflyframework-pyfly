@@ -189,7 +189,8 @@ class QueryCacheAdapter:
     async def entry_key(self, cache_key: str, digest: str | None, ttl: timedelta | None = None) -> str | None:
         """The key the entry of *cache_key* lives under for the caller whose scope is *digest*
         (:func:`scope_digest`): *cache_key* itself when unscoped, else a key under the current generation of
-        *cache_key*. ``None`` when the call is not cached: the cache cannot be read, or *cache_key* contains
+        *cache_key*. ``None`` when the call is not cached: the cache cannot be read, no generation could be
+        started (the cache refused to store one; the region logged it), or *cache_key* contains
         :data:`SCOPE_SEPARATOR` or ends with :data:`GENERATION_SUFFIX` (it could then address another scope's
         entry, or a key's generation; such a key is reported once).
 
@@ -207,6 +208,8 @@ class QueryCacheAdapter:
         except Exception as exc:
             _logger.warning("CQRS cache get failed for key '%s%s': %s", CQRS_CACHE_PREFIX, cache_key, exc)
             return None
+        if generation is None:
+            return None
         return f"{cache_key}|{generation}{SCOPE_SEPARATOR}{digest}"
 
     def _report_reserved(self, cache_key: str) -> None:
@@ -221,7 +224,9 @@ class QueryCacheAdapter:
             GENERATION_SUFFIX,
         )
 
-    async def _generation(self, cache_key: str, ttl: timedelta) -> str:
+    async def _generation(self, cache_key: str, ttl: timedelta) -> str | None:
+        """The current generation of *cache_key*, started now when it has none; ``None`` when none could be
+        started (an entry stored under a generation that is not in the cache could never be reached)."""
         assert self._region is not None
         key = cache_key + GENERATION_SUFFIX
         current = await self._region.get(key)
@@ -231,7 +236,8 @@ class QueryCacheAdapter:
         fresh = uuid.uuid4().hex[:12]
         if await self._region.put_if_absent(key, fresh, ttl=ttl):
             return fresh
-        return str(await self._region.get(key) or fresh)
+        current = await self._region.get(key)  # another caller started one meanwhile, or the put was refused
+        return None if current is None else str(current)
 
     # ── read ───────────────────────────────────────────────────
 
