@@ -311,10 +311,14 @@ readers skip events. Changing a table's strategy is a migration with every write
   The events of one round are ordered by `recorded_at` (one clock, the database's), then by aggregate and
   sequence, so an aggregate's events keep their order and an event appended after another one committed comes
   after it. On SQLite `recorded_at` counts milliseconds: two events of different aggregates recorded in the same
-  millisecond and numbered in the same round are ordered by aggregate id. An append never touches the head row:
-  business transactions never wait for one another there, and none fails on it under snapshot isolation
-  (MariaDB 11's `REPEATABLE READ`, PostgreSQL's). The reader needs write access to the tables, and a read inside
-  a unit of work on the store's datasource shows only what is already numbered.
+  millisecond and numbered in the same round are ordered by aggregate id. No index serves that order, so a
+  backlog (events no reader has read for a while, or an earlier release's) is sorted once per 100 000 events,
+  and the rounds number that list in turn. An append never touches the head row: business transactions never
+  wait for one another there, and none fails on it under snapshot isolation (MariaDB 11's `REPEATABLE READ`,
+  PostgreSQL's). The reader needs write access to the tables, and a read inside
+  a unit of work on the store's datasource shows only what is already numbered: a reader that only ever runs in
+  one (a `@transactional(read_only=True)` endpoint listing recent events) sees new events once a reader outside
+  one (a projection runner, `last_position()`) has numbered them.
 - **`xid8`** (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing). An event's position is
   its writer's transaction id times 2^20 plus its place among that transaction's events, set as it is inserted;
   a reader sees only the positions below its snapshot's horizon (`pg_snapshot_xmin(pg_current_snapshot())`).
@@ -362,10 +366,38 @@ index (`CREATE UNIQUE INDEX ix_pyfly_event_store_global_position ON pyfly_event_
 for projections with checkpoints, the tables of the `projection_checkpoint_store` bean:
 `pyfly_projection_checkpoints` and the lease table `pyfly_locks`. Alembic autogenerates all four from
 `framework_metadata`; otherwise the stores create them when they start (the checkpoint store, when it only
-follows the event store's provider, on first use). Starting then places the events already
-stored on the stream, oldest `occurred_at` first, before any event appended since. Projections built by the earlier runner replayed the store at every start: give them
-`start_from="latest"` (or reset their checkpoint to `last_position()`) on the first start with checkpoints, so
-they do not replay it once more.
+follows the event store's provider, on first use).
+
+The events already stored have no global position yet. They get theirs oldest `occurred_at` first, before any
+event appended since: with `head-row` as the stream is read (a start does not wait for them; a projection's page
+read numbers what its page needs, and `last_position()`, which a runner with `start_from="latest"` calls, numbers
+all of them before it returns), with `xid8` at start. The store sorts such a backlog once per 100 000 events and
+numbers it in rounds of 1000, at roughly 10 000 to 30 000 events a second: in containers on a laptop, a million
+events took 54 s on PostgreSQL 17 and 93 s on MySQL 8 (100 000 took 3 s on both). A large table can be numbered
+in one statement instead, before the upgraded application first starts, while no event has a position yet (the
+set-based `UPDATE` took 18 to 39 s for a million events on PostgreSQL and 110 s on MySQL, in one transaction):
+
+```sql
+-- PostgreSQL, and SQLite 3.33 or later
+UPDATE pyfly_event_store AS e SET global_position = n.position
+FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
+      FROM pyfly_event_store) AS n
+WHERE e.event_id = n.event_id;
+
+-- MySQL 8 and MariaDB 10.2 or later
+UPDATE pyfly_event_store AS e
+JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
+      FROM pyfly_event_store) AS n ON e.event_id = n.event_id
+SET e.global_position = n.position;
+
+-- Every backend: the head row (when a store has created it already) takes the positions on from there
+UPDATE pyfly_event_store_head SET position = (SELECT MAX(global_position) FROM pyfly_event_store)
+WHERE store = 'pyfly_event_store';
+```
+
+Projections built by the earlier runner replayed the store at every start: give them `start_from="latest"` (or
+reset their checkpoint to `last_position()`) on the first start with checkpoints, so they do not replay it once
+more.
 
 ## Durable snapshot store providers
 
@@ -475,7 +507,8 @@ projection scenarios once per position strategy):
 
 - `tests/integration/test_event_store_matrix.py`: commit order, ties, a transaction committing late, concurrent
   appends, an aggregate appended to across units, the business transaction's rollback (proof p10), one `INSERT`
-  per append, the upgrade of an earlier release's table;
+  per append, the upgrade of an earlier release's table, a backlog sorted once per window (with another store
+  numbering part of it meanwhile, and a round failing), the set-based numbering SQL;
 - `tests/integration/test_snapshot_store_matrix.py`: the conditional upsert, UTC instants, snapshots and events
   committing together;
 - `tests/integration/test_projection_matrix.py`: restart without replay, two replicas on one non-idempotent
