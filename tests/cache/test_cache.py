@@ -389,6 +389,34 @@ class TestCacheDecorator:
         assert call_count == 2  # TTL expired, re-fetched
 
 
+class _Switchable(InMemoryCache):
+    """A primary cache that can be taken down, as a Redis outage would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.down = False
+
+    def _check(self) -> None:
+        if self.down:
+            raise ConnectionError("primary cache unreachable")
+
+    async def get(self, key: str) -> Any | None:
+        self._check()
+        return await super().get(key)
+
+    async def put(self, key: str, value: Any, ttl: timedelta | None = None) -> None:
+        self._check()
+        await super().put(key, value, ttl)
+
+    async def evict(self, key: str) -> bool:
+        self._check()
+        return await super().evict(key)
+
+    async def exists(self, key: str) -> bool:
+        self._check()
+        return await super().exists(key)
+
+
 class TestCacheManager:
     @pytest.mark.asyncio
     async def test_uses_primary(self):
@@ -398,8 +426,73 @@ class TestCacheManager:
 
         await manager.put("key", "value")
         assert await manager.get("key") == "value"
-        # Also written to fallback
-        assert await fallback.get("key") == "value"
+        # Not mirrored into the per-process fallback (C024): it would outlive evictions on other nodes.
+        assert await fallback.exists("key") is False
+
+    async def test_a_primary_miss_never_reads_the_fallback(self) -> None:
+        primary = InMemoryCache()
+        fallback = InMemoryCache()
+        await fallback.put("price:1", "stale")
+        manager = CacheManager(primary=primary, fallback=fallback)
+        assert await manager.get("price:1") is None
+        assert await manager.exists("price:1") is False
+
+    async def test_an_eviction_on_one_node_reaches_every_node(self) -> None:
+        """Three nodes share one primary, each with its own fallback (C024)."""
+        shared = InMemoryCache()
+        nodes = {name: CacheManager(primary=shared, fallback=InMemoryCache()) for name in "ABC"}
+        db = {"price": 10}
+        loads: list[str] = []
+
+        def reader(node: str):  # noqa: ANN202
+            @cacheable(nodes[node], key="price:1")
+            async def get_price() -> int:
+                loads.append(node)
+                return db["price"]
+
+            return get_price
+
+        def writer(node: str):  # noqa: ANN202
+            from pyfly.cache.decorators import cache_evict
+
+            @cache_evict(nodes[node], key="price:1")
+            async def set_price(value: int) -> None:
+                db["price"] = value
+
+            return set_price
+
+        read = {name: reader(name) for name in "ABC"}
+        assert await read["B"]() == 10
+        await writer("A")(11)
+        assert await read["C"]() == 11
+        await writer("A")(12)
+        assert [await read["B"](), await read["C"]()] == [12, 12]
+        await writer("A")(13)
+        for _ in range(3):
+            assert [await read["B"](), await read["C"]()] == [13, 13]
+
+    async def test_an_outage_uses_the_fallback_briefly_and_recovery_forgets_it(self) -> None:
+        primary = _Switchable()
+        fallback = InMemoryCache()
+        manager = CacheManager(primary=primary, fallback=fallback, fallback_ttl=timedelta(seconds=30))
+        await manager.put("k", "before")
+
+        primary.down = True
+        assert await manager.get("k") is None  # the outage starts cold: nothing was mirrored
+        await manager.put("k", "during", ttl=timedelta(hours=1))
+        assert await manager.get("k") == "during"
+        assert fallback._store["k"][1] is not None  # capped by fallback_ttl, not the hour asked for
+
+        primary.down = False
+        assert await manager.get("k") == "before"
+        assert await fallback.exists("k") is False  # recovery forgets what the outage wrote
+
+    async def test_a_value_the_cache_refuses_is_not_an_outage(self) -> None:
+        fallback = InMemoryCache()
+        manager = CacheManager(primary=InMemoryCache(), fallback=fallback)
+        with pytest.raises(CacheValueError, match="CachedProduct"):
+            await manager.put("p", CachedProduct(id=1, name="widget"))
+        assert fallback.get_keys() == []
 
     @pytest.mark.asyncio
     async def test_failover_to_fallback(self):
