@@ -498,7 +498,7 @@ from pyfly.context.events import (
 |--------------------------|----------------|-------------|
 | `ContextRefreshedEvent`  | The `ApplicationContext` has finished initializing all beans and wiring dependencies. | Run database migrations, seed caches, validate configuration. |
 | `ApplicationReadyEvent`  | The application is fully started and ready to serve requests (after web server is listening). | Start background tasks, open WebSocket connections, log startup metrics. |
-| `ContextClosedEvent`     | The application is shutting down. | Flush buffers, close connections, save state. |
+| `ContextClosedEvent`     | The application is shutting down: the first step of `stop()`, while every bean (the datasources included) still works. | Flush buffers, close connections, save state. |
 
 ### ApplicationEventBus
 

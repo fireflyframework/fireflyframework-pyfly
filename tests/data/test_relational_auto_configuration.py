@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Integer, event, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.context.application_context import ApplicationContext
@@ -251,12 +251,18 @@ class TestStopOrder:
         disposed: list[int] = []
         event.listen(engine.sync_engine, "engine_disposed", lambda e: disposed.append(id(e)))
         await context.stop()
-        # The schema was dropped on the live pool, then the registry disposed it: no pool left open.
+        # The schema was dropped on the live pool, then the registry disposed it: no pool left open,
+        # and the disposed engine refuses to open another one.
         assert disposed == [id(engine.sync_engine)]
         assert engine.pool.checkedin() == 0
-        with pytest.raises(Exception, match="no such table"):
-            await _scalar(engine, f"SELECT count(*) FROM {StopOrderItem.__tablename__}")
-        await engine.dispose()
+        with pytest.raises(Exception, match="closed"):
+            await _scalar(engine, "SELECT 1")
+        fresh = create_async_engine(_sqlite(tmp_path / "app.db"))
+        try:
+            with pytest.raises(Exception, match="no such table"):
+                await _scalar(fresh, f"SELECT count(*) FROM {StopOrderItem.__tablename__}")
+        finally:
+            await fresh.dispose()
 
 
 class TestBeansAreViewsOverTheRegistry:

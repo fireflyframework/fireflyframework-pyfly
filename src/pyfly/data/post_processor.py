@@ -23,17 +23,29 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, get_type_hints
 
+from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.data.query_parser import QueryMethodParser
 
 # Prefixes that indicate a derived query method.
 DERIVED_PREFIXES = ("find_by_", "count_by_", "exists_by_", "delete_by_")
 
+#: The order of every repository post-processor: ahead of the AOP post-processor (order 0), so that
+#: advice wraps the compiled derived and ``@query`` methods instead of being replaced by them.
+REPOSITORY_POST_PROCESSOR_ORDER = HIGHEST_PRECEDENCE + 100
 
+
+@order(REPOSITORY_POST_PROCESSOR_ORDER)
 class BaseRepositoryPostProcessor(ABC):
     """Template base for repository bean post-processors.
 
     Subclasses implement the adapter-specific hooks while inheriting the
     shared iteration loop, stub detection, and ``before_init``.
+
+    They run before every post-processor of the default order, the AOP one included
+    (:data:`REPOSITORY_POST_PROCESSOR_ORDER`). The compiled queries are bound on the instance, so a
+    post-processor that ran earlier and wrapped the stubs, as AOP weaving does, would lose its
+    wrappers; ties used to be broken by the alphabetical order of the auto-configuration entry points,
+    which put ``aop`` first and dropped every aspect on derived and ``@query`` methods.
     """
 
     def __init__(self) -> None:

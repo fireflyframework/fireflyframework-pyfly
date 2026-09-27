@@ -50,7 +50,7 @@ The `pyfly.core` module provides three concerns that every application needs:
 | **Bootstrap** | `@pyfly_application`, `PyFlyApplication` | Mark an entry-point class and orchestrate the startup/shutdown lifecycle. |
 | **Configuration** | `Config`, `@config_properties`, `Value` | Load, layer, and access configuration from YAML/TOML files, profiles, and environment variables. |
 | **Banner** | `BannerMode`, `BannerPrinter` | Render a startup banner to stdout (ASCII art, minimal one-liner, or off). |
-| **Lifecycle** | `Lifecycle` protocol | Unified `start()`/`stop()` contract for all infrastructure adapters. |
+| **Lifecycle** | `Lifecycle` protocol | Unified `start()`/`stop()` contract for all infrastructure adapters, with `SmartLifecycle`-style phases (`pyfly.kernel.lifecycle`). |
 | **Logging Fallback** | `StdlibLoggingAdapter` | Zero-dependency fallback when `structlog` is not installed. Wraps stdlib `logging` with structlog-style key-value API. |
 
 All public symbols are re-exported from `pyfly.core`:
@@ -197,9 +197,10 @@ This is the async entry point you call to bring the application to life. It:
 async def shutdown(self) -> None:
 ```
 
-Logs a shutdown message and delegates to `ApplicationContext.stop()`, which calls
-`@pre_destroy` on all resolved beans in reverse initialization order and publishes
-`ContextClosedEvent`.
+Logs a shutdown message and delegates to `ApplicationContext.stop()`, which publishes
+`ContextClosedEvent`, drains the consumers and the scheduler, calls `@pre_destroy` on every bean
+(each before the beans it depends on), stops the remaining lifecycle beans and disposes the
+datasource registry last (see the stop() lifecycle in the dependency-injection guide).
 
 ### Fail-Fast Startup
 

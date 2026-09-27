@@ -15,19 +15,24 @@
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import inspect
 import logging
+import sys
 import threading
 import time
 import types
 import typing
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Iterable, Mapping
 from typing import Annotated, Any, TypeVar, Union, cast, get_args, get_origin
 
 from pyfly.container.autowired import Autowired
 from pyfly.container.bean import Qualifier
 from pyfly.container.exceptions import (
+    BeanCreationException,
+    BeanCreationNotAllowedError,
     BeanCurrentlyInCreationError,
     NoSuchBeanError,
     NoUniqueBeanError,
@@ -36,7 +41,7 @@ from pyfly.container.metrics import BeanMetrics
 from pyfly.container.ordering import get_order
 from pyfly.container.provider import Provider
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope, ScopeHandler, ScopeSpec
+from pyfly.container.types import Scope, ScopeHandler, ScopeSpec, scope_name
 
 T = TypeVar("T")
 
@@ -76,6 +81,102 @@ def _safe_issubclass(impl: Any, origin: Any) -> bool:
         return False
 
 
+if sys.version_info >= (3, 14):
+    import annotationlib
+
+    def _own_annotations(klass: type) -> Mapping[str, Any]:
+        """The annotations *klass* itself declares, unevaluated where they cannot be evaluated.
+
+        Python 3.14 evaluates annotations lazily (PEP 649/749): a class defined without
+        ``from __future__ import annotations`` keeps no ``__annotations__`` in its ``__dict__``. The
+        ``FORWARDREF`` format evaluates what it can and leaves a forward reference for the rest (a
+        ``TYPE_CHECKING``-only import), so one such name does not hide the others.
+        """
+        try:
+            return annotationlib.get_annotations(klass, format=annotationlib.Format.FORWARDREF)
+        except Exception:  # noqa: BLE001 — annotations that cannot even be listed declare nothing to read
+            return {}
+
+else:
+
+    def _own_annotations(klass: type) -> Mapping[str, Any]:
+        """The annotations *klass* itself declares (Python 3.12 and 3.13 keep them in the class dictionary)."""
+        annotations: Mapping[str, Any] = klass.__dict__.get("__annotations__", {})
+        return annotations
+
+
+#: The raw annotation of a field that has none.
+_UNANNOTATED: Any = object()
+
+# The Autowired/Value fields of each class, found once per class (weakly keyed, so classes defined
+# at runtime, in tests for instance, are not kept alive by the cache).
+_FIELD_CACHE: weakref.WeakKeyDictionary[type, tuple[tuple[str, type | None, Any, Any], ...]] = (
+    weakref.WeakKeyDictionary()
+)
+
+# The resolved annotation of each field, by the class that declares it and the field name. Only a
+# resolution that succeeded is kept: a forward reference to a class defined later resolves next time.
+_HINT_CACHE: weakref.WeakKeyDictionary[type, dict[str, Any]] = weakref.WeakKeyDictionary()
+
+
+def _injected_fields(cls: type) -> tuple[tuple[str, type | None, Any, Any], ...]:
+    """``(name, declaring class, descriptor, raw annotation)`` for every ``Autowired``/``Value`` field of *cls*.
+
+    The fields are the ``Autowired``/``Value`` objects the classes of the MRO hold, so finding them
+    evaluates no annotation, and a class without such fields (every third-party ``@bean`` product) is
+    left alone. The declaring class is the first class in the MRO that annotates the name; its module
+    is where the annotation is resolved. A field nobody annotates has no declaring class and the raw
+    annotation :data:`_UNANNOTATED`.
+    """
+    try:
+        return _FIELD_CACHE[cls]
+    except (KeyError, TypeError):
+        pass
+    from pyfly.core.value import Value
+
+    names: dict[str, None] = {}
+    for klass in cls.__mro__:
+        for name, value in vars(klass).items():
+            if isinstance(value, (Autowired, Value)):
+                names.setdefault(name)
+    fields: list[tuple[str, type | None, Any, Any]] = []
+    if names:
+        annotations_by_class = [(klass, _own_annotations(klass)) for klass in cls.__mro__]
+        for name in names:
+            default = getattr(cls, name, None)
+            if not isinstance(default, (Autowired, Value)):  # a subclass replaced the field
+                continue
+            owner, raw = next(
+                ((klass, annotations[name]) for klass, annotations in annotations_by_class if name in annotations),
+                (None, _UNANNOTATED),
+            )
+            fields.append((name, owner, default, raw))
+    result = tuple(fields)
+    with contextlib.suppress(TypeError):  # a class that cannot be weakly referenced is not cached
+        _FIELD_CACHE[cls] = result
+    return result
+
+
+def _field_hint(owner: type, name: str, raw: Any) -> Any:
+    """The resolved annotation *raw* of field *name*, evaluated alone in the module and namespace of *owner*.
+
+    ``typing.get_type_hints`` on the whole class fails as soon as ANY annotation of ANY class in the
+    MRO cannot be resolved; a probe class that carries just this one annotation does not. The result
+    is cached per field, so a transient bean does not build a probe class on every creation.
+    """
+    cached = _HINT_CACHE.get(owner)
+    if cached is not None and name in cached:
+        return cached[name]
+    probe = types.new_class(
+        f"{owner.__name__}_{name}_hint",
+        exec_body=lambda namespace: namespace.update({"__annotations__": {name: raw}, "__module__": owner.__module__}),
+    )
+    hint = typing.get_type_hints(probe, localns=dict(vars(owner)), include_extras=True)[name]
+    with contextlib.suppress(TypeError):  # a class that cannot be weakly referenced is not cached
+        _HINT_CACHE.setdefault(owner, {})[name] = hint
+    return hint
+
+
 def _collect_generic_args(cls: Any) -> set[type]:
     """Concrete (non-TypeVar) type arguments from a class's generic bases, recursively.
 
@@ -90,6 +191,20 @@ def _collect_generic_args(cls: Any) -> set[type]:
         if base_origin is not None and base_origin is not cls and hasattr(base_origin, "__orig_bases__"):
             found |= _collect_generic_args(base_origin)
     return found
+
+
+def scope_key(reg: Registration) -> str:
+    """The key a scope caches the instance of *reg* under: one per bean definition.
+
+    It names the definition, not the class: the module-qualified class and, for a named bean, its
+    name. Two ``@bean`` methods that return one class (two request- or refresh-scoped session
+    factories, one per database) are two definitions with two keys, and so are two classes that share
+    a ``__qualname__`` in different modules. Keying by ``__qualname__`` alone (26.09.07 and earlier)
+    handed every name after the first the first one's instance.
+    """
+    impl = reg.impl_type
+    qualified = f"{getattr(impl, '__module__', '')}.{getattr(impl, '__qualname__', reg.display_name)}"
+    return f"__pyfly_bean_{qualified}#{reg.name}" if reg.name else f"__pyfly_bean_{qualified}"
 
 
 class Container:
@@ -119,12 +234,28 @@ class Container:
         # two @bean methods returning the same concrete type would collapse and
         # one bean would silently vanish from type/list resolution.
         self._all: dict[tuple[type, str], Registration] = {}
+        # The classes registered under two or more bean names: only a lookup of one of these has to
+        # choose among several beans (see _registration_for); every other lookup stays one dict hit.
+        self._names_by_type: dict[type, set[str]] = {}
+        # The classes of _names_by_type with two names or more: the lookups that must choose.
+        self._shared_types: set[type] = set()
         self._lock = threading.RLock()
-        # Installed by ApplicationContext AFTER startup so SINGLETON beans created
-        # lazily (post-startup) still run the full init pipeline (BeanPostProcessors,
-        # @post_construct, AOP weaving). None during startup — the batched startup
-        # passes handle eager beans then (avoids double-initialization).
+        # Called with every instance the container creates, of every scope, before it is cached or
+        # handed out; it returns the instance to use. ApplicationContext installs it for the whole
+        # start() and after it, so a TRANSIENT, REQUEST, SESSION or custom-scoped bean, and a @lazy
+        # singleton first resolved while the context starts, get the BeanPostProcessors and
+        # @post_construct like any eager singleton. None for a bare container.
         self._post_create_hook: Callable[[Any, Registration], Any] | None = None
+        # The scoped proxy of each proxied registration, by registration identity (the registration
+        # is kept with it, so a recycled id never hands out another registration's proxy).
+        self._scoped_proxies: dict[int, tuple[Registration, Any]] = {}
+        # Why the container builds no bean at the moment, or None while it may, and the scopes that
+        # applies to (None: every scope). ApplicationContext refuses singletons when stop() starts
+        # destroying beans, every scope once they are released, and allows creation again when start()
+        # begins, so a stopped context never rebuilds a singleton it released (an engine nobody would
+        # dispose).
+        self._creation_refused: str | None = None
+        self._refused_scopes: frozenset[ScopeSpec] | None = None
 
     @property
     def _resolving(self) -> dict[type, None]:
@@ -134,6 +265,28 @@ class Container:
             stack = {}
             self._resolving_local.stack = stack
         return stack
+
+    def refuse_creation(self, reason: str, *, scopes: Iterable[ScopeSpec] | None = None) -> None:
+        """Build no bean of *scopes* (of any scope when ``None``) from now on; resolving one that does
+        not exist yet raises :class:`~pyfly.container.exceptions.BeanCreationNotAllowedError` with *reason*.
+
+        The instances that exist are still handed out. ``scopes=(Scope.SINGLETON,)`` is Spring's
+        "singletons currently in destruction" state: a transient or scoped bean can still be built,
+        so a ``@pre_destroy`` that writes through a ``Provider[AsyncSession]`` works.
+        :meth:`allow_creation` ends it.
+        """
+        self._creation_refused = reason
+        self._refused_scopes = None if scopes is None else frozenset(scopes)
+
+    def allow_creation(self) -> None:
+        """Build beans again (see :meth:`refuse_creation`)."""
+        self._creation_refused = None
+        self._refused_scopes = None
+
+    @property
+    def creation_refused(self) -> bool:
+        """Whether the container currently refuses to build beans (of one scope at least)."""
+        return self._creation_refused is not None
 
     def register_scope(self, name: str, handler: ScopeHandler) -> None:
         """Register a custom bean scope (Spring's ``ConfigurableBeanFactory.registerScope``).
@@ -159,18 +312,45 @@ class Container:
         name: str = "",
     ) -> None:
         """Register a class for injection."""
+        from pyfly.container.refresh_scope import REFRESH_SCOPE_NAME
+
         bean_name = name or getattr(cls, "__pyfly_bean_name__", "")
         bean_scope = getattr(cls, "__pyfly_scope__", None) or scope
+        if getattr(cls, "__pyfly_refresh_scope__", False):
+            # @refresh_scope survives a stereotype applied after it (which resets __pyfly_scope__).
+            bean_scope = REFRESH_SCOPE_NAME
+        scoped_proxy = bool(getattr(cls, "__pyfly_scoped_proxy__", False))
+        if scoped_proxy and bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):
+            # The marker used to be ignored here: the dependants silently got the instance itself.
+            raise TypeError(
+                f"a scoped proxy needs a REQUEST, SESSION or custom scope; "
+                f"{getattr(cls, '__qualname__', cls)!r} is registered {scope_name(bean_scope)}"
+            )
         reg = Registration(
             impl_type=cls,
             scope=bean_scope,
             condition=condition,
             name=bean_name,
+            scoped_proxy=scoped_proxy,
         )
         self._registrations[cls] = reg
         self._all[(cls, bean_name)] = reg
+        names = self._names_by_type.setdefault(cls, set())
+        names.add(bean_name)
+        if len(names) > 1:
+            self._shared_types.add(cls)
         if bean_name:
             self._named[bean_name] = reg
+
+    def _unindex_name(self, cls: type, name: str) -> None:
+        """Forget that *cls* is registered under *name* (its ``(cls, name)`` registration was dropped)."""
+        names = self._names_by_type.get(cls)
+        if names is not None:
+            names.discard(name)
+            if len(names) < 2:
+                self._shared_types.discard(cls)
+            if not names:
+                del self._names_by_type[cls]
 
     # ------------------------------------------------------------------
     # Public introspection / registration SPI
@@ -218,9 +398,13 @@ class Container:
 
     def resolve(self, cls: type[T]) -> T:
         """Resolve an instance of the given type."""
-        # Direct registration
-        if cls in self._registrations:
-            return cast(T, self._resolve_registration(self._registrations[cls]))
+        # Direct registration. Only a class registered under two or more names has to choose among
+        # several beans (see _registration_for); every other lookup stays one dictionary hit.
+        reg = self._registrations.get(cls)
+        if reg is not None:
+            if cls in self._shared_types:
+                reg = self._registration_for(cls)
+            return cast(T, self._resolve_registration(reg))
 
         # Follow binding(s)
         impls = self._bindings.get(cls, [])
@@ -233,16 +417,57 @@ class Container:
             )
 
         if len(impls) == 1:
-            return cast(T, self._resolve_registration(self._registrations[impls[0]]))
+            return cast(T, self._resolve_registration(self._registration_for(impls[0])))
 
         # Multiple impls: pick @primary — a class-level marker OR an @bean-level
         # primary recorded on the registration (the @Bean @Primary equivalent).
         for impl in impls:
             reg = self._registrations.get(impl)
             if getattr(impl, "__pyfly_primary__", False) or (reg is not None and reg.primary):
-                return cast(T, self._resolve_registration(self._registrations[impl]))
+                return cast(T, self._resolve_registration(self._registration_for(impl)))
 
         raise NoUniqueBeanError(bean_type=cls, candidates=impls)
+
+    def _registration_for(self, cls: type) -> Registration:
+        """The registration that answers a lookup of exactly *cls*.
+
+        The by-type slot holds the LAST registration of a class, but two named beans can share a
+        class (two ``@bean`` methods returning ``AsyncEngine``). The slot used to answer anyway, so the
+        bean registered last silently shadowed the others, ``@bean(primary=True)`` included. When
+        several distinct beans share *cls*, the ``@primary`` one answers; without exactly one primary
+        the lookup is ambiguous and raises :class:`NoUniqueBeanError` (Spring's behavior). Resolve
+        one of them by name or ``Qualifier``, or all of them with ``list[T]``.
+        """
+        slot = self._registrations[cls]
+        if cls not in self._shared_types:
+            return slot
+        siblings = self._same_type_registrations(cls)
+        if len(siblings) < 2:
+            return slot
+        primaries = [reg for reg in siblings if reg.primary or getattr(reg.impl_type, "__pyfly_primary__", False)]
+        if len(primaries) == 1:
+            return primaries[0]
+        raise NoUniqueBeanError(
+            bean_type=cls,
+            candidates=[cls for _ in siblings],
+            candidate_names=[reg.display_name for reg in siblings],
+            primary_names=[reg.display_name for reg in primaries],
+        )
+
+    def _same_type_registrations(self, cls: type) -> list[Registration]:
+        """The distinct beans registered under exactly *cls* (one per registration, or one per shared
+        factory/instance: an ``@bean``'s aliases are one bean)."""
+        found: list[Registration] = []
+        seen: set[int] = set()
+        for (registered, _name), reg in self._all.items():
+            if registered is not cls:
+                continue
+            identity = id(reg.instance) if reg.instance is not None else id(reg.factory) if reg.factory else id(reg)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            found.append(reg)
+        return found
 
     def resolve_by_name(self, name: str, expected_type: type | None = None) -> Any:
         """Resolve a bean by its registered name.
@@ -363,14 +588,28 @@ class Container:
                 if reg.instance is not None:
                     self._ensure_metrics(reg.impl_type).resolution_count += 1
                     return reg.instance
-                instance = self._create_instance(reg)
-                if self._post_create_hook is not None:
-                    # Lazily-created singleton (post-startup): run the full init pipeline.
-                    instance = self._post_create_hook(instance, reg)
+                instance = self._create_initialized(reg)
                 reg.instance = instance
                 self._ensure_metrics(reg.impl_type).resolution_count += 1
                 return instance
 
+        if reg.scoped_proxy and reg.scope != Scope.TRANSIENT:
+            return self._scoped_proxy(reg)
+        return self._resolve_scoped(reg)
+
+    def _scoped_proxy(self, reg: Registration) -> Any:
+        """The one :class:`~pyfly.container.scoped_proxy.ScopedProxy` of *reg* (built on first use)."""
+        from pyfly.container.scoped_proxy import ScopedProxy
+
+        proxy = self._scoped_proxies.get(id(reg))
+        if proxy is None or proxy[0] is not reg:
+            target_type = reg.impl_type if isinstance(reg.impl_type, type) else object
+            proxy = (reg, ScopedProxy(lambda: self._resolve_scoped(reg), target_type))
+            self._scoped_proxies[id(reg)] = proxy
+        return proxy[1]
+
+    def _resolve_scoped(self, reg: Registration) -> Any:
+        """The instance a non-singleton registration's scope holds now (created when it holds none)."""
         if reg.scope == Scope.REQUEST:
             instance = self._resolve_request_scoped(reg)
             self._ensure_metrics(reg.impl_type).resolution_count += 1
@@ -386,9 +625,18 @@ class Container:
             self._ensure_metrics(reg.impl_type).resolution_count += 1
             return instance
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         self._ensure_metrics(reg.impl_type).resolution_count += 1
         return instance
+
+    def _create_initialized(self, reg: Registration) -> Any:
+        """Create an instance of *reg* and run the post-create hook on it (the init pipeline)."""
+        refused = self._creation_refused
+        if refused is not None and (self._refused_scopes is None or reg.scope in self._refused_scopes):
+            raise BeanCreationNotAllowedError(bean=reg.display_name, reason=refused)
+        instance = self._create_instance(reg)
+        hook = self._post_create_hook
+        return instance if hook is None else hook(instance, reg)
 
     def _resolve_request_scoped(self, reg: Registration) -> Any:
         """Resolve a REQUEST-scoped bean from the active RequestContext."""
@@ -402,12 +650,12 @@ class Container:
             )
 
         # Store request-scoped instances in the context's attributes
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        cache_key = scope_key(reg)
         existing = ctx.get(cache_key)
         if existing is not None:
             return existing
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         ctx.set(cache_key, instance)
         return instance
 
@@ -433,14 +681,42 @@ class Container:
                 f"Ensure the session module (SessionFilter) is enabled."
             )
 
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        cache_key = scope_key(reg)
         existing = session.get_attribute(cache_key)
         if existing is not None:
             return existing
+        existing = self._adopt_legacy_session_attribute(session, reg, cache_key)
+        if existing is not None:
+            return existing
 
-        instance = self._create_instance(reg)
+        instance = self._create_initialized(reg)
         session.set_attribute(cache_key, instance)
         return instance
+
+    def _adopt_legacy_session_attribute(self, session: Any, reg: Registration, cache_key: str) -> Any | None:
+        """The instance a session stored under the key of 26.09.07 and earlier, moved to *cache_key*.
+
+        Until 26.09.07 a SESSION-scoped bean lived under ``__pyfly_bean_<class qualname>``, and a
+        session persisted in a store (Redis) still carries that key. It is adopted only when exactly
+        one SESSION-scoped registration maps to it and the stored object is of that registration's
+        type; when two beans shared the key, nobody can tell whose object it is, and it is left alone.
+        """
+        legacy_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
+        if legacy_key == cache_key:
+            return None
+        stored = session.get_attribute(legacy_key)
+        if stored is None or not _assignable(stored, reg.impl_type):
+            return None
+        sharing = {
+            id(candidate)
+            for candidate in (*self._registrations.values(), *self._all.values(), *self._named.values())
+            if candidate.scope == Scope.SESSION and f"__pyfly_bean_{candidate.impl_type.__qualname__}" == legacy_key
+        }
+        if len(sharing) != 1:
+            return None
+        session.set_attribute(cache_key, stored)
+        session.remove_attribute(legacy_key)
+        return stored
 
     def _resolve_custom_scoped(self, reg: Registration) -> Any:
         """Resolve a bean through a custom :class:`ScopeHandler` registered by name."""
@@ -451,8 +727,7 @@ class Container:
                 f"{reg.display_name}. Available: {sorted(self._custom_scopes)}. "
                 f"Call container.register_scope({reg.scope!r}, handler) first."
             )
-        cache_key = f"__pyfly_bean_{reg.impl_type.__qualname__}"
-        return handler.get(cache_key, lambda: self._create_instance(reg))
+        return handler.get(scope_key(reg), lambda: self._create_initialized(reg))
 
     def _create_instance(self, reg: Registration) -> Any:
         """Create an instance, resolving constructor and field dependencies."""
@@ -468,6 +743,14 @@ class Container:
             # on every resolution (notably TRANSIENT @bean beans).
             if reg.factory is not None:
                 instance = reg.factory()
+                if instance is None:
+                    # A factory declared ``-> Port | None`` declined. A scoped one is asked on every
+                    # resolution; declining means there is no bean (an Optional parameter gets None,
+                    # a required one fails), never a bean whose value is None.
+                    raise NoSuchBeanError(
+                        bean_type=reg.impl_type,
+                        required_by=f"the factory of bean {reg.display_name!r}, which returned None (it declined)",
+                    )
                 self._inject_autowired_fields(instance)
                 metrics = self._ensure_metrics(reg.impl_type)
                 metrics.creation_time_ns = time.perf_counter_ns() - start
@@ -575,8 +858,12 @@ class Container:
                 # injecting the wrong object. Leave it unset (None).
                 if non_none[0] is Any:
                     return None
+                # The inner type goes through this same resolver, not resolve(): a parametrized
+                # generic (async_sessionmaker[AsyncSession], Provider[X], Repository[U, ID]),
+                # list[X] or Annotated[X, Qualifier(...)] is never a registration key, so a raw
+                # lookup always failed and the parameter silently received None.
                 try:
-                    return self.resolve(non_none[0])
+                    return self._resolve_param(non_none[0])
                 except (NoSuchBeanError, NoUniqueBeanError):
                     return None
 
@@ -615,58 +902,83 @@ class Container:
         return self.resolve(param_type)
 
     def _inject_autowired_fields(self, instance: Any) -> None:
-        """Inject dependencies into fields marked with Autowired() or Value()."""
+        """Inject dependencies into fields marked with Autowired() or Value().
+
+        Only the annotations of those fields are read, each on its own. A class that declares none
+        (every third-party @bean product, such as ``AsyncSession``) is left alone, and an annotation
+        elsewhere in the class that cannot be resolved (a ``TYPE_CHECKING``-only import) no longer
+        disables the injection of the others. A required ``Autowired`` field whose type cannot be
+        known (its annotation cannot be resolved, or it has none and no qualifier) fails the creation
+        instead of keeping its sentinel.
+        """
         from pyfly.core.value import Value
 
-        try:
-            hints = typing.get_type_hints(type(instance), include_extras=True)
-        except NameError:
-            logging.getLogger(__name__).warning(
-                "Could not resolve type hints for %s — Autowired fields will not be injected. "
-                "Check for unresolved forward references.",
-                type(instance).__qualname__,
-            )
-            return
-
-        for attr_name, attr_type in hints.items():
-            default = getattr(type(instance), attr_name, None)
-
-            # Handle @Value("${key}") field descriptors
+        cls = type(instance)
+        for attr_name, owner, default, raw in _injected_fields(cls):
+            # Handle @Value("${key}") field descriptors: the expression, not the annotation, decides.
             if isinstance(default, Value):
                 from pyfly.core.config import Config
 
                 config_reg = self._registrations.get(Config)
                 if config_reg is None or config_reg.instance is None:
                     raise RuntimeError(
-                        f"Cannot resolve @Value for {type(instance).__qualname__}.{attr_name}: "
-                        f"Config bean not registered"
+                        f"Cannot resolve @Value for {cls.__qualname__}.{attr_name}: Config bean not registered"
                     )
-                resolved = default.resolve(config_reg.instance)
-                setattr(instance, attr_name, resolved)
+                setattr(instance, attr_name, default.resolve(config_reg.instance))
                 continue
 
-            if not isinstance(default, Autowired):
-                continue
-
-            if default.qualifier:
-                base = get_args(attr_type)[0] if get_origin(attr_type) is Annotated else attr_type
-                value = self.resolve_by_name(default.qualifier, expected_type=base)
-            elif get_origin(attr_type) is Annotated:
-                value = self._resolve_param(attr_type)
-            else:
+            attr_type: Any = None
+            if owner is not None:
                 try:
-                    value = self.resolve(attr_type)
-                except (NoSuchBeanError, NoUniqueBeanError):
-                    if not default.required:
-                        value = None
-                    else:
-                        raise NoSuchBeanError(
-                            bean_type=attr_type if isinstance(attr_type, type) else None,
-                            required_by=f"{type(instance).__qualname__}.{attr_name}",
-                            parameter=f"{attr_name}: {getattr(attr_type, '__name__', repr(attr_type))} = Autowired()",
-                        ) from None
+                    attr_type = _field_hint(owner, attr_name, raw)
+                except Exception as exc:  # noqa: BLE001 — any failure to evaluate the annotation
+                    self._untyped_autowired_field(
+                        instance, attr_name, default, f"cannot be resolved ({type(exc).__name__}: {exc})", exc
+                    )
+                    continue
+            elif not default.qualifier:
+                # The bean name would decide without a type; with neither, nothing tells what to inject.
+                self._untyped_autowired_field(instance, attr_name, default, "is missing", None)
+                continue
+
+            try:
+                if default.qualifier:
+                    base = get_args(attr_type)[0] if get_origin(attr_type) is Annotated else attr_type
+                    value = self.resolve_by_name(default.qualifier, expected_type=base)
+                else:
+                    value = self._resolve_param(attr_type)
+            except (NoSuchBeanError, NoUniqueBeanError):
+                if default.required and default.qualifier:
+                    raise
+                if default.required:
+                    raise NoSuchBeanError(
+                        bean_type=attr_type if isinstance(attr_type, type) else None,
+                        required_by=f"{cls.__qualname__}.{attr_name}",
+                        parameter=f"{attr_name}: {getattr(attr_type, '__name__', repr(attr_type))} = Autowired()",
+                    ) from None
+                value = None
 
             setattr(instance, attr_name, value)
+
+    @staticmethod
+    def _untyped_autowired_field(
+        instance: Any, attr_name: str, field: Autowired, problem: str, cause: Exception | None
+    ) -> None:
+        """An ``Autowired`` field whose type cannot be known: a required one fails, an optional one is ``None``."""
+        owner = type(instance).__qualname__
+        if field.required:
+            raise BeanCreationException(
+                subsystem="injection",
+                provider=f"{owner}.{attr_name}",
+                reason=(
+                    f"the annotation of the Autowired field {owner}.{attr_name} {problem}; "
+                    "annotate it with a type imported at runtime, or name the bean with a qualifier"
+                ),
+            ) from cause
+        logging.getLogger(__name__).warning(
+            "The annotation of the optional Autowired field %s.%s %s; it is left None", owner, attr_name, problem
+        )
+        setattr(instance, attr_name, None)
 
     def _ensure_metrics(self, cls: type) -> BeanMetrics:
         """Return the metrics for *cls*, creating a new entry if needed."""

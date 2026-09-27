@@ -32,6 +32,7 @@ Two auto-configurations live here:
 
 import inspect
 import logging
+import weakref
 from typing import Any
 
 try:
@@ -49,10 +50,11 @@ except ImportError:
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec, scope_name
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
+    conditional_on_missing_bean,
     conditional_on_property,
 )
 from pyfly.context.events import RefreshScopeRefreshedEvent, app_event_listener
@@ -72,7 +74,51 @@ try:
 except ImportError:
     MetricsRegistry = object  # type: ignore[misc,assignment]
 
+try:
+    from pyfly.data.relational.datasource_registry import close_connections_on_return
+except ImportError:  # without SQLAlchemy there is no engine, and nothing calls it
+
+    def close_connections_on_return(engine: Any) -> None:  # type: ignore[misc]
+        """Nothing to hook: SQLAlchemy is not installed."""
+
+
 _logger = logging.getLogger(__name__)
+
+# The engines a split primary was reported for, per registry of a configuration: an engine bean and the
+# session factory over it warn once, and a restarted context (it builds a new registry) warns again.
+_SPLIT_REPORTED: weakref.WeakKeyDictionary[Any, weakref.WeakSet[Any]] = weakref.WeakKeyDictionary()
+
+_SPLIT_HINT = (
+    "an AsyncEngine bean, or an async_sessionmaker bean over an engine that is not the registry's primary, "
+    "replaces the primary of the session factory, the AsyncSession bean and the repositories, while "
+    "DataSourceRegistry.primary keeps pyfly.data.relational.url; configure the primary under "
+    "pyfly.data.relational (url, connect-args, pool) and a second database under "
+    "pyfly.data.relational.datasources.<name> instead of declaring an engine or session factory bean"
+)
+
+
+def _warn_if_split_primary(engine: Any, config: Config | None, *, datasource: str | None = None) -> None:
+    """WARNING when the primary sessions use another engine than the registry's primary, URL configured.
+
+    The session factory, the ``AsyncSession`` bean and the repositories then use *engine*, while
+    :attr:`DataSourceRegistry.primary` (every module that looks the registry up) uses
+    ``pyfly.data.relational.url``: two primaries. *datasource* names the registry datasource *engine*
+    belongs to when it is one (a named datasource), and ``None`` for an engine no registry owns.
+    Reported once per engine and registry.
+    """
+    if config is None or not str(config.get("pyfly.data.relational.url", "") or "").strip():
+        return
+    reported = _SPLIT_REPORTED.setdefault(DataSourceRegistry.for_config(config), weakref.WeakSet())
+    if engine in reported:
+        return
+    reported.add(engine)
+    if datasource is None:
+        _logger.warning("relational_engine_not_in_registry", extra={"engine": str(engine.url), "hint": _SPLIT_HINT})
+    else:
+        _logger.warning(
+            "relational_primary_on_named_datasource",
+            extra={"engine": str(engine.url), "datasource": datasource, "hint": _SPLIT_HINT},
+        )
 
 
 class QueryMetricsLifecycle:
@@ -127,8 +173,9 @@ class EngineLifecycle:
     * ``none`` — skip DDL (for Alembic-managed databases)
 
     ``stop()`` closes the session it was given and, when *dispose_engine* is true (a standalone
-    engine), disposes the engine. A registry engine is left to the registry, which disposes every
-    engine once when the context stops.
+    engine), disposes the engine; a connection still in use is closed when it is returned (the hook is
+    installed when the lifecycle is built). A registry engine is left to the registry, which disposes
+    every engine once when the context stops.
     """
 
     _VALID_DDL_MODES = {"none", "create", "create-drop"}
@@ -145,6 +192,9 @@ class EngineLifecycle:
         self._session = session
         self._ddl_auto = ddl_auto if ddl_auto in self._VALID_DDL_MODES else "create"
         self._dispose_engine = dispose_engine
+        if dispose_engine:
+            # Now, not at stop: installed then, it added pool listeners while a connect could be running.
+            close_connections_on_return(engine)
 
     async def start(self) -> None:
         """Apply DDL strategy — create tables from Base.metadata when configured."""
@@ -170,6 +220,8 @@ class EngineLifecycle:
         except Exception:
             _logger.debug("session_close_failed", exc_info=True)
         if self._dispose_engine:
+            # A connection still in use (a probe in flight) is closed when it is returned: the hook was
+            # installed when this lifecycle was built.
             await self._engine.dispose()
 
 
@@ -230,10 +282,21 @@ class DataSourceSpiRegistrar:
     :class:`~pyfly.data.relational.dialect_customizers.DataSourceCredentialsProvider`. A method of the
     same name that is not a coroutine (respectively, is one) or that cannot be called with those
     arguments is not the SPI, and the bean is left alone.
+
+    Only singletons are registered (``singletons_only``): the registry keeps what it is given for its
+    whole life, so a TRANSIENT, REQUEST or refresh-scoped SPI bean would be registered again at each
+    creation and consulted after its scope ended (a request's tenant customizer running in the next
+    request's units of work, an evicted credentials provider answering with the old password). Such a
+    bean is ignored with a warning; declare it a singleton that reads the request or the live
+    configuration when it is called.
     """
+
+    #: The context hands this post-processor singletons only (see ``BeanPostProcessor``).
+    singletons_only = True
 
     def __init__(self, registry: DataSourceRegistry) -> None:
         self._registry = registry
+        self._warned: set[type] = set()
 
     def before_init(self, bean: Any, bean_name: str) -> Any:
         """Pass through."""
@@ -249,18 +312,38 @@ class DataSourceSpiRegistrar:
             self._registry.add_credentials_provider(bean)
         return bean
 
+    def non_singleton_skipped(self, bean: Any, bean_name: str, scope: ScopeSpec) -> None:
+        """Warn, once per class, that a non-singleton SPI bean is not registered."""
+        cls = type(bean)
+        if cls in self._warned:
+            return
+        if _defines_coroutine(bean, "after_begin", 2) or _defines_method(bean, "datasource_credentials", 1):
+            self._warned.add(cls)
+            _logger.warning(
+                "datasource_spi_bean_not_singleton",
+                extra={
+                    "bean": cls.__qualname__,
+                    "bean_name": bean_name,
+                    "scope": scope_name(scope).lower(),
+                    "hint": "only a singleton customizer or credentials provider is registered; "
+                    "make it a singleton that reads the request or the live configuration when called",
+                },
+            )
+
 
 @auto_configuration
 @conditional_on_class("sqlalchemy")
 class DataSourceAutoConfiguration:
     """The application's datasource registry, its lifecycle, and its SPI registrar."""
 
-    @bean
+    @bean(primary=True)
+    @conditional_on_missing_bean(DataSourceRegistry, singletons_only=True)
     def datasource_registry(self, config: Config) -> DataSourceRegistry:
         """The registry of this configuration (:meth:`DataSourceRegistry.for_config`).
 
         Every module that needs SQL resolves its datasource here; it is the same object whichever
-        auto-configuration asks first.
+        auto-configuration asks first. A singleton ``DataSourceRegistry`` bean of the application
+        replaces it; a scoped one does not, and this one stays the ``@primary`` candidate.
         """
         return DataSourceRegistry.for_config(config)
 
@@ -282,7 +365,15 @@ class RelationalAutoConfiguration:
     """Auto-configures the SQLAlchemy engine, sessions and repository post-processor as views over the
     :class:`~pyfly.data.relational.datasource_registry.DataSourceRegistry`."""
 
-    @bean
+    # The primary data beans back off for a SINGLETON of their type only, and are the @primary
+    # candidates of their type. A singleton AsyncEngine or async_sessionmaker bean replaces the
+    # application's primary; a request- or refresh-scoped one is a second database beside it.
+    # Counting a scoped one switched the primary off: start() failed (a request-scoped factory has
+    # no request at startup, two scoped factories are ambiguous) or every session, the routing
+    # factory and each repository moved to the scoped database.
+
+    @bean(primary=True)
+    @conditional_on_missing_bean(AsyncEngine, singletons_only=True)
     def async_engine(self, config: Config) -> AsyncEngine:
         """The primary datasource's engine.
 
@@ -291,12 +382,23 @@ class RelationalAutoConfiguration:
         """
         return DataSourceRegistry.for_config(config).primary.engine
 
-    @bean
-    def async_session_factory(self, async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-        """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``)."""
+    @bean(primary=True)
+    @conditional_on_missing_bean(async_sessionmaker, singletons_only=True)
+    def async_session_factory(
+        self, async_engine: AsyncEngine, config: Config | None = None
+    ) -> async_sessionmaker[AsyncSession]:
+        """The primary datasource's ``async_sessionmaker`` (``expire_on_commit=False``).
+
+        An ``AsyncEngine`` bean of the application that the registry does not own gets a session
+        factory of its own. While ``pyfly.data.relational.url`` is configured too, that splits the
+        primary in two: the session factory, the ``AsyncSession`` bean and the repositories use the
+        application's engine, and :attr:`DataSourceRegistry.primary` (every module that looks the
+        registry up) the configured URL. A WARNING says so.
+        """
         datasource = datasource_of(async_engine)
         if datasource is not None:
             return datasource.sessionmaker
+        _warn_if_split_primary(async_engine, config)
         return async_sessionmaker(async_engine, expire_on_commit=False)
 
     @bean
@@ -308,7 +410,8 @@ class RelationalAutoConfiguration:
         """
         return NamedDataSources.of_registry(DataSourceRegistry.for_config(config))
 
-    @bean
+    @bean(primary=True)
+    @conditional_on_missing_bean(RoutingSessionFactory, singletons_only=True)
     def routing_session_factory(
         self, async_session_factory: async_sessionmaker[AsyncSession], config: Config
     ) -> RoutingSessionFactory:
@@ -317,11 +420,24 @@ class RelationalAutoConfiguration:
         Routes to the primary's read replica inside a :func:`~pyfly.data.relational.routing.read_only`
         block when ``pyfly.data.relational.read-replica.url`` is configured; otherwise it always uses
         the primary (no behavior change).
+
+        A session factory the application declared over an engine of its own, or over an engine of the
+        registry that is not its primary (a named datasource), splits the primary while
+        ``pyfly.data.relational.url`` is configured, as an engine bean does, and a WARNING says so.
         """
         datasource = datasource_of(async_session_factory)
         if datasource is not None:
             replica = datasource.replica
         else:
+            bind = getattr(async_session_factory, "kw", {}).get("bind")
+            if isinstance(bind, AsyncEngine):
+                bound = datasource_of(bind)
+                owner = bound.registry if bound is not None else None
+                if bound is None:
+                    _warn_if_split_primary(bind, config)
+                elif owner is None or not owner.has_primary or bound is not owner.primary:
+                    # A named datasource or a replica: the registry's primary is another database.
+                    _warn_if_split_primary(bind, config, datasource=bound.qualified_name)
             # A session factory the application declared itself still routes to the configured replica.
             registry = DataSourceRegistry.for_config(config)
             replica = registry.primary.replica if registry.has_primary else None

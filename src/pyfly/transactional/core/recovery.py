@@ -20,6 +20,7 @@ import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
 from pyfly.transactional.core.persistence import (
     ExecutionPersistenceProvider,
     ExecutionState,
@@ -38,6 +39,10 @@ class RecoveryService:
         retention_period: terminal executions older than this are deleted.
         scan_interval: time between background scans.
     """
+
+    #: The scan loop stops before any ``@pre_destroy``, so no scan reaches a destroyed bean
+    #: (see :mod:`pyfly.kernel.lifecycle`).
+    phase = CONSUMER_PHASE
 
     def __init__(
         self,

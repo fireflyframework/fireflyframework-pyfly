@@ -736,11 +736,13 @@ class DocumentAutoConfiguration:
 
 The detection is purely library-based: if Beanie is installed in your Python environment, the MongoDB adapter is available. You still need to set `pyfly.data.document.enabled: true` in config to activate it.
 
+The client bean (`mongo_client`, a pymongo `AsyncMongoClient`) carries `@conditional_on_missing_bean(AsyncMongoClient, singletons_only=True)`: declare your own singleton `AsyncMongoClient` bean (TLS, a credentials callback, read preferences) and the auto-configured one backs off; the `BeanieInitializer` then uses yours and closes it at stop. Until 26.09.07 the framework's client silently shadowed it. A request- or refresh-scoped `AsyncMongoClient` bean is a second client: the auto-configured one stays, as the `@primary` candidate that an injection by type receives.
+
 ### Beanie Initialization
 
 Beanie requires explicit initialization before any document operations can be performed. The `BeanieInitializer` lifecycle bean (in `src/pyfly/data/document/mongodb/initializer.py`) handles this automatically during application startup.
 
-`BeanieInitializer` is registered as a bean by `DocumentAutoConfiguration.odm_initializer()`. Because it implements the `start()`/`stop()` lifecycle protocol, `ApplicationContext._start_infrastructure()` calls it during the startup sequence:
+`BeanieInitializer` is registered as a bean by `DocumentAutoConfiguration.odm_initializer()`. Because it implements the `start()`/`stop()` lifecycle protocol, the `ApplicationContext` starts it during the startup sequence, and stops it after every `@pre_destroy`, so a final flush to MongoDB in a `@pre_destroy` still has its client:
 
 **`start()`:**
 1. Reads `pyfly.data.document.database` from config (defaults to `"pyfly"`).
@@ -1454,7 +1456,7 @@ async def main():
     #   - motor_client        (AsyncIOMotorClient)
     #   - mongo_post_processor (MongoRepositoryBeanPostProcessor)
     #   - odm_initializer     (BeanieInitializer — scans for BaseDocument subclasses
-    #                           and calls init_beanie() during _start_infrastructure())
+    #                           and calls init_beanie() when the lifecycle beans start)
 
     # Create the web application
     app = create_app(

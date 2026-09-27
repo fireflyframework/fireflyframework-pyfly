@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ class TransactionalOutbox:
             permanently failed.
         poll_interval_s: how often to scan the outbox.
     """
+
+    #: The relay stops before any ``@pre_destroy``, and before the publisher it relays through (a
+    #: consumer created before it), so it never publishes into a stopped or destroyed bean
+    #: (see :mod:`pyfly.kernel.lifecycle`).
+    phase = CONSUMER_PHASE
 
     def __init__(
         self,

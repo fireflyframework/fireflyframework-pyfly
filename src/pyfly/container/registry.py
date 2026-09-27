@@ -44,6 +44,14 @@ class Registration:
     # ``init_plan_built`` distinguishes "not built yet" from "built, trivial (None)".
     init_plan: list[tuple[str, Any, bool]] | None = field(default=None, repr=False, compare=False)
     init_plan_built: bool = field(default=False, repr=False, compare=False)
+    # Resolve to a scoped proxy instead of the scoped instance: the proxy looks the current instance
+    # up on every use, so a singleton that injected it follows a refresh or a new request. Only for
+    # REQUEST, SESSION and custom scopes (see pyfly.container.scoped_proxy).
+    scoped_proxy: bool = False
+    # The ``destroy_method`` of the @bean method that produces the bean (the method called on the
+    # instance when it is destroyed, after its @pre_destroy; see pyfly.container.bean), or None for a
+    # bean no @bean method produces.
+    destroy_method: str | None = None
 
     @property
     def display_name(self) -> str:

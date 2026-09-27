@@ -679,6 +679,84 @@ A relational application with no `pyfly.data.relational.url` **fails at startup*
 it silently opened `./app.db` in the working directory. With the `dev` profile active, it falls back
 to `sqlite+aiosqlite:///./app.db` and logs a warning.
 
+**Overriding the beans.** `async_engine`, `async_session_factory`, `routing_session_factory` and
+`datasource_registry` carry `@conditional_on_missing_bean(..., singletons_only=True)`: declare your
+own **singleton** `AsyncEngine`, `async_sessionmaker`, `RoutingSessionFactory` or
+`DataSourceRegistry` bean and the framework's backs off (the beans that take them, such as the
+health indicator and the engine lifecycle, use yours, and the engine lifecycle disposes an engine
+that is not a registry engine). Such a bean replaces the application's **primary**. When several
+beans share a class, the `@primary` one is injected, and a lookup by that class raises
+`NoUniqueBeanError` when none is primary. Named and module datasources are still built by the
+registry.
+
+**Never declare a singleton `AsyncEngine` or `async_sessionmaker` bean for a second database**: it
+takes over the primary. Declare the database under `pyfly.data.relational.datasources.<name>` (see
+[Multiple Named Datasources](#multiple-named-datasources)) and use `registry.engine("<name>")`,
+`registry.session_factory("<name>")` or `NamedDataSources`. An engine bean the registry does not own,
+or a session factory bean over an engine of its own, also splits the primary while
+`pyfly.data.relational.url` is configured: the session factory, the `AsyncSession` bean and the
+repositories use that engine, and `DataSourceRegistry.primary`, with every module that looks the
+registry up, the URL. A `relational_engine_not_in_registry` WARNING says so, once per engine and
+run. A session factory bean over a named datasource or a replica of the registry splits it the same
+way and logs `relational_primary_on_named_datasource`; one over the registry's own primary engine
+(other session options) is no split.
+Driver arguments, pool settings and the credentials provider are all configurable on the registry's
+own primary, so an engine bean is rarely needed.
+
+A request- or refresh-scoped bean of one of these types is a **second database**, not a
+replacement: the auto-configured beans stay, and they are the `@primary` candidates of their type.
+An injection by type (`AsyncEngine`, `async_sessionmaker[AsyncSession]`), the `AsyncSession` bean,
+the routing factory and the repositories keep the primary; inject the scoped bean by name:
+
+```python
+@configuration
+class TenantSessions:
+    @bean(scope=Scope.REQUEST)
+    def tenant_sessions(self, registry: DataSourceRegistry) -> async_sessionmaker[AsyncSession]:
+        # one named datasource per tenant: pyfly.data.relational.datasources.<tenant>
+        return registry.session_factory(str(RequestContext.current().get("tenant")))
+
+
+class TenantReader:
+    def __init__(
+        self, sessions: Annotated[async_sessionmaker[AsyncSession], Qualifier("tenant_sessions")]
+    ) -> None:
+        self.sessions = sessions
+```
+
+**Closing.** The context closes the registry **last** when it stops: after the consumers drained,
+after every `@pre_destroy` and after every lifecycle bean stopped, so the last writes of the
+application still have their datasource (see the stop() lifecycle in the dependency-injection
+guide). `close()` disposes the engines concurrently and waits for them at most
+`pyfly.data.relational.datasource_registry.CLOSE_TIMEOUT` seconds (5 by default, or
+`close(timeout=...)`): a dispose that
+is still waiting is on a database that stopped answering, and it is cancelled while the connections
+left idle in its pool are terminated (their sockets closed, nothing sent), so `ctx.stop()` ends on
+time. When `pyfly.context.shutdown-timeout` is shorter and the stop cancels the close first, those
+connections are terminated all the same. From the moment it is closed, the registry's engines
+**refuse to connect**: using one raises
+`DataSourceConfigurationError` instead of silently opening a pool that nobody would dispose, and
+the db health indicator of a closed registry answers `OUT_OF_SERVICE` without touching them. A
+restarted context builds a new registry.
+
+A connection that is **in use** while the registry closes (a request or a readiness probe in flight
+during `ctx.stop()`), or that a connect in flight opens in the old pool just after, finishes its
+work and is **closed when it is returned**. `AsyncEngine.dispose()` alone closes the idle
+connections only: a connection returned later went back into the disposed pool and stayed open (on
+PostgreSQL, in `pg_stat_activity`) until the garbage collector found that pool. The hook,
+`close_connections_on_return(engine)` (from `pyfly.data.relational.datasource_registry`), closes a
+connection returned to a pool the engine no longer uses, and leaves the current pool alone: the
+engine pools as before after any number of disposes (an engine handed to a restarted context,
+shared with a second one, an in-memory SQLite database on a `StaticPool`). The registry installs it
+on every engine it builds, the context on every `AsyncEngine` a `@bean` method returns, and the
+engine lifecycle on the application's engine it disposes. For an engine you create and dispose
+yourself, call it **when you create the engine**: it adds pool listeners, and adding them while a
+connection is connecting (asyncpg awaits inside the connect event) breaks that connect.
+
+The registry belongs to the **configuration object** (`DataSourceRegistry.for_config(config)`): two
+contexts built on one `Config` share it, and stopping one closes it for both, so the other's engines
+refuse to connect from then on. Give each context its own `Config`.
+
 ### Configuration Reference
 
 Every key is read for its exact name, so `${...}` placeholders resolve and a `PYFLY_*` environment
@@ -812,6 +890,13 @@ tenant GUC, a `SET LOCAL statement_timeout` or a `search_path`. Declare it as a
 bean and it applies to every datasource and its replica. To limit it, give the class a `datasources`
 attribute, or register it with `registry.add_customizer(customizer, datasource="name")`. Customizers
 run in `@order` order. An exception aborts the unit.
+
+A customizer bean, like a `DataSourceCredentialsProvider` bean, must be a **singleton**: the registry
+keeps it for its whole life. A `TRANSIENT`, `REQUEST` or refresh-scoped one is not registered, and a
+`datasource_spi_bean_not_singleton` warning names it. Registering one at each creation used to run a
+request's customizer in the units of work of every later request (the last tenant won) and to keep an
+evicted credentials provider answering with the old password. A singleton reads the request (a
+`ContextVar`, as below) or the live configuration when it is called.
 
 ```python
 from contextvars import ContextVar
@@ -1209,6 +1294,12 @@ This adds a `version` column. SQLAlchemy automatically appends `WHERE version = 
 ## RepositoryBeanPostProcessor
 
 The `RepositoryBeanPostProcessor` is a `BeanPostProcessor` that runs after each repository bean is initialized. It scans the repository class for stub methods and replaces them with real query implementations.
+
+It runs for every repository the container creates, whatever its scope: a singleton, a `@lazy` one
+first resolved during startup, and a `TRANSIENT`, `REQUEST` or custom-scoped one (until 26.09.07
+those kept their stubs, and `find_by_*` answered `None`). It declares `@order(HIGHEST_PRECEDENCE +
+100)`, ahead of the AOP post-processor, so an aspect on `repository.*.*` wraps the compiled
+derived and `@query` methods instead of being replaced by them.
 
 ### How It Works
 

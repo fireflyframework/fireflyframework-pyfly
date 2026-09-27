@@ -26,6 +26,7 @@ from pyfly.container.container import Container
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
+    conditional_on_missing_bean,
     conditional_on_property,
 )
 from pyfly.core.config import Config
@@ -41,8 +42,14 @@ from pyfly.data.document.mongodb.post_processor import (
 class DocumentAutoConfiguration:
     """Auto-configures pymongo AsyncMongoClient, Beanie initializer, and Mongo repository post-processor."""
 
-    @bean
+    @bean(primary=True)
+    @conditional_on_missing_bean(AsyncMongoClient, singletons_only=True)
     def mongo_client(self, config: Config) -> AsyncMongoClient:  # type: ignore[type-arg]
+        """The application's Mongo client, from ``pyfly.data.document.uri``.
+
+        A singleton ``AsyncMongoClient`` bean of the application replaces it. A request- or
+        refresh-scoped one is a second client, and this one stays the ``@primary`` candidate.
+        """
         uri = str(config.get("pyfly.data.document.uri", "mongodb://localhost:27017"))
         return AsyncMongoClient(uri)
 

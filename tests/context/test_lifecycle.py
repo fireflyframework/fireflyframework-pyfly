@@ -67,3 +67,29 @@ class TestMultipleAnnotations:
 
         assert MyService.start.__pyfly_post_construct__ is True
         assert MyService.stop.__pyfly_pre_destroy__ is True
+
+
+class TestMarkedMethodNames:
+    """``marked_method_names`` finds the methods a lifecycle marker is on, for the context and the refresher."""
+
+    def test_it_finds_the_marked_methods_without_evaluating_a_property(self):
+        from pyfly.context.lifecycle import marked_method_names
+
+        class Bean:
+            @pre_destroy
+            async def close(self) -> None: ...
+
+            @staticmethod
+            @pre_destroy
+            def release() -> None: ...
+
+            @post_construct
+            def init(self) -> None: ...
+
+            @property
+            def state(self) -> str:
+                raise AssertionError("a property is never evaluated")
+
+        assert marked_method_names(Bean, "__pyfly_pre_destroy__") == ("close", "release")
+        assert marked_method_names(Bean, "__pyfly_post_construct__") == ("init",)
+        assert marked_method_names(Bean, "__pyfly_pre_destroy__") is marked_method_names(Bean, "__pyfly_pre_destroy__")

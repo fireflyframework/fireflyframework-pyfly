@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import pytest
 
+from pyfly.container.container import Container
 from pyfly.container.refresh_scope import RefreshScope, refresh_scope
 from pyfly.container.stereotypes import service
 from pyfly.context.application_context import ApplicationContext
-from pyfly.context.events import RefreshScopeRefreshedEvent, app_event_listener
+from pyfly.context.events import ApplicationEventBus, RefreshScopeRefreshedEvent, app_event_listener
+from pyfly.context.lifecycle import pre_destroy
 from pyfly.context.refresh import ContextRefresher
 from pyfly.core.config import Config
 
@@ -115,3 +117,31 @@ async def test_actuator_post_refresh_endpoint() -> None:
     assert resp.json()["refreshed"]  # the counter's cache key was refreshed
     # the bean rebuilds after the HTTP-triggered refresh
     assert ctx.get_bean(_Counter).id == 2
+
+
+class _Closing:
+    closed: list[str] = []
+
+    @pre_destroy
+    async def close(self) -> None:
+        type(self).closed.append("close")
+
+    @pre_destroy
+    def release(self) -> None:
+        type(self).closed.append("release")
+
+    @property
+    def not_a_hook(self) -> str:
+        raise AssertionError("a property is never evaluated while looking for @pre_destroy")
+
+
+async def test_a_refresher_without_a_destroy_callback_runs_the_pre_destroy_methods() -> None:
+    """Without the context's destroy callback, the refresher calls the evicted instance's ``@pre_destroy``."""
+    _Closing.closed = []
+    container = Container()
+    scope = RefreshScope()
+    scope.get("closing", _Closing)
+    refresher = ContextRefresher(container, scope, ApplicationEventBus())
+
+    assert await refresher.refresh() == ["closing"]
+    assert sorted(_Closing.closed) == ["close", "release"]
