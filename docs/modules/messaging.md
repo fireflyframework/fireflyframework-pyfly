@@ -215,7 +215,7 @@ class PaymentProcessor:
         await self._process_payment(data)
 ```
 
-### Retries and Dead Letters
+### Retry and Dead-Letter Routing
 
 A failing listener is attempted again after a back-off, and after its last attempt its
 message is dead-lettered. On Kafka and RabbitMQ the listener container does this outside
