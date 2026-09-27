@@ -24,7 +24,7 @@ from sqlalchemy import update as sa_update
 
 from pyfly.data.page import Page
 from pyfly.data.pageable import Pageable, Sort
-from pyfly.data.relational.sqlalchemy.repository import ID, Repository
+from pyfly.data.relational.sqlalchemy.repository import ID, STREAM_BATCH_SIZE, STREAM_FIRST_BATCH, Repository
 from pyfly.data.relational.sqlalchemy.specification import Specification
 
 T = TypeVar("T")
@@ -148,13 +148,16 @@ class SoftDeleteRepository(Repository[T, ID]):
         return list((await session.execute(stmt)).scalars().all())
 
     async def stream_all(self, criteria: Sort | None = None, **filters: Any) -> AsyncIterator[T]:
-        """Stream non-deleted entities lazily."""
+        """Stream non-deleted entities lazily (in growing batches, as :meth:`Repository.stream_all`)."""
         stmt = self._active_select(**filters)
         if criteria is not None:
             stmt = self._apply_orders(stmt, criteria)
         result = await self._require_session().stream_scalars(stmt)
-        async for row in result:
-            yield row
+        size = STREAM_FIRST_BATCH
+        while batch := await result.fetchmany(size):
+            for row in batch:
+                yield row
+            size = min(size * 5, STREAM_BATCH_SIZE)
 
     async def find_all_including_deleted(self, **filters: Any) -> list[T]:
         """Find all entities INCLUDING soft-deleted ones."""

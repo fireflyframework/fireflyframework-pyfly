@@ -197,7 +197,10 @@ class UnitSession(AsyncSession):
         if unit is None:
             return await super().stream_scalars(*args, **kwargs)
         async with unit.operation():
-            return GuardedResult(await super().stream_scalars(*args, **kwargs), unit)
+            # AsyncSession.stream_scalars() goes through self.stream(), which would guard every fetch a
+            # second time: open the stream unguarded here and guard its scalars once.
+            result = await AsyncSession.stream(self, *args, **kwargs)
+        return GuardedResult(result.scalars(), unit)
 
     def begin_nested(self) -> AsyncSessionTransaction:
         unit = self._pyfly_unit

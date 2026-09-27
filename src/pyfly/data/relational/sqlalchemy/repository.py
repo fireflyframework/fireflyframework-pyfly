@@ -71,6 +71,13 @@ ID = TypeVar("ID")
 
 _logger = logging.getLogger(__name__)
 
+STREAM_FIRST_BATCH = 5
+"""How many rows ``stream_all`` fetches first; each batch after that is five times larger, up to
+:data:`STREAM_BATCH_SIZE` (the buffering SQLAlchemy applies to a streamed result read row by row)."""
+
+STREAM_BATCH_SIZE = 1000
+"""The most rows ``stream_all`` fetches from its server-side cursor at a time."""
+
 READ_PREFIXES: tuple[str, ...] = ("find", "count", "exists", "stream", "get")
 """A repository method whose name starts with one of these runs in a read auto unit outside a transaction."""
 
@@ -300,14 +307,19 @@ class Repository(Generic[T, ID]):
         else:
             unit.check_usable()
         inner = function(self, *args, **kwargs)
+        step = inner.__anext__
+        # The state the stream's steps run in, built once: the unit is bound only while the inner generator
+        # runs a step, never across a yield (the consumer's own code between items is not inside it).
+        scoped = current_state().with_scope(datasource, unit)
         error: BaseException | None = None
         try:
             while True:
-                # The unit is bound only while the inner generator runs a step, never across a yield: the
-                # consumer's own code between items is not inside this stream's unit.
-                token = bind_state(current_state().with_scope(datasource, unit))
+                # Rows come from a fetched batch without touching the unit: a stream iterated after the unit
+                # it captured completed still fails loudly.
+                unit.check_usable()
+                token = bind_state(scoped)
                 try:
-                    item = await anext(inner)
+                    item = await step()
                 except StopAsyncIteration:
                     break
                 finally:
@@ -317,7 +329,7 @@ class Repository(Generic[T, ID]):
             error = raised
             raise
         finally:
-            token = bind_state(current_state().with_scope(datasource, unit))
+            token = bind_state(scoped)
             try:
                 await inner.aclose()
             finally:
@@ -465,14 +477,21 @@ class Repository(Generic[T, ID]):
         return list(result.scalars().all())
 
     async def stream_all(self, criteria: Sort | None = None, **filters: Any) -> AsyncIterator[T]:
-        """Stream entities lazily (``Flux<T>`` analogue) via a server-side cursor."""
+        """Stream entities lazily (``Flux<T>`` analogue) via a server-side cursor.
+
+        Rows are fetched in growing batches (:data:`STREAM_FIRST_BATCH` rows first, up to
+        :data:`STREAM_BATCH_SIZE`): one fetch, and one pass of the unit's operation guard, per batch.
+        """
         session = self._require_session()
         stmt = self._filtered_select(**filters)
         if criteria is not None:
             stmt = self._apply_orders(stmt, criteria)
         result = await session.stream_scalars(stmt)
-        async for row in result:
-            yield row
+        size = STREAM_FIRST_BATCH
+        while batch := await result.fetchmany(size):
+            for row in batch:
+                yield row
+            size = min(size * 5, STREAM_BATCH_SIZE)
 
     async def _find_page(self, pageable: Pageable, **filters: Any) -> Page[T]:
         session = self._require_session()
