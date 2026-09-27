@@ -80,7 +80,6 @@ Spring Data semantics, at the minimum statement count:
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import inspect
 import logging
@@ -1030,14 +1029,6 @@ class Repository(Generic[T, ID]):
         stmt = self._filtered_select(**filters)
         if criteria is not None:
             stmt = stmt.order_by(*self._orders(session, criteria))
-        # Closing this stream early closes the inner one (and its cursor) at once, not when it is collected.
-        async with contextlib.aclosing(self._stream(session, stmt, load, chunk_size)) as rows:
-            async for entity in rows:
-                yield entity
-
-    async def _stream(
-        self, session: AsyncSession, stmt: Select[Any], load: FetchPlan | None, chunk_size: int | None
-    ) -> AsyncGenerator[Any, None]:
         options = self._load_options(load)
         planned = stmt.options(*options)
         streamed = stream_safe(planned, self._model)
