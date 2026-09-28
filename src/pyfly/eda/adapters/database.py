@@ -18,6 +18,10 @@ publishes it, so the event exists exactly when that unit commits (see :mod:`pyfl
 relay, a :data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE` lifecycle bean, delivers the events owed to its
 consumer group to the subscribed handlers, at least once, each subscription settled on its own.
 
+The bus reads and writes through the :class:`~pyfly.eda.ports.outbox.OutboxStore` port: by default a
+:class:`~pyfly.eda.outbox.SqlOutboxStore` on the datasource it is given, or any store passed as *store* (a
+document store, once there is one). The accelerators below are the SQL store's, on PostgreSQL.
+
 On PostgreSQL two accelerators are on: a publish is one statement that also sends ``NOTIFY`` (delivered by the
 server only if the unit commits), and a bus that consumes keeps a ``LISTEN`` connection that wakes its relay at
 once. The ``LISTEN`` connection is opened once the bus runs and a handler is subscribed (a bus that only
@@ -46,15 +50,16 @@ from typing import TYPE_CHECKING, Any
 
 from pyfly.eda.dlq import EdaDeadLetterStore
 from pyfly.eda.outbox import (
-    Outbox,
     OutboxRelay,
     OutboxTables,
     Retention,
+    SqlOutboxStore,
     StartPosition,
     Subscription,
     describe_error,
 )
 from pyfly.eda.ports.outbound import EventHandler
+from pyfly.eda.ports.outbox import OutboxStore
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
@@ -125,7 +130,9 @@ class _PostgresListener:
 
                 self._driver = await asyncpg.connect(_normalise_dsn(self._listen_dsn))
             else:
-                self._pooled = await self._bus.outbox.engine().connect()
+                store = self._bus.sql_store
+                assert store is not None  # a bus listens only on the SQL store (_notifies)
+                self._pooled = await store.engine().connect()
                 raw = await self._pooled.get_raw_connection()
                 self._driver = raw.driver_connection
             await self._driver.add_listener(self._channel, self._notified)
@@ -239,7 +246,9 @@ class DatabaseEventBus:
     """``EventPublisher`` on the transactional outbox (see the module documentation).
 
     - *datasource*: where the outbox lives (a name, a ``DataSource``, an ``AsyncEngine``; ``None``: the
-      default datasource);
+      default datasource), in a :class:`~pyfly.eda.outbox.SqlOutboxStore` the bus builds; or *store*, the
+      :class:`~pyfly.eda.ports.outbox.OutboxStore` to run on (then neither *datasource*, *tables* nor
+      *create_tables* applies: the store has its own);
     - *destinations*: what the bus's consumer group consumes (``None``: every destination), *group*: its name.
       Every process of a group must subscribe the same handlers and consume the same destinations: a delivery
       goes to one of them, and the group's last registration decides what the whole group is owed;
@@ -250,9 +259,9 @@ class DatabaseEventBus:
       :class:`~pyfly.eda.outbox.OutboxRelay`;
     - *create_tables*: create the outbox tables when they are missing (otherwise they are only checked);
       *tables*: the outbox's tables (the ``pyfly_outbox_*`` ones by default);
-    - *notify*: the PostgreSQL wake-ups (``None``: on when the datasource is PostgreSQL and the ``LISTEN``
-      connection can be opened: with the asyncpg driver, or on *listen_dsn*), on *channel*, with the ``LISTEN``
-      connection opened on *listen_dsn* when given;
+    - *notify*: the PostgreSQL wake-ups (``None``: on when the store is a SQL store on PostgreSQL and the
+      ``LISTEN`` connection can be opened: with the asyncpg driver, or on *listen_dsn*), on *channel*, with the
+      ``LISTEN`` connection opened on *listen_dsn* when given;
     - *dead_letter_store*: where dead letters go instead of the outbox's table.
     """
 
@@ -287,18 +296,23 @@ class DatabaseEventBus:
         listen_dsn: str | None = None,
         dead_letter_store: EdaDeadLetterStore | None = None,
         owner: str | None = None,
+        store: OutboxStore | None = None,
     ) -> None:
         self._channel = _channel_name(channel)
         self._notify = notify
         self._listen_dsn = listen_dsn
         self._group = group
         self._destinations = list(destinations) if destinations else None
-        self._outbox = Outbox(
-            datasource,
-            tables=tables,
-            create_tables=create_tables,
-            notify_channel=None if notify is False else self._channel,  # sent on PostgreSQL only
-        )
+        if store is None:
+            store = SqlOutboxStore(
+                datasource,
+                tables=tables,
+                create_tables=create_tables,
+                notify_channel=None if notify is False else self._channel,  # sent on PostgreSQL only
+            )
+        elif datasource is not None or tables is not None:
+            raise ValueError("DatabaseEventBus takes a store, or a datasource (and tables) to build one, not both")
+        self._outbox: OutboxStore = store
         self._relay = OutboxRelay(
             self._outbox,
             group=group,
@@ -324,9 +338,14 @@ class DatabaseEventBus:
     # -- introspection -----------------------------------------------------------------------------------------
 
     @property
-    def outbox(self) -> Outbox:
-        """The outbox the bus writes and reads."""
+    def outbox(self) -> OutboxStore:
+        """The outbox store the bus writes and reads."""
         return self._outbox
+
+    @property
+    def sql_store(self) -> SqlOutboxStore | None:
+        """The outbox store when it is the SQL one (its PostgreSQL accelerators need it), else ``None``."""
+        return self._outbox if isinstance(self._outbox, SqlOutboxStore) else None
 
     @property
     def relay(self) -> OutboxRelay:
@@ -441,12 +460,14 @@ class DatabaseEventBus:
                 await self._release()
                 raise
             self._state = BusState.RUNNING
+            sql = self.sql_store
             logger.info(
                 "eda_outbox_bus_started",
                 extra={
                     "group": self._group,
                     "destinations": self._destinations,
-                    "dialect": self._outbox.dialect(),
+                    "store": type(self._outbox).__name__,
+                    "dialect": sql.dialect() if sql is not None else None,
                     "listener": self.listener_state.value,
                 },
             )
@@ -454,12 +475,13 @@ class DatabaseEventBus:
     def _notifies(self) -> bool:
         if self._notify is False:
             return False
-        postgresql = self._outbox.dialect() == "postgresql"
+        sql = self.sql_store
+        postgresql = sql is not None and sql.dialect() == "postgresql"
         if self._notify and not postgresql:
-            raise ValueError("notify=True needs a PostgreSQL datasource (LISTEN/NOTIFY)")
-        if not postgresql:
+            raise ValueError("notify=True needs a SQL outbox store on PostgreSQL (LISTEN/NOTIFY)")
+        if sql is None or not postgresql:
             return False
-        driver = self._outbox.engine().dialect.driver
+        driver = sql.engine().dialect.driver
         if listen_driver_supported(driver, self._listen_dsn):
             return True
         if self._notify:
@@ -478,7 +500,8 @@ class DatabaseEventBus:
         return False
 
     async def stop(self) -> None:
-        """Stop the relay (the delivery in flight finishes) and close the wake-up connection. Idempotent."""
+        """Stop the relay (the delivery in flight finishes), close the wake-up connection and stop the store.
+        Idempotent."""
         async with self._lock:
             if self._state is not BusState.RUNNING:
                 await self._release_datasource()  # a publish may have resolved one on a bus never started
@@ -492,6 +515,8 @@ class DatabaseEventBus:
         listener, self._listener = self._listener, None
         if listener is not None:
             await listener.close()
+        with contextlib.suppress(Exception):
+            await self._outbox.stop()
         await self._release_datasource()
 
     async def _release_datasource(self) -> None:
@@ -504,15 +529,11 @@ class DatabaseEventBus:
     # -- health ------------------------------------------------------------------------------------------------
 
     async def ping(self) -> None:
-        """Run ``SELECT 1`` on the outbox's datasource; raises when the database cannot be reached."""
-        from sqlalchemy import text
-
-        from pyfly.data.transaction import infrastructure_unit
-        from pyfly.data.transaction.context import outside_transaction
-
-        with outside_transaction():
-            async with infrastructure_unit(self._outbox.datasource, read_only=True, single_statement=True) as session:
-                await session.execute(text("SELECT 1"))
+        """Ping the outbox store's backend (``SELECT 1`` on the SQL store's datasource); raises when it cannot be
+        reached. A store without a ``ping()`` of its own is taken as reachable."""
+        ping = getattr(self._outbox, "ping", None)
+        if callable(ping):
+            await ping()
 
     async def health_status(self) -> HealthStatus:
         """``UP`` while the bus runs, its relay's task runs and its database answers, ``DOWN`` otherwise, with the

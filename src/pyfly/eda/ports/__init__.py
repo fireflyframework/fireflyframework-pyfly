@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""EDA ports — abstract interfaces for event-driven architecture."""
+"""EDA ports — abstract interfaces for event-driven architecture: the event publisher, and the store of the
+transactional outbox."""
 
 from pyfly.eda.ports.outbound import EventPublisher
+from pyfly.eda.ports.outbox import OutboxStore
 
-__all__ = ["EventPublisher"]
+__all__ = ["EventPublisher", "OutboxStore"]
