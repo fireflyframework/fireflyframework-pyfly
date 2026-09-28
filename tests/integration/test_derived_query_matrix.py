@@ -40,8 +40,9 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import pytest
-from sqlalchemy import Boolean, ForeignKey, Integer, String, event, insert, select, text
+from sqlalchemy import Boolean, ColumnElement, ForeignKey, Integer, String, event, func, insert, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, Session, composite, mapped_column, relationship
 
 from pyfly.data import transactional
@@ -80,6 +81,15 @@ class DqAccount(Base):
     @property
     def label(self) -> str:
         return f"{self.owner}/{self.tag}"
+
+    @hybrid_property
+    def shouted_owner(self) -> str:
+        return self.owner.upper()
+
+    @shouted_owner.inplace.expression
+    @classmethod
+    def _shouted_owner_expression(cls) -> ColumnElement[str]:
+        return func.upper(cls.owner)  # an untyped function: its SQL type is NullType
 
 
 @projection
@@ -158,6 +168,14 @@ class AccountRepository(Repository[DqAccount, int]):
     async def find_by_id_in_or_tag(self, ids: list[int], tag: str) -> list[AccountView]: ...
 
     async def find_by_id_in_and_tag_in(self, ids: list[int], tags: list[str]) -> list[DqAccount]: ...
+
+    async def find_by_shouted_owner_in(self, owners: list[str]) -> list[DqAccount]: ...
+
+    async def find_by_shouted_owner_not_in(self, owners: list[str]) -> list[DqAccount]: ...
+
+    async def count_by_shouted_owner_in(self, owners: list[str]) -> int: ...
+
+    async def find_by_id_in_and_shouted_owner_in(self, ids: list[int], owners: list[str]) -> list[DqAccount]: ...
 
 
 ROWS = [
@@ -637,6 +655,35 @@ async def test_the_lists_of_a_statement_share_what_it_binds(
             assert all(sql.count("?") + sql.count("%s") <= 4 for sql in selects)
             with pytest.raises(ValueError, match="more than one such list"):
                 await accounts.find_by_id_in_and_tag_in([1, 2, 3], ["x", "t", "y"])
+
+
+async def test_an_in_list_over_an_untyped_expression(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hybrid over an untyped SQL function (``func.upper(owner)``) has no SQL type to make an array of: its list
+    is an expanding bind on PostgreSQL too, padded and split within the statement's share as everywhere else,
+    while the typed lists beside it stay one array bind there."""
+    async with repository_datasources(relational_backend, *MODELS) as datasources:
+        accounts = await _accounts(datasources)
+        assert _ids(await accounts.find_by_shouted_owner_in(["ANN", "CAT", "ZED"])) == [1, 3]
+        assert _ids(await accounts.find_by_shouted_owner_not_in(["ANN", "CAT"])) == [2, 4, 5]
+        assert await accounts.count_by_shouted_owner_in(["BOB", "DAN", "BOB"]) == 2
+        assert await accounts.find_by_shouted_owner_in([]) == []
+        dialect = datasources.engine.dialect
+        # Two values per statement (beside the binds reserved for the rest of it).
+        monkeypatch.setitem(statements._IN_LIMITS, statements.backend_name(dialect), statements.RESERVED_BINDS + 2)
+        with datasources.counter() as counter:
+            assert _ids(await accounts.find_by_shouted_owner_in(["ANN", "BOB", "CAT"])) == [1, 2, 3]
+        assert dml(counter).get("SELECT", 0) == 2  # two chunks, PostgreSQL included
+        if datasources.dialect == "postgresql":
+            # The id list is one array bind, so the untyped list has the statement's whole share.
+            with datasources.counter() as counter:
+                assert _ids(await accounts.find_by_id_in_and_shouted_owner_in([1, 2, 3], ["ANN", "BOB"])) == [1, 2]
+            (sql,) = sql_of(counter, "SELECT")
+            assert "= ANY (" in sql
+        else:
+            with pytest.raises(ValueError, match="more than one such list"):
+                await accounts.find_by_id_in_and_shouted_owner_in([1, 2, 3], ["ANN", "BOB"])
 
 
 async def test_a_composite_compares_with_its_value(relational_backend: RelationalBackend) -> None:

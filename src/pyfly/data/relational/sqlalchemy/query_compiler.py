@@ -31,7 +31,10 @@ cache key on the statement, so a call costs what running a prebuilt statement co
   pattern of ``None`` arguments;
 - an ``_in`` list is one ``= ANY(:array)`` bind on PostgreSQL (the same statement for every length) and an
   expanding bind elsewhere, padded to the next power of two (``statements.padded``) within its share of what
-  the dialect binds in one statement (the lists of a statement split it); a longer list runs one statement per
+  the dialect binds in one statement (the lists of a statement split it). A list over an untyped expression (a
+  hybrid over ``func.upper(...)``, whose SQL type is ``NullType``) has no type to make an array of, so it is an
+  expanding bind on PostgreSQL too, and shares the statement with its other expanding lists; a longer list runs
+  one statement per
   chunk, where that gives the same answer (an unordered ``find_by`` of entities, a projection without ``_or_``,
   ``exists_by``, ``delete_by``, and ``count_by`` without ``_or_``), and raises ``ValueError`` otherwise;
 - ``_containing``, ``_starting_with`` and ``_ending_with`` match their argument as it is (its ``%`` and ``_``
@@ -88,7 +91,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapper, RelationshipProperty
-from sqlalchemy.types import TypeDecorator
+from sqlalchemy.types import NullType, TypeDecorator
 
 from pyfly.data.pageable import Pageable, Sort
 from pyfly.data.projection import projection_fields
@@ -174,6 +177,13 @@ def _sql_type(attribute: Any) -> Any:
     return sqltype
 
 
+def _is_typed(attribute: Any) -> bool:
+    """Whether *attribute*'s expression has a SQL type (an untyped function's, ``func.upper(...)``, is
+    ``NullType``)."""
+    sqltype = _sql_type(attribute)
+    return sqltype is not None and not isinstance(sqltype, NullType)
+
+
 def _is_string(attribute: Any) -> bool:
     """Whether case folding applies to *attribute*: a string column (an enum is a string type in SQLAlchemy, but
     a native type without ``lower()`` on PostgreSQL)."""
@@ -192,6 +202,13 @@ class _Part:
     first: int
     composite: Any = None
     """The composite property the attribute is (compared with a value of its class), or ``None``."""
+    arrays: bool = False
+    """Whether its IN list binds as one array on PostgreSQL: a list over a typed attribute (an untyped expression
+    has no type to make an array of, and binds its list as an expanding bind there too)."""
+
+    def binds_array(self, backend: str) -> bool:
+        """Whether its IN list is one ``= ANY(:array)`` bind on *backend*."""
+        return self.arrays and backend == "postgresql"
 
     @property
     def by_value(self) -> type | None:
@@ -255,6 +272,7 @@ class DerivedQuery:
         self._parts = self._compile_parts()
         self._dynamic = self._criteria is None or any(part.by_value is not None for part in self._parts)
         self._lists = sum(1 for part in self._parts if part.operator in _LIST_OPERATORS)
+        self._array_lists = sum(1 for part in self._parts if part.arrays)
         self._orders = self._compile_orders()
         self._columns = self._projection_columns()
         self._statements: dict[tuple[Any, ...], Any] = {}
@@ -316,7 +334,8 @@ class DerivedQuery:
                 folds = True
             elif self._parsed.all_ignore_case:
                 folds = operator in CASE_FOLDING_OPERATORS and not by_value and _is_string(attribute)
-            parts.append(_Part(predicate, attribute, relationship, folds, position, composite))
+            arrays = operator in _LIST_OPERATORS and _is_typed(attribute)
+            parts.append(_Part(predicate, attribute, relationship, folds, position, composite, arrays))
             position += predicate.arguments
         return parts
 
@@ -427,7 +446,7 @@ class DerivedQuery:
             return column == value if operator == "eq" else column != value
         names = part.names
         if operator in _LIST_OPERATORS:
-            if backend_name(dialect) == "postgresql":
+            if part.binds_array(backend_name(dialect)):
                 array = bindparam(names[0], type_=ARRAY(column.type))
                 return column == any_(array) if operator == "in" else column != all_(array)
             listed: Any = bindparam(names[0], expanding=True)
@@ -487,7 +506,7 @@ class DerivedQuery:
                 continue
             if part.operator in _LIST_OPERATORS:
                 listed = self._listed(part, first)
-                if backend == "postgresql":
+                if part.binds_array(backend):
                     parameters[part.names[0]] = listed
                 elif len(listed) > capacity:
                     overflowing.append((part, listed))
@@ -504,12 +523,14 @@ class DerivedQuery:
         return _Call(tuple(nulls), self._chunked(parameters, overflowing, capacity, backend), literals)
 
     def _capacity(self, dialect: Dialect, backend: str) -> int:
-        """How many values one IN list of the statement binds, padding included: the dialect's limit per list
-        (Oracle), or its share of the statement's (the limit, less the binds reserved for the rest of the
-        statement, split between its lists), so the lists together never bind more than the dialect takes."""
+        """How many values one expanding IN list of the statement binds, padding included: the dialect's limit
+        per list (Oracle), or its share of the statement's (the limit, less the binds reserved for the rest of the
+        statement, split between its expanding lists: a PostgreSQL array is one bind), so the lists together
+        never bind more than the dialect takes."""
         if backend in _PER_LIST:
             return in_list_limit(dialect)
-        return max(1, (in_list_limit(dialect) - RESERVED_BINDS) // max(1, self._lists))
+        expanding = self._lists - (self._array_lists if backend == "postgresql" else 0)
+        return max(1, (in_list_limit(dialect) - RESERVED_BINDS) // max(1, expanding))
 
     def _listed(self, part: _Part, value: Any) -> list[Any]:
         if value is None or isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
