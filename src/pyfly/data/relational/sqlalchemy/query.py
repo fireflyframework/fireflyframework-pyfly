@@ -370,12 +370,21 @@ def _expanding(tokens: list[Token]) -> set[str]:
     return expanding
 
 
+_EMPTY_SUBQUERY = "(SELECT NULL FROM DUAL WHERE 1 = 0)"
+
 _EMPTY_LISTS: dict[str, tuple[str, str]] = {
     "postgresql": ("= ANY('{}')", "<> ALL('{}')"),
-    "mysql": ("IN (SELECT NULL FROM DUAL WHERE 1 = 0)", "NOT IN (SELECT NULL FROM DUAL WHERE 1 = 0)"),
+    "mysql": (f"IN {_EMPTY_SUBQUERY}", f"NOT IN {_EMPTY_SUBQUERY}"),
+    "mariadb": (f"IN {_EMPTY_SUBQUERY}", f"NOT IN {_EMPTY_SUBQUERY}"),
 }
-"""Dialect -> how ``IN :name`` and ``NOT IN :name`` are written for an empty list (:func:`_without_empty_lists`);
-MariaDB's dialect is ``mysql`` too."""
+"""Dialect name -> how ``IN :name`` and ``NOT IN :name`` are written for an empty list
+(:func:`_without_empty_lists`). MariaDB's dialect is named ``mariadb``, or ``mysql`` through a ``mysql://`` URL."""
+
+
+def _needs_empty_list_rewrite(dialect: Dialect) -> bool:
+    """Whether an empty ``IN`` list is written by :func:`_without_empty_lists` on *dialect*, not as SQLAlchemy
+    writes it."""
+    return dialect.name in _EMPTY_LISTS
 
 
 def _without_empty_lists(described: TranspiledQuery, dialect: Dialect, names: frozenset[str]) -> TranspiledQuery:
@@ -929,7 +938,7 @@ class CompiledQuery:
             if name not in arguments:
                 raise TypeError(f"{self._name}: the query needs a value for :{name}")
             values[name] = _listed(arguments[name]) if name in described.expanding else arguments[name]
-        if dialect.name in _EMPTY_LISTS:
+        if _needs_empty_list_rewrite(dialect):
             empty = frozenset(name for name in described.expanding if not values[name])
             if empty:  # SQLAlchemy's empty list is a set of integers there (_without_empty_lists)
                 described, clause = self._prepared(dialect, empty)

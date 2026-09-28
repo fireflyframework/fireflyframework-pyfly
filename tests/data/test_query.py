@@ -23,6 +23,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import Integer, String, Uuid, text
 from sqlalchemy.dialects import mssql, mysql, postgresql, sqlite
+from sqlalchemy.dialects.mysql.mariadb import MariaDBDialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -35,6 +36,7 @@ from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostPr
 from pyfly.data.relational.sqlalchemy.query import (
     QueryExecutor,
     _native,
+    _needs_empty_list_rewrite,
     _parameter,
     _without_empty_lists,
     query,
@@ -611,15 +613,22 @@ class TestInListParameters:
         assert rewritten.binds == ("x", "kept")
         assert rewritten.expanding == {"kept"}
 
-    def test_an_empty_list_is_an_empty_subquery_of_null_on_mysql_and_mariadb(self):
+    @pytest.mark.parametrize("dialect", [mysql.dialect(), MariaDBDialect()], ids=["mysql", "mariadb"])
+    def test_an_empty_list_is_an_empty_subquery_of_null_on_mysql_and_mariadb(self, dialect: Any):
         """SQLAlchemy writes an empty IN list as a set of integers on MySQL and MariaDB too, which MariaDB refuses to
         compare with a ``UUID`` or ``INET6`` column: an empty list is a subquery of ``NULL`` there, which compares
-        with any type."""
+        with any type. MariaDB's dialect is named ``mariadb`` (``mysql`` through a ``mysql://`` URL)."""
         described = _native("SELECT id FROM t WHERE code IN (:codes) AND NOT tag IN :tags AND id NOT IN (:ids)")
-        rewritten = _without_empty_lists(described, mysql.dialect(), frozenset({"codes", "tags", "ids"}))
+        assert _needs_empty_list_rewrite(dialect)
+        rewritten = _without_empty_lists(described, dialect, frozenset({"codes", "tags", "ids"}))
         empty = "(SELECT NULL FROM DUAL WHERE 1 = 0)"
         assert rewritten.sql == f"SELECT id FROM t WHERE code IN {empty} AND NOT tag IN {empty} AND id NOT IN {empty}"
         assert rewritten.binds == () and rewritten.expanding == frozenset()
+
+    @pytest.mark.parametrize("dialect", [sqlite.dialect(), mssql.dialect()], ids=["sqlite", "mssql"])
+    def test_an_empty_list_stays_as_sqlalchemy_writes_it_elsewhere(self, dialect: Any):
+        """SQLite compares values of any type, and SQL Server's empty list is left as SQLAlchemy writes it."""
+        assert not _needs_empty_list_rewrite(dialect)
 
     def test_an_empty_list_bound_outside_in_too_stays_bound(self):
         described = _native("SELECT id FROM t WHERE code IN (:codes) OR :codes IS NULL", postgresql.dialect())
