@@ -71,6 +71,7 @@ from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
 from pyfly.data.document.mongodb import exception_translation as _translation  # noqa: F401 — registers it
+from pyfly.data.document.mongodb._document_state import register_restorer
 from pyfly.data.transaction.definition import TransactionDefinition
 from pyfly.data.transaction.errors import (
     CommitOutcomeUnknownError,
@@ -295,6 +296,10 @@ class MongoTransactionManager:
             await self._discard(unit)
             raise
         unit.attributes[_TRANSACTION] = True
+        if not unit.read_only:
+            # Registered as the transaction starts, so it is the unit's first synchronization: it restores what the
+            # repository wrote before any after-rollback callback of the application runs.
+            register_restorer(unit)
 
     async def _discard(self, unit: UnitOfWork) -> None:
         """End the session of a unit that failed to start (shielded; its failure is the one to raise)."""

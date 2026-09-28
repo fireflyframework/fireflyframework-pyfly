@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from beanie import Document
 
 from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
 from pyfly.data.document.mongodb.document import AggregateDocument
@@ -124,3 +125,41 @@ async def test_the_pending_events_of_a_saved_aggregate_are_published_with_the_sa
     await env.orders.save_all(orders)
     assert sorted(order for phase, order in env.seen if phase == "after_commit") == ["b-0", "b-1", "b-2"]
     assert all(order.pending_events() == [] for order in orders)
+
+
+@dataclass(frozen=True)
+class OrderShipped(DomainEvent):
+    order: str = ""
+
+
+class EvShipment(Document):
+    order: str
+
+    class Settings:
+        name = "ev_shipments"
+
+
+async def test_a_before_commit_listener_that_makes_the_units_first_write_runs_once(mongo_rs_url: str) -> None:
+    """The unit's body writes nothing through a repository; the before-commit listener of the event its aggregate
+    raises saves a projection, the unit's first repository write. The listener runs once, and one projection is
+    stored."""
+    bus = ApplicationEventBus()
+    calls: list[str] = []
+    shipments: MongoRepository[EvShipment, str] = MongoRepository(EvShipment)
+
+    async def project(event: OrderShipped) -> None:
+        calls.append(event.order)
+        await shipments.save(EvShipment(order=event.order))
+
+    bus.subscribe(OrderShipped, project, phase=TransactionPhase.BEFORE_COMMIT)
+    publisher = DomainEventPublisher(ApplicationEventPublisher(bus))
+    await publisher.start()
+    try:
+        async with beanie_database(mongo_rs_url, [EvOrder, EvShipment]) as db:
+            order = await MongoRepository(EvOrder).save(EvOrder(reference="o-9"))
+            async with TransactionTemplate(MongoTransactionManager.for_client(db.client)).transaction():
+                order.raise_event(OrderShipped(order="o-9"))
+            assert calls == ["o-9"]
+            assert await db.database["ev_shipments"].count_documents({}) == 1
+    finally:
+        await publisher.stop()

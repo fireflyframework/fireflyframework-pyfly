@@ -96,6 +96,7 @@ from pymongo.errors import BulkWriteError, WriteConcernError
 
 from pyfly.container.types import NoAutowire
 from pyfly.data.document.mongodb import exception_translation as _translation  # noqa: F401 — registers it
+from pyfly.data.document.mongodb._document_state import restore_after, snapshots, written
 from pyfly.data.document.mongodb.properties import (
     ID_FIELD,
     InvalidIdError,
@@ -113,7 +114,6 @@ from pyfly.data.transaction.context import bind_state, current_state, reset_stat
 from pyfly.data.transaction.decorator import is_transactional
 from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.registry import TransactionManagerRegistry, installed_registry
-from pyfly.data.transaction.synchronization import CompletionStatus, TransactionSynchronizationAdapter
 from pyfly.data.transaction.template import AutoUnit, complete_auto_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork, cancel_requests
 
@@ -357,97 +357,6 @@ _RUNS_EVENT_ACTIONS: frozenset[str] = frozenset(
 )
 """The framework's methods that run the document's event actions: user code, so they hold the operation guard
 for each driver command only, never for the whole call (module documentation)."""
-
-_WRITTEN_DOCUMENTS = "pyfly_mongo_written_documents"
-"""``UnitOfWork.attributes`` key: the :class:`_RestoreOnRollback` of a unit that runs a transaction."""
-
-
-class _DocumentState:
-    """What a save changes on a document that must match the server's copy: its id, its revision, and its saved
-    state (Beanie's state management)."""
-
-    __slots__ = ("document", "id", "previous_saved_state", "revision_id", "saved_state")
-
-    def __init__(self, document: Any) -> None:
-        self.document = document
-        self.id = document.id
-        self.revision_id = document.revision_id
-        self.saved_state = document._saved_state
-        self.previous_saved_state = document._previous_saved_state
-
-    def restore(self) -> None:
-        """Give the document back the state it had when this snapshot was taken."""
-        document = self.document
-        document.id = self.id
-        document.revision_id = self.revision_id
-        document._saved_state = self.saved_state
-        document._previous_saved_state = self.previous_saved_state
-
-
-class _RestoreOnRollback(TransactionSynchronizationAdapter):
-    """Gives the documents a transaction wrote the state they had before its first write of them, when the
-    transaction rolls back: none of those writes is stored. It is the unit's first synchronization, so it runs
-    before any after-rollback callback of the application, which may save one of them again in a unit of its own. A
-    commit whose outcome is unknown leaves them as the writes left them."""
-
-    def __init__(self) -> None:
-        self.states: dict[int, _DocumentState] = {}
-
-    def remember(self, states: Iterable[_DocumentState]) -> None:
-        for state in states:
-            self.states.setdefault(id(state.document), state)
-
-    async def after_completion(self, status: CompletionStatus) -> None:
-        states, self.states = self.states, {}  # a completed unit keeps no document alive
-        if status is CompletionStatus.ROLLED_BACK:
-            failure = _restore(states.values())
-            if failure is not None:
-                raise failure  # logged and counted by the unit, as any synchronization failure
-
-
-def _restore(states: Iterable[_DocumentState]) -> Exception | None:
-    """Give each document of *states* its state back; one that refuses it (a validator that runs on assignment)
-    does not stop the others. Returns the first failure."""
-    failure: Exception | None = None
-    for state in states:
-        try:
-            state.restore()
-        except Exception as error:  # noqa: BLE001 — every document gets its state back; the first failure is reported
-            if failure is None:
-                failure = error
-    return failure
-
-
-def _restore_after(error: BaseException, states: Iterable[_DocumentState]) -> None:
-    """Give the documents of *states* their state back after a write failed with *error* (the error the caller
-    re-raises: a restore that fails too is logged)."""
-    failure = _restore(states)
-    if failure is not None:
-        _logger.warning(
-            "document_state_restore_failed",
-            extra={"error": type(error).__name__},
-            exc_info=(type(failure), failure, failure.__traceback__),
-        )
-
-
-def _snapshots(documents: Iterable[Any]) -> list[_DocumentState]:
-    """The state of *documents* before a save writes them."""
-    return [_DocumentState(document) for document in documents]
-
-
-def _written(unit: UnitOfWork, states: Iterable[_DocumentState]) -> None:
-    """Record that *unit* wrote the documents of *states* (their state before the write): in a transaction, its
-    rollback gives that state back. Only a write that succeeded is recorded, so a rollback never undoes what another
-    unit stored after a save that failed here."""
-    if not in_transaction(unit):
-        return
-    restorer = unit.attributes.get(_WRITTEN_DOCUMENTS)
-    if restorer is None:
-        unit.check_usable()
-        restorer = _RestoreOnRollback()
-        unit.synchronizations.insert(0, restorer)  # before any after-rollback callback the application registered
-        unit.attributes[_WRITTEN_DOCUMENTS] = restorer
-    restorer.remember(states)
 
 
 def _written_before(error: BaseException, count: int) -> int:
@@ -926,7 +835,7 @@ class MongoRepository(Generic[T, ID]):
         unit = self._writable_unit()
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         new = self._is_new(document)
-        (state,) = _snapshots((document,))
+        (state,) = snapshots((document,))
         fields: dict[str, Any] = {}
         sent = False
         try:
@@ -956,9 +865,9 @@ class MongoRepository(Generic[T, ID]):
                 if new:
                     self._stored(document, True, fields)
                 raise
-            _restore_after(error, (state,))
+            restore_after(error, (state,))
             raise
-        _written(unit, (state,))
+        written(unit, (state,))
         if new:
             if document.id is None:
                 document.id = _as_id(self._model, result.inserted_id)
@@ -1004,7 +913,7 @@ class MongoRepository(Generic[T, ID]):
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         unit = self._writable_unit()
         transactional = in_transaction(unit)
-        states = _snapshots(items)
+        states = snapshots(items)
         operations: list[InsertOne[Any] | UpdateOne] = []
         plans: list[tuple[Any, bool, dict[str, Any]]] = []
         guarded = 0
@@ -1046,12 +955,12 @@ class MongoRepository(Generic[T, ID]):
         except BaseException as error:
             if not transactional and error is conflict:
                 raise  # every document was sent: the ones whose revision matched are stored with their new one
-            written = 0 if transactional else _written_before(error, len(plans))
-            for entity, new, document in plans[:written]:
+            reached = 0 if transactional else _written_before(error, len(plans))
+            for entity, new, document in plans[:reached]:
                 self._stored(entity, new, document)
-            _restore_after(error, states[written:])
+            restore_after(error, states[reached:])
             raise
-        _written(unit, states)
+        written(unit, states)
         for entity, new, document in plans:
             self._stored(entity, new, document)
             if new:
