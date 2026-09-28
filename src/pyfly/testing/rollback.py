@@ -45,11 +45,12 @@ What differs from production, by construction:
   savepoint, and when that unit rolls back the writing unit is marked rollback-only (its commit fails with
   ``UnexpectedRollbackError``) instead of losing the write;
 - work that runs detached is a task of its own that sees no unit of its caller (an ``@async_method`` call, the
-  steps of a saga, a TCC participant or a workflow): started while a unit of the test is open (an
+  steps of a saga and its compensations, a workflow): started while a unit of the test is open (an
   ``@async_method`` called inside a ``@transactional`` method, a saga run inside one), its unit is refused
   like any other that overlaps, and the refusal is that work's failure (the ``AsyncUncaughtExceptionHandler``
   gets it, a saga compensates and fails). In production that work commits on its own. Awaited where no unit
-  of the test is open, its units take part and roll back;
+  of the test is open, its units take part and roll back. TCC participants are not detached: they run in the
+  caller's task, so a TCC started inside a unit of the test joins that unit and rolls back with it;
 - a stream reads its rows when its statement runs, not through a server-side cursor: a cursor left open on
   the shared connection would hang the other units' statements on MySQL and MariaDB, and on SQLite the scan
   would see the rows the test writes meanwhile;

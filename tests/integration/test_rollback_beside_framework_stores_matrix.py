@@ -25,7 +25,9 @@ The integration of the data-test rollback (WP11) with the event store and projec
 - a relay round the test runs itself takes part: it delivers what the test published, inside the test's
   transaction;
 - work that runs detached (WP13: an ``@async_method`` call, a saga's steps) takes part when the test awaits it
-  where no unit is open, and is refused, as its failure, when a unit of the test that started it is still open.
+  where no unit is open, and is refused, as its failure, when a unit of the test that started it is still open;
+- a TCC's participants are not detached: started inside a unit of the test, they join it and roll back with
+  the test.
 """
 
 from __future__ import annotations
@@ -76,6 +78,8 @@ from pyfly.session.ports.outbound import SessionStore
 from pyfly.testing import data_slice
 from pyfly.transactional.saga.annotations import saga, saga_step
 from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+from pyfly.transactional.tcc.annotations import cancel_method, confirm_method, tcc, tcc_participant, try_method
+from pyfly.transactional.tcc.engine.tcc_engine import TccEngine
 from tests.support.backend_matrix import RelationalBackend
 
 # The context stops within this many seconds after a test, background consumers included.
@@ -301,10 +305,11 @@ class _Auditor:
 
 @service
 class _Checkout:
-    def __init__(self, rows: _AuditRows, auditor: _Auditor, sagas: SagaEngine) -> None:
+    def __init__(self, rows: _AuditRows, auditor: _Auditor, sagas: SagaEngine, tccs: TccEngine) -> None:
         self.rows = rows
         self.auditor = auditor
         self.sagas = sagas
+        self.tccs = tccs
         self.audits: list[asyncio.Task[Any]] = []
 
     @transactional
@@ -316,6 +321,11 @@ class _Checkout:
     async def place_through_a_saga(self) -> Any:
         await self.rows.save(_AuditRow(kind="order"))
         return await self.sagas.execute("w4-rollback-saga")
+
+    @transactional
+    async def place_through_a_tcc(self) -> Any:
+        await self.rows.save(_AuditRow(kind="order"))
+        return await self.tccs.execute("w4-rollback-tcc")
 
 
 @saga(name="w4-rollback-saga")
@@ -331,6 +341,26 @@ class _AuditSaga:
         await self.rows.save(_AuditRow(kind="undo"))
 
 
+@tcc(name="w4-rollback-tcc")
+class _AuditTcc:
+    def __init__(self, rows: _AuditRows) -> None:
+        self.rows = rows
+
+    @tcc_participant(id="audit", order=1)
+    class Audit:
+        @try_method()
+        async def reserve(self) -> None:
+            await self.rows.save(_AuditRow(kind="try"))
+
+        @confirm_method()
+        async def confirm(self) -> None:
+            await self.rows.save(_AuditRow(kind="confirm"))
+
+        @cancel_method()
+        async def cancel(self) -> None:
+            await self.rows.save(_AuditRow(kind="cancel"))
+
+
 @component
 class _UncaughtErrors(AsyncUncaughtExceptionHandler):
     def __init__(self) -> None:
@@ -344,7 +374,9 @@ class _UncaughtErrors(AsyncUncaughtExceptionHandler):
 
 def _detached_slice(backend: RelationalBackend) -> Any:
     config = backend.config({"pyfly.transactional.enabled": "true"})
-    return data_slice(_AuditRows, _Auditor, _Checkout, _AuditSaga, _UncaughtErrors, config=config, rollback=True)
+    return data_slice(
+        _AuditRows, _Auditor, _Checkout, _AuditSaga, _AuditTcc, _UncaughtErrors, config=config, rollback=True
+    )
 
 
 async def _kinds(context: Any) -> list[str]:
@@ -380,3 +412,15 @@ async def test_detached_work_started_inside_a_unit_of_the_test_is_refused(
         assert result.success is False
         assert isinstance(result.error, IllegalTransactionStateError)
         assert await _kinds(context) == ["order", "order"]
+
+
+async def test_a_tcc_started_inside_a_unit_of_the_test_joins_it_and_rolls_back(
+    relational_backend: RelationalBackend,
+) -> None:
+    """TCC participants run in the caller's task (they are not detached): nothing is refused."""
+    await relational_backend.create_tables(_AuditRow)
+    async with await _detached_slice(relational_backend) as context:
+        result = await context.get_bean(_Checkout).place_through_a_tcc()
+        assert result.success is True
+        assert await _kinds(context) == ["confirm", "order", "try"]
+    assert (await _committed(relational_backend, _AuditRow.__table__))["w4_rollback_audit"] == 0

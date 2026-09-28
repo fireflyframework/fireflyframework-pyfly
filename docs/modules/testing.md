@@ -788,12 +788,15 @@ by construction:
   unit is marked rollback-only and its commit fails with `UnexpectedRollbackError` (caused by an
   `IllegalTransactionStateError` that says why) instead of losing the write;
 - work that runs detached is a task of its own that sees no unit of its caller: an `@async_method` call, the
-  steps of a saga, a TCC participant or a workflow. Started while a unit of the test is open (an
-  `@async_method` called inside a `@transactional` method, a saga run inside one), its unit is refused like any
-  other that overlaps, and the refusal is that work's failure: the `AsyncUncaughtExceptionHandler` gets the
-  `IllegalTransactionStateError`, a saga compensates and fails. In production that work commits on its own.
-  Await it where no unit of the test is open (`await (await service.audit(...))`, `saga_engine.execute(...)`
-  from the test body) and its units take part and roll back, or test it with `rollback=False`;
+  steps of a saga (and its compensations, a saga composition's included) or a workflow. Started while a unit
+  of the test is open (an `@async_method` called inside a `@transactional` method, a saga run inside one), its
+  unit is refused like any other that overlaps, and the refusal is that work's failure: the
+  `AsyncUncaughtExceptionHandler` gets the `IllegalTransactionStateError`, a saga compensates and fails. In
+  production that work commits on its own. Await it where no unit of the test is open
+  (`await (await service.audit(...))`, `saga_engine.execute(...)` from the test body) and its units take part
+  and roll back, or test it with `rollback=False`. TCC participants are not detached: they run in the caller's
+  task, so a TCC started inside a unit of the test joins that unit (as it joins the caller's unit in
+  production), and its phases roll back with the test;
 - a stream (`stream_all()`, `session.stream()`) reads its rows when its statement runs, not through a
   server-side cursor: a cursor left open on the shared connection would hang the other units' statements on
   MySQL and MariaDB, and on SQLite the scan would see the rows the test writes meanwhile. It holds the rows
