@@ -20,12 +20,16 @@ completes them (:meth:`commit`, :meth:`rollback`, :meth:`release`), and manages 
 :class:`~pyfly.data.transaction.template.TransactionTemplate` does, once, for every backend.
 
 The adapters are :class:`pyfly.data.relational.sqlalchemy.transaction_manager.SqlAlchemyTransactionManager`
-(one per registry datasource) and the MongoDB manager of the document module.
+(one per registry datasource) and :class:`pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager`.
 
 A manager whose backend lets the application open savepoints of its own may also define
 ``failed_within_savepoint(unit, savepoint) -> bool``: whether a statement failed inside such a savepoint,
 opened within a ``NESTED`` scope's *savepoint* and left open. The template then rolls the ``NESTED`` scope
 back to its savepoint. It is optional, and not part of the protocol.
+
+A manager may also name a ``resource_parameter`` (the MongoDB manager's ``"session"``): a ``@transactional``
+coroutine that declares a parameter of that name receives the unit's resource there, unless the caller passes
+one. It is optional too.
 """
 
 from __future__ import annotations

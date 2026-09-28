@@ -112,6 +112,7 @@ def mongodb_container(image: str = "mongo:7", **kwargs: Any) -> Any:
 
 
 _ALREADY_INITIALIZED = 23  # MongoDB error code AlreadyInitialized: replSetInitiate on an initiated set
+_MONGOD_OPEN_FILES = 64000  # MongoDB's recommended open-file limit (the container default is 1024)
 
 
 class MongoDbReplicaSetContainer:
@@ -128,6 +129,11 @@ class MongoDbReplicaSetContainer:
     Use it like any testcontainer (``with mongodb_replica_set_container() as mongo: ...``);
     :func:`pyfly_config_for` maps it to ``pyfly.data.document.uri``. Starting it needs ``pymongo``,
     which ``pyfly[data-document]`` installs.
+
+    ``mongod`` runs with the open-file limit MongoDB recommends (``nofile`` 64000) unless ``ulimits`` is
+    passed: WiredTiger keeps a file open per collection and index for minutes after they are dropped, and
+    a test suite that gives every test a database of its own exhausts the default limit of 1024, at which
+    point ``mongod`` aborts ("Too many open files").
     """
 
     def __init__(
@@ -144,6 +150,9 @@ class MongoDbReplicaSetContainer:
         self.port = port
         self.startup_timeout = startup_timeout
         container_cls = _load("testcontainers.core.container", "DockerContainer")
+        if "ulimits" not in kwargs:
+            ulimit = _load("docker.types", "Ulimit")
+            kwargs["ulimits"] = [ulimit(name="nofile", soft=_MONGOD_OPEN_FILES, hard=_MONGOD_OPEN_FILES)]
         self._container: Any = (
             container_cls(image, **kwargs)
             .with_command(["--replSet", replica_set, "--bind_ip_all", "--port", str(port)])

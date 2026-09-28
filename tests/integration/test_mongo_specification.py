@@ -15,17 +15,15 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
-
-mongomock_motor = pytest.importorskip("mongomock_motor", reason="mongomock-motor not installed")
-
-from beanie import init_beanie
-from mongomock_motor import AsyncMongoMockClient
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.specification import MongoSpecification
 from pyfly.data.pageable import Order, Pageable, Sort
+from tests.support.mongo import beanie_database
 
 # ---------------------------------------------------------------------------
 # Test document
@@ -47,11 +45,10 @@ class User(BaseDocument):
 
 
 @pytest.fixture(autouse=True)
-async def init_db():
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["test_db"], document_models=[User])
-    yield
-    client.close()
+async def init_db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [User]):
+        yield
 
 
 @pytest.fixture

@@ -11,20 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for BaseDocument — uses mongomock for Beanie initialisation."""
+"""Tests for BaseDocument and AggregateDocument as models (Beanie builds a document only once it is bound to
+a database: a replica set of the test's own).
+
+The audit hooks and the timestamp round trip are proven on a real replica set in
+``tests/integration/test_mongo_context.py``; the domain events of aggregate documents in
+``tests/integration/test_mongo_domain_events.py``.
+"""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
 
-mongomock_motor = pytest.importorskip("mongomock_motor", reason="mongomock-motor not installed")
-
-from beanie import init_beanie
-from mongomock_motor import AsyncMongoMockClient
-
-from pyfly.data.document.mongodb.document import BaseDocument
+from pyfly.data.document.mongodb.document import AggregateDocument, BaseDocument
+from pyfly.domain.domain_event import DomainEvent
+from tests.support.mongo import beanie_database
 
 # ---------------------------------------------------------------------------
 # Test document subclass
@@ -39,18 +43,22 @@ class UserDocument(BaseDocument):
         name = "users"
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+class OrderPlaced(DomainEvent):
+    pass
+
+
+class OrderDocument(AggregateDocument):
+    status: str = "NEW"
+
+    class Settings:
+        name = "orders"
 
 
 @pytest.fixture(autouse=True)
-async def init_db():
-    """Initialise Beanie with an in-memory mock client."""
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["test_db"], document_models=[UserDocument])
-    yield
-    client.close()
+async def init_db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [UserDocument, OrderDocument]):
+        yield
 
 
 # ===========================================================================
@@ -125,3 +133,42 @@ class TestBaseDocument:
         doc = UserDocument(name="Charlie", email="charlie@example.com")
         assert doc.name == "Charlie"
         assert doc.email == "charlie@example.com"
+
+    def test_timestamps_are_aware_utc(self):
+        """A naive timestamp is taken as UTC, an aware one converted to UTC (the Mongo timestamp contract)."""
+        naive = UserDocument(name="n", created_at=datetime(2026, 1, 1, 12, 0), updated_at=datetime(2026, 1, 1, 12, 0))
+        assert naive.created_at == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        from datetime import timedelta, timezone
+
+        madrid = timezone(timedelta(hours=2))
+        aware = UserDocument(name="a", created_at=datetime(2026, 7, 1, 14, 0, tzinfo=madrid))
+        assert aware.created_at == datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        assert aware.created_at.tzinfo is UTC
+        assert UserDocument(name="d").created_at.tzinfo is UTC
+
+    def test_audit_hooks_are_public_event_actions(self):
+        """Beanie runs only public event actions: the audit hooks must not start with an underscore."""
+        hooks = [name for name in dir(BaseDocument) if name.startswith("pyfly_audit_")]
+        assert sorted(hooks) == [
+            "pyfly_audit_insert",
+            "pyfly_audit_replace",
+            "pyfly_audit_save",
+            "pyfly_audit_save_changes",
+            "pyfly_audit_update",
+        ]
+        assert all(getattr(getattr(BaseDocument, hook), "has_action", False) for hook in hooks)
+
+
+class TestAggregateDocument:
+    def test_it_queues_and_drains_its_events(self):
+        order = OrderDocument()
+        event = OrderPlaced()
+        order.raise_event(event)
+        assert order.pending_events() == [event]
+        assert order.clear_events() == [event]
+        assert order.pending_events() == []
+
+    def test_its_events_are_not_persisted_fields(self):
+        order = OrderDocument()
+        order.raise_event(OrderPlaced())
+        assert "_pending_events" not in order.model_dump()

@@ -11,20 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for MongoRepositoryBeanPostProcessor — integration tests using mongomock."""
+"""Tests for MongoRepositoryBeanPostProcessor on a real MongoDB replica set."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
-
-mongomock_motor = pytest.importorskip("mongomock_motor", reason="mongomock-motor not installed")
-
-from beanie import init_beanie
-from mongomock_motor import AsyncMongoMockClient
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
 from pyfly.data.document.mongodb.repository import MongoRepository
+from tests.support.mongo import beanie_database
 
 # ---------------------------------------------------------------------------
 # Test document
@@ -78,11 +76,10 @@ class ConcreteMethodRepo(MongoRepository[PPItem, str]):
 
 
 @pytest.fixture(autouse=True)
-async def init_db():
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["test_db"], document_models=[PPItem])
-    yield
-    client.close()
+async def init_db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [PPItem]):
+        yield
 
 
 @pytest.fixture

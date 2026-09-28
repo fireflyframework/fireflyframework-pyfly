@@ -52,7 +52,10 @@ ResourceResolver = Callable[[object], "TransactionManager | None"]
 """Returns the manager that owns a resource object (a session factory, a client), or ``None``."""
 
 # Backend adapters that register a resource resolver when imported (see register_resource_resolver).
-_ADAPTER_MODULES: list[str] = ["pyfly.data.relational.sqlalchemy.transaction_manager"]
+_ADAPTER_MODULES: list[str] = [
+    "pyfly.data.relational.sqlalchemy.transaction_manager",
+    "pyfly.data.document.mongodb.transaction_manager",
+]
 _RESOURCE_RESOLVERS: list[ResourceResolver] = []
 _adapters_loaded = False
 _adapters_lock = threading.Lock()
@@ -113,6 +116,14 @@ class TransactionManagerRegistry:
             self._managers[manager.datasource] = manager
             if default:
                 self._default = manager.datasource
+
+    def set_default(self, name: str) -> str:
+        """Make datasource *name* the default (a boundary that names none runs on it); returns the previous
+        default's name, for a caller that restores it (the document auto-configuration makes its datasource the
+        default of an application without a relational one, for as long as its context runs)."""
+        with self._lock:
+            previous, self._default = self._default, name
+            return previous
 
     def unregister(self, manager: TransactionManager) -> bool:
         """Remove *manager* if it is the one registered under its datasource name (another registered since

@@ -13,14 +13,13 @@
 # limitations under the License.
 """Tests for batch operations on MongoRepository."""
 
+from collections.abc import AsyncIterator
+
 import pytest
-
-mongomock_motor = pytest.importorskip("mongomock_motor", reason="mongomock-motor not installed")
-
-from beanie import Document, init_beanie
-from mongomock_motor import AsyncMongoMockClient
+from beanie import Document
 
 from pyfly.data.document.mongodb.repository import MongoRepository
+from tests.support.mongo import beanie_database
 
 
 class Widget(Document):
@@ -31,12 +30,10 @@ class Widget(Document):
 
 
 @pytest.fixture
-async def db():
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["testdb"], document_models=[Widget])
-    yield
-    # Cleanup
-    await Widget.find_all().delete()
+async def db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [Widget]):
+        yield
 
 
 @pytest.fixture

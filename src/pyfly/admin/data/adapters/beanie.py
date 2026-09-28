@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Administration of initialized Beanie documents, with atomic conditional writes."""
+"""Administration of initialized Beanie documents, with atomic conditional writes.
+
+Ids are parsed with the document's own id type (an ``ObjectId``, a string, a ``UUID``...), and a new document
+gets its id on the client when its type allows it, as the repository does (C090). Each write costs one round
+trip: a create builds its record from the document it inserted (through the collection's own BSON codec, so
+the record and its edit token are what a read would give), and an update or a delete checks the document it
+read and writes it in one conditional ``findAndModify`` (``find_one_and_replace``/``find_one_and_delete``),
+which fails when the document changed since.
+"""
 
 from __future__ import annotations
 
@@ -21,13 +29,17 @@ from decimal import Decimal
 from typing import Any, cast, get_args
 from uuid import uuid4
 
-from beanie import Document, PydanticObjectId
+import bson
+from beanie import Document
 from beanie.odm.utils.dump import get_dict
 from pydantic import ValidationError
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pyfly.admin.data.identifiers import EditTokens, json_value
+from pyfly.admin.data.identifiers import EditTokens, decode_id, json_value
 from pyfly.admin.data.models import AdminField, AdminOperationContext, AdminPage, AdminQuery, AdminRecord, ModelAdmin
+from pyfly.data.auditing import active_auditing_handler
+from pyfly.data.document.mongodb.properties import encode, id_type, new_id
 from pyfly.kernel.exceptions import (
     ConflictException,
     ForbiddenException,
@@ -94,15 +106,22 @@ class BeanieAdminProvider:
     def _filter(self, resource: ModelAdmin, context: AdminOperationContext, id: str | None = None) -> dict[str, Any]:
         parts: list[dict[str, Any]] = []
         if id is not None:
-            try:
-                parts.append({"_id": PydanticObjectId(id)})
-            except Exception as exc:
-                raise ValidationException("Invalid document identifier") from exc
+            parts.append({"_id": self._id(resource, id)})
         for name, value in resource.scope(context).items():
             parts.append({self._alias(resource, name): {"$eq": value}})
         if "deleted_at" in BeanieAdminProvider._model(resource).model_fields:
             parts.append({self._alias(resource, "deleted_at"): None})
         return {"$and": parts} if parts else {}
+
+    def _id(self, resource: ModelAdmin, value: str) -> Any:
+        """*value* (a record id) as the document's id type; an id the type cannot hold is a 400."""
+        try:
+            (parsed,) = decode_id(value, [id_type(self._model(resource))])
+        except ValidationException as exc:
+            raise ValidationException("Invalid document identifier") from exc
+        if parsed is None:
+            raise ValidationException("Invalid document identifier")
+        return encode(self._model(resource), parsed)  # a UUID as BSON binary, whatever the client's settings
 
     def _record(self, resource: ModelAdmin, raw: dict[str, Any]) -> AdminRecord:
         document = self._model(resource).model_validate(raw)
@@ -111,7 +130,7 @@ class BeanieAdminProvider:
             value = getattr(document, name)
             values[name] = adapter.serialize(value) if value is not None else None
         values = {name: json_value(value) for name, value in values.items()}
-        return AdminRecord(str(raw["_id"]), values, self._tokens.issue(resource.resource_id, raw))
+        return AdminRecord(_record_id(raw["_id"]), values, self._tokens.issue(resource.resource_id, raw))
 
     async def list(self, resource: ModelAdmin, query: AdminQuery, context: AdminOperationContext) -> AdminPage:
         from pydantic import TypeAdapter
@@ -182,7 +201,7 @@ class BeanieAdminProvider:
             for name, value in {**supplied, **scope}.items():
                 candidate[self._alias(resource, name)] = value
             model = self._model(resource)
-            now = datetime.now(UTC)
+            now = _now()
             for name, value in (("updated_at", now), ("updated_by", context.security.user_id)):
                 if name in model.model_fields:
                     candidate[self._alias(resource, name)] = value
@@ -192,6 +211,10 @@ class BeanieAdminProvider:
                         candidate[self._alias(resource, name)] = value
             if model.get_settings().use_revision:
                 candidate["revision_id"] = uuid4()
+            if snapshot is None and candidate.get("_id") is None and candidate.get("id") is None:
+                generated = new_id(model)
+                if generated is not None:
+                    candidate["_id"] = generated
             return cast(Document, model.model_validate(candidate))
         except ValidationError as exc:
             raise ValidationException(
@@ -202,13 +225,12 @@ class BeanieAdminProvider:
     async def create(self, resource: ModelAdmin, values: dict[str, Any], context: AdminOperationContext) -> AdminRecord:
         document = self._validate(resource, values, context)
         collection = self._model(resource).get_pymongo_collection()
+        inserted = get_dict(document, to_db=True)
         try:
-            inserted = await collection.insert_one(get_dict(document, to_db=True))
+            await collection.insert_one(inserted)  # sets inserted["_id"] when the server assigns it
         except DuplicateKeyError as exc:
             raise ConflictException("Record violates a uniqueness constraint") from exc
-        raw = await collection.find_one({"_id": inserted.inserted_id})
-        assert raw is not None
-        return self._record(resource, raw)
+        return self._record(resource, _as_stored(collection, inserted))
 
     async def _mutate(
         self, resource: ModelAdmin, id: str, values: dict[str, Any] | None, token: str, context: AdminOperationContext
@@ -222,20 +244,21 @@ class BeanieAdminProvider:
             raise ForbiddenException("Operation is not permitted for this record")
         self._tokens.check(resource.resource_id, raw, token)
         criteria = {"$and": [self._filter(resource, context, id), {"$expr": {"$eq": ["$$ROOT", {"$literal": raw}]}}]}
+        record: AdminRecord | None = None
         try:
             if values is None and "deleted_at" not in BeanieAdminProvider._model(resource).model_fields:
-                result = await collection.delete_one(criteria)
-                matched = result.deleted_count
-                record = None
+                matched = await collection.find_one_and_delete(criteria, projection={"_id": 1}) is not None
             else:
                 document = self._validate(resource, values or {}, context, raw)
                 if values is None:
-                    document.deleted_at = datetime.now(UTC)
+                    document.deleted_at = _now()
                 replacement = {**raw, **get_dict(document, to_db=True)}
-                update = await collection.replace_one(criteria, replacement)
-                matched = update.matched_count
-                saved = await collection.find_one({"_id": raw["_id"]})
-                record = self._record(resource, saved) if saved is not None and values is not None else None
+                saved = await collection.find_one_and_replace(
+                    criteria, replacement, return_document=ReturnDocument.AFTER
+                )
+                matched = saved is not None
+                if saved is not None and values is not None:
+                    record = self._record(resource, saved)
         except DuplicateKeyError as exc:
             raise ConflictException("Record violates a uniqueness constraint") from exc
         if not matched:
@@ -251,3 +274,24 @@ class BeanieAdminProvider:
 
     async def delete(self, resource: ModelAdmin, id: str, edit_token: str, context: AdminOperationContext) -> None:
         await self._mutate(resource, id, None, edit_token, context)
+
+
+def _now() -> datetime:
+    """The auditing clock's time (UTC now when auditing is off), cut to the millisecond BSON stores."""
+    handler = active_auditing_handler()
+    moment = handler.now() if handler is not None else datetime.now(UTC)
+    return moment.replace(microsecond=moment.microsecond - moment.microsecond % 1000)
+
+
+def _as_stored(collection: Any, document: dict[str, Any]) -> dict[str, Any]:
+    """*document* as a read of it gives it back: through the collection's BSON codec (its time zone, UUID and
+    type settings), so the record and its edit token match those of a later read."""
+    options = collection.codec_options
+    return cast(dict[str, Any], bson.decode(bson.encode(document, codec_options=options), codec_options=options))
+
+
+def _record_id(stored: Any) -> str:
+    """The record id of a stored ``_id``: a UUID read by a client without a UUID representation is still one."""
+    if isinstance(stored, bson.Binary) and stored.subtype in (bson.binary.UUID_SUBTYPE, bson.binary.OLD_UUID_SUBTYPE):
+        return str(stored.as_uuid(stored.subtype))
+    return str(stored)

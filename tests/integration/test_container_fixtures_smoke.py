@@ -110,15 +110,16 @@ async def test_mongo_replica_set_lane_commits_and_aborts_transactions(mongo_back
 @requires_docker
 @pytest.mark.asyncio
 async def test_mongo_fixture_roundtrips(mongo_url: str) -> None:
-    motor = pytest.importorskip("motor.motor_asyncio")
-    client = motor.AsyncIOMotorClient(mongo_url)
+    from pymongo import AsyncMongoClient
+
+    client: AsyncMongoClient[dict[str, object]] = AsyncMongoClient(mongo_url)
     try:
         coll = client["pyfly_it"]["smoke"]
         _id = await coll.insert_one({"k": "v"})
         doc = await coll.find_one({"_id": _id.inserted_id})
         assert doc is not None and doc["k"] == "v"
     finally:
-        client.close()
+        await client.close()
 
 
 @requires_docker

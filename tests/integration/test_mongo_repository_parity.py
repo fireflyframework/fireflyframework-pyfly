@@ -11,25 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Spring-parity surface tests for MongoRepository (mongomock-backed)."""
+"""Spring-parity surface tests for MongoRepository (on a real MongoDB replica set)."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
-
-mongomock_motor = pytest.importorskip("mongomock_motor", reason="mongomock-motor not installed")
-
-from beanie import Document, init_beanie
-from mongomock_motor import AsyncMongoMockClient
+from beanie import Document
 
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.page import Page
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.ports.outbound import (
+    BatchRepository,
     CrudRepository,
     PagingAndSortingRepository,
     ReactiveSortingRepository,
 )
+from tests.support.mongo import beanie_database
 
 
 class ParityDoc(Document):
@@ -41,11 +41,10 @@ class ParityDoc(Document):
 
 
 @pytest.fixture
-async def db():
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["paritydb"], document_models=[ParityDoc])
-    yield
-    await ParityDoc.find_all().delete()
+async def db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [ParityDoc]):
+        yield
 
 
 @pytest.fixture
@@ -58,6 +57,7 @@ class TestConformance:
         assert isinstance(repo, CrudRepository)
         assert isinstance(repo, ReactiveSortingRepository)
         assert isinstance(repo, PagingAndSortingRepository)
+        assert isinstance(repo, BatchRepository)
 
 
 class TestFindAllFamily:
