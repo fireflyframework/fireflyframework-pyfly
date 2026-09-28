@@ -23,11 +23,12 @@ conflict) or of a fixed ``DuplicateKeyException`` saves them, instead of raising
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 import pytest
-from beanie import Document, Insert, Save, after_event
+from beanie import Document, Insert, Save, after_event, before_event
 from pymongo import IndexModel
 
 from pyfly.data.document.mongodb.repository import MongoRepository
@@ -57,6 +58,24 @@ class RtDoc(Document):
         RtDoc.journal.append(f"save {self.code}")
 
 
+class RtParked(Document):
+    """A document whose insert action waits at :attr:`gate` while one is set."""
+
+    code: str
+    gate: ClassVar[asyncio.Event | None] = None
+    parked: ClassVar[asyncio.Event | None] = None
+
+    class Settings:
+        name = "rt_parked"
+        use_revision = True
+
+    @before_event(Insert)
+    async def park(self) -> None:
+        if RtParked.gate is not None and RtParked.parked is not None:
+            RtParked.parked.set()
+            await RtParked.gate.wait()
+
+
 class RtRepository(MongoRepository[RtDoc, str]):
     async def import_then_fail(self, documents: list[RtDoc]) -> None:
         """Saves *documents*, then fails: outside a transaction the method's own unit rolls the save back."""
@@ -67,7 +86,7 @@ class RtRepository(MongoRepository[RtDoc, str]):
 @pytest.fixture
 async def db(mongo_rs_url: str) -> AsyncIterator[BeanieDatabase]:
     RtDoc.journal.clear()
-    async with beanie_database(mongo_rs_url, [RtDoc]) as database:
+    async with beanie_database(mongo_rs_url, [RtDoc, RtParked]) as database:
         yield database
 
 
@@ -211,6 +230,30 @@ async def test_a_rollback_after_save_all_returned_gives_the_documents_back(db: B
     await repository.save_all([stored, fresh])
     await _assert_as_stored(stored, fresh)
     assert await _stored_codes(db) == {"a": 3, "fresh": 0}
+
+
+async def test_a_cancelled_save_all_gives_the_documents_back(db: BeanieDatabase) -> None:
+    """A cancellation is a failure too: cancelled while an insert action runs, after the batch made a revision for
+    the stored document and an id for the new one, ``save_all`` gives both back."""
+    repository: MongoRepository[RtParked, str] = MongoRepository(RtParked)
+    stored = await repository.save(RtParked(code="a"))
+    stored.code = "b"
+    fresh = RtParked(code="fresh")
+    RtParked.gate, RtParked.parked = asyncio.Event(), asyncio.Event()
+    try:
+        task = asyncio.ensure_future(repository.save_all([stored, fresh]))
+        await RtParked.parked.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        RtParked.gate = RtParked.parked = None
+    found = await RtParked.get(stored.id)
+    assert found is not None and (found.code, found.revision_id) == ("a", stored.revision_id)
+    assert (fresh.id, fresh.revision_id) == (None, None)
+
+    await repository.save_all([stored, fresh])
+    assert sorted(row["code"] for row in await db.database["rt_parked"].find({}).to_list()) == ["b", "fresh"]
 
 
 async def test_without_a_transaction_the_documents_written_before_a_failure_stay_saved(mongo_url: str) -> None:
