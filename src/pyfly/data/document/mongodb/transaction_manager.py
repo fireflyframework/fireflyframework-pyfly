@@ -236,7 +236,9 @@ class MongoTransactionManager:
                 f"Datasource '{self._datasource}' is a standalone MongoDB server, and multi-document transactions "
                 "need a replica set or a sharded cluster. Run MongoDB as a replica set (a single-node one is enough: "
                 "mongod --replSet rs0, then rs.initiate()), or drop @transactional from this call: outside a "
-                "transaction each repository write is atomic on its own document.",
+                "transaction each repository write is atomic on its own document. A message listener container "
+                "opens a unit per delivery on the default datasource: set pyfly.messaging.listener.transactional "
+                "(pyfly.eda.listener.transactional) to false to deliver without one.",
                 datasource=self._datasource,
             )
         session = self._client.start_session()
