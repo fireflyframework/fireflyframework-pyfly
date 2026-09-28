@@ -208,6 +208,37 @@ def test_migration_auto_configuration_builds_runner() -> None:
     assert isinstance(runner, MigrationRunner)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flag", "migrated"),
+    [("true", True), ("1", True), (1, True), ("yes", True), ("on", True), ("0", False), ("no", False), ("off", False)],
+)
+async def test_the_startup_migrations_read_the_flag_as_the_schema_strategy_does(
+    tmp_path: Path, flag: object, migrated: bool
+) -> None:
+    """``pyfly.data.relational.migrations.enabled`` is one boolean for the startup migrations and for the schema
+    strategy. The migrations ran for ``true`` only: with ``1`` (``PYFLY_DATA_RELATIONAL_MIGRATIONS_ENABLED=1``),
+    ``yes`` or ``on`` the schema strategy saw migrations enabled and created nothing, and no runner migrated
+    either, so the application started without its tables and without a warning."""
+    from pyfly.context.application_context import ApplicationContext
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    ini = environment(tmp_path, [_CREATE_ITEMS])
+    relational = {
+        "enabled": "true",
+        "url": url,
+        "ddl-auto": "none",
+        "migrations": {"enabled": flag, "config": str(ini)},
+    }
+    context = ApplicationContext(Config({"pyfly": {"data": {"relational": relational}}}))
+    await context.start()
+    try:
+        assert len(context.get_beans_of_type(MigrationRunner)) == (1 if migrated else 0)
+    finally:
+        await context.stop()
+    assert ("wp11_mig_item" in await _tables(url)) is migrated
+
+
 # ---------------------------------------------------------------------------------------------------------
 # The application's logging survives the migrations (C028)
 # ---------------------------------------------------------------------------------------------------------

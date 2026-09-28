@@ -861,13 +861,15 @@ class RelationalAutoConfiguration:
 
 @auto_configuration
 @conditional_on_class("sqlalchemy")
-@conditional_on_property("pyfly.data.relational.migrations.enabled", having_value="true")
+@conditional_on_property("pyfly.data.relational.migrations.enabled")
 class MigrationAutoConfiguration:
     """Applies Alembic migrations on startup (Spring Boot Flyway-style auto-migrate).
 
     Opt-in via ``pyfly.data.relational.migrations.enabled=true``; reuses the project's
     Alembic environment (``pyfly db init``). Migrates the same datasource as the app, before the
-    schema strategy of ``ddl-auto`` and every other lifecycle bean runs.
+    schema strategy of ``ddl-auto`` and every other lifecycle bean runs. The flag is the boolean the
+    schema strategy reads (``true``/``yes``/``on``/``1``, ``false``/``no``/``off``/``0``): a flag
+    that stops the strategy from creating the tables always starts the migrations.
     """
 
     @bean
@@ -876,11 +878,14 @@ class MigrationAutoConfiguration:
         config: Config,
         async_engine: AsyncEngine | None = None,
         datasource_registry: DataSourceRegistry | None = None,
-    ) -> MigrationRunner:
+    ) -> MigrationRunner | None:
         """The runner of the startup migrations, on the application's primary engine (an application's singleton
         ``AsyncEngine`` bean, or the registry's primary), under the schema lock
-        (``pyfly.data.relational.schema.lock-timeout``). Without a primary it migrates ``alembic.ini``'s URL."""
+        (``pyfly.data.relational.schema.lock-timeout``). Without a primary it migrates ``alembic.ini``'s URL.
+        ``None`` (no runner) when the flag is set but switched off (``no``, ``off``, ``0``)."""
         properties = RelationalProperties.from_config(config)
+        if not properties.migrations.enabled:
+            return None
         engine = async_engine
         if engine is None and properties.url:
             engine = _datasources(datasource_registry, config).primary.engine
