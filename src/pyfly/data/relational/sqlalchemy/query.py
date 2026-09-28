@@ -60,17 +60,19 @@ count):
   ``SELECT EXISTS``.
 
 **Statements that change rows** (``UPDATE``, ``DELETE``, ``INSERT``, after a ``WITH`` clause too) need
-:func:`~pyfly.data.query.modifying` and return the number of rows they changed (``None`` for ``-> None``);
-without it the repository fails to build. The statement's verb decides the unit a call outside a transaction runs
-in: a read unit for a ``SELECT`` (or ``VALUES``) that changes nothing, a write unit for any other statement (a
-``@modifying`` one, a ``CALL``, which may return ``None``, a ``SELECT`` whose ``WITH`` clause deletes). MySQL
-refuses an ``UPDATE`` or a ``DELETE`` whose subquery reads its own table (error 1093; MariaDB accepts it), and
-MariaDB a ``WITH`` clause before one.
+:func:`~pyfly.data.query.modifying` and return the number of rows they changed (``-> int`` or ``-> int | None``;
+``None`` for ``-> None``); without it the repository fails to build. The statement's verb decides the unit a call
+outside a transaction runs in: a read unit for a ``SELECT`` (or ``VALUES``) that changes nothing, a write unit for
+any other statement (a ``@modifying`` one, a ``CALL``, which may return ``None``, a ``SELECT`` whose ``WITH``
+clause deletes). A statement returning ``None`` has its result closed unread. MySQL refuses an ``UPDATE`` or a
+``DELETE`` whose subquery reads its own table (error 1093; MariaDB accepts it), and MariaDB a ``WITH`` clause
+before one.
 
 **Arguments** bind by name (``:name``, a parameter of the method) and, in JPQL, by position (``?1`` is the first
 parameter after ``self``); the method takes them by position or by keyword. ``IN (:ids)`` (or ``IN :ids``) binds
-a collection, one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an aware ``datetime`` as
-``UtcDateTime``, as entity columns of those types store them; other values bind as the driver takes them.
+a collection (a list, a tuple, a set...), one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an
+aware ``datetime`` as ``UtcDateTime`` (a collection by its elements), as entity columns of those types store them;
+other values bind as the driver takes them.
 
 **JPQL** (``native=False``, the default) is rewritten token by token, for the dialect the query runs on:
 
@@ -106,7 +108,7 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -829,12 +831,10 @@ class CompiledQuery:
 
     def _shape_of(self, described: TranspiledQuery, return_type: Any) -> ResultShape:
         if self._modifying is not None:
-            if return_type in (None, int, Any) or return_type is type(None):
-                return (
-                    ResultShape(ResultKind.NONE, ElementKind.SCALAR, None)
-                    if return_type is type(None)
-                    else ResultShape(ResultKind.ONE, ElementKind.SCALAR, int)
-                )
+            if return_type is type(None):
+                return ResultShape(ResultKind.NONE, ElementKind.SCALAR, None)
+            if return_type in (None, int, Any) or _is_int(return_type):
+                return ResultShape(ResultKind.ONE, ElementKind.SCALAR, int)
             raise self._fail(f"a @modifying query returns int (the row count) or None, not {return_type}")
         if return_type is None or return_type is Any:
             legacy = _LEGACY_SCALAR.match(described.sql)
@@ -882,7 +882,7 @@ class CompiledQuery:
             return await self._modify(session, bound, dialect)
         if self._shape.kind is ResultKind.NONE:  # a statement run for what it does (a CALL): nothing to read
             await _flush_pending(session)
-            await session.execute(bound)
+            (await session.execute(bound)).close()  # rows it returns are not read, nor left open
             return None
         if self._shape.element is ElementKind.ENTITY:
             entity = self._shape.type or self._entity
@@ -898,6 +898,7 @@ class CompiledQuery:
             await _flush_pending(session)
         result = await session.execute(statement)
         rowcount = getattr(result, "rowcount", None)
+        result.close()  # an UPDATE ... RETURNING's rows are not read, nor left open
         count = int(rowcount) if rowcount is not None else -1
         if count < 0 and dialect.name == "sqlite":
             # Python's sqlite3 counts the rows of a statement that starts with INSERT, UPDATE, DELETE or REPLACE
@@ -951,7 +952,9 @@ def _bound(clause: Any, values: dict[str, Any], expanding: frozenset[str]) -> An
 
 
 def _parameter(name: str, value: Any, expanding: bool) -> Any:
-    sample = value[0] if expanding and isinstance(value, Sequence) and value else value
+    if expanding and isinstance(value, Collection) and not isinstance(value, (str, bytes)):
+        value = list(value)  # a set binds as a list: SQLAlchemy indexes an expanding value
+    sample = value[0] if expanding and isinstance(value, list) and value else value
     if isinstance(sample, uuid.UUID):
         return bindparam(name, value, type_=Uuid(), expanding=expanding)
     if isinstance(sample, datetime) and sample.tzinfo is not None:
@@ -980,6 +983,15 @@ def _eager_as_selectin(entity: type) -> list[Any]:
         for relationship in mapper.relationships
         if relationship.lazy in _EAGER_FROM_THE_STATEMENT
     ]
+
+
+def _is_int(annotation: Any) -> bool:
+    """Whether *annotation* is ``int``, or ``int | None``: a row count."""
+    try:
+        shape = result_shape(annotation)
+    except InvalidQueryMethodError:
+        return False
+    return shape.kind is ResultKind.ONE and shape.type is int
 
 
 def _is_mapped(candidate: Any) -> bool:

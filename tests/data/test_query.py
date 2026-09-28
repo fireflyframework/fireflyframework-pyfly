@@ -458,6 +458,16 @@ class _Statements(Repository[Item, UUID]):
     @query("ANALYZE q_items", native=True)
     async def analyze(self) -> None: ...
 
+    @query("PRAGMA table_info(q_items)", native=True)
+    async def describe(self) -> None: ...
+
+    @modifying
+    @query("UPDATE Item i SET i.score = i.score + 1 WHERE i.role = :role")
+    async def bump(self, role: str) -> int | None: ...
+
+    @query("SELECT i.name FROM Item i WHERE i.id IN (:ids) ORDER BY i.name")
+    async def names_of(self, ids: set[UUID] | frozenset[UUID]) -> list[str]: ...
+
 
 class TestWhatAStatementDoes:
     """The verb after a ``WITH`` clause decides whether a statement is ``@modifying``; only a statement that
@@ -489,6 +499,40 @@ class TestWhatAStatementDoes:
         """Python's sqlite3 reports no row count for a statement that starts with ``WITH``: SQLite's does."""
         compiled = executor.compile_query_method(_Statements.purge_below, Item)
         assert await compiled(seeded_session, floor=80) == 2  # Bob (70) and Dave (60)
+
+    async def test_a_statement_run_for_what_it_does_closes_its_result(
+        self, executor: QueryExecutor, seeded_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Rows a statement run for what it does returns are never read, and its result is closed: a result left
+        open beside the next statement is what MySQL refuses on one connection."""
+        results: list[Any] = []
+        execute = seeded_session.execute
+
+        async def recorded(*args: Any, **kwargs: Any) -> Any:
+            results.append(await execute(*args, **kwargs))
+            return results[-1]
+
+        monkeypatch.setattr(seeded_session, "execute", recorded)
+        compiled = executor.compile_query_method(_Statements.describe, Item)
+        assert await compiled(seeded_session) is None
+        assert results and all(result.closed for result in results)
+
+    async def test_a_modifying_statement_may_return_int_or_none(
+        self, executor: QueryExecutor, seeded_session: AsyncSession
+    ):
+        compiled = executor.compile_query_method(_Statements.bump, Item)
+        assert await compiled(seeded_session, role="admin") == 2
+
+    @pytest.mark.parametrize("kind", [set, frozenset])
+    async def test_a_set_of_uuids_binds_as_uuids(
+        self, executor: QueryExecutor, seeded_session: AsyncSession, kind: type
+    ):
+        """A collection's values are typed by any of its elements, not only a sequence's first one: a set of UUIDs
+        binds as ``Uuid`` (32 hex digits on SQLite), as a list of them does."""
+        items = (await seeded_session.execute(text("SELECT id, name FROM q_items"))).all()
+        by_name = {name: UUID(hex=str(key)) for key, name in items}
+        compiled = executor.compile_query_method(_Statements.names_of, Item)
+        assert await compiled(seeded_session, ids=kind([by_name["Bob"], by_name["Dave"]])) == ["Bob", "Dave"]
 
 
 class TestLiteralsAsEachDialectReadsThem:
