@@ -163,3 +163,42 @@ async def test_a_before_commit_listener_that_makes_the_units_first_write_runs_on
             assert await db.database["ev_shipments"].count_documents({}) == 1
     finally:
         await publisher.stop()
+
+
+@dataclass(frozen=True)
+class OrderInvoiced(DomainEvent):
+    order: str = ""
+
+
+async def test_an_event_a_before_commit_listener_raises_is_published_before_the_commit(mongo_rs_url: str) -> None:
+    """The before-commit listener of the event the saved aggregate raised raises a follow-up event on it: that one is
+    published in the same unit, before the commit, and nothing stays pending on the aggregate."""
+    bus = ApplicationEventBus()
+    seen: list[tuple[str, str]] = []
+    order = EvOrder(reference="o-10")
+
+    async def invoice(event: OrderConfirmed) -> None:
+        seen.append(("before_commit", event.order))
+        order.raise_event(OrderInvoiced(order=event.order))
+
+    async def invoiced(event: OrderInvoiced) -> None:
+        seen.append(("inline", event.order))
+
+    async def after_commit(event: OrderInvoiced) -> None:
+        seen.append(("after_commit", event.order))
+
+    bus.subscribe(OrderConfirmed, invoice, phase=TransactionPhase.BEFORE_COMMIT)
+    bus.subscribe(OrderInvoiced, invoiced)
+    bus.subscribe(OrderInvoiced, after_commit, phase=TransactionPhase.AFTER_COMMIT)
+    publisher = DomainEventPublisher(ApplicationEventPublisher(bus))
+    await publisher.start()
+    try:
+        async with beanie_database(mongo_rs_url, [EvOrder]) as db:
+            async with TransactionTemplate(MongoTransactionManager.for_client(db.client)).transaction():
+                order.confirm()
+                await MongoRepository(EvOrder).save(order)
+            assert seen == [("before_commit", "o-10"), ("inline", "o-10"), ("after_commit", "o-10")]
+            assert order.pending_events() == []
+            assert {row["reference"] for row in await db.database["ev_orders"].find({}).to_list()} == {"o-10"}
+    finally:
+        await publisher.stop()

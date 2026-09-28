@@ -20,6 +20,7 @@ collects, what a listener raising more events does, the publishers of two contex
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from pyfly.data.transaction import (
     TransactionSynchronizationAdapter,
     TransactionTemplate,
     current_unit_of_work,
+    register_synchronization,
 )
 from pyfly.domain import AggregateRoot, DomainEvent
 from pyfly.eda.domain_events import MAX_PUBLICATION_ROUNDS, DomainEventPublisher, active_domain_event_publisher
@@ -48,6 +50,11 @@ class Opened(DomainEvent):
 
 @dataclass(frozen=True)
 class Welcomed(DomainEvent):
+    account: str = ""
+
+
+@dataclass(frozen=True)
+class Invoiced(DomainEvent):
     account: str = ""
 
 
@@ -177,6 +184,81 @@ async def test_a_synchronization_a_before_commit_listener_puts_first_runs_once_a
     async with template.transaction():
         Account("a-5").open()
     assert runs == ["listener a-5", "put first"]
+
+
+async def test_an_event_a_before_commit_listener_raises_is_published_before_the_commit(
+    template: TransactionTemplate, bus: ApplicationEventBus
+) -> None:
+    """A listener that runs as the unit commits (``BEFORE_COMMIT``) raises a follow-up event: it goes out in the same
+    unit, before the commit, instead of staying pending on the aggregate."""
+    seen: list[str] = []
+    account = Account("a-6")
+
+    async def invoice(event: Opened) -> None:
+        seen.append(f"before_commit {event.account}")
+        account.raise_event(Invoiced(account=event.account))
+
+    async def inline(event: Invoiced) -> None:
+        unit = current_unit_of_work()
+        seen.append(f"invoiced {event.account} in the unit: {unit is not None and not unit.completed}")
+
+    async def after_commit(event: Invoiced) -> None:
+        seen.append(f"after_commit {event.account}")
+
+    bus.subscribe(Opened, invoice, phase=TransactionPhase.BEFORE_COMMIT)
+    bus.subscribe(Invoiced, inline)
+    bus.subscribe(Invoiced, after_commit, phase=TransactionPhase.AFTER_COMMIT)
+    async with template.transaction():
+        account.open()
+    assert seen == ["before_commit a-6", "invoiced a-6 in the unit: True", "after_commit a-6"]
+    assert account.pending_events() == []
+
+
+async def test_a_synchronization_an_earlier_one_registers_as_the_unit_commits_runs_once_in_order(
+    template: TransactionTemplate, bus: ApplicationEventBus
+) -> None:
+    """A synchronization that runs before the unit's events go out registers another one: it runs once, in the order
+    it was registered (before the listener the events register), although the unit took its list before either."""
+    runs: list[str] = []
+
+    class Late(TransactionSynchronizationAdapter):
+        async def before_commit(self, read_only: bool) -> None:
+            runs.append("late")
+
+    class First(TransactionSynchronizationAdapter):
+        async def before_commit(self, read_only: bool) -> None:
+            runs.append("first")
+            register_synchronization(Late())
+
+    async def listener(event: Opened) -> None:
+        runs.append(f"listener {event.account}")
+
+    bus.subscribe(Opened, listener, phase=TransactionPhase.BEFORE_COMMIT)
+    async with template.transaction():
+        register_synchronization(First())
+        Account("a-7").open()
+    assert runs == ["first", "late", "listener a-7"]
+
+
+async def test_synchronizations_that_keep_registering_more_as_the_unit_commits_roll_it_back(
+    template: TransactionTemplate, bus: ApplicationEventBus
+) -> None:
+    runs: list[str] = []
+
+    class Again(TransactionSynchronizationAdapter):
+        async def before_commit(self, read_only: bool) -> None:
+            runs.append("again")
+            await asyncio.sleep(0)
+            register_synchronization(Again())
+
+    async def listener(event: Opened) -> None:
+        register_synchronization(Again())
+
+    bus.subscribe(Opened, listener, phase=TransactionPhase.BEFORE_COMMIT)
+    with pytest.raises(RuntimeError, match=f"after {MAX_PUBLICATION_ROUNDS} rounds"):
+        async with asyncio.timeout(10), template.transaction():
+            Account("a-8").open()
+    assert len(runs) <= MAX_PUBLICATION_ROUNDS  # bounded
 
 
 async def test_listeners_that_keep_raising_events_roll_the_unit_back(

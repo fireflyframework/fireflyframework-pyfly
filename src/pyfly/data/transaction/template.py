@@ -334,11 +334,27 @@ async def _rollback(unit: UnitOfWork, outcome: _Outcome) -> None:
     outcome.status = CompletionStatus.ROLLED_BACK
 
 
+async def run_before_commit(unit: UnitOfWork, read_only: bool) -> int:
+    """Run ``before_commit(read_only)`` of each synchronization of *unit* whose before-commit part has not run
+    yet, in the unit's order (the ones in its list when called); returns how many ran.
+
+    Each one runs once per unit, whoever runs it (``UnitOfWork.claim_before_commit``): the template as the unit
+    commits, and a synchronization that drives the rest of the phase itself, such as the domain event collector,
+    which runs the ones its events register (and the ones registered after the template took the unit's list) so
+    it can publish the events they raise. One registered while this runs is left to the next call.
+    """
+    ran = 0
+    for synchronization in list(unit.synchronizations):
+        if unit.claim_before_commit(synchronization):
+            ran += 1
+            await synchronization.before_commit(read_only)
+    return ran
+
+
 async def _commit(unit: UnitOfWork, outcome: _Outcome) -> None:
     """Commit *unit* (its before-commit callbacks first) and release it; record any failure in *outcome*."""
     try:
-        for synchronization in list(unit.synchronizations):
-            await synchronization.before_commit(unit.read_only)
+        await run_before_commit(unit, unit.read_only)
     except BaseException as sync_error:
         outcome.error = sync_error
         await _rollback(unit, outcome)
@@ -914,8 +930,7 @@ async def _end_read(unit: UnitOfWork, outcome: _Outcome) -> None:
     # Nothing was written: end the transaction the cheapest way (a rollback; nothing on autocommit), and
     # report the unit to its synchronizations as a committed one.
     try:
-        for synchronization in list(unit.synchronizations):
-            await synchronization.before_commit(True)
+        await run_before_commit(unit, True)
     except BaseException as error:
         outcome.error = error
         await _rollback(unit, outcome)

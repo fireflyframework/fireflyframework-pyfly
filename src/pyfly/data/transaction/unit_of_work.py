@@ -350,6 +350,9 @@ class UnitOfWork:
         self._rollback_only_reason: BaseException | str | None = None
         self._savepoints: list[_Savepoint] = []  # open savepoints, outermost first
         self._open_stream: object | None = None  # the streamed result that holds the unit (stream_opened)
+        # The synchronizations whose before-commit part ran (or is running), by identity: the objects are kept, so
+        # no id is reused while the unit lives (claim_before_commit).
+        self._before_commit_claimed: dict[int, TransactionSynchronization] = {}
 
     # -- state ------------------------------------------------------------------------------------------
 
@@ -562,6 +565,16 @@ class UnitOfWork:
         """Add *synchronization* to this unit (see :func:`~pyfly.data.transaction.register_synchronization`)."""
         self.check_usable()
         self.synchronizations.append(synchronization)
+
+    def claim_before_commit(self, synchronization: TransactionSynchronization) -> bool:
+        """Whether *synchronization*'s ``before_commit`` is still to run as this unit commits, claiming it: the first
+        caller runs it, and every later one skips it, wherever it sits in :attr:`synchronizations` (by identity).
+        See :func:`~pyfly.data.transaction.template.run_before_commit`."""
+        key = id(synchronization)
+        if key in self._before_commit_claimed:
+            return False
+        self._before_commit_claimed[key] = synchronization
+        return True
 
     # -- diagnostics ----------------------------------------------------------------------------------------
 

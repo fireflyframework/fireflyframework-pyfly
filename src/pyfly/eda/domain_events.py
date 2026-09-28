@@ -20,7 +20,8 @@ aggregate, and publishes them as that unit commits, from a ``before_commit`` syn
 
 - to the application's event listeners (:class:`~pyfly.context.events.ApplicationEventPublisher`): a
   plain ``@app_event_listener`` runs there, inside the unit; one declared with a transaction phase runs at
-  that phase (``AFTER_COMMIT``: once the unit committed, and not at all when it rolls back);
+  that phase (``AFTER_COMMIT``: once the unit committed, and not at all when it rolls back). The events a
+  listener raises, a ``BEFORE_COMMIT`` one included, go out in the same unit, before it commits;
 - and, with a *destination* (``pyfly.eda.domain-events.destination``), through the EDA event publisher,
   as ``publish(destination, event.event_type, event.to_payload(), headers)``. An outbox bus (the ``postgres``
   and ``database`` providers) on the aggregate's datasource writes them in the committing unit itself: they are
@@ -60,7 +61,8 @@ _UNIT_KEY = "pyfly.domain_events"
 """``UnitOfWork.attributes`` key of the unit's collector."""
 
 MAX_PUBLICATION_ROUNDS = 16
-"""How many times a unit's collector publishes the events raised while it publishes, before it gives up."""
+"""How many rounds a unit's collector runs as the unit commits (publish the pending events, then run the
+synchronizations whose before-commit part has not run), before it gives up and the unit rolls back."""
 
 EVENT_ID_HEADER = "x-pyfly-event-id"
 AGGREGATE_TYPE_HEADER = "x-pyfly-aggregate-type"
@@ -207,31 +209,30 @@ class _UnitEvents:
         self._aggregates.setdefault(id(aggregate), aggregate)
 
     async def before_commit(self, read_only: bool) -> None:
+        """Publish the pending events of the unit's aggregates, then run the rest of the unit's before-commit phase
+        (see :func:`~pyfly.data.transaction.template.run_before_commit`): the synchronizations whose before-commit
+        part has not run yet, in the unit's order, the ``BEFORE_COMMIT`` listeners these events registered among
+        them. A listener may make an aggregate raise more, or register more synchronizations: alternate until
+        neither is left, in at most :data:`MAX_PUBLICATION_ROUNDS` rounds (listeners that keep raising events for
+        each other would never let the unit commit)."""
         publisher = active_domain_event_publisher()
         if publisher is None:
             return
-        synchronizations = self._unit.synchronizations
-        # The synchronizations the unit runs itself in this phase, by identity (the objects are kept, so no id is
-        # reused): one registered anywhere in the list while the events go out cannot shift the others.
-        taken = {id(synchronization): synchronization for synchronization in synchronizations}
-        # A listener may make an aggregate raise more: publish until they are all drained (a bounded number of
-        # rounds: listeners that keep raising events for each other would never let the unit commit).
+        from pyfly.data.transaction.template import run_before_commit
+
+        unit = self._unit
+        unit.claim_before_commit(self)  # never run again by the synchronizations below (the template claimed it)
         for _round in range(MAX_PUBLICATION_ROUNDS):
             pending = [aggregate for aggregate in self._aggregates.values() if aggregate.pending_events()]
-            if not pending:
-                break
-            await publisher.publish(*pending)
-        else:
-            raise RuntimeError(
-                f"The domain event listeners of {self._unit.describe()} kept raising events after "
-                f"{MAX_PUBLICATION_ROUNDS} rounds of publication; the unit rolls back"
-            )
-        # Synchronizations registered while publishing (the BEFORE_COMMIT listeners of these events) came after
-        # the unit's list of synchronizations was taken for this phase: run their before-commit part here, once.
-        while fresh := [item for item in synchronizations if id(item) not in taken]:
-            for synchronization in fresh:
-                taken[id(synchronization)] = synchronization
-                await synchronization.before_commit(read_only)
+            if pending:
+                await publisher.publish(*pending)
+            ran = await run_before_commit(unit, read_only)
+            if not pending and not ran:
+                return
+        raise RuntimeError(
+            f"The domain event listeners of {unit.describe()} kept raising events or registering synchronizations "
+            f"after {MAX_PUBLICATION_ROUNDS} rounds of publication; the unit rolls back"
+        )
 
     async def before_completion(self) -> None:
         """Nothing to do before completion."""
