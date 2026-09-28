@@ -312,7 +312,7 @@ class TestSessionFilter:
         await f.do_filter(request, call_next)
         assert await store.get("s1") is None
         assert response.set_cookie_calls == []
-        assert "PYFLY_SESSION" in response.deleted
+        assert response.deleted == []  # no deletion either: the browser may hold a newer cookie by now
 
     @pytest.mark.asyncio
     async def test_a_store_without_replace_keeps_saving_changed_sessions(self) -> None:

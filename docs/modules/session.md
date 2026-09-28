@@ -208,8 +208,9 @@ in-place mutation alone is not saved again. Call `set_attribute` with the mutate
 or already saved by it) is written back through the store's `replace`, only while the store still holds it.
 When the session was logged out (by another request of the same browser), evicted (by a login elsewhere under
 `evict-oldest`) or expired while the request ran, its change is dropped, the session counts as invalidated and
-the response clears its cookie: the request neither brings the session back nor sends its cookie again. A new
-or rotated id is inserted with `save`. With a custom store that has no `replace`, every change goes through
+the response sets no session cookie at all: the request neither brings the session back nor sends its cookie
+again, and it does not clear the cookie either, since another request of the same browser (a login in another
+tab, rotating the session) may have set a new one meanwhile. A new or rotated id is inserted with `save`. With a custom store that has no `replace`, every change goes through
 `save`, which brings such a session back.
 
 `request.state.persist_session` (a coroutine function taking no arguments) saves the session at once. Every

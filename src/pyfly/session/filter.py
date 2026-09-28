@@ -47,10 +47,12 @@ class SessionFilter(OncePerRequestFilter):
     (:attr:`HttpSession.stored_id`: loaded by this request, or already saved by it) is written back
     through the store's ``replace`` (:class:`~pyfly.session.ports.outbound.ConditionalSessionStore`),
     only while the store still holds it. When it was logged out, evicted or expired while the request
-    ran, the change is dropped, the session counts as invalidated and its cookie is cleared: the
-    request neither brings it back nor sends its cookie again. A new or rotated id is inserted with
-    ``save``. A store without ``replace`` gets every change through ``save``, an insert-or-replace,
-    and cannot tell a revoked session from a live one.
+    ran, the change is dropped, the session counts as invalidated, and the response sets no session
+    cookie at all: the request neither brings the session back nor sends its cookie again, and it
+    does not clear the cookie either (another request of the same browser, a login in another tab,
+    may have set a new one meanwhile). A new or rotated id is inserted with ``save``. A store without
+    ``replace`` gets every change through ``save``, an insert-or-replace, and cannot tell a revoked
+    session from a live one.
 
     ``request.state.persist_session`` saves the session at once (a coroutine function taking no
     arguments): the OAuth2 login handler saves the session it has just logged in before it registers
@@ -79,9 +81,13 @@ class SessionFilter(OncePerRequestFilter):
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         session = await self._load_or_create_session(request)
         request.state.session = session
+        # Set once a write-back finds the session revoked: nothing is persisted, and no cookie is sent, after that.
+        ended = False
 
         async def persist_session() -> None:
-            await self._persist_session(session)
+            nonlocal ended
+            if not ended:
+                ended = not await self._persist_session(session)
 
         request.state.persist_session = persist_session
         # Expose the session to the container for SESSION-scoped bean resolution.
@@ -94,7 +100,12 @@ class SessionFilter(OncePerRequestFilter):
         try:
             response = await call_next(request)
         finally:
-            await self._persist_session(session)
+            await persist_session()
+
+        if ended:
+            # Revoked while this request ran: neither its cookie again nor a deletion, which could clear the
+            # cookie another request of the same browser set meanwhile (a login in another tab rotating it).
+            return response
 
         # Issue the cookie for a new session, and re-issue it for an existing,
         # still-valid session so its max-age slides forward on each access
@@ -128,9 +139,11 @@ class SessionFilter(OncePerRequestFilter):
         new_id = uuid.uuid4().hex
         return HttpSession(new_id, is_new=True)
 
-    async def _persist_session(self, session: HttpSession) -> None:
+    async def _persist_session(self, session: HttpSession) -> bool:
         """Save or delete the session in the store based on its state (see the class documentation); a saved
-        session is left unmodified until its next change."""
+        session is left unmodified until its next change. ``False`` when the write-back of a session the store
+        was known to hold found it gone (revoked while the request ran): the session is then invalidated, and
+        nothing was written."""
         # If the id was rotated (e.g. on login), drop the pre-rotation entry so a
         # fixed/stale id can no longer resolve to this session (anti-fixation).
         if session.previous_id is not None and session.previous_id != session.id:
@@ -138,18 +151,19 @@ class SessionFilter(OncePerRequestFilter):
 
         if session.invalidated:
             await self._store.delete(session.id)
-            return
+            return True
         if not session.modified:
-            return
+            return True
         if self._replace is not None and session.stored_id == session.id:
             if not await self._replace(session.id, session.get_data(), self._ttl):
                 # Logged out, evicted or expired while this request ran: never bring it back.
                 logger.debug("session_ended_during_request")
                 session.invalidate()
-                return
+                return False
         else:
             await self._store.save(session.id, session.get_data(), self._ttl)
         session.mark_persisted()
+        return True
 
     @staticmethod
     def _is_secure_request(request: Any) -> bool:

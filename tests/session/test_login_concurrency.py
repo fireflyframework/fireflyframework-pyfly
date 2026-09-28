@@ -30,6 +30,7 @@ import logging
 from typing import Any
 
 import pytest
+from starlette.responses import Response
 
 from pyfly.session.adapters.memory import InMemorySessionStore
 from pyfly.session.concurrency import (
@@ -134,6 +135,33 @@ async def test_a_revoked_session_stays_revoked(revocation: str) -> None:
     replica = logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
 
     await logins.a_revoked_session_stays_revoked(replica, revocation)
+
+
+@pytest.mark.asyncio
+async def test_a_request_ending_after_another_tab_logged_in_leaves_the_new_cookie_alone() -> None:
+    """Tab A's request of the pre-authentication session S1 changes it and is still running when tab B, in the
+    same browser, logs in: the login rotates S1 to S2 and sets S2's cookie. Tab A's request then finds S1 gone.
+    Its response cleared the session cookie, and when it arrived last the browser lost S2's."""
+    store = _YieldingStore()
+    replica = logins.Replica(store, _controller(store, max_sessions=-1, strategy="evict-oldest"))
+    s1 = await logins.start_login(store)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def in_flight(request: Any) -> Any:
+        request.state.session.set_attribute("cart", ["book"])
+        entered.set()
+        await release.wait()
+        return Response()
+
+    tab_a = asyncio.create_task(replica.session_filter.do_filter(logins.app_request(s1), in_flight))
+    await asyncio.wait_for(entered.wait(), 10)
+    tab_b = await logins.login(replica, s1)
+    release.set()
+    tab_a_response = await asyncio.wait_for(tab_a, 10)
+
+    assert tab_b.status == 302 and await store.exists(tab_b.session_id)
+    assert not await store.exists(s1)
+    assert logins.session_cookies(tab_a_response) == []
 
 
 class _RegistryDown(InMemorySessionRegistry):
