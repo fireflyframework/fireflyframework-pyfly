@@ -2408,6 +2408,11 @@ with track_commits() as commits:
         raise
 ```
 
+A single-statement `infrastructure_unit()` runs on an autocommit connection on PostgreSQL, where its statement
+commits as it runs: one that ran its statement and then failed or was cancelled reports `unknown` (it may have
+committed), never rolled back. Through 26.09.07 it reported rolled back, so a step whose outbox append, cache
+write or state upsert had committed could be retried and write twice.
+
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises
 `ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. When a cancel

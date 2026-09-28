@@ -23,7 +23,12 @@ that rolled back is neither. Here, on a SQLite file and on PostgreSQL, with real
 - a unit whose ``COMMIT`` was in flight when its task was cancelled counts as committed, although the call
   raised ``CancelledError`` (the commit is shielded and lands);
 - units opened by tasks started inside the block count, and units of ``detached()`` work do not;
-- nested blocks both see a unit of the inner one.
+- nested blocks both see a unit of the inner one;
+- a single-statement unit (``infrastructure_unit(single_statement=True)``) runs on an autocommit connection
+  on PostgreSQL, where its statement commits as it runs: one that fails or is cancelled after its statement
+  ran may have committed (it used to count as rolled back, so a step whose outbox append, cache write or
+  state upsert had committed could be retried and write twice). One that fails before any statement ran
+  rolled back, and on SQLite, where the unit is a transaction, a failure rolls it back.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import Integer, String, text
+from sqlalchemy import Integer, String, insert, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -44,7 +49,7 @@ from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
-from pyfly.data.transaction import CommitTracker, detached, track_commits
+from pyfly.data.transaction import CommitTracker, detached, infrastructure_unit, track_commits
 from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 from tests.support.commit_gate import SQLITE_OVERRIDES, CommitGate
 
@@ -217,3 +222,56 @@ async def test_a_unit_outside_every_block_reports_to_no_tracker(harness: Harness
         pass
     await harness.writer.write(1)
     assert _counts(commits) == (0, 0, 0)
+
+
+def _single_statement_autocommits(harness: Harness) -> bool:
+    """Whether a single-statement unit runs on an autocommit connection on this lane (PostgreSQL)."""
+    return harness.backend.lane == PG
+
+
+async def test_a_single_statement_unit_that_fails_after_its_statement_ran_may_have_committed(
+    harness: Harness,
+) -> None:
+    with track_commits() as commits, pytest.raises(RolledBackError):
+        async with infrastructure_unit(None, single_statement=True) as session:
+            await session.execute(insert(TrackedRow.__table__).values(id=1, name="single statement"))
+            raise RolledBackError("the adapter fails after its statement")
+    if _single_statement_autocommits(harness):
+        assert _counts(commits) == (0, 0, 1)  # the statement committed as it ran
+        assert commits.may_have_committed
+        assert await harness.committed() == [1]
+    else:
+        assert _counts(commits) == (0, 1, 0)
+        assert await harness.committed() == []
+
+
+async def test_a_single_statement_unit_cancelled_after_its_statement_ran_may_have_committed(
+    harness: Harness,
+) -> None:
+    with track_commits() as commits, pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            async with infrastructure_unit(None, single_statement=True) as session:
+                await session.execute(insert(TrackedRow.__table__).values(id=2, name="single statement"))
+                await asyncio.sleep(5)  # the timeout lands after the statement ran
+    if _single_statement_autocommits(harness):
+        assert _counts(commits) == (0, 0, 1)
+        assert await harness.committed() == [2]
+    else:
+        assert _counts(commits) == (0, 1, 0)
+        assert await harness.committed() == []
+
+
+async def test_a_single_statement_unit_that_fails_before_any_statement_rolled_back(harness: Harness) -> None:
+    with track_commits() as commits, pytest.raises(RolledBackError):
+        async with infrastructure_unit(None, single_statement=True):
+            raise RolledBackError("before any statement")
+    assert _counts(commits) == (0, 1, 0)
+    assert not commits.may_have_committed
+
+
+async def test_a_single_statement_unit_that_returns_counts_as_committed(harness: Harness) -> None:
+    with track_commits() as commits:
+        async with infrastructure_unit(None, single_statement=True) as session:
+            await session.execute(insert(TrackedRow.__table__).values(id=3, name="single statement"))
+    assert _counts(commits) == (1, 0, 0)
+    assert await harness.committed() == [3]

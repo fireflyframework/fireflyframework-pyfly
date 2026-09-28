@@ -43,6 +43,10 @@ outside the block. Units begun by tasks started inside the block report too (a c
 tracker), except :func:`~pyfly.data.transaction.detached` work, which starts without one: its commits are
 its own. Nested blocks each see the units of the innermost one.
 
+A write auto unit on an autocommit connection (a single-statement :func:`~pyfly.data.transaction.infrastructure_unit`
+on PostgreSQL) commits each statement as it runs: one that ran a statement and then failed, or was cancelled,
+reports ``UNKNOWN`` (it may have committed), never rolled back.
+
 Only units of work the framework manages are seen: a session opened straight from an ``async_sessionmaker``
 and committed by hand, or a raw connection, is invisible here (and its commit is not shielded either).
 """

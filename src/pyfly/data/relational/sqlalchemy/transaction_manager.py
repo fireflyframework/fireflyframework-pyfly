@@ -125,9 +125,6 @@ __all__ = [
 
 _logger = logging.getLogger(__name__)
 
-_AUTOCOMMIT = "pyfly_autocommit"
-"""``UnitOfWork.attributes`` key: the unit runs on an ``AUTOCOMMIT`` connection."""
-
 _DRIVER_CONNECTION = "pyfly_driver_connection"
 """``UnitOfWork.attributes`` key: the driver connection of a SQLite unit, whose write lock a discard releases."""
 
@@ -377,7 +374,7 @@ class SqlAlchemyTransactionManager:
         # What an auto unit's call returns outlives its commit: it is never expired, whatever the factory says.
         session = self._new_session(self._sessionmaker, expire_on_commit=False)
         unit = UnitOfWork(self, self.datasource, session, auto=True, read_only=read_only)
-        unit.attributes[_AUTOCOMMIT] = autocommit
+        unit.autocommit = autocommit
         _claim_the_connection(engine, unit)
         await self._start(unit, session, options, None if autocommit else target, read_only=read_only, dialect=dialect)
         return unit
@@ -434,7 +431,7 @@ class SqlAlchemyTransactionManager:
                         sqlite_discard.install(connection.engine)
                         unit.attributes[_DRIVER_CONNECTION] = _driver_of(connection)
                     statement = _READ_ONLY_DIALECT_STATEMENT.get(dialect) if read_only else None
-                    if statement is not None and not unit.attributes.get(_AUTOCOMMIT):
+                    if statement is not None and not unit.autocommit:
                         await connection.exec_driver_sql(statement)
             if target is not None:
                 await target.run_after_begin(session)
@@ -635,8 +632,9 @@ class SqlAlchemyTransactionManager:
         return isinstance(error, DBAPIError) and bool(error.connection_invalidated)
 
     def is_autocommit(self, unit: UnitOfWork) -> bool:
-        """Whether *unit* runs on an ``AUTOCOMMIT`` connection (a fast read auto unit)."""
-        return bool(unit.attributes.get(_AUTOCOMMIT))
+        """Whether *unit* runs on an ``AUTOCOMMIT`` connection (a fast read auto unit, or a single-statement
+        write auto unit)."""
+        return unit.autocommit
 
     def __repr__(self) -> str:
         source = self._datasource.masked_url if self._datasource is not None else "ad-hoc session factory"

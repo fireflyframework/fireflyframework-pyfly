@@ -843,6 +843,7 @@ class AutoUnit:
     async def __aenter__(self) -> UnitOfWork:
         self._since = cancel_requests()
         unit = await self._manager.open_auto_unit(read_only=self._read_only, autocommit=self._autocommit)
+        unit.operations = 0  # opening it (the checkout, BEGIN) ran none of its work
         observe(unit)
         self._unit = unit
         self._token = bind_state(current_state().with_scope(self._manager.datasource, unit))
@@ -868,12 +869,14 @@ async def complete_auto_unit(
     """Complete an auto unit after its work returned (*error* ``None``) or raised, and release it.
 
     A write unit commits; a read unit ends without writing (a rollback, nothing on autocommit) and is
-    reported to its synchronizations as committed. *since* is the task's
-    :func:`~pyfly.data.transaction.unit_of_work.cancel_requests` when the unit was opened. *reset* is the
-    token of the scope the unit was bound with, restored before the after-completion callbacks run. Raises
-    the completion's own error (an ``UnexpectedRollbackError``, a commit failure), a cancellation that
-    arrived meanwhile, and the cancellation a driver error in *error* stood in for; otherwise the caller
-    re-raises *error* itself.
+    reported to its synchronizations as committed. A write unit on an autocommit connection (a single
+    statement, :func:`infrastructure_unit`) that ran an operation and then rolled back (it failed, or was
+    cancelled) is reported as ``UNKNOWN``: its statements committed as they ran, and the rollback undid
+    nothing. *since* is the task's :func:`~pyfly.data.transaction.unit_of_work.cancel_requests` when the unit
+    was opened. *reset* is the token of the scope the unit was bound with, restored before the
+    after-completion callbacks run. Raises the completion's own error (an ``UnexpectedRollbackError``, a
+    commit failure), a cancellation that arrived meanwhile, and the cancellation a driver error in *error*
+    stood in for; otherwise the caller re-raises *error* itself.
     """
     replaced = _poison_on_cancellation(unit, error, since)
     outcome = _Outcome()
@@ -884,6 +887,14 @@ async def complete_auto_unit(
             await _end_read(unit, outcome)
         else:
             await _commit(unit, outcome)
+        if (
+            outcome.status is CompletionStatus.ROLLED_BACK
+            and unit.autocommit
+            and unit.operations
+            and not unit.read_only
+        ):
+            unit.status = UnitStatus.UNKNOWN
+            outcome.status = CompletionStatus.UNKNOWN
     finally:
         if reset is not None:
             reset_state(reset)

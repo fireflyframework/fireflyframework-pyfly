@@ -284,6 +284,7 @@ class _Operation:
         except BaseException:
             unit.guard.release()
             raise
+        unit.operations += 1
         return unit
 
     async def __aexit__(
@@ -333,6 +334,12 @@ class UnitOfWork:
         self.savepoint_depth = 0
         self.guard = OperationGuard()
         self.poisoned = False
+        #: Whether each statement commits as it runs (an auto unit on an autocommit connection): a rollback
+        #: undoes nothing, so such a write unit that ran an operation and then failed may have committed.
+        self.autocommit = False
+        #: How many guarded operations (statements, flushes, fetches) began on the resource; an auto unit
+        #: counts from when its work begins, not the checkout or ``BEGIN`` that opened it.
+        self.operations = 0
         #: The unit this one suspended (``REQUIRES_NEW``), for diagnostics and lock-cycle detection.
         self.suspended: UnitOfWork | None = None
         #: Backend-private state (the relational manager keeps the connection's options here).
