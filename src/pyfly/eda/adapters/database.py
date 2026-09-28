@@ -241,7 +241,8 @@ class DatabaseEventBus:
     - *datasource*: where the outbox lives (a name, a ``DataSource``, an ``AsyncEngine``; ``None``: the
       default datasource);
     - *destinations*: what the bus's consumer group consumes (``None``: every destination), *group*: its name.
-      Every process of a group must subscribe the same handlers: a delivery goes to one of them;
+      Every process of a group must subscribe the same handlers and consume the same destinations: a delivery
+      goes to one of them, and the group's last registration decides what the whole group is owed;
     - *settings*: the listener container settings (``pyfly.eda.listener.*``: the retry policy, whether and
       how a handler runs in a unit of work, the shutdown timeout); *retry* overrides the retry policy, and
       *error_strategy* chooses what a failure leads to (:class:`~pyfly.eda.types.ErrorStrategy`);

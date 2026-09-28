@@ -143,7 +143,9 @@ class StartPosition(enum.Enum):
     LATEST = "latest"
     """With the events published after it registered (what a new Kafka, Redis or RabbitMQ consumer gets)."""
     EARLIEST = "earliest"
-    """With every event the outbox still holds for its destinations, then the ones published after."""
+    """With every event the outbox still holds for its destinations, then the ones published after. An event
+    whose publishing unit is in flight while the group registers can be missed: its publish read the groups
+    before the registration committed, and the registration read the events before the publish committed."""
 
     @classmethod
     def of(cls, value: StartPosition | str) -> StartPosition:
@@ -514,10 +516,11 @@ class Outbox:
         (each group once). On PostgreSQL the publish is one statement, ``NOTIFY`` included.
 
         The registered groups are the ones the publishing unit sees. On MySQL and MariaDB a unit reads them in
-        the snapshot of its first read (``REPEATABLE READ``): a group first registered after that read is not
-        owed the event (a group that registers starts with the events published after, and a unit that began
-        before straddles that boundary). A bus that consumes the destination includes its own group, so its
-        own events are always owed to it.
+        the snapshot of its first read (``REPEATABLE READ``), and so does a unit declared ``REPEATABLE READ`` or
+        ``SERIALIZABLE`` on PostgreSQL: a group first registered after that read is not owed the event (a group
+        that registers starts with the events published after, and a unit that began before straddles that
+        boundary). A bus that consumes the destination includes its own group, so its own events are always
+        owed to it. A group registered for both the destination and every destination is owed the event once.
         """
         from pyfly.data.transaction import infrastructure_unit
 
@@ -646,11 +649,16 @@ class Outbox:
         """Register consumer group *group* for *destinations* (``None``: every destination), in a short unit of
         its own; returns whether the group was new.
 
-        The group's destinations become exactly these: the ones it no longer lists stop being owed to it. A new
-        group starts at *start*: with the events published from now on, or (``earliest``) with every event the
-        outbox holds for its destinations as well, owed in the same unit. When the relays of several nodes
-        register a new group at once, the one whose registration writes the group's first row is the one that
-        finds it new (and owes it the earlier events): the others wait for it, and find it registered.
+        The group's destinations become exactly these: the ones it no longer lists stop being owed to it, so
+        every node of a group must register the same destinations (the last registration decides what the whole
+        group is owed, and nodes that register different ones at once can leave all of them registered; each
+        event is still owed to the group once). A new group starts at *start*: with the events published from now
+        on, or (``earliest``) with every event the outbox holds for its destinations as well, owed in the same
+        unit. An event whose publishing unit is in flight meanwhile can be owed neither way (its publish read the
+        groups before this registration committed, and this unit reads the events before it commits). When the
+        relays of several nodes register a new group at once, the one whose registration writes the group's
+        first row is the one that finds it new (and owes it the earlier events): the others wait for it, and
+        find it registered.
         """
         from sqlalchemy import delete, select
 

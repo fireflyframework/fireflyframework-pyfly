@@ -275,7 +275,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.outbox.batch-size` | `int` | `100` | Deliveries claimed per round. |
 | `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. A relay extends the lease before it runs a delivery that could outlast it (see below), so such a delivery waits up to its worst case plus `claim-timeout`. |
 | `pyfly.eda.outbox.handler-timeout` | duration | `60s` | How long one handler may run before it is cancelled and the attempt counts as failed (`none`: no limit, and a handler that outlasts the lease may run twice at once). Must be shorter than `claim-timeout`. A delivery runs every matching handler of the group in turn, so its worst case is `handler-timeout` times their number; when that is longer than what is left of the lease, the relay extends the lease first, and the delivery runs. |
-| `pyfly.eda.outbox.start` | `str` | `latest` | Where a consumer group that registers for the first time starts: `latest` (the events published from then on) or `earliest` (every event the outbox still holds for its destinations). |
+| `pyfly.eda.outbox.start` | `str` | `latest` | Where a consumer group that registers for the first time starts: `latest` (the events published from then on) or `earliest` (every event the outbox still holds for its destinations, then the ones published after; an event still in flight while the group registers can be missed: see *The `latest` boundary* under [The transactional outbox](#the-transactional-outbox-postgres-and-database)). |
 | `pyfly.eda.outbox.error-strategy` | `str` | `DEAD_LETTER` | See [ErrorStrategy](#errorstrategy-enum). |
 | `pyfly.eda.outbox.retention.delivered` | duration | `1h` | An event every group handled is deleted once older than this (`none`: kept). |
 | `pyfly.eda.outbox.retention.max-age` | duration | | An event older than this is deleted with the deliveries still owed for it (a group that stopped consuming loses them; a WARNING says how many). Unset: never. |
@@ -408,14 +408,21 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
   same group, and on MariaDB failed the business unit). A new group starts at `pyfly.eda.outbox.start`
   (`latest`); when the processes of a new `earliest` group start at once, the first registration owes it the
   events the outbox holds, and the others find the group registered. Every process of a group must subscribe
-  the same handlers: each event goes to one of them. A group registered for every destination is never given
-  the events of the event sourcing `TransactionalOutbox` (destinations `eventsourcing.outbox:<name>`), which
-  share the tables.
+  the same handlers (each event goes to one of them) and consume the same `pyfly.eda.destinations`: a
+  registration makes the group's destinations its own list, so the last process to register decides what the
+  whole group is owed, and processes that register different lists at once (a rolling deploy that changes the
+  setting) can leave all of them registered. An event is owed to a group once, whichever of its destinations
+  match. A group registered for every destination is never given the events of the event sourcing
+  `TransactionalOutbox` (destinations `eventsourcing.outbox:<name>`), which share the tables.
 - **The `latest` boundary.** A publish owes its event to the groups its unit sees registered. On MySQL and
   MariaDB a unit reads them in the snapshot of its first read (`REPEATABLE READ`): a group another process
   registers for the first time while the unit runs is owed the events published after it, not that one. On
-  PostgreSQL (`READ COMMITTED`) the publish reads the groups registered when it runs. The publishing process's
-  own group is always owed its events (see above).
+  PostgreSQL (`READ COMMITTED`) the publish reads the groups registered when it runs; a unit declared
+  `REPEATABLE READ` or `SERIALIZABLE` reads them in its snapshot, as on MySQL. The publishing process's own
+  group is always owed its events (see above). An `earliest` group has the same boundary: the events the
+  outbox holds when its registration reads them are owed to it, and so are the ones whose publish sees it
+  registered, but an event whose unit is in flight meanwhile can be neither (its publish read the groups
+  before the registration committed, and the registration read the events before that unit committed).
 - **Retention.** The relays delete, in batches, the events every group handled (`retention.delivered`), and
   with `retention.max-age` the older ones whatever is still owed for them. The sweep of handled events reads
   past the events still owed: a group that stopped consuming keeps its backlog, and every sweep (every
