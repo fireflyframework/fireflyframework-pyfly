@@ -385,9 +385,10 @@ class _DocumentState:
 
 
 class _RestoreOnRollback(TransactionSynchronizationAdapter):
-    """Gives the documents a transaction's saves wrote the state they had before the first of them, when the
-    transaction rolls back: none of those writes is stored. A commit whose outcome is unknown leaves them as the
-    saves left them."""
+    """Gives the documents a transaction wrote the state they had before its first write of them, when the
+    transaction rolls back: none of those writes is stored. It is the unit's first synchronization, so it runs
+    before any after-rollback callback of the application, which may save one of them again in a unit of its own. A
+    commit whose outcome is unknown leaves them as the writes left them."""
 
     def __init__(self) -> None:
         self.states: dict[int, _DocumentState] = {}
@@ -402,18 +403,24 @@ class _RestoreOnRollback(TransactionSynchronizationAdapter):
                 state.restore()
 
 
-def _snapshots(unit: UnitOfWork, documents: Iterable[Any]) -> list[_DocumentState]:
-    """The state of *documents* before a save writes them; in a transaction, also kept so that a rollback of *unit*
-    gives it back."""
-    states = [_DocumentState(document) for document in documents]
-    if in_transaction(unit):
-        restorer = unit.attributes.get(_WRITTEN_DOCUMENTS)
-        if restorer is None:
-            restorer = _RestoreOnRollback()
-            unit.register_synchronization(restorer)
-            unit.attributes[_WRITTEN_DOCUMENTS] = restorer
-        restorer.remember(states)
-    return states
+def _snapshots(documents: Iterable[Any]) -> list[_DocumentState]:
+    """The state of *documents* before a save writes them."""
+    return [_DocumentState(document) for document in documents]
+
+
+def _written(unit: UnitOfWork, states: Iterable[_DocumentState]) -> None:
+    """Record that *unit* wrote the documents of *states* (their state before the write): in a transaction, its
+    rollback gives that state back. Only a write that succeeded is recorded, so a rollback never undoes what another
+    unit stored after a save that failed here."""
+    if not in_transaction(unit):
+        return
+    restorer = unit.attributes.get(_WRITTEN_DOCUMENTS)
+    if restorer is None:
+        unit.check_usable()
+        restorer = _RestoreOnRollback()
+        unit.synchronizations.insert(0, restorer)  # before any after-rollback callback the application registered
+        unit.attributes[_WRITTEN_DOCUMENTS] = restorer
+    restorer.remember(states)
 
 
 def _written_before(error: BaseException, count: int) -> int:
@@ -890,7 +897,7 @@ class MongoRepository(Generic[T, ID]):
         unit = self._writable_unit()
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         new = self._is_new(document)
-        (state,) = _snapshots(unit, (document,))
+        (state,) = _snapshots((document,))
         try:
             await _validate(document)
             if new:
@@ -913,6 +920,7 @@ class MongoRepository(Generic[T, ID]):
         except BaseException:
             state.restore()
             raise
+        _written(unit, (state,))
         if new:
             if document.id is None:
                 document.id = _as_id(self._model, result.inserted_id)
@@ -958,7 +966,7 @@ class MongoRepository(Generic[T, ID]):
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         unit = self._writable_unit()
         transactional = in_transaction(unit)
-        states = _snapshots(unit, items)
+        states = _snapshots(items)
         operations: list[InsertOne[Any] | UpdateOne] = []
         plans: list[tuple[Any, bool, dict[str, Any]]] = []
         guarded = 0
@@ -1006,6 +1014,7 @@ class MongoRepository(Generic[T, ID]):
             for state in states[written:]:
                 state.restore()
             raise
+        _written(unit, states)
         for entity, new, document in plans:
             self._stored(entity, new, document)
             if new:

@@ -33,7 +33,8 @@ from pymongo import IndexModel
 
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
-from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction import Propagation, TransactionTemplate
+from pyfly.data.transaction.synchronization import TransactionPhase, on_phase
 from pyfly.kernel.exceptions import ConcurrencyException, DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
 
@@ -42,12 +43,18 @@ class RtDoc(Document):
     code: str
     n: int = 0
     journal: ClassVar[list[str]] = []
+    refused: ClassVar[bool] = False
 
     class Settings:
         name = "rt_docs"
         use_revision = True
         use_state_management = True
         indexes = [IndexModel("code", unique=True)]
+
+    @before_event(Insert)
+    def refuse(self) -> None:
+        if RtDoc.refused:
+            raise ValueError("insert refused")
 
     @after_event(Insert)
     def inserted(self) -> None:
@@ -254,6 +261,68 @@ async def test_a_cancelled_save_all_gives_the_documents_back(db: BeanieDatabase)
 
     await repository.save_all([stored, fresh])
     assert sorted(row["code"] for row in await db.database["rt_parked"].find({}).to_list()) == ["b", "fresh"]
+
+
+@pytest.mark.parametrize("stored_first", [False, True], ids=["new", "stored"])
+async def test_an_after_rollback_callback_that_saves_the_document_again_keeps_what_it_stored(
+    db: BeanieDatabase, template: TransactionTemplate, stored_first: bool
+) -> None:
+    """The documents get their state back before any after-rollback callback of the unit runs, even one registered
+    before its first save: a callback that saves the document again in a unit of its own keeps what it stored."""
+    repository = RtRepository()
+    order = RtDoc(code="o1")
+    if stored_first:
+        await repository.save(order)
+    errors: list[BaseException] = []
+
+    async def mark_failed() -> None:
+        order.n = -1
+        try:
+            await repository.save(order)
+        except Exception as error:  # noqa: BLE001 — a callback's failure is logged, never raised: keep it to assert
+            errors.append(error)
+
+    with pytest.raises(RuntimeError, match="business failure"):
+        async with template.transaction():
+            await on_phase(TransactionPhase.AFTER_ROLLBACK, mark_failed)
+            order.n = 1
+            await repository.save(order)
+            raise RuntimeError("business failure")
+    assert errors == []
+    await _assert_as_stored(order)
+    assert await _stored_codes(db) == {"o1": -1}
+
+    order.n = 2
+    await repository.save(order)
+    await _assert_as_stored(order)
+    assert await _stored_codes(db) == {"o1": 2}
+    assert await db.database["rt_docs"].count_documents({}) == 1
+
+
+async def test_a_save_that_failed_before_its_write_leaves_a_later_write_of_another_unit_alone(
+    db: BeanieDatabase, template: TransactionTemplate
+) -> None:
+    """Only a write the unit made is undone by its rollback: a save that failed before writing, followed by a save of
+    the same document in a unit of its own that commits, leaves the document as that unit stored it."""
+    repository = RtRepository()
+    item = RtDoc(code="b")
+    with pytest.raises(RuntimeError, match="outer fails later"):
+        async with template.transaction():
+            RtDoc.refused = True
+            try:
+                with pytest.raises(ValueError, match="insert refused"):
+                    await repository.save(item)
+            finally:
+                RtDoc.refused = False
+            async with template.transaction(propagation=Propagation.REQUIRES_NEW):
+                await repository.save(item)
+            raise RuntimeError("outer fails later")
+    await _assert_as_stored(item)
+
+    item.n = 3
+    await repository.save(item)
+    assert await _stored_codes(db) == {"b": 3}
+    assert await db.database["rt_docs"].count_documents({}) == 1
 
 
 async def test_without_a_transaction_the_documents_written_before_a_failure_stay_saved(mongo_url: str) -> None:
