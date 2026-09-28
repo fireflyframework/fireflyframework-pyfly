@@ -498,3 +498,24 @@ async def test_a_batch_rebuild_keeps_a_named_check(tmp_path: Path) -> None:
                 await connection.execute(text("INSERT INTO wp11_wallet (id, name, balance) VALUES (1, NULL, -5)"))
     finally:
         await registry.close()
+
+
+_ALTER_WALLET_KEEPING_ITS_CHECK = """\
+    with op.batch_alter_table('wp11_wallet', table_args=(sa.CheckConstraint('balance>=0'),)) as batch:
+        batch.alter_column('name', existing_type=sa.String(50), nullable=True)"""
+
+
+@pytest.mark.asyncio
+async def test_a_batch_rebuild_that_declares_the_unnamed_check_again_keeps_it(tmp_path: Path) -> None:
+    """The rebuilt table declares the rule again, spaced otherwise (``balance>=0``): the rule is kept, and the
+    rebuild goes through."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    ini = environment(tmp_path, [_UNNAMED_CHECK, _ALTER_WALLET_KEEPING_ITS_CHECK])
+    registry, engine = _registry_engine(url)
+    try:
+        await MigrationRunner(config_path=str(ini), engine=engine).start()
+        async with engine.connect() as connection:
+            with pytest.raises(Exception, match="CHECK constraint failed"):
+                await connection.execute(text("INSERT INTO wp11_wallet (id, name, balance) VALUES (1, NULL, -5)"))
+    finally:
+        await registry.close()

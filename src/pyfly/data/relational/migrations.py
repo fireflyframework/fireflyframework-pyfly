@@ -325,8 +325,8 @@ def _refuse_check_loss(
     rebuilt = _table_sql(conn, f"_alembic_tmp_{name}")
     if original is None or rebuilt is None:
         return
-    kept = {expression for _named, expression in _checks(rebuilt)}
-    lost = [expression for named, expression in _checks(original) if not named and expression not in kept]
+    kept = {_compact(expression) for _named, expression in _checks(rebuilt)}
+    lost = [expression for named, expression in _checks(original) if not named and _compact(expression) not in kept]
     if lost:
         raise MigrationError(
             f"A batch migration of table {name!r} would drop its unnamed CHECK constraint(s) "
@@ -345,6 +345,11 @@ def _table_sql(conn: Connection, name: str) -> str | None:
     finally:
         cursor.close()
     return str(row[0]) if row and row[0] else None
+
+
+def _compact(expression: str) -> str:
+    """*expression* without whitespace: the same rule declared again with other spacing (``x>0``, ``x > 0``)."""
+    return "".join(expression.split())
 
 
 def _checks(create_table: str) -> list[tuple[bool, str]]:
