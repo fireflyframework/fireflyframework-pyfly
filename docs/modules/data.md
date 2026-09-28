@@ -1272,6 +1272,7 @@ Some capabilities are **backend-specific** today:
 | Read-replica routing (`@transactional(read_only=True)`) | ✅ a new read-only unit runs on the replica | ❌ |
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ✅ `created/updated_at` **and** `created/updated_by` (`BaseDocument`) |
 | `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, except `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
+| Transactional outbox for events (`pyfly.eda.outbox.*`, the `database` bus) | ✅ `SqlOutboxStore`: the `pyfly_outbox_*` tables, appended in the relational unit (SQLite, PostgreSQL, MySQL, MariaDB) | ✅ `MongoOutboxStore`: the `pyfly_outbox_*` collections, appended in the document unit's transaction (a replica set; no LISTEN/NOTIFY wake-ups: the relays poll). `pyfly.eda.outbox.store: auto` picks it when the document datasource is the default of `@transactional` ([The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)) |
 
 For a write that must not lose a concurrent update, or a check two requests must not both pass (two
 withdrawals of 60 from a balance of 100), choose between a guarded atomic `UPDATE`, a pessimistic lock and

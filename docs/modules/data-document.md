@@ -145,7 +145,7 @@ class OrderDocument(AggregateDocument):
         self.raise_event(OrderConfirmed(order_id=str(self.id)))
 ```
 
-The application's `DomainEventPublisher` (`pyfly.eda.domain_events`) publishes them as the document's unit of work commits: an event raised inside a unit of the document's datasource is tied to it, and the pending events of a document `MongoRepository.save`/`save_all` writes are tied to the unit of the save. A unit that rolls back publishes nothing, and the events stay pending on the document. A unit of another datasource never takes a document's events: an event raised inside a relational `@transactional` alone stays pending until a document unit saves the document, so the relational commit never publishes the event of a document whose save failed. Listeners declared with a transaction phase run at that phase (`AFTER_COMMIT`: once the unit committed).
+The application's `DomainEventPublisher` (`pyfly.eda.domain_events`) publishes them as the document's unit of work commits: an event raised inside a unit of the document's datasource is tied to it, and the pending events of a document `MongoRepository.save`/`save_all` writes are tied to the unit of the save. A unit that rolls back publishes nothing, and the events stay pending on the document, except in one case: with `pyfly.eda.domain-events.destination` and an outbox whose store is not in the document database (the SQL store, which `pyfly.eda.outbox.store: auto` keeps in an application with both data layers), the events are appended in a short unit of the SQL datasource that commits at once, as the document unit begins to commit. That is a dual write: a document unit whose commit then fails has published them, and a `TransactionalEventPublisher.publish()` inside a document unit is committed at once, even when that unit then rolls back. With the Mongo outbox store they commit with the document unit ([Publishing Events](#publishing-events-the-outbox-on-mongodb)). A unit of another datasource never takes a document's events: an event raised inside a relational `@transactional` alone stays pending until a document unit saves the document, so the relational commit never publishes the event of a document whose save failed. Listeners declared with a transaction phase run at that phase (`AFTER_COMMIT`: once the unit committed).
 
 ### Settings Class
 
@@ -302,6 +302,8 @@ A `MongoRepository` never holds a session. Every public `async def` (on `MongoRe
   - a method that sends one command runs without a transaction: `save`, `delete`, `delete_by_id`, and the bulk and derived deletes when the document class has no delete event actions and the ids or documents fit one `$in` filter (10,000; a longer list, or an iterator the call cannot count up front, takes a transaction). MongoDB runs one command atomically on each document it touches;
   - on a standalone server (no transactions) every auto unit runs without one.
 
+A write auto unit without a transaction is an autocommit unit: one that fails after its command ran (an after-insert action, a write concern failure, an ordered bulk write stopped at a failing document) completes as `UNKNOWN` for `track_commits()`, so a saga step is compensated, not retried.
+
 **Event actions call repositories safely.** Beanie's event actions (`@before_event`/`@after_event`, `ValidateOnSave`), and so `BaseDocument`'s audit hooks and your `AuditorAware`, are your code, and Beanie runs coroutine actions in `asyncio.gather` child tasks. The repository runs them itself, in Beanie's order, around each write it sends (with `skip_actions`), and holds the operation guard for one driver command at a time, never while an action runs: an action may read or write other repositories (validate a reference, denormalize a counter, look the auditor up) without waiting for a guard its own save holds. Inside a unit of work the action's repository calls join it, so its writes commit or roll back with the save; outside one they run in auto units of their own, and are not part of the save's one command.
 
 The datasource is the one named by `datasource=` (constructor) or the class attribute `__datasource__`; without one it is the datasource of the transaction manager that serves the client the document class is bound to (`"document"`, `pyfly.data.document.datasource`). Custom methods reach the current session with `self._session`:
@@ -386,7 +388,7 @@ class OrderRepository(MongoRepository[OrderDocument, PydanticObjectId]):
   - *outside a transaction* (a `save`'s one command, any write on a standalone server) it raises pymongo's `WriteConcernError` (`WTimeoutError`), left untranslated: nothing is wrong with the data, and the kernel has no exception for "applied, not acknowledged". A new document keeps the id and revision it was stored with, so a retry updates it instead of inserting it twice; a standalone `save_all` whose bulk write failed only its write concern takes every document as stored.
   - *in a transaction* (every `save_all` outside one on a replica set, every write inside a unit of work) the individual writes carry no write concern, and the commit's does: its failure raises `CommitOutcomeUnknownError`, and the documents stay as the writes left them (the unknown-commit rule below), so a retry never inserts them twice.
   - a stored document with `use_revision` whose own update failed its write concern keeps its old revision in memory (Beanie makes the new one, and returns it only on success). Its next save matches no document: while the write concern still fails, that save raises `WriteConcernError` again although it wrote nothing (the server reports the write concern before the revision conflict), and once the write concern is met it raises `OptimisticLockingFailureException`. Neither writes a duplicate: load the document again before saving it.
-- **An outcome the driver cannot know is taken as not written, except at commit.** A cancellation or a lost connection while a write runs outside a transaction (a `save`'s one command on a replica set, any write on a standalone server) may have been applied, and the repository cannot tell: it gives the documents their state back, as Beanie's `insert` and Spring Data do, so a retry of a new document may insert it a second time. A commit whose outcome is unknown (`CommitOutcomeUnknownError`) is the opposite case: the documents stay as the saves left them, and the boundary says not to retry blindly.
+- **An outcome the driver cannot know is taken as not written, except at commit.** A cancellation or a lost connection while a write runs outside a transaction (a `save`'s one command on a replica set, any write on a standalone server) may have been applied, and the repository cannot tell: it gives the documents their state back, as Beanie's `insert` and Spring Data do, so a retry of a new document may insert it a second time. A commit whose outcome is unknown (`CommitOutcomeUnknownError`) is the opposite case: the documents stay as the saves left them, and the boundary says not to retry blindly. Whatever the documents keep, the unit of a write without a transaction that failed after its command ran (a cancellation, a lost connection, a write concern failure, a failing after-insert action) completes as `UNKNOWN`: `track_commits()` counts it as work that may have committed, so a saga, TCC or workflow step is compensated instead of retried (see [Step Transactions, Failures and Cancellation](transactional.md#step-transactions-failures-and-cancellation)).
 - **Without a transaction a bulk write stops at the failing document.** On a standalone server, the documents an ordered `save_all` reached before the one that failed are stored and keep their new ids and revisions (the saved state is recorded, but their after-save actions do not run and their domain events are not collected: the call failed); the others get their state back. A stored document with a stale revision before the failing one matched nothing, and is still taken as stored: load it again. A stale document with no failure after it does not stop the others either: they are stored with their new revisions, and the call raises `OptimisticLockingFailureException`.
 - **A completed unit keeps no document.** The states it recorded are dropped when it commits or rolls back.
 
@@ -737,7 +739,7 @@ The `DocumentProperties` dataclass (`pyfly.config.properties.mongodb`) captures 
 | `transaction.read_concern` | `str \| None` | `None` (the client's)          | Read concern of the transactions (`snapshot`, `majority`...) |
 | `transaction.write_concern`| `str \| None` | `None` (the client's)          | Write concern of the transactions (`majority`, a number of nodes) |
 | `transaction.max_commit_time` | `float \| None` | `None`                    | Seconds a commit may take on the server (`maxCommitTimeMS`); a unit's `timeout=` wins |
-| `transaction.default`      | `bool \| None` | `None`                        | Whether the document datasource is the default of `@transactional`; by default it is when the relational layer is not enabled |
+| `transaction.default`      | `bool \| None` | `None`                        | Whether the document datasource is the default of `@transactional`; by default it is when the relational layer is not enabled. `pyfly.eda.outbox.store: auto` follows it |
 | `health.timeout`           | `float`       | `2.0`                          | Seconds the readiness check waits for `ping` |
 
 Before 26.09.08 the client was built from the URI alone: the documented pool settings were ignored, and `tz_aware=False` made every `BaseDocument` timestamp naive after a save and a load.
@@ -837,7 +839,7 @@ With `pyfly.data.document.enabled: true` it registers:
 | `mongo_health_indicator` | `MongoHealthIndicator` | The readiness check of the datasource |
 | `document_auditing_handler` | `DocumentAuditingHandler` | Stamps `BaseDocument` writes (`pyfly.data.auditing.enabled`, on by default) |
 
-The client bean carries `@conditional_on_missing_bean(AsyncMongoClient, singletons_only=True)`: declare your own singleton `AsyncMongoClient` bean (TLS, a credentials callback, read preferences) and the auto-configured one backs off; the `BeanieInitializer`, the transaction manager and the health indicator then use yours, and the client is closed when the context disposes its resources. Until 26.09.07 the framework's client silently shadowed it. A request- or refresh-scoped `AsyncMongoClient` bean is a second client: the auto-configured one stays, as the `@primary` candidate that an injection by type receives.
+The client bean carries `@conditional_on_missing_bean(AsyncMongoClient, singletons_only=True)`: declare your own singleton `AsyncMongoClient` bean (TLS, a credentials callback, read preferences) and the auto-configured one backs off; the `BeanieInitializer`, the transaction manager and the health indicator then use yours, and the client is closed when the context disposes its resources. Through 26.09.07 the framework's client silently shadowed it. A request- or refresh-scoped `AsyncMongoClient` bean is a second client: the auto-configured one stays, as the `@primary` candidate that an injection by type receives.
 
 ### Beanie Initialization
 
@@ -924,6 +926,8 @@ class AccountService:
 
 A unit of another datasource never satisfies a join: a `REQUIRED` MongoDB boundary inside a relational unit starts its own transaction, which commits at its own end whatever the relational unit does next (there is no two-phase commit between them).
 
+**Read preference.** A unit's transaction reads from the primary whatever read preference the client has: MongoDB refuses any other in a transaction ("read preference in a transaction must be primary"). A client configured with `readPreference=secondaryPreferred` (in the URI, in `pyfly.data.document.options`, or on an `AsyncMongoClient` bean of your own) keeps that preference for the reads outside a transaction.
+
 **Failures and the rest of the semantics** are those of the unit of work (see [Transaction Management](data-relational.md#transaction-management)): additive `rollback_for`/`no_rollback_for` rules, rollback-only marking (a caught participant failure makes the outer boundary raise `UnexpectedRollbackError`), `read_only=True` (repository writes are refused, before the document's validation and event actions run), `timeout=` (`TransactionTimedOutError`, and `maxCommitTimeMS` on the commit), synchronizations (`after_commit`), cancellation safety (commit, abort and `end_session` run shielded, so a client disconnect never leaves a transaction open on the server holding its document locks). MongoDB aborts a transaction as soon as one of its commands fails, so a caught `DuplicateKeyException` dooms the unit too. A commit whose outcome the driver cannot know raises `CommitOutcomeUnknownError`, never retried.
 
 **Code that calls Beanie or pymongo directly** passes the session on. A coroutine that declares a `session` parameter receives the unit's session there (as it always did), and `current_session()` returns it anywhere inside the unit:
@@ -946,7 +950,7 @@ A Beanie call without `session=` runs outside the transaction. `TransactionTempl
 
 ### Replica Set Requirement
 
-MongoDB transactions require a replica set (a single-node one is enough) or a sharded cluster. On a standalone server `@transactional` raises `IllegalTransactionStateError` saying so, instead of running without a transaction; repository calls outside a transaction still work (each write is atomic on its own document). A message listener container opens a unit per delivery on the default datasource: on a standalone server set `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional`) to `false`. **Breaking** for a MongoDB-only application on a standalone server: the document datasource is now the default transaction manager when the relational layer is off, so every delivery fails with `IllegalTransactionStateError` (naming the setting) until the setting is `false`; before 26.09.08 the container found no manager and delivered without a unit.
+MongoDB transactions require a replica set (a single-node one is enough) or a sharded cluster. On a standalone server `@transactional` raises `IllegalTransactionStateError` saying so, instead of running without a transaction; repository calls outside a transaction still work (each write is atomic on its own document). A message listener container opens a unit per delivery on the default datasource: on a standalone server set `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional`) to `false`. **Breaking** for a MongoDB-only application on a standalone server: the document datasource is now the default transaction manager when the relational layer is off, so every delivery fails with `IllegalTransactionStateError` (naming the setting) until the setting is `false`. 26.09.07 had no listener container: its deliveries ran without a unit.
 
 For local development, you can run a single-node replica set:
 
@@ -1012,9 +1016,10 @@ Source file: `src/pyfly/data/document/mongodb/transaction_manager.py`
 
 An event published to a broker inside a document `@transactional` method would reach the broker before the commit,
 and stay there after a rollback. The transactional outbox of `pyfly.eda` removes that dual write in a MongoDB
-application too: with `pyfly.eda.outbox.enabled: true` (any broker) or `pyfly.eda.provider: database`, the event
-publisher keeps its outbox in collections of the document database (`MongoOutboxStore`,
-`pyfly.eda.adapters.mongo_outbox`), and a publish is written in the unit's MongoDB transaction, beside the documents.
+application too: in an application whose default `@transactional` datasource is the document one (the relational
+data layer off), `pyfly.eda.outbox.enabled: true` (any broker) or `pyfly.eda.provider: database` keeps the event
+publisher's outbox in collections of the document database (`MongoOutboxStore`, `pyfly.eda.adapters.mongo_outbox`),
+and a publish is written in the unit's MongoDB transaction, beside the documents.
 The unit commits both or neither; a relay forwards the committed event afterwards, at least once, with its id in
 `x-pyfly-event-id`.
 
@@ -1028,7 +1033,7 @@ pyfly:
   eda:
     provider: rabbitmq
     outbox:
-      enabled: true      # store: auto is mongo: the application has no relational datasource
+      enabled: true      # store: auto is mongo: the document datasource is the default of @transactional
 ```
 
 ```python
@@ -1054,12 +1059,20 @@ class OrderService:
   `pyfly_outbox_consumers`, `pyfly_outbox_dead_letters` and `pyfly_outbox_counters`, whose indexes the store creates
   when the application starts (`pyfly.eda.outbox.auto-create-tables: false`: it only checks them).
 - It needs a replica set (see [Replica Set Requirement](#replica-set-requirement)): on a standalone server the
-  publisher refuses to start.
+  publisher refuses to start. On a sharded cluster, keep its five collections unsharded on one shard (the
+  database's primary shard), so an event and its deliveries commit on one shard.
 - It runs on the document datasource's client and units of work (`pyfly.data.document.datasource`): a publish joins
   the `@transactional` unit of that datasource (outside one, it runs in a short transaction of its own), and a
   read-only unit refuses it.
-- `pyfly.eda.outbox.store: auto` picks it when the application has the document layer and no relational datasource;
-  `mongo` asks for it in an application with both.
+- `pyfly.eda.outbox.store: auto` picks it exactly when the document datasource is the default of `@transactional`
+  (`pyfly.data.document.transaction.default`; unset, when the relational data layer is off) and no
+  `pyfly.eda.outbox.datasource`/`url` is set, so the outbox and a plain `@transactional` run on one database. It reads
+  the configuration alone: a `pyfly.data.relational.url` without the relational layer, the `dev` profile's SQLite
+  fallback and a datasource another store registers do not turn it to the SQL store. The store chosen is logged at
+  INFO (`eda_outbox_store`). `mongo` asks for it in an application with both layers, and raises a `ValueError`
+  beside `pyfly.eda.outbox.datasource` or `url`. With the SQL store in an application with both layers, a publish
+  inside a document unit is a dual write (see [Aggregate Documents and Domain
+  Events](#aggregate-documents-and-domain-events)).
 - The events an `AggregateDocument` raises go the same way with `pyfly.eda.domain-events.destination`: they are
   appended to the outbox in the unit that saves the document (see
   [Aggregate Documents and Domain Events](#aggregate-documents-and-domain-events)). A `MongoRepository.save`

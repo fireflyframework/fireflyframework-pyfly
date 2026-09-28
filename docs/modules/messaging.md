@@ -400,6 +400,20 @@ writes wait for it, and a `REQUIRES_NEW` write from a service the listener calls
 listener itself `REQUIRES_NEW` (it then runs in its own unit only), or set
 `pyfly.messaging.listener.transactional: false`.
 
+In an application whose default datasource is the document one (the relational data
+layer off: see [Replica Set Requirement](data-document.md#replica-set-requirement)), a
+delivery's unit is a MongoDB transaction, which needs a replica set. On a standalone
+server every delivery fails with `IllegalTransactionStateError`, naming the setting,
+until `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional` for
+the EDA buses) is `false`. Without a unit (that setting off, or a listener declared
+`SUPPORTS`, `NOT_SUPPORTED` or `NEVER`) each MongoDB repository call commits on its
+own. A write without a transaction (a single-command `save` or `delete`, any write on a
+standalone server) that fails after its command ran has an unknown outcome
+(`track_commits()` counts it as `unknown`, see
+[Cancellation and commit outcome](data-relational.md#cancellation-and-commit-outcome)),
+and a delivery that fails after a write is delivered again with that write stored.
+Make such a listener idempotent.
+
 Each delivery opens and commits a unit (a connection checkout, `BEGIN`, `COMMIT`) even
 when the listener never touches the database. A high-throughput listener that does not
 can save that with `pyfly.messaging.listener.transactional: false`.
@@ -423,11 +437,16 @@ The transactional outbox of `pyfly.eda` does, for events published through the E
 With `pyfly.eda.outbox.enabled: true`, a publish on the Kafka, RabbitMQ or Redis bus
 is appended to the outbox in the caller's unit of work and forwarded to the broker
 after the commit. The outbox is the `pyfly_outbox_*` tables on a relational datasource,
-or, in a MongoDB application, the `pyfly_outbox_*` collections of the document database,
-written in the document unit's transaction (`pyfly.eda.outbox.store`, see
+or the `pyfly_outbox_*` collections of the document database, written in the document
+unit's transaction, when the document datasource is the default of `@transactional`
+(`pyfly.eda.outbox.store: auto`) or with `pyfly.eda.outbox.store: mongo` (see
 [The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)):
 
-* **A unit that rolls back publishes nothing.**
+* **A unit that rolls back publishes nothing**, when it is a unit of the outbox's
+  datasource. A publish in a unit of another datasource (a document unit, with the SQL
+  store of an application that has both data layers) is appended in a short unit of the
+  outbox's datasource that commits at once: a dual write, forwarded even when that unit
+  rolls back.
 * **A unit that commits publishes at least once**: once in the normal path, again
   after a failed publish, and again when a process died between the broker publish
   and the settling of its delivery (after the lease, `pyfly.eda.outbox.forward.claim-timeout`).
@@ -440,6 +459,8 @@ written in the document unit's transaction (`pyfly.eda.outbox.store`, see
   forwarded by one of them; after the last attempt of a broker outage the event waits
   in the outbox's dead letters (in the application's `EdaDeadLetterStore` when it
   defines one as a bean).
+* **A broker that is down at start fails the start**: the publisher starts the
+  broker's bus first, and the outbox does not buffer until the broker is back.
 
 A message published through `MessageBrokerPort` itself has none of this: publish it
 after the commit (`pyfly.data.transaction.after_commit`) where losing it on a crash is

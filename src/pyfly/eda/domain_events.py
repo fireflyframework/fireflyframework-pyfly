@@ -23,10 +23,15 @@ aggregate, and publishes them as that unit commits, from a ``before_commit`` syn
   that phase (``AFTER_COMMIT``: once the unit committed, and not at all when it rolls back). The events a
   listener raises, a ``BEFORE_COMMIT`` one included, go out in the same unit, before it commits;
 - and, with a *destination* (``pyfly.eda.domain-events.destination``), through the EDA event publisher,
-  as ``publish(destination, event.event_type, event.to_payload(), headers)``. An outbox bus (the ``postgres``
-  and ``database`` providers) on the aggregate's datasource writes them in the committing unit itself: they are
-  published exactly when the aggregate's changes are (an outbox on another datasource commits them in a unit
-  of its own, just before). A broker bus (Kafka, RabbitMQ) gets them after the commit.
+  as ``publish(destination, event.event_type, event.to_payload(), headers)``. An outbox (the ``postgres`` and
+  ``database`` buses, or a broker behind ``pyfly.eda.outbox.enabled``) whose store is on the aggregate's
+  datasource writes them in the committing unit itself: they are published exactly when the aggregate's changes
+  are. An outbox on another datasource commits them in a unit of its own, just before: a dual write. The SQL
+  store beside an aggregate a MongoDB unit saves (an application with both data layers, where
+  ``pyfly.eda.outbox.store=auto`` keeps the SQL store) appends them in a short SQL unit that commits at once, so
+  a MongoDB commit that then fails has published them all the same, and a ``TransactionalEventPublisher.publish``
+  called inside that MongoDB unit is committed at once too, even when the unit then rolls back. A broker bus
+  (Kafka, RabbitMQ) without the outbox gets them after the commit.
 
 Which events it collects:
 
@@ -35,9 +40,10 @@ Which events it collects:
 - the pending events of an aggregate a relational unit of work saves (``session.add``: ``Repository.save``
   of a new or detached aggregate), such as those an aggregate raises in its factory before any unit exists.
 
-A unit that rolls back publishes nothing: the events stay pending on the aggregate, and a unit that saves it
-again publishes them. Code that wants to publish by hand calls :meth:`DomainEventPublisher.publish` inside the
-unit of work (it drains the aggregates it is given).
+A unit that rolls back publishes nothing (except what an outbox on another datasource took as its commit began,
+above): the events stay pending on the aggregate, and a unit that saves it again publishes them. Code that wants
+to publish by hand calls :meth:`DomainEventPublisher.publish` inside the unit of work (it drains the aggregates
+it is given).
 """
 
 from __future__ import annotations
