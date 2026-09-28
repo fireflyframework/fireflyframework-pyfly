@@ -27,8 +27,8 @@ and join the caller's unit where atomicity matters, and MongoDB runs the same mo
 The audit's proofs, ported to the new API, now hold every expected line on a SQLite file and on
 PostgreSQL 17, and the fixes are pinned by tests that run on a backend matrix (a SQLite file with
 foreign keys on, PostgreSQL 17, MySQL 8, MariaDB 11 and a MongoDB replica set), on SQLAlchemy 2.1 and
-the 2.0 line: the fast suite went from 5,330 to 7,555 passing tests, and the integration suite from 50
-to 2,494.
+the 2.0 line: the fast suite went from 5,330 to 7,574 passing tests, and the integration suite from 50
+to 2,564.
 
 Many behaviors change on purpose, several of them breaking: read **Upgrading** at the end of this
 section before you deploy.
