@@ -111,6 +111,10 @@ async def test_a_serving_role_boots_round_trips_and_prunes(least_privilege_url: 
         await bus.start()
         await bus.publish("pyfly.events", "order.created", {"id": 1})
         await asyncio.wait_for(done.wait(), timeout=15)
+        for _ in range(300):  # the relay settles the delivery once its handler returned
+            if bus.relay.counters.delivered:
+                break
+            await asyncio.sleep(0.05)
         pruned = await bus.outbox.prune(Retention(delivered=timedelta(0)))
     finally:
         await bus.stop()
