@@ -545,6 +545,12 @@ class CodeRepository(Repository[QaCode, int]):
     @query("SELECT c.id FROM QaCode c WHERE c.code IN (?1) ORDER BY c.id")
     async def coded_at(self, codes: str | Iterable[str] | None) -> list[int]: ...
 
+    @query("SELECT c.id FROM QaCode c WHERE c.code NOT IN (:codes) ORDER BY c.id")
+    async def not_coded(self, codes: str | Iterable[str] | None) -> list[int]: ...
+
+    @query("SELECT id FROM qa_code WHERE NOT code IN (:codes) ORDER BY id", native=True)
+    async def native_not_coded(self, codes: str | Iterable[str] | None) -> list[int]: ...
+
     @query("SELECT c FROM QaCode c WHERE c.id IN :ids ORDER BY c.id")
     async def numbered(self, ids: int | Iterable[int]) -> list[QaCode]: ...
 
@@ -587,9 +593,20 @@ _CODE_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
     ("a frozenset", lambda: frozenset({"AB"}), [3]),
     ("a generator", lambda: (code for code in ("B", "AB")), [2, 3]),
     ("an empty list", lambda: [], []),
+    ("an empty set", lambda: set(), []),
+    ("an empty generator", lambda: (code for code in ()), []),
     ("None", lambda: None, []),  # IN (NULL): no row, not even the one whose code is NULL
 ]
 """(what is bound, a factory of it, the ids it matches); a factory, so each call gets a fresh generator."""
+
+_NOT_CODE_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
+    ("a string", lambda: "AB", [1, 2, 4]),  # NOT IN of a list with a value: never the NULL code
+    ("a list", lambda: ["A", "AB"], [2, 4]),
+    ("a generator", lambda: (code for code in ("B", "AB")), [1, 4]),
+    ("an empty list", lambda: [], [1, 2, 3, 4, 5]),  # NOT IN of no value: every row, the NULL code included
+    ("an empty generator", lambda: (code for code in ()), [1, 2, 3, 4, 5]),
+    ("None", lambda: None, []),  # NOT IN (NULL): no row
+]
 
 _ID_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
     ("an int", lambda: 3, [3]),
@@ -599,6 +616,7 @@ _ID_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
     ("a frozenset", lambda: frozenset({1, 3}), [1, 3]),
     ("a generator", lambda: (key for key in range(2, 4)), [2, 3]),
     ("a range", lambda: range(4, 6), [4, 5]),
+    ("an empty tuple", lambda: (), []),
 ]
 
 
@@ -607,17 +625,23 @@ async def test_in_binds_a_collection_by_its_elements_and_a_single_value_as_one(
 ) -> None:
     """``IN (:codes)`` (``IN :ids``, ``IN (?1)``) binds a collection, whichever it is, one value per element, and
     a single value as a list of one: ``"AB"`` matches ``AB``, not ``A`` and ``B``; ``3`` matches row 3; a UUID binds
-    as ``Uuid``, as a list of UUIDs does. In JPQL and in native SQL alike."""
+    as ``Uuid``, as a list of UUIDs does. An empty collection matches no row, and with ``NOT IN`` (or ``NOT ... IN``)
+    every row, over a column of any type (PostgreSQL compared an empty list as integers, and refused a string
+    column). In JPQL and in native SQL alike."""
     async with repository_datasources(relational_backend, QaCode) as datasources:
         codes = await _codes(datasources)
         for label, value, expected in _CODE_CASES:
             for method in (codes.coded, codes.native_coded, codes.coded_at):
+                assert await method(value()) == expected, (label, method.__name__)
+        for label, value, expected in _NOT_CODE_CASES:
+            for method in (codes.not_coded, codes.native_not_coded):
                 assert await method(value()) == expected, (label, method.__name__)
         for label, value, expected in _ID_CASES:
             for entities in (codes.numbered, codes.native_numbered):
                 assert _ids(await entities(value())) == expected, (label, entities.__name__)
         assert await codes.tokened(uuid.UUID(int=3)) == [3]
         assert await codes.tokened({uuid.UUID(int=4), uuid.UUID(int=1)}) == [1, 4]
+        assert await codes.tokened([]) == []
 
 
 async def test_a_modifying_in_with_a_single_string_deletes_exactly_its_rows(
@@ -627,6 +651,8 @@ async def test_a_modifying_in_with_a_single_string_deletes_exactly_its_rows(
     (a string bound letter by letter deleted those two, and kept ``AB``); ``None`` deletes nothing."""
     async with repository_datasources(relational_backend, QaCode) as datasources:
         codes = await _codes(datasources)
+        assert await codes.discard([]) == 0
+        assert await codes.native_discard(code for code in ()) == 0
         assert await codes.discard("AB") == 1
         assert await _code_ids(datasources) == [1, 2, 4, 5]
         assert await codes.native_discard("B") == 1

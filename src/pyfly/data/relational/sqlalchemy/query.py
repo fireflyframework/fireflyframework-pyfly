@@ -72,10 +72,13 @@ before one.
 parameter after ``self``); the method takes them by position or by keyword. ``IN (:ids)`` (or ``IN :ids``) binds
 a collection (a list, a tuple, a set, a generator...), one value per element, and any other value as a list of
 one: a string, bytes, a mapping, a number or ``None`` is one value, never iterated, so ``IN (:code)`` with ``"AB"``
-matches ``AB`` (not ``A`` and ``B``), and with ``None`` matches no row, as ``IN (NULL)`` does. A ``UUID`` binds as
-SQLAlchemy's ``Uuid`` and an aware ``datetime`` as ``UtcDateTime`` (a collection by its elements), as entity
-columns of those types store them; other values bind as the driver takes them. A parameter the query never uses
-is accepted, and binds nothing.
+matches ``AB`` (not ``A`` and ``B``), and with ``None`` matches no row, as ``IN (NULL)`` does. An empty collection
+matches no row, and after ``NOT IN`` every row, whatever the column's type: SQLAlchemy writes an empty list as a set
+of integers, so for that call ``IN`` is written ``= ANY('{}')`` (``NOT IN``: ``<> ALL('{}')``) on PostgreSQL, which
+types the array as the column, and ``IN (SELECT NULL FROM DUAL WHERE 1 = 0)`` on MySQL and MariaDB, whose ``NULL``
+compares with any type (a MariaDB ``UUID``, too). A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an aware
+``datetime`` as ``UtcDateTime`` (a collection by its elements), as entity columns of those types store them; other
+values bind as the driver takes them. A parameter the query never uses is accepted, and binds nothing.
 
 **JPQL** (``native=False``, the default) is rewritten token by token, for the dialect the query runs on:
 
@@ -112,7 +115,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -365,6 +368,49 @@ def _expanding(tokens: list[Token]) -> set[str]:
             tokens[significant[position - 1]].text = ""
             tokens[significant[position + 1]].text = ""
     return expanding
+
+
+_EMPTY_LISTS: dict[str, tuple[str, str]] = {
+    "postgresql": ("= ANY('{}')", "<> ALL('{}')"),
+    "mysql": ("IN (SELECT NULL FROM DUAL WHERE 1 = 0)", "NOT IN (SELECT NULL FROM DUAL WHERE 1 = 0)"),
+}
+"""Dialect -> how ``IN :name`` and ``NOT IN :name`` are written for an empty list (:func:`_without_empty_lists`);
+MariaDB's dialect is ``mysql`` too."""
+
+
+def _without_empty_lists(described: TranspiledQuery, dialect: Dialect, names: frozenset[str]) -> TranspiledQuery:
+    """*described* for a call that binds no value to its ``IN`` lists *names*, on a dialect of
+    :data:`_EMPTY_LISTS`.
+
+    SQLAlchemy writes an empty list as a set of integers (``IN (SELECT CAST(NULL AS INTEGER) WHERE 1!=1)`` on
+    PostgreSQL, ``IN (SELECT _in_0 FROM (SELECT 1 AS _in_0) ...)`` on MySQL and MariaDB), which PostgreSQL refuses
+    to compare with a column of another type, and MariaDB with a ``UUID`` or ``INET6`` one. So ``IN :name`` is
+    written ``= ANY('{}')`` and ``NOT IN :name`` ``<> ALL('{}')`` on PostgreSQL, which types the empty array as the
+    column it is compared with, and ``[NOT] IN (SELECT NULL FROM DUAL WHERE 1 = 0)`` on MySQL and MariaDB, whose
+    ``NULL`` compares with any type. They answer as an empty list does (``IN``: false; ``NOT IN``: true, for a
+    ``NULL`` too). A name the query also binds outside an ``IN`` list stays bound there."""
+    in_empty, not_in_empty = _EMPTY_LISTS[dialect.name]
+    tokens = tokenize(described.sql, dialect)
+    significant = _significant(tokens)
+    for position, index in enumerate(significant):
+        token = tokens[index]
+        if token.kind != "bind" or token.text[1:] not in names or position == 0:
+            continue
+        operator = significant[position - 1]
+        if tokens[operator].upper != "IN":
+            continue
+        negated = position >= 2 and tokens[significant[position - 2]].upper == "NOT"
+        start = significant[position - 2] if negated else operator
+        for between in range(start, index + 1):
+            tokens[between] = Token("space", "")
+        tokens[start] = Token("other", not_in_empty if negated else in_empty)
+    binds = tuple(_binds(tokens))
+    return replace(
+        described,
+        sql="".join(token.text for token in tokens),
+        binds=binds,
+        expanding=described.expanding & frozenset(binds),
+    )
 
 
 def _escaped_colons(tokens: Sequence[Token]) -> None:
@@ -781,7 +827,7 @@ class CompiledQuery:
         self._query: str = method.__pyfly_query__  # type: ignore[attr-defined]
         self._parameters = tuple(parameters)
         self._modifying: ModifyingOptions | None = getattr(method, "__pyfly_modifying__", None)
-        self._by_dialect: dict[str, tuple[TranspiledQuery, Any]] = {}
+        self._by_dialect: dict[tuple[str, frozenset[str]], tuple[TranspiledQuery, Any]] = {}
         self._lock = threading.Lock()
         described = self._transpile(None)  # checks the query once, at startup, whatever the dialect
         self._kind = described.kind
@@ -857,17 +903,20 @@ class CompiledQuery:
             return ResultShape(shape.kind, ElementKind.ENTITY, shape.type)
         return shape
 
-    def _prepared(self, dialect: Dialect) -> tuple[TranspiledQuery, Any]:
-        """The transpiled query and its ``text()`` clause for *dialect*, built on first use."""
-        name = dialect.name
-        prepared = self._by_dialect.get(name)
+    def _prepared(self, dialect: Dialect, empty: frozenset[str] = frozenset()) -> tuple[TranspiledQuery, Any]:
+        """The transpiled query and its ``text()`` clause for *dialect*, built on first use; with *empty*, for a
+        call that binds no value to those ``IN`` lists (:func:`_without_empty_lists`)."""
+        key = (dialect.name, empty)
+        prepared = self._by_dialect.get(key)
         if prepared is None:
             described = self._transpile(dialect)
+            if empty:
+                described = _without_empty_lists(described, dialect, empty)
             clause: Any = text(described.sql)
             if described.columns and self._shape.element is not ElementKind.ENTITY:
                 clause = clause.columns(*(column(label, type_) for label, type_ in described.columns))
             with self._lock:
-                prepared = self._by_dialect.setdefault(name, (described, clause))
+                prepared = self._by_dialect.setdefault(key, (described, clause))
         return prepared
 
     # -- execution ----------------------------------------------------------------------------------------
@@ -875,11 +924,16 @@ class CompiledQuery:
     async def __call__(self, session: AsyncSession, **arguments: Any) -> Any:
         dialect = session.sync_session.get_bind().dialect
         described, clause = self._prepared(dialect)
-        values = {}
+        values: dict[str, Any] = {}
         for name in dict.fromkeys(described.binds):
             if name not in arguments:
                 raise TypeError(f"{self._name}: the query needs a value for :{name}")
-            values[name] = arguments[name]
+            values[name] = _listed(arguments[name]) if name in described.expanding else arguments[name]
+        if dialect.name in _EMPTY_LISTS:
+            empty = frozenset(name for name in described.expanding if not values[name])
+            if empty:  # SQLAlchemy's empty list is a set of integers there (_without_empty_lists)
+                described, clause = self._prepared(dialect, empty)
+                values = {name: values[name] for name in dict.fromkeys(described.binds)}
         bound = _bound(clause, values, described.expanding) if values else clause
         if self._modifying is not None:
             return await self._modify(session, bound, dialect)
@@ -958,14 +1012,21 @@ _ONE_VALUE: tuple[type, ...] = (str, bytes, bytearray, memoryview, Mapping)
 """Iterables that are one value in an ``IN`` list, never iterated: a string, binary data, a mapping."""
 
 
+def _listed(value: Any) -> list[Any]:
+    """The values an ``IN`` list binds for *value*: a collection's elements (any iterable: a list, a tuple, a set,
+    a generator...), and any other value, a string, bytes, a mapping or ``None`` included, as a list of one. A
+    string iterated letter by letter matched ``A`` and ``B`` for ``"AB"``; ``None`` binds ``IN (NULL)``, which
+    matches no row."""
+    if type(value) is list:
+        return value
+    return list(value) if isinstance(value, Iterable) and not isinstance(value, _ONE_VALUE) else [value]
+
+
 def _parameter(name: str, value: Any, expanding: bool) -> Any:
-    """The bind of *value* for ``:name`` (:func:`_bound`). After ``IN`` (*expanding*) it binds a list, as
-    SQLAlchemy indexes an expanding value: a collection (any iterable: a list, a tuple, a set, a generator...) by
-    its elements, and any other value, a string, bytes, a mapping or ``None`` included, as a list of one. A string
-    iterated letter by letter matched ``A`` and ``B`` for ``"AB"``; ``None`` binds ``IN (NULL)``, which matches no
-    row. A list is typed by its first value that is not ``None``."""
+    """The bind of *value* for ``:name`` (:func:`_bound`). After ``IN`` (*expanding*) it binds a list
+    (:func:`_listed`), as SQLAlchemy indexes an expanding value, typed by its first value that is not ``None``."""
     if expanding:
-        value = list(value) if isinstance(value, Iterable) and not isinstance(value, _ONE_VALUE) else [value]
+        value = _listed(value)
         sample = next((item for item in value if item is not None), None)
     else:
         sample = value

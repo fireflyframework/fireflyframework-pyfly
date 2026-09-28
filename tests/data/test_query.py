@@ -36,6 +36,7 @@ from pyfly.data.relational.sqlalchemy.query import (
     QueryExecutor,
     _native,
     _parameter,
+    _without_empty_lists,
     query,
     tokenize,
     transpile_jpql,
@@ -591,6 +592,40 @@ class TestInListParameters:
         key = UUID(int=7)
         typed = _parameter("x", [None, key], expanding=True)
         assert typed.value == [None, key] and isinstance(typed.type, Uuid)
+
+    def test_an_empty_list_is_an_empty_array_on_postgresql(self):
+        """SQLAlchemy writes an empty IN list as a set of integers on PostgreSQL, which refuses to compare one
+        with a string column: an empty list's ``IN`` is ``= ANY('{}')`` there, and ``NOT IN`` ``<> ALL('{}')``,
+        which PostgreSQL types as the column. The other parameters stay."""
+        described = _native(
+            "SELECT id FROM t WHERE code IN (:codes) AND id NOT IN :ids AND NOT tag IN (:tags) AND x = :x "
+            "AND y IN (:kept)",
+            postgresql.dialect(),
+        )
+        assert described.expanding == {"codes", "ids", "tags", "kept"}
+        rewritten = _without_empty_lists(described, postgresql.dialect(), frozenset({"codes", "ids", "tags"}))
+        assert rewritten.sql == (
+            "SELECT id FROM t WHERE code = ANY('{}') AND id <> ALL('{}') AND NOT tag = ANY('{}') AND x = :x "
+            "AND y IN :kept"
+        )
+        assert rewritten.binds == ("x", "kept")
+        assert rewritten.expanding == {"kept"}
+
+    def test_an_empty_list_is_an_empty_subquery_of_null_on_mysql_and_mariadb(self):
+        """SQLAlchemy writes an empty IN list as a set of integers on MySQL and MariaDB too, which MariaDB refuses to
+        compare with a ``UUID`` or ``INET6`` column: an empty list is a subquery of ``NULL`` there, which compares
+        with any type."""
+        described = _native("SELECT id FROM t WHERE code IN (:codes) AND NOT tag IN :tags AND id NOT IN (:ids)")
+        rewritten = _without_empty_lists(described, mysql.dialect(), frozenset({"codes", "tags", "ids"}))
+        empty = "(SELECT NULL FROM DUAL WHERE 1 = 0)"
+        assert rewritten.sql == f"SELECT id FROM t WHERE code IN {empty} AND NOT tag IN {empty} AND id NOT IN {empty}"
+        assert rewritten.binds == () and rewritten.expanding == frozenset()
+
+    def test_an_empty_list_bound_outside_in_too_stays_bound(self):
+        described = _native("SELECT id FROM t WHERE code IN (:codes) OR :codes IS NULL", postgresql.dialect())
+        rewritten = _without_empty_lists(described, postgresql.dialect(), frozenset({"codes"}))
+        assert rewritten.sql == "SELECT id FROM t WHERE code = ANY('{}') OR :codes IS NULL"
+        assert rewritten.binds == ("codes",) and rewritten.expanding == {"codes"}
 
     def test_a_value_outside_in_binds_as_it_is(self):
         """Only ``IN`` lists expand: ``= ANY(:ids)`` binds the list itself (a PostgreSQL array)."""
