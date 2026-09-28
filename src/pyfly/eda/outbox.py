@@ -24,7 +24,8 @@ Four framework tables (:mod:`pyfly.data.relational.framework_schema`) hold an ou
 - ``pyfly_outbox_events``: one row per event;
 - ``pyfly_outbox_consumers``: the consumer groups, and the destinations each consumes;
 - ``pyfly_outbox_deliveries``: what the outbox still owes, one row per consumer group and event. Publishing
-  an event inserts its row for every group registered for its destination (or for the groups named);
+  an event inserts its row for every group registered for its destination (or for the groups named), and for
+  the groups the publish includes (a bus includes its own group when it consumes the destination);
 - ``pyfly_outbox_dead_letters``: the deliveries a subscription failed to handle on every attempt.
 
 **Delivery is claimed by state, not read by a cursor.** A group's relay claims the delivery rows whose
@@ -483,12 +484,21 @@ class Outbox:
 
     # -- writing --------------------------------------------------------------------------------------------
 
-    async def append(self, envelope: EventEnvelope, *, groups: Sequence[str] | None = None) -> int:
+    async def append(
+        self, envelope: EventEnvelope, *, groups: Sequence[str] | None = None, include: Sequence[str] = ()
+    ) -> int:
         """Write *envelope* in the unit of work bound for the outbox's datasource (or a short unit of its own)
         and return its outbox id.
 
         It is owed to every consumer group registered for its destination, or to *groups* when given (then no
-        registration is consulted). On PostgreSQL the publish is one statement, ``NOTIFY`` included.
+        registration is consulted), and to the groups in *include* as well, whether or not they are registered
+        (each group once). On PostgreSQL the publish is one statement, ``NOTIFY`` included.
+
+        The registered groups are the ones the publishing unit sees. On MySQL and MariaDB a unit reads them in
+        the snapshot of its first read (``REPEATABLE READ``): a group first registered after that read is not
+        owed the event (a group that registers starts with the events published after, and a unit that began
+        before straddles that boundary). A bus that consumes the destination includes its own group, so its
+        own events are always owed to it.
         """
         from pyfly.data.transaction import infrastructure_unit
 
@@ -501,17 +511,26 @@ class Outbox:
             "headers": encode_json(envelope.headers),
             "created_at": now,
         }
+        included = list(dict.fromkeys(include))
+        if groups is not None:
+            groups, included = list(dict.fromkeys([*groups, *included])), []
         postgresql = self.dialect() == "postgresql"
         single = postgresql and groups is None
         async with infrastructure_unit(self._target, single_statement=single) as session:
             if single:
-                return await self._append_on_postgresql(session, values)
-            return await self._append(session, values, groups, notify=postgresql)
+                return await self._append_on_postgresql(session, values, included)
+            return await self._append(session, values, groups, included, notify=postgresql)
 
     async def _append(
-        self, session: AsyncSession, values: dict[str, Any], groups: Sequence[str] | None, *, notify: bool
+        self,
+        session: AsyncSession,
+        values: dict[str, Any],
+        groups: Sequence[str] | None,
+        include: Sequence[str],
+        *,
+        notify: bool,
     ) -> int:
-        from sqlalchemy import BigInteger, Integer, func, insert, literal, select
+        from sqlalchemy import BigInteger, Integer, func, insert, literal, select, union
 
         from pyfly.data.relational.framework_schema import UtcTimestamp
 
@@ -524,17 +543,25 @@ class Outbox:
             # InnoDB's INSERT ... SELECT takes shared next-key locks on what it reads: read the groups with a
             # plain (non-locking) read instead, so a publish never holds locks on the consumer table.
             query = select(consumers.c.consumer_group).where(consumers.c.destination.in_(destinations))
-            groups = list(dict.fromkeys((await session.execute(query)).scalars()))
+            groups = list(dict.fromkeys([*(await session.execute(query)).scalars(), *include]))
         if groups is None:
-            owed = (
-                select(
-                    consumers.c.consumer_group,
-                    literal(outbox_id, BigInteger()),
-                    literal(values["created_at"], UtcTimestamp()),
-                    literal(0, Integer()),
+            registered = select(consumers.c.consumer_group).where(consumers.c.destination.in_(destinations))
+            owed_groups = (
+                union(
+                    registered,
+                    *(
+                        select(literal(group, consumers.c.consumer_group.type).label("consumer_group"))
+                        for group in include
+                    ),
                 )
-                .where(consumers.c.destination.in_(destinations))
-                .distinct()
+                if include
+                else registered.distinct()
+            ).subquery()
+            owed = select(
+                owed_groups.c.consumer_group,
+                literal(outbox_id, BigInteger()),
+                literal(values["created_at"], UtcTimestamp()),
+                literal(0, Integer()),
             )
             await session.execute(
                 insert(deliveries).from_select(["consumer_group", "outbox_id", "available_at", "attempts"], owed)
@@ -557,7 +584,7 @@ class Outbox:
             await session.execute(select(func.pg_notify(self._notify_channel, "")))
         return outbox_id
 
-    async def _append_on_postgresql(self, session: AsyncSession, values: dict[str, Any]) -> int:
+    async def _append_on_postgresql(self, session: AsyncSession, values: dict[str, Any], include: Sequence[str]) -> int:
         from sqlalchemy import bindparam, text
 
         from pyfly.data.relational.framework_schema import UtcTimestamp
@@ -568,15 +595,18 @@ class Outbox:
         deliveries = preparer.format_table(tables.deliveries)
         consumers = preparer.format_table(tables.consumers)
         notify = ", pg_notify(:channel, '')" if self._notify_channel else ""
+        # UNION: every group once, the registered ones and the included ones alike.
+        included = "".join(f" UNION SELECT CAST(:include_{index} AS VARCHAR)" for index in range(len(include)))
         statement = text(
             f"WITH e AS (INSERT INTO {events} (event_id, destination, event_type, payload, headers, created_at) "
             "VALUES (:event_id, :destination, :event_type, :payload, :headers, :created_at) RETURNING id), "
             f"d AS (INSERT INTO {deliveries} (consumer_group, outbox_id, available_at, attempts) "
-            f"SELECT DISTINCT c.consumer_group, e.id, :created_at, 0 FROM {consumers} c CROSS JOIN e "
-            "WHERE c.destination IN (:destination, :every)) "
+            f"SELECT g.consumer_group, e.id, :created_at, 0 FROM (SELECT c.consumer_group FROM {consumers} c "
+            f"WHERE c.destination IN (:destination, :every){included}) g CROSS JOIN e) "
             f"SELECT e.id{notify} FROM e"
         ).bindparams(bindparam("created_at", type_=UtcTimestamp()))
         parameters = {**values, "every": EVERY_DESTINATION}
+        parameters.update({f"include_{index}": group for index, group in enumerate(include)})
         if self._notify_channel:
             parameters["channel"] = self._notify_channel
         row = (await session.execute(statement, parameters)).first()
@@ -592,12 +622,14 @@ class Outbox:
         *,
         start: StartPosition | str = StartPosition.LATEST,
     ) -> bool:
-        """Register consumer group *group* for *destinations* (``None``: every destination); returns whether
-        the group was new.
+        """Register consumer group *group* for *destinations* (``None``: every destination), in a short unit of
+        its own; returns whether the group was new.
 
         The group's destinations become exactly these: the ones it no longer lists stop being owed to it. A new
         group starts at *start*: with the events published from now on, or (``earliest``) with every event the
-        outbox holds for its destinations as well.
+        outbox holds for its destinations as well, owed in the same unit. When the relays of several nodes
+        register a new group at once, the one whose registration writes the group's first row is the one that
+        finds it new (and owes it the earlier events): the others wait for it, and find it registered.
         """
         from sqlalchemy import delete, select
 
@@ -617,21 +649,23 @@ class Outbox:
                 await session.execute(
                     delete(consumers).where(consumers.c.consumer_group == group, consumers.c.destination.in_(stale))
                 )
+            inserted = False
             for destination in wanted:
                 if destination not in existing:
-                    await insert_if_absent(
+                    inserted |= await insert_if_absent(
                         session,
                         consumers,
                         {"consumer_group": group, "destination": destination, "registered_at": now},
                         key=("consumer_group", "destination"),
                     )
-        new_group = not existing
-        if new_group and StartPosition.of(start) is StartPosition.EARLIEST:
-            await self._backfill(group, wanted)
+            new_group = not existing and inserted
+            if new_group and StartPosition.of(start) is StartPosition.EARLIEST:
+                await self._backfill(session, group, wanted)
         return new_group
 
-    async def _backfill(self, group: str, destinations: Sequence[str]) -> None:
-        """Owe *group* every event the outbox holds for *destinations* that it is not owed yet."""
+    async def _backfill(self, session: AsyncSession, group: str, destinations: Sequence[str]) -> None:
+        """Owe *group* every event the outbox holds for *destinations* that it is not owed yet (a delivery row
+        another unit wrote meanwhile is left as it is)."""
         from sqlalchemy import Integer, exists, insert, literal, select
 
         from pyfly.data.relational.framework_schema import UtcTimestamp
@@ -648,10 +682,23 @@ class Outbox:
         else:
             # Every destination, but not the events owed only to the groups that were named (event sourcing's).
             source = source.where(~events.c.destination.startswith(ADDRESSED_DESTINATION_PREFIX, autoescape=True))
-        async with self._relay_unit() as session:
-            await session.execute(
-                insert(deliveries).from_select(["consumer_group", "outbox_id", "available_at", "attempts"], source)
+        columns = ["consumer_group", "outbox_id", "available_at", "attempts"]
+        dialect = self.dialect()
+        statement: Any
+        if dialect in ("postgresql", "sqlite"):
+            from sqlalchemy.dialects import postgresql, sqlite
+
+            module: Any = postgresql if dialect == "postgresql" else sqlite
+            statement = (
+                module.insert(deliveries)
+                .from_select(columns, source)
+                .on_conflict_do_nothing(index_elements=[deliveries.c.consumer_group, deliveries.c.outbox_id])
             )
+        elif dialect in ("mysql", "mariadb"):
+            statement = insert(deliveries).from_select(columns, source).prefix_with("IGNORE")
+        else:
+            statement = insert(deliveries).from_select(columns, source)
+        await session.execute(statement)
 
     async def unregister(self, group: str) -> int:
         """Remove consumer group *group*: nothing is owed to it any more (the deliveries it had not made are
@@ -1418,10 +1465,11 @@ class OutboxRelay:
         return self._registered or not self._register
 
     async def register(self) -> None:
-        """Register the relay's consumer group for its destinations, once: from then on every event published to
-        them is owed to the group, whether or not a relay runs. A registering relay does it before its first
-        claim, a bus when it starts with subscriptions, and a bus's publish when the group has subscriptions
-        and is not registered yet: then in the publisher's unit of work, which the registration is part of."""
+        """Register the relay's consumer group for its destinations, once, in a short unit of its own: from then
+        on every event published to them is owed to the group, whether or not a relay runs. A registering relay
+        does it before its first claim, and a bus when it starts with subscriptions. A publish never registers
+        (in the publisher's unit it raced the relays that register the same group): the bus that publishes owes
+        its own events to its group instead (:meth:`Outbox.append`'s *include*)."""
         if self.registered:
             return
         from pyfly.data.transaction import after_commit

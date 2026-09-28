@@ -22,7 +22,8 @@
   completes, shielded) skipped the query-cache invalidation. The bus now invalidates when the handler ends
   with a cancellation or an unknown commit outcome.
 
-A real ``ApplicationContext`` on a SQLite file database (foreign keys on) and on PostgreSQL.
+A real ``ApplicationContext`` on every relational lane (SQLite file with foreign keys on, PostgreSQL, MySQL,
+MariaDB).
 """
 
 from __future__ import annotations
@@ -58,9 +59,7 @@ from pyfly.data.transaction import transactional
 from pyfly.domain import DomainEvent
 from pyfly.eda.adapters.database import DatabaseEventBus
 from pyfly.eda.types import EventEnvelope
-from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
-
-pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
+from tests.support.backend_matrix import RelationalBackend
 
 
 class CommandedItem(Base):

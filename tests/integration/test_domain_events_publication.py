@@ -16,7 +16,7 @@
 ``AggregateRoot.raise_event`` promised publication "after the unit of work commits", and nothing published
 anything; the docs told the application to publish before committing, so a rollback left phantom events
 behind. A real ``ApplicationContext`` (relational and EDA auto-configuration, the ``database`` outbox bus)
-on a SQLite file database (foreign keys on) and on PostgreSQL:
+on every relational lane (SQLite file with foreign keys on, PostgreSQL, MySQL, MariaDB):
 
 - the events an aggregate raises inside a ``@transactional`` method reach the ``AFTER_COMMIT`` listeners
   once it committed, and the outbox in the same unit (an ``@event_listener`` then receives them);
@@ -47,9 +47,7 @@ from pyfly.domain import AggregateRoot, DomainEvent
 from pyfly.eda.auto_configuration import EdaAutoConfiguration
 from pyfly.eda.decorators import event_listener
 from pyfly.eda.types import EventEnvelope
-from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
-
-pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
+from tests.support.backend_matrix import RelationalBackend
 
 
 @dataclass(frozen=True)

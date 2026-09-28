@@ -23,7 +23,8 @@ e-mail or called a remote API did so even when the transaction then rolled back.
 - ``AFTER_COMPLETION`` either way;
 
 and outside a transaction every phase but ``AFTER_ROLLBACK`` runs at once. A listener with no phase still runs
-inline. A real ``ApplicationContext`` on a SQLite file database (foreign keys on) and on PostgreSQL.
+inline. A real ``ApplicationContext`` on every relational lane (SQLite file with foreign keys on, PostgreSQL,
+MySQL, MariaDB).
 """
 
 from __future__ import annotations
@@ -44,9 +45,7 @@ from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.transaction import TransactionPhase, is_transaction_active, transactional
-from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
-
-pytestmark = pytest.mark.backends(SQLITE_FILE, PG)
+from tests.support.backend_matrix import RelationalBackend
 
 
 class PhaseInvoice(Base):

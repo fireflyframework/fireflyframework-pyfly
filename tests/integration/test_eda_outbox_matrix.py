@@ -40,7 +40,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
-from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction import TransactionTemplate, detached
 from pyfly.eda.adapters.database import DatabaseEventBus
 from pyfly.eda.outbox import Outbox, OutboxRelay, OutboxTables, Retention
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
@@ -131,6 +131,63 @@ async def test_a_publish_is_part_of_the_unit_of_work(relational_backend: Relatio
     await _drain(bus.relay)
     assert await _count(engine, "wp09_outbox_order") == 1
     assert received.ids() == [2]
+
+
+async def test_a_publish_racing_its_groups_first_registration_is_still_owed_to_the_group(
+    relational_backend: RelationalBackend,
+) -> None:
+    """An application context starts its bus before it subscribes the ``@event_listener`` methods, so the relay's
+    first round registers the group while the first requests run. On MySQL and MariaDB a business unit reads the
+    consumer groups in the snapshot of its first read: a unit that read before the relay registered the group
+    committed its order and an event owed to no one, and the handler this very process had subscribed never saw
+    it. The publishing bus now owes the event to its own group whatever the snapshot shows."""
+    engine = relational_backend.create_engine()
+    await relational_backend.create_tables(OutboxOrder)
+    bus = await _bus(engine, group="app", destinations=["orders"])
+    received = Recorder()
+    bus.subscribe("order.*", received)  # subscribed after the start: not registered yet
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+
+    async with template.transaction() as unit:
+        assert unit is not None
+        await unit.resource.execute(select(func.count()).select_from(OutboxOrder))  # the unit's snapshot
+        await detached(bus.relay.register())  # the relay's first round, in its own task
+        unit.resource.add(OutboxOrder(name="order-1"))
+        await bus.publish("orders", "order.placed", {"n": 1})
+
+    assert await _count(engine, "wp09_outbox_order") == 1
+    await _drain(bus.relay)
+    assert received.ids() == [1]
+
+
+async def test_a_publish_of_a_node_not_registered_yet_neither_fails_nor_loses_its_event(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Two nodes of a new group boot at once: node A's relay registers the group while a request of node B,
+    whose relay has not registered yet, publishes. Node B registered the group inside the request's unit, so on
+    MariaDB (snapshot isolation) the business unit failed with 1020 "Record has changed since last read", and on
+    MySQL it committed an event owed to no one. A publish no longer writes the consumer groups: the request
+    commits, and the event is owed to the group."""
+    engine = relational_backend.create_engine()
+    await relational_backend.create_tables(OutboxOrder)
+    node_a = await _bus(engine, group="app", destinations=["orders"])
+    node_b = await _bus(engine, group="app", destinations=["orders"])
+    received = Recorder()
+    node_a.subscribe("*", received)
+    node_b.subscribe("*", Recorder())
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+
+    async with template.transaction() as unit:
+        assert unit is not None
+        await unit.resource.execute(select(func.count()).select_from(OutboxOrder))  # node B's request reads
+        await detached(node_a.relay.register())  # node A's relay registers the group
+        unit.resource.add(OutboxOrder(name="order-1"))
+        await node_b.publish("orders", "order.placed", {"n": 1})
+
+    assert await _count(engine, "wp09_outbox_order") == 1
+    assert [p.envelope.event_type for p in await node_a.outbox.pending("app")] == ["order.placed"]
+    await _drain(node_a.relay)
+    assert received.ids() == [1]
 
 
 @pytest.mark.backends(PG, MYSQL, MARIADB)
@@ -332,6 +389,39 @@ async def test_a_new_group_starts_at_the_latest_event_unless_told_the_earliest(
     assert early.ids() == ["old", "new"]
 
 
+@pytest.mark.backends(PG, MYSQL, MARIADB)
+async def test_nodes_registering_a_new_earliest_group_at_once_owe_it_each_event_once(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The replicas of a new ``earliest`` group boot at once. Each registration found the group new (from a read
+    taken before its insert) and owed it the backlog in a unit of its own, so the second copy of the backlog
+    failed on the deliveries' primary key (a raw 1062 on MySQL): two of three replicas did not boot. The one whose
+    registration writes the group's first row now owes the backlog, in the same unit."""
+    engine = relational_backend.create_engine()
+    outbox = Outbox(engine)
+    await outbox.start()
+    now = outbox.now()
+    backlog = [
+        {"event_id": f"e{n}", "destination": "orders", "event_type": "x", "payload": "{}", "headers": "{}"}
+        for n in range(2000)
+    ]
+    async with engine.begin() as conn:
+        await conn.execute(TABLES.events.insert(), [{**row, "created_at": now} for row in backlog])
+    nodes = [Outbox(engine) for _ in range(3)]
+
+    for group in ("fresh-1", "fresh-2", "fresh-3", "fresh-4", "fresh-5"):  # a race: run it a few times
+        results = await asyncio.gather(
+            *(node.register(group, ["orders"], start="earliest") for node in nodes), return_exceptions=True
+        )
+
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert errors == []
+        assert sorted(results, key=bool) == [False, False, True]  # one registration found the group new
+        owed = select(func.count()).select_from(TABLES.deliveries).where(TABLES.deliveries.c.consumer_group == group)
+        async with engine.connect() as conn:
+            assert (await conn.execute(owed)).scalar_one() == len(backlog)
+
+
 async def test_a_group_registered_for_some_destinations_gets_only_those(
     relational_backend: RelationalBackend,
 ) -> None:
@@ -473,7 +563,8 @@ async def test_retry_keeps_attempting_and_an_unregistered_group_is_owed_nothing(
     assert [(p.attempts, (p.last_error or "").startswith("RuntimeError")) for p in pending] == [(5, True)]
 
     assert await bus.outbox.unregister("stubborn") == 1  # its undelivered delivery goes with it
-    await bus.publish("d", "later", {"n": 2})
+    publisher = await _bus(engine, group="publisher")  # another process: it owes the registered groups only
+    await publisher.publish("d", "later", {"n": 2})
     assert await bus.outbox.pending("stubborn") == []
 
 

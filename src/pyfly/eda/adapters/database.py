@@ -396,12 +396,18 @@ class DatabaseEventBus:
         from pyfly.data.transaction import after_commit
 
         await self._resolve()
-        if self._relay.subscriptions and not self._relay.registered:
-            # This process consumes the group, and its relay has not registered it yet (a publish right after the
-            # context subscribed the listeners): register it here, in this unit, so this event is owed to it too.
-            await self._relay.register()
-        await self._outbox.append(envelope)
+        # The event is owed to the groups registered for its destination, as the publishing unit sees them, and
+        # to this bus's own group whenever this process consumes it: its relay may not have registered the group
+        # yet (the application context subscribes the listeners after the bus started, and the relay registers
+        # at its next round), and on MySQL and MariaDB the unit's snapshot may predate the registration. A publish
+        # never writes the consumer groups itself: in the caller's unit, racing a relay that registers the same
+        # group, that failed the business unit on MariaDB (1020, "Record has changed since last read").
+        include = (self._group,) if self._relay.subscriptions and self._consumes(envelope.destination) else ()
+        await self._outbox.append(envelope, include=include)
         await after_commit(self._relay.wake)
+
+    def _consumes(self, destination: str) -> bool:
+        return self._destinations is None or destination in self._destinations
 
     def _owns_datasource(self) -> bool:
         """Whether the bus builds its datasource itself (a subclass given a URL outside an application does)."""
