@@ -51,7 +51,7 @@ class OrderRepository(Repository[OrderEntity, int]):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter. A relational repository bean in a context without it fails the start (its derived and `@query` methods would never be compiled) |
+| `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter. Without it (and without a `RepositoryBeanPostProcessor` registered by hand) a relational repository with derived or `@query` methods fails the start: they would never be compiled, and each would answer `None` |
 | `pyfly.data.relational.url` | `str` | *(required)* | Database connection URL. Startup fails without it, except in the `dev` profile (`sqlite+aiosqlite:///./app.db`, with a warning) |
 | `pyfly.data.relational.echo` | `bool` or `debug` | `false` | Log all SQL statements (`debug` also logs rows); `"false"` from an env var is `false` |
 | `pyfly.data.relational.ddl-auto` | `str` | `create` on SQLite, `none` otherwise | Schema strategy: `none`, `validate`, `create` or `create-drop`; any other value fails the startup ([Schema Strategy](../modules/data-relational.md#schema-strategy-ddl-auto)) |

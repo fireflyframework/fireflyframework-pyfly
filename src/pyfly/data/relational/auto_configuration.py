@@ -24,7 +24,7 @@ Two auto-configurations live here:
   :class:`~pyfly.data.transaction.registry.TransactionManagerRegistry` (one SQLAlchemy transaction manager
   per datasource), installed while the context runs, so ``@transactional`` and repositories find their
   transaction manager by datasource name, and the :class:`RepositoryWiringCheck`, which fails the start on a
-  relational repository the relational beans did not wire.
+  relational repository whose derived or ``@query`` stubs no repository post-processor compiled.
 - :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled=true``) keeps the beans an
   application injects (``async_engine``, ``async_session_factory``, ``routing_session_factory``,
   ``named_data_sources``, ``async_session``, ``engine_lifecycle``, ``db_health_indicator``,
@@ -514,13 +514,15 @@ class DataSourceSpiRegistrar:
 
 @order(HIGHEST_PRECEDENCE + 200)
 class RepositoryWiringCheck:
-    """``BeanPostProcessor`` that fails the start on a relational repository the relational data layer did not wire.
+    """``BeanPostProcessor`` that fails the start on a relational repository whose query stubs were never compiled.
 
-    The repository post-processor of :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled``)
-    compiles a repository's derived and ``@query`` methods and binds its calls to the context's transaction
-    managers. Without it the stubs keep their ``...`` bodies and answer ``None`` (``exists_by_*`` a falsy
-    ``None``), with or without a database. A repository that got a session of its own (manual mode) is left
-    alone. It runs right after the repository post-processors, before the AOP one.
+    The repository post-processor (the one of :class:`RelationalAutoConfiguration`, with
+    ``pyfly.data.relational.enabled``, or one registered by hand) replaces a repository's derived
+    (``find_by_*``, ``count_by_*``, ``exists_by_*``, ``delete_by_*``) and ``@query`` stubs with compiled queries.
+    Without it the stubs keep their ``...`` bodies and answer ``None`` (``exists_by_*`` a falsy ``None``), with or
+    without a database. The inherited CRUD methods need no compiling: a repository no post-processor bound to the
+    context's transaction managers finds them when it is called. A repository that got a session of its own
+    (manual mode) is left alone. It runs right after the repository post-processors, before the AOP one.
     """
 
     def before_init(self, bean: Any, bean_name: str) -> Any:
@@ -528,22 +530,46 @@ class RepositoryWiringCheck:
         return bean
 
     def after_init(self, bean: Any, bean_name: str) -> Any:
-        """Refuse *bean* when it is a relational repository that no post-processor wired."""
-        if (
-            isinstance(bean, Repository)
-            and bean._manual_session is None
-            and getattr(bean, "_transaction_managers", None) is None
-        ):
-            raise BeanCreationException(
-                subsystem="data",
-                provider=type(bean).__name__,
-                reason=(
-                    f"{type(bean).__name__} ({bean_name}) is a relational repository, and the relational data layer "
-                    "is not enabled: its derived and @query methods would never be compiled. Set "
-                    "pyfly.data.relational.enabled=true (with pyfly.data.relational.url)."
-                ),
-            )
+        """Refuse *bean* when it is a relational repository with a derived or ``@query`` stub no post-processor
+        compiled."""
+        if isinstance(bean, Repository) and bean._manual_session is None:
+            stubs = _uncompiled_query_methods(bean)
+            if stubs:
+                raise BeanCreationException(
+                    subsystem="data",
+                    provider=type(bean).__name__,
+                    reason=(
+                        f"{type(bean).__name__} ({bean_name}) is a relational repository whose query methods "
+                        f"({', '.join(stubs)}) no repository post-processor compiled: they would answer None "
+                        "without touching the database. The relational data layer is not enabled: set "
+                        "pyfly.data.relational.enabled=true (with pyfly.data.relational.url)."
+                    ),
+                )
         return bean
+
+
+def _uncompiled_query_methods(bean: Any) -> list[str]:
+    """The derived and ``@query`` stubs of *bean*'s class that no repository post-processor replaced on *bean*.
+
+    It looks where the post-processor does (``BaseRepositoryPostProcessor.after_init``): the public methods the
+    repository's class defines, a compiled one being bound on the instance."""
+    from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
+
+    cls = type(bean)
+    inherited = set(dir(Repository))
+    compiled = vars(bean)
+    stubs: list[str] = []
+    for name in vars(cls):
+        if name.startswith("_") or name in compiled:
+            continue
+        method = getattr(cls, name, None)
+        if method is None or not callable(method):
+            continue
+        if hasattr(method, "__pyfly_query__") or (
+            name not in inherited and name.startswith(DERIVED_PREFIXES) and BaseRepositoryPostProcessor._is_stub(method)
+        ):
+            stubs.append(name)
+    return stubs
 
 
 @auto_configuration
@@ -574,7 +600,7 @@ class DataSourceAutoConfiguration:
 
     @bean
     def repository_wiring_check(self) -> RepositoryWiringCheck:
-        """Fails the start on a relational repository the relational data layer did not wire
+        """Fails the start on a relational repository whose query stubs were never compiled
         (:class:`RepositoryWiringCheck`)."""
         return RepositoryWiringCheck()
 
