@@ -298,7 +298,16 @@ commits behind the engine's back:
   (`pyfly.data.transaction.detached`): its `@transactional` work (and its
   repository calls) never join the caller's unit, even when the saga is started
   inside `@transactional`, and a step commits on its own. So does each
-  compensation.
+  compensation. A step therefore does not see the caller's uncommitted writes,
+  and it waits for the locks the caller holds while the caller waits for the
+  saga. On a SQLite file, whose database has one writer, a saga started inside
+  a write `@transactional` fails after `busy_timeout` with "database is locked"
+  once a step writes. On PostgreSQL, a step that writes rows the caller locked
+  waits for the caller, which waits for the saga, and neither ends until a
+  timeout (the step's, the caller's or the server's) does. Start
+  the saga outside the business transaction, or after it commits
+  (`pyfly.data.transaction.after_commit`). Through 26.09.07 the steps joined the
+  caller's unit and committed or rolled back with it.
 - **A step that fails.** In a saga, the steps of its layer that are still
   running are awaited, never cancelled (a step cancelled while its `COMMIT` is in
   flight would commit behind the engine's back); the steps waiting for the layer's
@@ -338,6 +347,15 @@ commits behind the engine's back:
   included (the engine cannot tell whether the CONFIRM's work is complete), so
   make CANCEL undo a confirmed reservation too, or give CONFIRM a timeout it
   never reaches.
+- **An orchestration run by a step.** Commit tracking stops at a detached
+  task: the steps of a saga (or workflow) that a step runs commit in units of
+  their own, which the outer step's tracking does not see. A workflow step that
+  ran a saga to completion and then timed out counts as having committed
+  nothing, so it is retried and the saga runs again. Conversely, TCC
+  participants run in the step's task, so the commits of a CANCEL phase make the
+  step count as committed, and it is not retried although the TCC left nothing
+  behind. Make a step that runs another orchestration idempotent, or give it no
+  retries.
 - **TCC participants run in the caller's task.** Unlike saga and workflow steps,
   the TRY, CONFIRM and CANCEL methods are not detached: called inside the
   caller's `@transactional`, their units of work join the caller's unit (they
