@@ -815,7 +815,10 @@ pyfly db init
    - imports the modules that declare your entities: `pyfly.data.relational.migrations.models` from
      `pyfly.yaml`, or else the project's package, which `init` detects and writes into `MODEL_PACKAGES` (every
      module under it except the application's entry point, which is never imported); a src-layout project that
-     is not installed gets its `src` directory on `sys.path` only when the package cannot be imported otherwise
+     is not installed gets its `src` directory on `sys.path` only when the package cannot be imported otherwise.
+     Startup migrations import the same modules: when one of them needs what the runtime image lacks (tests
+     inside the package, a worker's optional dependency), the start fails with `MigrationError`, so list only
+     the entity modules in `pyfly.data.relational.migrations.models`
    - lists `Base.metadata` and the framework's own tables (`framework_metadata`: `pyfly_locks`,
      `pyfly_orchestration_state`, ...) as `target_metadata`, so autogenerate never proposes dropping either
    - runs on the application's primary datasource: `pyfly.data.relational.url` from `pyfly.yaml`, with the
@@ -1069,7 +1072,7 @@ pyfly:
         revision: head           # target revision (default: head)
 ```
 
-When enabled, the app runs `alembic upgrade <revision>` against the same datasource (`pyfly.data.relational.url`) during startup, on a connection of its own engine, before any other bean starts; the application's logging is left as it is, and instances that start together migrate one at a time. `ddl-auto` then defaults to `none` (`validate` checks the models against the migrated schema; `create` beside migrations fails the startup). If `alembic.ini` is not found, the migration step is skipped with a warning suggesting you run `pyfly db init` — startup is not aborted. See [Data Relational — Run Migrations on Startup](modules/data-relational.md#run-migrations-on-startup-flyway-style) for the full configuration reference.
+When enabled, the app runs `alembic upgrade <revision>` against the same datasource (`pyfly.data.relational.url`) during startup, on a connection of its own engine, before any other bean starts; the application's logging is left as it is, and instances that start together migrate one at a time. `ddl-auto` then defaults to `none` (`validate` checks the models against the migrated schema; `create` beside migrations fails the startup). If `alembic.ini` is not found, the migration step is skipped with a warning suggesting you run `pyfly db init` — startup is not aborted, and since `ddl-auto` is `none` beside migrations, the application starts without its schema. See [Data Relational — Run Migrations on Startup](modules/data-relational.md#run-migrations-on-startup-flyway-style) for the full configuration reference.
 
 ---
 

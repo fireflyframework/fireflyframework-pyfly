@@ -197,7 +197,11 @@ def init_cmd() -> None:
     console.print("[success]\u2713[/success] Initialized Alembic migration environment in 'alembic/'.")
     if packages:
         modules = ", ".join(packages)
-        console.print(f"[dim]Models: every module of {modules} (pyfly.data.relational.migrations.models)[/dim]")
+        console.print(
+            f"[dim]Models: every module of {modules} is imported, by pyfly db and by the startup migrations. "
+            "When a module there needs something the runtime lacks (tests, an optional dependency), list only "
+            "the entity modules in pyfly.data.relational.migrations.models.[/dim]"
+        )
     else:
         console.print(
             "[dim]List the modules that declare your entities in pyfly.data.relational.migrations.models[/dim]"

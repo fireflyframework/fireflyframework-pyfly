@@ -1338,7 +1338,7 @@ run 'pyfly db init' to create the Alembic environment; skipping migrations.
 | `pyfly.data.relational.migrations.enabled` | `false` (absent) | Apply migrations on startup when `true`. |
 | `pyfly.data.relational.migrations.config` | `alembic.ini` | Path to the Alembic config file. |
 | `pyfly.data.relational.migrations.revision` | `head` | Target revision passed to `alembic upgrade`. |
-| `pyfly.data.relational.migrations.models` | the project's package | The modules that declare your entities, imported by `env.py` (a package with every module under it). |
+| `pyfly.data.relational.migrations.models` | the project's package | The modules that declare your entities, imported by `env.py` (a package with every module under it), from `pyfly db` and at startup. List only the entity modules when a module of the package needs what the runtime lacks (tests, an optional dependency): its import error fails the start with `MigrationError`. |
 
 > **Migrations vs. `ddl-auto`:** with startup migrations enabled, `ddl-auto` defaults to `none` and may not be `create` or `create-drop`; `validate` checks the models against the migrated schema.
 
