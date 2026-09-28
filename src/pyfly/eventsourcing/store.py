@@ -17,10 +17,9 @@ Every event an :class:`EventStore` holds has two places: its aggregate's ``seque
 aggregate, the optimistic-locking version) and a **global position** on the store's global stream, which
 :meth:`EventStore.stream_all` pages by (``after_position``). Positions only move forward for a reader: once it has
 seen position *p*, no event appears below *p* later, and an aggregate's events are on the stream in sequence
-order (except the events an earlier release stored, which follow the clocks that stamped them: see ``head-row``
-below). A projection can therefore keep one number as its checkpoint and never skip an event that committed late,
-never get an event twice from paging, and never stall on events that share a timestamp. ``occurred_at`` is the
-event's data, not a cursor.
+order, whatever the clocks that stamped them did. A projection can therefore keep one number as its checkpoint and
+never skip an event that committed late, never get an event twice from paging, and never stall on events that
+share a timestamp. ``occurred_at`` is the event's data, not a cursor.
 
 :class:`SqlAlchemyEventStore` keeps the events in the framework table ``pyfly_event_store`` and gives out the
 positions with one of two strategies, recorded per table in ``pyfly_event_store_head`` by the first store that
@@ -34,10 +33,13 @@ starts on it:
   to a committed event, and always above every position given before. An append never touches the head row, so
   business transactions do not wait for one another there, and none of them fails on it under snapshot isolation
   (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round are ordered by the database's clock when
-  it recorded them (``recorded_at``), then by aggregate and sequence: an aggregate's events keep their order, and
-  an event appended after another one committed comes after it. (Events an earlier release stored have no
-  ``recorded_at`` and are placed by ``occurred_at``, the clock of the process that built them, as that release's
-  stream was; where those clocks disagreed, so do the positions of an aggregate's events.)
+  it recorded them (``recorded_at``; events an earlier release stored have none and are placed by ``occurred_at``,
+  the clock of the process that built them), then by aggregate and sequence, except that an event is never placed
+  before an earlier event of its aggregate: where the clock stepped back (an NTP step, a virtual machine's time
+  sync), or the clocks of an earlier release's processes disagreed, the aggregate's later events are held at the
+  time it last recorded until the clock is past it again. An aggregate's events therefore keep their order, and
+  an event appended after another one committed comes after it as far as the database's clock tells (after a step
+  back, an event another aggregate recorded can be placed before one that committed before it, in one round).
 - ``xid8`` (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing): an event's position is
   its writer's transaction id times 2**20 plus its place among that transaction's events, set as it is inserted,
   and a reader only sees the positions below its snapshot's horizon (``pg_snapshot_xmin(pg_current_snapshot())``):
@@ -60,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import weakref
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -85,7 +88,7 @@ from pyfly.kernel.exceptions import ConcurrencyException, OptimisticLockingFailu
 if TYPE_CHECKING:
     from sqlalchemy import CursorResult, Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-    from sqlalchemy.sql.elements import ColumnElement
+    from sqlalchemy.sql.elements import ColumnElement, Label
 
 _logger = logging.getLogger(__name__)
 
@@ -112,6 +115,7 @@ _NUMBERING_BATCH = 1000  # committed events given positions per numbering unit
 _NUMBERING_ATTEMPTS = 5  # numbering rounds in a row that may find the head row moved before a read fails
 _NUMBERING_WINDOW = 100_000  # event ids one ordered read of the events without a position fetches (about 10 MB)
 _ASSIGN_CHUNK = 500  # events per positions UPDATE (one CASE branch and one IN value each)
+_SQLITE_WINDOW_FUNCTIONS = sqlite3.sqlite_version_info >= (3, 25, 0)  # the numbering order's running maximum
 
 
 class ConcurrencyError(OptimisticLockingFailureException):
@@ -291,8 +295,8 @@ class SqlAlchemyEventStore:
     SQLite, whose one writer holds the database's write lock until its unit of work ends, a store whose tables do
     not exist yet cannot create them from inside a unit that has written: start it before. Events a table got
     before it had global positions (rows an earlier release wrote, after a migration added
-    the column) are placed on the stream like any other event without one, oldest ``occurred_at`` first: by the
-    readers with ``head-row``, at start with ``xid8``.
+    the column) are placed on the stream like any other event without one, oldest ``occurred_at`` first and an
+    aggregate's in sequence order: by the readers with ``head-row``, at start with ``xid8``.
     """
 
     def __init__(
@@ -819,19 +823,24 @@ class SqlAlchemyEventStore:
 
     async def _read_backlog(self, session: AsyncSession) -> list[str]:
         """The committed events without a position, up to :data:`_NUMBERING_WINDOW` of them, in the order they get
-        theirs: oldest record first (``recorded_at``, the database's clock; an earlier release's rows, which have
-        none, by ``occurred_at``, the clocks of the processes that built them), then by aggregate and sequence.
+        theirs: by when they were recorded, then by aggregate and sequence, where an event is never placed before
+        an earlier event of its aggregate (:func:`_placed_at`).
 
-        No index serves that order, so the read sorts every event without a position: it happens once per window,
-        and the rounds number the list it returns in turn (a backlog of N events costs N/window sorts, not
-        N/round). Events that commit after the read are numbered after the list, above every position it got."""
-        from sqlalchemy import func, select
+        No index serves that order, so the read sorts every event without a position (by aggregate and sequence for
+        the running maximum, then into the order): it happens once per window, and the rounds number the list it
+        returns in turn (a backlog of N events costs N/window sorts, not N/round). Events that commit after the read
+        are numbered after the list, above every position it got."""
+        from sqlalchemy import select
 
         table = self._events
-        pending = (
-            select(table.c.event_id)
+        backlog = (
+            select(table.c.event_id, table.c.aggregate_id, table.c.sequence, _placed_at(table, self._backend))
             .where(table.c.global_position.is_(None))
-            .order_by(func.coalesce(table.c.recorded_at, table.c.occurred_at), table.c.aggregate_id, table.c.sequence)
+            .subquery("backlog")
+        )
+        pending = (
+            select(backlog.c.event_id)
+            .order_by(backlog.c.placed_at, backlog.c.aggregate_id, backlog.c.sequence)
             .limit(_NUMBERING_WINDOW)
         )
         found: Sequence[Any] = (await session.execute(pending)).scalars().all()
@@ -940,6 +949,41 @@ def _locked_out(error: BaseException | None) -> bool:
     from sqlalchemy.exc import DBAPIError
 
     return isinstance(error, DBAPIError) and "database is locked" in str(error.orig)
+
+
+def _placed_at(table: Table, backend: str) -> Label[datetime]:
+    """Where an event without a position is placed in time on the global stream (``placed_at``): when it was
+    recorded (``recorded_at``, the database's clock; an earlier release's rows, which have none, by
+    ``occurred_at``, the clock of the process that built the event), or the latest such time of the aggregate's
+    earlier events without a position, when that is later.
+
+    ``recorded_at`` is stamped row by row (PostgreSQL's ``clock_timestamp()``, MariaDB's bulk ``INSERT``), and
+    a database server's clock can step back (an NTP step, a virtual machine's time sync on resume), as the
+    clocks of an earlier release's processes could disagree. Placed by the stamps alone, an aggregate's later
+    events went before its earlier ones on the stream. Placed here, an aggregate's events are held at the time
+    it last recorded until the clock is past it again, so they follow their sequence whatever the clock did,
+    and every other event keeps its place by the clock.
+
+    A running maximum per aggregate (a window function: every backend the store supports, SQLite from 3.25);
+    on an older SQLite, the same maximum from a correlated subquery through the ``(aggregate_id, sequence)``
+    index, which reads an aggregate's earlier events again for each of its events."""
+    from sqlalchemy import func, select
+
+    recorded = func.coalesce(table.c.recorded_at, table.c.occurred_at)
+    if backend != "sqlite" or _SQLITE_WINDOW_FUNCTIONS:
+        running = func.max(recorded).over(partition_by=table.c.aggregate_id, order_by=table.c.sequence, rows=(None, 0))
+        return running.label("placed_at")
+    earlier = table.alias("earlier")
+    latest = (
+        select(func.max(func.coalesce(earlier.c.recorded_at, earlier.c.occurred_at)))
+        .where(
+            earlier.c.aggregate_id == table.c.aggregate_id,
+            earlier.c.sequence <= table.c.sequence,
+            earlier.c.global_position.is_(None),
+        )
+        .scalar_subquery()
+    )
+    return latest.label("placed_at")
 
 
 def _database_now(backend: str) -> ColumnElement[datetime] | datetime:

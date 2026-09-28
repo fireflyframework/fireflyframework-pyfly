@@ -19,10 +19,13 @@ first and committed second was skipped for good, events with one timestamp were 
 every event a global position no reader can see an event committed below later (by default a head-row counter
 that numbers the committed events when the stream is read; on PostgreSQL, opt-in, the writer's ``xid8`` below
 the readers' snapshot horizon), pages by it, and joins the ambient unit of work, so an aggregate's events commit
-or roll back with the rest of the business transaction.
+or roll back with the rest of the business transaction. The head-row numbering orders the events by the
+database's clock, and a step back of that clock put an aggregate's later events before its earlier ones: an
+event is now placed no earlier than its aggregate's earlier events (the clock-step section).
 
 The sqlite-file lane runs in the fast suite; PostgreSQL, MySQL and MariaDB run with ``-m integration``, and
-PostgreSQL runs the scenarios a second time with the ``xid8`` strategy (at the end of the module).
+PostgreSQL runs the scenarios a second time with the ``xid8`` strategy (at the end of the module). The sqlite-file
+lane runs the placement scenarios a second time as a SQLite without window functions (before 3.25) numbers.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Column, MetaData, String, Table, Update, func, insert, select, update
+from sqlalchemy import Column, MetaData, String, Table, Update, bindparam, func, insert, select, update
 
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, event_store, event_store_head
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
@@ -602,6 +605,52 @@ async def test_events_stored_by_an_earlier_release_get_positions_in_their_order(
     assert _types(await _drain(store)) == ["Legacy-0", "Legacy-1", "Legacy-2", "New"]
 
 
+async def test_an_earlier_release_s_events_keep_their_aggregate_s_order_whatever_clocks_stamped_them(
+    relational_backend: RelationalBackend,
+) -> None:
+    """An earlier release's rows have no ``recorded_at`` and are placed by ``occurred_at``, the clock of the process
+    that built each event. Where two processes' clocks disagreed, an aggregate's later event carried the earlier
+    ``occurred_at`` and was streamed first. It is now placed at its predecessor's time: after it, as every event of
+    the aggregate is."""
+    engine = relational_backend.create_engine()
+    await _store(relational_backend)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    fast, slow = base + timedelta(seconds=10), base + timedelta(seconds=1)  # a node's clock ahead of another's
+    legacy = [("legacy-x", 1, fast), ("legacy-x", 2, slow), ("legacy-y", 1, base + timedelta(seconds=5))]
+    async with engine.begin() as connection:
+        await connection.execute(insert(event_store), [_legacy_row(*row) for row in legacy])
+
+    store = await _store(relational_backend)
+    await store.append("new", "Order", [_envelope("New")], expected_version=0)
+    events = await _drain(store)
+    assert [(event.aggregate_id, event.sequence) for event in events] == [
+        ("legacy-y", 1),
+        ("legacy-x", 1),
+        ("legacy-x", 2),
+        ("new", 1),
+    ]
+
+
+def _legacy_row(aggregate_id: str, sequence: int, occurred_at: datetime) -> dict[str, Any]:
+    """The row an earlier release stored for an event: no ``recorded_at``, no global position."""
+    envelope = _envelope(f"{aggregate_id}-{sequence}".title(), occurred_at=occurred_at)
+    envelope.aggregate_id, envelope.aggregate_type, envelope.sequence = aggregate_id, "Order", sequence
+    return {
+        "event_id": envelope.event_id,
+        "aggregate_id": aggregate_id,
+        "aggregate_type": "Order",
+        "sequence": sequence,
+        "event_type": envelope.event_type,
+        "payload": envelope.to_json(),
+        "metadata": "{}",
+        "occurred_at": occurred_at,
+        "version": 1,
+        "tenant_id": None,
+        "recorded_at": None,
+        "global_position": None,
+    }
+
+
 @pytest.mark.backends(PG)
 async def test_xid8_is_opt_in_on_postgresql_and_the_strategy_is_the_table_s(
     relational_backend: RelationalBackend,
@@ -780,6 +829,130 @@ async def test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order(
 
 
 # ---------------------------------------------------------------------------------------------------------
+# The database's clock stepping back
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def _record_at(engine: Any, stamps: dict[str, datetime]) -> None:
+    """Give the events *stamps* names (by event id) the ``recorded_at`` the database's clock would have stamped
+    them with, before any reader numbers them."""
+    statement = (
+        update(event_store)
+        .where(event_store.c.event_id == bindparam("stamped_id"))
+        .values(recorded_at=bindparam("stamped_at", type_=event_store.c.recorded_at.type))
+    )
+    async with engine.begin() as connection:
+        await connection.execute(statement, [{"stamped_id": key, "stamped_at": at} for key, at in stamps.items()])
+
+
+async def _step_the_clock_back(engine: Any, aggregate_id: str, *, from_sequence: int) -> None:
+    """The database server's clock stepped back while *aggregate_id*'s rows were written (an NTP step, a virtual
+    machine's time sync): its rows from *from_sequence* on are recorded before every row written before them, by
+    the rows' whole span plus 100 ms."""
+    columns = (event_store.c.event_id, event_store.c.sequence, event_store.c.recorded_at)
+    async with engine.connect() as connection:
+        rows = (await connection.execute(select(*columns).where(event_store.c.aggregate_id == aggregate_id))).all()
+    stamps = [row.recorded_at for row in rows]
+    step = max(stamps) - min(stamps) + timedelta(milliseconds=100)
+    await _record_at(engine, {row.event_id: row.recorded_at - step for row in rows if row.sequence >= from_sequence})
+
+
+def _in_sequence_order(events: list[StoredEventEnvelope]) -> bool:
+    """Whether every aggregate's events are in sequence order, 1, 2, 3..."""
+    sequences: dict[str, list[int]] = {}
+    for event in events:
+        assert event.aggregate_id is not None
+        sequences.setdefault(event.aggregate_id, []).append(event.sequence)
+    return all(found == list(range(1, len(found) + 1)) for found in sequences.values())
+
+
+async def test_an_append_the_database_clock_stepped_back_during_streams_in_sequence_order(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Review of WP08: the MariaDB lane of the backlog test above failed once, ``big-b`` streaming its event 1043
+    at index 768. ``recorded_at`` is stamped row by row (MariaDB's bulk ``INSERT``, PostgreSQL's
+    ``clock_timestamp()``) and the numbering ordered the events by it, so the database server's clock stepping
+    back during an append (the test VM's time sync stepped it 17 times in that run) put an aggregate's later
+    events before its earlier ones on the stream, for good. Here big-b's rows from 1043 on are recorded before
+    every row before them, and the stream is read in pages of 500 (numbering rounds of 1000)."""
+    store = await _store(relational_backend)
+    await store.append("big-a", "Order", [_envelope(f"A{i}") for i in range(1300)], expected_version=0)
+    await store.append("big-b", "Order", [_envelope(f"B{i}") for i in range(1300)], expected_version=0)
+    await _step_the_clock_back(store.engine, "big-b", from_sequence=1043)
+
+    events = await _drain(store, limit=500)
+    assert len(events) == 2600 and len({event.event_id for event in events}) == 2600
+    assert [event.sequence for event in events if event.aggregate_id == "big-a"] == list(range(1, 1301))
+    assert [event.sequence for event in events if event.aggregate_id == "big-b"] == list(range(1, 1301))
+    if store.position_strategy == "head-row":
+        assert [event.global_position for event in events] == list(range(1, 2601))
+
+
+async def test_an_aggregate_the_clock_stepped_back_for_is_held_at_its_last_time_until_the_clock_catches_up(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Where the numbering places the events of an aggregate recorded after the clock stepped back: at the time
+    the aggregate last recorded an event, until the clock is past it again; every other event keeps its place by
+    the clock. a and b record in turn, a millisecond apart, and the clock steps back 5 ms before b's third event
+    (b3 and b4 are held at b2's time, b5 is back on the clock, level with a3, and follows it by aggregate)."""
+    store = await _store(relational_backend)
+    a = [_envelope(f"A{index}") for index in range(1, 7)]
+    b = [_envelope(f"B{index}") for index in range(1, 7)]
+    await store.append("a", "Order", a, expected_version=0)
+    await store.append("b", "Order", b, expected_version=0)
+    base = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    stamps = {event.event_id: base + timedelta(milliseconds=2 * index) for index, event in enumerate(a, start=1)}
+    for index, event in enumerate(b, start=1):
+        stamps[event.event_id] = base + timedelta(milliseconds=2 * index + 1 - (5 if index >= 3 else 0))
+    await _record_at(store.engine, stamps)
+
+    events = await _drain(store, limit=5)
+    assert _types(events) == ["A1", "B1", "A2", "B2", "B3", "B4", "A3", "B5", "A4", "B6", "A5", "A6"]
+    assert [event.global_position for event in events] == list(range(1, 13))
+
+
+async def test_appends_to_an_aggregate_stay_in_order_when_the_clock_steps_back_between_units(
+    relational_backend: RelationalBackend,
+) -> None:
+    """The clock steps back between two appends to one aggregate, each in a unit of its own: the second append is
+    recorded before the first. It streams after it, at the first's time; the other aggregate keeps its place."""
+    store = await _store(relational_backend)
+    opened, other = _envelope("Opened"), _envelope("OtherOpened")
+    deposited, withdrawn = _envelope("Deposited"), _envelope("Withdrawn")
+    await store.append("acc", "Account", [opened], expected_version=0)
+    await store.append("other", "Account", [other], expected_version=0)
+    await store.append("acc", "Account", [deposited, withdrawn], expected_version=1)
+    base = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    stamps = [(opened, 10), (other, 20), (deposited, 2), (withdrawn, 3)]
+    await _record_at(store.engine, {e.event_id: base + timedelta(milliseconds=ms) for e, ms in stamps})
+
+    events = await _drain(store)
+    assert _types(events) == ["Opened", "Deposited", "Withdrawn", "OtherOpened"]
+    assert _in_sequence_order(events)
+
+
+async def test_one_unit_s_appends_to_an_aggregate_stay_in_order_when_the_clock_steps_back_between_them(
+    relational_backend: RelationalBackend,
+) -> None:
+    """One unit appends to an aggregate, to another one, then to the first again, and the clock steps back
+    between the first and the last append: the aggregate's events stream in sequence order, interleaved with the
+    other aggregate's by the clock."""
+    store = await _store(relational_backend)
+    opened, other, deposited = _envelope("Opened"), _envelope("OtherOpened"), _envelope("Deposited")
+    async with _template(store).transaction():
+        await store.append("acc", "Account", [opened], expected_version=0)
+        await store.append("other", "Account", [other], expected_version=0)
+        await store.append("acc", "Account", [deposited], expected_version=1)
+    base = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    stamps = [(opened, 10), (other, 11), (deposited, 5)]
+    await _record_at(store.engine, {e.event_id: base + timedelta(milliseconds=ms) for e, ms in stamps})
+
+    events = await _drain(store)
+    assert _types(events) == ["Opened", "Deposited", "OtherOpened"]
+    assert _in_sequence_order(events)
+
+
+# ---------------------------------------------------------------------------------------------------------
 # A backlog of events without a position (an earlier release's rows, or no reader for a while)
 # ---------------------------------------------------------------------------------------------------------
 
@@ -788,27 +961,10 @@ async def _legacy_backlog(engine: Any, count: int, *, aggregates: int = 50) -> l
     """*count* events as an earlier release left them (no ``recorded_at``, no position), inserted in an order
     unrelated to their ``occurred_at``; returns their ``(aggregate_id, sequence)`` in ``occurred_at`` order."""
     base = datetime(2026, 1, 1, tzinfo=UTC)
-    rows = []
-    for index in range(count):
-        envelope = _envelope(f"L{index}", occurred_at=base + timedelta(milliseconds=index))
-        aggregate, sequence = f"legacy-{index % aggregates:03d}", index // aggregates + 1
-        envelope.aggregate_id, envelope.aggregate_type, envelope.sequence = aggregate, "Order", sequence
-        rows.append(
-            {
-                "event_id": envelope.event_id,
-                "aggregate_id": aggregate,
-                "aggregate_type": "Order",
-                "sequence": sequence,
-                "event_type": envelope.event_type,
-                "payload": envelope.to_json(),
-                "metadata": "{}",
-                "occurred_at": envelope.occurred_at,
-                "version": 1,
-                "tenant_id": None,
-                "recorded_at": None,
-                "global_position": None,
-            }
-        )
+    rows = [
+        _legacy_row(f"legacy-{index % aggregates:03d}", index // aggregates + 1, base + timedelta(milliseconds=index))
+        for index in range(count)
+    ]
     expected = [(row["aggregate_id"], row["sequence"]) for row in rows]
     random.Random(8).shuffle(rows)
     async with engine.begin() as connection:
@@ -823,7 +979,7 @@ def _backlog_sorts(counter: StatementCounter) -> int:
         1
         for statement in counter.statements
         if statement.verb == "SELECT"
-        and all(part in statement.sql.lower() for part in ("global_position is null", "order by coalesce("))
+        and all(part in statement.sql.lower() for part in ("global_position is null", "order by backlog.placed_at"))
     )
 
 
@@ -1209,14 +1365,20 @@ async def test_last_position_numbers_the_events_committed_when_it_was_called_not
 _NUMBER_EARLIER_EVENTS = {
     "postgresql": """
 UPDATE pyfly_event_store AS e SET global_position = n.position
-FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
-      FROM pyfly_event_store) AS n
+FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY placed_at, aggregate_id, sequence) AS position
+      FROM (SELECT event_id, aggregate_id, sequence,
+                   MAX(occurred_at) OVER (PARTITION BY aggregate_id ORDER BY sequence
+                                          ROWS UNBOUNDED PRECEDING) AS placed_at
+            FROM pyfly_event_store) AS p) AS n
 WHERE e.event_id = n.event_id
 """,
     "mysql": """
 UPDATE pyfly_event_store AS e
-JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
-      FROM pyfly_event_store) AS n ON e.event_id = n.event_id
+JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY placed_at, aggregate_id, sequence) AS position
+      FROM (SELECT event_id, aggregate_id, sequence,
+                   MAX(occurred_at) OVER (PARTITION BY aggregate_id ORDER BY sequence
+                                          ROWS UNBOUNDED PRECEDING) AS placed_at
+            FROM pyfly_event_store) AS p) AS n ON e.event_id = n.event_id
 SET e.global_position = n.position
 """,
 }
@@ -1230,12 +1392,18 @@ async def test_the_documented_sql_numbers_an_earlier_release_s_events_before_the
     relational_backend: RelationalBackend,
 ) -> None:
     """The set-based numbering the upgrade notes give for a large table, where a store has already started on it
-    (its head row is there, at 0): the head row takes the positions on from the highest one."""
+    (its head row is there, at 0): the head row takes the positions on from the highest one. It places the events
+    as the store does, an aggregate's in sequence order where the clocks that stamped them disagreed (skewed's
+    second event was built on a node an hour behind the first's)."""
     from sqlalchemy import text
 
     engine = relational_backend.create_engine()
     await _store(relational_backend)
     expected = await _legacy_backlog(engine, 1200)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    skewed = [("skewed", 1, base + timedelta(hours=1)), ("skewed", 2, base + timedelta(milliseconds=300))]
+    async with engine.begin() as connection:
+        await connection.execute(insert(event_store), [_legacy_row(*row) for row in skewed])
     numbering = _NUMBER_EARLIER_EVENTS["mysql" if relational_backend.dialect in ("mysql", "mariadb") else "postgresql"]
     async with engine.begin() as connection:
         await connection.execute(text(numbering))
@@ -1246,9 +1414,14 @@ async def test_the_documented_sql_numbers_an_earlier_release_s_events_before_the
         await store.start()
         await store.append("new", "Order", [_envelope("New")], expected_version=0)
         events = await _drain(store, limit=500)
-    assert [(event.aggregate_id, event.sequence) for event in events] == [*expected, ("new", 1)]
+    assert [(event.aggregate_id, event.sequence) for event in events] == [
+        *expected,
+        ("skewed", 1),
+        ("skewed", 2),
+        ("new", 1),
+    ]
     positions = [event.global_position or 0 for event in events]
-    assert positions[:-1] == list(range(1, 1201)) and positions[-1] > 1200
+    assert positions[:-1] == list(range(1, 1203)) and positions[-1] > 1202
     assert _backlog_sorts(reading) == (0 if store.position_strategy == "xid8" else 1)  # only the new event is left
 
 
@@ -1274,9 +1447,11 @@ _XID8_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
     test_an_append_sends_its_events_in_one_insert,
     test_the_tables_are_created_at_start_and_only_checked_without_ddl,
     test_events_stored_by_an_earlier_release_get_positions_in_their_order,
+    test_an_earlier_release_s_events_keep_their_aggregate_s_order_whatever_clocks_stamped_them,
     test_a_page_of_the_stream_is_read_through_the_global_position_index,
     test_skewed_clocks_do_not_reorder_the_stream,
     test_a_backlog_larger_than_a_numbering_round_is_streamed_in_order,
+    test_an_append_the_database_clock_stepped_back_during_streams_in_sequence_order,
     test_a_backlog_is_sorted_once_while_it_is_numbered,
     test_the_documented_sql_numbers_an_earlier_release_s_events_before_the_first_start,
 )
@@ -1293,3 +1468,47 @@ async def test_the_xid8_strategy_on_postgresql(
     them again with its opt-in ``xid8`` accelerator."""
     monkeypatch.setattr(sys.modules[__name__], "_STRATEGY", "xid8")
     await scenario(relational_backend)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SQLite before 3.25 (no window functions)
+# ---------------------------------------------------------------------------------------------------------
+
+_PLACEMENT_SCENARIOS: tuple[Callable[[RelationalBackend], Awaitable[None]], ...] = (
+    test_an_append_the_database_clock_stepped_back_during_streams_in_sequence_order,
+    test_an_aggregate_the_clock_stepped_back_for_is_held_at_its_last_time_until_the_clock_catches_up,
+    test_appends_to_an_aggregate_stay_in_order_when_the_clock_steps_back_between_units,
+    test_one_unit_s_appends_to_an_aggregate_stay_in_order_when_the_clock_steps_back_between_them,
+    test_an_earlier_release_s_events_keep_their_aggregate_s_order_whatever_clocks_stamped_them,
+    test_a_backlog_is_sorted_once_while_it_is_numbered,
+)
+
+
+@pytest.mark.backends("sqlite-file")
+@pytest.mark.parametrize("scenario", _PLACEMENT_SCENARIOS, ids=lambda scenario: scenario.__name__.removeprefix("test_"))
+async def test_a_sqlite_without_window_functions_places_the_events_the_same_way(
+    relational_backend: RelationalBackend,
+    scenario: Callable[[RelationalBackend], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The numbering places an event at the running maximum of its aggregate's record times, a window function
+    SQLite runs from 3.25 (2018). On an older SQLite it reads the same maximum from a correlated subquery: the
+    scenarios place every event as the window does."""
+    from sqlalchemy import event as sqlalchemy_event
+    from sqlalchemy.engine import Engine
+
+    import pyfly.eventsourcing.store as store_module
+
+    monkeypatch.setattr(store_module, "_SQLITE_WINDOW_FUNCTIONS", False)
+    backlog_reads: list[str] = []
+
+    def capture(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "placed_at" in statement:
+            backlog_reads.append(statement.upper())
+
+    sqlalchemy_event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        await scenario(relational_backend)
+    finally:
+        sqlalchemy_event.remove(Engine, "before_cursor_execute", capture)
+    assert backlog_reads and not any(" OVER " in read for read in backlog_reads)

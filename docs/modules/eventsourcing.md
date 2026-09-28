@@ -173,11 +173,11 @@ await runner.start()                         # or declare the runner as a bean: 
 Every event gets a **global position** on the store's global stream, and `stream_all(after_position=p,
 limit=n)` returns the committed events after position `p`, in position order, each with its
 `global_position` set. Positions only move forward for a reader: once it has seen position `p`, no event appears
-below it later, and an aggregate's events are on the stream in sequence order (except the events an earlier
-release stored: see [Upgrading from 26.09.07](#upgrading-from-260907)). A projection therefore keeps one
-number as its place, and never skips an event whose transaction committed late, never gets an event twice from
-paging, and never stalls on events that share a timestamp. `occurred_at` is the event's data (the clock of the
-process that built it), never a cursor. The order across aggregates depends on the
+below it later, and an aggregate's events are on the stream in sequence order, whatever the clocks that stamped
+them did (a database server's clock stepping back, the clocks of an earlier release's processes disagreeing). A
+projection therefore keeps one number as its place, and never skips an event whose transaction committed late,
+never gets an event twice from paging, and never stalls on events that share a timestamp. `occurred_at` is the
+event's data (the clock of the process that built it), never a cursor. The order across aggregates depends on the
 [position strategy](#position-strategies): with the default one an event appended after another one committed
 comes after it on the stream.
 
@@ -352,22 +352,29 @@ readers skip events. Changing a table's strategy is a migration with every write
   (`UPDATE ... WHERE position = :read`); one that finds it moved (something wrote it without the lock) is rolled
   back and runs again, logging `event_store_head_row_moved` at WARNING, and after five such units in a row the
   read fails with a `ConcurrencyException` rather than give out a position twice.
-  The events of one round are ordered by `recorded_at` (one clock, the database's), then by aggregate and
-  sequence, so an aggregate's events keep their order and an event appended after another one committed comes
-  after it. On SQLite `recorded_at` counts milliseconds: two events of different aggregates recorded in the same
-  millisecond and numbered in the same round are ordered by aggregate id. No index serves that order, so a
-  backlog (events no reader has read for a while, or an earlier release's) is sorted once per 100 000 events,
-  and the rounds number that list in turn. An append never touches the head row: business transactions never
-  wait for one another there, and none fails on it under snapshot isolation (MariaDB 11's `REPEATABLE READ`,
-  PostgreSQL's). The reader needs write access to the tables; on SQLite a reader that numbers queues for the
-  write lock like any writer (up to `busy_timeout`, 5 s by default, then `database is locked`). A read inside
-  a unit of work on the store's datasource shows only what is already numbered: a reader that only ever runs in
-  one (a `@transactional(read_only=True)` endpoint listing recent events) sees new events once a reader outside
-  one (a projection runner, `last_position()`) has numbered them. What a read costs: one that finds new events to
-  number runs a probe, a numbering unit and the page read, where 26.09.07 ran one `SELECT` that sorted the whole
-  table. On PostgreSQL 17 (in a container on a laptop), reading the stream after appending one event took 4.7 ms
-  against 26.09.07's 1.3 ms with 1 000 events stored, and 5.6 ms against 5.3 ms with 50 000. A reader behind a
-  numbered page (a projection catching up) reads it without numbering.
+  The events of one round are ordered by `recorded_at` (one clock, the database's), then by aggregate and sequence,
+  so an event appended after another one committed comes after it; and an event is never placed before an earlier
+  event of its aggregate. `recorded_at` is stamped row by row (PostgreSQL's `clock_timestamp()`, MariaDB's bulk
+  `INSERT`), and a database server's clock can step back (an NTP step, a virtual machine's time sync on resume): the
+  events an aggregate records after such a step are held at the time it last recorded until the clock is past it
+  again (a running maximum of `recorded_at` per aggregate), so its events keep their order whatever the clock did.
+  Only the order across aggregates follows the clock: after a step back, another aggregate's event recorded later
+  can be placed before one that committed before it, in the same round. On SQLite `recorded_at` counts milliseconds:
+  two events of different aggregates recorded in the same millisecond and numbered in the same round are ordered by
+  aggregate id. No index serves that order, so a backlog (events no reader has read for a while, or an earlier
+  release's) is sorted once per 100 000 events, and the rounds number that list in turn. The running maximum is a
+  window function (SQLite runs them from 3.25; an older SQLite reads the same maximum with a correlated subquery,
+  slower on large aggregates). An append never touches the head row: business transactions never wait for one
+  another there, and none fails on it under snapshot isolation (MariaDB 11's `REPEATABLE READ`, PostgreSQL's). The
+  reader needs write access to the tables; on SQLite a reader that numbers queues for the write lock like any writer
+  (up to `busy_timeout`, 5 s by default, then `database is locked`). A read inside a unit of work on the store's
+  datasource shows only what is already numbered: a reader that only ever runs in one (a
+  `@transactional(read_only=True)` endpoint listing recent events) sees new events once a reader outside one (a
+  projection runner, `last_position()`) has numbered them. What a read costs: one that finds new events to number
+  runs a probe, a numbering unit and the page read, where 26.09.07 ran one `SELECT` that sorted the whole table. On
+  PostgreSQL 17 (in a container on a laptop), reading the stream after appending one event took 4.7 ms against
+  26.09.07's 1.3 ms with 1 000 events stored, and 5.6 ms against 5.3 ms with 50 000. A reader behind a numbered page
+  (a projection catching up) reads it without numbering.
 - **`xid8`** (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing). An event's position is
   its writer's transaction id times 2^20 plus its place among that transaction's events, set as it is inserted;
   a reader sees only the positions below its snapshot's horizon (`pg_snapshot_xmin(pg_current_snapshot())`).
@@ -417,29 +424,39 @@ for projections with checkpoints, the tables of the `projection_checkpoint_store
 `framework_metadata`; otherwise the stores create them when they start (the checkpoint store, when it only
 follows the event store's provider, on first use).
 
-The events already stored have no global position yet. They get theirs oldest `occurred_at` first, before any
-event appended since. `occurred_at` is the clock of the process that built the event, and 26.09.07 ordered its
-stream by it: where the clocks of those processes disagreed, an aggregate's earlier event is placed after its
-later one, as that release streamed them. With `head-row` they are numbered as the stream is read (a start does
-not wait for them; a projection's page read numbers what its page needs, and `last_position()`, which a runner
-with `start_from="latest"` calls, numbers all of them before it returns), with `xid8` at start. The store sorts
-such a backlog once per 100 000 events and numbers it in rounds of 1000, at roughly 10 000 to 30 000 events a
-second: in containers on a laptop, a million events took 54 s on PostgreSQL 17 and 93 s on MySQL 8 (100 000 took
-3 s on both). A large table can be numbered in one statement instead, before the upgraded application first
-starts, while no event has a position yet (the set-based `UPDATE` took 18 to 39 s for a million events on
-PostgreSQL and 110 s on MySQL, in one transaction):
+The events already stored have no global position yet. They get theirs oldest `occurred_at` first, before any event
+appended since, and an aggregate's in sequence order. `occurred_at` is the clock of the process that built the
+event, and 26.09.07 ordered its stream by it: where the clocks of those processes disagreed, it streamed an
+aggregate's later event before its earlier one. Such an event is now placed at its predecessor's time, right after
+it (the running maximum of the `head-row` strategy above). With `head-row` they are numbered as the stream is read
+(a start does not wait for them; a projection's page read numbers what its page needs, and `last_position()`, which
+a runner with `start_from="latest"` calls, numbers all of them before it returns), with `xid8` at start. The store
+sorts such a backlog once per 100 000 events and numbers it in rounds of 1000, at roughly 10 000 to 30 000 events a
+second: in containers on a laptop, a million events took 54 s on PostgreSQL 17 and 93 s on MySQL 8 (100 000 took 3 s
+on both). The running maximum that keeps each aggregate in sequence order adds a window function to each of those
+sorts: measured side by side on one machine, numbering a million events went from 23 to 28 s on PostgreSQL, from 25
+to 30 s on MySQL and from 24 to 39 s on MariaDB 11 (its window functions are slow), and 100 000 stayed at about 2 s.
+A large table can be numbered in one statement instead, before the upgraded application first starts, while no event
+has a position yet (the set-based `UPDATE` took 18 to 39 s for a million events on PostgreSQL and 110 s on MySQL, in
+one transaction; side by side, its running maximum added under 10% on PostgreSQL and MySQL and 45% on MariaDB):
 
 ```sql
 -- PostgreSQL, and SQLite 3.33 or later
 UPDATE pyfly_event_store AS e SET global_position = n.position
-FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
-      FROM pyfly_event_store) AS n
+FROM (SELECT event_id, ROW_NUMBER() OVER (ORDER BY placed_at, aggregate_id, sequence) AS position
+      FROM (SELECT event_id, aggregate_id, sequence,
+                   MAX(occurred_at) OVER (PARTITION BY aggregate_id ORDER BY sequence
+                                          ROWS UNBOUNDED PRECEDING) AS placed_at
+            FROM pyfly_event_store) AS p) AS n
 WHERE e.event_id = n.event_id;
 
 -- MySQL 8 and MariaDB 10.2 or later
 UPDATE pyfly_event_store AS e
-JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY occurred_at, aggregate_id, sequence) AS position
-      FROM pyfly_event_store) AS n ON e.event_id = n.event_id
+JOIN (SELECT event_id, ROW_NUMBER() OVER (ORDER BY placed_at, aggregate_id, sequence) AS position
+      FROM (SELECT event_id, aggregate_id, sequence,
+                   MAX(occurred_at) OVER (PARTITION BY aggregate_id ORDER BY sequence
+                                          ROWS UNBOUNDED PRECEDING) AS placed_at
+            FROM pyfly_event_store) AS p) AS n ON e.event_id = n.event_id
 SET e.global_position = n.position;
 
 -- Every backend: the head row (when a store has created it already) takes the positions on from there
@@ -560,7 +577,10 @@ projection scenarios once per position strategy):
 - `tests/integration/test_event_store_matrix.py`: commit order, ties, a transaction committing late, concurrent
   appends, an aggregate appended to across units, the business transaction's rollback (proof p10), one `INSERT`
   per append, the upgrade of an earlier release's table, a backlog sorted once per window (with another store
-  numbering part of it meanwhile, and a round failing), the set-based numbering SQL;
+  numbering part of it meanwhile, and a round failing), the set-based numbering SQL, the database's clock
+  stepping back (during an append of 1300 events, between two units' appends, inside one unit) and an earlier
+  release's disagreeing clocks, each aggregate streamed in sequence order (on a SQLite without window functions
+  too);
 - `tests/integration/test_snapshot_store_matrix.py`: the conditional upsert, UTC instants, snapshots and events
   committing together;
 - `tests/integration/test_projection_matrix.py`: restart without replay, two replicas on one non-idempotent
