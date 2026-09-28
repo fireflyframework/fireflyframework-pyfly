@@ -439,6 +439,26 @@ class TestTransactionalOutboxConfiguration:
             with pytest.raises(ValueError, match="pyfly.data.document.enabled=true"):
                 EdaAutoConfiguration().event_publisher(config)
 
+    def test_the_mongo_store_without_the_mongodb_driver_names_the_extra(self) -> None:
+        import sys
+
+        import pytest
+
+        config = pyfly_config(
+            base={
+                "pyfly.data.document.enabled": "true",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.store": "mongo",
+            }
+        )
+        with (
+            patch.dict(sys.modules, {"pyfly.eda.adapters.mongo_outbox": None}),  # pymongo is not installed
+            pytest.raises(ValueError, match=r"pyfly\[data-document\]") as raised,
+        ):
+            EdaAutoConfiguration().event_publisher(config)
+        assert "enable the document data layer" not in str(raised.value)  # it is enabled already
+
     def test_auto_picks_the_store_of_the_applications_datasource(self, tmp_path: Path) -> None:
         from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
         from pyfly.eda.outbox import SqlOutboxStore

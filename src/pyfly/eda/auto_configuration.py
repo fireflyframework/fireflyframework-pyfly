@@ -116,6 +116,7 @@ from pyfly.eda.dlq import EdaDeadLetterStore
 from pyfly.eda.domain_events import DomainEventPublisher
 from pyfly.eda.health import EventPublisherHealthIndicator
 from pyfly.eda.ports.outbound import EventPublisher
+from pyfly.eda.ports.outbox import OutboxStore
 
 
 @auto_configuration
@@ -307,7 +308,6 @@ class EdaAutoConfiguration:
         Mongo store of the document datasource), forwarding with ``outbox.forward.*``."""
         from pyfly.eda.outbox import SqlOutboxStore
         from pyfly.eda.outbox_forwarding import ForwardingSettings, TransactionalEventPublisher
-        from pyfly.eda.ports.outbox import OutboxStore
 
         kind = cls._outbox_store_kind(config, provider, container)
         listener = cls._listener_settings(config)
@@ -330,7 +330,7 @@ class EdaAutoConfiguration:
         )
 
     @classmethod
-    def _mongo_outbox_store(cls, config: Config) -> Any:
+    def _mongo_outbox_store(cls, config: Config) -> OutboxStore:
         """The :class:`~pyfly.eda.adapters.mongo_outbox.MongoOutboxStore` of the application's document datasource
         (``pyfly.data.document.datasource``): its collections in ``pyfly.data.document.database``, on the client and
         units of work of the ``MongoTransactionManager`` the context registers under that name, resolved at each use
@@ -348,7 +348,11 @@ class EdaAutoConfiguration:
             from pyfly.config.properties.mongodb import DocumentProperties
             from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
         except ImportError as error:  # the document extra (pymongo) is not installed
-            raise ValueError(missing) from error
+            raise ValueError(
+                "pyfly.eda.outbox.store=mongo keeps the outbox in the application's MongoDB database, and the MongoDB "
+                "driver is not installed: add the document extra (pip install 'pyfly[data-document]'), or run the "
+                "outbox on a relational datasource (pyfly.eda.outbox.store=sql)"
+            ) from error
         from pyfly.eda.outbox import OutboxSettings
 
         properties = DocumentProperties.from_config(config)
