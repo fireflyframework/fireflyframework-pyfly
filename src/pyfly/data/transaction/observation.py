@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Whether a block of code committed anything: :func:`track_commits`.
+"""Whether a block of code committed anything: :func:`track_commits` (and :func:`untracked`).
 
 Code that runs work it does not control (an orchestration engine running a saga step, a TCC participant or a
 workflow step) must know whether that work committed before it failed, timed out or was cancelled. A step
@@ -46,6 +46,12 @@ its own. Nested blocks each see the units of the innermost one.
 A write auto unit on an autocommit connection (a single-statement :func:`~pyfly.data.transaction.infrastructure_unit`
 on PostgreSQL) commits each statement as it runs: one that ran a statement and then failed, or was cancelled,
 reports ``UNKNOWN`` (it may have committed), never rolled back.
+
+Units begun inside an :func:`untracked` block report to no tracker. The framework runs its idempotent
+bookkeeping there, the writes it makes on a call's way that are not the call's effects: numbering the events a
+read of the event store's global stream returns, filling a cache after a miss (``@cacheable``, the query
+bus's cache), taking, renewing and releasing a lease of the database lock. A step that only read, and made
+such writes on its way, has committed nothing of its own, and is retried when it fails.
 
 Only units of work the framework manages are seen: a session opened straight from an ``async_sessionmaker``
 and committed by hand, or a raw connection, is invisible here (and its commit is not shielded either).
@@ -125,6 +131,22 @@ def track_commits() -> Iterator[CommitTracker]:
     token = COMMIT_TRACKERS.set((*COMMIT_TRACKERS.get(), tracker))
     try:
         yield tracker
+    finally:
+        COMMIT_TRACKERS.reset(token)
+
+
+@contextlib.contextmanager
+def untracked() -> Iterator[None]:
+    """Keep the units of work begun inside the block from every :func:`track_commits` block open around it.
+
+    For idempotent bookkeeping only, which any later call would redo (see the module documentation), never for
+    a write the calling work is made of (an outbox append, a state upsert, an event appended): a step whose
+    such write committed would be retried, and the write applied twice. The trackers come back when the block
+    exits. A transaction-aware cache write deferred inside the block to a unit's commit stays untracked when it
+    runs; any other after-commit callback reports to the trackers of the task that completes the unit."""
+    token = COMMIT_TRACKERS.set(())
+    try:
+        yield
     finally:
         COMMIT_TRACKERS.reset(token)
 

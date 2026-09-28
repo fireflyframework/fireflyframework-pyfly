@@ -31,7 +31,8 @@ Main entry points:
 - :func:`detached` (a function and a decorator) for work that must not join its caller's unit;
 - :func:`outside_transaction` for a block of the calling task that must not join its units either;
 - :func:`track_commits` to learn whether a block committed anything (orchestration engines use it to
-  compensate, and never retry, a step that committed before it failed or was cancelled);
+  compensate, and never retry, a step that committed before it failed or was cancelled), and
+  :func:`untracked` for the framework's idempotent bookkeeping writes, which no tracker counts;
 - :func:`current_unit_of_work`, :func:`is_transaction_active`.
 """
 
@@ -55,7 +56,7 @@ from pyfly.data.transaction.errors import (
     UnexpectedRollbackError,
 )
 from pyfly.data.transaction.manager import TransactionCapabilities, TransactionManager
-from pyfly.data.transaction.observation import CommitTracker, track_commits
+from pyfly.data.transaction.observation import CommitTracker, track_commits, untracked
 from pyfly.data.transaction.registry import (
     TransactionManagerRegistry,
     install_registry,
@@ -124,4 +125,5 @@ __all__ = [
     "track_commits",
     "transactional",
     "uninstall_registry",
+    "untracked",
 ]

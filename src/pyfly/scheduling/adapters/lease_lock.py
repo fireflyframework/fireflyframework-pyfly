@@ -42,22 +42,21 @@ for work that must run on one node at a time (a projection, a schema migration).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import socket
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from pyfly.data.transaction import auto_unit, resolve_manager
+from pyfly.data.transaction import UnitOfWork, auto_unit, resolve_manager, untracked
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
-
-    from pyfly.data.transaction.template import AutoUnit
 
 _logger = logging.getLogger(__name__)
 
@@ -139,9 +138,13 @@ class LeaseLock:
             self._table_object = locks_table(self._table_name)
         return self._table_object
 
-    def _unit(self, *, read_only: bool = False) -> AutoUnit:
-        # A unit of its own, committed at once: a lease is never part of the caller's transaction.
-        return auto_unit(resolve_manager(self._target), read_only=read_only, autocommit=True)
+    @contextlib.asynccontextmanager
+    async def _unit(self, *, read_only: bool = False) -> AsyncIterator[UnitOfWork]:
+        # A unit of its own, committed at once: a lease is never part of the caller's transaction. Nor is it the
+        # caller's work to track (untracked): a step that took a lease on its way has committed nothing of its own.
+        with untracked():
+            async with auto_unit(resolve_manager(self._target), read_only=read_only, autocommit=True) as unit:
+                yield unit
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -59,6 +59,7 @@ from pyfly.cqrs.exceptions import QueryProcessingException
 from pyfly.cqrs.query.handler import ContextAwareQueryHandler, QueryHandler
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Query, QueryCacheScope
+from pyfly.data.transaction.observation import untracked
 
 _logger = logging.getLogger(__name__)
 
@@ -245,7 +246,8 @@ class DefaultQueryBus:
         except Exception as error:  # noqa: BLE001 — a cache problem never fails the query: fail closed
             self._report_unkeyable(handler, error)
             return None
-        return await self._cache.entry_key(query_cache_key(handler, raw), digest, ttl=self._ttl(handler))
+        with untracked():  # starting a key's generation is the cache's bookkeeping, not the query's effect
+            return await self._cache.entry_key(query_cache_key(handler, raw), digest, ttl=self._ttl(handler))
 
     def _report_unkeyable(self, handler: QueryHandler[Any, Any], error: Exception) -> None:
         handler_type = type(handler)
@@ -324,4 +326,5 @@ class DefaultQueryBus:
             return
         if result is None and not handler.caches_none():
             return  # no negative caching unless the handler opts in
-        await self._cache.put(cache_key, result, ttl=self._ttl(handler))
+        with untracked():  # the fill is the cache's bookkeeping: a step that only queried committed nothing
+            await self._cache.put(cache_key, result, ttl=self._ttl(handler))

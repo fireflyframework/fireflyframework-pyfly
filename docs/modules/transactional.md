@@ -338,7 +338,12 @@ commits behind the engine's back:
   commit whose outcome is unknown, `CommitOutcomeUnknownError`) is compensated
   like a completed step (`SagaContext.committed_steps`, a workflow step record's
   `committed` flag), and it is **never retried**: a retry would apply its writes
-  twice. An attempt that committed nothing is retried as configured. In TCC, a
+  twice. An attempt that committed nothing is retried as configured. The
+  framework's idempotent bookkeeping on the step's way does not count (numbering
+  the events a read of the global stream returns, a cache fill after a miss, a
+  lease: `pyfly.data.transaction.untracked()`), so a step that only read is
+  retried; a single-statement write on an autocommit connection that failed
+  after its statement ran counts as a commit whose outcome is unknown. In TCC, a
   TRY that failed after committing is cancelled with the participants that tried
   (an optional one at once) and is not retried; neither is a CONFIRM or CANCEL
   attempt that committed. A CONFIRM attempt whose timeout fired after a unit of

@@ -76,6 +76,7 @@ from pyfly.data.transaction import (
     is_transaction_active,
     outside_transaction,
     resolve_manager,
+    untracked,
 )
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.upcaster import EventUpcaster
@@ -692,7 +693,8 @@ class SqlAlchemyEventStore:
             isolation = Isolation.DEFAULT  # SQLite: one writer at a time, which is stronger
         template = TransactionTemplate(manager, propagation=Propagation.REQUIRES_NEW, isolation=isolation)
         numbered = moves = 0
-        with outside_transaction():
+        # Bookkeeping, not the reader's work: a read-only step that numbered events on its way committed nothing.
+        with outside_transaction(), untracked():
             while True:
                 try:
                     async with template.transaction() as unit:

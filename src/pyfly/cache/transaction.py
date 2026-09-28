@@ -272,9 +272,18 @@ class TransactionAwareCache:
 
     async def _defer(self, operation: str, key: str, write: Callable[[], Awaitable[Any]]) -> None:
         from pyfly.data.transaction import IllegalTransactionStateError, UnitStatus, after_commit, current_unit_of_work
+        from pyfly.data.transaction.context import COMMIT_TRACKERS
+
+        # The write reports to the commit trackers open where it was deferred, not where the unit completes: a
+        # fill deferred from an untracked() block stays untracked.
+        trackers = COMMIT_TRACKERS.get()
 
         async def deferred() -> None:
-            await self._attempt(operation, key, write)
+            token = COMMIT_TRACKERS.set(trackers)
+            try:
+                await self._attempt(operation, key, write)
+            finally:
+                COMMIT_TRACKERS.reset(token)
 
         try:
             await after_commit(deferred)

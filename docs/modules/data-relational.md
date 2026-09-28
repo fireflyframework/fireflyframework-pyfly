@@ -2413,6 +2413,21 @@ commits as it runs: one that ran its statement and then failed or was cancelled 
 committed), never rolled back. Through 26.09.07 it reported rolled back, so a step whose outbox append, cache
 write or state upsert had committed could be retried and write twice.
 
+The framework's own bookkeeping, the idempotent writes it makes on a call's way that are not the call's
+effects, runs in `untracked()` blocks, which no tracker counts: numbering the committed events a read of the
+event store's global stream returns, filling a cache after a miss (`@cacheable`, the query bus's cache, also
+when the fill waits for a read-only unit to end), and taking, renewing and releasing a lease of the database
+lock. A saga step that only read, and failed, is therefore retried. Use `untracked()` for such writes only,
+ones any later call would redo; never for a write the calling work is made of (an append, an upsert of state,
+an outbox message), whose step would then be retried and apply it twice:
+
+```python
+from pyfly.data.transaction import untracked
+
+with untracked():
+    await self._cache.put(key, value)   # a fill: not the step's effect
+```
+
 A cancellation that lands while a statement is in flight can come back as a driver error: an anyio scope
 cancels SQLAlchemy's own cleanup of the interrupted statement too, and aiosqlite then raises
 `ValueError('Connection closed')`, asyncmy `InterfaceError('Cancelled during execution')`. When a cancel

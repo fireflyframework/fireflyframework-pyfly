@@ -44,6 +44,7 @@ from pyfly.cache.namespaces import cache_region
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.cache.serialization import restore, uncacheable_type
 from pyfly.cache.transaction import TransactionAwareCache
+from pyfly.data.transaction.observation import untracked
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -214,10 +215,12 @@ def cache(
             elif await target.exists(resolved_key):
                 return None
 
-            # Execute and (unless excluded) cache: after the commit inside a unit, never raising.
+            # Execute and (unless excluded) cache: after the commit inside a unit, never raising. The fill is the
+            # cache's bookkeeping, not the call's effect: a step that only read committed nothing (untracked).
             result = await func(*args, **kwargs)
             if unless is None or not unless(result):
-                await target.put(resolved_key, result, ttl=ttl)
+                with untracked():
+                    await target.put(resolved_key, result, ttl=ttl)
             return result
 
         return wrapper  # type: ignore[return-value]
