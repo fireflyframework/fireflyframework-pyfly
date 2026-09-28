@@ -402,7 +402,7 @@ With `properties=` (the relational post-processor passes the entity's columns, s
 | `exists_by_` | `bool`      | Check if any entity matches            |
 | `delete_by_` | `int`, `None`, `list[T]` | Delete matching entities (the count, nothing, or the entities) |
 
-The result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value.
+On the relational adapter, the result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value. The MongoDB adapter does not shape results by the annotation yet: its `find_by_` returns a list (of `T`, or of the projection a `list[...]` annotation names; see [Data Document](data-document.md)).
 
 ### Operators
 
@@ -436,7 +436,7 @@ Every keyword may be preceded by `_is` (`_is_between`, `_is_in`). `_ignore_case`
 
 ### Connectors
 
-Connect multiple predicates with `_and_` or `_or_`. `and` binds tighter than `or`, as in Spring and SQL:
+Connect multiple predicates with `_and_` or `_or_`. On the relational adapter, `and` binds tighter than `or`, as in Spring and SQL (the MongoDB adapter still combines mixed connectors left to right, see [Data Document](data-document.md)):
 
 ```python
 # AND: status = ? AND customer_id = ?
