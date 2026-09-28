@@ -122,6 +122,39 @@ class TestEdaAutoConfiguration:
         assert bus.relay._error_strategy is ErrorStrategy.LOG_AND_CONTINUE
         assert bus.outbox.creates_tables is False
 
+    def test_the_outbox_tables_follow_the_schema_strategy_by_default(self, tmp_path: Path) -> None:
+        """Unset, the outbox creates its framework tables only where the other framework stores do: when
+        ``pyfly.data.relational.ddl-auto`` lets them (``create``, ``create-drop``); otherwise it only checks them."""
+        for ddl_auto, creates in (("none", False), ("validate", False), ("create", True), ("create-drop", True)):
+            config = pyfly_config(
+                base={
+                    "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                    "pyfly.data.relational.ddl-auto": ddl_auto,
+                    "pyfly.eda.provider": "database",
+                }
+            )
+            bus = EdaAutoConfiguration().event_publisher(config)
+            assert bus.outbox.creates_tables is creates, ddl_auto
+
+    def test_an_explicit_auto_create_tables_wins_over_the_schema_strategy(self, tmp_path: Path) -> None:
+        url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+        for key, value, ddl_auto in (
+            ("pyfly.eda.outbox.auto-create-tables", "true", "none"),
+            ("pyfly.eda.outbox.auto-create-tables", "false", "create"),
+            ("pyfly.eda.postgres.auto-create-tables", "true", "none"),
+        ):
+            provider = "postgres" if ".postgres." in key else "database"
+            config = pyfly_config(
+                base={
+                    "pyfly.data.relational.url": url,
+                    "pyfly.data.relational.ddl-auto": ddl_auto,
+                    "pyfly.eda.provider": provider,
+                    key: value,
+                }
+            )
+            bus = EdaAutoConfiguration().event_publisher(config)
+            assert bus.outbox.creates_tables is (value == "true"), key
+
     def test_a_datasource_and_a_url_for_the_bus_are_exclusive(self, tmp_path: Path) -> None:
         import pytest
 

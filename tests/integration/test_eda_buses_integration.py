@@ -550,6 +550,9 @@ async def test_the_auto_configured_bus_runs_on_the_primary_datasource(
         async def on_order(self, envelope: EventEnvelope) -> None:
             self.seen.append(envelope.event_type)
 
+    from pyfly.eda.outbox import OutboxTables
+
+    await relational_backend.create_tables(*OutboxTables.named().all())  # ddl-auto none: as migrations would
     for overrides in ({}, {"pyfly.eda.postgres.dsn": relational_backend.url}):
         config = relational_backend.config({"pyfly.eda.provider": "postgres", "pyfly.eda.group": "orders", **overrides})
         ctx = ApplicationContext(config)

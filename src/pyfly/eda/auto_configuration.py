@@ -48,9 +48,10 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
   the datasource's pool).
 * ``postgres.channel`` — pg_notify channel. Default ``pyfly_eda``.
 * ``postgres.auto-create-tables`` / ``outbox.auto-create-tables`` — Create the outbox tables when they are
-  missing. Default ``true``. When they exist nothing is created, so a serving process needs no
-  schema-creation right; set this to ``false`` when the schema is managed by migrations and the framework
-  must never issue DDL at all.
+  missing (otherwise they are only checked). Unset, the outbox follows ``pyfly.data.relational.ddl-auto`` as
+  every framework store does: it creates them under ``create`` and ``create-drop``
+  (:func:`~pyfly.data.relational.framework_schema.creates_tables`). When they exist nothing is created, so a
+  serving process needs no schema-creation right; ``false`` means the framework never issues DDL for them.
 * ``outbox.*`` — the outbox buses' relay: ``poll-interval``, ``batch-size``, ``claim-timeout``,
   ``handler-timeout``, ``start`` (``latest``/``earliest``), ``error-strategy``, ``retention.delivered``,
   ``retention.max-age``, ``retention.interval``, ``retention.batch-size``, ``notify`` (see
@@ -223,8 +224,12 @@ class EdaAutoConfiguration:
         create_raw = config.get("pyfly.eda.postgres.auto-create-tables") if provider == "postgres" else None
         if create_raw is not None and str(create_raw).strip():
             create_tables = parse_bool(create_raw, "pyfly.eda.postgres.auto-create-tables")
-        else:
-            create_tables = True if settings.create_tables is None else settings.create_tables
+        elif settings.create_tables is not None:
+            create_tables = settings.create_tables
+        else:  # unset: the outbox tables are framework tables, created where ddl-auto lets the stores create theirs
+            from pyfly.data.relational.framework_schema import context_datasource_registry, creates_tables
+
+            create_tables = creates_tables(context_datasource_registry(config, container).properties.ddl_auto)
         options: dict[str, Any] = {
             "destinations": destinations,
             "group": group,

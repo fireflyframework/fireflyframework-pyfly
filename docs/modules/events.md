@@ -270,7 +270,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.postgres.datasource` / `pyfly.eda.postgres.dsn` | `str` | | The same two keys for `postgres`; `dsn` is the key it always had. Before 26.09.08 `dsn` was required, and the bus opened a connection pool of its own. |
 | `pyfly.eda.postgres.listen-dsn` | `str` | | A direct DSN for the LISTEN connection (behind a pooler in transaction mode); by default it is checked out of the datasource's pool. |
 | `pyfly.eda.postgres.channel` | `str` | `pyfly_eda` | `pg_notify` channel name. |
-| `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | `true` | Create the outbox tables when they are missing. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL at all (the tables are only checked). |
+| `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | what `ddl-auto` allows | Create the outbox tables when they are missing. Unset, the outbox does what `pyfly.data.relational.ddl-auto` lets every framework store do: create them under `create` and `create-drop`, only check them otherwise. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL for them (the tables are only checked). |
 | `pyfly.eda.outbox.poll-interval` | duration | `5s` | How often an idle relay polls (seconds, or `500ms`, `90s`, `5m`, `2h`). |
 | `pyfly.eda.outbox.batch-size` | `int` | `100` | Deliveries claimed per round. |
 | `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. A relay extends the lease before it runs a delivery that could outlast it (see below), so such a delivery waits up to its worst case plus `claim-timeout`. |
@@ -461,10 +461,12 @@ consumer group drain them before the upgrade (or copy what a group had not consu
 Postgres checks `CREATE` on the schema *before* it checks `IF NOT EXISTS`, so replaying `CREATE TABLE IF NOT
 EXISTS` at every boot, as the adapter used to, needed schema-creation rights for work it never did. The outbox
 tables are framework tables (`pyfly.data.relational.framework_schema`): `start()` creates the ones that are
-missing, and when they all exist it only reads the catalog, which needs nothing beyond `USAGE` on the schema. A
-first boot against an empty database still creates everything. Set `pyfly.eda.postgres.auto-create-tables:
-false` when migrations own the schema (list `framework_metadata` in Alembic's `target_metadata`) and the
-framework must not issue DDL under any circumstance.
+missing, and when they all exist it only reads the catalog, which needs nothing beyond `USAGE` on the schema. It
+creates them as every framework store creates its tables, when `pyfly.data.relational.ddl-auto` is `create` or
+`create-drop`; with `none` or `validate` it only checks them, and migrations create them (list
+`framework_metadata` in Alembic's `target_metadata`). Set `pyfly.eda.postgres.auto-create-tables` to `true` or
+`false` to decide for the outbox alone: `false` means the framework must not issue DDL for it under any
+circumstance.
 
 A serving process therefore needs only:
 

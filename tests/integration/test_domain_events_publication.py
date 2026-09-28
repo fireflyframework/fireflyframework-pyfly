@@ -46,6 +46,7 @@ from pyfly.data.transaction import TransactionPhase, transactional
 from pyfly.domain import AggregateRoot, DomainEvent
 from pyfly.eda.auto_configuration import EdaAutoConfiguration
 from pyfly.eda.decorators import event_listener
+from pyfly.eda.outbox import OutboxTables
 from pyfly.eda.types import EventEnvelope
 from tests.support.backend_matrix import RelationalBackend
 
@@ -115,6 +116,7 @@ class Listeners:
 
 async def _boot(backend: RelationalBackend) -> ApplicationContext:
     await backend.create_tables(Parcel)
+    await backend.create_tables(*OutboxTables.named().all())  # ddl-auto none: the outbox tables come from migrations
     config = backend.config(
         {
             "pyfly.data.relational.ddl-auto": "none",
