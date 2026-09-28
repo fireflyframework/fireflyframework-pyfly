@@ -28,15 +28,17 @@ PostgreSQL runs the scenarios a second time with the ``xid8`` strategy (at the e
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import random
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Column, MetaData, String, Table, func, insert, select, update
+from sqlalchemy import Column, MetaData, String, Table, Update, func, insert, select, update
 
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, event_store, event_store_head
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
@@ -505,8 +507,12 @@ async def test_an_append_sends_its_events_in_one_insert(relational_backend: Rela
     else:
         # The first read numbers the 25 committed events in one round (a probe, the head row locked, the
         # events without a position, the head row moved on, their positions), then reads its page; the next
-        # reads find nothing to number.
-        assert statements == {"SELECT": 8, "UPDATE": 2}
+        # reads find nothing to number. On SQLite the round takes the write lock first: this engine is built by
+        # hand, and its driver would begin the transaction only at the round's first write.
+        expected = {"SELECT": 8, "UPDATE": 2}
+        if relational_backend.dialect == "sqlite":
+            expected["BEGIN"] = 1  # BEGIN IMMEDIATE
+        assert statements == expected
 
 
 async def test_the_tables_are_created_at_start_and_only_checked_without_ddl(
@@ -892,6 +898,207 @@ async def test_a_numbering_round_that_fails_is_numbered_again_in_order(relationa
     events = first + await _drain(store, 1000, limit=1000)
     assert [(event.aggregate_id, event.sequence) for event in events] == expected
     assert [event.global_position for event in events] == list(range(1, 2501))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Numbering rounds side by side
+# ---------------------------------------------------------------------------------------------------------
+
+# A store on an engine built by hand (on SQLite: no BEGIN recipe, the driver defers BEGIN until the first write)
+# and one on the datasource registry's engine (on SQLite: the recipe, whose write units begin IMMEDIATE).
+_THROUGH = pytest.mark.parametrize("through", ["engine", "registry"])
+
+
+@contextlib.asynccontextmanager
+async def _store_through(backend: RelationalBackend, through: str) -> AsyncIterator[SqlAlchemyEventStore]:
+    if through == "engine":
+        yield await _store(backend)
+        return
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry(backend.config())
+    try:
+        store = SqlAlchemyEventStore(registry.primary, position_strategy=_STRATEGY)
+        await store.start()
+        yield store
+    finally:
+        await registry.close()
+
+
+async def _head_and_highest(store: SqlAlchemyEventStore) -> tuple[int, int]:
+    """The head row's position and the highest position given out."""
+    async with store.engine.connect() as connection:
+        head = (
+            await connection.execute(
+                select(event_store_head.c.position).where(event_store_head.c.store == "pyfly_event_store")
+            )
+        ).scalar_one()
+        highest = (await connection.execute(select(func.coalesce(func.max(event_store.c.global_position), 0)))).scalar()
+    return int(head), int(highest or 0)
+
+
+def _head_row_moves(caplog: pytest.LogCaptureFixture) -> int:
+    return sum(1 for record in caplog.records if record.getMessage() == "event_store_head_row_moved")
+
+
+@_THROUGH
+async def test_readers_side_by_side_number_each_event_once_and_the_head_row_never_goes_back(
+    relational_backend: RelationalBackend, through: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Final review of WP08: a numbering round locked the head row with ``SELECT ... FOR UPDATE``, which SQLite
+    ignores, and on a SQLite engine built by hand the driver defers ``BEGIN`` until the first write. Two rounds
+    read the same head row, and the later one moved it back below positions already given out; every round after
+    that gave out positions that existed (UNIQUE global_position), so the stream failed for good, after a restart
+    too. On SQLite a round now takes the write lock before it reads the head row, and on every backend it moves
+    the head row only from the position it read: readers side by side queue, never number an event twice, and all
+    catch up."""
+    caplog.set_level(logging.WARNING, logger="pyfly.eventsourcing.store")
+    writers, appends, readers = 4, 40, 4
+    total = writers * appends
+    pages = random.Random(24)
+    async with _store_through(relational_backend, through) as store:
+
+        async def write(writer: int) -> None:
+            for index in range(appends):
+                await store.append(f"w{writer}-{index}", "Order", [_envelope(f"W{writer}")], expected_version=0)
+                await asyncio.sleep(pages.random() * 0.002)
+
+        async def read() -> list[tuple[str, int]]:
+            seen: list[StoredEventEnvelope] = []
+            after = 0
+            while len(seen) < total:
+                page = await store.stream_all(after_position=after, limit=pages.randint(1, 5))
+                if not page:
+                    await asyncio.sleep(0.001)
+                    continue
+                seen.extend(page)
+                after = page[-1].global_position or after
+            return [(event.event_id, event.global_position or 0) for event in seen]
+
+        async with asyncio.timeout(120):
+            _, views = await asyncio.gather(
+                asyncio.gather(*(write(writer) for writer in range(writers))),
+                asyncio.gather(*(read() for _ in range(readers))),
+            )
+
+        first = views[0]
+        assert len(first) == total and len({event_id for event_id, _ in first}) == total
+        assert all(view == first for view in views)  # every reader: every event once, at one position
+        positions = [position for _, position in first]
+        assert positions == sorted(positions) and len(set(positions)) == total
+        if store.position_strategy == "head-row":
+            assert positions == list(range(1, total + 1))
+            assert await _head_and_highest(store) == (total, total)
+
+        # The stream goes on, for this store and for one started again on the table.
+        await store.append("after", "Order", [_envelope("After")], expected_version=0)
+        assert _types(await store.stream_all(after_position=positions[-1])) == ["After"]
+        restarted = SqlAlchemyEventStore(store.engine, position_strategy=_STRATEGY)
+        await restarted.start()
+        assert _types(await restarted.stream_all(after_position=positions[-1])) == ["After"]
+    assert _head_row_moves(caplog) == 0  # the rounds queued on the head row's lock: none ran twice
+
+
+def _move_the_head_row_in_the_round(times: int) -> Callable[..., None]:
+    """A ``before_execute`` listener that, before a numbering round moves the head row (its first *times* rounds),
+    does what another store's round would do if the round's lock did not keep it out: it numbers a newer event (at
+    the head row's position plus one) and moves the head row to it, in the round's own transaction."""
+    left, moving = [times], [False]
+
+    def move(conn: Any, clauseelement: Any, *_args: Any) -> None:
+        if moving[0] or not left[0]:
+            return
+        if not (isinstance(clauseelement, Update) and clauseelement.table.name == event_store_head.name):
+            return
+        left[0] -= 1
+        moving[0] = True  # its own UPDATE of the head row is not a round's
+        try:
+            _number_elsewhere(conn)
+        finally:
+            moving[0] = False
+
+    return move
+
+
+def _number_elsewhere(conn: Any) -> None:
+    """Another store's numbering round, as the listener above plays it: a newer event at the head row's position
+    plus one, and the head row moved to it."""
+    head = conn.execute(
+        select(event_store_head.c.position).where(event_store_head.c.store == "pyfly_event_store")
+    ).scalar_one()
+    elsewhere = _envelope("NumberedElsewhere")
+    conn.execute(
+        insert(event_store).values(
+            event_id=elsewhere.event_id,
+            aggregate_id=f"elsewhere-{elsewhere.event_id}",
+            aggregate_type="Order",
+            sequence=1,
+            event_type=elsewhere.event_type,
+            payload=elsewhere.to_json(),
+            metadata="{}",
+            occurred_at=elsewhere.occurred_at,
+            version=1,
+            global_position=int(head) + 1,
+        )
+    )
+    conn.execute(
+        update(event_store_head).where(event_store_head.c.store == "pyfly_event_store").values(position=int(head) + 1)
+    )
+
+
+@_THROUGH
+async def test_a_numbering_round_that_finds_the_head_row_moved_runs_again(
+    relational_backend: RelationalBackend, through: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The head row moves only from the position the round read (``UPDATE ... WHERE position = :read``), which
+    holds on every backend whatever keeps other rounds out. The round's lock does (``FOR UPDATE``; SQLite's write
+    lock, taken first), so the test moves the head row inside the round, as a round that took no lock would have
+    seen another store do. Without the fence the round went on from the position it read: it gave the newer
+    event's position to another event and failed, or moved the head row back. The round is rolled back with what
+    it saw and runs again."""
+    from sqlalchemy import event as sqlalchemy_event
+
+    caplog.set_level(logging.WARNING, logger="pyfly.eventsourcing.store")
+    async with _store_through(relational_backend, through) as store:
+        if store.position_strategy != "head-row":
+            return
+        await store.append("acc", "Account", [_envelope("Opened"), _envelope("Deposited")], expected_version=0)
+        move = _move_the_head_row_in_the_round(1)
+        sqlalchemy_event.listen(store.engine.sync_engine, "before_execute", move)
+        try:
+            events = await _drain(store)
+        finally:
+            sqlalchemy_event.remove(store.engine.sync_engine, "before_execute", move)
+
+        assert _head_row_moves(caplog) == 1
+        assert [(event.event_type, event.global_position) for event in events] == [("Opened", 1), ("Deposited", 2)]
+        assert await _head_and_highest(store) == (2, 2)  # the move went with the round it was made in
+
+
+async def test_a_head_row_that_keeps_moving_under_the_numbering_fails_the_read_and_says_so(
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A round that finds the head row moved runs again, a bounded number of times: a head row that moves under
+    every round (something writes it without its lock) fails the read, with an error that says so, rather than
+    retrying forever or giving events positions another event has."""
+    from sqlalchemy import event as sqlalchemy_event
+
+    from pyfly.kernel.exceptions import ConcurrencyException
+
+    caplog.set_level(logging.WARNING, logger="pyfly.eventsourcing.store")
+    store = await _store(relational_backend, "head-row")
+    await store.append("acc", "Account", [_envelope("Opened")], expected_version=0)
+    move = _move_the_head_row_in_the_round(100)
+    sqlalchemy_event.listen(store.engine.sync_engine, "before_execute", move)
+    try:
+        with pytest.raises(ConcurrencyException, match="head row of event table pyfly_event_store kept moving"):
+            await store.stream_all()
+    finally:
+        sqlalchemy_event.remove(store.engine.sync_engine, "before_execute", move)
+
+    assert _head_row_moves(caplog) == 5
+    assert [(event.event_type, event.global_position) for event in await _drain(store)] == [("Opened", 1)]
+    assert await _head_and_highest(store) == (1, 1)
 
 
 # The set-based numbering docs/modules/eventsourcing.md gives for a large table of an earlier release.

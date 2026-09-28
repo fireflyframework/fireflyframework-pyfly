@@ -268,6 +268,52 @@ async def test_without_a_lease_the_checkpoint_still_fences_two_runners(relationa
     assert await setup.read_model() == (60, 60, 60)
 
 
+async def test_two_projections_on_one_store_each_get_every_event_once_while_it_is_appended_to(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Final review of WP08: two runners (two projections) on one store over a SQLite engine built by hand, with
+    events appended while they ran, stalled for good in 7 runs of 8: their numbering rounds read the same head row
+    (SQLite ignores ``FOR UPDATE``, and the driver defers ``BEGIN``), the later one moved it back, and every page
+    read after that failed on positions given out twice."""
+    setup = await _setup(relational_backend)
+    checkpoints = setup.checkpoints()
+    seen: dict[str, list[str]] = {"deposits": [], "audit": []}
+
+    def record(name: str) -> Callable[[StoredEventEnvelope], Awaitable[None]]:
+        async def handle(event: StoredEventEnvelope) -> None:
+            seen[name].append(event.event_id)
+
+        return handle
+
+    runners = [
+        ProjectionRunner(
+            FunctionProjection(name, record(name)),
+            setup.store,
+            checkpoints=checkpoints,
+            poll_interval_s=0.01,
+            batch_size=10,
+        )
+        for name in seen
+    ]
+    for runner in runners:
+        await runner.start()
+    try:
+        for index in range(300):  # one at a time, while the runners read: their numbering rounds meet
+            await setup.store.append(f"acc-{index}", "Account", [_deposit()], expected_version=0)
+            await asyncio.sleep(0.001)
+        deadline = time.monotonic() + 30.0
+        while min([len(events) for events in seen.values()]) < 300:
+            assert time.monotonic() < deadline, f"the projections did not catch up: {[len(e) for e in seen.values()]}"
+            await asyncio.sleep(0.02)
+    finally:
+        for runner in runners:
+            await runner.stop()
+
+    for events in seen.values():
+        assert len(events) == 300 and len(set(events)) == 300
+    assert seen["deposits"] == seen["audit"]  # one stream, one order
+
+
 async def test_a_standby_replica_takes_over_from_the_checkpoint_when_the_lease_holder_stops(
     relational_backend: RelationalBackend,
 ) -> None:

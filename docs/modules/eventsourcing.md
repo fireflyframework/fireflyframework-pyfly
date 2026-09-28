@@ -308,6 +308,13 @@ readers skip events. Changing a table's strategy is a migration with every write
   numbers the events that have committed since the last read (as many as the page needs), in short `READ
   COMMITTED` units of their own that lock the head row: a position only ever goes to a committed event, above
   every position given before, and the positions follow one another without gaps (unless events are deleted).
+  SQLite has no row locks (it ignores `FOR UPDATE`), so there a numbering unit takes the database's write lock
+  before it reads the head row: the datasource registry's engines begin every write unit with `BEGIN IMMEDIATE`,
+  and on an engine built by hand, whose driver defers `BEGIN` until the first write, the unit begins with it
+  itself. On every backend a unit moves the head row on only from the position it read
+  (`UPDATE ... WHERE position = :read`); one that finds it moved (something wrote it without the lock) is rolled
+  back and runs again, logging `event_store_head_row_moved` at WARNING, and after five such units in a row the
+  read fails with a `ConcurrencyException` rather than give out a position twice.
   The events of one round are ordered by `recorded_at` (one clock, the database's), then by aggregate and
   sequence, so an aggregate's events keep their order and an event appended after another one committed comes
   after it. On SQLite `recorded_at` counts milliseconds: two events of different aggregates recorded in the same

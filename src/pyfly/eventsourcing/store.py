@@ -27,12 +27,14 @@ starts on it:
 
 - ``head-row`` (every backend; the default): an event is inserted without a position, so it is not on the global
   stream yet. Reading the stream first gives the events that have committed since the last read their positions,
-  in a short ``READ COMMITTED`` unit of its own that locks the table's head row (the last position given out): a
-  position only ever goes to a committed event, and always above every position given before. An append never
-  touches the head row, so business transactions do not wait for one another there, and none of them fails on
-  it under snapshot isolation (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round are ordered
-  by the database's clock when it recorded them (``recorded_at``), then by aggregate and sequence: an aggregate's
-  events keep their order, and an event appended after another one committed comes after it.
+  in a short ``READ COMMITTED`` unit of its own that locks the table's head row (the last position given out; on
+  SQLite, which has no row locks, the database's write lock, taken before the head row is read) and moves it on
+  only from the position it read (a round that finds it moved all the same runs again): a position only ever goes
+  to a committed event, and always above every position given before. An append never touches the head row, so
+  business transactions do not wait for one another there, and none of them fails on it under snapshot isolation
+  (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round are ordered by the database's clock when
+  it recorded them (``recorded_at``), then by aggregate and sequence: an aggregate's events keep their order, and
+  an event appended after another one committed comes after it.
 - ``xid8`` (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing): an event's position is
   its writer's transaction id times 2**20 plus its place among that transaction's events, set as it is inserted,
   and a reader only sees the positions below its snapshot's horizon (``pg_snapshot_xmin(pg_current_snapshot())``):
@@ -58,7 +60,7 @@ import logging
 import weakref
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from pyfly.data.transaction import (
     Isolation,
@@ -74,10 +76,10 @@ from pyfly.data.transaction import (
 )
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.upcaster import EventUpcaster
-from pyfly.kernel.exceptions import OptimisticLockingFailureException
+from pyfly.kernel.exceptions import ConcurrencyException, OptimisticLockingFailureException
 
 if TYPE_CHECKING:
-    from sqlalchemy import Table
+    from sqlalchemy import CursorResult, Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
 
@@ -103,6 +105,7 @@ to one event table."""
 
 _XID8_SCALE = 1 << XID8_ORDINAL_BITS
 _NUMBERING_BATCH = 1000  # committed events given positions per numbering unit
+_NUMBERING_ATTEMPTS = 5  # numbering rounds in a row that may find the head row moved before a read fails
 _NUMBERING_WINDOW = 100_000  # event ids one ordered read of the events without a position fetches (about 10 MB)
 _ASSIGN_CHUNK = 500  # events per positions UPDATE (one CASE branch and one IN value each)
 
@@ -260,6 +263,15 @@ class _Backlog:
         self.head: int | None = None
 
 
+class _HeadRowMoved(Exception):
+    """A numbering round found the head row moved on from the position it read (something moved it without the
+    round's lock keeping it out): the round is rolled back and runs again."""
+
+    def __init__(self, read: int) -> None:
+        super().__init__(f"the head row moved on from position {read} during the numbering round")
+        self.read = read
+
+
 class SqlAlchemyEventStore:
     """Async SQL adapter for the event store (see the module documentation).
 
@@ -301,6 +313,8 @@ class SqlAlchemyEventStore:
         self._configured = position_strategy
         self._strategy: str | None = None
         self._backend = ""
+        # A SQLite engine without the datasource registry's BEGIN recipe: numbering begins IMMEDIATE itself.
+        self._numbering_begins_immediate = False
         self._events_table: Table | None = None
         self._head_table: Table | None = None
         self._backlog = _Backlog([])  # the events without a position, as the numbering rounds work through them
@@ -327,13 +341,16 @@ class SqlAlchemyEventStore:
         await self._start(create=True)
 
     async def _start(self, *, create: bool) -> None:
+        from pyfly.data.relational.dialect_customizers import uses_sqlite_begin_recipe
         from pyfly.data.relational.framework_schema import ensure_tables
         from pyfly.data.relational.upsert import backend_name
 
         # Setting up is never part of a caller's transaction, even when the first append starts the store.
         with outside_transaction():
             await ensure_tables(self._target, self._events, self._head, create=create)
-            self._backend = backend_name(self.engine)
+            engine = self.engine
+            self._backend = backend_name(engine)
+            self._numbering_begins_immediate = self._backend == "sqlite" and not uses_sqlite_begin_recipe(engine)
             strategy = await self._settle_strategy()
             if strategy == POSITION_XID8:
                 await self._number_unnumbered(resolve_manager(self._target))
@@ -644,12 +661,19 @@ class SqlAlchemyEventStore:
         if not manager.capabilities.supports_isolation(isolation):
             isolation = Isolation.DEFAULT  # SQLite: one writer at a time, which is stronger
         template = TransactionTemplate(manager, propagation=Propagation.REQUIRES_NEW, isolation=isolation)
-        numbered = 0
+        numbered = moves = 0
         with outside_transaction():
             while True:
-                async with template.transaction() as unit:
-                    assert unit is not None
-                    count, more, backlog, reached, head = await self._number_round(unit.resource)
+                try:
+                    async with template.transaction() as unit:
+                        assert unit is not None
+                        await self._lock_the_database(unit.resource)
+                        count, more, backlog, reached, head = await self._number_round(unit.resource)
+                except _HeadRowMoved as moved:
+                    moves += 1
+                    self._head_row_moved(moved, moves)
+                    continue
+                moves = 0
                 # Only once the round has committed are the events it went through known to have positions.
                 if backlog is self._backlog and reached > backlog.reached:
                     backlog.reached, backlog.head = reached, head
@@ -660,12 +684,52 @@ class SqlAlchemyEventStore:
                     break
         _logger.debug("event_store_events_numbered", extra={"table": self._table_name, "events": numbered})
 
+    async def _lock_the_database(self, session: AsyncSession) -> None:
+        """On SQLite, which has no row locks (``FOR UPDATE`` is dropped), a numbering round takes the database's
+        write lock before it reads the head row, so rounds queue for it instead of reading the same head row.
+
+        The datasource registry's engines begin every write unit with ``BEGIN IMMEDIATE`` already. On an engine
+        built by hand the driver defers its ``BEGIN`` until the first write, and the round begins it itself (unless
+        the driver is in a transaction already: an engine with a ``BEGIN`` of its own)."""
+        if not self._numbering_begins_immediate:
+            return
+        from pyfly.data.relational.dialect_customizers import begin_immediate
+
+        connection = await session.connection()
+        sync_connection = connection.sync_connection
+        driver = sync_connection.connection.driver_connection if sync_connection is not None else None
+        if not getattr(driver, "in_transaction", False):
+            await begin_immediate(session)
+
+    def _head_row_moved(self, moved: _HeadRowMoved, moves: int) -> None:
+        """A numbering round was rolled back because the head row moved under it (*moves* rounds in a row): log it,
+        and after :data:`_NUMBERING_ATTEMPTS` of them fail the read rather than retry forever."""
+        _logger.warning(
+            "event_store_head_row_moved",
+            extra={
+                "table": self._table_name,
+                "position_read": moved.read,
+                "attempt": moves,
+                "hint": f"something moved {self._head_table_name} without taking the lock a numbering round holds "
+                "(a store of an earlier build, SQL run by hand): the round was rolled back and runs again",
+            },
+        )
+        if moves >= _NUMBERING_ATTEMPTS:
+            raise ConcurrencyException(
+                f"The head row of event table {self._table_name} kept moving under the numbering rounds: "
+                f"{moves} rounds in a row found it moved on from the position they read. Something writes "
+                f"{self._head_table_name} without locking the row; the events still without a position wait for a "
+                "round that finds the head row where it read it.",
+                context={"table": self._table_name, "head_table": self._head_table_name},
+            ) from moved
+
     async def _number_round(self, session: AsyncSession) -> tuple[int, bool, _Backlog, int, int | None]:
         """One numbering round: lock the head row, give the next positions to the next committed events of the
         store's backlog list that still have none (:meth:`_read_backlog`, read again when the list is used up),
-        move the head row on. Returns how many it numbered, whether events may be left without a position, the
-        list it took them from and how far it got through it, and the head row's new position when no other
-        store had numbered anything since the list was read (``None`` otherwise: see :class:`_Backlog`)."""
+        move the head row on from the position read (:class:`_HeadRowMoved` when it is not there any more).
+        Returns how many it numbered, whether events may be left without a position, the list it took them from
+        and how far it got through it, and the head row's new position when no other store had numbered anything
+        since the list was read (``None`` otherwise: see :class:`_Backlog`)."""
         from sqlalchemy import case, select, update
 
         from pyfly.data.relational.framework_schema import FrameworkSchemaError
@@ -696,9 +760,17 @@ class SqlAlchemyEventStore:
             reached += len(chunk)
             if event_ids:
                 break
-        await session.execute(
-            update(head).where(head.c.store == self._table_name).values(position=base + len(event_ids))
+        # The head row moves on only from the position the round read. Under the round's lock nothing else moves
+        # it; a round that finds it moved all the same is rolled back and runs again, rather than give out
+        # positions another round gave out or move the head row back below them (for good: every later round
+        # would give out positions that exist).
+        moved = await session.execute(
+            update(head)
+            .where(head.c.store == self._table_name, head.c.position == base)
+            .values(position=base + len(event_ids))
         )
+        if cast("CursorResult[Any]", moved).rowcount != 1:
+            raise _HeadRowMoved(base)
         for start in range(0, len(event_ids), _ASSIGN_CHUNK):
             part = event_ids[start : start + _ASSIGN_CHUNK]
             positions = case(
