@@ -29,9 +29,10 @@ propagation (``REQUIRED``, ``REQUIRES_NEW``, ``SUPPORTS``,
   asked once per manager).
 - **Auto units.** A repository call outside a transaction gets a short unit: a *read* runs in a session with
   no transaction (one round trip); a *write* runs in a transaction that commits at the end of the call, so a
-  method that writes several documents (``save_all``, ``delete_all_by_id``) is atomic, except when the call
-  is a single-document command (``save``, ``delete``), which is atomic by itself and runs without one
-  (``autocommit=True``), and on a standalone server, which has no transactions.
+  method that writes several times (``save_all``, a delete that runs event actions document by document) is
+  atomic, except when the call is one command (``save``, ``delete``, a bulk delete), which MongoDB runs
+  atomically on each document it touches and which runs without one (``autocommit=True``), and on a
+  standalone server, which has no transactions.
 - **Failures.** MongoDB aborts a transaction as soon as one of its commands fails, so every driver error in
   a transactional unit marks it rollback-only: a caught duplicate key cannot commit the rest
   (:class:`~pyfly.data.transaction.errors.UnexpectedRollbackError` at the boundary). A commit whose outcome

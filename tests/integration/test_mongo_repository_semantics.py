@@ -39,7 +39,7 @@ from pydantic import Field, field_validator
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
-from pyfly.data.document.mongodb.repository import MongoRepository
+from pyfly.data.document.mongodb.repository import IN_CHUNK, MongoRepository
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import InvalidQueryMethodError
@@ -455,6 +455,35 @@ async def test_exists_reads_only_the_id_of_one_document(db: BeanieDatabase) -> N
     for _name, body in db.log.commands:
         assert body.get("projection") == {"_id": 1}
         assert body.get("limit") == 1
+
+
+@pytest.mark.parametrize("method", ["delete_all_by_id", "delete_all_by_id_in_batch"])
+async def test_a_bulk_delete_of_more_ids_than_one_filter_holds_is_one_transaction(
+    db: BeanieDatabase, method: str
+) -> None:
+    """A bulk delete sends one ``delete`` per :data:`IN_CHUNK` ids: outside a transaction, a list that needs more
+    than one runs in a transaction of its own (atomic), and so does an iterator, which cannot be counted up front;
+    a list that fits one filter is one command, with no transaction."""
+    repository: MongoRepository[SemNote, str] = MongoRepository(SemNote)
+    kept = await repository.save(SemNote(title="kept"))
+    delete = getattr(repository, method)
+    ids = [str(ObjectId()) for _ in range(IN_CHUNK + 1)]
+
+    def deletes() -> list[dict[str, Any]]:
+        return [body for name, body in db.log.commands if name == "delete"]
+
+    db.log.clear()
+    await delete(ids)
+    assert len(deletes()) == 2 and all(body.get("autocommit") is False for body in deletes())
+    assert db.log.names()[-1] == "commitTransaction"
+    db.log.clear()
+    await delete(ids[:IN_CHUNK])
+    assert db.log.names() == ["delete"] and "autocommit" not in deletes()[0]
+    db.log.clear()
+    await delete(iter([*ids[:2], str(kept.id)]))
+    assert [body.get("autocommit") for body in deletes()] == [False]
+    assert db.log.names()[-1] == "commitTransaction"
+    assert await repository.count() == 0
 
 
 async def test_delete_actions_still_run_document_by_document(db: BeanieDatabase) -> None:

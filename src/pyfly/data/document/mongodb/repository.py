@@ -27,9 +27,9 @@ runs in an **operation scope**, as the relational repository's calls do:
   relational repository) runs in a session without a transaction, retried once when its connection turns
   out to be dead; any other method runs in a transaction that commits at the end of the call, so ``save_all``
   (and a subclass method that writes twice) is atomic. A method that sends one command (``save``, ``delete``,
-  ``delete_by_id``, the bulk deletes and derived ``delete_by_*`` when the class has no delete event actions)
-  runs without one: MongoDB runs a command atomically on each document it touches. On a standalone server (no
-  transactions) every auto unit runs without one.
+  ``delete_by_id``, and the bulk and derived deletes when the class has no delete event actions and the ids or
+  documents fit one ``$in`` filter, :data:`IN_CHUNK`) runs without one: MongoDB runs a command atomically on
+  each document it touches. On a standalone server (no transactions) every auto unit runs without one.
 
 The operation guard is held for one driver command at a time, and never while the document's event actions
 run: Beanie's ``@before_event``/``@after_event`` and ``ValidateOnSave`` actions, and so ``BaseDocument``'s audit
@@ -77,7 +77,7 @@ import functools
 import inspect
 import logging
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterable, Sequence, Sized
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, cast, get_args, get_origin, overload
 
 import pymongo
@@ -149,9 +149,9 @@ WRITE_WORDS: frozenset[str] = frozenset(
 
 _CONJUNCTIONS = frozenset({"and", "or"})
 
-Single = bool | Callable[[Any], bool]
+Single = bool | Callable[[Any, tuple[Any, ...], dict[str, Any]], bool]
 """Whether a write method sends one command (and so needs no transaction outside one), or a callable that
-tells it from the repository."""
+tells it from the repository and the call's positional and keyword arguments."""
 
 IN_CHUNK = 10_000
 """The most ids one ``$in`` filter carries (a filter document is limited to 16 MB)."""
@@ -178,7 +178,7 @@ def repository_operation(
 
     *read* selects an auto unit without a transaction outside a transaction, *single* a write auto unit without
     one: the method sends one command, which MongoDB runs atomically on each document it touches (a callable
-    decides from the repository the call is made on). *atomic* holds the unit's operation guard for the
+    decides from the repository and the call's arguments). *atomic* holds the unit's operation guard for the
     whole call: the framework's own methods that run no user code (a method that runs the document's event
     actions takes the guard for each driver command only, see the module documentation). A method decorated
     with ``@transactional`` opens no auto unit: its own boundary provides the unit. A persistence exception
@@ -313,19 +313,35 @@ def _has_delete_actions(model: type) -> bool:
     )
 
 
-def deletes_in_one_command(repository: Any) -> bool:
-    """Whether a delete of *repository*'s documents is one command: its class has no delete event actions."""
+def deletes_in_one_command(repository: Any, *_call: Any) -> bool:
+    """Whether a delete of *repository*'s documents is one command: its class has no delete event actions (a
+    derived ``delete_by_*``, whatever it matches; the call's arguments, when given, are not needed)."""
     return not _has_delete_actions(repository._model)
+
+
+def _bulk_delete_rule(argument: str, *, actions: bool) -> Callable[[Any, tuple[Any, ...], dict[str, Any]], bool]:
+    """The ``single`` rule of a bulk delete of the ids or documents its first argument (*argument*) names: one
+    command when it deletes everything (``None``) or at most :data:`IN_CHUNK` of them (one ``$in`` filter) and,
+    with *actions*, when the class has no delete event actions. Values the call cannot count before it runs (an
+    iterator) take a transaction."""
+
+    def one_command(repository: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+        if actions and _has_delete_actions(repository._model):
+            return False
+        values = args[0] if args else kwargs.get(argument)
+        return values is None or (isinstance(values, Sized) and len(values) <= IN_CHUNK)
+
+    return one_command
 
 
 _SINGLE_COMMAND: dict[str, Single] = {
     "save": True,
     "delete": True,
     "delete_by_id": True,
-    "delete_all_in_batch": True,
-    "delete_all_by_id_in_batch": True,
-    "delete_all": deletes_in_one_command,
-    "delete_all_by_id": deletes_in_one_command,
+    "delete_all_in_batch": _bulk_delete_rule("entities", actions=False),
+    "delete_all_by_id_in_batch": _bulk_delete_rule("ids", actions=False),
+    "delete_all": _bulk_delete_rule("entities", actions=True),
+    "delete_all_by_id": _bulk_delete_rule("ids", actions=True),
 }
 """The framework's write methods that send one command: they need no transaction outside one (a subclass's
 override of one is not assumed to)."""
@@ -510,7 +526,7 @@ class MongoRepository(Generic[T, ID]):
                 reset_state(token)
         if transactional:
             return await function(self, *args, **kwargs)
-        one_command = single(self) if callable(single) else single
+        one_command = single(self, args, kwargs) if callable(single) else single
         attempts = 2 if read else 1
         for attempt in range(1, attempts + 1):
             try:
