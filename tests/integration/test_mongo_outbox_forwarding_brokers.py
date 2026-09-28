@@ -44,8 +44,8 @@ from pyfly.eda.domain_events import EVENT_ID_HEADER
 from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.types import EventEnvelope
-from tests.integration.test_outbox_forwarding_brokers import Broker, _eventually
 from tests.support.backend_matrix import MongoBackend
+from tests.support.brokers import Broker, eventually
 from tests.support.mongo import beanie_database
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker, pytest.mark.brokers, pytest.mark.mongo]
@@ -89,7 +89,7 @@ async def test_a_mongo_unit_that_rolls_back_publishes_nothing_and_one_that_commi
             async with template.transaction():
                 await orders.save(ForwardedDoc(name="committed"))
                 await publisher.publish(broker.destination, "order.placed", {"n": "committed"}, {"x-trace": "t-1"})
-            await _eventually(lambda: publisher.relay.counters.delivered == 1)
+            await eventually(lambda: publisher.relay.counters.delivered == 1)
         finally:
             await publisher.stop()
 
@@ -173,7 +173,7 @@ async def test_a_document_only_application_carries_a_committed_unit_through_the_
             await desk.place("rolled back", fail=True)
         await desk.place("committed")
 
-        await _eventually(lambda: len(received) >= 1, timeout=60)
+        await eventually(lambda: len(received) >= 1, timeout=60)
         await asyncio.sleep(1.5)  # a copy too many would arrive meanwhile
         assert [envelope.payload for envelope in received] == [{"n": "committed"}]
         assert received[0].headers[EVENT_ID_HEADER]

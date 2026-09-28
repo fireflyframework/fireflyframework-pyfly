@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
 
 import pytest
 from beanie import Document, PydanticObjectId
@@ -50,6 +49,7 @@ from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.types import EventEnvelope
 from pyfly.kernel.exceptions import DuplicateKeyException
 from tests.support.backend_matrix import MongoBackend
+from tests.support.brokers import eventually
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker, pytest.mark.mongo]
 
@@ -152,16 +152,6 @@ class ShippedAndBilledEvents:
         self.received.append(envelope)
 
 
-async def _eventually(condition: Any, timeout: float = 30.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if condition():
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError("condition not met in time")
-
-
 @pytest.mark.parametrize("provider", ["memory", "database"])
 async def test_a_document_only_application_keeps_its_outbox_in_mongodb(
     mongo_backend: MongoBackend, provider: str
@@ -195,7 +185,7 @@ async def test_a_document_only_application_keeps_its_outbox_in_mongodb(
             await desk.place("rolled back", fail=True)
         await desk.place("committed")
 
-        await _eventually(lambda: len(received) >= 1)
+        await eventually(lambda: len(received) >= 1)
         await asyncio.sleep(1.0)  # a copy too many would arrive meanwhile
         assert [envelope.payload for envelope in received] == [{"n": "committed"}]
         if provider == "memory":
@@ -236,7 +226,7 @@ async def test_the_events_of_a_mongodb_aggregate_go_through_the_outbox_in_the_un
         assert await publisher.pending() == []  # the rolled-back unit appended nothing
         await shipping.ship("s-2")
 
-        await _eventually(lambda: len(received) >= 1)
+        await eventually(lambda: len(received) >= 1)
         await asyncio.sleep(1.0)  # a copy too many would arrive meanwhile
         assert [(envelope.destination, envelope.payload["order"]) for envelope in received] == [("shipping", "s-2")]
         assert received[0].headers[EVENT_ID_HEADER] == received[0].payload["event_id"]  # the domain event's id
@@ -276,7 +266,7 @@ async def test_an_event_of_an_aggregate_saved_outside_a_transaction_is_written_w
         order = ShippedOrder(reference="s-1")
         order.ship()
         await orders.save(order)
-        await _eventually(lambda: len(received) >= 1)
+        await eventually(lambda: len(received) >= 1)
 
         counter = await database[store.collections.counters].find_one({"_id": store.collections.events})
         assert counter is not None
@@ -351,7 +341,7 @@ async def test_each_event_of_an_aggregate_saved_outside_a_transaction_is_a_trans
         assert await database[store.collections.events].find_one({"_id": billed}) is None  # not written at all
         await database[store.collections.deliveries].delete_one(clash)
 
-        await _eventually(lambda: len(received) >= 1)
+        await eventually(lambda: len(received) >= 1)
         await asyncio.sleep(1.0)  # a copy too many, or the second event, would arrive meanwhile
         assert [(envelope.event_type, envelope.payload["order"]) for envelope in received] == [
             ("AppOrderShipped", "p-1")
