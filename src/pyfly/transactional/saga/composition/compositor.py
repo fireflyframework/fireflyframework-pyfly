@@ -37,7 +37,9 @@ class SagaCompositor:
     """Executes a :class:`SagaComposition` using layer-based ordering.
 
     Sagas in the same DAG layer run concurrently via :func:`asyncio.gather`.
-    On failure the compositor compensates all previously completed sagas.
+    On failure the compositor compensates every saga that completed: those of
+    the earlier layers, and those of the failing layer, whichever of its
+    sagas failed.
 
     Parameters
     ----------
@@ -118,17 +120,21 @@ class SagaCompositor:
                     return_exceptions=True,
                 )
 
-                # Process results from this layer.
+                # Record every saga of the layer before failing on the first one that failed: a saga that
+                # completed after it in the same layer must be compensated too.
+                failure: BaseException | None = None
                 for saga_name, result in zip(layer, results, strict=True):
                     if isinstance(result, BaseException):
-                        raise result
+                        failure = failure or result
+                        continue
 
                     ctx.saga_results[saga_name] = result
                     completed_sagas.append(saga_name)
 
-                    if not result.success:
-                        msg = f"Saga '{saga_name}' failed in composition '{composition.name}'"
-                        raise RuntimeError(msg)
+                    if not result.success and failure is None:
+                        failure = RuntimeError(f"Saga '{saga_name}' failed in composition '{composition.name}'")
+                if failure is not None:
+                    raise failure
 
         except Exception as exc:
             ctx.error = exc

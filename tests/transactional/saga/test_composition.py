@@ -21,6 +21,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from pyfly.context.application_context import ApplicationContext
+from pyfly.core.config import Config
+from pyfly.transactional.saga.annotations import saga, saga_step
 from pyfly.transactional.saga.composition.compensation_manager import (
     CompensationManager,
 )
@@ -39,6 +42,7 @@ from pyfly.transactional.saga.composition.compositor import SagaCompositor
 from pyfly.transactional.saga.composition.data_flow_manager import DataFlowManager
 from pyfly.transactional.saga.composition.validator import CompositionValidator
 from pyfly.transactional.saga.core.result import SagaResult, StepOutcome
+from pyfly.transactional.saga.engine.saga_engine import SagaEngine
 from pyfly.transactional.shared.types import CompensationPolicy, StepStatus
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -613,3 +617,113 @@ class TestSagaCompositor:
         assert captured_inputs["a"] == {"base": 1}
         assert captured_inputs["b"]["base"] == 1
         assert captured_inputs["b"]["a_data"] == {"val": "from-a"}
+
+
+# ── A layer whose failure is not its last saga (the saga engine, in-memory persistence) ────────────────────────
+
+_EFFECTS: list[str] = []
+
+
+class ChargeDeclinedError(Exception):
+    """The failing saga's step."""
+
+
+@saga(name="w4-a-reserve-stock")
+class _ReserveStock:
+    @saga_step(id="reserve", compensate="release")
+    async def reserve(self) -> str:
+        _EFFECTS.append("reserve-stock")
+        return "reserved"
+
+    async def release(self) -> None:
+        _EFFECTS.append("release-stock")
+
+
+@saga(name="w4-b-charge-card")
+class _ChargeCard:
+    @saga_step(id="charge")
+    async def charge(self) -> None:
+        raise ChargeDeclinedError("the card was declined")
+
+
+@saga(name="w4-c-book-courier")
+class _BookCourier:
+    @saga_step(id="book", compensate="cancel")
+    async def book(self) -> str:
+        _EFFECTS.append("book-courier")
+        return "booked"
+
+    async def cancel(self) -> None:
+        _EFFECTS.append("cancel-courier")
+
+
+def _one_layer() -> SagaComposition:
+    """The three sagas in one layer, run concurrently in the order ``a``, ``b`` (fails), ``c``."""
+    builder = SagaCompositionBuilder("w4-order")
+    for name in ("w4-a-reserve-stock", "w4-b-charge-card", "w4-c-book-courier"):
+        builder = builder.saga(name).depends_on().add()
+    return builder.build()
+
+
+@pytest.fixture
+async def saga_engine() -> Any:
+    _EFFECTS.clear()
+    context = ApplicationContext(Config({"pyfly": {"transactional": {"enabled": "true"}}}))
+    for cls in (_ReserveStock, _ChargeCard, _BookCourier):
+        context.register_bean(cls)
+    await context.start()
+    try:
+        yield context.get_bean(SagaEngine)
+    finally:
+        await context.stop()
+
+
+class TestACompositionLayerThatFailsInTheMiddle:
+    @pytest.mark.anyio
+    async def test_every_saga_of_the_layer_that_completed_is_compensated(self, saga_engine: SagaEngine) -> None:
+        """The layer's results used to be read in order, raising at the failed one: a saga after it in the same
+        layer had completed but was never recorded, so it was never compensated."""
+        ctx = await SagaCompositor(saga_engine).execute(_one_layer())
+
+        assert isinstance(ctx.error, RuntimeError)
+        assert "w4-b-charge-card" in str(ctx.error)
+        assert set(ctx.saga_results) == {"w4-a-reserve-stock", "w4-b-charge-card", "w4-c-book-courier"}
+        assert {"w4-a-reserve-stock", "w4-c-book-courier"} <= set(ctx.compensated_sagas)
+        assert sorted(_EFFECTS) == ["book-courier", "cancel-courier", "release-stock", "reserve-stock"]
+
+    @pytest.mark.anyio
+    async def test_a_saga_that_raises_mid_layer_leaves_its_siblings_recorded_and_compensated(self) -> None:
+        compensated: list[str] = []
+
+        async def execute(saga_name: str, **kwargs: Any) -> SagaResult:
+            if saga_name == "b":
+                raise RuntimeError("saga b exploded")
+            return _make_saga_result(saga_name, step_results={"main": saga_name})
+
+        class _Recording(CompensationManager):
+            async def compensate_completed(
+                self, completed_sagas: list[str], composition: Any, ctx: Any, saga_engine: Any
+            ) -> None:
+                compensated.extend(reversed(completed_sagas))
+
+        engine = AsyncMock()
+        engine.execute = AsyncMock(side_effect=execute)
+        composition = (
+            SagaCompositionBuilder("exploding-layer")
+            .saga("a")
+            .depends_on()
+            .add()
+            .saga("b")
+            .depends_on()
+            .add()
+            .saga("c")
+            .depends_on()
+            .add()
+            .build()
+        )
+
+        ctx = await SagaCompositor(engine, _Recording()).execute(composition)
+
+        assert "saga b exploded" in str(ctx.error)
+        assert set(ctx.saga_results) == {"a", "c"}
+        assert compensated == ["c", "a"]
