@@ -340,13 +340,14 @@ async def test_the_late_release_of_a_run_cancelled_at_its_ttl_leaves_the_next_ru
     await asyncio.wait_for(job.second_holds.wait(), 10)  # the next run took the lease
     holder = await lock.holder("late")
     job.first_may_end.set()
-    await first  # the first run ends now, and releases its lease late
+    await asyncio.wait_for(first, 10)  # the first run ends now, and releases its lease late
 
     assert await lock.holder("late") == holder  # the second run keeps its lease
-    await scheduler._invoke(job, job.work, lock="late", lock_ttl=30.0)  # skipped: the second run holds it
+    # skipped: the second run holds it
+    await asyncio.wait_for(scheduler._invoke(job, job.work, lock="late", lock_ttl=30.0), 10)
     job.second_may_end.set()
-    await second
-    await harness.stop()
+    await asyncio.wait_for(second, 10)
+    await asyncio.wait_for(harness.stop(), 30)
 
     assert job.runs == ["run-1", "run-2"]
     assert await harness.committed() == ["run-2"]
