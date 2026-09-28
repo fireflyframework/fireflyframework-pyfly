@@ -460,7 +460,8 @@ unit's transaction, when the document datasource is the default of `@transaction
   in the outbox's dead letters (in the application's `EdaDeadLetterStore` when it
   defines one as a bean).
 * **A broker that is down at start fails the start**: the publisher starts the
-  broker's bus first, and the outbox does not buffer until the broker is back.
+  broker's bus first, so an application whose broker is unreachable when it starts
+  does not start (the outbox buffers no publish before its bus is up).
 
 A message published through `MessageBrokerPort` itself has none of this: publish it
 after the commit (`pyfly.data.transaction.after_commit`) where losing it on a crash is
