@@ -15,13 +15,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from uuid import UUID
+
 import pytest
-from sqlalchemy import String, select
+from sqlalchemy import ForeignKey, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -42,8 +46,10 @@ class User(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -231,3 +237,41 @@ class TestSpecificationNoop:
         negated = ~noop
         names = await _names(seeded_session, negated)
         assert names == ["Alice", "Bob", "Charlie", "Diana"]
+
+
+class Post(BaseEntity):
+    __tablename__ = "spec_posts"
+
+    author_id: Mapped[UUID] = mapped_column(ForeignKey("spec_users.id"))
+    title: Mapped[str] = mapped_column(String(100))
+
+
+class TestAsCriterion:
+    """``as_criterion`` is what ``|`` and ``~`` combine (C058)."""
+
+    def test_a_filter_on_the_roots_own_rows_is_its_where(self):
+        admin: Specification[User] = Specification(lambda root, q: q.where(root.role == "admin"))
+        criterion = admin.as_criterion(User)
+        assert criterion is not None
+        assert str(criterion.compile(compile_kwargs={"literal_binds": True})) == "spec_users.role = 'admin'"
+
+    def test_a_join_becomes_an_exists_correlated_by_the_key(self):
+        posted: Specification[User] = Specification(
+            lambda root, q: q.join(Post, Post.author_id == root.id).where(Post.title == "t")
+        )
+        criterion = posted.as_criterion(User)
+        sql = " ".join(str(select(User).where(criterion).compile(compile_kwargs={"literal_binds": True})).split())
+        assert "EXISTS (SELECT 1 FROM spec_users AS spec_users_1 JOIN spec_posts" in sql
+        assert "spec_users_1.id = spec_users.id" in sql
+        assert sql.count("FROM spec_users") == 2  # the outer query keeps its one FROM: no cartesian product
+
+    def test_a_specification_that_restricts_nothing_has_no_criterion(self):
+        assert Specification[User](lambda root, q: q).as_criterion(User) is None
+        assert Specification[User](lambda root, q: q.order_by(root.name)).as_criterion(User) is None
+
+    def test_operands_are_evaluated_on_a_clean_select(self):
+        base = select(User).where(User.active == True)  # noqa: E712 — a repository's own criteria
+        admin: Specification[User] = Specification(lambda root, q: q.where(root.role == "admin"))
+        combined = (~admin).to_predicate(User, base)
+        sql = str(combined.compile(compile_kwargs={"literal_binds": True}))
+        assert sql.count("spec_users.active = ") == 1  # neither copied into the operand nor negated with it

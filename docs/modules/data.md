@@ -366,7 +366,7 @@ PyFly can automatically generate query implementations from method names, follow
 
 ### QueryMethodParser
 
-The `QueryMethodParser` lives in the commons layer and is shared by all adapters. It parses method names into structured `ParsedQuery` objects that are backend-agnostic.
+The `QueryMethodParser` lives in the commons layer and is shared by all adapters (Spring's `PartTree`). It parses method names into structured `ParsedQuery` objects that are backend-agnostic.
 
 ```python
 from pyfly.data import QueryMethodParser
@@ -379,22 +379,30 @@ parsed = parser.parse("find_by_status_and_role_order_by_name_desc")
 #      connectors=["and"],
 #      order_clauses=[OrderClause("name", "desc")]
 #    )
+
+# Against the entity's properties (what the repository post-processors do at startup)
+parser.parse("find_by_logged_in", properties={"logged_in", "name"})
+# -> FieldPredicate("logged_in", "eq"): the property is read whole, not as "logged" IN
 ```
+
+With `properties=` (the relational post-processor passes the entity's columns, synonyms, hybrids and relationships to one entity), every field must be one of them, or the parse raises `InvalidQueryMethodError` naming it, and the property names decide how the method name splits: `find_by_terms_and_conditions_accepted` is one property when the entity has it (the longest property that fits wins). That parse also knows the full keyword set below. Without `properties=`, the parser keeps the original keyword set and splits on every `_and_`/`_or_`.
 
 ### Naming Convention
 
 ```
-<prefix>_<field>[_<operator>][_<connector>_<field>[_<operator>]]*[_order_by_<field>_<direction>]*
+<prefix>_<field>[_<operator>][_ignore_case][_<connector>_<field>[_<operator>][_ignore_case]]*[_all_ignore_case][_order_by_<field>[_<direction>]]*
 ```
 
 ### Prefixes
 
 | Prefix       | Return Type | Description                            |
 |--------------|-------------|----------------------------------------|
-| `find_by_`   | `list[T]`   | Find all matching entities             |
+| `find_by_`   | `list[T]`, `T \| None`, `Page[T]`, `Slice[T]` (by the return annotation) | Find matching entities (or projections) |
 | `count_by_`  | `int`       | Count matching entities                |
 | `exists_by_` | `bool`      | Check if any entity matches            |
-| `delete_by_` | `int`       | Delete matching entities (return count)|
+| `delete_by_` | `int`, `None`, `list[T]` | Delete matching entities (the count, nothing, or the entities) |
+
+On the relational adapter, the result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value. The MongoDB adapter does not shape results by the annotation yet: its `find_by_` returns a list (of `T`, or of the projection a `list[...]` annotation names; see [Data Document](data-document.md)).
 
 ### Operators
 
@@ -402,22 +410,33 @@ Operators are suffixed to field names. They are checked longest-first to avoid p
 
 | Suffix                 | Operator      | Meaning              | Args  |
 |------------------------|---------------|----------------------|-------|
-| *(none)*               | `eq`          | equals               | 1     |
-| `_greater_than`        | `gt`          | `>`                  | 1     |
-| `_less_than`           | `lt`          | `<`                  | 1     |
+| *(none)*, `_is`, `_equals` | `eq`      | equals (`IS NULL` for a `None` argument) | 1     |
+| `_greater_than`, `_after` | `gt`       | `>`                  | 1     |
+| `_less_than`, `_before` | `lt`         | `<`                  | 1     |
 | `_greater_than_equal`  | `gte`         | `>=`                 | 1     |
 | `_less_than_equal`     | `lte`         | `<=`                 | 1     |
 | `_between`             | `between`     | `BETWEEN ? AND ?`    | 2     |
-| `_like`                | `like`        | `LIKE ?`             | 1     |
-| `_containing`          | `containing`  | contains substring   | 1     |
+| `_like`                | `like`        | `LIKE ?` (the argument is a pattern) | 1     |
+| `_not_like`            | `not_like`    | `NOT LIKE ?`         | 1     |
+| `_containing`, `_contains` | `containing` | contains the argument as it is | 1     |
+| `_not_containing`      | `not_containing` | does not contain it | 1     |
+| `_starting_with`, `_starts_with` | `starting_with` | starts with the argument as it is | 1 |
+| `_ending_with`, `_ends_with` | `ending_with` | ends with the argument as it is | 1 |
 | `_in`                  | `in`          | `IN (?)`             | 1 (list) |
-| `_not`                 | `not`         | `!=`                 | 1     |
-| `_is_null`             | `is_null`     | `IS NULL`            | 0     |
-| `_is_not_null`         | `is_not_null` | `IS NOT NULL`        | 0     |
+| `_not_in`              | `not_in`      | `NOT IN (?)`         | 1 (list) |
+| `_not`, `_is_not`      | `not`         | `!=` (`IS NOT NULL` for `None`) | 1     |
+| `_is_null`, `_null`    | `is_null`     | `IS NULL`            | 0     |
+| `_is_not_null`, `_not_null` | `is_not_null` | `IS NOT NULL`   | 0     |
+| `_true`, `_is_true`    | `is_true`     | the boolean is true  | 0     |
+| `_false`, `_is_false`  | `is_false`    | the boolean is false | 0     |
+
+Every keyword may be preceded by `_is` (`_is_between`, `_is_in`). `_ignore_case` (or `_ignoring_case`) after a predicate compares that string property without case; `_all_ignore_case` at the end of the criteria does it for every string property of the query. The keywords after the first column of the table, the `_is` forms, `_ignore_case` and `_all_ignore_case` need the parse against the entity's properties (the relational adapter's).
+
+"As it is" means the argument's `%` and `_` are plain characters (escaped on the relational backend), so `find_by_name_containing("50%")` does not match `"500"`; `_like` takes a pattern whose wildcards stay wildcards.
 
 ### Connectors
 
-Connect multiple predicates with `_and_` or `_or_`:
+Connect multiple predicates with `_and_` or `_or_`. On the relational adapter, `and` binds tighter than `or`, as in Spring and SQL (the MongoDB adapter still combines mixed connectors left to right, see [Data Document](data-document.md)):
 
 ```python
 # AND: status = ? AND customer_id = ?
@@ -425,7 +444,12 @@ async def find_by_status_and_customer_id(self, status: str, customer_id: str) ->
 
 # OR: status = ? OR role = ?
 async def find_by_status_or_role(self, status: str, role: str) -> list[T]: ...
+
+# Both: owner = ? OR (tag = ? AND balance = ?)
+async def find_by_owner_or_tag_and_balance(self, owner: str, tag: str, balance: int) -> list[T]: ...
 ```
+
+`ParsedQuery.groups` holds the predicates as an `or` of `and` groups (`[[owner], [tag, balance]]`).
 
 ### Ordering
 
@@ -445,15 +469,19 @@ async def find_by_active_order_by_name_asc_created_at_desc(self, active: bool) -
 @dataclass
 class ParsedQuery:
     prefix: str                          # "find_by", "count_by", "exists_by", "delete_by"
-    predicates: list[FieldPredicate]     # [{field_name: "status", operator: "eq"}, ...]
+    predicates: list[FieldPredicate]     # [{field_name: "status", operator: "eq", ignore_case: False}, ...]
     connectors: list[str]                # ["and", "or", ...]
     order_clauses: list[OrderClause]     # [{field_name: "name", direction: "desc"}, ...]
+    all_ignore_case: bool = False        # the name ends its criteria with _all_ignore_case
+
+    groups: list[list[FieldPredicate]]   # property: the or of and groups
+    argument_count: int                  # property: the method arguments the predicates take
 ```
 
 The parsing algorithm:
 1. Extracts the prefix (`find_by_`, `count_by_`, etc.).
-2. Splits off the `_order_by_` suffix.
-3. Splits the remaining body by `_and_` and `_or_` connectors.
+2. Splits off the `_order_by_` suffix (against the properties: the first `order_by` after which both parts read as properties).
+3. Splits the remaining body by `_and_` and `_or_` connectors (against the properties: where the properties say, longest property first).
 4. Parses each segment for field name and operator suffix (longest-match).
 
 ### QueryMethodCompilerPort
@@ -469,11 +497,11 @@ class QueryMethodCompilerPort(Protocol):
     ) -> Callable[..., Coroutine[Any, Any, Any]]: ...
 ```
 
-The parser is fully shared — you never need to reimplement parsing logic. Your adapter only needs to compile parsed queries into the target database's query format.
+The parser is fully shared — you never need to reimplement parsing logic. Your adapter only needs to compile parsed queries into the target database's query format, as an `or` of the `and` groups in `ParsedQuery.groups`.
 
 | Adapter    | Compiler Class             | Output                           |
 |------------|---------------------------|----------------------------------|
-| SQLAlchemy | `QueryMethodCompiler`      | SQLAlchemy column expressions    |
+| SQLAlchemy | `QueryMethodCompiler`      | SQLAlchemy statements, built once per shape |
 | MongoDB    | `MongoQueryMethodCompiler` | MongoDB filter documents         |
 
 ### Complete Derived Query Examples
@@ -529,10 +557,11 @@ async def find_by_status_and_customer_id_order_by_total_desc(
 ) -> list[T]: ...
 ```
 
-Each method body should be a stub (`...` or `pass`). The adapter's `BeanPostProcessor` detects them and replaces them with real implementations at startup.
+Each method body must be a stub: after an optional docstring, nothing else, `...`, `pass` or `raise NotImplementedError` (`pyfly.data.post_processor.is_stub`). The adapter's `BeanPostProcessor` recognizes stubs by the shape of their body, also on intermediate base classes and mixins, and replaces them with real implementations at startup; any other body is a hand-written method and is kept. The implementation takes its arguments by position or by keyword, and a stub whose parameters do not match its name fails at startup.
 
 Source files:
-- `src/pyfly/data/query_parser.py` — `QueryMethodParser`, `ParsedQuery`, `FieldPredicate`, `OrderClause`
+- `src/pyfly/data/query_parser.py` — `QueryMethodParser`, `ParsedQuery`, `FieldPredicate`, `OrderClause`, `result_shape`, `InvalidQueryMethodError`, `IncorrectResultSizeException`
+- `src/pyfly/data/post_processor.py` — `BaseRepositoryPostProcessor`, `is_stub`
 - `src/pyfly/data/ports/compiler.py` — `QueryMethodCompilerPort`
 
 ---
@@ -1073,10 +1102,10 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 **Shared behaviour:**
 - `before_init(bean, bean_name)` — Returns the bean unchanged (default no-op)
 - `after_init(bean, bean_name)` — Iterates class attributes, detects stubs, compiles derived queries
-- `_is_stub(method)` — Bytecode analysis to detect `...` or `pass` stubs
+- `_is_stub(method)` — Reads the body's shape (`pyfly.data.post_processor.is_stub`): an optional docstring, then nothing, `...`, `pass` or `raise NotImplementedError`; any other body is a hand-written method and is kept
 - `DERIVED_PREFIXES` — `("find_by_", "count_by_", "exists_by_", "delete_by_")`
 
-**Abstract hooks:**
+**Hooks** (the first three are abstract):
 
 | Method | Description |
 |--------|-------------|
@@ -1084,6 +1113,9 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 | `_compile_derived(parsed, entity, bean)` | Compile a parsed derived query into a callable |
 | `_wrap_derived_method(compiled_fn)` | Wrap a compiled function for binding onto the bean |
 | `_process_query_decorated(...)` | Handle decorator-based queries (default: no-op) |
+| `_implement_derived(bean, method)` | Build one derived method (default: `_parse` the name against `_properties(entity)`, check the arguments, then `_compile_derived` and `_wrap_derived_method`) |
+
+The SQLAlchemy adapter overrides `_implement_derived` to build each derived statement once per repository class. A subclass of it that overrides `_compile_derived` or `_wrap_derived_method` still has its derived methods built with those hooks.
 
 **Adapter implementations:**
 
@@ -1233,13 +1265,17 @@ Some capabilities are **backend-specific** today:
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
 | `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ⚠️ commit/abort per call (replica set); the unit-of-work manager for MongoDB is still to come |
 
-**Not yet implemented on either backend** (so you don't reach for them): `@Modifying`-style
-declarative bulk `UPDATE`/`DELETE`; `Slice` (count-less paging) and streaming/reactive result
-types; DTO / open (SpEL) / dynamic / association-traversing projections; the derived-query keywords
-`StartingWith` / `EndingWith` / `IgnoreCase` / `True` / `False` / `Distinct` / `Top<N>` /
-`After` / `Before` (use `_like`/`_containing`/`@query` instead); `ExampleMatcher` string-match
-modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fall back to `@query`
-(or `native=True`) — it covers every case the derived parser doesn't.
+**Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; open
+(SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational
+`@query` builds any class from its rows: `-> list[OrderSummary]` is `OrderSummary(**row)`); the
+derived-query keywords `Distinct` / `Top<N>` / `First` and property paths through relationships (use `@query`
+instead); `ExampleMatcher` string-match modes; named queries and `Pageable`/SpEL injection into `@query`. For
+these, fall back to `@query` (or `native=True`) — it covers every case the derived parser doesn't.
+
+On the relational backend, `@modifying` (Spring's `@Modifying`) marks a bulk `UPDATE`/`DELETE` `@query`, derived
+queries return `T | None`, `Page[T]` and `Slice[T]`, and the derived-query keywords `StartingWith` /
+`EndingWith` / `IgnoreCase` / `AllIgnoreCase` / `True` / `False` / `After` / `Before` / `NotIn` / `NotLike` /
+`NotContaining` are available (see [Operators](#operators)); the document backend adopts them next.
 
 ---
 

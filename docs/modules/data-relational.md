@@ -26,11 +26,17 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Creating a Repository](#creating-a-repository)
   - [CRUD Methods Reference](#crud-methods-reference)
 - [Derived Query Methods](#derived-query-methods)
+  - [Checked at Startup](#checked-at-startup)
+  - [Results Follow the Return Annotation](#results-follow-the-return-annotation)
+  - [Operators and Precedence](#operators-and-precedence)
+  - [Soft Delete](#soft-delete)
+  - [Statements Built Once](#statements-built-once)
   - [Complete Derived Query Examples](#complete-derived-query-examples)
 - [Custom Queries with @query](#custom-queries-with-query)
   - [JPQL-Like Syntax](#jpql-like-syntax)
   - [Native SQL](#native-sql)
-  - [Return Type Inference](#return-type-inference)
+  - [Query Results by Return Type](#query-results-by-return-type)
+  - [Modifying Queries](#modifying-queries)
   - [JPQL Transpilation Details](#jpql-transpilation-details)
 - [Specifications](#specifications)
   - [Creating Specifications](#creating-specifications)
@@ -563,6 +569,49 @@ PyFly automatically generates query implementations from method names using the 
 
 For the full naming convention reference (prefixes, operators, connectors, ordering), see the [Data Module Guide — Derived Query Methods](data.md#derived-query-methods).
 
+### Checked at Startup
+
+A derived method is checked against its entity when the repository is built, as Spring Data does at bootstrap. A method that cannot work fails `ApplicationContext.start()` with `InvalidQueryMethodError` (from `pyfly.data.query_parser`), naming the repository and the method, instead of failing on its first call:
+
+- **Every field is a property of the entity**: a column, a synonym, a hybrid property, a relationship to one entity or a composite (both compared with an instance of their class, or `None`: `find_by_location(Point(1, 2))`, with `_not`, `_is_null` and `_is_not_null` too). A typo (`find_by_nmae`), a plain Python `@property` or a collection fails.
+- **The name is read against those properties**, so a property whose name ends in an operator word or holds a connector is read whole: `find_by_logged_in` is `logged_in = ?` (not `logged IN ?`), and `find_by_terms_and_conditions_accepted` is one property. When two readings are possible, the longest property wins.
+- **The parameters match the name**: `find_by_age_between(low, high)` takes two values, `find_by_email_is_null()` none. A parameter annotated `Pageable` or `Sort` binds no value (see below). A forgotten `_and_id` no longer drops an argument silently (which widened a `delete_by_`).
+- **The return annotation is one the prefix returns** (the next section), `_ignore_case` applies to a string property, and `_true`/`_false` to a boolean one.
+- **The annotations resolve at runtime**: they decide the result's shape and which parameter is a `Pageable` or a `Sort`, so a derived method whose annotation names a type imported only under `TYPE_CHECKING` fails, naming the annotation (the entity's own name always resolves). Import the type at runtime. Before 26.09.08 the annotations of a derived method were never read. A `@query` method, whose annotations only shape its result, logs the one that does not resolve at WARNING and reads it as absent.
+
+### Results Follow the Return Annotation
+
+| Annotation | `find_by_` returns |
+|---|---|
+| `list[T]` (or `Sequence[T]`, or none) | every match |
+| `T \| None` (or `T`) | the match, or `None`; `IncorrectResultSizeException` when two rows match |
+| `Page[T]`, with a `pageable: Pageable` parameter | a page and the total (the total is counted only when the page cannot tell it) |
+| `Slice[T]`, with a `pageable: Pageable` parameter | a page and whether another follows, with no `COUNT` |
+| `list[T]`, with a `sort: Sort` parameter | every match, sorted (names validated, as `find_all(Sort)` validates them) |
+| `list[P]` or `P \| None`, `P` a `@projection` | objects with the projection's fields, selecting only those columns |
+
+`count_by_` returns `int`, `exists_by_` returns `bool` (one `SELECT 1 ... LIMIT 1`, never a `COUNT` of every match), whether annotated `int` and `bool`, `int | None` and `bool | None` (they never return `None`), or not at all, and `delete_by_` returns the number of deleted rows (`-> int`, `-> int | None` or no annotation), nothing (`-> None`), or the deleted entities (`-> list[T]`). Arguments bind by position or by keyword: `await repo.find_by_status_and_role(role="admin", status="open")`.
+
+### Operators and Precedence
+
+- **`and` binds tighter than `or`**, as in Spring and SQL: `find_by_owner_or_tag_and_balance(o, t, b)` is `owner = o OR (tag = t AND balance = b)`.
+- **`_containing`, `_starting_with` and `_ending_with` match their argument as it is**: its `%` and `_` are escaped (`LIKE ... ESCAPE '/'`), so `find_by_name_containing("50%")` does not match `"500"`. `_like` takes a pattern whose wildcards stay wildcards.
+- **`None` compares with `IS NULL`**: `find_by_email(None)` is `email IS NULL`, `find_by_email_not(None)` is `email IS NOT NULL`.
+- **An `_in` list** is one `= ANY(:array)` bind on PostgreSQL (the same statement for every length) and an expanding bind elsewhere, padded to the next power of two so a handful of statements cover every length. A list over an untyped expression (a hybrid over `func.upper(...)`, whose SQL type is `NullType`) has no type to make an array of, so it is an expanding bind on PostgreSQL too. The expanding lists of one statement share what the dialect binds (two lists get half each). A list longer than its share runs one statement per chunk in the same unit of work where that gives the same answer (an unordered `find_by_` of entities, a projection without `_or_`, `exists_by_`, `delete_by_`, and `count_by_` without `_or_`), and raises `ValueError` otherwise (two lists that overflow, an order, a page, a count or a projection with `_or_`, which would return a row once per chunk).
+
+### Soft Delete
+
+Derived queries honor soft delete (`SoftDeleteMixin`):
+
+- On a `SoftDeleteRepository`, `find_by_`/`count_by_`/`exists_by_` never see a soft-deleted row, not even inside `including_deleted()`, and `delete_by_` **soft-deletes** the live rows that match (the same `UPDATE` as `delete()`: version bumped, audit columns stamped); a row deleted before keeps its `deleted_at`.
+- On a plain `Repository` over a soft-delete entity, reads go through the soft-delete criteria every ORM `SELECT` gets (lifted inside `including_deleted()`), and `delete_by_` deletes for good what those reads see.
+
+A plain repository's `delete_by_` sends one bulk `DELETE` when the mapper has no cascade, version column, inheritance or delete listener (the entities the unit holds are synchronized); otherwise it loads the matching entities and deletes them through the ORM (`soft_delete_criteria.hard_delete`), so cascades, version checks and delete listeners run, and a cascade reaches soft-deleted dependents.
+
+### Statements Built Once
+
+Each derived method builds its statement once per shape, with its arguments as bound parameters (Spring Data's `PartTreeJpaQuery` caches its criteria query the same way), and reuses it on every call, so a call costs what running a prebuilt statement costs. The statement varies only with the pattern of `None` arguments (`IS NULL` instead of `= ?`); a method comparing a relationship or a composite builds its own per call, and so does every method of a repository that overrides `_criteria()` (its read criteria may change from call to call, a tenant filter for one). A repository class's derived and `@query` methods are described, checked and compiled once, for its first instance, and bound to every later one, so a transient or request-scoped repository costs a few attribute assignments per instance (a subclass of `RepositoryBeanPostProcessor` that overrides how methods are built, or a processor with a query compiler or executor of its own, builds them per instance, as before, and never reuses a query another processor compiled).
+
 ### Complete Derived Query Examples
 
 ```python
@@ -572,9 +621,17 @@ class OrderRepository(Repository[Order, UUID]):
     # Equals (default operator)
     async def find_by_status(self, status: str) -> list[Order]: ...
 
+    # One result, or None
+    async def find_by_reference(self, reference: str) -> Order | None: ...
+
     # Multiple conditions with AND
     async def find_by_customer_id_and_status(
         self, customer_id: str, status: str
+    ) -> list[Order]: ...
+
+    # OR binds looser than AND: status = ? OR (customer_id = ? AND total > ?)
+    async def find_by_status_or_customer_id_and_total_greater_than(
+        self, status: str, customer_id: str, total: float
     ) -> list[Order]: ...
 
     # Greater than
@@ -583,11 +640,11 @@ class OrderRepository(Repository[Order, UUID]):
     # Between (takes 2 arguments)
     async def find_by_total_between(self, low: float, high: float) -> list[Order]: ...
 
-    # LIKE pattern
+    # LIKE pattern (wildcards are the caller's)
     async def find_by_customer_id_like(self, pattern: str) -> list[Order]: ...
 
-    # Contains (wraps value in %)
-    async def find_by_customer_id_containing(self, fragment: str) -> list[Order]: ...
+    # Contains the value as it is (its % and _ are not wildcards), ignoring case
+    async def find_by_customer_id_containing_ignore_case(self, fragment: str) -> list[Order]: ...
 
     # IN a list
     async def find_by_status_in(self, statuses: list[str]) -> list[Order]: ...
@@ -596,10 +653,13 @@ class OrderRepository(Repository[Order, UUID]):
     async def find_by_deleted_at_is_null(self) -> list[Order]: ...
     async def find_by_email_is_not_null(self) -> list[User]: ...
 
+    # A page of results (the Pageable binds no value)
+    async def find_by_customer_id(self, customer_id: str, pageable: Pageable) -> Page[Order]: ...
+
     # COUNT prefix
     async def count_by_status(self, status: str) -> int: ...
 
-    # EXISTS prefix
+    # EXISTS prefix (SELECT 1 ... LIMIT 1)
     async def exists_by_customer_id(self, customer_id: str) -> bool: ...
 
     # DELETE prefix (returns number of rows deleted)
@@ -616,7 +676,7 @@ class OrderRepository(Repository[Order, UUID]):
     ) -> list[Order]: ...
 ```
 
-Each method body should be a stub (`...` or `pass`). The `RepositoryBeanPostProcessor` detects them and replaces them with real implementations at startup.
+Each method body must be a stub: see [Stub Detection](#stub-detection).
 
 ---
 
@@ -625,12 +685,12 @@ Each method body should be a stub (`...` or `pass`). The `RepositoryBeanPostProc
 For complex queries that cannot be expressed through method naming conventions, use the `@query` decorator:
 
 ```python
-from pyfly.data.relational.sqlalchemy import query
+from pyfly.data.query import modifying, query
 ```
 
 ### JPQL-Like Syntax
 
-By default, `@query` accepts a JPQL-like query string that is transpiled to SQL at startup:
+By default, `@query` accepts a JPQL-like query string that is transpiled to SQL for the dialect it runs on:
 
 ```python
 @repo_stereotype
@@ -643,9 +703,15 @@ class OrderRepository(Repository[Order, UUID]):
 
     @query("SELECT COUNT(o) FROM Order o WHERE o.role = :role")
     async def count_by_role(self, role: str) -> int: ...
+
+    @query("SELECT o FROM Order o WHERE o.status = ?1 ORDER BY o.created_at DESC")
+    async def find_latest(self, status: str) -> list[Order]: ...
+
+    @query("SELECT o FROM Order o WHERE o.id IN (:ids)")
+    async def find_several(self, ids: list[UUID]) -> list[Order]: ...
 ```
 
-Named parameters (`:param_name`) are bound from the method's keyword arguments.
+Named parameters (`:param_name`) are the method's parameters, and in JPQL `?1` is the first one after `self`; the method takes its arguments by position or by keyword. `IN (:ids)` (or `IN :ids`) binds a collection (a list, a tuple, a set, a generator...), one value per element, and any other value as a list of one: a string, bytes, a mapping, a number or `None` is one value, never iterated, so `IN (:code)` with `"AB"` matches `AB` (not `A` and `B`), and with `None` matches no row, as `IN (NULL)` does. An empty collection matches no row, and after `NOT IN` every row, whatever the column's type: SQLAlchemy writes an empty list as a set of integers, so for that call `IN` is written `= ANY('{}')` (`NOT IN`: `<> ALL('{}')`) on PostgreSQL, which types the array as the column, and `IN (SELECT NULL FROM DUAL WHERE 1 = 0)` on MySQL and MariaDB, whose `NULL` compares with any type (a MariaDB `UUID`, too). A `UUID` binds as SQLAlchemy's `Uuid` and an aware `datetime` as `UtcDateTime` (a collection of them by its elements), as entity columns of those types store them; other values bind as the driver takes them. A `:name` the method does not have fails at startup, and so does a `Pageable` or `Sort` parameter (before 26.09.08 it was silently ignored): write `ORDER BY` and `LIMIT` in the query, or page a derived query. A parameter the query never uses is accepted, and binds nothing (Spring refuses an unused named parameter).
 
 ### Native SQL
 
@@ -656,32 +722,67 @@ Set `native=True` for raw SQL queries:
 async def find_by_status_native(self, status: str) -> list[Order]: ...
 ```
 
-### Return Type Inference
+### Query Results by Return Type
 
-The `QueryExecutor` infers the return type from the query shape:
+The result's shape comes from the method's return annotation, never from the SQL's text (a list query with an `EXISTS` subquery returns a list). Each annotation resolves on its own: one that does not resolve at runtime (a name imported only for type checking) is logged at WARNING and read as absent, and the others still count.
 
-| Query Pattern              | Return Type    |
-|----------------------------|----------------|
-| `SELECT COUNT(...)`        | `int`          |
-| Query containing `EXISTS`  | `bool`         |
-| All other `SELECT` queries | `list[entity]` |
+| Annotation | Result |
+|---|---|
+| `list[Order]`, `Order \| None` | the unit of work's own entities (below); one result, `None`, or `IncorrectResultSizeException` past one row |
+| `int`, `bool`, `str`, `list[str]`... | the first column (`bool` also from a `COUNT` or `SELECT EXISTS`) |
+| `list[tuple[...]]`, `tuple \| None` | the rows' values |
+| `list[dict[str, Any]]` | the rows by column name |
+| `list[P]`, `P` a `@projection` | objects with the projection's fields, read from the columns of the same names |
+| `list[SomeClass]` | `SomeClass(**row)` for any other class (a DTO) |
+| none | the entities, or the value of a query that starts with `SELECT COUNT` or `SELECT EXISTS` |
+
+**Entity results** run as `select(Order).from_statement(text(sql))`: the rows are the unit of work's identity-mapped entities, so a change to one inside `@transactional` is flushed with the unit, `save()` updates it, and `find_by_id` returns the same object. They are typed and mapped by attribute through the entity's columns (a `UUID` is a `UUID` on SQLite too, and an attribute whose column is named differently maps), their relationships load as any read loads them (one the mapping loads from the statement itself, `lazy="joined"` or `lazy="subquery"`, by one more statement, since a text statement can be neither joined nor nested), and the unit's pending changes are flushed before the query runs. The query must select the entity's columns (`SELECT o` in JPQL, `SELECT *` or the column list in native SQL). A query that returns other values also flushes the pending changes first.
+
+A `@query` does not see the soft-delete criteria: its SQL runs as written, as a native query does in Spring. Add `deleted_at IS NULL` where you need it.
+
+### Modifying Queries
+
+A statement that changes rows (`UPDATE`, `DELETE`, `INSERT`, after a `WITH` clause too) is marked `@modifying` (Spring's `@Modifying`) and returns the number of rows it changed (annotate it `-> int` or `-> int | None`; it returns `None` with `-> None`); it runs in a write unit of work:
+
+```python
+@modifying
+@query("UPDATE Order o SET o.status = 'CANCELLED' WHERE o.created_at < :cutoff")
+async def cancel_stale(self, cutoff: datetime) -> int: ...
+
+@modifying(clear_automatically=True)
+@query("DELETE FROM Order o WHERE o.status = :status")
+async def purge(self, status: str) -> int: ...
+```
+
+It flushes the unit's pending changes before the statement (`flush_automatically=True`, the default). The entities the unit holds are not refreshed: `clear_automatically=True` detaches them all afterwards, so the next read loads the rows as the statement left them. Without `@modifying`, a changing statement fails at startup, and `@modifying` on a `SELECT` does too. A persistence failure is raised translated (`DataIntegrityException`, `DuplicateKeyException`...), as for every repository method.
+
+The statement's verb, read after a `WITH` clause, decides the unit of work a call outside a transaction runs in: a read unit for a `SELECT` (or `VALUES`) that changes nothing, a write unit for any other statement: a `@modifying` one, a `CALL` (which may return `None`), a PostgreSQL `SELECT` whose `WITH` clause changes rows (`WITH gone AS (DELETE ... RETURNING id) SELECT id FROM gone`, which returns what it selects). A read unit is `READ ONLY` on PostgreSQL, MySQL and MariaDB.
+
+Two backend limits apply to modifying statements: MySQL refuses an `UPDATE` or a `DELETE` whose subquery reads its own table (error 1093, raised as the driver's error; MariaDB accepts it), and MariaDB accepts a `WITH` clause before a `SELECT` only.
 
 ### JPQL Transpilation Details
 
-The lightweight JPQL-to-SQL transpiler performs these transformations:
+The transpiler rewrites the query token by token, for the dialect the query runs on; string literals, quoted identifiers and comments are never rewritten, and a name that is not an entity (a table in a subquery, `schema.table`) is left as it is:
 
-1. `FROM Entity alias` becomes `FROM <tablename>` (alias is removed)
-2. `SELECT alias` becomes `SELECT *`
-3. `COUNT(alias)` becomes `COUNT(*)`
-4. `alias.field` references become just `field` (alias prefix stripped)
-5. Boolean literals `= true` / `= false` become `= 1` / `= 0`
+1. `FROM Entity alias` (and `JOIN Entity alias`, `UPDATE Entity alias`) names the entity's table, quoted where the dialect needs it (a table called `group` or `user`). The alias stays, so a correlated subquery keeps its correlation.
+2. `SELECT alias` selects the entity's columns (`alias.col1, alias.col2, ...`); `COUNT(alias)` becomes `COUNT(*)` and `COUNT(DISTINCT alias)` counts its key.
+3. `alias.attribute` names the attribute's column (`alias.column`). A name that is neither an attribute nor a column of the entity fails at startup.
+4. The literals `true` and `false` are rendered as the dialect accepts them (`true`/`false` on PostgreSQL, `1`/`0` where booleans are integers); `IS TRUE` and `IS NOT FALSE` are left as written.
+5. The target of an `UPDATE` or a `DELETE` drops its alias (MySQL before 8.0.16 accepts none): its `SET` targets are bare columns (PostgreSQL requires it) and its other references are qualified with the table. Every other alias stays, the one of a subquery over the target's own entity included, so that subquery stays correlated with the row being changed: `DELETE FROM Node n WHERE NOT EXISTS (SELECT 1 FROM Node c WHERE c.parent_id = n.id)` becomes `DELETE FROM node WHERE NOT EXISTS (SELECT 1 FROM node c WHERE c.parent_id = node.id)`, and deletes the leaves.
+
+Aliases are scoped as SQL scopes them: inside a subquery that declares an alias again, the alias names the subquery's own entity.
 
 Example transpilation:
 
 ```
-JPQL:  SELECT u FROM User u WHERE u.email LIKE :pattern AND u.active = true
-SQL:   SELECT * FROM users WHERE email LIKE :pattern AND active = 1
+JPQL:        SELECT u FROM User u WHERE u.email LIKE :pattern AND u.active = true
+PostgreSQL:  SELECT u.id, u.email, u.active, ... FROM users u WHERE u.email LIKE :pattern AND u.active = true
+SQLite:      SELECT u.id, u.email, u.active, ... FROM users u WHERE u.email LIKE :pattern AND u.active = 1
 ```
+
+String literals are read as the dialect reads them: a backslash escapes a quote on MySQL and MariaDB (`'it\'s'`), a doubled quote everywhere (`'it''s'`), and PostgreSQL's `E'...'` and dollar-quoted (`$$...$$`) bodies are literals. `[name]` is a quoted identifier on SQL Server and SQLite only; elsewhere a bracket builds or subscripts an array, so `ARRAY[:a, :b]` and `tags[:i]` bind their parameters on PostgreSQL. The startup check runs before the dialect is known and reads brackets as arrays: quote a name that contains a colon with double quotes (or MySQL's backticks). In JPQL and native SQL alike, the colons of string literals, quoted identifiers and comments are escaped, so `'10:30'`, `'a :b'` or `-- see :x` never become parameters. A colon already escaped the way `text()` documents (`'10\:30'`, which queries written before this release carry) is escaped once, not twice, and matches `10:30` as before. `pyfly.data.relational.sqlalchemy.query.transpile_jpql(jpql, Entity, dialect)` shows what a query becomes.
+
+> **Before 26.09.08** the transpiler was regular-expression substitution: it stripped `alias.` everywhere (inside string literals and identifiers too, which de-correlated subqueries), rewrote `= true` to `= 1` (an error on PostgreSQL), and built transient copies of the entities from the raw rows.
 
 ---
 
@@ -701,6 +802,9 @@ from pyfly.data.relational.sqlalchemy import Specification
 # Inline specification
 active = Specification(lambda root, q: q.where(root.active == True))
 admin = Specification(lambda root, q: q.where(root.role == "admin"))
+
+# A specification may join: refer to the entity through root
+has_open_order = Specification(lambda root, q: q.join(root.orders).where(Order.status == "OPEN"))
 ```
 
 ### Combining Specifications
@@ -719,13 +823,20 @@ inactive = ~active
 
 # Complex combinations with parentheses
 complex_spec = (active & admin) | ~admin
+
+# Joins stay inside their operand: customers with an open order, or VIPs
+spec = has_open_order | Specification(lambda root, q: q.where(root.tier == "VIP"))
 ```
 
-**How combination works internally:**
+**How combination works:**
 
-- `&` (AND): Chains the two predicates sequentially. SQLAlchemy naturally combines successive `.where()` calls with AND.
-- `|` (OR): Applies each predicate independently, extracts the `whereclause` from each, and combines them using `sqlalchemy.or_()`.
-- `~` (NOT): Applies the predicate, extracts the `whereclause`, and wraps it with `sqlalchemy.not_()`.
+- `&` (AND): chains the two predicates on the query, so the joins of both stay in it (a page of entities that a join repeats is cut from their distinct keys).
+- `|` (OR) and `~` (NOT) combine what their operands *match*, as criteria (`spec.as_criterion(root)`): an operand that only filters the root's own rows is its `WHERE`; one that joins another table is an `EXISTS` over its own statement, on an alias of the root correlated by its primary key. The join never reaches the combined query: no cartesian product, no row dropped because an inner join found nothing for it, each entity once.
+- Each operand is evaluated on a clean `select` of the root, never on the query it is combined into, so the query's own criteria (a `SoftDeleteRepository`'s `deleted_at IS NULL`) are neither copied into an operand nor negated with it, and the SQL grows linearly with the number of operands.
+- An operand that restricts nothing (`FilterUtils.from_dict({})`) is absent, as in Spring: `noop | admin` is `admin`, and `~noop` restricts nothing, on every repository.
+- What an operand of `|` or `~` does besides matching rows (an ordering, a fetch plan, a lock) does not reach the combined query: apply it with `&`, or on the repository call.
+
+> **Before 26.09.08** `|` and `~` rebuilt the query from the whole statement's `WHERE`: a join inside an operand was dropped (a cartesian product, rows matching neither side), and the base query's criteria were copied into every branch.
 
 ### Using Specifications with Repositories
 
@@ -756,12 +867,14 @@ page = await repo.find_all_by_spec_paged(active & admin, pageable)
 | `gte(field, value)`               | `field >= value`              | field, value   |
 | `lt(field, value)`                | `field < value`               | field, value   |
 | `lte(field, value)`               | `field <= value`              | field, value   |
-| `like(field, pattern)`            | `field LIKE pattern`          | field, pattern |
-| `contains(field, value)`          | `field LIKE '%value%'`        | field, value   |
+| `like(field, pattern)`            | `field LIKE pattern` (the pattern's wildcards) | field, pattern |
+| `contains(field, value)`          | `field LIKE '%value%' ESCAPE '/'` (the value as it is) | field, value   |
 | `in_list(field, values)`          | `field IN (values)`           | field, list    |
 | `is_null(field)`                  | `field IS NULL`               | field          |
 | `is_not_null(field)`              | `field IS NOT NULL`           | field          |
 | `between(field, low, high)`       | `field BETWEEN low AND high`  | field, low, high|
+
+Every field name is validated when the specification is applied, against the entity: its columns, synonyms and hybrid properties, its relationships to one entity (`FilterOperator.eq("owner", user)` compares with an instance, or `None`), and its composites (`FilterOperator.eq("location", Point(1, 2))`, with `neq`, `is_null` and `is_not_null`; `neq` is the negation of `eq`, and `None` means every column null; any other operator on a composite raises `InvalidPropertyError`). Anything else (a typo, a Python `@property`, a private or dunder name, a name with `$`) raises `InvalidPropertyError`, which the web layer answers with 400, so filters taken from a request never reach `getattr`.
 
 ### Composing Filters
 
@@ -788,7 +901,7 @@ results = await repo.find_all_by_spec(final_spec)
 
 ## FilterUtils: Query by Example
 
-> **Commons port:** `FilterUtils` extends the `BaseFilterUtils` ABC from `pyfly.data.filter`. The `by()`, `from_dict()`, and `from_example()` algorithms are inherited from the base class — `FilterUtils` only implements the adapter-specific hooks `_create_eq()` and `_create_noop()`. See the [BaseFilterUtils Port](data.md#basefilterutils-port) section in the Data Commons guide.
+> **Commons port:** `FilterUtils` extends the `BaseFilterUtils` ABC from `pyfly.data.filter`. The `by()`, `from_dict()`, and `from_example()` algorithms are inherited from the base class — `FilterUtils` implements the adapter-specific hooks `_create_eq()`, `_create_noop()` and `_example_values()` (how an entity probe is read). See the [BaseFilterUtils Port](data.md#basefilterutils-port) section in the Data Commons guide.
 
 `FilterUtils` generates `Specification` objects from various input formats, providing a Pythonic take on Spring Data's Query by Example pattern.
 
@@ -804,6 +917,10 @@ filters = {"role": "admin", "name": None, "active": True}
 spec = FilterUtils.from_dict(filters)
 # Produces: role = 'admin' AND active = True (name is skipped)
 
+# From an example entity (Spring's Example.of(entity))
+spec = FilterUtils.from_example(User(role="admin"))
+# Produces: role = 'admin'
+
 # From an example object (dataclass or plain object)
 # Non-None fields become equality predicates
 from dataclasses import dataclass
@@ -818,13 +935,15 @@ spec = FilterUtils.from_example(example)
 # Produces: role = 'admin' (active is None, so skipped)
 ```
 
+An **entity probe** contributes the mapped column attributes it holds (set on a new instance, or loaded) that are not `None`, by attribute name: a loaded entity therefore matches on its key and every loaded column, as Spring's `Example.of(entity)` does. Relationships and attributes that are not loaded are left out. Any other probe contributes its dataclass fields or its public attributes (a name with a leading underscore is not a field). The names are validated as `FilterOperator`'s are.
+
 **FilterUtils methods:**
 
 | Method                    | Input                | Behavior                                    |
 |---------------------------|----------------------|---------------------------------------------|
 | `by(**kwargs)`            | Keyword arguments    | All eq, ANDed together                      |
 | `from_dict(filters)`      | `dict[str, Any]`     | All eq, ANDed; `None` values skipped        |
-| `from_example(example)`   | Dataclass or object  | Non-`None` fields become eq predicates      |
+| `from_example(example)`   | Entity, dataclass or object | Non-`None` fields become eq predicates |
 
 ---
 
@@ -2462,20 +2581,32 @@ The `after_init(bean, bean_name)` method:
 
 1. Checks if the bean is an instance of `Repository`. If not, it is returned unchanged.
 2. Gets the entity type from `bean._model`.
-3. Iterates over all attributes defined on the bean's class (not inherited from `Repository`).
-4. For `@query`-decorated methods: compiles them via `QueryExecutor.compile_query_method()` and replaces the stub with a wrapper that runs on `bean._session`. Call them with keyword arguments.
-5. For derived query methods (`find_by_*`, `count_by_*`, `exists_by_*`, `delete_by_*`): checks if the method is a stub, parses the method name via `QueryMethodParser.parse()`, compiles it via `QueryMethodCompiler.compile()`, and replaces the stub with a wrapper.
-6. Every compiled wrapper is a repository operation like the inherited methods: it joins the current unit of work or runs in an auto unit (a read unit for `find_by_`, `count_by_`, `exists_by_` and `SELECT` queries, a write unit otherwise).
+3. Walks the repository class's MRO up to the framework's repository classes: the methods the class declares, and those it inherits from an intermediate base or a mixin (the most derived definition of a name wins).
+4. For `@query`-decorated methods: compiles them via `QueryExecutor.compile_query_method()` and replaces the stub with a wrapper that runs on `bean._session`.
+5. For derived query methods (`find_by_*`, `count_by_*`, `exists_by_*`, `delete_by_*`) whose body is a stub: parses the method name against the entity's properties via `QueryMethodParser.parse(name, properties=...)`, compiles it via `QueryMethodCompiler.compile()` (once per repository class), and replaces the stub with a wrapper.
+6. Every compiled wrapper is a repository operation like the inherited methods: it joins the current unit of work or runs in an auto unit (a read unit for `find_by_`, `count_by_`, `exists_by_` and `SELECT` queries that change nothing, a write unit for `delete_by_`, `@modifying` statements and any other statement), raises the kernel's translated persistence exceptions, and takes its arguments by position or by keyword.
 7. Binds the repository to the application context's transaction managers, so two contexts in one process never share units.
+
+A method that cannot be implemented as declared (a property the entity does not have, parameters that do not match the name or the query, an unsupported return type, a changing statement without `@modifying`) raises `InvalidQueryMethodError` here, so the context fails to start.
 
 ### Stub Detection
 
-A method is considered a stub when its code object contains no meaningful constants beyond `None` and `Ellipsis`. This covers both forms:
+A derived-query method is implemented only when its body is a **stub**, recognized by the shape of its body alone (`pyfly.data.post_processor.is_stub`): an optional docstring, then nothing else, `...`, `pass`, or `raise NotImplementedError` (bare, called, or with a literal message):
 
 ```python
 async def find_by_status(self, status: str) -> list[Order]: ...    # Ellipsis stub
 async def find_by_status(self, status: str) -> list[Order]: pass   # Pass stub
+
+async def find_by_status(self, status: str) -> list[Order]:
+    """Orders in a status."""                                       # Docstring-only stub
+
+async def find_by_status(self, status: str) -> list[Order]:
+    raise NotImplementedError                                       # Raise stub
 ```
+
+Any other body is a hand-written implementation and is never replaced, however little it holds: a case-insensitive lookup, a join, a call to another method, a hand-written soft delete named `delete_by_*`. The shape is compared with reference stubs compiled by the running interpreter, so it does not depend on the Python version.
+
+> **Before 26.09.08** a body was a stub when its code held no literal constant, so hand-written bodies built from names, attributes and positional calls were silently replaced by a derived query (a hand-written soft delete became a physical `DELETE`), and stubs declared on an intermediate base class were never compiled.
 
 Register the post-processor in your application context:
 
@@ -2489,16 +2620,16 @@ context.register_post_processor(RepositoryBeanPostProcessor())
 
 ## QueryMethodCompiler
 
-The SQLAlchemy `QueryMethodCompiler` implements the [`QueryMethodCompilerPort`](data.md#querymethodcompilerport) protocol. It takes `ParsedQuery` objects produced by the shared `QueryMethodParser` and compiles them into SQLAlchemy column expressions.
+The SQLAlchemy `QueryMethodCompiler` implements the [`QueryMethodCompilerPort`](data.md#querymethodcompilerport) protocol. It takes `ParsedQuery` objects produced by the shared `QueryMethodParser` and compiles them into a `DerivedQuery`, whose statement is built once per shape (see [Statements Built Once](#statements-built-once)).
 
 | Prefix       | Generated Query Pattern                             |
 |--------------|-----------------------------------------------------|
-| `find_by`    | `SELECT entity WHERE ... ORDER BY ...`              |
-| `count_by`   | `SELECT COUNT(*) FROM entity WHERE ...`             |
-| `exists_by`  | `SELECT COUNT(*) FROM entity WHERE ... > 0`         |
-| `delete_by`  | `DELETE FROM entity WHERE ...` (returns `rowcount`) |
+| `find_by`    | `SELECT entity WHERE ... ORDER BY ...` (the projection's columns for a projection; `LIMIT 2` for one result) |
+| `count_by`   | `SELECT count(*) FROM entity WHERE ...`             |
+| `exists_by`  | `SELECT 1 FROM entity WHERE ... LIMIT 1`            |
+| `delete_by`  | one bulk `DELETE FROM entity WHERE ...`, the matching entities deleted through the ORM, or, on a `SoftDeleteRepository`, the soft-delete `UPDATE` of the live rows that match |
 
-The compiler builds SQLAlchemy column expressions from each `FieldPredicate`, combines them using the connectors, and applies ORDER BY clauses from `OrderClause` objects.
+The compiler builds the `WHERE` as an `OR` of `AND` groups (`ParsedQuery.groups`), reads fields through the entity's properties, and applies the ORDER BY clauses from `OrderClause` objects; `compile(parsed, entity, return_type=..., repository=...)` takes the return annotation and the repository whose read criteria, fetch plan (`__load__`) and soft delete apply.
 
 ---
 

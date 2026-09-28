@@ -15,16 +15,33 @@
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Optional, Protocol
+
 import pytest
 from sqlalchemy import Integer, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.data.page import Page, Slice
+from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.projection import projection
 from pyfly.data.query_parser import (
+    ElementKind,
+    FieldPredicate,
+    InvalidQueryMethodError,
+    ParsedQuery,
     QueryMethodParser,
+    ResultKind,
+    ResultShape,
+    is_special_parameter,
+    result_shape,
 )
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity for compiler tests
@@ -49,8 +66,10 @@ class Product(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -280,6 +299,198 @@ class TestParserEdgeCases:
         assert result.predicates[1].field_name == "status"
         assert result.predicates[1].operator == "eq"
         assert result.connectors == ["and"]
+
+
+class TestParserPrecedence:
+    """``and`` binds tighter than ``or`` (Spring's PartTree), whether or not the parse knows the properties."""
+
+    @pytest.mark.parametrize("properties", [None, {"owner", "tag", "balance"}])
+    def test_or_splits_before_and(self, parser: QueryMethodParser, properties: set[str] | None):
+        result = parser.parse("find_by_owner_or_tag_and_balance", properties=properties)
+        assert [[p.field_name for p in group] for group in result.groups] == [["owner"], ["tag", "balance"]]
+
+    @pytest.mark.parametrize("properties", [None, {"owner", "tag", "balance"}])
+    def test_and_groups_on_both_sides_of_or(self, parser: QueryMethodParser, properties: set[str] | None):
+        result = parser.parse("find_by_owner_and_tag_or_owner_and_balance", properties=properties)
+        assert [[p.field_name for p in group] for group in result.groups] == [["owner", "tag"], ["owner", "balance"]]
+
+    def test_groups_of_a_hand_built_parsed_query(self):
+        parsed = ParsedQuery(
+            prefix="find_by",
+            predicates=[FieldPredicate("a"), FieldPredicate("b"), FieldPredicate("c"), FieldPredicate("d")],
+            connectors=["and", "or", "and"],
+        )
+        assert [[p.field_name for p in group] for group in parsed.groups] == [["a", "b"], ["c", "d"]]
+        assert ParsedQuery(prefix="find_by").groups == []
+
+    def test_argument_count_follows_the_operators(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_age_between_and_email_is_null_and_role_in")
+        assert result.argument_count == 3
+
+
+PROPERTIES = frozenset(
+    {
+        "name",
+        "status",
+        "role",
+        "email",
+        "age",
+        "active",
+        "logged_in",
+        "opt_in",
+        "terms_and_conditions_accepted",
+        "order",
+        "position",
+        "created_at",
+    }
+)
+
+
+class TestParserAgainstProperties:
+    """With the entity's properties, the names decide how the method name splits, and typos fail at once."""
+
+    def test_a_property_ending_in_an_operator_word_is_read_whole(self, parser: QueryMethodParser):
+        for name in ("logged_in", "opt_in"):
+            result = parser.parse(f"find_by_{name}", properties=PROPERTIES)
+            assert [(p.field_name, p.operator) for p in result.predicates] == [(name, "eq")]
+
+    def test_a_property_holding_a_connector_is_read_whole(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_terms_and_conditions_accepted", properties=PROPERTIES)
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("terms_and_conditions_accepted", "eq")]
+        assert result.connectors == []
+
+    def test_an_operator_after_such_a_property(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_logged_in_in_and_opt_in_not", properties=PROPERTIES)
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("logged_in", "in"), ("opt_in", "not")]
+
+    def test_an_unknown_property_fails_naming_it(self, parser: QueryMethodParser):
+        with pytest.raises(InvalidQueryMethodError, match="'nmae' names no property"):
+            parser.parse("find_by_nmae", properties=PROPERTIES)
+
+    def test_an_unknown_order_property_fails(self, parser: QueryMethodParser):
+        with pytest.raises(InvalidQueryMethodError, match="order_by_nmae"):
+            parser.parse("find_by_name_order_by_nmae", properties=PROPERTIES)
+
+    def test_a_property_named_order_before_order_by(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_order_order_by_position_desc", properties=PROPERTIES)
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("order", "eq")]
+        assert [(o.field_name, o.direction) for o in result.order_clauses] == [("position", "desc")]
+
+    def test_order_by_without_criteria(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_order_by_created_at_desc_name", properties=PROPERTIES)
+        assert result.predicates == []
+        assert [(o.field_name, o.direction) for o in result.order_clauses] == [("created_at", "desc"), ("name", "asc")]
+
+    @pytest.mark.parametrize(
+        ("suffix", "operator"),
+        [
+            ("", "eq"),
+            ("_is", "eq"),
+            ("_equals", "eq"),
+            ("_is_not", "not"),
+            ("_not", "not"),
+            ("_after", "gt"),
+            ("_is_before", "lt"),
+            ("_greater_than_equal", "gte"),
+            ("_is_less_than", "lt"),
+            ("_is_between", "between"),
+            ("_null", "is_null"),
+            ("_is_null", "is_null"),
+            ("_is_not_null", "is_not_null"),
+            ("_not_null", "is_not_null"),
+            ("_like", "like"),
+            ("_not_like", "not_like"),
+            ("_starting_with", "starting_with"),
+            ("_starts_with", "starting_with"),
+            ("_ending_with", "ending_with"),
+            ("_is_containing", "containing"),
+            ("_contains", "containing"),
+            ("_not_containing", "not_containing"),
+            ("_in", "in"),
+            ("_is_not_in", "not_in"),
+        ],
+    )
+    def test_keywords(self, parser: QueryMethodParser, suffix: str, operator: str):
+        result = parser.parse(f"find_by_name{suffix}", properties=PROPERTIES)
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("name", operator)]
+
+    def test_boolean_keywords_take_no_argument(self, parser: QueryMethodParser):
+        result = parser.parse("count_by_active_true_or_active_is_false", properties=PROPERTIES)
+        assert [(p.field_name, p.operator) for p in result.predicates] == [
+            ("active", "is_true"),
+            ("active", "is_false"),
+        ]
+        assert result.argument_count == 0
+
+    def test_ignore_case(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_name_starting_with_ignore_case_and_email_ignoring_case", properties=PROPERTIES)
+        assert [(p.field_name, p.operator, p.ignore_case) for p in result.predicates] == [
+            ("name", "starting_with", True),
+            ("email", "eq", True),
+        ]
+        assert result.all_ignore_case is False
+
+    def test_all_ignore_case(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_name_and_email_all_ignore_case_order_by_name", properties=PROPERTIES)
+        assert [p.field_name for p in result.predicates] == ["name", "email"]
+        assert result.all_ignore_case is True
+        assert [o.field_name for o in result.order_clauses] == ["name"]
+
+    def test_without_properties_the_original_keywords_apply(self, parser: QueryMethodParser):
+        result = parser.parse("find_by_name_starting_with")
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("name_starting_with", "eq")]
+        result = parser.parse("find_by_logged_in")
+        assert [(p.field_name, p.operator) for p in result.predicates] == [("logged", "in")]
+
+
+class TestResultShape:
+    """Return annotations become result shapes."""
+
+    def test_containers(self):
+        assert result_shape(list[Product], Product) == ResultShape(ResultKind.LIST, ElementKind.ENTITY, Product)
+        assert result_shape(Sequence[Product], Product).kind is ResultKind.LIST
+        assert result_shape(Page[Product], Product) == ResultShape(ResultKind.PAGE, ElementKind.ENTITY, Product)
+        assert result_shape(Slice[Product], Product).kind is ResultKind.SLICE
+        assert result_shape(list, Product) == ResultShape(ResultKind.LIST, ElementKind.ENTITY, Product)
+
+    def test_single_results(self):
+        assert result_shape(Product | None, Product) == ResultShape(ResultKind.ONE, ElementKind.ENTITY, Product)
+        assert result_shape(Optional[Product], Product).kind is ResultKind.ONE  # noqa: UP045
+        assert result_shape(Product, Product).kind is ResultKind.ONE
+        assert result_shape(None, Product) == ResultShape(ResultKind.NONE, ElementKind.ENTITY, None)
+
+    def test_elements(self):
+        assert result_shape(int, Product) == ResultShape(ResultKind.ONE, ElementKind.SCALAR, int)
+        assert result_shape(list[str], Product) == ResultShape(ResultKind.LIST, ElementKind.SCALAR, str)
+        assert result_shape(list[tuple[int, str]], Product).element is ElementKind.ROW
+        assert result_shape(list[dict[str, Any]], Product).element is ElementKind.MAPPING
+        assert result_shape(list[ProductView], Product) == ResultShape(
+            ResultKind.LIST, ElementKind.PROJECTION, ProductView
+        )
+        assert result_shape(list[ProductRow], Product) == ResultShape(ResultKind.LIST, ElementKind.OBJECT, ProductRow)
+        assert result_shape(list[Any], Product).element is ElementKind.ENTITY
+
+    def test_a_union_of_two_types_is_refused(self):
+        with pytest.raises(InvalidQueryMethodError):
+            result_shape(int | str, Product)
+
+
+class TestSpecialParameters:
+    def test_pageable_and_sort_are_special(self):
+        assert is_special_parameter(Pageable)
+        assert is_special_parameter(Sort | None)
+        assert not is_special_parameter(str)
+        assert not is_special_parameter(int | None)
+
+
+@projection
+class ProductView(Protocol):
+    name: str
+
+
+@dataclasses.dataclass
+class ProductRow:
+    name: str
 
 
 # ===========================================================================
