@@ -433,6 +433,34 @@ async def test_a_store_first_used_inside_a_unit_that_has_written_joins_it(
         await registry.close()
 
 
+@pytest.mark.backends("sqlite-file")
+async def test_a_store_first_used_inside_a_sqlite_unit_before_its_tables_exist_says_to_start_it_first(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Final review of WP08: on SQLite a store first used inside a unit that has written cannot create its tables
+    (the unit holds the write lock until it ends), a documented limitation; the error said the tables were missing
+    and pointed at a migration. It now says to start the store before the unit."""
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry(relational_backend.config({"pyfly.data.relational.sqlite.busy-timeout": "50"}))
+    try:
+        datasource = registry.primary
+        async with datasource.engine.begin() as connection:
+            await connection.run_sync(orders.create, checkfirst=True)
+        store = SqlAlchemyEventStore(datasource, position_strategy=_STRATEGY)  # built by hand; no tables yet
+        with pytest.raises(FrameworkSchemaError, match="start the store before the unit"):
+            async with TransactionTemplate(resolve_manager(datasource)).transaction():
+                async with infrastructure_unit(datasource) as session:
+                    await session.execute(insert(orders).values(id="order-1", name="first"))
+                await store.append("order-1", "Order", [_envelope("OrderPlaced")], expected_version=0)
+
+        await store.start()  # outside a unit it creates them
+        await store.append("order-1", "Order", [_envelope("OrderPlaced")], expected_version=0)
+        assert _types(await _drain(store)) == ["OrderPlaced"]
+    finally:
+        await registry.close()
+
+
 @pytest.mark.backends(PG, MYSQL, MARIADB)
 async def test_business_units_that_append_do_not_wait_for_or_fail_on_one_another(
     relational_backend: RelationalBackend,

@@ -282,7 +282,9 @@ out in `pyfly_event_store_head` (one row per event table), both declared on the 
 `framework_metadata` in Alembic's `target_metadata`). The context starts the store: it creates the tables when
 `pyfly.data.relational.ddl-auto` allows it (`create`, `create-drop`, `update`) and otherwise only checks them,
 failing the startup with a `FrameworkSchemaError` that names what is missing. A store built by hand starts on
-first use, or with `await store.start()`.
+first use, or with `await store.start()`. On SQLite a store whose tables do not exist yet cannot create them when
+it is first used inside a unit of work that holds the write lock (until the unit ends): start it before the unit,
+as the `FrameworkSchemaError` then says.
 
 | Column | Type | |
 |--------|------|-|

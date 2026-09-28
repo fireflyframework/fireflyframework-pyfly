@@ -342,12 +342,22 @@ class SqlAlchemyEventStore:
 
     async def _start(self, *, create: bool) -> None:
         from pyfly.data.relational.dialect_customizers import uses_sqlite_begin_recipe
-        from pyfly.data.relational.framework_schema import ensure_tables
+        from pyfly.data.relational.framework_schema import FrameworkSchemaError, ensure_tables
         from pyfly.data.relational.upsert import backend_name
 
+        inside = is_transaction_active(resolve_manager(self._target).datasource)
         # Setting up is never part of a caller's transaction, even when the first append starts the store.
         with outside_transaction():
-            await ensure_tables(self._target, self._events, self._head, create=create)
+            try:
+                await ensure_tables(self._target, self._events, self._head, create=create)
+            except FrameworkSchemaError as error:
+                if not (inside and _locked_out(error.__cause__)):
+                    raise
+                raise FrameworkSchemaError(
+                    f"{error} The event store was first used inside a unit of work that holds SQLite's write lock "
+                    "until it ends, so it could not create what is missing: start the store before the unit (the "
+                    "application context starts it; call await store.start() on a store built by hand)."
+                ) from error
             engine = self.engine
             self._backend = backend_name(engine)
             self._numbering_begins_immediate = self._backend == "sqlite" and not uses_sqlite_begin_recipe(engine)
@@ -917,6 +927,14 @@ def _concurrent_append(error: BaseException) -> bool:
     from pyfly.kernel.exceptions import DuplicateKeyException
 
     return isinstance(translate_exception(error), (DuplicateKeyException, OptimisticLockingFailureException))
+
+
+def _locked_out(error: BaseException | None) -> bool:
+    """Whether *error* is SQLite's ``database is locked``: another connection held the write lock past
+    ``busy_timeout``."""
+    from sqlalchemy.exc import DBAPIError
+
+    return isinstance(error, DBAPIError) and "database is locked" in str(error.orig)
 
 
 def _database_now(backend: str) -> ColumnElement[datetime] | datetime:
