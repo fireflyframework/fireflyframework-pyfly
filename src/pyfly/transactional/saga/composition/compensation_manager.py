@@ -11,13 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Manages cross-saga compensation within a composition."""
+"""Manages cross-saga compensation within a composition.
+
+The compensations run as the saga engine runs a saga's own: in a task of their own with the transaction
+state cleared (:func:`~pyfly.data.transaction.detached`), to completion even when the caller is cancelled
+meanwhile.
+Each saga of a composition committed its steps on its own, never in the caller's unit of work, so its
+compensation commits on its own too: a caller's rollback must not take the compensation with it while the
+saga's effects stay.
+
+Once they ran, the persisted state of each saga that had completed is updated where the engine records a
+saga's state (in the caller's task, as ``mark_completed`` is): its compensated steps are recorded
+``COMPENSATED`` (``update_step_status``) and the saga is marked failed (``mark_completed(..., False)``), since
+its effects did not stay.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pyfly.data.transaction import detached
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.saga.core.context import SagaContext
 from pyfly.transactional.shared.types import StepStatus
 
@@ -32,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class CompensationManager:
-    """Compensates successfully completed sagas after a composition failure.
+    """Compensates successfully completed sagas after a composition failure (see the module documentation).
 
     Compensation is executed in reverse completion order so that the most
     recently completed saga is compensated first.  The manager delegates to
@@ -46,7 +62,10 @@ class CompensationManager:
         ctx: CompositionContext,
         saga_engine: Any,
     ) -> None:
-        """Compensate completed sagas in reverse order.
+        """Compensate completed sagas in reverse order, then record their persisted state.
+
+        The compensations run detached and shielded (see the module documentation); a cancellation of the
+        calling task meanwhile is re-raised once they ran and the persisted states are updated.
 
         Parameters
         ----------
@@ -60,11 +79,37 @@ class CompensationManager:
             recorded.
         saga_engine:
             The saga engine used to trigger compensation.
+
+        Raises
+        ------
+        asyncio.CancelledError
+            The caller was cancelled while the compensations ran; they ran to completion first.
         """
         if not completed_sagas:
             return
 
-        # Reverse order: last completed should be compensated first.
+        compensated: dict[str, SagaContext] = {}
+        _result, _error, cancelled = await run_shielded(
+            detached(
+                self._compensate_each(completed_sagas, composition, ctx, saga_engine, compensated),
+                name=f"composition-compensation-{composition.name}",
+            )
+        )
+        _result, _error, recording_cancelled = await run_shielded(
+            self._record_compensated(compensated, ctx, saga_engine)
+        )
+        if cancelled or recording_cancelled:
+            raise asyncio.CancelledError
+
+    async def _compensate_each(
+        self,
+        completed_sagas: list[str],
+        composition: SagaComposition,
+        ctx: CompositionContext,
+        saga_engine: Any,
+        compensated: dict[str, SagaContext],
+    ) -> None:
+        """Compensate each saga, newest first; *compensated* gets the context of each one that had steps to."""
         for saga_name in reversed(completed_sagas):
             logger.info(
                 "Compensating saga '%s' in composition '%s' (correlation_id=%s)",
@@ -86,6 +131,7 @@ class CompensationManager:
                             saga_name,
                             saga_result,
                         )
+                        compensated[saga_name] = saga_ctx
                         await saga_engine._compensator.compensate(
                             policy=composition.compensation_policy,
                             saga_name=saga_name,
@@ -102,6 +148,32 @@ class CompensationManager:
                     exc,
                 )
                 ctx.compensated_sagas.append(saga_name)
+
+    @staticmethod
+    async def _record_compensated(
+        compensated: dict[str, SagaContext],
+        ctx: CompositionContext,
+        saga_engine: Any,
+    ) -> None:
+        """Record the compensated steps of each saga in *compensated*, and mark the saga failed."""
+        persistence = getattr(saga_engine, "_persistence_port", None)
+        if persistence is None:
+            return
+        for saga_name, saga_ctx in compensated.items():
+            try:
+                for step_id, status in saga_ctx.step_statuses.items():
+                    if status == StepStatus.COMPENSATED:
+                        await persistence.update_step_status(saga_ctx.correlation_id, step_id, status.value)
+                saga_result = ctx.saga_results.get(saga_name)
+                if saga_result is not None and saga_result.success:
+                    await persistence.mark_completed(saga_ctx.correlation_id, False)
+            except Exception as exc:  # noqa: BLE001 — the compensation ran; a state that cannot be updated is logged
+                logger.warning(
+                    "Could not record the compensation of saga '%s' (correlation_id=%s): %s",
+                    saga_name,
+                    saga_ctx.correlation_id,
+                    exc,
+                )
 
     @staticmethod
     def _build_saga_context(

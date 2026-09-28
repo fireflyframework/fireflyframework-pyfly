@@ -1079,6 +1079,32 @@ earlier layers and in the failing layer alike. Each saga runs under a
 correlation id of its own, the composition's followed by `:` and the saga's
 name, so a persistence provider keeps the state of each saga apart.
 
+- **Compensation runs on its own.** As a saga's own compensation does, the
+  compensation of a composed saga runs in a task of its own with the
+  transaction state cleared (`pyfly.data.transaction.detached`), to completion
+  even when the caller is cancelled meanwhile: the saga's steps committed on
+  their own, never in the caller's unit, so their compensation commits on its
+  own too, and a caller's `@transactional` that rolls back keeps it. (On a
+  SQLite file the composition's steps cannot run inside a write
+  `@transactional` at all: see [Step Transactions, Failures and
+  Cancellation](#step-transactions-failures-and-cancellation).)
+- **Compensated sagas are persisted as failed.** Each saga the composition
+  compensates has its compensated steps recorded `COMPENSATED`
+  (`update_step_status`) and is marked failed (`mark_completed(..., False)`):
+  its effects did not stay. These updates run where the engine records a
+  saga's state, in the caller's task.
+- **A saga that ends cancelled on its own** (nothing cancelled the
+  composition) failed: the composition fails with an `OrchestrationError` and
+  compensates, as for any other failure.
+- **The caller cancels the composition.** The sagas of the running layer are
+  cancelled and awaited (each compensates its own committed steps), the sagas
+  that completed are compensated, and `CancelledError` is re-raised.
+
+Through 26.09.07 the compensation of a composed saga ran in the caller's task
+(inside the caller's unit of work, rolled back with it), a composed saga the
+composition compensated stayed `COMPLETED`, and a saga that ended cancelled, or
+a cancellation of the composition, skipped the compensation.
+
 ---
 
 ## Persistence

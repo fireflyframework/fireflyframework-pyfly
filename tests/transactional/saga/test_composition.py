@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -23,6 +24,9 @@ import pytest
 
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
+from pyfly.data.transaction import is_transaction_active, track_commits
+from pyfly.data.transaction.context import COMMIT_TRACKERS
+from pyfly.transactional.core.exceptions import OrchestrationError
 from pyfly.transactional.saga.annotations import saga, saga_step
 from pyfly.transactional.saga.composition.compensation_manager import (
     CompensationManager,
@@ -727,3 +731,150 @@ class TestACompositionLayerThatFailsInTheMiddle:
         assert "saga b exploded" in str(ctx.error)
         assert set(ctx.saga_results) == {"a", "c"}
         assert compensated == ["c", "a"]
+
+
+# ── Cancellation: a saga that ends cancelled on its own; the composition cancelled ─────────────────────────────
+
+
+class _Recording(CompensationManager):
+    """Records the sagas it is asked to compensate, newest first; *gate* holds the compensation until it is set."""
+
+    def __init__(self, gate: asyncio.Event | None = None) -> None:
+        self.compensated: list[str] = []
+        self.started = asyncio.Event()
+        self.finished = False
+        self._gate = gate
+
+    async def compensate_completed(
+        self, completed_sagas: list[str], composition: Any, ctx: Any, saga_engine: Any
+    ) -> None:
+        self.compensated.extend(reversed(completed_sagas))
+        self.started.set()
+        if self._gate is not None:
+            await self._gate.wait()
+        self.finished = True
+
+
+def _layers(*layers: tuple[str, ...]) -> SagaComposition:
+    """A composition whose sagas of each layer depend on every saga of the layer before."""
+    builder = SagaCompositionBuilder("cancellable")
+    previous: tuple[str, ...] = ()
+    for layer in layers:
+        for name in layer:
+            builder = builder.saga(name).depends_on(*previous).add()
+        previous = layer
+    return builder.build()
+
+
+class TestACompositionThatIsCancelled:
+    @pytest.mark.anyio
+    async def test_a_saga_that_ends_cancelled_on_its_own_fails_the_composition_and_its_siblings_are_compensated(
+        self,
+    ) -> None:
+        """The compositor used to catch ``Exception`` only: the saga's ``CancelledError`` escaped it, and the sagas
+        that had completed were never compensated."""
+
+        async def execute(saga_name: str, **kwargs: Any) -> SagaResult:
+            if saga_name == "b":
+                raise asyncio.CancelledError  # it awaited something that was cancelled; nothing cancelled it
+            return _make_saga_result(saga_name)
+
+        engine = AsyncMock()
+        engine.execute = AsyncMock(side_effect=execute)
+        manager = _Recording()
+
+        ctx = await SagaCompositor(engine, manager).execute(_layers(("a", "b", "c")))
+
+        assert isinstance(ctx.error, OrchestrationError)
+        assert "'b' ended cancelled" in str(ctx.error)
+        assert set(ctx.saga_results) == {"a", "c"}
+        assert manager.compensated == ["c", "a"]
+
+    @pytest.mark.anyio
+    async def test_a_composition_cancelled_mid_layer_compensates_what_completed_then_raises(self) -> None:
+        """A cancellation of the compositor used to escape ``asyncio.gather`` with no compensation at all."""
+        running = asyncio.Event()
+        stopped: list[str] = []
+
+        async def execute(saga_name: str, **kwargs: Any) -> SagaResult:
+            if saga_name == "c":
+                running.set()
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    stopped.append(saga_name)  # the saga compensates its own steps, then re-raises
+                    raise
+            return _make_saga_result(saga_name)
+
+        engine = AsyncMock()
+        engine.execute = AsyncMock(side_effect=execute)
+        manager = _Recording()
+        task = asyncio.ensure_future(SagaCompositor(engine, manager).execute(_layers(("a",), ("b", "c"))))
+        async with asyncio.timeout(5):
+            await running.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(5):
+                await task
+
+        assert stopped == ["c"]  # the running saga was cancelled and awaited
+        assert manager.compensated == ["b", "a"]  # the sagas that completed: the earlier layer's and b
+        assert manager.finished
+
+    @pytest.mark.anyio
+    async def test_a_cancellation_during_the_compensation_lets_it_run_to_completion(self) -> None:
+        async def execute(saga_name: str, **kwargs: Any) -> SagaResult:
+            return _make_saga_result(saga_name, success=saga_name != "b")
+
+        engine = AsyncMock()
+        engine.execute = AsyncMock(side_effect=execute)
+        gate = asyncio.Event()
+        manager = _Recording(gate)
+        task = asyncio.ensure_future(SagaCompositor(engine, manager).execute(_layers(("a",), ("b",))))
+        async with asyncio.timeout(5):
+            await manager.started.wait()
+
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()  # the compensation holds the cancellation until it is done
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(5):
+                await task
+        assert manager.finished
+        assert manager.compensated == ["b", "a"]
+
+
+class TestCompensationRunsOnItsOwn:
+    @pytest.mark.anyio
+    async def test_each_compensation_runs_detached_from_the_caller_and_its_commit_tracking(
+        self, saga_engine: SagaEngine
+    ) -> None:
+        """A composition's compensation used to run in the caller's task: inside the caller's unit of work it joined
+        that unit, and the caller's rollback took it with it while the saga's committed effects stayed."""
+        seen: list[tuple[bool, tuple[Any, ...]]] = []
+        compensate = saga_engine._compensator.compensate
+
+        async def spy(**kwargs: Any) -> None:
+            seen.append((is_transaction_active(), COMMIT_TRACKERS.get()))
+            await compensate(**kwargs)
+
+        saga_engine._compensator.compensate = spy  # type: ignore[method-assign]
+        with track_commits():  # the caller tracks its commits
+            ctx = await SagaCompositor(saga_engine).execute(_one_layer())
+
+        assert ctx.error is not None
+        assert seen and all(state == (False, ()) for state in seen)
+
+    @pytest.mark.anyio
+    async def test_the_compensated_sagas_are_persisted_as_failed(self, saga_engine: SagaEngine) -> None:
+        ctx = await SagaCompositor(saga_engine).execute(_one_layer())
+
+        port = saga_engine._persistence_port
+        assert port is not None
+        for name, step in (("w4-a-reserve-stock", "reserve"), ("w4-c-book-courier", "book")):
+            state = await port.get_state(ctx.saga_results[name].correlation_id)
+            assert state is not None
+            assert (state["status"], state["successful"]) == ("FAILED", False)
+            assert state["steps"] == {step: {"status": "COMPENSATED"}}

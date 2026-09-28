@@ -20,6 +20,9 @@ import logging
 import uuid
 from typing import Any
 
+from pyfly.data.transaction.template import run_shielded
+from pyfly.transactional.core.backpressure import cancel_and_wait, retrieve_outcomes
+from pyfly.transactional.core.exceptions import OrchestrationError
 from pyfly.transactional.saga.composition.compensation_manager import (
     CompensationManager,
 )
@@ -36,12 +39,24 @@ logger = logging.getLogger(__name__)
 class SagaCompositor:
     """Executes a :class:`SagaComposition` using layer-based ordering.
 
-    Sagas in the same DAG layer run concurrently via :func:`asyncio.gather`.
-    On failure the compositor compensates every saga that completed: those of
-    the earlier layers, and those of the failing layer, whichever of its
-    sagas failed. Each saga runs under a correlation id of its own,
-    ``<composition correlation id>:<saga name>`` (:meth:`saga_correlation_id`),
-    so a persistence provider keeps each saga's state apart.
+    Sagas in the same DAG layer run concurrently, each in a task of its own,
+    and the compositor waits for all of them. On failure the compositor
+    compensates every saga that completed: those of the earlier layers, and
+    those of the failing layer, whichever of its sagas failed. Each saga runs
+    under a correlation id of its own, ``<composition correlation id>:<saga
+    name>`` (:meth:`saga_correlation_id`), so a persistence provider keeps
+    each saga's state apart.
+
+    - A saga that ends cancelled although nothing cancelled the composition
+      (it awaited something that was cancelled) failed: the composition fails
+      with an :class:`~pyfly.transactional.core.exceptions.OrchestrationError`
+      and compensates, as for any other failure.
+    - When the caller cancels the composition, the sagas of the running layer
+      are cancelled and awaited (each compensates its own committed steps),
+      the sagas that completed are compensated, and ``CancelledError`` is
+      re-raised. The compensation runs to completion whatever happens to the
+      calling task, and in a task of its own with the transaction state
+      cleared (see :class:`CompensationManager`).
 
     Parameters
     ----------
@@ -106,55 +121,102 @@ class SagaCompositor:
             len(layers),
         )
 
+        cancellation: asyncio.CancelledError | None = None
         try:
             for layer in layers:
-                results = await asyncio.gather(
-                    *(
-                        self._execute_saga(
-                            saga_name=saga_name,
-                            composition=composition,
-                            ctx=ctx,
-                            initial_input=initial_input,
-                            headers=headers,
-                        )
-                        for saga_name in layer
-                    ),
-                    return_exceptions=True,
-                )
-
-                # Record every saga of the layer before failing on the first one that failed: a saga that
-                # completed after it in the same layer must be compensated too.
-                failure: BaseException | None = None
-                for saga_name, result in zip(layer, results, strict=True):
-                    if isinstance(result, BaseException):
-                        failure = failure or result
-                        continue
-
-                    ctx.saga_results[saga_name] = result
-                    completed_sagas.append(saga_name)
-
-                    if not result.success and failure is None:
-                        failure = RuntimeError(f"Saga '{saga_name}' failed in composition '{composition.name}'")
-                if failure is not None:
-                    raise failure
-
+                await self._run_layer(layer, composition, ctx, initial_input, headers, completed_sagas)
+        except asyncio.CancelledError as exc:
+            # The caller cancelled the composition: every saga of the running layer has ended. Undo the ones
+            # that completed, then let the cancellation propagate.
+            cancellation = exc
         except Exception as exc:
             ctx.error = exc
-            logger.warning(
-                "Composition '%s' (correlation_id=%s) failed: %s. Compensating %d completed saga(s).",
-                composition.name,
-                ctx.correlation_id,
-                exc,
-                len(completed_sagas),
-            )
-            await self._compensation_manager.compensate_completed(
+
+        if ctx.error is None and cancellation is None:
+            return ctx
+
+        logger.warning(
+            "Composition '%s' (correlation_id=%s) %s. Compensating %d completed saga(s).",
+            composition.name,
+            ctx.correlation_id,
+            "was cancelled" if cancellation is not None else f"failed: {ctx.error}",
+            len(completed_sagas),
+        )
+        _result, error, cancelled = await run_shielded(
+            self._compensation_manager.compensate_completed(
                 completed_sagas=completed_sagas,
                 composition=composition,
                 ctx=ctx,
                 saga_engine=self._saga_engine,
             )
-
+        )
+        if cancellation is not None:
+            raise cancellation
+        if cancelled:
+            raise asyncio.CancelledError
+        if error is not None:
+            raise error
         return ctx
+
+    async def _run_layer(
+        self,
+        layer: list[str],
+        composition: SagaComposition,
+        ctx: CompositionContext,
+        initial_input: Any,
+        headers: dict[str, str] | None,
+        completed_sagas: list[str],
+    ) -> None:
+        """Run the sagas of one layer concurrently, record the ones that completed, and raise the first failure.
+
+        Every saga of the layer is recorded before the failure is raised: a saga that completed after the failed
+        one must be compensated too. A cancellation of the caller cancels and awaits the layer's sagas, records
+        the ones that had completed, and propagates.
+        """
+        tasks = {
+            saga_name: asyncio.ensure_future(
+                self._execute_saga(
+                    saga_name=saga_name,
+                    composition=composition,
+                    ctx=ctx,
+                    initial_input=initial_input,
+                    headers=headers,
+                )
+            )
+            for saga_name in layer
+        }
+        try:
+            if tasks:
+                await asyncio.wait(tasks.values())
+        except asyncio.CancelledError:
+            await cancel_and_wait(tasks.values())
+            for saga_name, task in tasks.items():
+                if not task.cancelled() and task.exception() is None:
+                    ctx.saga_results[saga_name] = task.result()
+                    completed_sagas.append(saga_name)
+            raise
+        retrieve_outcomes(tasks.values())
+
+        failure: BaseException | None = None
+        for saga_name, task in tasks.items():
+            if task.cancelled():
+                # Nothing here cancelled it (the composition was not cancelled): the saga failed.
+                failure = failure or OrchestrationError(
+                    f"Saga '{saga_name}' ended cancelled in composition '{composition.name}' although the "
+                    "composition was not cancelled; the saga failed"
+                )
+                continue
+            error = task.exception()
+            if error is not None:
+                failure = failure or error
+                continue
+            result = task.result()
+            ctx.saga_results[saga_name] = result
+            completed_sagas.append(saga_name)
+            if not result.success and failure is None:
+                failure = RuntimeError(f"Saga '{saga_name}' failed in composition '{composition.name}'")
+        if failure is not None:
+            raise failure
 
     async def _execute_saga(
         self,
