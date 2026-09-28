@@ -1101,6 +1101,29 @@ async def test_a_head_row_that_keeps_moving_under_the_numbering_fails_the_read_a
     assert await _head_and_highest(store) == (1, 1)
 
 
+async def test_a_reader_behind_a_full_numbered_page_reads_it_without_numbering(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Final review of WP08: a page read ran a numbering round (the head row locked and written) whenever a
+    committed event had no position, even with a full numbered page after the reader's cursor, so a runner
+    catching up over a numbered history under steady writes took the head row's lock and wrote on every page.
+    The positions follow one another without gaps: a head row at or past the page's end means the page is there."""
+    store = await _store(relational_backend, "head-row")
+    await store.append("numbered", "Order", [_envelope(f"N{index}") for index in range(10)], expected_version=0)
+    assert len(await _drain(store)) == 10
+    await store.append("new", "Order", [_envelope("New")], expected_version=0)  # committed, no position yet
+
+    with StatementCounter(store.engine) as behind:
+        page = await store.stream_all(after_position=2, limit=5)
+    assert [(event.event_type, event.global_position) for event in page] == [(f"N{i}", i + 1) for i in range(2, 7)]
+    assert (behind.count("UPDATE"), behind.count("SELECT")) == (0, 2)  # the probe, the page
+
+    with StatementCounter(store.engine) as at_the_end:
+        tail = await store.stream_all(after_position=8, limit=5)
+    assert [(event.event_type, event.global_position) for event in tail] == [("N8", 9), ("N9", 10), ("New", 11)]
+    assert at_the_end.count("UPDATE") == 2  # the page reaches past the head row: the new event is numbered
+
+
 # The set-based numbering docs/modules/eventsourcing.md gives for a large table of an earlier release.
 _NUMBER_EARLIER_EVENTS = {
     "postgresql": """

@@ -514,10 +514,11 @@ class SqlAlchemyEventStore:
         :class:`EventStore`); inside a unit of work, that unit's own events are not on the stream yet.
 
         With ``head-row`` a read outside a unit of work on the store's datasource first gives the committed events
-        without a position theirs (as many as the page needs). A read inside such a unit numbers nothing: it shows
-        the events a reader outside one has numbered, so a reader that only ever runs inside one (a
-        ``@transactional(read_only=True)`` endpoint) sees new events once another reader, a projection runner or
-        :meth:`last_position`, has numbered them."""
+        without a position theirs (as many as the page needs), unless the page is numbered already (the head row is
+        at or past its end: positions follow one another without gaps), as it is for a reader catching up. A read
+        inside such a unit numbers nothing: it shows the events a reader outside one has numbered, so a reader that
+        only ever runs inside one (a ``@transactional(read_only=True)`` endpoint) sees new events once another
+        reader, a projection runner or :meth:`last_position`, has numbered them."""
         from sqlalchemy import select
 
         _one_cursor(after_position, after_event_id)
@@ -525,9 +526,11 @@ class SqlAlchemyEventStore:
         table = self._events
         manager = resolve_manager(self._target)
         probe = self._numbers_on_read(strategy, manager)
+        # Where the page ends when the head row is past it (with after_event_id, not known before the page is).
+        reach = None if after_event_id is not None else max(after_position or 0, 0) + limit
         while True:
             async with infrastructure_unit(manager, read_only=True) as session:
-                if not (probe and await self._unnumbered(session)):
+                if not (probe and await self._page_to_number(session, reach)):
                     after = max(after_position or 0, 0)
                     if after_event_id is not None:
                         found = (
@@ -608,6 +611,17 @@ class SqlAlchemyEventStore:
         Not from inside a unit of work on the datasource: that unit's own events are not committed, and on
         SQLite its write lock would keep the numbering unit waiting. The read then shows what has a position."""
         return strategy == POSITION_HEAD_ROW and not is_transaction_active(manager.datasource)
+
+    async def _page_to_number(self, session: AsyncSession, reach: int | None) -> bool:
+        """Whether a page read numbers first: a committed event has no position yet, and the page may need it (the
+        head row is below *reach*, where the page ends; ``None``: not known). One statement, the indexed probe."""
+        from sqlalchemy import select
+
+        head, table = self._head, self._events
+        waiting = select(table.c.event_id).where(table.c.global_position.is_(None)).limit(1).scalar_subquery()
+        numbered = select(head.c.position).where(head.c.store == self._table_name).scalar_subquery()
+        found = (await session.execute(select(waiting, numbered))).one()
+        return found[0] is not None and (reach is None or found[1] is None or int(found[1]) < reach)
 
     async def _unnumbered(self, session: AsyncSession) -> bool:
         """Whether a committed event has no global position yet (one indexed probe)."""

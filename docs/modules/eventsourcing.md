@@ -325,7 +325,11 @@ readers skip events. Changing a table's strategy is a migration with every write
   PostgreSQL's). The reader needs write access to the tables, and a read inside
   a unit of work on the store's datasource shows only what is already numbered: a reader that only ever runs in
   one (a `@transactional(read_only=True)` endpoint listing recent events) sees new events once a reader outside
-  one (a projection runner, `last_position()`) has numbered them.
+  one (a projection runner, `last_position()`) has numbered them. What a read costs: one that finds new events to
+  number runs a probe, a numbering unit and the page read, where 26.09.07 ran one `SELECT` that sorted the whole
+  table. On PostgreSQL 17 (in a container on a laptop), reading the stream after appending one event took 4.7 ms
+  against 26.09.07's 1.3 ms with 1 000 events stored, and 5.6 ms against 5.3 ms with 50 000. A reader behind a
+  numbered page (a projection catching up) reads it without numbering.
 - **`xid8`** (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing). An event's position is
   its writer's transaction id times 2^20 plus its place among that transaction's events, set as it is inserted;
   a reader sees only the positions below its snapshot's horizon (`pg_snapshot_xmin(pg_current_snapshot())`).
