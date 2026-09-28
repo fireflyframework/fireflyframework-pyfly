@@ -638,7 +638,9 @@ class MongoOutboxStore:
 
     async def claim(self, group: str, *, limit: int, lease: timedelta, owner: str) -> list[Delivery]:
         """Claim up to *limit* deliveries owed to *group* whose time has come, for *lease* (see the module
-        documentation); returns them in publication order."""
+        documentation); returns them in publication order (none for a *limit* below one)."""
+        if limit <= 0:
+            return []
         now = self._clock()
         until = now + lease
         token = f"{owner}/{uuid.uuid4().hex[:12]}"
@@ -648,10 +650,14 @@ class MongoOutboxStore:
             session = unit.resource
             taken = 0
             for _ in range(_CLAIM_READS):
+                # Past what it read already: with a lease that ends at once, what it took is due again.
+                query: dict[str, Any] = {"consumer_group": group, "available_at": {"$lte": now}}
+                if due:
+                    query["outbox_id"] = {"$nin": list(due)}
                 async with unit.operation():
                     candidates = (
                         await deliveries.find(
-                            {"consumer_group": group, "available_at": {"$lte": now}},
+                            query,
                             {"outbox_id": 1, "available_at": 1, "_id": 0},
                             session=session,
                         )
@@ -899,13 +905,20 @@ class MongoOutboxStore:
     # -- reading --------------------------------------------------------------------------------------------------
 
     async def pending(self, group: str, *, limit: int = 1000) -> list[PendingDelivery]:
-        """The deliveries still owed to *group* (claimed ones included), oldest first."""
+        """The first *limit* deliveries still owed to *group* (claimed ones included), oldest first.
+
+        The page is read from the deliveries' index before their events are looked up, so a delivery whose event
+        is gone (pruned while a backfill owed it to the group; the next claim drops it) is not listed and leaves
+        the page that much shorter."""
+        if limit <= 0:
+            return []
         async with self._unit(read_only=True) as unit, unit.operation():
             rows = await (
                 await self._collection(self._collections.deliveries).aggregate(
                     [
                         {"$match": {"consumer_group": group}},
                         {"$sort": {"outbox_id": 1}},
+                        {"$limit": limit},
                         {
                             "$lookup": {
                                 "from": self._collections.events,
@@ -915,7 +928,6 @@ class MongoOutboxStore:
                             }
                         },
                         {"$unwind": "$event"},
-                        {"$limit": limit},
                     ],
                     session=unit.resource,
                 )
@@ -932,7 +944,9 @@ class MongoOutboxStore:
         ]
 
     async def dead_letters(self, group: str | None = None, *, limit: int = 100) -> list[EdaDeadLetterEntry]:
-        """The dead letters (of *group*, or of every group), most recent first."""
+        """The dead letters (of *group*, or of every group), most recent first (none for a *limit* below one)."""
+        if limit <= 0:
+            return []
         query: dict[str, Any] = {} if group is None else {"consumer_group": group}
         async with self._unit(read_only=True) as unit, unit.operation():
             rows = (

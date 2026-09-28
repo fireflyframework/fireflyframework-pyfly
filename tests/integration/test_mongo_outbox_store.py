@@ -18,7 +18,8 @@
 - a rolled-back append leaves no event, and a unit that commits late (a lower id behind delivered higher ones) is
   still delivered: there is no id cursor to skip it;
 - a relay process killed in the middle of its lease leaves its delivery to be claimed again once the lease ends;
-- two relays on two clients split a group's deliveries and never take one twice;
+- two relays on two clients split a group's deliveries and never take one twice, and a claim that reads on past
+  what another relay took never takes its own deliveries again; a limit of zero claims and lists nothing;
 - in a unit that runs no transaction (a single-command repository write outside ``@transactional``) the store
   runs its writes in a transaction of its own: an append that fails leaves no event without its deliveries;
 - a single-command unit of the store's own that fails after its write reports an unknown outcome;
@@ -40,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pymongo import AsyncMongoClient, monitoring
+from pymongo import AsyncMongoClient, MongoClient, monitoring
 from pymongo.errors import BulkWriteError
 
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
@@ -291,6 +292,70 @@ async def test_two_relays_on_two_clients_split_the_deliveries_and_never_take_one
     assert handled[0] and handled[1]  # both took their share
     assert sum(relay.counters.delivered for relay in relays) == 60
     assert await publisher.pending("workers") == []
+
+
+class _TakeOneFirst(monitoring.CommandListener):
+    """As a claim's first ``update`` of the deliveries starts, another relay (a client of its own) takes delivery
+    *outbox_id* of group ``g``: the claim loses it, and reads on."""
+
+    def __init__(self, url: str, database: str, collection: str) -> None:
+        self.other: MongoClient[Any] = MongoClient(url)
+        self.database = database
+        self.collection = collection
+        self.outbox_id: int | None = None
+
+    def started(self, event: monitoring.CommandStartedEvent) -> None:
+        if self.outbox_id is None or event.command_name != "update" or event.command["update"] != self.collection:
+            return
+        self.other[self.database][self.collection].update_one(
+            {"consumer_group": "g", "outbox_id": self.outbox_id},
+            {"$set": {"available_at": datetime.now(UTC) + LEASE, "claimed_by": "other/relay"}, "$inc": {"attempts": 1}},
+        )
+        self.outbox_id = None
+
+    def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
+        pass
+
+    def failed(self, event: monitoring.CommandFailedEvent) -> None:
+        pass
+
+
+async def test_a_claim_that_reads_on_past_what_another_relay_took_never_takes_its_own_deliveries_again(
+    mongo: Mongo,
+) -> None:
+    """With no lease (its deliveries due again at once), a claim that lost one of the deliveries it read must not
+    match the ones it just took when it reads on: each is claimed, and counted as attempted, once."""
+    names = MongoOutboxCollections.named()
+    listener = _TakeOneFirst(mongo.backend.url, mongo.backend.database, names.deliveries)
+    try:
+        store = MongoOutboxStore(mongo.another_client(event_listeners=[listener]), database=mongo.backend.database)
+        await store.start()
+        await store.register("g", None)
+        first, taken, third = [await store.append(_event(n)) for n in range(3)]
+
+        listener.outbox_id = taken
+        claimed = await store.claim("g", limit=10, lease=timedelta(0), owner="n")
+    finally:
+        listener.other.close()
+
+    assert [(delivery.outbox_id, delivery.attempts) for delivery in claimed] == [(first, 1), (third, 1)]
+    assert sorted((p.outbox_id, p.attempts) for p in await store.pending("g")) == [(first, 1), (taken, 1), (third, 1)]
+
+
+async def test_a_limit_of_zero_claims_and_lists_nothing_as_on_the_sql_store(mongo: Mongo) -> None:
+    store = mongo.store()
+    await store.start()
+    await store.register("g", None)
+    for n in range(3):
+        await store.append(_event(n))
+    (dead,) = await store.claim("g", limit=1, lease=LEASE, owner="n")
+    assert await store.settle(dead, dead=[("s", RuntimeError("failed"))]) is True
+
+    assert await store.claim("g", limit=0, lease=LEASE, owner="n") == []
+    assert await store.pending("g", limit=0) == []
+    assert await store.dead_letters(limit=0) == []
+    assert [p.attempts for p in await store.pending("g")] == [0, 0]  # the claim of none took none
+    assert len(await store.dead_letters()) == 1
 
 
 # ---------------------------------------------------------------------------------------------------------------
