@@ -342,6 +342,7 @@ async def test_a_forwarder_killed_between_the_broker_publish_and_the_settle_publ
 
     script = tmp_path / "dying_forwarder.py"
     script.write_text(_DYING_FORWARDER)
+    broker.queues.append(f"wp09b-dying.{broker.destination}")  # the dying process's bus declares it
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         str(script),
