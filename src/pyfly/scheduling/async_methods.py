@@ -74,12 +74,22 @@ class LoggingAsyncUncaughtExceptionHandler:
         )
 
 
+def is_dispatching(member: Any) -> bool:
+    """Whether *member* is already a :func:`dispatching` wrapper (it carries the ``@async_method`` marker it
+    copied from the method, and must never be wrapped again)."""
+    return getattr(member, "__pyfly_async_dispatch__", False) is True
+
+
 def dispatching(
     method: Callable[..., Any],
     executor: TaskExecutorPort,
     handler: AsyncUncaughtExceptionHandler | None = None,
 ) -> Callable[..., Coroutine[Any, Any, asyncio.Task[Any]]]:
-    """Wrap the bound *method* so that a call submits it through *executor* and returns its task at once."""
+    """Wrap the bound *method* so that a call submits it through *executor* and returns its task at once.
+
+    The wrapper is marked (:func:`is_dispatching`): wrapping it again would submit a task whose result is the
+    inner wrapper's task, not the method's result.
+    """
     report = handler or LoggingAsyncUncaughtExceptionHandler()
 
     @functools.wraps(method)
@@ -92,6 +102,7 @@ def dispatching(
         task.add_done_callback(functools.partial(_report, report, method, args, kwargs))
         return task
 
+    dispatch.__pyfly_async_dispatch__ = True  # type: ignore[attr-defined]
     return dispatch
 
 

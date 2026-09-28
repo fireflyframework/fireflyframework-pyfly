@@ -274,6 +274,64 @@ class TestAsyncMethodWiring:
         assert finished == ["recorded"]
 
     @pytest.mark.asyncio
+    async def test_a_bean_registered_under_two_keys_is_dispatched_once(self):
+        """An interface-typed @bean is registered under its port and its class, sharing one instance: each call
+        submits the method once, and the task it returns gives the method's result (not another task)."""
+        from typing import Protocol
+
+        from pyfly.container.bean import bean
+        from pyfly.container.stereotypes import configuration
+        from pyfly.scheduling.decorators import async_method
+
+        class Notifier(Protocol):
+            async def notify(self, text: str) -> str: ...
+
+        class EmailNotifier:
+            @async_method
+            async def notify(self, text: str) -> str:
+                return f"sent {text}"
+
+        @configuration
+        class NotifierConfig:
+            @bean
+            def notifier(self) -> Notifier:
+                return EmailNotifier()
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(NotifierConfig)
+        await ctx.start()
+        try:
+            notifier = ctx.get_bean(Notifier)
+            assert await (await notifier.notify("x")) == "sent x"
+            assert ctx.wiring_counts["async_methods"] == 1
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_wiring_twice_never_wraps_a_dispatching_method_again(self):
+        """Wiring is idempotent: a method that already dispatches its calls is never wrapped again."""
+        from pyfly.scheduling.decorators import async_method
+
+        @service
+        class Greeter:
+            @async_method
+            async def greet(self, name: str) -> str:
+                return f"hello {name}"
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(Greeter)
+        await ctx.start()
+        try:
+            greeter = ctx.get_bean(Greeter)
+            dispatching = greeter.greet
+            ctx._wire_async_methods()
+            assert greeter.greet is dispatching
+            assert ctx.wiring_counts["async_methods"] == 0
+            assert await (await greeter.greet("ada")) == "hello ada"
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.asyncio
     async def test_a_declared_uncaught_exception_handler_that_cannot_be_created_fails_the_start(self):
         """Not silently replaced by the logging default: the start fails, naming what the handler lacks."""
         from pyfly.container.exceptions import NoSuchBeanError

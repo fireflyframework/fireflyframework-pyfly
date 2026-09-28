@@ -1749,15 +1749,15 @@ class ApplicationContext:
         :meth:`stop` waits for the calls in flight; an ``AsyncUncaughtExceptionHandler`` bean, when declared,
         receives their uncaught exceptions.
         """
-        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler, dispatching
+        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler, dispatching, is_dispatching
 
         count = 0
         dispatch: tuple[Any, Any] | None = None
-        for reg in self._container._registrations.values():
-            if reg.instance is None:
-                continue
+        # Each bean once: an interface-typed @bean is registered under two keys sharing one instance, and a
+        # second pass wrapped the dispatching wrapper, whose task then gave another task, not the result.
+        for reg in self._unique_live_instances():
             for attr_name, method in self._safe_members(reg.instance):
-                if not getattr(method, "__pyfly_async__", False):
+                if not getattr(method, "__pyfly_async__", False) or is_dispatching(method):
                     continue
                 if dispatch is None:
                     handler: Any = None
