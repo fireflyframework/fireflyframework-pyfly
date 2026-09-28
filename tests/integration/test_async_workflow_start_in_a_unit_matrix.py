@@ -208,6 +208,17 @@ class Harness:
         registry = self.ctx.get_bean(DataSourceRegistry)
         return sum(ds.engine.sync_engine.pool.checkedout() for ds in registry.all_datasources())
 
+    async def all_connections_returned(self, timeout: float = 5.0) -> int:
+        """The checked-out count once it reaches zero, or after *timeout* seconds.
+
+        A failed step's rollback runs shielded and can return its connection a few loop turns after the
+        run reports its outcome; a leaked connection never comes back, so it still fails the check.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while (count := self.checked_out()) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        return count
+
     async def committed(self) -> list[str]:
         engine = create_async_engine(self.backend.url, poolclass=NullPool)
         try:
@@ -240,7 +251,7 @@ async def harness(request: pytest.FixtureRequest, relational_backend: Relational
     try:
         yield harness
         await harness.settle()
-        assert harness.checked_out() == 0
+        assert await harness.all_connections_returned() == 0
     finally:
         await ctx.stop()
 
