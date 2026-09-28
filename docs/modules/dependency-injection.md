@@ -209,7 +209,7 @@ Resolves an instance of the given type. The resolution order is:
 1. **Direct registration** -- if `cls` is registered, resolve it. When several beans share that
    exact class (two `@bean` methods that both return `AsyncEngine`), the one marked `@primary`
    (or `@bean(primary=True)`) answers; without exactly one primary the lookup raises
-   `NoUniqueBeanError`, naming the beans (and, when several are `@primary`, those). Until 26.09.07
+   `NoUniqueBeanError`, naming the beans (and, when several are `@primary`, those). Through 26.09.07
    the bean registered **last** answered silently. Resolve one of them by name or `Qualifier`, or
    all of them with `list[T]`.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
@@ -372,12 +372,14 @@ Data access layer. Use `@repository` for classes that interact with databases or
 external storage.
 
 ```python
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from pyfly.container import repository
 
 @repository
 class UserRepository:
-    def __init__(self, session: SessionPort):
-        self.session = session
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self._sessions = sessions
 
     async def find_by_email(self, email: str) -> User | None:
         ...
@@ -580,7 +582,7 @@ class ScopeHandler(Protocol):
 `name` is the bean's scope key: `__pyfly_bean_<module>.<class qualname>`, followed by
 `#<bean name>` for a named bean. It identifies the bean *definition*, so two `@bean` methods that
 return one class (two request- or refresh-scoped session factories, one per database) get two
-instances; until 26.09.07 the key was the class `__qualname__` alone, and every name after the
+instances; through 26.09.07 the key was the class `__qualname__` alone, and every name after the
 first received the first one's instance. A `SESSION`-scoped bean stored by an older version under
 the old key is adopted and moved when exactly one session-scoped bean maps to that key.
 
@@ -665,7 +667,7 @@ order:
    bean (the scope builds it on demand, in a synchronous resolution), but `stop()` is how it
    releases what it holds.
 
-Each step is bounded by `pyfly.context.shutdown-timeout`; a failure is logged. Until 26.09.07 nothing
+Each step is bounded by `pyfly.context.shutdown-timeout`; a failure is logged. Through 26.09.07 nothing
 was destroyed, so each refresh of a bean that owned an engine leaked a connection pool.
 
 **Injecting a refresh-scoped bean into a singleton.** A singleton receives the instance that exists
@@ -804,9 +806,9 @@ class InfraConfig:
     def payment_gateway(self) -> PaymentGateway:
         return StripeGateway(api_key="sk_test_...")
 
-    @bean(name="secondary_db", scope=Scope.TRANSIENT)
-    def secondary_database(self) -> DataSource:
-        return PostgresDataSource(url="postgresql://...")
+    @bean(name="audit_client", scope=Scope.TRANSIENT)
+    def audit_client(self) -> AuditClient:
+        return AuditClient(base_url="https://audit.internal")
 ```
 
 ### How It Works
@@ -821,7 +823,7 @@ During `ApplicationContext.start()`, the context:
    registers the returned object under its concrete class and under the declared return type.
 6. For a **non-singleton** (`TRANSIENT`, `REQUEST`, `SESSION`, `"refresh"`, a custom scope) whose
    return hint declares one class, does **not** call the method: it registers the method as the
-   factory of that class, and the scope calls it when it needs an instance. Until 26.09.07 every
+   factory of that class, and the scope calls it when it needs an instance. Through 26.09.07 every
    `@bean` method ran once at startup whatever its scope, so a refresh-scoped or transient factory
    built an object for nothing (an extra engine per scoped datasource) and a request-scoped
    factory ran outside any request. A non-singleton is therefore resolvable by its declared
@@ -860,13 +862,15 @@ class PartnerApiConfiguration:
         return httpx.AsyncClient(base_url=str(config.get("partner.url")))
 ```
 
-**A second database is not an `AsyncEngine` bean.** A singleton `AsyncEngine`, `async_sessionmaker`
-or `DataSourceRegistry` bean **replaces the application's primary everywhere**: the relational
-auto-configuration backs off, and `@transactional`, every repository, `SessionProvider`,
-`infrastructure_unit()`, the session factory and the `AsyncSession` bean use it, while the modules
-that look the registry up by configuration (event store, snapshots, saga persistence, the PostgreSQL
-cache) keep `pyfly.data.relational.url` (a WARNING says so when an engine or session factory bean over
-an engine of its own meets a configured URL).
+**A second database is not an `AsyncEngine` bean.** A singleton `AsyncEngine` or `async_sessionmaker`
+bean **replaces the application's primary** for `@transactional`, every repository, `SessionProvider`,
+`infrastructure_unit()`, the session factory and the `AsyncSession` bean: the relational
+auto-configuration backs off. The framework's SQL stores (event store, snapshots, checkpoints, saga
+persistence, the SQL cache, the scheduler lock, the token and session stores, the outbox) still resolve
+their datasource in the context's `DataSourceRegistry`, whose primary keeps `pyfly.data.relational.url`
+(a WARNING, `relational_engine_not_in_registry`, says so when an engine or session factory bean over an
+engine of its own meets a configured URL). A singleton `DataSourceRegistry` bean replaces the registry
+for all of them.
 Declare a second database under `pyfly.data.relational.datasources.<name>` and inject
 `DataSourceRegistry` (`registry.engine("archive")`, `registry.session_factory("archive")`) or
 `NamedDataSources`: the registry builds it with the same pool and dialect setup and disposes it last
@@ -1063,7 +1067,7 @@ An annotation elsewhere in the class that cannot be resolved at runtime (a name 
 `TYPE_CHECKING`) no longer matters. If the type of a **required** `Autowired` field cannot be known
 (its annotation cannot be resolved, or it has no annotation and no `qualifier`), the creation fails
 with a `BeanCreationException` naming the field; an optional one is set to `None` with a warning.
-Until 26.09.07 any unresolvable annotation made the container log one warning and skip every
+Through 26.09.07 any unresolvable annotation made the container log one warning and skip every
 `Autowired` field of the class, which left required fields holding the `Autowired` sentinel (and
 every transient `AsyncSession` logged that warning).
 
@@ -1121,7 +1125,7 @@ class ShippingService:
 The inner type of an Optional is resolved like any other parameter, so generics, `list[T]`,
 `Provider[T]` and `Annotated[T, Qualifier("name")]` work inside it:
 `async_sessionmaker[AsyncSession] | None`, `Provider[Job] | None` and `Repository[User, int] | None`
-receive the bean (until 26.09.07 they always received `None`), and `None` when no candidate exists.
+receive the bean (through 26.09.07 they always received `None`), and `None` when no candidate exists.
 
 ### list[T]
 
@@ -1429,10 +1433,12 @@ subscriptions (its class defines `subscribe`: an event bus, a message broker) is
 later. The start order holds within one start pass: the lifecycle beans the `@bean` methods produced
 start at step 2e and the ones created later (a scanned `@component`) at step 5b, so a consumer
 `@bean` starts before a scanned default-phase lifecycle bean. The stop order covers every started
-bean. The framework's schedulers and pollers declare `CONSUMER_PHASE`: `OrchestrationScheduler`,
-`RecoveryService`, `TransactionalOutbox` and `ProjectionRunner` stop before any `@pre_destroy`, and
-the outbox relay stops before the publisher it relays through (a consumer created before it). A
-poller of your own that dispatches work into other beans should declare it too.
+bean. The framework's schedulers, pollers and consumers declare `CONSUMER_PHASE`, among them
+`OrchestrationScheduler`, `RecoveryService`, `WorkflowRuns`, `TaskScheduler`, `ProjectionRunner`, the
+outbox relays (`TransactionalOutbox`, `OutboxRelay`, `TransactionalEventPublisher`, `DatabaseEventBus`)
+and the broker buses: they stop before any `@pre_destroy`, and the outbox relay stops before the
+publisher it relays through (a consumer created before it). A poller of your own that dispatches work
+into other beans should declare it too.
 
 ```python
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
@@ -1476,7 +1482,7 @@ When `ApplicationContext.stop()` is called (each step bounded per bean by
    wired, the post-create hook) is forgotten, so a later `start()` is a cold start. From here on
    the container builds no bean of any scope until the context starts again.
 
-Until 26.09.07 the lifecycle beans stopped first, in reverse registration order, then
+Through 26.09.07 the lifecycle beans stopped first, in reverse registration order, then
 `@pre_destroy` ran and `ContextClosedEvent` came last: the primary engine was disposed before the
 consumers, the user lifecycle beans and every `@pre_destroy`, and their writes reconnected through
 a pool nobody disposed. A restart also restarted the previous run's adapters and delivered each
@@ -1534,7 +1540,7 @@ on the method.
 `BeanPostProcessor` is a `Protocol` (runtime-checkable) that lets you hook into the bean
 creation lifecycle. Implementations are called for **every** bean the `ApplicationContext`
 creates: eager and lazy singletons, and every `TRANSIENT`, `REQUEST`, `SESSION` and custom-scoped
-instance (until 26.09.07 only singletons, so a transient or request-scoped repository kept its
+instance (through 26.09.07 only singletons, so a transient or request-scoped repository kept its
 derived-query stubs). Post-processors run in `@order`; the repository post-processors declare a
 high precedence so that AOP advice wraps the compiled derived and `@query` methods.
 
@@ -1736,7 +1742,7 @@ The data auto-configurations follow this pattern for the beans an application re
 bean of one of these types replaces the application's **primary**. A request- or refresh-scoped
 one is a second database: the auto-configured primary stays, and it is the `@primary` candidate,
 so an injection by type (`AsyncEngine`, `async_sessionmaker[AsyncSession]`) receives the primary.
-Inject the scoped bean by name (`Annotated[AsyncEngine, Qualifier("reporting_engine")]`). Until
+Inject the scoped bean by name (`Annotated[AsyncEngine, Qualifier("reporting_engine")]`). Through
 26.09.07 a user engine or session factory, even `primary=True`, was shadowed by the framework's.
 
 ### @conditional_on_single_candidate
@@ -2056,7 +2062,7 @@ class Worker:
 `Provider` is exported from `pyfly.container`. It exposes `.get()` and is also callable
 (`provider()` is equivalent to `provider.get()`). `T` can be anything a constructor parameter can
 be: `Provider[async_sessionmaker[AsyncSession]]` resolves the `async_sessionmaker` bean, and
-`Provider[X | None]` answers `None` when there is no `X` (until 26.09.07 a parametrized `T` raised
+`Provider[X | None]` answers `None` when there is no `X` (through 26.09.07 a parametrized `T` raised
 `NoSuchBeanError` even when the bean existed).
 
 ### Map injection — dict[str, T]

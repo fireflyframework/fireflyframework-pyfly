@@ -114,8 +114,10 @@ nightly). Those jobs are **not** PR merge gates; the fast unit suite, which incl
 | Job | Command | Covers |
 |---|---|---|
 | `test` | `pytest tests/` | the fast suite, including the `sqlite-file` lane |
-| `integration` | `pytest -m integration tests/integration` | everything under `tests/integration/`, brokers included |
-| `integration-lanes` (`integration-pg`, `integration-mysql`, `integration-mariadb`, `integration-mongo-rs`) | `pytest -m "integration and <lane>" tests/` | one database lane across the whole tree |
+| `test-sqlalchemy-2-0` | `mypy src/pyfly --strict` and `pytest tests/` on the SQLAlchemy 2.0 line | the fast suite on the oldest supported SQLAlchemy line (`>=2.0.50,<2.1`) |
+| `integration` | `pytest -m integration tests/integration` | everything under `tests/integration/`, brokers and the MongoDB replica set included |
+| `integration-lanes` (`integration-pg`, `integration-mysql`, `integration-mariadb`, `integration-mongo-rs`) | `pytest -m "integration and <marker>" tests/` (markers `pg`, `mysql`, `mariadb`, `mongo`) | one database lane across the whole tree |
+| `integration-sqlalchemy-2-0` | `pytest -m "integration and pg" tests/` on the SQLAlchemy 2.0 line | the PostgreSQL lane on the oldest supported SQLAlchemy line |
 
 ## Writing a new integration test
 
