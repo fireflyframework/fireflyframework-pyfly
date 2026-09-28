@@ -414,7 +414,9 @@ This is where the bulk of the DI and lifecycle work happens. The steps are:
    migrations, the schema strategy, the default phase, then the consumers). This is fully
    generic -- it does not hardcode subsystem names. Examples of lifecycle beans:
    `RedisCacheAdapter`, `KafkaAdapter`, `BeanieInitializer`, `HttpxClientAdapter`. On
-   failure, `BeanCreationException` is raised immediately (fail-fast). The lifecycle beans
+   failure, `BeanCreationException` is raised immediately (fail-fast), after the lifecycle beans
+   already started are stopped in reverse order (a start that fails at any later step stops them
+   too). The lifecycle beans
    created later (step 5) start at step 5b; see
    [The start() Lifecycle](modules/dependency-injection.md#the-start-lifecycle).
 

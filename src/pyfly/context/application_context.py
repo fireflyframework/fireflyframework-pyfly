@@ -324,6 +324,11 @@ class ApplicationContext:
         (a scanned ``@component``) start once every singleton is initialized.
 
         :meth:`stop` clears the flag, so a stopped context can be started again and rebuilds normally.
+
+        A start that fails stops the lifecycle beans it had started, highest phase first and in reverse start
+        order within a phase (as :meth:`stop` does, and as Spring does when a refresh fails), then raises its
+        failure: a bean that fails to stop is logged, and does not replace it. Through 26.09.07 they kept running
+        until the caller called :meth:`stop`, which still releases the rest of the failed run.
         """
         if self._started:
             logger.debug("context_start_ignored", extra={"reason": "already started"})
@@ -333,14 +338,25 @@ class ApplicationContext:
             await self._do_start()
         except BeanCreationException:
             self._startup_created = None
+            await self._stop_lifecycle_beans_of_failed_start()
             raise
         except Exception as exc:
             self._startup_created = None
+            await self._stop_lifecycle_beans_of_failed_start()
             raise BeanCreationException(
                 subsystem="startup",
                 provider=type(exc).__qualname__,
                 reason=str(exc),
             ) from exc
+
+    async def _stop_lifecycle_beans_of_failed_start(self) -> None:
+        """Stop the lifecycle beans a failed start had started (see :meth:`start`), each within
+        ``pyfly.context.shutdown-timeout``; a later :meth:`stop` does not stop them again."""
+        shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
+        stop_order = self._lifecycle_stop_order()
+        self._lifecycle_beans = []
+        for bean in stop_order:
+            await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
     async def _do_start(self) -> None:
         """Internal startup logic."""

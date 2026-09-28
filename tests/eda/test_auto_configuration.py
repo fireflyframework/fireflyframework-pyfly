@@ -610,7 +610,7 @@ class TestAutoOutboxStoreInAnApplicationContext:
                 with pytest.raises(Exception) as raised:
                     await context.start()
             finally:
-                await context.stop()  # the lifecycle beans that started before the failure (the domain events')
+                await context.stop()  # releases the rest of the failed run (its lifecycle beans are stopped already)
             chain = _cause_chain(raised.value)
             assert not any("No primary datasource" in link for link in chain), (provider, chain)
             assert _raised_in(raised.value, "mongo_outbox.py", "start"), (provider, chain)

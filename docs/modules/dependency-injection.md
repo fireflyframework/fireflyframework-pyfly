@@ -1424,6 +1424,13 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
    CQRS handlers, `@scheduled` methods, and `@async_method` to their targets.
 7. **Publish lifecycle events** -- `ContextRefreshedEvent`, then `ApplicationReadyEvent`.
 
+A start that fails at any step stops the lifecycle beans it had started, highest phase first and in
+reverse start order within a phase (as `stop()` does, and as Spring does when a refresh fails), then
+raises its failure as `BeanCreationException`. A bean that fails to stop then is logged
+(`adapter_stop_failed`) and does not replace that failure. `stop()` still releases the rest of the
+failed run, and does not stop those beans again. Through 26.09.07 they kept running until the caller
+called `stop()`.
+
 #### Lifecycle phases
 
 A lifecycle bean's phase is its `phase` attribute or property when it declares an `int` one

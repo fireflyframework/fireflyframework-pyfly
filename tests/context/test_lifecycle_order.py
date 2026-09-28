@@ -626,6 +626,88 @@ async def test_lifecycle_beans_start_by_ascending_phase_and_stop_by_descending_p
     ]
 
 
+# ---------------------------------------------------------------------------
+# A failed start stops the lifecycle beans it started (Spring stops them when a refresh fails).
+# ---------------------------------------------------------------------------
+
+
+class _Unreachable(_Phased):
+    async def start(self) -> None:
+        EVENTS.append(f"{self.name}.start")
+        raise ConnectionError("broker unreachable")
+
+
+class _StopFails(_Phased):
+    async def stop(self) -> None:
+        EVENTS.append(f"{self.name}.stop")
+        raise RuntimeError("stop failed")
+
+
+@configuration
+class _FailingStartConfiguration:
+    @bean
+    def broker(self) -> _Unreachable:
+        return _Unreachable("broker", 5)
+
+    @bean
+    def consumer(self) -> _Phased:
+        return _Phased("consumer", CONSUMER_PHASE)
+
+    @bean
+    def default(self) -> _StopFails:
+        return _StopFails("default", 0)
+
+    @bean
+    def early(self) -> _Phased:
+        return _Phased("early", -10)
+
+
+async def test_a_failed_start_stops_the_lifecycle_beans_it_started_in_reverse_order() -> None:
+    from pyfly.container.exceptions import BeanCreationException
+
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_FailingStartConfiguration)
+    with pytest.raises(BeanCreationException) as raised:
+        await ctx.start()
+
+    # The start's own failure is the one raised, although a bean failed to stop; the bean that failed to start
+    # and the one that never started are not stopped.
+    assert isinstance(raised.value.__cause__, ConnectionError)
+    assert EVENTS == ["early.start", "default.start", "broker.start", "default.stop", "early.stop"]
+    EVENTS.clear()
+
+    await ctx.stop()  # still releases the rest, and stops nothing twice
+    assert [event for event in EVENTS if event.endswith(".stop")] == []
+
+
+class _BrokenInit:
+    @post_construct
+    def init(self) -> None:
+        raise ValueError("bad configuration")
+
+
+@configuration
+class _BrokenInitConfiguration:
+    @bean
+    def early(self) -> _Phased:
+        return _Phased("early", -10)
+
+    @bean
+    def broken(self) -> _BrokenInit:
+        return _BrokenInit()
+
+
+async def test_a_start_that_fails_after_the_lifecycle_beans_started_stops_them() -> None:
+    from pyfly.container.exceptions import BeanCreationException
+
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_BrokenInitConfiguration)
+    with pytest.raises(BeanCreationException, match="bad configuration"):
+        await ctx.start()
+    assert EVENTS == ["early.start", "early.stop"]
+    await ctx.stop()
+
+
 async def test_the_registry_closes_last_whatever_the_registration_order(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
