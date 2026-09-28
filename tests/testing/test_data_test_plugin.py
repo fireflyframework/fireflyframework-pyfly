@@ -206,3 +206,29 @@ def test_the_plugin_is_registered_with_pytest(pytestconfig: pytest.Config, name:
     assert pytestconfig.pluginmanager.has_plugin("pyfly")
     plugin = pytestconfig.pluginmanager.get_plugin("pyfly")
     assert hasattr(plugin, name)
+
+
+def test_the_plugin_loads_without_the_rest_of_pyfly_testing() -> None:
+    """pytest loads the plugin in every run where PyFly is installed: it imports what ``@DataTest`` needs, and
+    ``pyfly.testing`` imports the rest (the web client, the application context, the containers) on first use.
+    Importing it all up front cost every pytest run about 0.16 s."""
+    code = (
+        "import sys; import pyfly.testing.pytest_plugin; "
+        "heavy = [name for name in ('pyfly.testing.client', 'pyfly.testing.fixtures', "
+        "'pyfly.testing.testcontainers', 'pyfly.context.application_context') if name in sys.modules]; "
+        "print(heavy)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", result.stdout
+
+
+def test_the_public_names_of_pyfly_testing_load_on_first_use() -> None:
+    import pyfly.testing
+
+    for name in pyfly.testing.__all__:
+        assert getattr(pyfly.testing, name) is not None, name
+    assert set(pyfly.testing.__all__) <= set(dir(pyfly.testing))
+    assert pyfly.testing.slice_context.data_slice is pyfly.testing.data_slice  # a submodule, as before
+    with pytest.raises(AttributeError, match="no_such_name"):
+        _ = pyfly.testing.no_such_name  # type: ignore[attr-defined]
