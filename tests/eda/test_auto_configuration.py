@@ -422,6 +422,120 @@ class TestTransactionalOutboxConfiguration:
         )
         assert isinstance(EdaAutoConfiguration().event_publisher(both).store, SqlOutboxStore)  # type: ignore[attr-defined]
 
+    def test_auto_sees_every_relational_datasource_the_registry_has(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """The relational datasource is the registry's, however it is configured: the legacy ``pyfly.data.url``
+        alias, the ``PYFLY_DATA_RELATIONAL_URL`` environment variable, or a named datasource. An application with
+        one of them and a Mongo client stays on the SQL store it had."""
+        import pytest
+
+        from pyfly.eda.adapters.database import DatabaseEventBus
+
+        document = {"pyfly.data.document.enabled": "true", "pyfly.eda.provider": "database"}
+        legacy = pyfly_config(base={**document, "pyfly.data.url": f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}"})
+        bus = EdaAutoConfiguration().event_publisher(legacy)
+        assert type(bus) is DatabaseEventBus
+        assert bus.sql_store is not None
+        assert bus.sql_store.datasource is DataSourceRegistry.for_config(legacy).primary
+
+        named = pyfly_config(
+            base={
+                **document,
+                "pyfly.data.relational.datasources.main.url": f"sqlite+aiosqlite:///{tmp_path / 'main.db'}",
+                "pyfly.eda.outbox.datasource": "main",
+            }
+        )
+        assert type(EdaAutoConfiguration().event_publisher(named)) is DatabaseEventBus
+        # A named datasource and no outbox.datasource: the SQL store's own error (no primary), not the Mongo one.
+        unnamed = pyfly_config(
+            base={**document, "pyfly.data.relational.datasources.main.url": f"sqlite+aiosqlite:///{tmp_path / 'm.db'}"}
+        )
+        with pytest.raises(DataSourceConfigurationError, match="No primary datasource"):
+            EdaAutoConfiguration().event_publisher(unnamed)
+
+        monkeypatch.setenv("PYFLY_DATA_RELATIONAL_URL", f"sqlite+aiosqlite:///{tmp_path / 'env.db'}")
+        assert type(EdaAutoConfiguration().event_publisher(pyfly_config(base=document))) is DatabaseEventBus
+
+    def test_a_document_uri_without_the_document_layer_is_no_mongo_client(self, tmp_path: Path) -> None:
+        """``pyfly.data.document.uri`` alone wires no Mongo client (``pyfly.data.document.enabled`` does): the SQL
+        store's error is the one raised, not the Mongo store's."""
+        import pytest
+
+        config = pyfly_config(
+            base={
+                "pyfly.data.document.uri": "mongodb://localhost:27017",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+            }
+        )
+        with pytest.raises(DataSourceConfigurationError, match="No primary datasource"):
+            EdaAutoConfiguration().event_publisher(config)
+
+
+def _cause_chain(error: BaseException) -> list[str]:
+    chain: list[str] = []
+    current: BaseException | None = error
+    while current is not None and len(chain) < 20:
+        chain.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+class TestAutoOutboxStoreInAnApplicationContext:
+    """``pyfly.eda.outbox.store=auto`` in a context that has the datasource auto-configuration, whose
+    ``DataSourceRegistry`` bean exists whenever SQLAlchemy is installed, a document-only application included."""
+
+    @staticmethod
+    async def _start(values: dict[str, object]) -> Any:
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.data.relational.auto_configuration import DataSourceAutoConfiguration
+
+        context = ApplicationContext(pyfly_config(base=values))
+        context.register_bean(DataSourceAutoConfiguration)
+        context.register_bean(EdaAutoConfiguration)
+        await context.start()
+        return context
+
+    async def test_a_document_only_application_gets_the_mongo_store(self) -> None:
+        import pytest
+
+        for provider in ("memory", "database"):
+            with pytest.raises(Exception) as raised:
+                context = await self._start(
+                    {
+                        "pyfly.data.document.enabled": "true",
+                        "pyfly.data.document.uri": "mongodb://localhost:1",
+                        "pyfly.eda.provider": provider,
+                        "pyfly.eda.outbox.enabled": "true",
+                    }
+                )
+                await context.stop()
+            chain = _cause_chain(raised.value)
+            assert any("not available until the Mongo outbox store lands" in link for link in chain), (provider, chain)
+
+    async def test_an_application_with_a_relational_datasource_keeps_the_sql_store(self, tmp_path: Path) -> None:
+        from pyfly.eda.outbox import SqlOutboxStore
+        from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
+        from pyfly.eda.ports.outbound import EventPublisher
+
+        context = await self._start(
+            {
+                "pyfly.data.document.enabled": "true",
+                "pyfly.data.document.uri": "mongodb://localhost:1",
+                "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.auto-create-tables": "true",
+            }
+        )
+        try:
+            publisher = context.get_bean(EventPublisher)
+            assert isinstance(publisher, TransactionalEventPublisher)
+            assert isinstance(publisher.store, SqlOutboxStore)
+            assert publisher.store.datasource is context.get_bean(DataSourceRegistry).primary
+            assert publisher.running
+        finally:
+            await context.stop()
+
     def test_values_that_do_not_parse_name_their_key(self, tmp_path: Path) -> None:
         import pytest
 
