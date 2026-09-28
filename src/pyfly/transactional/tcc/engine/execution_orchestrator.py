@@ -11,7 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TCC execution orchestrator — three-phase Try/Confirm/Cancel coordinator."""
+"""TCC execution orchestrator — three-phase Try/Confirm/Cancel coordinator.
+
+Knowing what committed: every phase attempt runs inside :func:`pyfly.data.transaction.track_commits`.
+
+- An attempt that failed or timed out after a unit of work of it committed (or with a commit whose outcome is
+  unknown) is never retried: a retry would apply its writes twice. A timeout that fires while the attempt's
+  ``COMMIT`` is in flight lets the commit finish (commits are shielded) and then fails the attempt.
+- A participant whose TRY failed that way reserved something all the same: it takes part in the CANCEL
+  phase with the participants whose TRY succeeded.
+- A CONFIRM attempt that failed that way is a failed CONFIRM like any other (whether its work is complete
+  cannot be told): the TCC fails, and every participant that tried is cancelled, the confirmed ones included.
+- A caller that cancels the TCC (a timeout, a disconnect, shutdown) gets ``CancelledError`` once the CANCEL
+  phase has run, to completion, for every participant that tried (the one whose TRY was cancelled after it
+  committed included). Whichever phase the cancellation lands in, the CANCEL phase a failure started
+  included: every CANCEL phase runs shielded, in a task of its own, so the cancellation never interrupts a
+  participant's cancel nor skips the ones after it.
+
+Participants run in the caller's task: inside the caller's ``@transactional`` their units of work join the
+caller's unit, whose commit happens outside the TCC and is not seen (start a TCC outside a transaction, or
+give the phase methods ``REQUIRES_NEW``). Only units of work the framework manages are seen
+(``@transactional``, repositories, ``TransactionTemplate``).
+"""
 
 from __future__ import annotations
 
@@ -20,6 +41,8 @@ import logging
 import time
 from typing import Any
 
+from pyfly.data.transaction import track_commits
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.tcc.core.context import TccContext
 from pyfly.transactional.tcc.core.phase import TccPhase
 from pyfly.transactional.tcc.engine.participant_invoker import TccParticipantInvoker
@@ -73,40 +96,57 @@ class TccExecutionOrchestrator:
         failed_participant_id: str | None = None
 
         for p_def in participants:
-            try:
-                result = await self._invoke_with_retry_and_timeout(
-                    self._invoker.invoke_try,
-                    p_def,
-                    bean,
-                    ctx,
-                    input_data,
-                    phase_attr="__pyfly_try_method__",
-                    tcc_def=tcc_def,
-                )
-                ctx.set_try_result(p_def.id, result)
-                ctx.set_participant_status(p_def.id, TccPhase.TRY)
-                tried_ids.append(p_def.id)
-            except Exception as exc:
-                ctx.record_participant_error(p_def.id, TccPhase.TRY, exc)
-                if p_def.optional:
+            with track_commits() as commits:
+                try:
+                    result = await self._invoke_with_retry_and_timeout(
+                        self._invoker.invoke_try,
+                        p_def,
+                        bean,
+                        ctx,
+                        input_data,
+                        phase_attr="__pyfly_try_method__",
+                        tcc_def=tcc_def,
+                    )
+                except asyncio.CancelledError:
+                    # The caller cancelled the TCC: release what the participants reserved, then propagate.
+                    if commits.may_have_committed:
+                        tried_ids.append(p_def.id)
+                    await self._cancel_on_cancellation(tried_ids, tcc_def, bean, ctx)
+                    raise
+                except Exception as exc:
+                    ctx.record_participant_error(p_def.id, TccPhase.TRY, exc)
+                    # A TRY that failed after it committed (its COMMIT landed as it timed out) reserved all the
+                    # same: it is cancelled like a participant that tried.
+                    committed = commits.may_have_committed
+                    if p_def.optional:
+                        logger.debug(
+                            "Optional participant '%s' TRY failed (skipped): %s",
+                            p_def.id,
+                            exc,
+                        )
+                        if committed and await self._run_cancel_phase([p_def.id], tcc_def, bean, ctx):
+                            # The caller cancelled the TCC meanwhile: release what the others reserved too.
+                            await self._cancel_on_cancellation(tried_ids, tcc_def, bean, ctx)
+                            raise asyncio.CancelledError from None
+                        continue
                     logger.debug(
-                        "Optional participant '%s' TRY failed (skipped): %s",
+                        "Participant '%s' TRY failed: %s",
                         p_def.id,
                         exc,
                     )
-                    continue
-                logger.debug(
-                    "Participant '%s' TRY failed: %s",
-                    p_def.id,
-                    exc,
-                )
-                failed_participant_id = p_def.id
-                break
+                    if committed:
+                        tried_ids.append(p_def.id)
+                    failed_participant_id = p_def.id
+                    break
+            ctx.set_try_result(p_def.id, result)
+            ctx.set_participant_status(p_def.id, TccPhase.TRY)
+            tried_ids.append(p_def.id)
 
         if failed_participant_id is not None:
             # ── CANCEL phase (TRY failure) ───────────────────────
             ctx.set_phase(TccPhase.CANCEL)
-            await self._cancel_participants(tried_ids, tcc_def, bean, ctx)
+            if await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx):
+                raise asyncio.CancelledError  # the caller cancelled the TCC meanwhile; the phase ran first
             return (False, failed_participant_id)
 
         # ── CONFIRM phase ────────────────────────────────────────
@@ -126,6 +166,10 @@ class TccExecutionOrchestrator:
                     tcc_def=tcc_def,
                 )
                 ctx.set_participant_status(p_def.id, TccPhase.CONFIRM)
+            except asyncio.CancelledError:
+                # Cancelled while confirming: as on a CONFIRM failure, every participant that tried is cancelled.
+                await self._cancel_on_cancellation(tried_ids, tcc_def, bean, ctx)
+                raise
             except Exception as exc:
                 ctx.record_participant_error(p_def.id, TccPhase.CONFIRM, exc)
                 logger.debug(
@@ -139,7 +183,8 @@ class TccExecutionOrchestrator:
         if failed_participant_id is not None:
             # ── CANCEL phase (CONFIRM failure) ───────────────────
             ctx.set_phase(TccPhase.CANCEL)
-            await self._cancel_participants(tried_ids, tcc_def, bean, ctx)
+            if await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx):
+                raise asyncio.CancelledError  # the caller cancelled the TCC meanwhile; the phase ran first
             return (False, failed_participant_id)
 
         return (True, None)
@@ -179,6 +224,33 @@ class TccExecutionOrchestrator:
                     exc,
                 )
 
+    async def _run_cancel_phase(
+        self,
+        tried_ids: list[str],
+        tcc_def: TccDefinition,
+        bean: Any,
+        ctx: TccContext,
+    ) -> bool:
+        """Cancel *tried_ids* to completion whatever happens to the calling task, in a task of its own.
+
+        Returns whether the caller was cancelled meanwhile: the caller raises ``CancelledError`` then.
+        """
+        _result, error, cancelled = await run_shielded(self._cancel_participants(tried_ids, tcc_def, bean, ctx))
+        if error is not None:
+            logger.warning("TCC CANCEL phase raised: %s", error)
+        return cancelled
+
+    async def _cancel_on_cancellation(
+        self,
+        tried_ids: list[str],
+        tcc_def: TccDefinition,
+        bean: Any,
+        ctx: TccContext,
+    ) -> None:
+        """Run the CANCEL phase for *tried_ids* to completion although the caller is being cancelled."""
+        ctx.set_phase(TccPhase.CANCEL)
+        await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx)
+
     async def _invoke_with_retry_and_timeout(
         self,
         invoke_fn: Any,
@@ -214,23 +286,23 @@ class TccExecutionOrchestrator:
         started = time.perf_counter()
         try:
             for attempt in range(1, total_attempts + 1):
-                try:
-                    coro = self._build_coro(invoke_fn, p_def, bean, ctx, input_data)
+                with track_commits() as commits:
+                    try:
+                        coro = self._build_coro(invoke_fn, p_def, bean, ctx, input_data)
 
-                    if timeout_ms > 0:
-                        return await asyncio.wait_for(
-                            coro,
-                            timeout=timeout_ms / 1000.0,
-                        )
-                    return await coro
+                        if timeout_ms > 0:
+                            async with asyncio.timeout(timeout_ms / 1000.0):
+                                return await coro
+                        return await coro
 
-                except Exception:
-                    if attempt < total_attempts:
-                        if backoff_ms > 0:
-                            await asyncio.sleep(backoff_ms / 1000.0)
-                        backoff_ms *= 2
-                    else:
-                        raise
+                    except Exception:
+                        # An attempt that committed (its COMMIT landed as it timed out, say) is never retried.
+                        if attempt < total_attempts and not commits.may_have_committed:
+                            if backoff_ms > 0:
+                                await asyncio.sleep(backoff_ms / 1000.0)
+                            backoff_ms *= 2
+                        else:
+                            raise
 
             # Should never reach here, but satisfy type checker.
             raise RuntimeError("Unreachable")  # pragma: no cover

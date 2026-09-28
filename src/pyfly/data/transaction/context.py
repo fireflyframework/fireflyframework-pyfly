@@ -138,6 +138,10 @@ EMPTY = TransactionState()
 
 _STATE: ContextVar[TransactionState] = ContextVar("pyfly_transaction_state", default=EMPTY)
 
+COMMIT_TRACKERS: ContextVar[tuple[Any, ...]] = ContextVar("pyfly_commit_trackers", default=())
+"""The :class:`~pyfly.data.transaction.observation.CommitTracker` blocks open in the running task, innermost
+last (:func:`~pyfly.data.transaction.observation.track_commits`); :func:`detached` work starts without any."""
+
 
 def current_state() -> TransactionState:
     """The transaction state of the running task."""
@@ -190,6 +194,7 @@ _DETACHED: set[asyncio.Task[Any]] = set()
 def _spawn(coroutine: Coroutine[Any, Any, R], name: str | None) -> asyncio.Task[R]:
     context = contextvars.copy_context()
     context.run(_STATE.set, EMPTY)
+    context.run(COMMIT_TRACKERS.set, ())  # its commits are its own, not those of the block that started it
     task = asyncio.get_running_loop().create_task(coroutine, name=name, context=context)
     _DETACHED.add(task)  # a fire-and-forget task needs a strong reference until it finishes
     task.add_done_callback(_DETACHED.discard)
@@ -210,7 +215,8 @@ def detached(target: Any, /, *, name: str | None = None) -> Any:
     - ``@detached`` on a coroutine function makes every call schedule such a task.
 
     The work opens its own transactions (and its repository calls their own auto units) instead of joining
-    the caller's unit, which may complete before the work does::
+    the caller's unit, which may complete before the work does; its commits are not counted by a
+    :func:`~pyfly.data.transaction.observation.track_commits` block of the caller either::
 
         @transactional
         async def place(self, order: Order) -> None:

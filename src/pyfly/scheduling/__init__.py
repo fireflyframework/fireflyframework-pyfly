@@ -19,14 +19,17 @@ Import concrete adapter types from the adapter package::
     from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 """
 
+from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler, LoggingAsyncUncaughtExceptionHandler
 from pyfly.scheduling.decorators import async_method, scheduled
 from pyfly.scheduling.lock import DistributedLock, InProcessDistributedLock, LocalLock
 from pyfly.scheduling.ports.outbound import TaskExecutorPort
 
 __all__ = [
+    "AsyncUncaughtExceptionHandler",
     "DistributedLock",
     "InProcessDistributedLock",
     "LocalLock",
+    "LoggingAsyncUncaughtExceptionHandler",
     "TaskExecutorPort",
     "async_method",
     "scheduled",

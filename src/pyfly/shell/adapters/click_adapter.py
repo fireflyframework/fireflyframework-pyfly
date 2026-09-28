@@ -11,12 +11,40 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Click-based adapter implementing :class:`ShellRunnerPort`."""
+"""Click-based adapter implementing :class:`ShellRunnerPort`.
+
+Commands run on the application's event loop, the loop the engine, the connection pools, the sessions and
+the Mongo client were created on:
+
+- :meth:`ClickShellAdapter.run` (one-shot) and :meth:`ClickShellAdapter.run_interactive` (the REPL) await an
+  async ``@shell_method`` on the running loop, where ``PyFlyApplication.run()`` and the ``CommandLineRunner``
+  beans run. A task the command starts (an ASYNC workflow, an ``@async_method`` call, a ``detached()``
+  write) lives on that loop too: it goes on after the command returns, and the application context drains the
+  framework's own background work (workflow runs, scheduler and ``@async_method`` tasks) when it stops.
+- The REPL reads each line in a daemon thread, so the loop keeps running scheduled jobs, message consumers
+  and orchestration recovery while the operator thinks, and an interrupted session never blocks the process
+  exit waiting for a line.
+- A command's output is printed; a failing command's message goes to stderr, its traceback to the log, and
+  ``run()`` returns its exit code: 1, or the one a command that ends on purpose chose (``SystemExit``,
+  Click's ``Exit``, a ``ClickException`` such as ``UsageError``), async commands included. Such an exit ends
+  the command, never the REPL nor the application.
+- An async command is awaited once Click has parsed its arguments and popped its context, so
+  ``click.get_current_context()`` is not available inside it: it takes what it needs as parameters.
+
+The synchronous :meth:`ClickShellAdapter.invoke` is for loop-less use (a script, a sync test): it runs an async
+command with ``asyncio.run()``, and refuses one while a loop is running (use :meth:`ClickShellAdapter.ainvoke`
+there). Through 26.09.07 an async command called with a running loop ran on a private ``asyncio.run()`` loop in a
+worker thread, where the application's engine, pool and Mongo client failed (every backend but SQLite), and the
+REPL blocked the application's loop for the whole session.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import functools
+import inspect
+import logging
+import sys
+import threading
 from collections.abc import Callable
 from io import StringIO
 from typing import Any
@@ -24,6 +52,8 @@ from typing import Any
 import click
 
 from pyfly.shell.result import MISSING, ShellParam
+
+logger = logging.getLogger(__name__)
 
 # ---- type mapping from Python types to Click parameter types ----
 
@@ -70,34 +100,56 @@ def _build_click_param(sp: ShellParam) -> click.Parameter:
     return click.Argument([sp.name], **kwargs_arg)
 
 
-def _wrap_handler(handler: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap *handler* so Click can call it.
+def _deliberate_exit(error: BaseException) -> tuple[int, str] | None:
+    """The ``(exit_code, message)`` of a command that ended on purpose (``SystemExit``, Click's ``Exit``, a
+    ``ClickException`` such as ``UsageError``); ``None`` when *error* is a failure."""
+    if isinstance(error, SystemExit):
+        return (error.code if isinstance(error.code, int) else 1), ""
+    if isinstance(error, click.exceptions.Exit):
+        return error.exit_code, ""
+    if isinstance(error, click.ClickException):
+        return error.exit_code, error.format_message()
+    return None
 
-    If the handler is an async coroutine function, wrap it so that
-    it is executed synchronously.  When a loop is already running
-    (e.g. inside ``pytest-asyncio``), the coroutine is scheduled on
-    the existing loop; otherwise ``asyncio.run()`` creates a new one.
+
+def _outcome(error: BaseException, args: list[str]) -> tuple[int, str]:
+    """``(exit_code, message)`` for a command that raised *error*: its own exit code when it ended on purpose,
+    else 1 with its traceback logged."""
+    deliberate = _deliberate_exit(error)
+    if deliberate is not None:
+        return deliberate
+    logger.error("shell_command_failed", extra={"command": args[:1]}, exc_info=error)
+    return 1, str(error)
+
+
+async def _read_line(prompt: str) -> str:
+    """Read a line with ``input()`` in a daemon thread, keeping the event loop free.
+
+    A daemon thread rather than the loop's default executor: a session interrupted while ``input()`` waits
+    (Ctrl-C cancels the application's main task) must not keep the process from exiting until Enter is
+    pressed. ``EOFError`` (Ctrl-D) and ``KeyboardInterrupt`` are raised from the await.
     """
-    if asyncio.iscoroutinefunction(handler):
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
 
-        @functools.wraps(handler)
-        def _sync_wrapper(**kwargs: Any) -> Any:
-            coro = handler(**kwargs)
-            try:
-                _loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # No running loop — safe to use asyncio.run()
-                return asyncio.run(coro)
-            # Already inside a running loop — run the coroutine via a new
-            # thread so we don't block the event loop.
-            import concurrent.futures
+    def settle(line: str | None, error: BaseException | None) -> None:
+        if future.done():  # the awaiting task was cancelled meanwhile
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(line or "")
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
+    def read() -> None:
+        try:
+            line = input(prompt)
+        except BaseException as error:  # noqa: BLE001 — EOFError / KeyboardInterrupt reach the awaiting task
+            loop.call_soon_threadsafe(settle, None, error)
+        else:
+            loop.call_soon_threadsafe(settle, line, None)
 
-        return _sync_wrapper
-    return handler
+    threading.Thread(target=read, name="pyfly-shell-input", daemon=True).start()
+    return await future
 
 
 class ClickShellAdapter:
@@ -129,7 +181,10 @@ class ClickShellAdapter:
 
         cmd = click.Command(
             name=key,
-            callback=_wrap_handler(handler),
+            # Click's callback of an async handler returns the handler's coroutine instead of running it: the
+            # adapter awaits it on the running loop (ainvoke), or runs it with asyncio.run() when no loop runs
+            # (invoke).
+            callback=handler,
             params=click_params,
             help=help_text or None,
         )
@@ -145,7 +200,48 @@ class ClickShellAdapter:
             self._root.add_command(cmd)
 
     def invoke(self, args: list[str]) -> tuple[int, str]:
-        """Invoke the Click group with *args*, returning ``(exit_code, output)``."""
+        """Invoke the Click group with *args*, returning ``(exit_code, output)`` — without a running loop.
+
+        An async command runs with ``asyncio.run()``. With a loop running (inside the application), an async
+        command raises :class:`RuntimeError`: it must run on that loop, through :meth:`ainvoke`.
+        """
+        exit_code, output, pending = self._dispatch(args)
+        if pending is None:
+            return exit_code, output
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                result = asyncio.run(pending)
+            except (SystemExit, Exception) as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+                return _outcome(exc, args)
+            return 0, result if isinstance(result, str) else ""
+        pending.close()
+        raise RuntimeError(
+            "ClickShellAdapter.invoke() cannot run an async command while an event loop is running: the command "
+            "would run on another loop than the application's engine, pools and clients. Await "
+            "ClickShellAdapter.ainvoke() (or run()) on the running loop instead."
+        )
+
+    async def ainvoke(self, args: list[str]) -> tuple[int, str]:
+        """Invoke the Click group with *args* on the running loop, returning ``(exit_code, output)``.
+
+        An async command is awaited here, on the application's loop. A command that raises returns exit code 1
+        and its message, its traceback logged; one that ends on purpose (``SystemExit``, Click's ``Exit``, a
+        ``ClickException``) returns the exit code it chose, as a synchronous command does.
+        """
+        exit_code, output, pending = self._dispatch(args)
+        if pending is None:
+            return exit_code, output
+        try:
+            result = await pending
+        except (SystemExit, Exception) as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+            return _outcome(exc, args)
+        return 0, result if isinstance(result, str) else ""
+
+    def _dispatch(self, args: list[str]) -> tuple[int, str, Any]:
+        """Parse and run *args* through Click: ``(exit_code, output, None)``, or ``(0, "", coroutine)`` when
+        the command is async and its coroutine still has to be awaited."""
         buf = StringIO()
         try:
             result = self._root.main(  # type: ignore[call-overload]
@@ -153,32 +249,42 @@ class ClickShellAdapter:
                 standalone_mode=False,
                 **{"color": False},
             )
-            if isinstance(result, str):
-                buf.write(result)
-            return 0, buf.getvalue()
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 1
-            return code, buf.getvalue()
-        except click.exceptions.UsageError as exc:
-            return 2, str(exc)
-        except Exception as exc:
-            return 1, str(exc)
+            return code, buf.getvalue(), None
+        except Exception as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+            code, message = _outcome(exc, args)
+            return code, message, None
+        if inspect.iscoroutine(result):
+            return 0, "", result
+        if isinstance(result, str):
+            buf.write(result)
+        return 0, buf.getvalue(), None
 
     async def run(self, args: list[str] | None = None) -> int:
-        """Run the Click group asynchronously, returning the exit code."""
-        exit_code, _ = self.invoke(args or [])
+        """Run one command on the running loop, print its output (a failure's message to stderr), and
+        return its exit code."""
+        exit_code, output = await self.ainvoke(args or [])
+        _print(output, error=exit_code != 0)
         return exit_code
 
     async def run_interactive(self) -> None:
-        """Simple REPL loop: read a line, split, and dispatch via :meth:`invoke`."""
+        """REPL loop: read a line off the loop, split it, and run it on the loop with :meth:`ainvoke`.
+
+        It ends on EOF (Ctrl-D) or Ctrl-C at the prompt.
+        """
         while True:
             try:
-                line = input("> ")
+                line = await _read_line("> ")
             except (EOFError, KeyboardInterrupt):
                 break
             if not line.strip():
                 continue
             tokens = line.strip().split()
-            exit_code, output = self.invoke(tokens)
-            if output:
-                print(output)
+            exit_code, output = await self.ainvoke(tokens)
+            _print(output, error=exit_code != 0)
+
+
+def _print(output: str, *, error: bool) -> None:
+    if output:
+        print(output, file=sys.stderr if error else sys.stdout)

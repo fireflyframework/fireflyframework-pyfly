@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import click
 import pytest
 
 from pyfly.shell.adapters.click_adapter import ClickShellAdapter
@@ -288,3 +289,157 @@ class TestGroupedCommands:
         exit_code, _ = adapter.invoke(["db", "seed"])
         assert exit_code == 0
         assert captured == ["migrate", "seed"]
+
+
+# ---------------------------------------------------------------------------
+# The application's loop (C077, C078)
+# ---------------------------------------------------------------------------
+
+
+class TestApplicationLoop:
+    @pytest.mark.asyncio
+    async def test_an_async_command_runs_on_the_running_loop(self) -> None:
+        import asyncio
+
+        adapter = ClickShellAdapter()
+        loops: list[object] = []
+
+        async def where() -> str:
+            loops.append(asyncio.get_running_loop())
+            return "here"
+
+        adapter.register_command("where", where)
+        assert await adapter.ainvoke(["where"]) == (0, "here")
+        assert loops == [asyncio.get_running_loop()]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_command_returns_1_and_run_prints_its_message(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        adapter = ClickShellAdapter()
+
+        async def broken() -> str:
+            raise RuntimeError("upstream down")
+
+        adapter.register_command("broken", broken)
+        assert await adapter.ainvoke(["broken"]) == (1, "upstream down")
+        assert await adapter.run(["broken"]) == 1
+        assert "upstream down" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_run_prints_the_output_of_a_command(self, capsys: pytest.CaptureFixture[str]) -> None:
+        adapter = ClickShellAdapter()
+
+        async def hello() -> str:
+            return "hello there"
+
+        adapter.register_command("hello", hello)
+        assert await adapter.run(["hello"]) == 0
+        assert capsys.readouterr().out == "hello there\n"
+
+    @pytest.mark.asyncio
+    async def test_the_repl_reads_off_the_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import asyncio
+        import builtins
+        import time
+
+        adapter = ClickShellAdapter()
+        ran: list[str] = []
+
+        async def note(word: str) -> None:
+            ran.append(word)
+
+        adapter.register_command("note", note, params=[ShellParam(name="word", param_type=str, is_option=False)])
+        lines = ["note a", "", "note b"]
+
+        def typed(prompt: str = "") -> str:
+            time.sleep(0.1)  # an operator thinking: the loop must stay free meanwhile
+            if not lines:
+                raise EOFError
+            return lines.pop(0)
+
+        monkeypatch.setattr(builtins, "input", typed)
+        ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            await adapter.run_interactive()
+        finally:
+            beat.cancel()
+        assert ran == ["a", "b"]
+        assert ticks >= 10  # ~0.4 s of reading, and the loop kept running (it used to stay blocked)
+
+    @pytest.mark.asyncio
+    async def test_the_repl_ends_on_ctrl_c_at_the_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import builtins
+
+        def interrupted(prompt: str = "") -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(builtins, "input", interrupted)
+        await ClickShellAdapter().run_interactive()  # returns instead of raising
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            (SystemExit(3), (3, "")),
+            (click.exceptions.Exit(4), (4, "")),
+            (click.ClickException("bad input"), (1, "bad input")),
+            (click.UsageError("missing --id"), (2, "missing --id")),
+        ],
+        ids=["SystemExit", "click-Exit", "ClickException", "UsageError"],
+    )
+    async def test_an_async_command_that_exits_on_purpose_returns_its_exit_code(
+        self, raised: BaseException, expected: tuple[int, str]
+    ) -> None:
+        """As a synchronous command's: the exit code it chose, never an exception out of ``run()``."""
+        adapter = ClickShellAdapter()
+
+        async def leave() -> str:
+            raise raised
+
+        adapter.register_command("leave", leave)
+        assert await adapter.ainvoke(["leave"]) == expected
+        assert await adapter.run(["leave"]) == expected[0]
+
+    def test_an_async_command_that_exits_on_purpose_without_a_loop_returns_its_exit_code(self) -> None:
+        adapter = ClickShellAdapter()
+
+        async def leave() -> str:
+            raise SystemExit(3)
+
+        adapter.register_command("leave", leave)
+        assert adapter.invoke(["leave"]) == (3, "")
+
+    @pytest.mark.asyncio
+    async def test_a_command_that_exits_on_purpose_does_not_end_the_repl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import builtins
+
+        adapter = ClickShellAdapter()
+        ran: list[str] = []
+
+        async def leave() -> str:
+            raise SystemExit(3)
+
+        async def note(word: str) -> None:
+            ran.append(word)
+
+        adapter.register_command("leave", leave)
+        adapter.register_command("note", note, params=[ShellParam(name="word", param_type=str, is_option=False)])
+        lines = ["leave", "note after"]
+
+        def typed(prompt: str = "") -> str:
+            if not lines:
+                raise EOFError
+            return lines.pop(0)
+
+        monkeypatch.setattr(builtins, "input", typed)
+        await adapter.run_interactive()
+        assert ran == ["after"]

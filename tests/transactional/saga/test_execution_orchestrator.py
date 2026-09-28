@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from pyfly.transactional.core.exceptions import OrchestrationError
 from pyfly.transactional.saga.core.context import SagaContext
 from pyfly.transactional.saga.engine.execution_orchestrator import (
     SagaExecutionOrchestrator,
@@ -363,8 +364,9 @@ class TestFailureStopsLayers:
         assert "C" not in ctx.step_statuses
 
     @pytest.mark.anyio
-    async def test_failure_in_parallel_layer_cancels_siblings(self, ctx: SagaContext, events: AsyncMock) -> None:
-        """When one step in a parallel layer fails, other tasks are cancelled."""
+    async def test_failure_in_parallel_layer_awaits_running_siblings(self, ctx: SagaContext, events: AsyncMock) -> None:
+        """A sibling already running when a step fails is awaited to its end, never cancelled mid-commit."""
+        b_running = asyncio.Event()
 
         async def invoke(
             step_def: StepDefinition,
@@ -373,25 +375,313 @@ class TestFailureStopsLayers:
             step_input: Any = None,
         ) -> str:
             if step_def.id == "A":
+                await b_running.wait()
                 raise RuntimeError("A failed")
-            # B is slow; should be cancelled
-            await asyncio.sleep(5)
+            b_running.set()
+            await asyncio.sleep(0.05)  # still running when A fails
             return f"result-{step_def.id}"
 
         invoker = _make_invoker_from_fn(invoke)
-
-        steps = {
-            "A": _make_step_def("A"),
-            "B": _make_step_def("B"),
-        }
-        saga = _make_saga(steps)
-
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")})
         orchestrator = SagaExecutionOrchestrator(invoker, events)
 
         with pytest.raises(RuntimeError, match="A failed"):
             await orchestrator.execute(saga, ctx)
 
         assert ctx.step_statuses["A"] == StepStatus.FAILED
+        assert ctx.step_statuses["B"] == StepStatus.DONE  # settled before the failure was raised
+        assert ctx.committed_steps == ["B"]  # the engine compensates it
+
+    @pytest.mark.anyio
+    async def test_failure_in_parallel_layer_never_starts_waiting_siblings(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        """A sibling still waiting for the layer's concurrency limit when a step fails never starts."""
+        started: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            started.append(step_def.id)
+            raise RuntimeError(f"{step_def.id} failed")
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")}, layer_concurrency=1)
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(RuntimeError, match="A failed"):
+            await orchestrator.execute(saga, ctx)
+
+        assert started == ["A"]
+        assert "B" not in ctx.step_statuses
+
+    @pytest.mark.anyio
+    async def test_a_running_sibling_starts_no_new_attempt_once_a_step_failed(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        attempts: list[str] = []
+        b_failed_once = asyncio.Event()
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            attempts.append(step_def.id)
+            if step_def.id == "A":
+                await b_failed_once.wait()
+                raise RuntimeError("A failed")
+            b_failed_once.set()
+            await asyncio.sleep(0)  # A fails while B's first attempt is ending
+            raise RuntimeError("B failed")
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B", retry=3, backoff_ms=20)})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(RuntimeError, match="A failed"):
+            await orchestrator.execute(saga, ctx)
+
+        assert attempts.count("B") == 1
+        assert ctx.step_statuses["B"] == StepStatus.FAILED
+
+    @pytest.mark.anyio
+    async def test_a_sibling_failing_during_a_steps_backoff_ends_it_without_a_new_attempt(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        """A step sleeping in its retry backoff when a sibling fails starts no new attempt (it could commit after
+        the saga is known to be failing), and its backoff ends at once."""
+        attempts: list[str] = []
+        b_backing_off = asyncio.Event()
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            attempts.append(step_def.id)
+            if step_def.id == "A":
+                await b_backing_off.wait()
+                await asyncio.sleep(0.01)  # B is sleeping in its backoff now
+                raise RuntimeError("A failed")
+            b_backing_off.set()
+            raise RuntimeError("B failed")
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B", retry=3, backoff_ms=30_000)})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(RuntimeError, match="A failed"):
+            await asyncio.wait_for(orchestrator.execute(saga, ctx), 5)  # not the 30 s backoff
+
+        assert attempts.count("B") == 1
+        assert ctx.step_statuses["B"] == StepStatus.FAILED
+        assert ctx.step_attempts["B"] == 1
+        failed = {call.args[2]: call.args[3] for call in events.on_step_failed.await_args_list}
+        assert str(failed["B"]) == "B failed"  # reported with its last failure
+        assert ctx.committed_steps == []
+
+    @pytest.mark.anyio
+    async def test_a_step_that_ends_cancelled_on_its_own_fails_and_its_dependents_never_run(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        """A step whose body ends in a ``CancelledError`` nobody requested (it awaited a reply future a client
+        library cancelled) failed; it is not a success, and not a cancellation of the saga."""
+        ran: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            ran.append(step_def.id)
+            if step_def.id == "reserve":
+                reply = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(reply.cancel)
+                await reply
+            return f"result-{step_def.id}"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga(
+            {"reserve": _make_step_def("reserve"), "charge": _make_step_def("charge", depends_on=["reserve"])}
+        )
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(OrchestrationError, match="'reserve' ended cancelled") as raised:
+            await orchestrator.execute(saga, ctx)
+
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert ran == ["reserve"]
+        assert ctx.step_statuses == {"reserve": StepStatus.FAILED}
+        assert ctx.committed_steps == []
+        events.on_step_failed.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_a_step_that_ended_cancelled_on_its_own_is_retried_like_any_failure(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        attempts: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            attempts.append(step_def.id)
+            if len(attempts) == 1:
+                reply = asyncio.get_running_loop().create_future()
+                reply.cancel()
+                await reply
+            return "reserved"
+
+        invoker = _make_invoker_from_fn(invoke)
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        await orchestrator.execute(_make_saga({"reserve": _make_step_def("reserve", retry=2)}), ctx)
+
+        assert attempts == ["reserve", "reserve"]
+        assert ctx.step_statuses["reserve"] == StepStatus.DONE
+
+    @pytest.mark.anyio
+    async def test_a_sibling_that_ends_cancelled_on_its_own_fails_the_layer_once_the_others_settled(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        reserve_running = asyncio.Event()
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            if step_def.id == "notify":
+                await reserve_running.wait()
+                reply = asyncio.get_running_loop().create_future()
+                reply.cancel()
+                await reply
+            reserve_running.set()
+            await asyncio.sleep(0.05)  # still running when its sibling fails
+            return f"result-{step_def.id}"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"reserve": _make_step_def("reserve"), "notify": _make_step_def("notify")})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(OrchestrationError, match="'notify' ended cancelled"):
+            await orchestrator.execute(saga, ctx)
+
+        assert ctx.step_statuses == {"reserve": StepStatus.DONE, "notify": StepStatus.FAILED}
+        assert ctx.committed_steps == ["reserve"]  # the engine compensates it
+
+    @pytest.mark.anyio
+    async def test_an_events_port_call_ending_cancelled_on_its_own_fails_the_layer(
+        self, ctx: SagaContext, events: AsyncMock
+    ) -> None:
+        events.on_step_success.side_effect = asyncio.CancelledError()  # nobody cancelled the step's task
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            return f"result-{step_def.id}"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B", depends_on=["A"])})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(OrchestrationError, match="'A' ended cancelled"):
+            await orchestrator.execute(saga, ctx)
+
+        assert ctx.step_statuses == {"A": StepStatus.DONE}  # it completed: the engine compensates it
+        assert ctx.committed_steps == ["A"]
+
+    @pytest.mark.anyio
+    async def test_a_step_that_cancels_its_own_task_fails_the_layer(self, ctx: SagaContext, events: AsyncMock) -> None:
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            if step_def.id == "A":
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel()
+                await asyncio.sleep(0)
+            return f"result-{step_def.id}"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B", depends_on=["A"])})
+        orchestrator = SagaExecutionOrchestrator(invoker, events)
+
+        with pytest.raises(OrchestrationError, match="'A' was cancelled although the saga was not"):
+            await orchestrator.execute(saga, ctx)
+
+        assert ctx.step_statuses == {"A": StepStatus.FAILED}
+
+    @pytest.mark.anyio
+    async def test_cancelling_the_saga_cancels_and_awaits_every_step_task(self, ctx: SagaContext) -> None:
+        running = asyncio.Event()
+        ended: list[str] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            running.set()
+            try:
+                await asyncio.sleep(30)
+            finally:
+                ended.append(step_def.id)
+            return "never"
+
+        invoker = _make_invoker_from_fn(invoke)
+        saga = _make_saga({"A": _make_step_def("A"), "B": _make_step_def("B")})
+        orchestrator = SagaExecutionOrchestrator(invoker)
+
+        task = asyncio.create_task(orchestrator.execute(saga, ctx))
+        await running.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert sorted(ended) == ["A", "B"]  # both step tasks ended before the cancellation propagated
+        assert [t for t in asyncio.all_tasks() if t.get_name().startswith("saga-step-") and not t.done()] == []
+        assert ctx.step_statuses == {"A": StepStatus.FAILED, "B": StepStatus.FAILED}
+        assert ctx.committed_steps == []
+
+    @pytest.mark.anyio
+    async def test_steps_run_with_the_transaction_state_cleared(self, ctx: SagaContext) -> None:
+        from pyfly.data.transaction.context import COMMIT_TRACKERS, current_state
+
+        seen: list[object] = []
+
+        async def invoke(
+            step_def: StepDefinition,
+            bean: Any,
+            context: SagaContext,
+            step_input: Any = None,
+        ) -> str:
+            seen.append(current_state().units)
+            seen.append(len(COMMIT_TRACKERS.get()))  # only the step's own attempt tracker
+            return "ok"
+
+        invoker = _make_invoker_from_fn(invoke)
+        orchestrator = SagaExecutionOrchestrator(invoker)
+        await orchestrator.execute(_make_saga({"A": _make_step_def("A")}), ctx)
+
+        assert seen == [(), 1]
 
 
 # ── Events emitted ────────────────────────────────────────────
@@ -629,3 +919,113 @@ class TestJitter:
         # With jitter_factor=0.5, delay is 100 * (1 + uniform(-0.5, 0.5))
         # So range is 50..150 ms — just verify it's in a reasonable range
         assert 30 <= gap_ms <= 200
+
+
+# ── Cancelled saga engine ─────────────────────────────────────
+
+
+class TestCancelledSagaEngine:
+    @pytest.mark.anyio
+    async def test_the_callers_own_cancellation_is_re_raised_after_compensation(self) -> None:
+        """The cancellation that reaches the caller is the one it issued (a cancel scope recognizes its own)."""
+        from pyfly.transactional.saga.engine.argument_resolver import ArgumentResolver
+        from pyfly.transactional.saga.engine.compensator import SagaCompensator
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+        from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
+
+        compensated: list[str] = []
+        waiting = asyncio.Event()
+
+        class Bean:
+            async def first(self) -> str:
+                return "done"
+
+            async def undo_first(self) -> None:
+                compensated.append("first")
+
+            async def second(self) -> None:
+                waiting.set()
+                await asyncio.sleep(30)
+
+        saga_def = _make_saga(
+            {
+                "first": StepDefinition(id="first", step_method=Bean.first, compensate_method=Bean.undo_first),
+                "second": StepDefinition(id="second", step_method=Bean.second, depends_on=["first"]),
+            },
+            name="cancelled",
+        )
+        saga_def.bean = Bean()
+        registry = SagaRegistry()
+        registry._sagas["cancelled"] = saga_def
+        invoker = StepInvoker(ArgumentResolver())
+        engine = SagaEngine(
+            registry=registry,
+            step_invoker=invoker,
+            execution_orchestrator=SagaExecutionOrchestrator(invoker),
+            compensator=SagaCompensator(invoker),
+        )
+
+        task = asyncio.create_task(engine.execute("cancelled"))
+        await waiting.wait()
+        task.cancel("caller gave up")
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+
+        assert raised.value.args == ("caller gave up",)
+        assert compensated == ["first"]
+
+    @pytest.mark.anyio
+    async def test_a_step_that_ends_cancelled_on_its_own_fails_the_saga_and_compensates(self) -> None:
+        """No silent success: the saga fails, the step that completed is compensated, the dependent never runs."""
+        from pyfly.transactional.saga.engine.argument_resolver import ArgumentResolver
+        from pyfly.transactional.saga.engine.compensator import SagaCompensator
+        from pyfly.transactional.saga.engine.saga_engine import SagaEngine
+        from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
+
+        calls: list[str] = []
+
+        class Bean:
+            async def hold(self) -> str:
+                calls.append("hold")
+                return "held"
+
+            async def release_hold(self) -> None:
+                calls.append("release_hold")
+
+            async def reserve(self) -> str:
+                calls.append("reserve")
+                reply = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_later(0.01, reply.cancel)  # a client library cancels its reply
+                await reply
+                return "reserved"
+
+            async def charge(self) -> str:
+                calls.append("charge")
+                return "charged"
+
+        saga_def = _make_saga(
+            {
+                "hold": StepDefinition(id="hold", step_method=Bean.hold, compensate_method=Bean.release_hold),
+                "reserve": StepDefinition(id="reserve", step_method=Bean.reserve, depends_on=["hold"]),
+                "charge": StepDefinition(id="charge", step_method=Bean.charge, depends_on=["reserve"]),
+            },
+            name="self-cancelled",
+        )
+        saga_def.bean = Bean()
+        registry = SagaRegistry()
+        registry._sagas["self-cancelled"] = saga_def
+        invoker = StepInvoker(ArgumentResolver())
+        engine = SagaEngine(
+            registry=registry,
+            step_invoker=invoker,
+            execution_orchestrator=SagaExecutionOrchestrator(invoker),
+            compensator=SagaCompensator(invoker),
+        )
+
+        result = await engine.execute("self-cancelled")
+
+        assert result.success is False
+        assert isinstance(result.error, OrchestrationError)
+        assert result.steps["reserve"].status == StepStatus.FAILED
+        assert result.steps["charge"].status == StepStatus.PENDING
+        assert calls == ["hold", "reserve", "release_hold"]

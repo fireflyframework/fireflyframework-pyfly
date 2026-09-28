@@ -46,6 +46,26 @@ class SagaContext:
     idempotency_keys: set[str] = field(default_factory=set)
     topology_layers: list[list[str]] = field(default_factory=list)
     step_dependencies: dict[str, list[str]] = field(default_factory=dict)
+    committed_steps: list[str] = field(default_factory=list)
+    """The steps whose work committed, in the order they ended: each step that completed (``DONE``), and
+    each step that failed, timed out or was cancelled after a unit of work of it committed (or with a commit
+    whose outcome is unknown). Compensation undoes them, newest first."""
+
+    # ── compensation helpers ──────────────────────────────────
+
+    def note_committed(self, step_id: str) -> None:
+        """Record that work of *step_id* committed (it is compensated if the saga fails)."""
+        if step_id not in self.committed_steps:
+            self.committed_steps.append(step_id)
+
+    def steps_to_compensate(self) -> list[str]:
+        """The steps compensation undoes, in the order they ended: :attr:`committed_steps`, then any other
+        step whose status is ``DONE``."""
+        ordered = list(self.committed_steps)
+        for step_id, status in self.step_statuses.items():
+            if status == StepStatus.DONE and step_id not in ordered:
+                ordered.append(step_id)
+        return ordered
 
     # ── result helpers ────────────────────────────────────────
 

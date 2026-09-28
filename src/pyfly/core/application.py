@@ -374,7 +374,14 @@ class PyFlyApplication:
         Resolves the :class:`ShellRunnerPort` (populated with ``@shell_command``
         handlers during startup) and runs the given args — or ``sys.argv[1:]`` —
         falling back to an interactive REPL when no command is supplied. This is
-        what the generated ``cli`` archetype's ``main()`` awaits (audit #1).
+        what the generated ``cli`` archetype's ``main()`` awaits (audit #1), and
+        exits with.
+
+        Commands run on this loop, the one the context started its engines, pools
+        and clients on, and the REPL reads its input off it, so scheduled jobs and
+        consumers keep running during a session. Background work a command started
+        (an ASYNC workflow, ``@async_method`` calls) is drained by the shutdown that
+        follows. Returns the command's exit code (0 after a REPL session).
         """
         from pyfly.shell.ports.outbound import ShellRunnerPort
 

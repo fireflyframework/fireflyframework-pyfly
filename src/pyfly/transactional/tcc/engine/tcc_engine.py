@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.shared.ports.outbound import (
     TransactionalEventsPort,
     TransactionalPersistencePort,
@@ -74,6 +76,8 @@ class TccEngine:
 
         Raises:
             ValueError: If tcc_name is not registered.
+            asyncio.CancelledError: The caller cancelled the TCC. The participants that tried were cancelled
+                first, and ``on_completed`` / ``mark_completed`` recorded the failure.
         """
         # 1. Look up TCC from registry.
         tcc_def: TccDefinition | None = self._registry.get(tcc_name)
@@ -108,6 +112,7 @@ class TccEngine:
                 }
             )
 
+        cancellation: asyncio.CancelledError | None = None  # re-raised as is: a cancel scope knows its own
         try:
             # 5. Execute via orchestrator.
             success, failed_participant_id = await self._orchestrator.execute(
@@ -115,6 +120,9 @@ class TccEngine:
                 ctx,
                 input_data=input_data,
             )
+        except asyncio.CancelledError as exc:
+            # The caller cancelled the TCC: the orchestrator ran the CANCEL phase before re-raising.
+            cancellation = exc
         except Exception as exc:
             error = exc
             logger.debug(
@@ -124,20 +132,15 @@ class TccEngine:
                 exc,
             )
         finally:
-            # 6. Emit on_completed event.
-            if self._events_port is not None:
-                await self._events_port.on_completed(
-                    tcc_name,
-                    ctx.correlation_id,
-                    success,
-                )
-
-            # 7. Persist final state.
-            if self._persistence_port is not None:
-                await self._persistence_port.mark_completed(
-                    ctx.correlation_id,
-                    success,
-                )
+            # 6-7. Emit on_completed and persist the final state, to completion even when the caller cancelled
+            # the TCC.
+            _result, finish_error, finish_cancelled = await run_shielded(self._finish(tcc_name, ctx, success))
+            if finish_error is not None and cancellation is None and not finish_cancelled:
+                raise finish_error
+        if cancellation is not None:
+            raise cancellation
+        if finish_cancelled:
+            raise asyncio.CancelledError
 
         # 8. Build and return TccResult.
         return self._build_result(
@@ -149,6 +152,13 @@ class TccEngine:
             error=error,
             failed_participant_id=failed_participant_id,
         )
+
+    async def _finish(self, tcc_name: str, ctx: TccContext, success: bool) -> None:
+        """Emit ``on_completed`` and persist the final state."""
+        if self._events_port is not None:
+            await self._events_port.on_completed(tcc_name, ctx.correlation_id, success)
+        if self._persistence_port is not None:
+            await self._persistence_port.mark_completed(ctx.correlation_id, success)
 
     @staticmethod
     def _build_result(

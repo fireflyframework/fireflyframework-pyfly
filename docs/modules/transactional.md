@@ -17,6 +17,7 @@ consistency across service boundaries without two-phase commit.
    - [The `@saga_step` Decorator](#the-saga_step-decorator)
    - [Compensation Methods](#compensation-methods)
    - [Step Dependencies (DAG)](#step-dependencies-dag)
+   - [Step Transactions, Failures and Cancellation](#step-transactions-failures-and-cancellation)
    - [Parameter Injection](#parameter-injection)
    - [SagaContext](#sagacontext)
    - [SagaResult and StepOutcome](#sagaresult-and-stepoutcome)
@@ -182,7 +183,7 @@ async def reserve_inventory(
 | `jitter` | `bool` | `False` | Whether to add jitter to backoff. |
 | `jitter_factor` | `float` | `0.0` | Fraction of backoff used as jitter range. |
 | `cpu_bound` | `bool` | `False` | Offload to a thread/process pool. |
-| `idempotency_key` | `str \| None` | `None` | Template string for deduplication. |
+| `idempotency_key` | `str \| None` | `None` | Template string for deduplication. Recorded on the step definition (and shown by the admin); the engine does not deduplicate on it. A step attempt that committed is never retried instead (see [Step Transactions](#step-transactions-failures-and-cancellation)). |
 | `compensation_retry` | `int \| None` | `None` | Override retry count for the compensation action. |
 | `compensation_backoff_ms` | `int \| None` | `None` | Override backoff for the compensation action. |
 | `compensation_timeout_ms` | `int \| None` | `None` | Override timeout for the compensation action. |
@@ -264,8 +265,9 @@ class NotifyWarehouseStep:
 
 Steps declare dependencies through `depends_on`, forming a directed acyclic
 graph. The engine computes topology layers -- groups of steps whose
-dependencies are all satisfied -- and executes each layer in parallel via
-`asyncio.gather`.
+dependencies are all satisfied -- and executes the steps of each layer
+concurrently, each in a task of its own (see
+[Step Transactions, Failures and Cancellation](#step-transactions-failures-and-cancellation)).
 
 ```
 Layer 0:  [validate-order]
@@ -284,6 +286,93 @@ registry validates the DAG at startup using Kahn's algorithm and raises
 
 * A `depends_on` entry references a nonexistent step.
 * The dependency graph contains a cycle.
+
+### Step Transactions, Failures and Cancellation
+
+The engines own the tasks and the units of work their steps run in, so that
+every step whose work committed is compensated exactly once, and no step
+commits behind the engine's back:
+
+- **Each step is a unit of work of its own.** A saga or workflow step runs in a
+  task started with the transaction state cleared
+  (`pyfly.data.transaction.detached`): its `@transactional` work (and its
+  repository calls) never join the caller's unit, even when the saga is started
+  inside `@transactional`, and a step commits on its own. So does each
+  compensation. A step therefore does not see the caller's uncommitted writes,
+  and it waits for the locks the caller holds while the caller waits for the
+  saga. On a SQLite file, whose database has one writer, a saga started inside
+  a write `@transactional` fails after `busy_timeout` with "database is locked"
+  once a step writes. On PostgreSQL, a step that writes rows the caller locked
+  waits for the caller, which waits for the saga, and neither ends until a
+  timeout (the step's, the caller's or the server's) does. Start
+  the saga outside the business transaction, or after it commits
+  (`pyfly.data.transaction.after_commit`). Through 26.09.07 the steps joined the
+  caller's unit and committed or rolled back with it.
+- **A step that fails.** In a saga, the steps of its layer that are still
+  running are awaited, never cancelled (a step cancelled while its `COMMIT` is in
+  flight would commit behind the engine's back); the steps waiting for the layer's
+  concurrency limit never start, and a running step starts no new attempt (one
+  sleeping in its retry backoff wakes up and fails with its last error). In a
+  workflow, the running siblings are cancelled and awaited (`asyncio.TaskGroup`
+  semantics). Either way compensation starts only once every step of the layer
+  has settled.
+- **A saga step that ends cancelled on its own** (its body awaited a future
+  something else cancelled, such as a reply future a client library gave up on,
+  while nothing cancelled the saga) failed: the attempt raises an
+  `OrchestrationError` chained from the `CancelledError`, and is retried,
+  compensated and reported like any other failure. The saga never takes it for
+  a success, nor for its own cancellation.
+- **The caller cancels** (a request timeout, `@time_limiter`, a client
+  disconnect, shutdown). The saga cancels and awaits every step task, compensates
+  the steps that committed, records its final state, and then re-raises
+  `CancelledError`; no step task outlives it. A TCC runs its CANCEL phase for the
+  participants that tried before it re-raises, also when the cancellation lands
+  during a CANCEL phase a failed TRY or CONFIRM started: that phase runs shielded
+  to completion. A workflow compensates and is
+  recorded `CANCELLED` (a workflow timeout records `TIMED_OUT`).
+- **Knowing what committed.** Commits are shielded: a cancellation or a step
+  timeout that fires while a step's `COMMIT` is in flight lets the commit finish,
+  and is raised afterwards. Each attempt therefore runs in
+  `pyfly.data.transaction.track_commits()`, and a step whose attempt failed,
+  timed out or was cancelled after a unit of work of it committed (or with a
+  commit whose outcome is unknown, `CommitOutcomeUnknownError`) is compensated
+  like a completed step (`SagaContext.committed_steps`, a workflow step record's
+  `committed` flag), and it is **never retried**: a retry would apply its writes
+  twice. An attempt that committed nothing is retried as configured. In TCC, a
+  TRY that failed after committing is cancelled with the participants that tried
+  (an optional one at once) and is not retried; neither is a CONFIRM or CANCEL
+  attempt that committed. A CONFIRM attempt whose timeout fired after a unit of
+  it committed is therefore a failed CONFIRM, as any other: the TCC fails and
+  runs CANCEL for every participant that tried, the ones already confirmed
+  included (the engine cannot tell whether the CONFIRM's work is complete), so
+  make CANCEL undo a confirmed reservation too, or give CONFIRM a timeout it
+  never reaches.
+- **An orchestration run by a step.** Commit tracking stops at a detached
+  task: the steps of a saga (or workflow) that a step runs commit in units of
+  their own, which the outer step's tracking does not see. A workflow step that
+  ran a saga to completion and then timed out counts as having committed
+  nothing, so it is retried and the saga runs again. Conversely, TCC
+  participants run in the step's task, so the commits of a CANCEL phase make the
+  step count as committed, and it is not retried although the TCC left nothing
+  behind. Make a step that runs another orchestration idempotent, or give it no
+  retries.
+- **TCC participants run in the caller's task.** Unlike saga and workflow steps,
+  the TRY, CONFIRM and CANCEL methods are not detached: called inside the
+  caller's `@transactional`, their units of work join the caller's unit (they
+  commit or roll back with it), and the TCC cannot see what they committed.
+  Start a TCC outside a transaction, or give its phase methods units of their own
+  (`@transactional(propagation=Propagation.REQUIRES_NEW)`).
+- **Only the framework's units of work are seen**: `@transactional`, repository
+  calls, `TransactionTemplate`, `SessionProvider.unit()`. A step that opens a
+  session from the `async_sessionmaker` and commits it by hand is invisible to
+  the engine (and its commit is not shielded); a step that calls another system
+  should make that call idempotent, since a cancelled call's outcome is unknown.
+
+Through 26.09.07 a saga cancelled a failed layer's running siblings (one cancelled
+mid-commit stayed `RUNNING` and was never compensated), a cancelled saga left its
+step tasks running and committing, a step whose timeout fired during `COMMIT` was
+retried and committed twice, a workflow compensated while its siblings were still
+running, and a TCC TRY that timed out after committing was never cancelled.
 
 ### Parameter Injection
 
@@ -1137,6 +1226,22 @@ execution state from the cache backend — there is no in-process index, so
 it is suitable only when the underlying cache adapter supports key scanning.
 A `ValueError` is raised at startup if no `CacheAdapter` bean is present
 (enable `pyfly.cache`, for example by setting `pyfly.cache.provider=memory`).
+Like the SQL provider, which joins the caller's unit of work, it follows the
+transaction-aware cache contract: a state saved or deleted inside a unit of
+work is written once the unit commits and dropped if it rolls back, and outside
+a unit it is written at once. The cache holds the state's JSON text, never a
+live object.
+
+The two providers order concurrent writes differently, though. A write the SQL
+provider makes outside the unit waits for the row lock of the unit that wrote
+the same execution, so it lands after that unit's commit. The cache provider
+writes it at once, and the unit's deferred write lands after it, at the commit.
+The engines never write one execution's state from two tasks at once: a saga or
+TCC writes its state from the task that runs it, and a background workflow run
+started inside a unit starts after that unit commits (see
+[Background runs and shutdown](#background-runs-and-shutdown)). The difference
+shows only when an application writes an execution's state itself, inside a
+unit and outside it at the same time.
 
 ### InMemoryPersistenceAdapter
 
@@ -1882,6 +1987,50 @@ definition = (
 )
 workflow_registry._definitions[definition.id] = definition  # or expose register_definition
 ```
+
+### Background runs and shutdown
+
+An ASYNC workflow (and `WorkflowEngine.start_async`) runs in a background task
+started with the transaction state cleared, so it never joins, nor outlives, the
+caller's unit of work.
+
+**Started inside a unit of work** (`@transactional`, a `TransactionTemplate`
+block, a `@transactional` step), the run starts once that unit commits, as
+Spring's `TransactionSynchronization.afterCommit` would start it. Its `PENDING`
+state is saved in the unit (the `sqlalchemy` provider joins it, the `cache`
+provider writes it at the commit), and the run is started by an after-commit
+synchronization registered right after that save. The states the run writes
+(`RUNNING`, then its final state) therefore always come after `PENDING`, with
+every provider. The other outcomes:
+
+- **The unit rolls back.** The run never starts, and its `PENDING` state is
+  deleted: a provider outside the unit (`memory`, `redis`, or `sqlalchemy` on
+  another datasource) wrote it at once.
+- **The commit outcome is unknown** (`CommitOutcomeUnknownError`). The run is not
+  started, a warning names it, and its `PENDING` state is kept, since the unit may
+  have committed. The recovery scan reports it once it is stale.
+- **The unit commits while the engine drains** (the context is stopping). The
+  run is not started either: a warning names it, and its `PENDING` state is kept.
+
+`start` and `start_async` still return `PENDING` at once, but the run does not
+progress before the commit, so do not wait inside the unit for it to progress
+(its signals, its queries, its completion). A start inside a
+`Propagation.NESTED` scope that rolls back to its savepoint still runs when the
+unit commits: synchronizations belong to the unit, not to a savepoint. Outside a
+unit of work the run starts at once. Through 26.09.07 the run started at once
+inside a unit too, so a caller that rolled back still ran the workflow.
+
+The auto-configured `WorkflowRuns` bean (a lifecycle bean
+of `CONSUMER_PHASE`) drains those runs when the application context stops,
+before any `@pre_destroy`: a run started just before shutdown (by a one-shot
+shell command, say) completes, and so do the fire-and-forget `async_` steps the
+runs spawn meanwhile. When `pyfly.context.shutdown-timeout` cuts the
+wait short, the runs still in flight are cancelled (each compensates what it
+committed) and awaited, and while it drains the engine refuses new ASYNC
+starts with `OrchestrationError`. A cancelled run records its final state
+(`CANCELLED`) to completion, even when it is cancelled again meanwhile. `@workflow_step(compensation_method="name")`
+names the compensating method directly; `@compensation_step(for_step=...)` still
+works.
 
 ### Persistence + REST
 

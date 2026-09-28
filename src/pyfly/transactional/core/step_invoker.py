@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Generic step / participant invoker — retry, jitter, timeout, cpu-bound dispatch."""
+"""Generic step / participant invoker — retry, jitter, timeout, cpu-bound dispatch.
+
+Each attempt runs inside :func:`pyfly.data.transaction.track_commits`. An attempt that failed, timed out or
+was cancelled after a unit of work of it committed (or with a commit whose outcome is unknown) is recorded on
+the context (:meth:`~pyfly.transactional.core.context.ExecutionContext.note_step_committed`), so the step is
+compensated like a completed one, and it is never retried: a retry would apply its writes twice. The
+timeout bounds each attempt; one that fires while the attempt's ``COMMIT`` is in flight lets the commit finish
+(commits are shielded) and then fails the attempt.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ import typing
 from collections.abc import Callable
 from typing import Any
 
+from pyfly.data.transaction import track_commits
 from pyfly.transactional.core.argument import (
     ArgumentResolver,
     SetVariable,
@@ -71,30 +80,42 @@ class StepInvoker:
             attempts = attempt
             await ctx.record_step_started(step_id)
             started = time.perf_counter()
-            try:
-                kwargs = self._resolver.resolve(
-                    method,
-                    ctx,
-                    compensation_error=compensation_error,
-                    compensation_results=compensation_results,
-                    current_participant_id=current_participant_id,
-                    skip_first=bean is not None,
-                )
-                value = await self._call(method, bean, kwargs, retry_policy.timeout_ms, cpu_bound, step_id)
-                latency_ms = (time.perf_counter() - started) * 1000.0
-                await ctx.record_step_success(step_id, value, latency_ms)
-                await self._apply_set_variables(method, kwargs, ctx)
-                return value
-            except StepTimeoutError as exc:
-                last_error = exc
-                latency_ms = (time.perf_counter() - started) * 1000.0
-                await ctx.record_step_failure(step_id, exc, latency_ms)
-                _logger.warning("step %s timed out (attempt %d/%d)", step_id, attempt, max_attempts)
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                latency_ms = (time.perf_counter() - started) * 1000.0
-                await ctx.record_step_failure(step_id, exc, latency_ms)
-                _logger.warning("step %s failed (attempt %d/%d): %s", step_id, attempt, max_attempts, exc)
+            with track_commits() as commits:
+                try:
+                    kwargs = self._resolver.resolve(
+                        method,
+                        ctx,
+                        compensation_error=compensation_error,
+                        compensation_results=compensation_results,
+                        current_participant_id=current_participant_id,
+                        skip_first=bean is not None,
+                    )
+                    value = await self._call(method, bean, kwargs, retry_policy.timeout_ms, cpu_bound, step_id)
+                except StepTimeoutError as exc:
+                    last_error = exc
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    await ctx.record_step_failure(step_id, exc, latency_ms)
+                    _logger.warning("step %s timed out (attempt %d/%d)", step_id, attempt, max_attempts)
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    await ctx.record_step_failure(step_id, exc, latency_ms)
+                    _logger.warning("step %s failed (attempt %d/%d): %s", step_id, attempt, max_attempts, exc)
+                except BaseException:
+                    # Cancelled (a sibling failed, the workflow timed out or was cancelled): the step ends here,
+                    # and what it committed first is compensated.
+                    ctx.note_step_cancelled(step_id, committed=commits.may_have_committed)
+                    raise
+                else:
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    await ctx.record_step_success(step_id, value, latency_ms)
+                    await self._apply_set_variables(method, kwargs, ctx)
+                    return value
+            if commits.may_have_committed:
+                # Work of this attempt committed: never retry it, compensate it like a completed step.
+                ctx.note_step_committed(step_id)
+                _logger.warning("step %s committed before it failed; not retried", step_id)
+                break
             if attempt < max_attempts:
                 delay = self._compute_backoff(retry_policy, attempt)
                 if delay > 0:
@@ -126,7 +147,8 @@ class StepInvoker:
 
         if timeout_ms > 0:
             try:
-                return await asyncio.wait_for(runner(), timeout=timeout_ms / 1000.0)
+                async with asyncio.timeout(timeout_ms / 1000.0):
+                    return await runner()
             except TimeoutError as exc:
                 raise StepTimeoutError(step_id=step_id, timeout_ms=timeout_ms) from exc
         return await runner()

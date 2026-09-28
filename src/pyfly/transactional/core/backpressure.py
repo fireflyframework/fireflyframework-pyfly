@@ -15,16 +15,74 @@
 
 Mirrors ``org.fireflyframework.orchestration.core.backpressure`` —
 adaptive (semaphore-bounded), batched, and circuit-breaker variants.
+
+Every strategy settles what it started before it returns or raises (structured concurrency, as
+``asyncio.TaskGroup``): when an item fails, the items still running are cancelled and awaited, and only
+then is the failure raised; when the caller is cancelled, every item is cancelled and awaited before the
+cancellation propagates. No item outlives :meth:`BackpressureStrategy.apply`, so a workflow compensates
+only once every sibling of a failed step has settled, and never misses one that committed meanwhile.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Coroutine
 from typing import Any, Protocol, runtime_checkable
 
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.core.model import BackpressureProperties, CircuitBreakerConfig
+
+
+async def settle_all(coroutines: list[Coroutine[Any, Any, Any]]) -> list[Any]:
+    """Run *coroutines* concurrently and return their results in order, or raise the first failure.
+
+    Structured like ``asyncio.TaskGroup``: when one fails, the others are cancelled and awaited before its
+    exception is raised; when the caller is cancelled, every one is cancelled and awaited (whatever further
+    cancellations arrive meanwhile) before the cancellation propagates.
+    """
+    tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
+    if not tasks:
+        return []
+    try:
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    except asyncio.CancelledError:
+        await cancel_and_wait(tasks)
+        raise
+    failure = next((task.exception() for task in tasks if task in done and _failed(task)), None)
+    if failure is None:
+        return [task.result() for task in tasks]
+    try:
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks)
+    except asyncio.CancelledError:
+        await cancel_and_wait(tasks)
+        raise
+    finally:
+        retrieve_outcomes(tasks)
+    raise failure
+
+
+def _failed(task: asyncio.Future[Any]) -> bool:
+    return task.done() and not task.cancelled() and task.exception() is not None
+
+
+async def cancel_and_wait(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Cancel *tasks* and wait until every one has ended, whatever cancellations the caller gets meanwhile; their
+    outcomes are marked as seen (:func:`retrieve_outcomes`)."""
+    for task in tasks:
+        task.cancel()
+    await run_shielded(asyncio.wait(tasks))
+    retrieve_outcomes(tasks)
+
+
+def retrieve_outcomes(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Mark every finished task's outcome as seen, so none is logged as never retrieved (the caller raises the
+    failure it reports itself)."""
+    for task in tasks:
+        if task.done() and not task.cancelled():
+            task.exception()
 
 
 @runtime_checkable
@@ -59,7 +117,7 @@ class AdaptiveBackpressureStrategy:
             async with semaphore:
                 return await processor(item)
 
-        return await asyncio.gather(*(_bounded(i) for i in items), return_exceptions=False)
+        return await settle_all([_bounded(i) for i in items])
 
 
 class BatchedBackpressureStrategy:
@@ -78,8 +136,12 @@ class BatchedBackpressureStrategy:
         results: list[Any] = []
         for i in range(0, len(items), self._batch_size):
             chunk = items[i : i + self._batch_size]
-            results.extend(await asyncio.gather(*(processor(c) for c in chunk)))
+            results.extend(await settle_all([_awaited(processor(c)) for c in chunk]))
         return results
+
+
+async def _awaited(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
 
 
 class CircuitBreakerBackpressureStrategy:

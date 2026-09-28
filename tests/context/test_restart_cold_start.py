@@ -136,21 +136,26 @@ def _context(tmp_path: Path) -> ApplicationContext:
     return context
 
 
-async def _run(context: ApplicationContext) -> tuple[list[tuple[str, int]], dict[str, int]]:
-    """Start, place one order, ping once, stop; the calls of this run and the ids of its beans."""
+async def _run(context: ApplicationContext) -> tuple[list[tuple[str, int]], dict[str, int], dict[str, object]]:
+    """Start, place one order, ping once, stop; the calls of this run, the ids of its beans, and the beans.
+
+    The caller keeps the beans alive while it compares runs: CPython may reuse the address (the ``id()``) of a
+    freed object, so the ids of two runs only tell their beans apart while both runs' beans are alive.
+    """
     first = len(CALLS)
     await context.start()
-    ids = {
-        "orders": id(context.get_bean(_Orders)),
-        "tracing": id(context.get_bean(_Tracing)),
-        "relay": id(context.get_bean(_Relay)),
-        "marker": id(context.get_bean(_Marker)),
-        "engine": id(context.get_bean(AsyncEngine)),
+    beans: dict[str, object] = {
+        "orders": context.get_bean(_Orders),
+        "tracing": context.get_bean(_Tracing),
+        "relay": context.get_bean(_Relay),
+        "marker": context.get_bean(_Marker),
+        "engine": context.get_bean(AsyncEngine),
     }
+    ids = {name: id(bean) for name, bean in beans.items()}
     await context.get_bean(ApplicationEventPublisher).publish(OrderPlaced())
     assert await context.get_bean(_Orders).ping() == "pong"
     await context.stop()
-    return CALLS[first:], ids
+    return CALLS[first:], ids, beans
 
 
 def _expected(ids: dict[str, int]) -> list[tuple[str, int]]:
@@ -167,12 +172,12 @@ def _expected(ids: dict[str, int]) -> list[tuple[str, int]]:
 async def test_a_restart_reproduces_a_cold_start(tmp_path: Path) -> None:
     context = _context(tmp_path)
 
-    first_calls, first_ids = await _run(context)
+    first_calls, first_ids, first_beans = await _run(context)
     assert first_calls == _expected(first_ids)
 
-    second_calls, second_ids = await _run(context)
+    second_calls, second_ids, second_beans = await _run(context)  # the first run's beans are still alive
     assert second_calls == _expected(second_ids)
-    assert all(second_ids[name] != first_ids[name] for name in ("orders", "relay", "marker"))
+    assert all(second_beans[name] is not first_beans[name] for name in ("orders", "relay", "marker"))
 
 
 async def test_stop_leaves_nothing_of_the_run_behind(tmp_path: Path) -> None:

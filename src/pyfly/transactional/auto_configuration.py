@@ -90,7 +90,7 @@ from pyfly.transactional.tcc.registry.tcc_registry import TccRegistry
 # workflow/
 from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
 from pyfly.transactional.workflow.continue_as_new_service import ContinueAsNewService
-from pyfly.transactional.workflow.engine import WorkflowEngine
+from pyfly.transactional.workflow.engine import WorkflowEngine, WorkflowRuns
 from pyfly.transactional.workflow.executor import WorkflowExecutor
 from pyfly.transactional.workflow.query_service import WorkflowQueryService
 from pyfly.transactional.workflow.registry import WorkflowRegistry
@@ -456,6 +456,11 @@ class TransactionalEngineAutoConfiguration:
             continue_service=cont,
             dead_letter_service=dlq,
         )
+
+    @bean
+    def workflow_runs(self, engine: WorkflowEngine) -> WorkflowRuns:
+        """Drains the ASYNC workflow runs in flight when the context stops, before any ``@pre_destroy``."""
+        return WorkflowRuns(engine)
 
     # -- Recovery and REST --------------------------------------------------
 

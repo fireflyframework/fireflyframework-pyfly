@@ -20,14 +20,19 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
+from pyfly.data.transaction import detached
+from pyfly.scheduling.adapters.asyncio_executor import drain
+
 T = TypeVar("T")
 
 
 class ThreadPoolTaskExecutor:
-    """TaskExecutor using a ThreadPoolExecutor for CPU-bound work.
+    """TaskExecutor using a ThreadPoolExecutor for blocking work.
 
-    Wraps sync functions to run in a thread pool, while async coroutines
-    are submitted to the event loop directly.
+    Coroutines are submitted to the event loop as tasks of their own, started with the transaction state
+    cleared (:func:`pyfly.data.transaction.detached`). Synchronous functions run in the pool of *max_workers*
+    threads: :meth:`submit_sync`, and :meth:`run_sync`, which the ``TaskScheduler`` uses for synchronous
+    ``@scheduled`` methods, so ``pyfly.scheduling.executor.max-workers`` bounds their threads.
     """
 
     def __init__(self, max_workers: int = 4) -> None:
@@ -36,27 +41,39 @@ class ThreadPoolTaskExecutor:
 
     async def submit(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         """Submit a coroutine for execution. Returns an asyncio.Task."""
-        task = asyncio.create_task(coro)
+        task = detached(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
     def submit_sync(self, func: Callable[..., T], *args: Any) -> asyncio.Task[Any]:
         """Submit a synchronous function to the thread pool."""
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self._executor, func, *args)
-        # Wrap the future as a Task-like
-        task: asyncio.Task[Any] = asyncio.ensure_future(future)
+        task: asyncio.Task[Any] = asyncio.ensure_future(self.run_sync(func, *args))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    async def run_sync(self, func: Callable[..., T], *args: Any) -> T:
+        """Run the synchronous *func* in the pool and return its result."""
+        return await asyncio.get_running_loop().run_in_executor(self._executor, func, *args)
 
     async def start(self) -> None:
         """No-op -- thread pool is ready after construction."""
 
     async def stop(self) -> None:
-        """Stop the executor and thread pool, waiting for pending tasks."""
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-        self._executor.shutdown(wait=True)
+        """Stop the executor and thread pool, waiting for pending tasks, then for the pool's threads.
+
+        A thread may still be running a function whose task has ended (a synchronous ``@async_method`` call
+        whose task its caller cancelled goes on in its thread): it is waited for off the event loop, so the
+        application goes on meanwhile. When the wait is cancelled (the context's shutdown timeout), the pending
+        tasks are cancelled and awaited, the functions still queued never start, and a thread already running a
+        function finishes it on its own.
+        """
+        try:
+            await drain(self._tasks)
+            self._tasks.clear()
+            await asyncio.to_thread(self._executor.shutdown, True)
+        except BaseException:
+            self._tasks.clear()
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            raise

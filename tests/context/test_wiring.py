@@ -216,22 +216,152 @@ class TestScheduledWiring:
 class TestAsyncMethodWiring:
     @pytest.mark.asyncio
     async def test_wraps_async_methods(self):
-        """@async_method decorated methods are wrapped for async execution."""
+        """@async_method calls return their task at once; the method runs in it (Spring @Async)."""
+        import asyncio
+        import threading
+
         from pyfly.scheduling.decorators import async_method
+
+        release = asyncio.Event()
 
         @service
         class MyService:
             @async_method
             def heavy_computation(self):
-                return 42
+                return threading.current_thread().name
+
+            @async_method
+            async def slow(self):
+                await release.wait()
+                return "slow done"
 
         ctx = ApplicationContext(Config({}))
         ctx.register_bean(MyService)
         await ctx.start()
 
-        assert ctx.wiring_counts["async_methods"] == 1
+        assert ctx.wiring_counts["async_methods"] == 2
+        svc = ctx.get_bean(MyService)
+        pending = await svc.slow()  # returns at once: the method waits for `release`
+        assert isinstance(pending, asyncio.Task) and not pending.done()
+        release.set()
+        assert await pending == "slow done"
+        thread = await (await svc.heavy_computation())
+        assert thread != threading.main_thread().name  # a sync method runs off the event loop
 
         await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_waits_for_the_calls_in_flight(self):
+        import asyncio
+
+        from pyfly.scheduling.decorators import async_method
+
+        finished: list[str] = []
+
+        @service
+        class Auditor:
+            @async_method
+            async def record(self):
+                await asyncio.sleep(0.05)
+                finished.append("recorded")
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(Auditor)
+        await ctx.start()
+        await ctx.get_bean(Auditor).record()
+        await ctx.stop()
+
+        assert finished == ["recorded"]
+
+    @pytest.mark.asyncio
+    async def test_a_bean_registered_under_two_keys_is_dispatched_once(self):
+        """An interface-typed @bean is registered under its port and its class, sharing one instance: each call
+        submits the method once, and the task it returns gives the method's result (not another task)."""
+        from typing import Protocol
+
+        from pyfly.container.bean import bean
+        from pyfly.container.stereotypes import configuration
+        from pyfly.scheduling.decorators import async_method
+
+        class Notifier(Protocol):
+            async def notify(self, text: str) -> str: ...
+
+        class EmailNotifier:
+            @async_method
+            async def notify(self, text: str) -> str:
+                return f"sent {text}"
+
+        @configuration
+        class NotifierConfig:
+            @bean
+            def notifier(self) -> Notifier:
+                return EmailNotifier()
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(NotifierConfig)
+        await ctx.start()
+        try:
+            notifier = ctx.get_bean(Notifier)
+            assert await (await notifier.notify("x")) == "sent x"
+            assert ctx.wiring_counts["async_methods"] == 1
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_wiring_twice_never_wraps_a_dispatching_method_again(self):
+        """Wiring is idempotent: a method that already dispatches its calls is never wrapped again."""
+        from pyfly.scheduling.decorators import async_method
+
+        @service
+        class Greeter:
+            @async_method
+            async def greet(self, name: str) -> str:
+                return f"hello {name}"
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(Greeter)
+        await ctx.start()
+        try:
+            greeter = ctx.get_bean(Greeter)
+            dispatching = greeter.greet
+            ctx._wire_async_methods()
+            assert greeter.greet is dispatching
+            assert ctx.wiring_counts["async_methods"] == 0
+            assert await (await greeter.greet("ada")) == "hello ada"
+        finally:
+            await ctx.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_declared_uncaught_exception_handler_that_cannot_be_created_fails_the_start(self):
+        """Not silently replaced by the logging default: the start fails, naming what the handler lacks."""
+        from pyfly.container.exceptions import NoSuchBeanError
+        from pyfly.container.stereotypes import component
+        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
+        from pyfly.scheduling.decorators import async_method
+
+        class AlertingClient:
+            """Never registered."""
+
+        @component
+        class AlertingHandler:
+            def __init__(self, client: AlertingClient) -> None:
+                self.client = client
+
+            def handle_uncaught_exception(self, error, method, args, kwargs) -> None:
+                raise AssertionError("never created")
+
+        @service
+        class Worker:
+            @async_method
+            async def work(self):
+                raise RuntimeError("boom")
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(AlertingHandler)
+        ctx.container.bind(AsyncUncaughtExceptionHandler, AlertingHandler)  # type: ignore[type-abstract]
+        ctx.register_bean(Worker)
+        with pytest.raises(NoSuchBeanError, match="AlertingClient"):
+            await ctx.start()
 
 
 # --- Test: Registry stats ---
