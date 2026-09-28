@@ -24,7 +24,9 @@ Knowing what committed: every phase attempt runs inside :func:`pyfly.data.transa
   cannot be told): the TCC fails, and every participant that tried is cancelled, the confirmed ones included.
 - A caller that cancels the TCC (a timeout, a disconnect, shutdown) gets ``CancelledError`` once the CANCEL
   phase has run, to completion, for every participant that tried (the one whose TRY was cancelled after it
-  committed included).
+  committed included). Whichever phase the cancellation lands in, the CANCEL phase a failure started
+  included: every CANCEL phase runs shielded, in a task of its own, so the cancellation never interrupts a
+  participant's cancel nor skips the ones after it.
 
 Participants run in the caller's task: inside the caller's ``@transactional`` their units of work join the
 caller's unit, whose commit happens outside the TCC and is not seen (start a TCC outside a transaction, or
@@ -122,8 +124,10 @@ class TccExecutionOrchestrator:
                             p_def.id,
                             exc,
                         )
-                        if committed:
-                            await self._cancel_participants([p_def.id], tcc_def, bean, ctx)
+                        if committed and await self._run_cancel_phase([p_def.id], tcc_def, bean, ctx):
+                            # The caller cancelled the TCC meanwhile: release what the others reserved too.
+                            await self._cancel_on_cancellation(tried_ids, tcc_def, bean, ctx)
+                            raise asyncio.CancelledError from None
                         continue
                     logger.debug(
                         "Participant '%s' TRY failed: %s",
@@ -141,7 +145,8 @@ class TccExecutionOrchestrator:
         if failed_participant_id is not None:
             # ── CANCEL phase (TRY failure) ───────────────────────
             ctx.set_phase(TccPhase.CANCEL)
-            await self._cancel_participants(tried_ids, tcc_def, bean, ctx)
+            if await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx):
+                raise asyncio.CancelledError  # the caller cancelled the TCC meanwhile; the phase ran first
             return (False, failed_participant_id)
 
         # ── CONFIRM phase ────────────────────────────────────────
@@ -178,7 +183,8 @@ class TccExecutionOrchestrator:
         if failed_participant_id is not None:
             # ── CANCEL phase (CONFIRM failure) ───────────────────
             ctx.set_phase(TccPhase.CANCEL)
-            await self._cancel_participants(tried_ids, tcc_def, bean, ctx)
+            if await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx):
+                raise asyncio.CancelledError  # the caller cancelled the TCC meanwhile; the phase ran first
             return (False, failed_participant_id)
 
         return (True, None)
@@ -218,6 +224,22 @@ class TccExecutionOrchestrator:
                     exc,
                 )
 
+    async def _run_cancel_phase(
+        self,
+        tried_ids: list[str],
+        tcc_def: TccDefinition,
+        bean: Any,
+        ctx: TccContext,
+    ) -> bool:
+        """Cancel *tried_ids* to completion whatever happens to the calling task, in a task of its own.
+
+        Returns whether the caller was cancelled meanwhile: the caller raises ``CancelledError`` then.
+        """
+        _result, error, cancelled = await run_shielded(self._cancel_participants(tried_ids, tcc_def, bean, ctx))
+        if error is not None:
+            logger.warning("TCC CANCEL phase raised: %s", error)
+        return cancelled
+
     async def _cancel_on_cancellation(
         self,
         tried_ids: list[str],
@@ -227,9 +249,7 @@ class TccExecutionOrchestrator:
     ) -> None:
         """Run the CANCEL phase for *tried_ids* to completion although the caller is being cancelled."""
         ctx.set_phase(TccPhase.CANCEL)
-        _result, error, _cancelled = await run_shielded(self._cancel_participants(tried_ids, tcc_def, bean, ctx))
-        if error is not None:
-            logger.warning("TCC CANCEL phase after a cancellation raised: %s", error)
+        await self._run_cancel_phase(tried_ids, tcc_def, bean, ctx)
 
     async def _invoke_with_retry_and_timeout(
         self,

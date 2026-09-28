@@ -23,7 +23,8 @@ PostgreSQL. Each phase writes through a ``@transactional`` service; a commit gat
 - An optional participant whose TRY timed out after committing is skipped, and cancelled at once so its
   reservation does not leak while the TCC goes on and confirms the others.
 - C019: a caller that cancels the TCC while a TRY runs gets ``CancelledError`` once the CANCEL phase has
-  released what the TRYs before it reserved (CANCEL never ran on cancellation).
+  released what the TRYs before it reserved (CANCEL never ran on cancellation). A cancellation that lands while
+  a participant is being cancelled lets that CANCEL finish too.
 """
 
 from __future__ import annotations
@@ -90,6 +91,9 @@ class Script:
         self.try_attempts = 0
         self.decline_first_try = False
         self.second_try_waiting = asyncio.Event()
+        self.revoke_started = asyncio.Event()
+        self.revoke_may_finish = asyncio.Event()
+        self.revoke_may_finish.set()
 
 
 @tcc(name="wp13-slow-reservation")
@@ -139,6 +143,8 @@ class OptionalPoints:
 
         @cancel_method()
         async def revoke(self) -> None:
+            self.script.revoke_started.set()
+            await self.script.revoke_may_finish.wait()
             await self.ledger.record("POINTS_REVOKED")
 
     @tcc_participant(id="stock", order=2)
@@ -305,3 +311,22 @@ async def test_an_optional_try_that_committed_as_it_timed_out_is_cancelled_at_on
 
     assert result.success is True  # type: ignore[attr-defined]
     assert await harness.committed() == ["POINTS", "POINTS_REVOKED", "RESERVED", "CONFIRMED"]
+
+
+async def test_cancelling_the_tcc_while_an_optional_try_is_cancelled_lets_its_cancel_finish(harness: Harness) -> None:
+    bean = harness.ctx.get_bean(OptionalPoints)
+    bean.script.revoke_may_finish.clear()
+    async with harness.gate() as gate:
+        await gate.close()
+        running: asyncio.Task[object] = asyncio.create_task(harness.engine.execute("wp13-optional-points"))
+        await gate.wait_for_commit()
+        await _timed_out(running)
+        await gate.open()
+        await asyncio.wait_for(bean.script.revoke_started.wait(), 10)
+    running.cancel()  # the caller gives up while the optional participant's reservation is being revoked
+    await asyncio.sleep(0.05)
+    bean.script.revoke_may_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(running, 10)
+
+    assert await harness.committed() == ["POINTS", "POINTS_REVOKED"]  # revoked, and nothing tried after it

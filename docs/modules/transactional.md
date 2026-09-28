@@ -317,7 +317,9 @@ commits behind the engine's back:
   disconnect, shutdown). The saga cancels and awaits every step task, compensates
   the steps that committed, records its final state, and then re-raises
   `CancelledError`; no step task outlives it. A TCC runs its CANCEL phase for the
-  participants that tried before it re-raises. A workflow compensates and is
+  participants that tried before it re-raises, also when the cancellation lands
+  during a CANCEL phase a failed TRY or CONFIRM started: that phase runs shielded
+  to completion. A workflow compensates and is
   recorded `CANCELLED` (a workflow timeout records `TIMED_OUT`).
 - **Knowing what committed.** Commits are shielded: a cancellation or a step
   timeout that fires while a step's `COMMIT` is in flight lets the commit finish,
