@@ -30,6 +30,10 @@ Example::
 
     # inactive users
     results = await repo.find_all_by_spec(~active)
+
+``~spec`` has SQL's semantics (:func:`~pyfly.data.document.mongodb.criteria.negate`): it matches the documents
+for which *spec* is false, never those for which it is unknown (a comparison on a null or missing field), as
+``NOT`` does on a relational database; MongoDB's own ``$nor`` would match those too.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from pyfly.data.document.mongodb.criteria import negate
 from pyfly.data.specification import Specification as SpecificationBase
 
 T = TypeVar("T")
@@ -52,7 +57,7 @@ class MongoSpecification(SpecificationBase[T, dict[str, Any]]):
 
     * ``spec_a & spec_b`` — both predicates must match (``$and``).
     * ``spec_a | spec_b`` — either predicate may match (``$or``).
-    * ``~spec_a`` — negated predicate (``$nor``).
+    * ``~spec_a`` — negated predicate, with SQL's semantics for null and missing fields.
     """
 
     def __init__(self, predicate: Callable[[type[T], dict[str, Any]], dict[str, Any]]) -> None:
@@ -97,13 +102,11 @@ class MongoSpecification(SpecificationBase[T, dict[str, Any]]):
         return MongoSpecification(or_predicate)
 
     def __invert__(self) -> MongoSpecification[T]:
-        """Negate this specification: NOT (``$nor``)."""
+        """Negate this specification: the documents for which it is false (SQL's ``NOT``); a specification
+        that filters nothing stays one."""
         pred = self._predicate
 
         def not_predicate(root: type[T], q: dict[str, Any]) -> dict[str, Any]:
-            doc = pred(root, q)
-            if not doc:
-                return {}
-            return {"$nor": [doc]}
+            return negate(pred(root, q))
 
         return MongoSpecification(not_predicate)

@@ -51,9 +51,10 @@ class TestBuildClause:
         assert idx == 1
 
     def test_not(self, compiler: MongoQueryMethodCompiler):
+        """``!=`` as on SQL: a null or missing field does not match (C110)."""
         pred = FieldPredicate(field_name="status", operator="not")
         clause, idx = compiler._build_clause("status", pred, ["inactive"], 0)
-        assert clause == {"status": {"$ne": "inactive"}}
+        assert clause == {"status": {"$nin": ["inactive", None]}}
         assert idx == 1
 
     def test_gt(self, compiler: MongoQueryMethodCompiler):
@@ -81,16 +82,23 @@ class TestBuildClause:
         assert idx == 1
 
     def test_like(self, compiler: MongoQueryMethodCompiler):
+        """SQL LIKE: anchored, case-sensitive, every character but ``%`` and ``_`` literal (C036)."""
         pred = FieldPredicate(field_name="name", operator="like")
         clause, idx = compiler._build_clause("name", pred, ["%Al%"], 0)
-        assert "$regex" in clause["name"]
+        assert clause == {"name": {"$regex": "Al", "$options": "s"}}
+        assert compiler._build_clause("code", pred, ["INV-%"], 0)[0] == {"code": {"$regex": r"^INV\-", "$options": "s"}}
+        assert compiler._build_clause("code", pred, ["A_1."], 0)[0] == {
+            "code": {"$regex": r"^A.1\.\z", "$options": "s"}
+        }
         assert idx == 1
 
     def test_containing(self, compiler: MongoQueryMethodCompiler):
+        """The argument is matched as it is, case-sensitive unless the name says ``_ignore_case``."""
         pred = FieldPredicate(field_name="name", operator="containing")
-        clause, idx = compiler._build_clause("name", pred, ["lic"], 0)
-        assert clause["name"]["$regex"] == ".*lic.*"
-        assert clause["name"]["$options"] == "i"
+        clause, idx = compiler._build_clause("name", pred, ["l.c"], 0)
+        assert clause == {"name": {"$regex": r"l\.c", "$options": "s"}}
+        folded = FieldPredicate(field_name="name", operator="containing", ignore_case=True)
+        assert compiler._build_clause("name", folded, ["lic"], 0)[0] == {"name": {"$regex": "lic", "$options": "is"}}
         assert idx == 1
 
     def test_in(self, compiler: MongoQueryMethodCompiler):
@@ -164,6 +172,8 @@ class TestBuildFilter:
         assert result == {"$or": [{"role": "admin"}, {"role": "superadmin"}]}
 
     def test_mixed_connectors(self, compiler: MongoQueryMethodCompiler):
+        """``and`` binds tighter than ``or``: ``a_and_b_or_c`` is ``(a AND b) OR c``, ``a_or_b_and_c`` is
+        ``a OR (b AND c)`` (the shared parser's groups)."""
         parsed = ParsedQuery(
             prefix="find_by",
             predicates=[
@@ -174,8 +184,10 @@ class TestBuildFilter:
             connectors=["and", "or"],
         )
         result = compiler._build_filter(parsed, ["Alice", "admin", True])
-        # Mixed: (name=Alice AND role=admin) OR active=True
-        assert "$or" in result or "$and" in result
+        assert result == {"$or": [{"$and": [{"name": "Alice"}, {"role": "admin"}]}, {"active": True}]}
+        parsed.connectors = ["or", "and"]
+        result = compiler._build_filter(parsed, ["Alice", "admin", True])
+        assert result == {"$or": [{"name": "Alice"}, {"$and": [{"role": "admin"}, {"active": True}]}]}
 
     def test_empty_predicates(self, compiler: MongoQueryMethodCompiler):
         parsed = ParsedQuery(prefix="find_by")
@@ -296,7 +308,7 @@ class TestParserCompilerIntegration:
     def test_find_by_name_containing_filter(self, parser: QueryMethodParser, compiler: MongoQueryMethodCompiler):
         parsed = parser.parse("find_by_name_containing")
         filter_doc = compiler._build_filter(parsed, ["lic"])
-        assert filter_doc["name"]["$regex"] == ".*lic.*"
+        assert filter_doc["name"]["$regex"] == "lic"
 
     def test_find_by_with_order(self, parser: QueryMethodParser, compiler: MongoQueryMethodCompiler):
         parsed = parser.parse("find_by_active_order_by_name_asc")

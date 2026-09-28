@@ -28,6 +28,10 @@ The query string may be:
 Named parameters use the ``:param_name`` convention inside JSON string values.
 During execution, ``":param_name"`` is replaced with the actual keyword-argument
 value while preserving the Python type (int, bool, list, etc.).
+
+The compiled query runs in the repository's unit of work: the unit's ``ClientSession`` goes with the ``find``
+or the ``aggregate``. A find filter and a pipeline without an ``$out`` or ``$merge`` stage are reads (outside a
+transaction they run without one); a pipeline that writes is a write.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +80,47 @@ def _substitute_params(obj: Any, params: dict[str, Any]) -> Any:
     return obj
 
 
+class MongoAnnotatedQuery:
+    """A compiled ``@query`` method: a find filter or an aggregation pipeline, with its placeholders.
+
+    :meth:`run` executes it on a repository, in the repository's unit of work. Calling the object itself with
+    a document class and the keyword arguments (``await query(Model, **kwargs)``, what the compiled callables of
+    earlier releases took) runs it through a repository of that class.
+    """
+
+    def __init__(self, template: Any) -> None:
+        self.template = template
+        self.is_pipeline = isinstance(template, list)
+        writes = self.is_pipeline and any(
+            isinstance(stage, dict) and ("$out" in stage or "$merge" in stage) for stage in template
+        )
+        self.reads = not writes
+        """Whether the query only reads (a pipeline ending in ``$out`` or ``$merge`` writes)."""
+
+    async def run(self, repository: Any, **kwargs: Any) -> Any:
+        """Run the query on *repository* (a ``MongoRepository``): the matching documents of a find filter, or
+        the rows (``dict``) of a pipeline."""
+        document = _substitute_params(self.template, kwargs)
+        if self.is_pipeline:
+            async with repository._operation(write=not self.reads) as session:
+                cursor = await repository._collection().aggregate(document, session=session)
+                return list(await cursor.to_list(length=None))
+        return list(await repository._find(document))
+
+    async def __call__(self, target: Any, **kwargs: Any) -> Any:
+        """Run the query on *target*: a ``MongoRepository``, or a document class (through a repository of it)."""
+        from pyfly.data.document.mongodb.repository import MongoRepository, repository_operation
+
+        repository = target if isinstance(target, MongoRepository) else MongoRepository(target)
+
+        async def execute(self_arg: Any) -> Any:
+            return await self.run(self_arg, **kwargs)
+
+        return await repository_operation(execute, read=self.reads, atomic=True)(repository)
+
+
 class MongoQueryExecutor:
-    """Compile ``@query``-decorated methods into async callables for MongoDB.
+    """Compile ``@query``-decorated methods into :class:`MongoAnnotatedQuery` objects.
 
     This class is used by :class:`MongoRepositoryBeanPostProcessor` to wire up
     custom query methods at startup time.
@@ -87,20 +130,16 @@ class MongoQueryExecutor:
         self,
         method: Callable[..., Any],
         entity: type[T],
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
-        """Compile a ``@query``-decorated method into an executable async function.
+    ) -> MongoAnnotatedQuery:
+        """Compile a ``@query``-decorated method into an executable query.
 
         Args:
             method: The decorated method (must have ``__pyfly_query__``).
-            entity: The Beanie document type (used for ``.find()`` /
-                    ``.aggregate()`` calls).
+            entity: The Beanie document type.
 
         Returns:
-            An async function with signature
-            ``(model: type[T], **kwargs) -> Any`` that returns:
-
-            - ``list[entity]`` for find-filter queries (JSON object).
-            - ``list[dict]`` for aggregation-pipeline queries (JSON array).
+            A :class:`MongoAnnotatedQuery` that returns ``list[entity]`` for a find filter (a JSON object) and
+            ``list[dict]`` for an aggregation pipeline (a JSON array).
 
         Raises:
             AttributeError: If *method* was not decorated with ``@query``.
@@ -110,47 +149,12 @@ class MongoQueryExecutor:
             raise AttributeError(f"{method} is not decorated with @query (missing __pyfly_query__)")
 
         query_string: str = method.__pyfly_query__
-        stripped = query_string.strip()
+        return MongoAnnotatedQuery(json.loads(query_string.strip()))
 
-        # Parse once at compile time to validate JSON and detect query type.
-        parsed = json.loads(stripped)
-        is_pipeline = isinstance(parsed, list)
+    def _compile_find(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
+        """A find filter as a query (see :class:`MongoAnnotatedQuery`)."""
+        return cast(Callable[..., Coroutine[Any, Any, Any]], MongoAnnotatedQuery(json.loads(query_string)))
 
-        if is_pipeline:
-            return self._compile_aggregate(stripped)
-        return self._compile_find(stripped)
-
-    def _compile_find(
-        self,
-        query_string: str,
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
-        """Build an async callable that executes a ``find`` with the given filter."""
-        template = json.loads(query_string)
-
-        async def _execute(model: type[T], **kwargs: Any) -> list[Any]:
-            filter_doc = _substitute_params(template, kwargs)
-            return list(await model.find(filter_doc).to_list())  # type: ignore[attr-defined]
-
-        return _execute
-
-    def _compile_aggregate(
-        self,
-        query_string: str,
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
-        """Build an async callable that executes an aggregation pipeline.
-
-        Uses the underlying pymongo async collection directly (via
-        ``get_pymongo_collection()``) instead of Beanie's
-        ``.aggregate()`` wrapper, because aggregation pipelines return
-        raw dicts (not document instances) and the driver-level API is
-        more reliable across async mock drivers.
-        """
-        template = json.loads(query_string)
-
-        async def _execute(model: type[T], **kwargs: Any) -> list[dict[str, Any]]:
-            pipeline = _substitute_params(template, kwargs)
-            collection = model.get_pymongo_collection()  # type: ignore[attr-defined]
-            cursor = collection.aggregate(pipeline)
-            return list(await cursor.to_list(length=None))
-
-        return _execute
+    def _compile_aggregate(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
+        """An aggregation pipeline as a query (see :class:`MongoAnnotatedQuery`)."""
+        return cast(Callable[..., Coroutine[Any, Any, Any]], MongoAnnotatedQuery(json.loads(query_string)))

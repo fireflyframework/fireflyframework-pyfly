@@ -15,21 +15,21 @@
 
 Closes the audit gap where the Mongo query compiler + projections were only smoke-tested (clause
 construction / return_type acceptance) but never EXECUTED against a collection. Here every
-comparison operator and the projection path run through a real (mongomock) find and assert results.
+comparison operator and the projection path run through a real (MongoDB replica set) find and assert results.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Protocol
 
 import pytest
-from beanie import init_beanie
-from mongomock_motor import AsyncMongoMockClient
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.projection import projection
+from tests.support.mongo import beanie_database
 
 
 class EItem(BaseDocument):
@@ -60,11 +60,10 @@ class OpRepo(MongoRepository[EItem, str]):
 
 
 @pytest.fixture(autouse=True)
-async def init_db():
-    client = AsyncMongoMockClient()
-    await init_beanie(database=client["test_db"], document_models=[EItem])
-    yield
-    client.close()
+async def init_db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [EItem]):
+        yield
 
 
 @pytest.fixture
@@ -111,8 +110,9 @@ async def test_in(repo: OpRepo) -> None:
 
 
 @pytest.mark.asyncio
-async def test_containing_case_insensitive(repo: OpRepo) -> None:
+async def test_containing_is_case_sensitive(repo: OpRepo) -> None:
     assert _names(await repo.find_by_name_containing("ar")) == {"Carol"}  # C-ar-ol
+    assert _names(await repo.find_by_name_containing("AR")) == set()  # as SQL LIKE on PostgreSQL (C036)
 
 
 @pytest.mark.asyncio

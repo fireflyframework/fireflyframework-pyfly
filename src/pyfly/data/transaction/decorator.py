@@ -26,10 +26,16 @@ The transaction manager is resolved per call, in this order:
    ``datasource=`` that name different datasources raise
    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError`);
 2. the legacy attributes, kept for compatibility: ``self._session_factory`` (an ``async_sessionmaker``,
-   mapped to its registry datasource) and ``self._motor_client``. A service that exposes both raises
+   mapped to its registry datasource) and ``self._motor_client`` (an ``AsyncMongoClient``, mapped to its
+   MongoDB transaction manager). A service that exposes both raises
    :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` unless a datasource is named;
-3. the default datasource of the running application context (``primary``). A service with no factory
-   attribute works, and so does a plain function.
+3. the default datasource of the running application context (``primary``, or the document datasource of
+   an application without a relational one). A service with no factory attribute works, and so does a plain
+   function.
+
+A coroutine that declares the parameter a manager names in its ``resource_parameter`` attribute (the MongoDB
+manager's ``session``) receives the unit's resource there, unless the caller passes one: code that calls the
+driver directly passes it on (``Document.insert(session=session)``).
 
 ``Propagation``, ``Isolation``, ``read_only``, ``timeout`` (seconds, new units only), ``rollback_for``
 and ``no_rollback_for`` (additive rules: any ``Exception`` rolls back unless a more specific
@@ -52,10 +58,7 @@ from pyfly.data.transaction.definition import Isolation, Propagation, Transactio
 from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.manager import TransactionManager
 from pyfly.data.transaction.registry import find_manager_for_resource, resolve_manager
-from pyfly.data.transaction.template import execute_in_transaction
-
-_LEGACY_DOCUMENT = object()
-"""Resolution result: run the pre-unit-of-work MongoDB runner (no Mongo manager is registered yet)."""
+from pyfly.data.transaction.template import TransactionBoundary, execute_in_transaction
 
 
 def transactional(
@@ -172,18 +175,20 @@ def _decorate_function(function: Any, options: dict[str, Any]) -> Any:
     definition = _definition(options)
     target = options.get("manager")
     coroutine: Callable[..., Coroutine[Any, Any, Any]] = function
+    keywords = _keyword_positions(function)
 
     @functools.wraps(coroutine)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         manager = _resolve(qualname, definition, target, args)
-        if manager is _LEGACY_DOCUMENT:
-            from pyfly.data.document.mongodb.transactional import run_mongo_transaction
-
-            return await run_mongo_transaction(
-                coroutine, args, kwargs, rollback_for=(Exception,), no_rollback_for=definition.no_rollback_for
-            )
-        assert isinstance(manager, TransactionManager)
-        return await execute_in_transaction(manager, definition, coroutine, args, kwargs)
+        declared = getattr(manager, "resource_parameter", None)
+        name = declared if isinstance(declared, str) else ""
+        position = keywords.get(name)
+        if position is None or kwargs.get(name) is not None or 0 <= position < len(args):
+            return await execute_in_transaction(manager, definition, coroutine, args, kwargs)
+        async with TransactionBoundary(manager, definition) as unit:
+            if unit is not None:
+                kwargs = {**kwargs, name: unit.resource}
+            return await coroutine(*args, **kwargs)
 
     wrapper.__pyfly_transactional__ = True  # type: ignore[attr-defined]
     wrapper.__pyfly_propagation__ = definition.propagation  # type: ignore[attr-defined]
@@ -194,7 +199,25 @@ def _decorate_function(function: Any, options: dict[str, Any]) -> Any:
     return wrapper
 
 
-def _resolve(qualname: str, definition: TransactionDefinition, target: object, args: tuple[Any, ...]) -> object:
+def _keyword_positions(function: Callable[..., Any]) -> dict[str, int]:
+    """The parameters of *function* a caller may pass by keyword, by name, with their position (``-1`` for a
+    keyword-only one)."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):  # a builtin or an object without a signature
+        return {}
+    positions: dict[str, int] = {}
+    for index, parameter in enumerate(parameters):
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            positions[parameter.name] = -1
+        elif parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            positions[parameter.name] = index
+    return positions
+
+
+def _resolve(
+    qualname: str, definition: TransactionDefinition, target: object, args: tuple[Any, ...]
+) -> TransactionManager:
     """The transaction manager of one call (see the module documentation for the order)."""
     if target is not None:
         explicit = resolve_manager(target)
@@ -227,7 +250,12 @@ def _resolve(qualname: str, definition: TransactionDefinition, target: object, a
         return manager
     if client is not None:
         manager = find_manager_for_resource(client)
-        return manager if manager is not None else _LEGACY_DOCUMENT
+        if manager is None:
+            raise IllegalTransactionStateError(
+                f"{qualname}: '_motor_client' is a {type(client).__name__}, not a client a transaction manager "
+                "serves (a pymongo AsyncMongoClient)."
+            )
+        return manager
     return resolve_manager(None)
 
 
