@@ -1479,17 +1479,24 @@ class OutboxRelay:
         return self._task is not None and not self._task.done()
 
     def _ended(self, task: asyncio.Task[None]) -> None:
-        """The relay's task ended: expected when it stops, a failure while it runs."""
+        """The relay's task ended: expected when it stops, a failure while it runs.
+
+        A cancelled task is logged as a warning: the event loop's shutdown cancels it that way in an application
+        that never stopped the relay (``asyncio.run``), and while the relay runs its bus reports ``DOWN``. A task
+        that failed or returned is an error."""
         if self._state is not RelayState.RUNNING or task is not self._task:
             return
         if task.cancelled():
             cause = "its task was cancelled by something other than a stop"
             error: BaseException | None = None
+            level = logging.WARNING
         else:
             error = task.exception()
             cause = describe_error(error) if error is not None else "its task returned"
+            level = logging.ERROR
         self._last_error = f"the relay ended: {cause}"
-        _logger.error(
+        _logger.log(
+            level,
             "outbox_relay_ended",
             extra={"group": self._group, "relay": self._name, "cause": cause},
             exc_info=(type(error), error, error.__traceback__) if error is not None else None,

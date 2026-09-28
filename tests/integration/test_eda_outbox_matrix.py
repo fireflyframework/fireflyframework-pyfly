@@ -29,6 +29,7 @@ SQLite file (foreign keys on), PostgreSQL, MySQL 8 and MariaDB 11.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from datetime import timedelta
 from typing import Any
@@ -602,10 +603,12 @@ async def test_a_handler_that_raises_cancelled_error_fails_its_delivery_and_the_
 
 
 async def test_a_relay_whose_task_ended_under_a_running_bus_reports_down_and_stops_quietly(
-    relational_backend: RelationalBackend,
+    relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A relay task that ends while its bus runs (cancelled by something other than ``stop()``) delivers nothing
-    more: the bus reports DOWN, and its ``stop()`` logs the end rather than raising it into the shutdown."""
+    more: the bus reports DOWN, and its ``stop()`` logs the end rather than raising it into the shutdown. The
+    cancellation is logged as a warning, not an error: the event loop's shutdown cancels it that way in an
+    application that never stopped its bus, and the health indicator is what reports it while the bus runs."""
     engine = relational_backend.create_engine()
     bus = await _bus(engine, group="ended", poll_interval=0.05)
     bus.subscribe("*", Recorder())
@@ -613,13 +616,17 @@ async def test_a_relay_whose_task_ended_under_a_running_bus_reports_down_and_sto
     try:
         assert (await bus.health_status()).status == "UP"
         task = next(task for task in asyncio.all_tasks() if task.get_name() == "eda ended")
-        task.cancel()  # not a stop
-        await asyncio.wait({task})
+        with caplog.at_level(logging.WARNING, logger="pyfly.eda.outbox"):
+            task.cancel()  # not a stop
+            await asyncio.wait({task})
+            await asyncio.sleep(0)  # the task's done callbacks
 
         health = await bus.health_status()
         assert health.status == "DOWN"
         assert health.details["reason"] == "the relay's task ended"
         assert bus.relay.alive is False
+        ended = [record for record in caplog.records if record.getMessage() == "outbox_relay_ended"]
+        assert [record.levelno for record in ended] == [logging.WARNING]
     finally:
         await bus.stop()
     assert bus.state is BusState.STOPPED
