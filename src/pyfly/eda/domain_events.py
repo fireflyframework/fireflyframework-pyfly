@@ -211,7 +211,9 @@ class _UnitEvents:
         if publisher is None:
             return
         synchronizations = self._unit.synchronizations
-        start = len(synchronizations)
+        # The synchronizations the unit runs itself in this phase, by identity (the objects are kept, so no id is
+        # reused): one registered anywhere in the list while the events go out cannot shift the others.
+        taken = {id(synchronization): synchronization for synchronization in synchronizations}
         # A listener may make an aggregate raise more: publish until they are all drained (a bounded number of
         # rounds: listeners that keep raising events for each other would never let the unit commit).
         for _round in range(MAX_PUBLICATION_ROUNDS):
@@ -226,11 +228,10 @@ class _UnitEvents:
             )
         # Synchronizations registered while publishing (the BEFORE_COMMIT listeners of these events) came after
         # the unit's list of synchronizations was taken for this phase: run their before-commit part here, once.
-        while start < len(synchronizations):
-            end = len(synchronizations)
-            for synchronization in synchronizations[start:end]:
+        while fresh := [item for item in synchronizations if id(item) not in taken]:
+            for synchronization in fresh:
+                taken[id(synchronization)] = synchronization
                 await synchronization.before_commit(read_only)
-            start = end
 
     async def before_completion(self) -> None:
         """Nothing to do before completion."""
