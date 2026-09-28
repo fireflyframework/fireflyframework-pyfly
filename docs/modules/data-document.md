@@ -315,7 +315,7 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
         return result.modified_count
 ```
 
-The `_query(**filters)` helper of earlier releases is kept for subclasses written against it: it returns a Beanie find query on `self._session`, with the names validated and mapped as `find_all(**filters)` does (the `_sort_spec` and `_find_page` helpers are gone: use `find_all(Sort)`/`find_all(Pageable)`).
+The `_query(**filters)` helper of earlier releases is kept for subclasses written against it: it returns a Beanie find query on `self._session`, with the names validated and mapped as `find_all(**filters)` does (the `_sort_spec` and `_find_page` helpers are gone: use `find_all(Sort)`/`find_all(Pageable)`). Because it takes the session of the call's unit of work, it now works only inside a repository method (or a unit of work of the datasource): called anywhere else it raises `IllegalTransactionStateError`, where earlier releases returned a query with no session.
 
 A persistence failure is raised translated to the kernel's exceptions, from the driver's (`pyfly.data.document.mongodb.exception_translation`): a duplicate key (alone or in a bulk write) is a `DuplicateKeyException` naming the unique index, a document validation failure a `DataIntegrityException`, a Beanie revision conflict an `OptimisticLockingFailureException`, and a write conflict (or any other transient transaction error) a `ConcurrencyException`, which a retry can get past (with the same document objects: a failed save gives them back the state the server holds, see [save_all()](#crud-methods-reference)).
 
@@ -371,6 +371,8 @@ class OrderRepository(MongoRepository[OrderDocument, PydanticObjectId]):
 | `find_slice_by_spec(spec, pageable)`       | `Slice[T]`          | A slice of them, with no count                 |
 
 **save()** inserts a document that is new (its `is_new()` hook when the class defines one, else `id is None`) and upserts any other (Beanie's `save()`). A new document gets its id on the client when its id type allows: a `PydanticObjectId`, the hex string of an `ObjectId` for a `str` id, a random `UUID`, so a `str`-id document is stored with a string `_id` and found by it.
+
+> **Upgrading (breaking):** `MongoRepository.save` and `save_all` no longer call Beanie's `Document.insert` or `Document.save`: a new document is sent with `insert_one` (`InsertOne` in `save_all`), and a stored one goes through `Document.update` (`UpdateOne`), the repository running the event actions and state management itself. A document class that overrides `insert` or `save` is therefore no longer called by the repository: move what the override adds into an event action (`@before_event(Insert)`, `@before_event(Save)`, `@after_event(...)`), which the repository runs, or call the overridden method yourself with `self._session` in a custom repository method.
 
 > **Upgrading (breaking):** a document class that declares `id: str` used to be stored with an `ObjectId` `_id` that the driver made; a new one is now stored with a string `_id`. A collection an earlier release wrote then holds both types, and a string id reaches only the documents stored with a string. To keep such a collection on `ObjectId`s, declare the field `id: PydanticObjectId | None = None` (callers can still pass strings: `MongoRepository[Doc, str]` converts them); otherwise migrate its `_id`s to strings before upgrading.
 

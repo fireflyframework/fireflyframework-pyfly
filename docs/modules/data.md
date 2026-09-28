@@ -1265,7 +1265,7 @@ Some capabilities are **backend-specific** today:
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
 | Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ✅ Beanie's `use_revision` (a stale write raises `OptimisticLockingFailureException`) |
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ✅ `created/updated_at` **and** `created/updated_by` (`BaseDocument`) |
-| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, but `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, except `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
 
 **Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; open
 (SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational

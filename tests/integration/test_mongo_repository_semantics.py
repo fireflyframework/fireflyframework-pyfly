@@ -46,7 +46,7 @@ from pyfly.data.document.mongodb.transaction_manager import MongoTransactionMana
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import InvalidQueryMethodError
-from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction import IllegalTransactionStateError, TransactionTemplate
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 from pyfly.kernel.exceptions import DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
@@ -343,6 +343,8 @@ async def test_the_query_helper_of_earlier_releases_maps_names_and_runs_on_the_c
     assert find["filter"] == {"displayName": "A"} and "txnNumber" in find
     with pytest.raises(InvalidPropertyError):
         await repository._query(nope=1).to_list()
+    with pytest.raises(IllegalTransactionStateError, match="no session here"):
+        repository._query(display="A")  # outside a repository method there is no unit to take the session of
 
 
 # ---------------------------------------------------------------------------------------------------------

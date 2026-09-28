@@ -17,7 +17,7 @@ Event actions (``@before_event``/``@after_event``, ``ValidateOnSave``, BaseDocum
 application's ``AuditorAware``) are user code. Beanie runs coroutine actions in ``asyncio.gather`` child tasks,
 and ``save_all`` does too for a class with two or more of them. A child task inherits the call's operation
 scope, so a repository call in it waits for the unit's operation guard: a repository write that held the guard
-while it ran the actions hung for ever. The guard is held for one driver command at a time and never while an
+while it ran the actions hung forever. The guard is held for one driver command at a time and never while an
 action runs, so each call here answers (within :data:`TIMEOUT`), and inside a unit of work the actions' own
 writes are part of it.
 
