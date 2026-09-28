@@ -1090,7 +1090,9 @@ reaches the unit wherever the repository lives (a nested service, a list, a `Pro
 backend-neutral package is `pyfly.data.transaction`; `@transactional` (below, in
 [Transaction Management with @transactional](#transaction-management-with-transactional)) is its
 declarative face, and one `SqlAlchemyTransactionManager` per datasource of the
-[registry](#datasource-registry) runs the units.
+[registry](#datasource-registry) runs the units. A Kafka or RabbitMQ listener runs each delivery in a
+unit that takes the listener's own `@transactional` settings and is acknowledged after that unit commits
+(see [Listener Transactions](messaging.md#listener-transactions)).
 
 ### Unit of Work
 
