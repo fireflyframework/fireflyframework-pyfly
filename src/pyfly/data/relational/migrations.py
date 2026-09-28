@@ -161,7 +161,9 @@ class MigrationRunner:
         if not os.path.exists(self._config_path):
             logger.warning(
                 "pyfly.data.relational.migrations.enabled is true but %s was not found — "
-                "run 'pyfly db init' to create the Alembic environment; skipping migrations.",
+                "run 'pyfly db init' to create the Alembic environment; skipping migrations. With migrations "
+                "enabled, ddl-auto is none (or validate): no table is created, and the application starts "
+                "without the schema its migrations would have built.",
                 self._config_path,
             )
             return

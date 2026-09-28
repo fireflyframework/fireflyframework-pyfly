@@ -164,9 +164,12 @@ def _registry_engine(url: str) -> tuple[Any, AsyncEngine]:
 
 
 @pytest.mark.asyncio
-async def test_start_is_noop_when_alembic_ini_missing(tmp_path: Path) -> None:
+async def test_start_is_noop_when_alembic_ini_missing(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     runner = MigrationRunner(config_path=str(tmp_path / "missing.ini"))
-    await runner.start()  # must not raise — logs a warning and skips
+    with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.migrations"):
+        await runner.start()  # must not raise — logs a warning and skips
+    # ddl-auto is none beside migrations: nothing creates the schema, and the warning says so.
+    assert "no table is created" in caplog.text
 
 
 @pytest.mark.asyncio
