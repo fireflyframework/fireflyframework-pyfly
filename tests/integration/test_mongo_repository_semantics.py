@@ -33,7 +33,7 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 import pytest
-from beanie import Delete, Document, Insert, PydanticObjectId, before_event
+from beanie import Delete, Document, Insert, PydanticObjectId, Save, Update, ValidateOnSave, after_event, before_event
 from bson import ObjectId
 from pydantic import Field, field_validator
 
@@ -115,6 +115,48 @@ class SemHooked(Document):
         name = "sem_hooked"
 
 
+class SemJournaled(Document):
+    """Every event action ``save_all`` runs, recorded in order."""
+
+    name: str
+    journal: ClassVar[list[str]] = []
+
+    @before_event(ValidateOnSave)
+    def validating(self) -> None:
+        SemJournaled.journal.append(f"validate {self.name}")
+
+    @before_event(Insert)
+    def inserting(self) -> None:
+        SemJournaled.journal.append(f"before insert {self.name}")
+
+    @after_event(Insert)
+    async def inserted(self) -> None:
+        SemJournaled.journal.append(f"after insert {self.name}")
+
+    @after_event(Insert)
+    async def tallied(self) -> None:
+        SemJournaled.journal.append(f"tallied {self.name}")
+
+    @before_event(Save)
+    def saving(self) -> None:
+        SemJournaled.journal.append(f"before save {self.name}")
+
+    @before_event(Update)
+    async def updating(self) -> None:
+        SemJournaled.journal.append(f"before update {self.name}")
+
+    @after_event(Update)
+    def updated(self) -> None:
+        SemJournaled.journal.append(f"after update {self.name}")
+
+    @after_event(Save)
+    async def saved(self) -> None:
+        SemJournaled.journal.append(f"after save {self.name}")
+
+    class Settings:
+        name = "sem_journaled"
+
+
 class NoteRepository(MongoRepository[SemNote, str]):
     async def find_by_status(self, status: str) -> list[SemNote]: ...
 
@@ -127,7 +169,7 @@ class NoteRepository(MongoRepository[SemNote, str]):
     async def find_by_display(self, display: str) -> list[SemNote]: ...
 
 
-MODELS = [SemNote, SemTag, SemTicket, SemRevised, SemValidated, SemHooked]
+MODELS = [SemNote, SemTag, SemTicket, SemRevised, SemValidated, SemHooked, SemJournaled]
 
 
 @pytest.fixture
@@ -309,6 +351,38 @@ async def test_save_all_validates_and_runs_insert_actions(db: BeanieDatabase) ->
     with pytest.raises(ValueError, match="negative"):
         await validated.save_all([invalid])
     assert await _raw(db, "sem_validated") == []
+
+
+async def test_save_all_runs_every_event_action_of_its_documents_in_order(db: BeanieDatabase) -> None:
+    SemJournaled.journal.clear()
+    repository: MongoRepository[SemJournaled, str] = MongoRepository(SemJournaled)
+    first, second = await repository.save_all([SemJournaled(name="a"), SemJournaled(name="b")])
+    assert SemJournaled.journal == [
+        "validate a",
+        "before insert a",
+        "validate b",
+        "before insert b",
+        "after insert a",
+        "tallied a",
+        "after insert b",
+        "tallied b",
+    ]
+    SemJournaled.journal.clear()
+    first.name = "c"
+    await repository.save_all([first, SemJournaled(name="d")])
+    assert SemJournaled.journal == [
+        "validate c",
+        "before save c",
+        "before update c",
+        "validate d",
+        "before insert d",
+        "after update c",
+        "after save c",
+        "after insert d",
+        "tallied d",
+    ]
+    assert sorted(row["name"] for row in await _raw(db, "sem_journaled")) == ["b", "c", "d"]
+    assert second.id is not None
 
 
 async def test_save_all_is_one_bulk_write_for_new_and_existing_documents(db: BeanieDatabase) -> None:

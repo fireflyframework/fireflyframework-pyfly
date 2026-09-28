@@ -28,6 +28,7 @@ string for a ``str`` id, a random ``UUID``.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -110,9 +111,23 @@ def coerce_id(entity: type, value: Any) -> Any:
     if id_class is None or isinstance(value, id_class):
         return value
     try:
-        return TypeAdapter(id_type(entity)).validate_python(value)
+        return _id_adapter(id_type(entity)).validate_python(value)
     except (ValidationError, TypeError, ValueError) as error:
         raise InvalidIdError(entity, value) from error
+
+
+@functools.lru_cache(maxsize=256)
+def _cached_adapter(annotation: Any) -> TypeAdapter[Any]:
+    return TypeAdapter(annotation)
+
+
+def _id_adapter(annotation: Any) -> TypeAdapter[Any]:
+    """The validator of an id annotation, built once per annotation (building one costs more than ten
+    validations, and ``find_all_by_id`` converts every id it is given)."""
+    try:
+        return _cached_adapter(annotation)
+    except TypeError:  # an annotation that cannot be hashed (metadata that is not hashable)
+        return TypeAdapter(annotation)
 
 
 def coerce_ids(entity: type, values: Iterable[Any]) -> list[Any]:

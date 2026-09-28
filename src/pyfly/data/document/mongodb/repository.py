@@ -62,6 +62,7 @@ Spring Data semantics, at the fewest round trips:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import inspect
@@ -71,6 +72,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, cast, get_args, get_origin, overload
 
 import pymongo
+from beanie import Document
 from beanie.exceptions import RevisionIdWasChanged
 from beanie.odm.actions import ActionDirections, ActionRegistry, EventTypes
 from beanie.odm.utils.dump import get_dict, get_top_level_nones
@@ -252,7 +254,37 @@ def _chunks(values: Sequence[Any], size: int = IN_CHUNK) -> Iterable[list[Any]]:
 
 
 async def _run_actions(entity: Any, event: EventTypes, direction: ActionDirections) -> None:
-    await ActionRegistry.run_actions(entity, event_type=event, action_direction=direction, exclude=[])
+    """Run *entity*'s event actions for *event* and *direction* as Beanie's ``ActionRegistry.run_actions`` does
+    (synchronous ones in order, then the coroutines together), awaiting a lone coroutine action in place: a
+    task per document and action would cost event-loop turns across a large ``save_all``."""
+    actions = ActionRegistry.get_action_list(type(entity), event, direction)
+    if not actions:
+        return
+    coroutines: list[Coroutine[Any, Any, Any]] = []
+    for action in actions:
+        if inspect.iscoroutinefunction(action):
+            coroutines.append(action(entity))
+        elif inspect.isfunction(action):
+            action(entity)
+    if len(coroutines) == 1:
+        await coroutines[0]
+    elif coroutines:
+        await asyncio.gather(*coroutines)
+
+
+async def _validate(entity: Any) -> None:
+    """Beanie's ``validate_self`` of *entity* (its ``validate_on_save`` validation and ``ValidateOnSave``
+    actions), skipped when there is nothing to run: validation off, no actions, and no override of it."""
+    cls = type(entity)
+    if (
+        cls.get_settings().validate_on_save
+        or getattr(cls, "validate_self", None) is not Document.validate_self
+        or any(
+            ActionRegistry.get_action_list(cls, EventTypes.VALIDATE_ON_SAVE, direction)
+            for direction in (ActionDirections.BEFORE, ActionDirections.AFTER)
+        )
+    ):
+        await entity.validate_self()
 
 
 def _has_delete_actions(model: type) -> bool:
@@ -733,7 +765,11 @@ class MongoRepository(Generic[T, ID]):
 
     async def save_all(self, entities: Iterable[T]) -> list[T]:
         """Persist *entities* with one ordered ``bulk_write`` (module documentation): validation, event actions,
-        revision checks and state management as ``save`` runs them, in the call's unit of work."""
+        revision checks and state management as ``save`` runs them, in the call's unit of work.
+
+        Outside a transaction on a replica set the call is one transaction, which MongoDB bounds in time
+        (``transactionLifetimeLimitSeconds``, 60 s by default) and size (``TransactionTooLargeForCache``): save a
+        large data set in batches of a few thousand documents, each atomic on its own."""
         items: list[Any] = list(entities)
         if not items:
             return []
@@ -743,7 +779,7 @@ class MongoRepository(Generic[T, ID]):
         guarded = 0
         for entity in items:
             new = self._is_new(entity)
-            await entity.validate_self()
+            await _validate(entity)
             if new:
                 self._assign_new_id(entity)
                 await _run_actions(entity, EventTypes.INSERT, ActionDirections.BEFORE)
