@@ -229,7 +229,9 @@ class ReportService:
   TTL whatever the run does, and another instance may then start the job, so a
   run still going at the TTL is cancelled (its `@transactional` work rolls back)
   and logged at `ERROR` with the job's name. A synchronous job's thread cannot be
-  cancelled and goes on. The run releases its lock from its own task once it has
+  cancelled, so its run is not time-boxed: it waits for the thread, keeping the
+  job's slot (the next tick never starts a second thread of the job beside it),
+  and is logged at `ERROR` once it ends past the TTL. The run releases its lock from its own task once it has
   ended: the built-in providers tell holders apart per task (or per acquisition),
   so a run cancelled at its TTL that ends after the job's next run took the lock
   leaves that run's lock alone.
@@ -600,8 +602,9 @@ task = executor.submit_sync(cpu_heavy_function, arg1, arg2)
 
 - **start()**: No-op (ready after construction).
 - **stop()**: Waits for all pending tasks (as `AsyncIOTaskExecutor.stop()`), clears task set, shuts down the
-  thread pool and waits for its threads off the event loop: a thread may still be running a synchronous job
-  whose run was cancelled at its `lock_ttl`, and the application goes on meanwhile. When the wait is cut short
+  thread pool and waits for its threads off the event loop: a thread may still be running a function whose
+  task was cancelled (a synchronous `@async_method` call its caller cancelled, say), and the application goes on
+  meanwhile. When the wait is cut short
   (`pyfly.context.shutdown-timeout`), the functions still queued never start and a running one finishes on its
   thread.
 

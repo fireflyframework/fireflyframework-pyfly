@@ -48,8 +48,9 @@ def scheduled(
       (ShedLock / Spring ``@SchedulerLock``). ``True`` auto-derives the name
       ``"Class.method"``; a string sets an explicit shared name; ``None`` disables.
       Requires a ``DistributedLock`` bean for cross-process coordination.
-    - lock_ttl: max time the lock is held before auto-expiry (default 60s). A run still going at the ttl is
-      cancelled: the lock has ended, and another instance may start the job.
+    - lock_ttl: max time the lock is held before auto-expiry (default 60s). An async run still going at the
+      ttl is cancelled: the lock has ended, and another instance may start the job. A synchronous one cannot
+      be: its run waits for its thread (the job never overlaps itself on this instance) and is logged.
     - concurrent: how many runs of the job may be in flight at once (``fixed_rate`` and ``cron``; default 1).
       Each run of a ``@transactional`` job holds a pooled connection, so keep it well below the pool size.
     """

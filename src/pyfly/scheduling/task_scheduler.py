@@ -28,8 +28,10 @@ follow Spring's ``ThreadPoolTaskScheduler`` contract:
 - **Distributed lock.** With ``lock=...`` the run takes the lock first and skips the tick when it is held
   elsewhere. The run is time-boxed to ``lock_ttl``: the lock ends at its TTL whatever the run does, so a run
   still going then is cancelled (its ``@transactional`` work rolls back) instead of overlapping the run another
-  node starts. A failure to take or release the lock (the database is down, a misconfigured provider) is
-  logged with the job's name, like a failure of the job itself.
+  node starts. A synchronous body cannot be cancelled (a thread cannot be interrupted): its run waits for it,
+  keeping the job's slot so the job never overlaps itself on this node, and is logged once it ends past the
+  TTL. A failure to take or release the lock (the database is down, a misconfigured provider) is logged with
+  the job's name, like a failure of the job itself.
 - **Graceful stop.** :meth:`TaskScheduler.stop` stops the loops (a loop only ever waits: for its next fire
   time, a free slot or its run's end, so stopping it never cancels a run), then drains the runs in flight of
   every trigger type alike through the executor. When the caller cuts the drain short (the application
@@ -299,12 +301,14 @@ class TaskScheduler:
         stall the loop — and therefore the whole application — for the duration of the task.
 
         When *lock* is set, the lock is taken first; if it is held elsewhere the tick is **skipped** (so only
-        one instance in a cluster runs the job). The run is time-boxed to *lock_ttl*, when the lock ends
-        whatever the run does: a run still going then is cancelled (a synchronous body's thread cannot be, and
-        goes on). The lock is released once the run ends, from the run's own task, so the late release of a run
-        whose lock another run took since leaves that lock alone. A failure to take or release the lock is
-        logged like a failure of the run (audit #186: a cron or fixed-rate run is not awaited by its loop, so
-        nothing else would report it).
+        one instance in a cluster runs the job). An async run is time-boxed to *lock_ttl*, when the lock ends
+        whatever the run does: a run still going then is cancelled. A synchronous body's thread cannot be
+        cancelled, so its run is not time-boxed: it waits for the thread (the run keeps the job's slot, and the
+        next tick cannot start a second thread of the job beside it) and is logged once it ends past the TTL.
+        The lock is released once the run ends, from the run's own task, so the late release of a run whose
+        lock another run took since leaves that lock alone. A failure to take or release the lock is logged
+        like a failure of the run (audit #186: a cron or fixed-rate run is not awaited by its loop, so nothing
+        else would report it).
         """
         name = _job_name(bean, method)
         if lock is not None:
@@ -316,7 +320,10 @@ class TaskScheduler:
             if not acquired:
                 logger.debug("scheduled task '%s' skipped — lock %r held elsewhere", name, lock)
                 return
-        deadline = asyncio.timeout(lock_ttl) if lock is not None else None
+        cancellable = inspect.iscoroutinefunction(method)
+        deadline = asyncio.timeout(lock_ttl) if lock is not None and cancellable else None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         try:
             async with deadline if deadline is not None else contextlib.nullcontext():
                 await self._call(method)
@@ -332,6 +339,14 @@ class TaskScheduler:
             else:
                 logger.exception("scheduled task '%s' failed", name)
         finally:
+            if lock is not None and not cancellable and loop.time() - started > lock_ttl:
+                logger.error(
+                    "scheduled task '%s' ran past the ttl of lock %r (%g s): its lock ended meanwhile, and another "
+                    "instance may have run it at the same time; raise lock_ttl above the job's longest run",
+                    name,
+                    lock,
+                    lock_ttl,
+                )
             if lock is not None:
                 # Released from the run's own task: the adapters tell holders apart per task (the in-process and
                 # advisory locks) or per acquisition of a task (the lease table), so a run whose lock ended at its

@@ -23,7 +23,8 @@
   retrieved``, without the job's name). It is logged with the job's name, and the run is skipped.
 - A run that outlives its lock's TTL is cancelled: the lock has ended and another node may run the job. It
   releases the lock from its own task, so when it ends after the job's next run took the lock, that run keeps
-  it.
+  it. A synchronous body cannot be cancelled: its run waits for its thread, holding the job's slot, so the
+  job never overlaps itself on this node, and is reported once it ends past the TTL.
 
 The database side (real ``@transactional`` runs, a real lease lock) is in
 ``tests/integration/test_scheduler_units_of_work_matrix.py``.
@@ -362,7 +363,7 @@ async def test_a_sync_job_runs_on_the_thread_executors_pool() -> None:
 
 
 class OverrunningSyncJob:
-    """A synchronous job past its lock's ttl: its run is cancelled, but its thread goes on."""
+    """A synchronous job past its lock's ttl: its thread cannot be cancelled, and its run waits for it."""
 
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -399,8 +400,47 @@ async def _start_overrunning_sync_job() -> tuple[OverrunningSyncJob, TaskSchedul
     with patch.object(logging.getLogger("pyfly.scheduling.task_scheduler"), "error"):  # the ttl overrun
         await scheduler.start()
         await _until(bean.started.is_set)
-        await asyncio.sleep(0.1)  # its run was cancelled at the ttl; its thread is still running
+        await asyncio.sleep(0.1)  # past the ttl; its thread, and therefore its run, is still running
     return bean, scheduler
+
+
+class OverlappingSyncJob:
+    """A synchronous job that runs past its lock's ttl while its next tick is due."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.runs = 0
+
+    @scheduled(fixed_rate=timedelta(seconds=0.02), lock="sync-overrun", lock_ttl=timedelta(seconds=0.05))
+    def work(self) -> None:
+        with self._guard:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        time.sleep(0.2)
+        with self._guard:
+            self.in_flight -= 1
+            self.runs += 1
+
+
+async def test_a_sync_job_past_its_lock_ttl_never_overlaps_itself(caplog: pytest.LogCaptureFixture) -> None:
+    """Its thread cannot be cancelled: the run waits for it, holding the job's slot and its lock, so the next
+    tick waits too instead of starting a second thread of the job beside it."""
+    bean = OverlappingSyncJob()
+    scheduler = TaskScheduler(executor=ThreadPoolTaskExecutor(max_workers=4), lock=InProcessDistributedLock())
+    scheduler.discover([bean])
+    with caplog.at_level(logging.ERROR, logger="pyfly.scheduling.task_scheduler"):
+        await scheduler.start()
+        try:
+            await _until(lambda: bean.runs >= 2)
+        finally:
+            await scheduler.stop()
+
+    assert bean.max_in_flight == 1
+    assert any(
+        "ran past the ttl" in r.getMessage() and "OverlappingSyncJob.work" in r.getMessage() for r in caplog.records
+    )
 
 
 async def test_stopping_waits_for_a_thread_still_running_without_blocking_the_event_loop() -> None:
