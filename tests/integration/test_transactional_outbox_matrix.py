@@ -79,6 +79,36 @@ async def test_an_enqueue_is_part_of_the_unit_of_work(relational_backend: Relati
     assert record.event.aggregate_id == "committed"
 
 
+async def test_a_unit_that_enqueues_many_events_wakes_the_relay_once(relational_backend: RelationalBackend) -> None:
+    """Every enqueue registered its own after-commit wake-up: a unit that appended N events carried N
+    synchronizations. It now carries one, however many events it enqueues."""
+    engine = relational_backend.create_engine()
+    published: list[int] = []
+
+    async def publish(envelope: StoredEventEnvelope) -> None:
+        published.append(envelope.sequence)
+
+    outbox = TransactionalOutbox(publish, datasource=engine, poll_interval_s=0.05)
+    await outbox.start()
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+    try:
+        async with template.transaction() as unit:
+            assert unit is not None
+            before = len(unit.synchronizations)
+            for sequence in range(5):
+                await outbox.enqueue(_event("batch", sequence))
+            assert len(unit.synchronizations) == before + 1
+
+        async def delivered() -> bool:
+            return len(published) == 5 and await outbox.pending() == []
+
+        await _eventually(delivered)
+    finally:
+        await outbox.stop()
+
+    assert published == [0, 1, 2, 3, 4]
+
+
 async def test_exhausted_events_are_dead_lettered(relational_backend: RelationalBackend) -> None:
     engine = relational_backend.create_engine()
     attempts = 0

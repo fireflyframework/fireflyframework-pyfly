@@ -138,15 +138,13 @@ class TransactionalOutbox:
     async def enqueue(self, event: StoredEventEnvelope) -> OutboxRecord:
         """Write *event* into the outbox, in the unit of work bound for the outbox's datasource (or a short unit
         of its own); the relay publishes it once that unit commits."""
-        from pyfly.data.transaction import after_commit
-
         envelope = EventEnvelope(
             event_type=event.event_type,
             payload=json.loads(event.to_json()),
             destination=self._group,
         )
         await self._outbox.append(envelope, groups=[self._group])
-        await after_commit(self._relay.wake)
+        self._relay.wake_after_commit()
         return OutboxRecord(id=envelope.event_id, event=event, created_at=envelope.timestamp)
 
     async def _forward(self, envelope: EventEnvelope) -> None:

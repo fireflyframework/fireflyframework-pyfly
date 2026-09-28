@@ -95,6 +95,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pyfly.data.transaction.synchronization import TransactionSynchronizationAdapter
 from pyfly.domain.domain_event import to_json_value
 from pyfly.eda.dlq import EdaDeadLetterEntry, EdaDeadLetterStore
 from pyfly.eda.ports.outbound import EventHandler
@@ -1227,6 +1228,16 @@ class RelayCounters:
 RoundHook = Callable[[], Awaitable[None]]
 
 
+class _WakeAfterCommit(TransactionSynchronizationAdapter):
+    """Wakes a relay once the unit that wrote to its outbox commits."""
+
+    def __init__(self, relay: OutboxRelay) -> None:
+        self._relay = relay
+
+    async def after_commit(self) -> None:
+        self._relay.wake()
+
+
 class OutboxRelay:
     """Hands the events an :class:`Outbox` owes consumer group *group* to its subscriptions (see the module
     documentation).
@@ -1308,6 +1319,7 @@ class OutboxRelay:
         self._state = RelayState.NEW
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
+        self._waker = _WakeAfterCommit(self)
         self._task: asyncio.Task[None] | None = None
         self._registered = False
         self._next_prune: datetime | None = None
@@ -1379,6 +1391,18 @@ class OutboxRelay:
     def wake(self) -> None:
         """Make the relay claim now instead of at its next poll."""
         self._wake.set()
+
+    def wake_after_commit(self) -> None:
+        """Wake the relay once the current unit of work commits (at once outside a unit), so the events it wrote
+        are claimed without waiting for the next poll. A unit carries one such wake-up, however many events it
+        writes; a rollback wakes nothing."""
+        from pyfly.data.transaction import current_unit_of_work, register_synchronization
+
+        unit = current_unit_of_work()
+        if unit is None:
+            self.wake()
+        elif not any(synchronization is self._waker for synchronization in unit.synchronizations):
+            register_synchronization(self._waker)
 
     def wake_after(self, seconds: float) -> None:
         """Make the relay's next round come no later than *seconds* from now."""
