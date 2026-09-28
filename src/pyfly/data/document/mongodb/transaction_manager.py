@@ -23,7 +23,9 @@ propagation (``REQUIRED``, ``REQUIRES_NEW``, ``SUPPORTS``,
 :class:`~pyfly.data.transaction.errors.NestedTransactionNotSupportedError`: MongoDB has no savepoints.
 
 - **Transactions.** A unit begins ``await session.start_transaction(...)`` with the configured read and write
-  concern and, for a unit with a timeout, ``maxCommitTimeMS``. Multi-document transactions need a replica
+  concern, the ``primary`` read preference (MongoDB reads in a transaction from the primary only, so a client
+  configured to read from secondaries keeps that preference outside transactions) and, for a unit with a timeout,
+  ``maxCommitTimeMS``. Multi-document transactions need a replica
   set or a sharded cluster: on a standalone server :meth:`MongoTransactionManager.begin` raises
   :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` saying so (the server's ``hello`` is
   asked once per manager).
@@ -69,7 +71,7 @@ import threading
 import weakref
 from typing import Any, cast
 
-from pymongo import AsyncMongoClient
+from pymongo import AsyncMongoClient, ReadPreference
 from pymongo.asynchronous.client_session import AsyncClientSession
 from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutError, WriteConcernError
 from pymongo.read_concern import ReadConcern
@@ -292,7 +294,10 @@ class MongoTransactionManager:
 
     async def _start(self, unit: UnitOfWork, definition: TransactionDefinition) -> None:
         session: AsyncClientSession = unit.resource
-        options: dict[str, Any] = {}
+        # MongoDB reads in a transaction from the primary only: a client that reads from secondaries
+        # (readPreference=secondaryPreferred) would have every read of the unit refused. Its reads outside a
+        # transaction keep its preference.
+        options: dict[str, Any] = {"read_preference": ReadPreference.PRIMARY}
         if self._read_concern is not None:
             options["read_concern"] = self._read_concern
         if self._write_concern is not None:

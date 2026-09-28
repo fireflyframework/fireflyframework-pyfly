@@ -30,7 +30,7 @@ from typing import Any
 import anyio
 import pytest
 from beanie import Indexed, init_beanie
-from pymongo import AsyncMongoClient
+from pymongo import AsyncMongoClient, ReadPreference
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
@@ -505,6 +505,48 @@ async def test_the_default_datasource_runs_a_plain_function(env: Env) -> None:
     with pytest.raises(ValueError):
         await plain()
     assert await env.owners() == []
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A client that reads from secondaries
+# ---------------------------------------------------------------------------------------------------------
+
+
+async def test_a_transaction_reads_from_the_primary_whatever_the_clients_read_preference(
+    mongo_backend: MongoBackend,
+) -> None:
+    """MongoDB refuses a read preference other than ``primary`` in a transaction ("read preference in a transaction
+    must be primary"): a client configured with ``readPreference=secondaryPreferred`` (the URI, the ``options`` map,
+    an ``AsyncMongoClient`` bean) still reads in its units' transactions, and keeps its preference outside them."""
+    client: AsyncMongoClient[Any] = AsyncMongoClient(mongo_backend.url, readPreference="secondaryPreferred")
+    await init_beanie(database=client[mongo_backend.database], document_models=[TxAccount])
+    manager = MongoTransactionManager(client)
+    registry = TransactionManagerRegistry(default=manager.datasource)
+    registry.register(manager)
+    install_registry(registry)
+    repository = TxAccountRepository()
+    collection = client[mongo_backend.database]["tx_accounts"]
+    try:
+
+        @transactional
+        async def open_and_read(owner: str) -> tuple[list[str], int, str | None]:
+            await repository.save(TxAccount(owner=owner))
+            found = [account.owner for account in await repository.find_all()]
+            counted = await repository.count()
+            raw = await collection.find_one({"owner": owner}, session=current_session())
+            return found, counted, None if raw is None else raw["owner"]
+
+        assert await open_and_read("a") == (["a"], 1, "a")
+
+        async with TransactionTemplate(manager).transaction():
+            assert await collection.find_one({"owner": "a"}, session=current_session()) is not None
+
+        # Outside a transaction the reads keep the client's preference.
+        assert client.read_preference.mode == ReadPreference.SECONDARY_PREFERRED.mode
+        assert [account.owner for account in await repository.find_all()] == ["a"]
+    finally:
+        uninstall_registry(registry)
+        await client.close()
 
 
 # ---------------------------------------------------------------------------------------------------------
