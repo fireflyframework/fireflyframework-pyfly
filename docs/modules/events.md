@@ -634,17 +634,22 @@ letters work alike. What differs is where the data lives, and why:
   method that saves documents and publishes commits both or neither. Outside a unit, the publish runs in a short
   transaction of its own, and so does a publish in a unit that runs no transaction: the one a single-command
   repository write opens outside `@transactional`. A `MongoRepository.save` there writes the document on its own,
-  and the events of its aggregate, published as that write's unit commits, are written with their deliveries in the
-  store's transaction, whole or not at all (a failure then fails the save, whose document stands). A read-only unit
-  refuses the publish (`IllegalTransactionStateError`), as a `MongoRepository` refuses a write there. In an
-  application with both layers `auto` stays on the SQL store: set `store: mongo` to have the events commit with the
-  document units instead (an event published in a relational unit is then written in a unit of the document
-  datasource, a second write).
+  and the events of its aggregate, published one by one as that write's unit commits, are each written with their
+  deliveries in a short transaction of the store's own, so no event is ever owed to no group. They are separate
+  transactions, not one: when a later event fails, the earlier ones stand and are delivered, and the save raises,
+  its document stored. When an aggregate's events must commit together (and with its document), save it in a
+  `@transactional` method. A read-only unit refuses the publish (`IllegalTransactionStateError`), as a
+  `MongoRepository` refuses a write there. In an application with both layers `auto` stays on the SQL store: set
+  `store: mongo` to have the events commit with the document units instead (an event published in a relational
+  unit is then written in a unit of the document datasource, a second write).
 - **A replica set.** The store writes an event and its deliveries in one multi-document transaction (the caller's
   unit's, or one of its own), which MongoDB runs on a replica set or a sharded cluster only. Its `start()` refuses a
   standalone server with `IllegalTransactionStateError`, so the publisher, and the application, fail to start rather
   than write events that could lose their deliveries. A single-node replica set is enough ([Replica Set
-  Requirement](data-document.md#replica-set-requirement)).
+  Requirement](data-document.md#replica-set-requirement)). The store is tested on a replica set; on a sharded
+  cluster, keep its five collections unsharded on one shard (the database's primary shard, where MongoDB puts an
+  unsharded collection), so an event and its deliveries commit on one shard and a claim, which reads them outside a
+  transaction, never sees a delivery before its event.
 - **Collections and indexes.** Five collections of the document database (`pyfly.data.document.database`), created
   with their indexes when the store starts (idempotent: an index that exists is left as it is):
 
@@ -667,11 +672,18 @@ letters work alike. What differs is where the data lives, and why:
 - **Claims.** A claim reads a group's due deliveries, oldest first, then moves them a lease ahead with one
   `updateMany` that matches only the ones still due, marked with the claim's token. MongoDB applies it to each
   document atomically, so two relays never take one delivery; a claim that lost some of what it read to another
-  relay reads on past them, as `FOR UPDATE SKIP LOCKED` would. A claim, a completion, an extension, a release and a
-  plain settle are single commands without a transaction; a registration, an unregistration, a settle with dead
-  letters and a retention batch are transactions (the caller's unit's when it runs one, else the store's own), run
-  again when MongoDB aborts one of the store's own for a write conflict (another process registering the same group
-  at once).
+  relay reads on past them, as `FOR UPDATE SKIP LOCKED` would. The writes of a claim, a completion, an extension, a
+  release and a plain settle are commands MongoDB applies to each document atomically (a claim reads around its
+  `updateMany`, and an extension may read which deliveries it still holds), so they need no transaction: they join
+  the caller's unit when one is bound, and otherwise run in a unit of their own without one. A registration, an
+  unregistration, a settle with dead letters and a retention batch are several writes that belong together, so they
+  run in a transaction (the caller's unit's when it runs one, else the store's own), run again when MongoDB aborts
+  one of the store's own for a write conflict (another process registering the same group at once).
+- **A registration from `earliest`** owes the new group every event the outbox holds, in its one transaction (the
+  events read a thousand at a time). On a very large outbox that transaction can outlast MongoDB's
+  `transactionLifetimeLimitSeconds` (60 seconds by default): MongoDB then aborts it, and after running it again a
+  few times the registration fails. Prune the outbox, or raise the limit, before a new group starts from `earliest`
+  on a large backlog.
 - **The payload is JSON**, as the SQL store keeps it: a consumer gets the same values from either store (an instant,
   a decimal or a UUID in a payload arrives as a string).
 - **The client is the application's.** The store runs on the document datasource's client and units of work,

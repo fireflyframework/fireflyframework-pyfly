@@ -45,11 +45,16 @@ dead letters. With ``create_indexes=False`` it only checks them, and fails namin
 unit of work bound for the store's datasource (a ``@transactional`` method of the document datasource, which the
 event then commits or rolls back with), or a short one of its own, outside a unit and in a unit that runs no
 transaction. The one a single-command repository write opens outside ``@transactional`` runs none: a
-``MongoRepository.save`` there writes the document on its own, and the events of its aggregate, appended as its unit
-commits, are written with their deliveries in a transaction of the store's own, whole or not at all. MongoDB runs
-multi-document transactions on a replica set or a sharded cluster, never on a standalone server, so
-:meth:`MongoOutboxStore.start` refuses one (a single-node replica set is enough: ``mongod --replSet rs0``, then
-``rs.initiate()``).
+``MongoRepository.save`` there writes the document on its own, and the events of its aggregate, appended one by
+one as its unit commits, are each written with their deliveries in a transaction of the store's own, so no event
+is ever owed to no group. They do not commit together: when a later one fails, the earlier ones stand (and are
+delivered) and the save raises, its document stored. Events that must commit together, and with the document, are
+published in a ``@transactional`` method. MongoDB runs multi-document transactions on a replica set or a sharded
+cluster, never on a standalone server, so :meth:`MongoOutboxStore.start` refuses one (a single-node replica set is
+enough: ``mongod --replSet rs0``, then ``rs.initiate()``). The store is tested on a replica set; on a sharded
+cluster, keep its collections unsharded on one shard (the database's primary shard, where MongoDB puts an
+unsharded collection), so that an event and its deliveries commit on one shard and a claim, which reads them
+outside a transaction, never sees a delivery before its event.
 
 **Outbox ids.** An event's outbox id is an integer taken from the counter with one atomic ``findAndModify``
 (``$inc``) *outside* the unit's transaction. Two transactions that increment one document conflict: MongoDB aborts

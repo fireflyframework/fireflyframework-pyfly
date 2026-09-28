@@ -1063,8 +1063,11 @@ class OrderService:
 - The events an `AggregateDocument` raises go the same way with `pyfly.eda.domain-events.destination`: they are
   appended to the outbox in the unit that saves the document (see
   [Aggregate Documents and Domain Events](#aggregate-documents-and-domain-events)). A `MongoRepository.save`
-  outside `@transactional` writes the document on its own, with no transaction; its events are then written with
-  their deliveries in a short transaction of the store's own, whole or not at all.
+  outside `@transactional` writes the document on its own, with no transaction; its events are then written one by
+  one, each with its deliveries in a short transaction of the store's own, so no event is ever owed to no group.
+  They do not commit together: when a later one fails, the earlier ones stand and are delivered, and the save
+  raises, its document stored. Save the aggregate in a `@transactional` method when its events must commit
+  together (and with the document).
 
 Its guarantees are those of the SQL outbox store; the configuration keys, the collections and their indexes, the
 outbox ids and the claims are in [The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo).

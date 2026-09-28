@@ -169,8 +169,8 @@ async def test_the_event_sourcing_outbox_runs_on_any_outbox_store(relational_bac
 
 
 async def test_the_forwarding_layer_runs_on_any_outbox_store(relational_backend: RelationalBackend) -> None:
-    """``TransactionalEventPublisher`` and its ``OutboxForwarder`` need nothing beyond the port: a document store
-    carries a transport's events as the SQL store does."""
+    """``TransactionalEventPublisher`` and its ``OutboxForwarder`` need nothing beyond the port: any store that has
+    only the port's methods carries a transport's events as the SQL store does."""
     store, template = await _store(relational_backend)
     transport = InMemoryEventBus()
     received: list[Any] = []
