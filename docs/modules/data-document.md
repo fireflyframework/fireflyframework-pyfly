@@ -662,6 +662,8 @@ The `MongoQueryExecutor` is used by the `MongoRepositoryBeanPostProcessor` to co
 2. **JSON parsing:** Parses the query string once at compile time to validate it and detect whether it is a find filter (JSON object) or an aggregation pipeline (JSON array).
 3. **Template compilation:** `_compile_find` (a filter) or `_compile_aggregate` (a pipeline), the hooks an executor subclass overrides, stores the parsed template in a `MongoAnnotatedQuery`, which substitutes the parameters at execution time and runs the query in the repository's unit of work.
 
+A hook that returns a coroutine callable of its own instead (called as `await compiled(Model, **kwargs)`), and a post-processor subclass's legacy `_compile_derived` that does (`await compiled(Model, *args)`), run as your code: the call joins or opens the unit of work as any repository call does, but does not hold the unit's operation guard while your callable runs, so it may call repositories, in child tasks too (`asyncio.gather`). Pass the unit's session to the Beanie and pymongo calls it makes itself (`current_session()`), as a custom repository method does with `self._session`.
+
 ```python
 from pyfly.data.document.mongodb.query import MongoQueryExecutor
 

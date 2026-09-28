@@ -20,12 +20,16 @@ scope, so a repository call in it waits for the unit's operation guard: a reposi
 while it ran the actions hung for ever. The guard is held for one driver command at a time and never while an
 action runs, so each call here answers (within :data:`TIMEOUT`), and inside a unit of work the actions' own
 writes are part of it.
+
+The query callables a post-processor subclass compiles itself (an executor's ``_compile_find`` or
+``_compile_aggregate``, a legacy ``_compile_derived``) are user code too: they run without the guard, and the
+framework's calls they make take it for each command.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
 
@@ -34,8 +38,10 @@ from beanie import Delete, Document, Insert, Save, Update, ValidateOnSave, after
 
 from pyfly.data.document.mongodb.document import BaseDocument, DocumentAuditingHandler
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
+from pyfly.data.document.mongodb.query import MongoQueryExecutor
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
+from pyfly.data.query import query
 from pyfly.data.transaction import IllegalTransactionStateError, TransactionTemplate
 from tests.support.mongo import BeanieDatabase, beanie_database
 
@@ -355,3 +361,50 @@ async def test_a_read_only_unit_refuses_a_write_before_any_event_action_runs(env
     assert ActOrder.seen == []
     assert await env.statuses() == ["KEPT"]
     assert await env.labels() == ["inserted KEPT"]
+
+
+async def _customers_in_a_child_task() -> int:
+    """User code that reads a repository in a child task (``asyncio.gather`` runs its coroutine in one)."""
+    (customers,) = await asyncio.gather(ActCustomerRepository().count())
+    return int(customers)
+
+
+class ChildTaskQueries(MongoQueryExecutor):
+    """An executor whose find filters compile to a coroutine of its own."""
+
+    def _compile_find(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
+        async def compiled(model: type, **kwargs: Any) -> int:
+            return await _customers_in_a_child_task()
+
+        return compiled
+
+
+class ChildTaskProcessor(MongoRepositoryBeanPostProcessor):
+    """A processor with an executor of its own, and derived queries compiled by its own legacy hook."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._query_executor = ChildTaskQueries()
+
+    def _compile_derived(self, parsed: Any, entity: Any, bean: Any, *, return_type: Any = None) -> Any:
+        async def compiled(model: type, *args: Any) -> int:
+            return await _customers_in_a_child_task()
+
+        return compiled
+
+
+class ActHookedQueries(MongoRepository[ActOrder, str]):
+    @query('{"status": ":status"}')
+    async def find_hooked(self, status: str) -> int: ...
+
+    async def count_by_status(self, status: str) -> int: ...
+
+
+@IN_UNIT
+@pytest.mark.parametrize("method", ["find_hooked", "count_by_status"])
+async def test_query_code_a_processor_subclass_compiles_calls_repositories_in_child_tasks(
+    env: Env, in_unit: bool, method: str
+) -> None:
+    repository = ActHookedQueries()
+    ChildTaskProcessor().after_init(repository, "actHookedQueries")
+    assert await env.run(lambda: getattr(repository, method)("NEW"), in_unit=in_unit) == 1

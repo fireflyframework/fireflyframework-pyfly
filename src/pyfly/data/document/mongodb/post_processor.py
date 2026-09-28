@@ -134,7 +134,11 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         return self._query_compiler.compile(parsed, entity, return_type=return_type)
 
     def _wrap_derived_method(self, compiled_fn: Any) -> Any:
-        """Wrap a compiled derived query as a repository operation on the repository it is called on."""
+        """Wrap a compiled derived query as a repository operation on the repository it is called on.
+
+        A *compiled_fn* that is not a :class:`MongoDerivedQuery` (a subclass's ``_compile_derived`` returned a
+        coroutine callable of its own) is user code: the call does not hold the operation guard while it runs, so it
+        may call repositories in child tasks, and the framework's calls it makes take the guard for each command."""
 
         async def wrapper(self_arg: Any, *args: Any) -> Any:
             if isinstance(compiled_fn, MongoDerivedQuery):
@@ -144,12 +148,19 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
                 return await compiled_fn.run(self_arg, values, pageable=pageable, sort=sort)
             return await compiled_fn(self_arg._model, *args)
 
-        read = not isinstance(compiled_fn, MongoDerivedQuery) or compiled_fn.parsed.prefix != "delete_by"
-        return repository_operation(wrapper, read=read, atomic=read)
+        framework = isinstance(compiled_fn, MongoDerivedQuery)
+        read = not framework or compiled_fn.parsed.prefix != "delete_by"
+        # A derived delete runs the delete event actions, and a callable of the subclass's own is user code: the
+        # guard is taken per command only.
+        return repository_operation(wrapper, read=read, atomic=framework and read)
 
     def _process_query_decorated(self, bean: Any, cls: type, attr_name: str, attr: Any, entity: Any) -> bool:
         """Compile a ``@query`` method into a repository operation that binds its arguments by the stub's
-        signature, by position or by keyword."""
+        signature, by position or by keyword.
+
+        A query an executor subclass compiles to a coroutine callable of its own (its ``_compile_find`` or
+        ``_compile_aggregate``) is user code: the call does not hold the operation guard while it runs, as for a
+        legacy ``_compile_derived`` (:meth:`_wrap_derived_method`)."""
         if not hasattr(attr, "__pyfly_query__"):
             return False
         method = describe_method(cls, attr_name, attr, entity, resolve=False)
@@ -164,9 +175,10 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         queried.__qualname__ = f"{cls.__qualname__}.{attr_name}"
         queried.__doc__ = method.function.__doc__
         queried.__module__ = method.function.__module__
+        framework = isinstance(compiled, MongoAnnotatedQuery)
         reads = compiled.reads if isinstance(compiled, MongoAnnotatedQuery) else True
         # A pipeline that writes ($out, $merge) is one command: outside a transaction it runs without one.
-        operation = repository_operation(queried, read=reads, atomic=True, single=not reads)
+        operation = repository_operation(queried, read=reads, atomic=framework, single=not reads)
         setattr(bean, attr_name, operation.__get__(bean, cls))
         return True
 
