@@ -33,7 +33,8 @@ nothing), so what a loop writes while it reads a stream stays. On exit the datas
 the transaction rolls back.
 
 The units of the task that entered the block, and of the tasks it starts, take part; the context's own
-background work (started before the block) keeps running on the datasource's own connections and commits.
+background work (started before the block: the outbox relay, a projection runner, scheduled jobs) keeps running
+on the datasource's own connections, commits, and never sees what the test writes.
 What differs from production, by construction:
 
 - every unit of a datasource runs on one connection: units that overlap in time (tasks that each open a
@@ -43,6 +44,12 @@ What differs from production, by construction:
   for; one that writes on through its own unit while such a unit is open writes inside that unit's
   savepoint, and when that unit rolls back the writing unit is marked rollback-only (its commit fails with
   ``UnexpectedRollbackError``) instead of losing the write;
+- work that runs detached is a task of its own that sees no unit of its caller (an ``@async_method`` call, the
+  steps of a saga, a TCC participant or a workflow): started while a unit of the test is open (an
+  ``@async_method`` called inside a ``@transactional`` method, a saga run inside one), its unit is refused
+  like any other that overlaps, and the refusal is that work's failure (the ``AsyncUncaughtExceptionHandler``
+  gets it, a saga compensates and fails). In production that work commits on its own. Awaited where no unit
+  of the test is open, its units take part and roll back;
 - a stream reads its rows when its statement runs, not through a server-side cursor: a cursor left open on
   the shared connection would hang the other units' statements on MySQL and MariaDB, and on SQLite the scan
   would see the rows the test writes meanwhile;

@@ -787,6 +787,13 @@ by construction:
   while such a unit is open writes inside that unit's savepoint, so when that unit rolls back, the writing
   unit is marked rollback-only and its commit fails with `UnexpectedRollbackError` (caused by an
   `IllegalTransactionStateError` that says why) instead of losing the write;
+- work that runs detached is a task of its own that sees no unit of its caller: an `@async_method` call, the
+  steps of a saga, a TCC participant or a workflow. Started while a unit of the test is open (an
+  `@async_method` called inside a `@transactional` method, a saga run inside one), its unit is refused like any
+  other that overlaps, and the refusal is that work's failure: the `AsyncUncaughtExceptionHandler` gets the
+  `IllegalTransactionStateError`, a saga compensates and fails. In production that work commits on its own.
+  Await it where no unit of the test is open (`await (await service.audit(...))`, `saga_engine.execute(...)`
+  from the test body) and its units take part and roll back, or test it with `rollback=False`;
 - a stream (`stream_all()`, `session.stream()`) reads its rows when its statement runs, not through a
   server-side cursor: a cursor left open on the shared connection would hang the other units' statements on
   MySQL and MariaDB, and on SQLite the scan would see the rows the test writes meanwhile. It holds the rows
@@ -812,7 +819,9 @@ by construction:
 - DDL inside the test commits on MySQL and MariaDB, and a session the code opens itself outside every unit
   commits for real, as does a unit of `@transactional(manager=...)` naming a manager instance of its own
   (the test replaces the managers of the context's `TransactionManagerRegistry` only);
-- the context's background work started before the test runs on its own connections and commits.
+- the context's background work started before the test (the outbox relay, a projection runner, scheduled
+  jobs) runs on its own connections, commits, and never sees what the test writes: a test delivers what it
+  published through the outbox with a relay round of its own (`await bus.relay.run_once()`), which takes part.
 
 Only relational datasources roll back. Use a SQLite **file** (`tmp_path`) or a server for data tests, never
 `sqlite:///:memory:` for transaction semantics: an in-memory database lives on one connection that every
