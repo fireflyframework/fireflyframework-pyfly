@@ -6,6 +6,600 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.08 (2026-09-28)
+
+The data layer, rebuilt on a unit of work. An audit of the ORM and transaction layer at `26.09.07`
+found fourteen defects and 179 catalog entries, 170 distinct issues once duplicates were merged, and
+the worst were silent: two concurrent `@transactional` calls swapped sessions and lost a committed
+write (five runs out of five on PostgreSQL), `REQUIRES_NEW` lost the outer transaction's later writes,
+repositories used outside a transaction never committed and pinned their connections until the pool ran
+dry, `isolation=` crashed, a caught failure of a participant committed partial work, child tasks shared
+one `AsyncSession`, the framework's own stores wrote beside the business transaction instead of in it,
+and MongoDB `@transactional` crashed on every call. None of this was a pooling problem: the primary
+path already reused its connections (1.08 ms for a pooled unit of work against 12.16 ms for a new
+connection); the defects were in how a session reached the code that used it.
+
+Every transactional boundary is now a `UnitOfWork` bound to the running task, and every repository call
+resolves it when it runs; no connection is ever held by a bean. `@transactional` has Spring's semantics
+on every backend, one `DataSourceRegistry` builds and disposes every engine, the framework's stores
+(event store, outbox, saga state, caches, locks, tokens, sessions) run on the application's datasources
+and join the caller's unit where atomicity matters, and MongoDB runs the same model on a replica set.
+The audit's proofs, ported to the new API, now hold every expected line on a SQLite file and on
+PostgreSQL 17, and the fixes are pinned by tests that run on a backend matrix (a SQLite file with
+foreign keys on, PostgreSQL 17, MySQL 8, MariaDB 11 and a MongoDB replica set), on SQLAlchemy 2.1 and
+the 2.0 line: the fast suite went from 5,330 to 7,555 passing tests, and the integration suite from 50
+to 2,494.
+
+Many behaviors change on purpose, several of them breaking: read **Upgrading** at the end of this
+section before you deploy.
+
+### Breaking
+
+#### Transactions and the unit of work
+
+- **A repository call outside a transaction commits.** Through `26.09.07` such a call ran on a
+  session nobody committed: the write was invisible to other connections, the connection stayed idle
+  in transaction, and the row was gone once the context stopped. Now every public repository method opens a
+  short unit of its own when no unit is bound for its datasource: a *read* method (`find*`, `count*`,
+  `exists*`, `stream*`, `scroll*`, `get*`) a read unit, any other method a write unit that commits.
+  On PostgreSQL a read unit runs on an `AUTOCOMMIT` connection, one round trip instead of three
+  (measured at 0.45 ms against 0.94 ms), and it is retried once when the connection was invalidated.
+  Inside a transaction, the call joins it.
+- **`rollback_for` adds rules; it no longer replaces the default.** A narrowed `rollback_for` used to
+  commit on every other exception. The rules now follow Spring's `RuleBasedTransactionAttribute`: any
+  `Exception` rolls back, `rollback_for` and `no_rollback_for` add rules, the most specific match wins
+  (by MRO distance, ties to rollback), and a `BaseException` that is not an `Exception` (cancellation,
+  `KeyboardInterrupt`) always rolls back.
+- **A caught failure of a participant makes the outer commit raise `UnexpectedRollbackError`.** A
+  `REQUIRED` call that joins a unit and exits with an exception its rules roll back on marks the unit
+  rollback-only, and so does any statement that leaves the connection's transaction inactive; catching
+  the exception no longer lets the caller commit half of the work. The outermost boundary then rolls
+  back and raises `UnexpectedRollbackError`. Use `Propagation.NESTED` for a best-effort step: its
+  failure rolls back to its savepoint and leaves the outer unit alone.
+- **`@transactional` refuses sync functions and async generators when it decorates them**
+  (`TypeError`): the data layer is async end to end, and a transaction cannot span an iteration
+  safely. Put `TransactionTemplate` around the loop instead.
+- **A service that exposes both a `_session_factory` and a `_motor_client` must name its datasource**
+  (`@transactional(datasource=...)`), or the call raises `IllegalTransactionStateError`. Through
+  `26.09.07` only the relational arm ran and the MongoDB writes committed on their own. A unit on one
+  datasource never satisfies a join on another: a `REQUIRED` call on datasource B inside a unit on A
+  starts B's own transaction (there is no two-phase commit).
+- **An injected `AsyncSession` joins the unit of work.** The transient `async_session` bean is now a
+  `ScopedAsyncSession`: inside a unit for its datasource its unit-of-work API delegates to the unit's
+  session, and `commit()` and `rollback()` raise `IllegalTransactionStateError` there (as Spring's
+  shared `EntityManager` does); outside a unit it behaves as before. A DAO that injects `AsyncSession`
+  therefore takes part in `@transactional` without changes, and must stop committing by hand inside it.
+- **Repositories and commits raise the kernel's persistence exceptions.** A repository call, a
+  `@transactional` commit and a `NESTED` savepoint release raise `DuplicateKeyException`,
+  `DataIntegrityException` and `OptimisticLockingFailureException` (chained from the driver error)
+  instead of SQLAlchemy's `IntegrityError` and `StaleDataError`, and `DataIntegrityException` and
+  `ConcurrencyException` are now `ConflictException`s (HTTP 409). An HTTP 409 body names the
+  constraint and never carries SQL or bound values. `except IntegrityError`, `rollback_for` and
+  `@retry(exceptions=...)` that name SQLAlchemy types must name the kernel types.
+- **On SQLite, a write `REQUIRES_NEW` inside another write unit is refused at once.** SQLite has one
+  writer, and a write unit takes the lock at an eager `BEGIN IMMEDIATE`, so the inner unit would wait
+  for a lock its own task holds. It now raises `IllegalTransactionStateError` immediately; `26.09.07`
+  hung for the busy timeout and then failed with "database is locked". A read-only `REQUIRES_NEW` works,
+  and an in-memory SQLite database (one shared connection) refuses any overlapping unit.
+- **`read_only=True` refuses writes, and `isolation=` and `timeout=` take effect.** A read-only unit
+  used to accept and commit writes; it now raises `IllegalTransactionStateError` at the flush, on every
+  backend. `isolation=`, which crashed, is applied to the connection and validated per dialect (an
+  unsupported level raises at `begin`). A body that runs over its `timeout=` rolls back and raises
+  `TransactionTimedOutError` (also a `TimeoutError`); the deadline is the unit's, participants cannot
+  extend it, and on PostgreSQL the unit also sets `SET LOCAL statement_timeout`.
+
+#### Relational repositories and queries
+
+- **`save()` persists or merges, and returns the managed instance.** It follows Spring's `save`: a new
+  entity (a `Persistable.is_new()` hook, else a `None` version, else a `None` key) is inserted, any other
+  merged, so a DTO carrying an existing id updates its row instead of failing with `IntegrityError`.
+  Use the returned object. `save()` is one `INSERT` with no refresh (generated values come through
+  `RETURNING`, or one targeted `SELECT` where there is none), and `save_all(n)` sends no per-entity
+  `SELECT`: on PostgreSQL `save_all(100)` is one batched `INSERT` where `26.09.07` sent it plus 100
+  `SELECT`s. Only the relationships the mapping loads eagerly are loaded after a save.
+- **The delete family runs ORM cascades, version checks and delete listeners on every backend.**
+  `delete(entity)`, `delete_by_id`, `delete_all_by_id` and `delete_all` delete entity by entity through
+  the ORM and fall back to one bulk `DELETE` only when nothing needs the ORM; `delete_all_in_batch()`
+  and `delete_all_by_id_in_batch()` are the explicit bulk forms. Deleting a detached entity now reads
+  its row first (`SELECT` + `DELETE`: 693 µs against 544 µs on a SQLite file, 2.49 ms against 2.11 ms
+  on PostgreSQL), and the cascaded relationships of the entities a unit holds are loaded once for all
+  of them (six parents: 2 `SELECT` and 2 `DELETE` against 6 and 12).
+- **Soft-deleted rows are invisible to every ORM `SELECT`**, on every session: relationship loads,
+  joins, `session.get`, a plain `Repository` and derived queries (Hibernate `@SoftDelete` parity). Opt
+  out with `execution_options(include_deleted=True)` or `with including_deleted():`. A direct
+  `session.delete()` of a parent whose cascades, nullable foreign keys or many-to-many links reach
+  soft-deleted rows now violates the foreign key (use `soft_delete_criteria.hard_delete(session, obj)`,
+  as the repositories and the admin data API do), and `session.merge()` of a detached soft-deleted
+  object must run inside `including_deleted()`. `SoftDeleteRepository` soft-deletes detached entities by
+  key with one `UPDATE`, bumps the version, stamps `updated_at`/`updated_by` and never overwrites
+  `deleted_at`.
+- **Derived query methods are checked when the repository is built, and take their result shape from
+  the return annotation.** A method is compiled only when its body is a stub by shape (a docstring,
+  then nothing, `...`, `pass` or `raise NotImplementedError`): a hand-written `delete_by_*` soft delete
+  used to become a physical `DELETE`. Every field must be a column, synonym, hybrid, many-to-one
+  relationship or composite, and the parameters must match the name, or the start fails with
+  `InvalidQueryMethodError`. `T | None` returns one entity or `None` and raises
+  `IncorrectResultSizeException` for more than one row; `Page[T]`, `Slice[T]`, projections and `list[T]`
+  are honored. `and` binds tighter than `or` (`find_by_a_or_b_and_c` is `a OR (b AND c)`). Derived
+  queries honor soft delete, and `_containing`, `_starting_with`, `_ending_with` and
+  `FilterOperator.contains` match their argument as written (`%` and `_` escaped); `_like` still takes a
+  pattern.
+- **`@query` returns identity-mapped entities, and a changing statement needs `@modifying`.** Entity
+  results are the unit's own instances (the query must select the entity's columns), pending changes
+  are flushed first, and results take their shape from the return annotation. An `UPDATE`, `DELETE` or
+  `INSERT` without the new `@modifying` (which returns the row count) fails the start, and so does a
+  `Pageable` or `Sort` parameter, which used to be ignored. The JPQL transpiler rewrites tokens instead
+  of regexes: string literals, quoted names and comments are never rewritten, and `[name]` is a quoted
+  identifier on SQL Server and SQLite only. `IN (:x)` binds any collection by its elements (typed by
+  them) and any other value as a list of one, and an empty collection matches no row (`NOT IN`: every
+  row) on every backend.
+- **Sort and filter names are validated.** An unknown, private or `@property` name, a `$` key, or a
+  relationship (except a many-to-one used as a filter) raises `InvalidPropertyError` (HTTP 400) in
+  `Sort`, `find_all(**filters)`, `FilterOperator`, `FilterUtils` and query-by-example; `__sortable__`
+  and `__filterable__` are allow-lists checked when the repository is built. `Specification` `|` and
+  `~` compose by what each operand matches (a joining operand becomes a correlated `EXISTS`) instead of
+  rebuilding the whole `WHERE`.
+- **A relational repository whose derived or `@query` stubs no post-processor compiled fails the start**
+  (`RepositoryWiringCheck`), where it used to answer `None` from every such method; with
+  `pyfly.data.relational.enabled` the auto-configuration compiles them.
+- **Private helpers:** `Repository._pk_column` is removed (use `_pk_attributes`), and
+  `_apply_orders` needs the call's session. A scalar id for a composite key raises `TypeError`.
+
+#### Schema, datasources and configuration
+
+- **`pyfly.data.relational.ddl-auto` defaults to `create` only for an embedded database.** Unset, it
+  is `create` on SQLite (or with no URL in the `dev` profile) and `none` on a database server, and
+  `none` whenever `pyfly.data.relational.migrations.enabled` is on; `create` or `create-drop` beside
+  startup migrations fails the start. `update` and any unknown value, which used to become `create`
+  silently, fail the start naming the key; `validate` is new; `false`, `off` and `no` mean `none`.
+- **A relational application without `pyfly.data.relational.url` fails at startup.** Only the `dev`
+  profile falls back to `sqlite+aiosqlite:///./app.db`, with a warning. `pyfly.data.url`, `pool-size`
+  and `echo` are deprecated aliases of the `pyfly.data.relational.*` keys, and `echo: "false"` from an
+  environment variable no longer turns SQL echo on.
+- **The per-module URL keys are aliases resolved through the registry.** The event store, snapshots,
+  projection checkpoints, saga persistence, SQL cache, scheduler lock, OAuth2 token store, session
+  stores and outbox each take `<prefix>.datasource` (a registry name) or `<prefix>.url`: no key is the
+  primary, a URL of a registered datasource reuses its engine, and another URL registers a named
+  datasource with the same pool settings. A store with neither key and no primary fails at startup
+  instead of opening `./app.db` (or, for the cache, `localhost:5432/cache`) on its own. The audit's
+  engine census went from six or seven engines (one of them disposed) to three, all disposed.
+- **Framework tables are created only when `ddl-auto` creates, and checked otherwise.** The
+  framework's `pyfly_*` tables are portable SQLAlchemy Core tables on
+  `pyfly.data.relational.framework_schema.framework_metadata`. Under `create` or `create-drop` a store
+  creates what is missing (indexes included, `CONCURRENTLY` on PostgreSQL); under `none` or `validate`
+  it fails fast with `FrameworkSchemaError` (`framework_schema.creates_tables(ddl_auto)` is true for
+  `create` and `create-drop` only). Key columns compare exactly on MySQL and MariaDB (a binary
+  `utf8mb4` collation), so keys, lease names and usernames that differ only by case or accents are
+  distinct there too.
+- **`pyfly db init` writes an `env.py` that imports your models and the framework tables.** Its
+  autogenerate used to see no model and drop every table; an autogenerate that would still do that is
+  refused. Regenerate an `env.py` made before `26.09.08`. Startup migrations run before the schema
+  strategy and every other lifecycle bean, serialized across instances (a PostgreSQL advisory lock,
+  MySQL/MariaDB `GET_LOCK`, a lease elsewhere).
+- **`BaseEntity` and `SoftDeleteMixin` timestamps are `UtcDateTime`**: aware UTC with microseconds on
+  every backend (`DATETIME(6)` on MySQL/MariaDB, `TIMESTAMPTZ` on PostgreSQL for new tables), and a
+  naive value is taken as UTC. See Upgrading for existing columns.
+- **The data beans back off for an application's singleton only, and a singleton `AsyncEngine` or
+  `async_sessionmaker` bean is the primary of every unit of work.** A request- or refresh-scoped engine,
+  session factory or MongoDB client is a second bean, and injection by type gets the `@primary`
+  auto-configured one. Declare a second database under `pyfly.data.relational.datasources.<name>`,
+  never as an engine bean: a singleton `AsyncEngine` beside a configured URL splits the primary (the
+  framework stores keep the registry's) and logs `relational_engine_not_in_registry`.
+
+#### Dependency injection and lifecycle
+
+- **`ApplicationContext.stop()` runs in phases, and the datasources close last.** `ContextClosedEvent`;
+  drain (tasks, the `TaskScheduler`, `CONSUMER_PHASE` lifecycle beans); `@pre_destroy` in reverse
+  dependency order; scoped instances; the other lifecycle beans; singleton destroy methods;
+  `ResourceRegistry.dispose_all()`. Through `26.09.07` the adapters stopped first and the primary engine
+  was disposed before every `@pre_destroy`. After stop the container builds no bean
+  (`BeanCreationNotAllowedError`), an engine of a closed registry refuses to open a new pool, and a
+  restart is a cold start. `DataSourceRegistry.close()` is bounded (5 s) and closes idle connections of
+  a silent database.
+- **Post-processors and `@post_construct` run on every scope, and non-singleton `@bean` methods are not
+  called at startup.** A transient, request, session or refresh-scoped instance goes through the same
+  pipeline as a singleton. A non-singleton `@bean` is registered under its declared return class (a
+  parametrized hint registers its origin class) and is resolvable by that class, not by the concrete
+  class it returns. A post-processor may declare `singletons_only = True`; the datasource SPI registrar
+  does, so a scoped `AfterBeginCustomizer` or `DataSourceCredentialsProvider` is ignored with a
+  `datasource_spi_bean_not_singleton` warning.
+- **Smaller DI changes:** an ambiguous `@bean` parameter raises `NoUniqueBeanError`;
+  `Provider[T]` resolves a parametrized `T`; `@scoped_proxy` on a singleton or transient bean raises
+  `TypeError`; `POST /actuator/refresh` keys are `__pyfly_bean_<module>.<class>[#name]`; the repository
+  post-processors run before AOP, so an aspect wraps derived and `@query` methods.
+
+#### MongoDB
+
+- **Failed saves and rolled-back units give documents back their stored id and revision.** The
+  repository makes ids and revisions on the client, and a call that fails, or a transaction that rolls
+  back, restores the id, revision and saved state of the documents it wrote (before the application's
+  after-rollback callbacks), so the same objects can be saved again after a `ConcurrencyException` or a
+  fixed `DuplicateKeyException`. Spring Data never restores an entity; PyFly deliberately does. A write
+  whose write concern alone failed stays stored, and an unknown commit outcome leaves the documents as
+  the saves left them.
+- **The repository no longer calls Beanie's `Document.insert` or `Document.save`.** New documents go
+  out with `insert_one`/`InsertOne` and stored ones through `Document.update`/`UpdateOne`, and the
+  repository runs the event actions and state management itself, outside the unit's operation guard,
+  so an action may call a repository. Move logic in an `insert`/`save` override into
+  `@before_event`/`@after_event` actions.
+- **The client is built with `tz_aware=True`.** Every `datetime` read back is aware UTC, and comparing
+  one with a naive value raises `TypeError`. `pyfly.data.document.tz-aware: false` restores naive values.
+- **`MongoFilterOperator.like` is SQL `LIKE`, anchored and case-sensitive.** It used to ignore case;
+  pass `ignore_case=True`. Derived `_like` is anchored and `_containing` case-sensitive.
+- **In a MongoDB-only application the document datasource is the default transaction manager**
+  (`pyfly.data.document.transaction.default`), so a message listener delivery opens a MongoDB unit. On a
+  standalone server every delivery then raises `IllegalTransactionStateError` until
+  `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional`) is `false`.
+- **A document class declaring `id: str` is stored with a string `_id`.** Earlier releases stored an
+  `ObjectId` the driver made; declare `id: PydanticObjectId | None = None` to keep `ObjectId`s.
+- **Only PyMongo's `AsyncMongoClient` is accepted.** The transaction manager refuses a Motor or mongomock
+  client with `TypeError`, a `_motor_client` that is not an `AsyncMongoClient` raises
+  `IllegalTransactionStateError`, and the legacy runner is gone. `@transactional` on a standalone server
+  raises `IllegalTransactionStateError` (transactions need a replica set), `NESTED` raises
+  `NestedTransactionNotSupportedError`, and only `Isolation.DEFAULT` is accepted.
+
+#### Event sourcing
+
+- **A `26.09.07` event table is refused at start until it is migrated.** `SqlAlchemyEventStore` gives
+  every event a global position (`pyfly_event_store` gains columns, `pyfly_event_store_head` is new);
+  the eventsourcing guide gives the SQL, and the set-based statement that numbers a large table before
+  the first start. `SqlAlchemyEventStore.DDL` and `SqlAlchemySnapshotStore.DDL` are removed.
+- **The stores join the caller's unit of work.** Appends, reads and snapshots run in the unit bound for
+  their datasource, so an aggregate's events and snapshot commit or roll back with the business
+  transaction (an append is one `INSERT`); outside one, each call is a short transaction of its own.
+  `ConcurrencyError` is now the kernel's `OptimisticLockingFailureException`, and
+  `stream_all(after_event_id=...)` raises `ValueError` for an id that is not on the stream (it used to
+  return nothing, forever).
+- **`eventsourcing.TransactionalOutbox` needs a data layer.** It was a dictionary in the process; it is
+  now table-backed: an event enqueued by a unit that rolls back is never published, a restart keeps what
+  is pending, and a delivered event leaves the table. An application without a data layer gets
+  `IllegalTransactionStateError` from `start()`.
+
+#### Outbox, events and messaging
+
+- **The database event bus runs on the `pyfly_outbox_*` framework tables.** `pyfly_eda_outbox` and
+  `pyfly_eda_offsets` are no longer read (the serving role needs `DELETE` on the new tables), a publish
+  after `stop()` writes durably instead of raising, and the relay registers consumer groups in units of
+  its own.
+- **The `DomainEventPublisher` is on by default and drains an aggregate's pending events as its unit
+  commits.** An application that collected `pending_events()` (or called `clear_events()`) after the
+  unit and published them by hand finds the buffer empty: set `pyfly.eda.domain-events.destination`, or
+  `pyfly.eda.domain-events.enabled: false` to keep publishing by hand. CQRS and domain-event payloads are
+  JSON (ISO-8601 instants), and `@app_event_listener` takes a transaction phase.
+- **Kafka and RabbitMQ listeners run each delivery in a unit with the listener's own `@transactional`
+  settings, and acknowledge it after that unit commits.** A SERIALIZABLE listener runs at SERIALIZABLE,
+  a timeout rolls the delivery back and retries it, and a read-only listener cannot write;
+  `REQUIRES_NEW`, `NESTED`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER` and `@retry` listeners run as declared
+  with no unit of the container's, and listeners that cannot share one unit each run on their own
+  (`listener_units_differ`). A `@transactional` service a listener calls joins the delivery's unit, so
+  its failure rolls the delivery back even when the listener catches it (`UnexpectedRollbackError`), and
+  transient failures use the same `retry.max-attempts` as any other: with the defaults an outage longer
+  than about 15 s dead-letters what is consumed during it.
+- **The EDA Kafka and RabbitMQ buses consume only once an `@event_listener` has subscribed**, so a
+  backlog is no longer acknowledged before the application's listeners are wired.
+
+#### Caching and CQRS
+
+- **The query cache fails closed.** A cacheable query is cached only when the cache can see who calls
+  it: `USER` scope needs a user (`ExecutionContext.user_id` or the authenticated `RequestContext`
+  principal), `TENANT` a tenant or organization, or else a user. Anonymous callers, consumers,
+  background jobs and a tenant kept in a `ContextVar` are no longer served one shared entry; a
+  `query_cache_skipped` warning names the handler once. `X-Tenant-Id` only narrows a key and never
+  identifies a caller. Declare `@cacheable(scope=QueryCacheScope.GLOBAL)` for data that is the same for
+  everyone. Keys are a full SHA-256 digest (they were truncated to 64 bits), so existing entries miss
+  once.
+- **Cache writes made in a unit of work wait for its commit.** The cache decorators and the CQRS query
+  cache go through the new `TransactionAwareCache` (Spring's `TransactionAwareCacheDecorator`): in a
+  unit, `put`, `evict`, `evict_by_prefix` and `clear` run once it has committed and are dropped when it
+  rolls back, so no request is served a value that never committed. Reads, `put_if_absent` and the
+  explicitly immediate operations run inside `pyfly.data.transaction.outside_transaction()`: the
+  caller's rollback does not undo them, and they never wait for a business unit's row locks.
+- **Cache entries live under a namespace.** The Redis and SQL caches keep their entries under
+  `pyfly:cache:`, and the orchestration state of `CachePersistenceProvider` and the HTTP idempotency
+  records moved to dedicated caches (`orchestration`, `idempotency`): what an earlier release wrote is not
+  read.
+
+#### Scheduling, orchestration and shell
+
+- **`@async_method` returns the `asyncio.Task` running the method at once**, detached from the caller's
+  transaction (Spring `@Async`): await the task for the result (`await (await svc.m())`). Uncaught
+  exceptions go to the `AsyncUncaughtExceptionHandler` bean.
+- **`@scheduled` `fixed_rate` and `cron` jobs no longer overlap themselves** (`@scheduled(concurrent=N)`
+  opts in); `cron` computes its next fire time after the run ends, and an async run with `lock=...` is
+  cancelled at `lock_ttl`.
+- **Saga and workflow steps run detached and no longer join the caller's unit.** A step that committed
+  and then failed, timed out or was cancelled (`track_commits()`) is compensated and never retried,
+  running saga siblings are awaited rather than cancelled, and a caller's cancellation is re-raised
+  after the compensation or the TCC CANCEL phase ran to completion. TCC participants still run in the
+  caller's task and join its unit. On a SQLite file a saga cannot run inside a write `@transactional`
+  ("database is locked"); start it outside. An `ASYNC` workflow started inside a unit starts once that
+  unit commits, and never when it rolls back.
+- **Shell commands run on the application's event loop**; `ClickShellAdapter.invoke()` raises
+  `RuntimeError` for an async command while a loop runs (use `ainvoke()` or `run()`), and a command that
+  exits on purpose returns its own exit code.
+
+#### Sessions and security
+
+- **`PostgresTokenStore` and `RedisTokenStore` implement the new `AtomicTokenStore`** and drop the
+  key-value `store`/`find`/`revoke` methods. The SQL store moves to `pyfly_oauth2_grants` and
+  `pyfly_oauth2_token_families` and does not read `pyfly_oauth2_tokens`; the Redis store does not read
+  its earlier key layout. Refresh tokens issued before the upgrade must be obtained again. The SQL token
+  store never joins a caller's unit, so a grant is not undone by the caller's rollback.
+- **The SQL session registry uses `pyfly_session_registrations` and `pyfly_session_principals`** and
+  does not read `pyfly_session_registry`. An unknown `pyfly.session.store` or
+  `pyfly.session.concurrency.registry` value raises `ValueError` instead of becoming `memory`.
+
+#### Testing
+
+- **A bare `@DataTest` runs every test of the class in a data slice whose units roll back** (a SQLite
+  file per test by default, with `create_all`); through `26.09.07` it only marked the class. Override
+  the `pyfly_data_config` fixture for another database. Detached work (saga steps, `@async_method`) is
+  refused in such a test; TCC participants join the test's unit and roll back with it.
+- **`pyfly_config_for()` maps MySQL testcontainers to `mysql+asyncmy://`** (aiomysql only when asyncmy is
+  not installed) and MariaDB images to `mariadb+asyncmy://`.
+
+### Changed
+
+- **Pool pre-ping stays off by default, and connections are recycled after 1800 s.** Pre-ping costs
+  about 0.675 ms per checkout, nearly doubling a single-read unit of work; instead SQLAlchemy invalidates
+  a connection on a disconnect and a read unit retries once. `pool.recycle`, `connect-args` pass-through
+  and a default PostgreSQL `application_name` are new settings, and every engine gets the pool settings.
+- **SQLite runs with foreign keys on, WAL, `synchronous=NORMAL` and `busy_timeout=5000` on file
+  databases**, and PyFly emits `BEGIN` itself (`BEGIN IMMEDIATE` for a write unit), so reads on a file
+  database run in a real transaction and isolation is real; all of it is configurable under
+  `pyfly.data.relational.sqlite.*`.
+- **The db health indicator is readiness-only and answers within `pyfly.data.relational.health.timeout`
+  (2 s).** An exhausted pool reports `UNKNOWN`, every datasource of the registry is checked, and a late
+  check has its connection's socket closed, so one black-holed pooled connection costs one `DOWN` probe
+  instead of about 15 minutes. A check on an in-memory SQLite connection is never cancelled (that used to
+  drop the database), and each probe request runs the indicators once.
+- **`exists_by_id` is `SELECT 1 ... LIMIT 1`** (or the unit's identity map), derived `exists_by_*` probes
+  one row, derived statements are built once per shape, and long id lists are chunked per dialect and
+  padded (one `= ANY(:array)` statement on PostgreSQL). Pages always end with a primary-key tie-break and
+  `find_all(Pageable)` skips the `COUNT` when the page proves the total; `stream_all` fetches in batches.
+- **Entities returned outside a transaction are never expired**, whatever `expire_on_commit` the session
+  factory sets, and a write auto unit counts as the call's transaction (a `@transactional` boundary inside
+  a repository write method joins it).
+- **The event store numbers events with a global position.** The default `head-row` strategy works on
+  every backend and numbers committed events as readers page (a backlog is sorted once per 100,000 events
+  and numbered in rounds of 1,000); `xid8` is an opt-in on PostgreSQL 13+
+  (`pyfly.eventsourcing.store.position-strategy`), and the table records its strategy.
+- **The saga and TCC engines and `SagaRecoveryService` persist through the configured provider**
+  (`pyfly.transactional.persistence.provider`, the `transactional_persistence_port` bean) instead of
+  always in memory; with `sqlalchemy`, a saga's record commits or rolls back with the caller's unit.
+- **The scheduler lock `provider=database` (and `postgres`) is the portable lease table `LeaseLock`**: it
+  honors `lock_ttl`, holds no connection while the job runs, and takes a lease in one statement on
+  PostgreSQL and SQLite. PostgreSQL advisory locks are an opt-in
+  (`pyfly.scheduling.lock.postgres.advisory=true`), and a tick whose lock ended no longer releases the
+  lock the next tick took.
+- **The session cap is atomic, and only live sessions count.** Concurrent logins never exceed
+  `max-sessions` (SQL registry, one Redis Lua script, the in-memory registry), and on MariaDB a capped
+  login that meets a concurrent change reruns its unit up to three times.
+- **The PyFly pytest plugin loads `pyfly.testing` lazily**, which saves about 0.15 s per pytest start.
+- **Auditing rewrites `updated_by` on every change** (`NULL` without a principal), runs its hooks once per
+  process, and a change to a child collection no longer bumps its versioned parent.
+- **Framework schedulers and pollers declare `CONSUMER_PHASE`** (`OrchestrationScheduler`,
+  `RecoveryService`, `TransactionalOutbox`, `ProjectionRunner` among them): they start last and stop
+  before any `@pre_destroy`.
+- **SQLAlchemy 2.1 is supported, and 2.0.50 is the floor.** The lock holds 2.1.1, the `data-relational`
+  extra requires `sqlalchemy>=2.0.50` with no upper bound (2.0.49 broke MySQL/MariaDB pre-ping when
+  PyMySQL 1.2 was installed), and every 2.0/2.1 difference lives in
+  `pyfly.data.relational.sqlalchemy.compat`. CI runs the fast suite and `mypy` on the 2.0 line on every
+  push (`test-sqlalchemy-2-0`) and its PostgreSQL lane nightly.
+- **The PR gate runs the MongoDB unit tests**, which no longer need a server; the replica-set tests run in
+  the integration gate. `mongomock-motor`, `motor` and `pytz` are gone from the development dependencies.
+
+### Added
+
+- **`pyfly.data.transaction`: one unit of work for every backend.** `@transactional` (bare or
+  parametrized, on a method or a class) with all seven propagations, `NESTED` savepoints, isolation
+  validated per dialect, read-only, timeouts, rollback rules and `datasource=`/`manager=`;
+  `TransactionTemplate` (`async with template.transaction(...)`); synchronizations
+  (`register_synchronization`, `after_commit`, `TransactionPhase`); `detached()` and
+  `outside_transaction()` for work that must not join its caller's unit; `infrastructure_unit()` for
+  framework adapters; `track_commits()` (whether a block committed anything: a single-statement write on
+  an autocommit connection that fails after its statement ran reports `UNKNOWN`, since it may have
+  committed) and `untracked()` (the framework's idempotent bookkeeping, which no tracker counts); the
+  `UnitOfWork` attributes `autocommit` and `operations`; the `TransactionManager` SPI
+  (`SessionPort` is its deprecated alias), `TransactionManagerRegistry` (`set_default`), and the errors
+  `UnexpectedRollbackError`, `IllegalTransactionStateError`, `TransactionTimedOutError`,
+  `NestedTransactionNotSupportedError` and `CommitOutcomeUnknownError` (a commit interrupted in flight,
+  never retried). Commits, rollbacks and closes run shielded, so a cancelled request never returns a
+  poisoned connection to the pool. A manager may inject its resource into a `session` parameter
+  (`resource_parameter`), and `SessionProvider` gives custom data access the current unit's session.
+- **`DataSourceRegistry`**: the primary, a read replica, named datasources
+  (`pyfly.data.relational.datasources.<name>`, placeholders and environment overrides resolved) and the
+  framework stores' datasources, built by one factory and disposed exactly once. A new read-only unit
+  runs on the replica (`@transactional(read_only=True)`). The after-begin customizer SPI
+  (`AfterBeginCustomizer`, for a tenant GUC or a statement timeout), credential rotation without a restart
+  (`DataSourceCredentialsProvider`), per-datasource pool metrics (`pyfly_db_pool_*`), and
+  `close_connections_on_return(engine)`.
+- **Repository APIs:** `find_slice`/`find_slice_by_spec` (`Slice`, no `COUNT`), keyset `scroll`
+  (`Window`, `KeysetPosition`), fetch plans (`load=`, `__load__`), pessimistic locks
+  (`find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE)`), `Order.nulls_first()`/`nulls_last()`/
+  `ignoring_case()`, composite keys in every id method, `stream_all(chunk_size=)`, `@modifying` (with
+  `flush_automatically` and `clear_automatically`), and `InvalidQueryMethodError` and
+  `IncorrectResultSizeException` exported from `pyfly.data`.
+- **Entities:** the `UtcDateTime` column type, a naming convention for unnamed constraints on `Base`
+  (opt-in for Alembic operations, `rename_constraints_to_convention` for existing databases), and
+  auditing ports (`AuditorAware`, `DateTimeProvider`, `pyfly.data.auditing.enabled`, `run_as(...)` as a
+  block or decorator, `SecurityContextHolder`); session-login and switch-user principals are audited.
+- **MongoDB on the unit of work:** `MongoTransactionManager` (every propagation but `NESTED`, a clear
+  error on a standalone server), repositories that pass the unit's session on every call, discovery of
+  every Beanie document including `Link` targets, `DocumentProperties.client_options()`,
+  `MongoHealthIndicator`, `MongoMetrics`, `AggregateDocument` domain events published when a document
+  unit commits, and `BaseDocument` audit fields kept current. A write concern failure at commit raises
+  `CommitOutcomeUnknownError`. `mongo_transactional` and `run_mongo_transaction` are deprecated.
+- **The transactional outbox as a layer of its own.** `pyfly.eda.ports.outbox.OutboxStore` (append in the
+  caller's unit, claim, settle, retention), `SqlOutboxStore` on the framework tables (`Outbox` stays an
+  alias), and `TransactionalEventPublisher` with `OutboxForwarder`: with `pyfly.eda.outbox.enabled` (off by
+  default; the `database` and `postgres` event buses are the outbox already), any
+  `EventPublisher` transport (Kafka, RabbitMQ, Redis Streams, in-process) becomes transactional, each
+  publish appended in the caller's unit and forwarded after the commit at least once, with the event id
+  in `x-pyfly-event-id`, retries and dead letters (`pyfly.eda.outbox.forward.*`;
+  `pyfly.eda.outbox.store` picks the SQL store whenever the application has a relational datasource).
+  `DatabaseEventBus(store=...)` and `TransactionalOutbox(store=...)` run on any store and stop the store
+  they were given when they stop, and `DatabaseEventBus.outbox` and `TransactionalOutbox.outbox` are typed
+  `OutboxStore` (`DatabaseEventBus.sql_store` gives the SQL store). A bus given a store of its own opens
+  its PostgreSQL `LISTEN` connection only when that store notifies the bus's channel, and polls otherwise.
+  `OutboxRelay.alive`, and a bus health of `DOWN` when the relay task ended. The outbox stores the
+  payload as JSON, so an in-process listener behind it receives a `datetime`, `Decimal` or `UUID` value
+  as a string.
+- **Event sourcing:** `stream_all(after_position=, limit=)`, `last_position()`,
+  `StoredEventEnvelope.global_position`, and a `ProjectionRunner` with durable checkpoints
+  (`CheckpointStore`, the `projection_checkpoint_store` bean), a lease so one replica is active,
+  `batch_size`, `start_from` and `lease_ttl_s`.
+- **Security and sessions:** the `AtomicTokenStore` port (`GrantOutcome`, `TokenRecord`,
+  `KeyValueTokenStore` for a custom key-value store), a SQL session store (`pyfly.session.store=postgres`,
+  `pyfly_sessions`) on any SQL backend, `AtomicSessionRegistry.register_limited`, and
+  `ConditionalSessionStore` (`replace`, `rename`), which keeps a revoked session from being written back.
+- **Portable framework SQL:** `pyfly.data.relational.upsert` (`upsert`, `insert_if_absent`, `take_over`)
+  runs the saga store, SQL cache, lease lock and `SqlUserDetailsService` on PostgreSQL, SQLite, MySQL and
+  MariaDB; `KeyString` and `UtcTimestamp` column types.
+- **Dependency injection:** `@conditional_on_missing_bean(..., singletons_only=True)`,
+  `@refresh_scope(proxy=True)` and `@scoped_proxy`, `@bean(destroy_method=...)` with inferred
+  `dispose()`/`aclose()`/`close()` for scoped beans, and `BeanCreationNotAllowedError`.
+- **Scheduling and messaging:** `@scheduled(concurrent=N)`, the `AsyncUncaughtExceptionHandler` bean, a
+  listener container shared by the Kafka and RabbitMQ adapters and buses (back-off policies, poison
+  messages, dead letters, `pyfly.messaging.kafka.max-poll-records`), and
+  `bus.dead_letter_store_failures`.
+- **Testing:** `StatementCounter` and `RecordedStatement` (`pyfly.testing`) count the SQL statements an
+  engine sends; `data_slice(..., rollback=True)` and `RollbackTransaction` roll back every unit of work of a
+  test; `mariadb_container()` and `mongodb_replica_set_container()` (a single-node `rs0` replica set that
+  runs transactions).
+- **The `mysql` extra** (`asyncmy>=0.2.11`) for `mysql+asyncmy://` and `mariadb+asyncmy://`, included in
+  `full`.
+- **`benchmarks/data/`**, a data-layer benchmark harness (unit-of-work overhead, statements per repository
+  method, pool reuse) on four backends, with its baseline in `BASELINE.md`.
+
+### Fixed
+
+- **An aggregate's events stay in sequence order on the global stream when a clock steps back.**
+  `26.09.07` streamed events in the order of `occurred_at`, the clock of each writing process, and the
+  first cut of the global positions followed `recorded_at`, stamped row by row by the database: either
+  way an NTP step or a VM time sync during or between appends put an aggregate's later events before its
+  earlier ones, for good, and a projection saw a deposit before the account was opened (the MariaDB lane
+  failed once this way). Events are now placed at the running maximum of their aggregate's record times:
+  where no clock went back the order is unchanged, rows an earlier release wrote keep their aggregate's
+  order, and the documented upgrade SQL does the same. Steady-state reads stay on the position index
+  (+0.3 ms); numbering a million-event backlog went from 23 to 28 s on PostgreSQL, 25 to 30 s on MySQL and
+  24 to 39 s on MariaDB.
+- **A saga composition compensates its sagas on its own, also when cancelled.** Compensations run
+  detached and shielded, so a caller's `@transactional` that rolls back keeps them; compensated sagas are
+  persisted as failed with their steps compensated; every completed saga of a failed layer is compensated
+  and each composed saga has its own correlation id (they overwrote one state row); a saga that ends
+  cancelled on its own fails the composition.
+- **A handler's own `CancelledError` is a failed delivery** (retried, then dead-lettered) in the listener
+  container; it no longer ends the Kafka consume loop or requeues the RabbitMQ message at once.
+- **OAuth2 grants are atomic on every token store**: refresh tokens, authorization codes and pushed
+  request URIs are single use across replicas, a family revocation is final, and a replay revokes the
+  family; a transient failure no longer turns the client's retry into a false theft signal.
+- **`VersionedMixin` keeps optimistic locking when the entity or a base declares `__mapper_args__`**
+  (the version column was silently dropped).
+- **On SQL Server, `BaseEntity` user columns are `NVARCHAR`** and the random UUID key is non-clustered.
+- **The SQL saga persistence and the SQL cache bind UTC instants**: `find_stale()` and `cleanup()` no
+  longer fail on PostgreSQL, the provider uses its configured table name, and `put_if_absent` takes over
+  an expired key.
+- **SQLite batch migrations refuse a rebuild that would silently drop an unnamed `CHECK` constraint.**
+- **A `KafkaEventBus` whose start cannot reach the broker closes its producer**, and a publish from a
+  `@pre_destroy` after a bus stopped no longer leaves a producer or AMQP connection open.
+- **A failing dead-letter store no longer re-runs handlers** or floods the dead-letter topic or queue.
+- **A query handler that subclasses a concrete handler is registrable** (it failed with "query type
+  unresolvable"), and a `PagedHandler[Q, T]` reports `Page[T]`, so its cache hits are no longer dropped
+  (`resolve_type_arguments`).
+- **`SwitchUserFilter` and the session security filter set `RequestContext.security_context`**, so method
+  security and the query cache see the impersonated or session principal.
+- **The Lumen sample keeps `balance >= 0` under concurrency.** Two withdrawals of 60 from a wallet holding
+  100 both succeeded on PostgreSQL, and two concurrent transfers both completed on SQLite and PostgreSQL.
+  The deposit and withdrawal handlers now read the wallet with a pessimistic lock, and the transfer saga
+  changes balances with one guarded `UPDATE`; `tests/test_concurrent_balance_changes.py` races them on a
+  SQLite file and on PostgreSQL. The docs describe the three concurrency-control options (a guarded
+  atomic update, a pessimistic lock, `VersionedMixin`) and route read-replica work through
+  `@transactional(read_only=True)`; the `RoutingSessionFactory` example no longer leaks sessions.
+
+### Upgrading
+
+- **`ddl-auto`.** On a database server the schema is no longer created for you. Run migrations
+  (`pyfly.data.relational.migrations.enabled: true`, with `validate` if you want the models compared with
+  the schema), or set `pyfly.data.relational.ddl-auto: create` explicitly where that is what you want. Replace
+  `update`, which `26.09.07` silently ran as `create`, with migrations; a typo now fails the start.
+- **`save()`.** Use the instance `save()` returns. A detached object or a DTO with an existing id is now
+  merged into its row instead of raising `IntegrityError`; if you relied on that error to detect
+  duplicates, check first or catch `DuplicateKeyException` on a new entity.
+- **Deletes.** Repository deletes now run cascades, version checks and delete listeners, and deleting a
+  detached entity reads it first. Use `delete_all_in_batch()`/`delete_all_by_id_in_batch()` where you
+  want one bulk `DELETE`. A `session.delete()` of a parent with soft-deleted dependents must go through
+  `hard_delete(session, obj)` or `passive_deletes=True` with `ON DELETE CASCADE`.
+- **`UtcDateTime`.** New tables get `TIMESTAMPTZ` on PostgreSQL and `DATETIME(6)` on MySQL/MariaDB. On
+  MySQL/MariaDB migrate existing `DATETIME` columns of `BaseEntity`/`SoftDeleteMixin` to `DATETIME(6)`; on
+  PostgreSQL a `timestamp without time zone` column reads back as UTC but should be migrated to
+  `timestamptz`. Compare these values with aware datetimes.
+- **Naming convention.** `Base` names the constraints your models leave unnamed (`uq_<table>_<column>`,
+  `fk_...`, `ck_...`, `pk_<table>`), and autogenerate spells those names out, while a database created
+  before `26.09.08` keeps the names its backend chose. Adopt the convention once, with a revision that calls
+  `rename_constraints_to_convention(op, Base.metadata)`; call `apply_convention_to_operations` in `env.py`
+  only for a history whose every revision was first applied under the convention.
+- **`pyfly db init`.** Regenerate an `env.py` created before `26.09.08`: its `target_metadata` must list your
+  models and `framework_metadata`, or autogenerate drops tables.
+- **Kernel exceptions.** Replace `except IntegrityError`/`StaleDataError` around repository calls and
+  commits, and the SQLAlchemy types in `rollback_for`, `no_rollback_for` and `@retry(exceptions=...)`,
+  with `DuplicateKeyException`, `DataIntegrityException` and `OptimisticLockingFailureException`.
+- **`rollback_for` is additive.** A method that listed `rollback_for=(SomeError,)` to commit on other
+  exceptions must now list those in `no_rollback_for`.
+- **Repository calls outside a transaction commit per call.** Code that relied on those writes being
+  discarded (or on a later manual commit of a shared session) must wrap the calls in `@transactional`
+  to make them one unit. Read-prefixed methods that write (`get_or_create`) are refused outside a
+  transaction; call them inside one.
+- **`UnexpectedRollbackError`.** A caller that catches a participant's exception and carries on now gets
+  `UnexpectedRollbackError` at commit. Make the participant `Propagation.NESTED` (best effort, rolled back
+  to its savepoint) or `REQUIRES_NEW`, or let the exception propagate.
+- **A service with both factories** (`_session_factory` and `_motor_client`) must name the datasource on
+  each `@transactional` method, e.g. `@transactional(datasource="document")`.
+- **`@transactional` on a sync function or an async generator** now fails at import: make the function
+  `async def`, or use `TransactionTemplate` around the iteration.
+- **Listeners are acknowledged after their unit commits.** A listener whose service call fails is retried
+  and dead-lettered even when the listener catches the failure; declare best-effort steps
+  `@transactional(propagation=Propagation.NESTED)`. Size `retry.max-attempts` and `retry.max-delay` to
+  outlast your failovers, and set `pyfly.messaging.listener.transactional: false` for a listener that
+  never touches the database.
+- **`DomainEventPublisher`.** If you published `pending_events()` after the unit yourself, set
+  `pyfly.eda.domain-events.destination` or `pyfly.eda.domain-events.enabled: false`.
+- **Event store.** Stop the writers of the earlier release, then add the event table's new columns (and,
+  under migrations, the head table) with the SQL in the eventsourcing guide before the first start; the
+  guide also gives the set-based statement that numbers a large table at once.
+- **Outbox and database event bus.** Drain `pyfly_eda_outbox` before upgrading, create the
+  `pyfly_outbox_*` tables through migrations (or `ddl-auto: create`), and grant the serving role `DELETE`
+  on them.
+- **Token and session stores.** Refresh tokens issued before the upgrade must be obtained again. The old
+  tables (`pyfly_oauth2_tokens`, `pyfly_session_registry`) and Redis token keys are no longer read; drop
+  them once no instance of an earlier release uses them.
+- **Query cache.** Declare `@cacheable(scope=QueryCacheScope.GLOBAL)` for data that is the same for every
+  caller, or pass an `ExecutionContext` with the user or tenant; anonymous calls are no longer cached.
+- **Caches.** Entries written by an earlier release are not read (each costs one miss; Redis entries
+  written without a TTL stay until deleted). Drain the sagas and workflows in flight before upgrading an
+  application that keeps orchestration state in a cache, since their state moved to the `orchestration`
+  cache.
+- **`@async_method`.** Callers that awaited the result must await the returned task:
+  `await (await service.method())`.
+- **MongoDB.**
+  - `tz_aware`: compare document datetimes with aware values, or set `pyfly.data.document.tz-aware: false`.
+  - `like`: pass `ignore_case=True` where the old case-insensitive match was intended.
+  - String ids: a class declaring `id: str` now stores a string `_id`; declare
+    `id: PydanticObjectId | None = None` to keep `ObjectId`s, or migrate the collection's `_id`s first.
+  - `insert`/`save` overrides are no longer called: move their logic into `@before_event`/`@after_event`
+    actions.
+  - Standalone listeners: a MongoDB-only application on a standalone server sets
+    `pyfly.messaging.listener.transactional` (and `pyfly.eda.listener.transactional`) to `false`, or moves
+    to a replica set.
+  - Restore on rollback: after a failed save or a rolled-back unit, the same document objects can be saved
+    again; a document stored with `use_revision` whose update failed its write concern should be reloaded
+    before the next save.
+  - Replace Motor and mongomock clients with PyMongo's `AsyncMongoClient`, and test transactions against a
+    replica set (`mongodb_replica_set_container()`).
+- **SQLAlchemy.** Upgrade to 2.0.50 or later (2.1 is supported).
+
+---
+
 ## v26.09.07 (2026-09-24)
 
 Three asks a platform raised against `26.09.06` on the day it shipped: logs that could not be
