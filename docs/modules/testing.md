@@ -482,7 +482,7 @@ is now closed: the per-instance `AsyncMock` is registered during `setup()`.
 
 ## Test Slices
 
-Test slices are class decorators that mark test classes for focused testing of specific application layers. They mirror Spring Boot's `@WebMvcTest`, `@DataJpaTest`, and `@SpringBootTest` annotations.
+Test slices are class decorators for focused testing of specific application layers. They mirror Spring Boot's `@WebMvcTest`, `@DataJpaTest`, and `@SpringBootTest` annotations. `@WebTest` and `@ServiceTest` mark a test class; `@DataTest` also runs each test of the class in a data slice whose units of work roll back.
 
 ```python
 from pyfly.testing import WebTest, DataTest, ServiceTest, get_test_slice
@@ -568,7 +568,7 @@ the context the test runs in, so the rollback holds whether or not the runner ca
 context variables over to the test (pytest-asyncio 0.23 does not).
 
 What rolls back is described under [Rolling back a test's units of work](#rolling-back-a-tests-units-of-work).
-Until 26.09.08 `@DataTest` only marked the class.
+Through 26.09.07 `@DataTest` only marked the class.
 
 ### @ServiceTest
 
@@ -616,8 +616,9 @@ get_test_slice(PlainTest)    # None
 
 ### Functional Slices (web_slice / service_slice / data_slice)
 
-While the `@WebTest`/`@DataTest`/`@ServiceTest` decorators *mark* a test class,
-the **functional slices** actually *build and start* a minimal `ApplicationContext`
+While `@WebTest` and `@ServiceTest` only *mark* a test class (and `@DataTest` builds
+a data slice for each test through the pytest plugin), the **functional slices**
+actually *build and start* a minimal `ApplicationContext`
 containing only the beans you pass (plus the collaborators you supply via
 `overrides`). They are the explicit-builder equivalents of Spring Boot's
 `@WebMvcTest` / `@DataJpaTest` / `@SpringBootTest` slices: each slice registers a
@@ -632,9 +633,9 @@ from pyfly.testing import web_slice, service_slice, data_slice, slice_context
 | Helper | Yields | Use for |
 |---|---|---|
 | `web_slice(*controllers, config=None, overrides=None)` | `(context, client)` | Controllers + a `PyFlyTestClient` |
-| `service_slice(*beans, config=None, overrides=None)` | `context` | Services and business logic |
+| `service_slice(*beans, config=None, overrides=None, rollback=False, datasources=None)` | `context` | Services and business logic |
 | `data_slice(*beans, config=None, overrides=None, rollback=False, datasources=None)` | `context` | Repositories and queries |
-| `slice_context(*beans, config=None, overrides=None)` | `context` | Generic minimal context |
+| `slice_context(*beans, config=None, overrides=None, rollback=False, datasources=None)` | `context` | Generic minimal context |
 
 `service_slice` and `data_slice` are intent-named aliases of `slice_context`. Each
 helper is a coroutine, so you `await` it to get an async context manager — the
@@ -1082,7 +1083,8 @@ with mongodb_replica_set_container() as mongo:
 
 Keyword arguments: `replica_set` (default `"rs0"`), `port` (default `27017`) and
 `startup_timeout` in seconds (default `60`). Others are passed to the underlying
-`DockerContainer`, which `get_wrapped_container()` returns.
+`DockerContainer`, which `get_wrapped_container()` returns; `ulimits` defaults to an open-file
+limit (`nofile`) of 64000, the limit MongoDB recommends. A container that fails to start is removed.
 
 ### Wiring Connections into Config
 
@@ -1225,7 +1227,7 @@ engine = context.get_bean(AsyncEngine)
 with StatementCounter(engine) as counter:
     await orders.save_all(new_orders)
 
-assert counter.counts() == {"INSERT": 1}  # statements per verb, in order of first appearance
+assert counter.counts() == {"INSERT": 1}  # on PostgreSQL; on a PyFly SQLite engine the unit's BEGIN counts too
 assert counter.commits == 1
 ```
 
@@ -1250,7 +1252,9 @@ What counts as a statement:
   "insertmanyvalues" batches, is one entry with `executemany` set, because it is one round trip.
 - The verb is the first SQL keyword after leading comments and parentheses: `SELECT`, `INSERT`,
   `UPDATE`, `DELETE`, `WITH`, `PRAGMA`, `SAVEPOINT`...
-- `BEGIN` usually does not appear: drivers start transactions implicitly or through their own API.
+- `BEGIN` does not appear on PostgreSQL, MySQL or MariaDB: the driver starts transactions implicitly or
+  through its own API. On a SQLite datasource PyFly builds, the engine sends `BEGIN` (`BEGIN IMMEDIATE` for
+  a write unit) itself, and it counts as a `BEGIN` statement.
 - `commits` and `rollbacks` still count on an `AUTOCOMMIT` connection, where the driver sends nothing.
 
 **Source:** `src/pyfly/testing/statement_counter.py`

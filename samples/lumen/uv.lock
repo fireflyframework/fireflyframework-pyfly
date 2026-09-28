@@ -493,7 +493,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.6.101"
+version = "26.9.8"
 source = { editable = "../../" }
 dependencies = [
     { name = "pydantic" },
@@ -526,6 +526,8 @@ requires-dist = [
     { name = "aiokafka", marker = "extra == 'kafka'", specifier = ">=0.14.0" },
     { name = "aiosqlite", marker = "extra == 'data-relational'", specifier = ">=0.22.1" },
     { name = "alembic", marker = "extra == 'data-relational'", specifier = ">=1.18.4" },
+    { name = "argon2-cffi", marker = "extra == 'argon2'", specifier = ">=23.1.0" },
+    { name = "asyncmy", marker = "extra == 'mysql'", specifier = ">=0.2.11" },
     { name = "asyncpg", marker = "extra == 'postgresql'", specifier = ">=0.31.0" },
     { name = "azure-storage-blob", marker = "extra == 'ecm-azure'", specifier = ">=12.19.0" },
     { name = "bcrypt", marker = "extra == 'security'", specifier = ">=5.0.0" },
@@ -546,6 +548,7 @@ requires-dist = [
     { name = "hypercorn", marker = "extra == 'hypercorn'", specifier = ">=0.18.0" },
     { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1.6" },
     { name = "jinja2", marker = "extra == 'notifications'", specifier = ">=3.1.6" },
+    { name = "jinja2", marker = "extra == 'templates'", specifier = ">=3.1.6" },
     { name = "jsonpath-ng", marker = "extra == 'testing'", specifier = ">=1.8.0" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.41.1" },
     { name = "opentelemetry-instrumentation-starlette", marker = "extra == 'observability'", specifier = ">=0.62b1" },
@@ -556,8 +559,9 @@ requires-dist = [
     { name = "prometheus-client", marker = "extra == 'observability'", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyfly", extras = ["fastapi", "granian"], marker = "extra == 'web-fastapi'" },
-    { name = "pyfly", extras = ["web", "data-relational", "data-document", "postgresql", "eda", "cache", "client", "grpc", "websocket", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn", "idp-azure", "idp-keycloak", "idp-cognito", "notifications", "config-server-git"], marker = "extra == 'full'" },
     { name = "pyfly", extras = ["web", "granian"], marker = "extra == 'web-fast'" },
+    { name = "pyfly", extras = ["web", "templates", "data-relational", "data-document", "postgresql", "mysql", "eda", "cache", "client", "grpc", "websocket", "ecm-aws", "ecm-azure", "observability", "security", "scheduling", "cli", "shell", "kafka", "rabbitmq", "redis", "granian", "fastapi", "hypercorn", "idp-azure", "idp-keycloak", "idp-cognito", "notifications", "config-server-git"], marker = "extra == 'full'" },
+    { name = "pyfly", extras = ["web", "templates", "security"], marker = "extra == 'webapp'" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'security'", specifier = ">=2.12.1" },
     { name = "pyotp", marker = "extra == 'security'", specifier = ">=2.9.0" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.27" },
@@ -566,7 +570,7 @@ requires-dist = [
     { name = "redis", extras = ["hiredis"], marker = "extra == 'cache'", specifier = ">=7.4.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'redis'", specifier = ">=7.4.0" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=15.0.0" },
-    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'data-relational'", specifier = ">=2.0.49" },
+    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'data-relational'", specifier = ">=2.0.50" },
     { name = "starlette", marker = "extra == 'web'", specifier = ">=1.0.0" },
     { name = "structlog", marker = "extra == 'observability'", specifier = ">=25.5.0" },
     { name = "testcontainers", marker = "extra == 'testcontainers'", specifier = ">=4.0.0" },
@@ -575,15 +579,17 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fastapi'", specifier = ">=0.22.1" },
     { name = "websockets", marker = "extra == 'websocket'", specifier = ">=12.0" },
 ]
-provides-extras = ["web", "data-relational", "testing", "testcontainers", "data-document", "postgresql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "config-server-git", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "notifications", "cli", "shell", "web-fast", "web-fastapi", "full"]
+provides-extras = ["templates", "webapp", "web", "data-relational", "testing", "argon2", "testcontainers", "data-document", "postgresql", "mysql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "config-server-git", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "notifications", "cli", "shell", "web-fast", "web-fastapi", "full"]
 
 [package.metadata.requires-dev]
+browser = [{ name = "playwright", specifier = ">=1.63.0" }]
 dev = [
+    { name = "aiomysql", specifier = ">=0.3.2" },
     { name = "aiosmtpd", specifier = ">=1.4" },
     { name = "coverage", extras = ["toml"], specifier = ">=7.13.5" },
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
-    { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "mypy", specifier = ">=1.20.2" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.41.1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

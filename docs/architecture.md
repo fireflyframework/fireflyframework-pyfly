@@ -102,7 +102,7 @@ Examples of ports in the framework:
 | Port | Module | Purpose |
 |---|---|---|
 | `RepositoryPort` | `pyfly.data.ports.outbound` | Defines data access operations (save, find, delete). |
-| `SessionPort` | `pyfly.data.ports.outbound` | Defines database session operations. |
+| `TransactionManager` | `pyfly.data.transaction` | Opens, commits and rolls back units of work on one datasource (`SessionPort` is its deprecated alias). |
 | `MessageBrokerPort` | `pyfly.messaging.ports.outbound` | Defines message publishing and subscribing. |
 | `CacheAdapter` | `pyfly.cache.ports.outbound` | Defines cache get/set/delete operations. |
 | `HttpClientPort` | `pyfly.client.ports.outbound` | Defines HTTP request operations. |
@@ -202,10 +202,11 @@ This unified lifecycle enables:
 - **Fail-fast startup**: adapters validate connectivity in `start()`, failing immediately if infrastructure is unreachable.
 - **Graceful shutdown**: adapters release resources in `stop()`, called in reverse initialization order.
 - **Consistent testing**: mock adapters implement the same `start()`/`stop()` contract.
-- **Generic infrastructure startup**: `ApplicationContext._start_infrastructure()` iterates all
-  resolved beans and starts any bean that defines `start()` and `stop()` methods -- no
-  hardcoded subsystem knowledge required. This also enables lifecycle beans like
-  `BeanieInitializer` (which initializes Beanie ODM and closes the Motor client).
+- **Generic infrastructure startup**: `ApplicationContext._start_lifecycle_beans()` starts every
+  singleton that defines `start()` and `stop()` methods, in ascending phase -- no hardcoded
+  subsystem knowledge required. This also enables lifecycle beans like `BeanieInitializer`
+  (which binds Beanie and releases the shared PyMongo `AsyncMongoClient` when the context
+  disposes its resources).
 
 ---
 
@@ -246,7 +247,7 @@ Infrastructure modules follow the hexagonal pattern: ports in `ports/`, adapters
 |---|---|---|---|
 | **Web** | `pyfly.web` | Mappings (`@get_mapping`, `@post_mapping`, etc.), params (`Body`, `PathVar`, `QueryParam`, `Header`, `Cookie`, `Valid`), `CORSConfig`, `SecurityHeadersConfig`, `WebFilter` protocol, `OncePerRequestFilter`, `@exception_handler`. Config-driven adapter selection (`pyfly.web.adapter`). | Starlette/ASGI (`StarletteWebAdapter`, `ControllerRegistrar`, `create_app`, `WebFilterChainMiddleware`, built-in filters), FastAPI (`FastAPIWebAdapter`, `FastAPIControllerRegistrar`). |
 | **Server** | `pyfly.server` | `ApplicationServerPort` (ASGI server contract), `EventLoopPort` (event loop policy contract), `ServerProperties`. Cascading auto-configuration for server and event loop selection. | Granian (`GranianServerAdapter`), Uvicorn (`UvicornServerAdapter`), Hypercorn (`HypercornServerAdapter`), uvloop (`UvloopEventLoopAdapter`), winloop (`WinloopEventLoopAdapter`), asyncio (`AsyncioEventLoopAdapter`). |
-| **Data** | `pyfly.data` | `RepositoryPort`, `SessionPort`, `QueryMethodCompilerPort`. | SQLAlchemy (`Repository`, `Specification`, `FilterUtils`, `@query`, `QueryMethodCompiler`, `RepositoryBeanPostProcessor`), MongoDB (`MongoRepository`, `BaseDocument`, `MongoQueryMethodCompiler`, `MongoRepositoryBeanPostProcessor`). |
+| **Data** | `pyfly.data` | `RepositoryPort`, `TransactionManager` (`pyfly.data.transaction`; `SessionPort` is its deprecated alias), `QueryMethodCompilerPort`. | SQLAlchemy (`Repository`, `Specification`, `FilterUtils`, `@query`, `QueryMethodCompiler`, `RepositoryBeanPostProcessor`), MongoDB (`MongoRepository`, `BaseDocument`, `MongoQueryMethodCompiler`, `MongoRepositoryBeanPostProcessor`). |
 | **Messaging** | `pyfly.messaging` | `MessageBrokerPort`, `MessageHandler`, `Message`, `@message_listener`. | Kafka (`KafkaAdapter`), RabbitMQ (`RabbitMQAdapter`), in-memory (`InMemoryMessageBroker`). |
 | **Cache** | `pyfly.cache` | `CacheAdapter`, `CacheManager`, `@cacheable`, `@cache_evict`, `@cache_put`. | Redis (`RedisCacheAdapter`), in-memory (`InMemoryCache`). |
 | **Client** | `pyfly.client` | `HttpClientPort`, `@service_client`, `@http_client`, `CircuitBreaker`, `RetryPolicy`, declarative `@get`, `@post`, `@put`, `@patch`, `@delete`. | HTTPX (`HttpxClientAdapter`), `HttpClientBeanPostProcessor`. |
@@ -405,12 +406,17 @@ This is where the bulk of the DI and lifecycle work happens. The steps are:
    to guard its `@bean` methods, and delegates provider detection to its own
    ``detect_provider()`` static method when the configured provider is `"auto"`.
 
-2d. **Start infrastructure** -- `_start_infrastructure()` iterates all resolved beans
-   and starts any bean whose class defines `start()` and `stop()` lifecycle methods.
-   This is fully generic -- it does not hardcode subsystem names. Examples of lifecycle
-   beans: `RedisCacheAdapter`, `KafkaAdapter`, `BeanieInitializer`,
-   `HttpxClientAdapter`. On failure, `BeanCreationException` is raised immediately
-   (fail-fast).
+2d. **Complete deferred user `@bean` methods** -- a user factory whose parameters were not
+   registered yet is called now that the auto-configurations ran.
+
+2e. **Start lifecycle beans** -- `_start_lifecycle_beans()` starts every singleton whose
+   class defines `start()` and `stop()` lifecycle methods, in ascending phase (startup
+   migrations, the schema strategy, the default phase, then the consumers). This is fully
+   generic -- it does not hardcode subsystem names. Examples of lifecycle beans:
+   `RedisCacheAdapter`, `KafkaAdapter`, `BeanieInitializer`, `HttpxClientAdapter`. On
+   failure, `BeanCreationException` is raised immediately (fail-fast). The lifecycle beans
+   created later (step 5) start at step 5b; see
+   [The start() Lifecycle](modules/dependency-injection.md#the-start-lifecycle).
 
 3. **Discover post-processors** -- `_discover_post_processors()` scans registered
    beans for `BeanPostProcessor` implementations and adds them to the post-processor
@@ -467,8 +473,9 @@ await app.startup()
     |       +-- 2.  _process_configurations(auto=False)  [user @configuration]
     |       +-- 2b. _evaluate_bean_conditions() (pass 2: on_bean, on_missing_bean)
     |       +-- 2c. _process_configurations(auto=True)   [@auto_configuration]
-    |       +-- 2d. _start_infrastructure()
-    |       |       +-- For each bean with start()/stop(): await bean.start()
+    |       +-- 2d. Complete deferred user @bean methods
+    |       +-- 2e. _start_lifecycle_beans()
+    |       |       +-- For each bean with start()/stop(), in ascending phase: await bean.start()
     |       |       +-- On failure: BeanCreationException
     |       +-- 3.  _discover_post_processors()
     |       +-- 4.  Eagerly resolve singletons (sorted by @order)
@@ -492,11 +499,15 @@ await app.shutdown()
     +-- Log "Shutting down {app}"
     +-- await ApplicationContext.stop()
             |
-            +-- Stop infrastructure adapters (reverse order)
-            |       +-- For each adapter: await adapter.stop()
-            +-- Call @pre_destroy on all beans (reverse order)
-            +-- Publish ContextClosedEvent
+            +-- 1. Publish ContextClosedEvent
+            +-- 2. Drain: tasks, TaskScheduler, lifecycle beans of CONSUMER_PHASE and above
+            +-- 3. @pre_destroy in reverse dependency order (no new singleton), then scoped instances
+            +-- 4. The other lifecycle beans stop, then singleton destroy methods run
+            +-- 5. ResourceRegistry.dispose_all(): the DataSourceRegistry closes every engine, last
+            +-- 6. Release: resolving a bean afterwards raises BeanCreationNotAllowedError
 ```
+
+See [The stop() Lifecycle](modules/dependency-injection.md#the-stop-lifecycle) for each step.
 
 ---
 
@@ -604,7 +615,7 @@ The twenty built-in auto-configuration classes are:
 | `CacheAutoConfiguration` | `pyfly.cache.auto_configuration` | `CacheAdapter` | `@conditional_on_property("pyfly.cache.enabled")`, `@conditional_on_missing_bean(CacheAdapter)` |
 | `MessagingAutoConfiguration` | `pyfly.messaging.auto_configuration` | `MessageBrokerPort` | `@conditional_on_property("pyfly.messaging.provider")`, `@conditional_on_missing_bean(MessageBrokerPort)` |
 | `ClientAutoConfiguration` | `pyfly.client.auto_configuration` | `HttpClientPort` | `@conditional_on_class("httpx")`, `@conditional_on_missing_bean(HttpClientPort)` |
-| `DocumentAutoConfiguration` | `pyfly.data.document.auto_configuration` | `AsyncIOMotorClient`, `MongoRepositoryBeanPostProcessor` | `@conditional_on_class("beanie")`, `@conditional_on_property("pyfly.data.document.enabled")` |
+| `DocumentAutoConfiguration` | `pyfly.data.document.auto_configuration` | PyMongo `AsyncMongoClient`, `MongoTransactionManager`, `BeanieInitializer`, `MongoHealthIndicator`, `MongoRepositoryBeanPostProcessor` | `@conditional_on_class("beanie")`; its beans need `pyfly.data.document.enabled` |
 | `RelationalAutoConfiguration` | `pyfly.data.relational.auto_configuration` | `RepositoryBeanPostProcessor` | `@conditional_on_class("sqlalchemy")`, `@conditional_on_property("pyfly.data.relational.enabled")` |
 | `ShellAutoConfiguration` | `pyfly.shell.auto_configuration` | `ShellRunnerPort` | `@conditional_on_class("click")` |
 | `CqrsAutoConfiguration` | `pyfly.cqrs.config.auto_configuration` | CQRS handlers | (unconditional) |
@@ -677,19 +688,13 @@ is needed in the context.
 
 ### Provider Detection
 
-The `AutoConfiguration` class (from `pyfly.config.auto`) provides static detection
-methods that check library availability via `importlib.import_module()`. These methods
-are called from within each subsystem's `@auto_configuration` class when the configured
-provider is `"auto"`:
-
-| Subsystem | Method | Detection Order | Returns |
-|---|---|---|---|
-| Web | `detect_web_adapter()` | `starlette` | `"starlette"` or `"none"` |
-| Cache | `detect_cache_provider()` | `redis.asyncio` | `"redis"` or `"memory"` |
-| Messaging | `detect_eda_provider()` | `aiokafka`, then `aio_pika` | `"kafka"`, `"rabbitmq"`, or `"memory"` |
-| HTTP Client | `detect_client_provider()` | `httpx` | `"httpx"` or `"none"` |
-| Data Relational | `detect_relational_provider()` | `sqlalchemy` | `"sqlalchemy"` or `"none"` |
-| Data Document | `detect_document_provider()` | `motor`, then `beanie` | `"mongodb"` or `"none"` |
+The `AutoConfiguration` class (from `pyfly.config.auto`) provides `is_available(module)`, which
+checks library availability via `importlib.import_module()`. A subsystem whose provider can be
+`"auto"` detects it in a `detect_provider()` static method of its own `@auto_configuration` class
+(`CacheAutoConfiguration`, `MessagingAutoConfiguration`, `EdaAutoConfiguration`). The data layers
+are switched on by configuration instead: the relational layer by `pyfly.data.relational.enabled`
+and a URL (only the `dev` profile falls back to `./app.db`), the document layer by `beanie` plus
+`pyfly.data.document.enabled`.
 
 ---
 
@@ -785,13 +790,31 @@ pyfly/data/                     # Data Commons
 ├── pageable.py                 # Pageable, Sort, Order
 ├── mapper.py                   # Mapper
 ├── query_parser.py             # QueryMethodParser
+├── exception_translation.py    # driver errors -> kernel exceptions (409s)
+├── auditing.py                 # AuditorAware, DateTimeProvider, run_as
 ├── ports/                      # Shared ports
-│   ├── outbound.py             # RepositoryPort, SessionPort
+│   ├── outbound.py             # RepositoryPort, SessionPort (deprecated alias)
 │   └── compiler.py             # QueryMethodCompilerPort
+├── transaction/                # Backend-neutral unit of work
+│   ├── decorator.py            # @transactional
+│   ├── template.py             # TransactionTemplate
+│   ├── manager.py              # TransactionManager SPI
+│   ├── unit_of_work.py         # UnitOfWork
+│   ├── context.py              # the task's transaction state, detached()
+│   ├── synchronization.py      # after_commit, TransactionSynchronization
+│   └── observation.py          # track_commits, untracked
 ├── relational/                 # Relational namespace
+│   ├── datasource_registry.py  # DataSourceRegistry, DataSource
+│   ├── framework_schema.py     # the pyfly_* framework tables
+│   ├── schema.py               # ddl-auto (SchemaInitializer)
+│   ├── migrations.py           # startup migrations (MigrationRunner)
+│   ├── upsert.py               # dialect-dispatched upserts
+│   ├── routing.py              # RoutingSessionFactory, read_only
 │   └── sqlalchemy/             # SQLAlchemy adapter
-│       ├── entity.py           # Base, BaseEntity
+│       ├── entity.py           # Base, BaseEntity, VersionedMixin
+│       ├── types.py            # UtcDateTime
 │       ├── repository.py       # Repository[T, ID]
+│       ├── transaction_manager.py  # SqlAlchemyTransactionManager
 │       ├── specification.py    # Specification
 │       ├── filter.py           # FilterOperator, FilterUtils
 │       ├── query.py            # @query, QueryExecutor
@@ -800,11 +823,12 @@ pyfly/data/                     # Data Commons
 │       └── transactional.py    # reactive_transactional
 └── document/                   # Document namespace
     └── mongodb/                # MongoDB adapter
-        ├── document.py         # BaseDocument
+        ├── document.py         # BaseDocument, AggregateDocument
         ├── repository.py       # MongoRepository[T, ID]
+        ├── transaction_manager.py  # MongoTransactionManager
         ├── query_compiler.py   # MongoQueryMethodCompiler
         ├── post_processor.py   # MongoRepositoryBeanPostProcessor
-        ├── transactional.py    # mongo_transactional
+        ├── transactional.py    # mongo_transactional (deprecated alias)
         └── initializer.py      # BeanieInitializer lifecycle bean
 ```
 
@@ -1119,7 +1143,7 @@ These rules ensure the framework stays modular, hexagonal, and Spring Boot-like.
 
 ### Rule 1: No Subsystem Knowledge in Core
 
-`ApplicationContext`, `Container`, and `core/application.py` must **never** import or reference specific subsystem adapters (Starlette, Redis, Kafka, Motor, httpx, SQLAlchemy, etc.). All subsystem wiring lives in per-subsystem `@auto_configuration` classes.
+`ApplicationContext`, `Container`, and `core/application.py` must **never** import or reference specific subsystem adapters (Starlette, Redis, Kafka, PyMongo, httpx, SQLAlchemy, etc.). All subsystem wiring lives in per-subsystem `@auto_configuration` classes.
 
 **Violation example** (banned):
 ```python
@@ -1129,7 +1153,7 @@ if provider == "redis":
     self._container.register(RedisCacheAdapter, ...)
 ```
 
-**Correct approach**: Create a lifecycle bean (e.g. `BeanieInitializer`, `RedisCacheAdapter`) via the subsystem's `@auto_configuration` class. `_start_infrastructure()` discovers and starts them generically via MRO inspection.
+**Correct approach**: Create a lifecycle bean (e.g. `BeanieInitializer`, `RedisCacheAdapter`) via the subsystem's `@auto_configuration` class. `_start_lifecycle_beans()` discovers and starts them generically via MRO inspection.
 
 ### Rule 2: Auto-Configuration via Entry Points
 
@@ -1155,7 +1179,7 @@ No hardcoded imports in `discover_auto_configurations()` — it reads entry poin
 
 ### Rule 4: Lifecycle via Duck Typing
 
-Infrastructure lifecycle is managed generically. Any bean with `start()` and `stop()` methods (defined on its class, not via `__getattr__`) is automatically started/stopped by `_start_infrastructure()`. No hardcoded adapter lists.
+Infrastructure lifecycle is managed generically. Any bean with `start()` and `stop()` methods (defined on its class, not via `__getattr__`) is automatically started by `_start_lifecycle_beans()` and stopped by `ApplicationContext.stop()`, in phase order. No hardcoded adapter lists.
 
 ### Rule 5: Web-Framework Agnostic Security
 

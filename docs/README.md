@@ -81,7 +81,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | Guide | Description |
 |-------|-------------|
 | [Security](modules/security.md) | JWT authentication, password encoding, authorization, protected endpoints |
-| [Session](modules/session.md) | Server-side session management, pluggable stores (in-memory, Redis), OAuth2 integration |
+| [Session](modules/session.md) | Server-side session management, pluggable stores (in-memory, Redis, SQL: `pyfly.session.store=postgres`), OAuth2 integration |
 
 ### Resilience & Performance
 
@@ -89,7 +89,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 |-------|-------------|
 | [Resilience](modules/resilience.md) | Rate limiting, bulkhead, timeout, fallback patterns |
 | [HTTP Client](modules/client.md) | Service client builder, circuit breaker, retry, declarative clients |
-| [Caching](modules/caching.md) | Cache decorators, Redis adapter, in-memory cache, cache management |
+| [Caching](modules/caching.md) | Cache decorators, Redis adapter, SQL cache (`pyfly.cache.provider=postgres`), in-memory cache, cache management |
 
 ### CLI & Shell
 
@@ -141,7 +141,7 @@ Browse the full [Adapter Catalog](adapters/README.md), or jump directly:
 
 | Adapter | Backend | Module |
 |---------|---------|--------|
-| [SQLAlchemy](adapters/sqlalchemy.md) | PostgreSQL, MySQL, SQLite | Data Relational |
+| [SQLAlchemy](adapters/sqlalchemy.md) | PostgreSQL, MySQL, MariaDB, SQLite | Data Relational |
 | [MongoDB](adapters/mongodb.md) | MongoDB (Beanie ODM) | Data Document |
 | [Starlette](adapters/starlette.md) | Starlette / Uvicorn | Web |
 | [FastAPI](adapters/fastapi.md) | FastAPI + Uvicorn / Granian | Web |

@@ -262,7 +262,9 @@ defaults the error code to `DOMAIN_RULE_VIOLATION`.
 For domain-tier microservices, decorate the application class with
 `enable_domain_stack` to activate CQRS, the transactional engine
 (saga/workflow/TCC), event sourcing, the rule engine, and the
-relational data layer:
+relational data layer (configure `pyfly.data.relational.url`: without it
+the start fails outside the `dev` profile, which falls back to
+`./app.db`):
 
 ```python
 from pyfly.core import pyfly_application

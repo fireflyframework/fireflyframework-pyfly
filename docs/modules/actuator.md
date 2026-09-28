@@ -1023,7 +1023,7 @@ refresh-scoped instances are destroyed (their `@pre_destroy` runs, then the dest
 of a lifecycle bean, so one that owns an engine disposes its pool). A `RefreshScopeRefreshedEvent`
 is published, and the response lists the scope
 keys of the refresh-scoped beans that were evicted (`__pyfly_bean_<module>.<class>`, followed by
-`#<bean name>` for a named bean; until 26.09.07 a key was `__pyfly_bean_<class>`, without the module
+`#<bean name>` for a named bean; through 26.09.07 a key was `__pyfly_bean_<class>`, without the module
 or the name, and two beans of one class shared it):
 
 ```json

@@ -256,7 +256,7 @@ class ImportService:
 `fixed_delay`). Out of the box the scheduler uses an in-process `LocalLock`
 that always acquires — so single-instance behavior is unchanged. For real
 coordination, select a built-in lock provider with
-`pyfly.scheduling.lock.provider` (`memory`, `redis`, or `postgres`) — no custom
+`pyfly.scheduling.lock.provider` (`memory`, `redis`, `database` or `postgres`) — no custom
 code required — or register your own `DistributedLock` bean. See
 [Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock).
 
@@ -716,8 +716,9 @@ pyfly:
   holds a pooled connection for the whole job, in `AUTOCOMMIT` (idle, never
   idle in transaction, so `idle_in_transaction_session_timeout` cannot drop it
   mid-job); a watchdog ends the lock at `lock_ttl` with a WARNING
-  (`scheduler_advisory_lock_expired`) but does not cancel the job, as with the
-  lease table; and an acquisition or an unlock that fails (a cancellation
+  (`scheduler_advisory_lock_expired`) but does not cancel the job itself, as
+  with the lease table (the `TaskScheduler` cancels an async `@scheduled` run at
+  `lock_ttl`, see [lock](#lock-distributed-locking)); and an acquisition or an unlock that fails (a cancellation
   included) discards the connection instead of returning a session that may
   hold the lock to the pool. An acquisition belongs to the task that took it:
   a tick whose lock ended at `lock_ttl` (or whose session the server ended,
@@ -863,9 +864,10 @@ pyfly:
       type: asyncio       # asyncio | thread
       max-workers: 4      # thread-pool size when type=thread
     lock:
-      provider: none      # none | memory | redis | postgres
+      provider: none      # none | memory | redis | database | postgres
       redis:
         url: redis://localhost:6379/0   # used when provider=redis
+      datasource: primary # provider=database/postgres: a datasource of the registry (or url:)
 ```
 
 | Key | Description | Default |
@@ -873,13 +875,17 @@ pyfly:
 | `pyfly.scheduling.enabled` | Convention flag set by the `application`/`data` starters (see [Auto-Configuration](#auto-configuration)) | `true` |
 | `pyfly.scheduling.executor.type` | Executor backend: `asyncio` (in-loop) or `thread` (`ThreadPoolTaskExecutor`) | `asyncio` |
 | `pyfly.scheduling.executor.max-workers` | Thread-pool size when `executor.type=thread` | `4` |
-| `pyfly.scheduling.lock.provider` | Distributed-lock backend: `none` / `memory` / `redis` / `postgres` | `none` |
+| `pyfly.scheduling.lock.provider` | Distributed-lock backend: `none` / `memory` / `redis` / `database` / `postgres` | `none` |
 | `pyfly.scheduling.lock.redis.url` | Redis URL when `lock.provider=redis` | `redis://localhost:6379/0` |
+| `pyfly.scheduling.lock.datasource` | The datasource of the `database`/`postgres` lock (a name in the registry); not together with `lock.url` | the primary |
+| `pyfly.scheduling.lock.url` | The URL of that datasource, resolved through the registry | the primary |
+| `pyfly.scheduling.lock.postgres.advisory` | With `provider=postgres`, PostgreSQL advisory locks instead of the lease table (needs a PostgreSQL datasource) | `false` |
 
 **Requires:** `uv add "pyfly[scheduling]"` (installs `croniter` for cron
 expression parsing). The `redis` lock provider additionally needs
-`redis.asyncio` importable; the `postgres` provider needs a SQLAlchemy
-`AsyncEngine` bean.
+`redis.asyncio` importable; the `database` and `postgres` providers need a
+relational datasource (the primary, or `pyfly.scheduling.lock.datasource` /
+`.url`), and the advisory lock needs it on PostgreSQL.
 
 ### Selecting the Executor
 
@@ -910,7 +916,7 @@ executor, override the `task_scheduler` bean (see
 `pyfly.scheduling.lock.provider` chooses the `distributed_lock` bean used for
 `@scheduled(lock=...)` coordination. See
 [Built-in Lock Providers](#built-in-lock-providers) for the full matrix and
-guidance on `none` / `memory` / `redis` / `postgres`.
+guidance on `none` / `memory` / `redis` / `database` / `postgres`.
 
 ```yaml
 pyfly:
@@ -933,7 +939,7 @@ When `croniter` is installed, PyFly automatically registers a `TaskScheduler` be
 
 | Bean | Type | Description |
 |------|------|-------------|
-| `distributed_lock` | `DistributedLock` | Lock backend for `@scheduled(lock=...)`, selected by `pyfly.scheduling.lock.provider` (`none`/`memory`/`redis`/`postgres`) |
+| `distributed_lock` | `DistributedLock` | Lock backend for `@scheduled(lock=...)`, selected by `pyfly.scheduling.lock.provider` (`none`/`memory`/`redis`/`database`/`postgres`) |
 | `task_scheduler` | `TaskScheduler` | Container-managed scheduler that discovers and runs `@scheduled` methods; uses the executor from `pyfly.scheduling.executor.type` and resolves the `distributed_lock` bean |
 
 With auto-configuration, you no longer need a `SchedulerManager` service. The `ApplicationContext` automatically:
@@ -1115,6 +1121,7 @@ import asyncio
 import logging
 from typing import Any, Coroutine, TypeVar
 
+from pyfly.data.transaction import detached
 from pyfly.scheduling import TaskExecutorPort
 
 T = TypeVar("T")
@@ -1129,7 +1136,7 @@ class LoggingTaskExecutor:
 
     async def submit(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         logger.info("Submitting task: %s", coro.__qualname__)
-        task = asyncio.create_task(coro)
+        task = detached(coro)          # outside the submitter's unit of work
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -1138,9 +1145,16 @@ class LoggingTaskExecutor:
         pass  # Ready after construction
 
     async def stop(self) -> None:
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
+        tasks = list(self._tasks)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:  # the stop itself was cancelled: cancel and await the tasks
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            self._tasks.clear()
 
 
 # Use it with the scheduler

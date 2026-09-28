@@ -113,13 +113,15 @@ class AccountService:
         await self._accounts.save_all([source, target])
 ```
 
-Every propagation but `NESTED` (MongoDB has no savepoints) works as on the relational backend. A legacy service
+Every propagation but `NESTED` (MongoDB has no savepoints: `NestedTransactionNotSupportedError`) works as on the
+relational backend, and only `Isolation.DEFAULT` is accepted (MongoDB has no isolation levels). A legacy service
 exposing `self._motor_client` (an `AsyncMongoClient`) still selects the MongoDB manager, and a coroutine that
 declares a `session` parameter still receives the unit's session; `current_session()` gives it to code that calls
 Beanie directly. Outside a transaction, repository reads run without one and writes in a short unit of their own.
 
 > `from pyfly.data.document.mongodb import mongo_transactional` still works but is a **deprecated
-> alias** of `@transactional`.
+> alias** of `@transactional`, and `run_mongo_transaction` is deprecated too (it runs through the unit of
+> work).
 
 ---
 
@@ -128,7 +130,8 @@ Beanie directly. Outside a transaction, repository reads run without one and wri
 Test against a real MongoDB replica set: `pyfly.testing.testcontainers.mongodb_replica_set_container()` starts a
 single-node one (MongoDB 7, `rs0`, `directConnection=true`) that runs transactions, and
 `pyfly_config_for(container)` points `pyfly.data.document.uri` at it. The repositories pass a session on every
-call, which mongomock does not support. Configure a dedicated test database:
+call, and a transaction needs a replica set, so test against a real server rather than an in-memory fake.
+Configure a dedicated test database:
 
 ```yaml
 # pyfly-test.yaml

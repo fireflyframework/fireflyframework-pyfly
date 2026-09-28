@@ -1548,7 +1548,7 @@ class SwitchUserConfig:
 
 An impersonated request can be recognised with `security_context.has_role("PREVIOUS_ADMINISTRATOR")`, and the original principal read from `security_context.attributes["switch_user_original"]`.
 
-The switch and the exit put the context they establish on `request.state.security_context` and on the current `RequestContext`, as every authenticating filter does, so method security and the CQRS query cache see the impersonated (or restored) principal within the same request; on later requests `OAuth2SessionSecurityFilter` restores it from the session.
+The switch and the exit put the context they establish on `request.state.security_context` and on the current `RequestContext`, as the token, HTTP Basic, X.509 and session filters do, so method security and the CQRS query cache see the impersonated (or restored) principal within the same request; on later requests `OAuth2SessionSecurityFilter` restores it from the session.
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/switch_user_filter.py`
 

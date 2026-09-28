@@ -350,8 +350,10 @@ The callback (`_handle_callback`) is the security-critical step. In order it:
 5. exchanges the code for tokens at `token_uri`, sending the `code_verifier`;
 6. establishes identity from the verified `id_token` (preferred) or the
    `user_info_uri`;
-7. **rotates the session id** (`session.rotate_id()`) to defeat session fixation,
-   then stores the `SecurityContext` under the session;
+7. **rotates the session id** (`session.rotate_id(on_login=True)`) to defeat session
+   fixation, then stores the `SecurityContext` under the session; with session
+   concurrency control, it saves the session before registering it with the
+   controller;
 8. fails with `401` if no authenticated principal could be determined (no silent
    anonymous session).
 
@@ -526,7 +528,7 @@ pyfly:
 |---|---|---|---|
 | `secret` | `str` | required | HMAC signing key (used for `HS*` algorithms) |
 | `client_repository` | `ClientRegistrationRepository` | required | Client lookup |
-| `token_store` | `TokenStore` | required | Refresh-token / code / family / PAR storage |
+| `token_store` | `AtomicTokenStore` or `TokenStore` | required | Refresh-token / code / family / PAR storage; a key-value `TokenStore` runs through `KeyValueTokenStore` |
 | `access_token_ttl` | `int` | `3600` | Access token lifetime (seconds) |
 | `refresh_token_ttl` | `int` | `86400` | Refresh token lifetime (seconds) |
 | `issuer` | `str \| None` | `None` | `iss` claim + RFC 9207 `iss` on authorize results |
@@ -1079,7 +1081,7 @@ Every key below nests under `pyfly:`. Defaults reflect the source.
 | `authorization-server.audience` | (unset) | `aud` claim (comma-separated or list) |
 | `authorization-server.access-token-ttl` | `3600` | Access token lifetime (seconds) |
 | `authorization-server.refresh-token-ttl` | `86400` | Refresh token lifetime (seconds) |
-| `token-store.provider` | `memory` | `memory`, `redis`, or `postgres` |
+| `token-store.provider` | `memory` | `memory`, `redis`, or `postgres`; any other value, and `redis` without `redis.asyncio`, falls back to `memory` |
 | `token-store.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis URL (redis provider) |
 | `token-store.datasource` | primary | Datasource of the SQL store (postgres provider) |
 | `token-store.url` | — | Alias resolved through the `DataSourceRegistry` (postgres provider) |

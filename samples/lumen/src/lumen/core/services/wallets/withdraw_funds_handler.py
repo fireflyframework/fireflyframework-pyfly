@@ -7,6 +7,14 @@ applies the withdrawal through it — the aggregate refuses to overdraw
 (``balance >= 0``). Persists the new state, then drains and publishes the
 pending events. Wrapped in ``@transactional()`` for a committed unit of
 work.
+
+The aggregate can only keep its invariant for the balance it was loaded
+with, so the row is read with a pessimistic lock
+(``LockMode.PESSIMISTIC_WRITE``, ``SELECT ... FOR UPDATE`` on PostgreSQL,
+MySQL and MariaDB; on SQLite the write unit holds the database's write lock
+from ``BEGIN IMMEDIATE``). A second withdrawal of the same wallet waits for
+this unit to end and then sees the balance it left: two withdrawals of 60
+from 100 can never both succeed.
 """
 
 from __future__ import annotations
@@ -20,7 +28,7 @@ from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -43,7 +51,8 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
 
     @transactional()
     async def do_handle(self, command: WithdrawFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        # Lock the row until the unit ends: a concurrent withdrawal waits here.
+        entity = await self._repository.find_by_id(command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE)
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 

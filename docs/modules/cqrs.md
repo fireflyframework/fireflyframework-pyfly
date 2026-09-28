@@ -536,8 +536,8 @@ can trust it (an empty identifier counts as none):
 * the tenant, organization and user of the `ExecutionContext` passed to
   `query_with_context()` (your application built it);
 * the authenticated principal of the request (`RequestContext.security_context`,
-  set by the bearer-token security middleware), so a plain `query()` behind the
-  web layer is keyed too;
+  set by the bearer-token security middleware, the session security filter and
+  the switch-user filter), so a plain `query()` behind the web layer is keyed too;
 * the `X-Tenant-Id` header of the request. Any client can send it and nothing
   authenticates it, so it only *narrows* an entry: it is part of the key, but
   it never identifies a caller by itself.
@@ -565,7 +565,7 @@ cached at all, and a warning (`query_cache_skipped`) names the handler once:
 caching it would share one entry among every caller the cache cannot tell
 apart. That covers anonymous requests, message consumers and background jobs,
 a `USER` call whose context names only a tenant, and callers whose identity
-lives somewhere the cache cannot see: a session-authenticated principal kept
+lives somewhere the cache cannot see: a principal that a custom filter keeps
 only on `request.state`, or a tenant kept in an application `ContextVar` (the
 tenant-GUC pattern of `pyfly.data.relational.dialect_customizers`). Pass that
 identity in the `ExecutionContext` of `query_with_context()`, or declare
@@ -697,8 +697,7 @@ disconnected. Inside a wider unit of work it waits for that unit's commit, so a
 publication failure that rolls the unit back drops it. When the handler ends with
 a cancellation or a `CommitOutcomeUnknownError`, its own unit may have committed
 (the commit completes, shielded, before a cancellation is delivered): the bus
-evicts all the same, then re-raises. Before 26.09.08 an asyncio cancellation that
-landed on the handler's commit skipped the eviction.
+evicts all the same, then re-raises.
 
 > **Prior behavior (corrected in 26.09.08):** `Command.get_cache_key()`,
 > `@cache_evict(events)`, `cache_key_prefix` and `caching_enabled` were read by

@@ -94,7 +94,7 @@ pyfly.transactional
 |  Shared Infrastructure                                               |
 |  +-------------------------------+  +----------------------------+   |
 |  | Ports (Protocols)             |  | Adapters                   |   |
-|  |  TransactionalPersistencePort |  |  InMemoryPersistenceAdapter|   |
+|  |  TransactionalPersistencePort |  |  ProviderPersistencePort   |   |
 |  |  TransactionalEventsPort      |  |  LoggerEventsAdapter       |   |
 |  |  BackpressureStrategyPort     |  |  CompositeEventsAdapter    |   |
 |  |  CompensationErrorHandlerPort |  |  Adaptive / Batched / CB   |   |
@@ -342,8 +342,13 @@ commits behind the engine's back:
   framework's idempotent bookkeeping on the step's way does not count (numbering
   the events a read of the global stream returns, a cache fill after a miss, a
   lease: `pyfly.data.transaction.untracked()`), so a step that only read is
-  retried; a single-statement write on an autocommit connection that failed
-  after its statement ran counts as a commit whose outcome is unknown. In TCC, a
+  retried. A write that commits as it runs and then fails counts as a commit
+  whose outcome is unknown: a single-statement write on an autocommit
+  connection (PostgreSQL) that failed after its statement ran, and a MongoDB
+  write outside a transaction (a single-command `save`, `delete` or
+  `delete_by_id`, a `$out` or `$merge` pipeline, every write on a standalone
+  server) whose after-insert or after-save event actions, write concern or
+  connection failed after the write. In TCC, a
   TRY that failed after committing is cancelled with the participants that tried
   (an optional one at once) and is not retried; neither is a CONFIRM or CANCEL
   attempt that committed. A CONFIRM attempt whose timeout fired after a unit of
@@ -364,7 +369,10 @@ commits behind the engine's back:
 - **TCC participants run in the caller's task.** Unlike saga and workflow steps,
   the TRY, CONFIRM and CANCEL methods are not detached: called inside the
   caller's `@transactional`, their units of work join the caller's unit (they
-  commit or roll back with it), and the TCC cannot see what they committed.
+  commit or roll back with it), and the TCC cannot see what they committed. A
+  participant whose `@transactional` method raises there, or whose statement
+  fails, marks the caller's unit rollback-only: the TCC runs CANCEL and reports
+  the failure, and the caller's commit then raises `UnexpectedRollbackError`.
   Start a TCC outside a transaction, or give its phase methods units of their own
   (`@transactional(propagation=Propagation.REQUIRES_NEW)`).
 - **Only the framework's units of work are seen**: `@transactional`, repository
@@ -444,6 +452,7 @@ from pyfly.transactional.saga.core.context import SagaContext
 | `idempotency_keys` | `set[str]` | Deduplication keys seen so far. |
 | `topology_layers` | `list[list[str]]` | Computed topology layers. |
 | `step_dependencies` | `dict[str, list[str]]` | Step dependency graph. |
+| `committed_steps` | `list[str]` | Steps whose work committed, in the order they ended (compensated on failure, never retried). |
 
 #### Helper Methods
 
@@ -1148,8 +1157,9 @@ the values below:
 | `cache` | `CachePersistenceProvider` | Depends on backend | Active `CacheAdapter` bean |
 
 The `memory` provider is the default and requires no additional packages.
-The `redis`, `sqlalchemy`, and `cache` providers are **durable**: they survive
-process restarts because execution state is held outside the Python process.
+The `redis` and `sqlalchemy` providers are **durable**: they survive process
+restarts because execution state is held outside the Python process. The
+`cache` provider is as durable as its cache backend.
 
 The provider stores the state of **every** engine. Workflows use it directly;
 the saga engine, the TCC engine and `SagaRecoveryService` persist through the
@@ -1165,7 +1175,9 @@ adapter, whatever the provider.) An application's own
 
 The engines record when an execution starts (`persist_state`, its
 `IN_FLIGHT` row) and how it ends (`mark_completed`); they do not persist step
-statuses (the `SagaResult` carries them). The port's `update_step_status` is
+statuses (the `SagaResult` carries them), except that a saga composition
+records the steps it compensated (`update_step_status`, see
+[Saga Composition](#execution)). The port's `update_step_status` is otherwise
 there for callers that record step progress themselves. The port serializes
 the updates of one execution (`update_step_status`, `mark_completed`: two
 updates that run together each keep the other's change), and executions never
@@ -1177,10 +1189,11 @@ inside a `@transactional` method writes its `IN_FLIGHT` row and its completion
 in the caller's transaction. Three consequences follow. Until the caller
 commits, no other process sees the saga, so a crash mid-saga leaves nothing to
 recover; when the caller rolls back, the record of the saga (including the
-remote steps it already ran) is rolled back with it; and when a step left that
-transaction unusable (on PostgreSQL, a failed statement aborts it), the
-engine's final `mark_completed` fails on it and its error replaces the
-`SagaResult` (the `memory` provider has no such failure). Start a saga outside
+remote steps it already ran) is rolled back with it; and when the caller's own
+work, or a TCC participant (it joins the caller's unit; saga steps never do),
+left that transaction unusable (on PostgreSQL, a failed statement aborts it),
+the engine's final `mark_completed` fails on it and its error replaces the
+`SagaResult` or `TccResult` (the `memory` provider has no such failure). Start a saga outside
 the business transaction when its log must outlive it.
 
 #### Redis provider
@@ -1442,6 +1455,7 @@ pyfly:
 |-----|------|---------|-------------|
 | `pyfly.transactional.persistence.provider` | `str` | `memory` | Persistence backend: `memory`, `redis`, `sqlalchemy`, or `cache`. |
 | `pyfly.transactional.persistence.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL (only used when provider is `redis`). |
+| `pyfly.transactional.persistence.sqlalchemy.datasource` | `str` | *(none)* | A datasource of the registry (provider `sqlalchemy`); not together with `.url`. |
 | `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). None: the primary datasource. Resolved through the datasource registry. |
 
 ### Saga Properties
