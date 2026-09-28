@@ -123,7 +123,9 @@ implement it: the in-memory store under its lock, Redis with `SET ... XX`, the S
 `UPDATE`. The `SessionFilter` uses it so that a request never brings back a session that was logged out,
 evicted or expired while the request ran (see [`SessionFilter`](#sessionfilter)). A custom store without
 `replace` keeps working: every change goes through `save`, and such a store cannot tell a revoked session from a
-live one.
+live one: the `SessionFilter` logs `session_store_without_replace` (a WARNING) when it is built on such a store.
+A subclass of a shipped store that overrides `save` (to encrypt the data, say) must override `replace` the same
+way: the filter writes every change of a session the store already holds through `replace`, bypassing `save`.
 
 ### `InMemorySessionStore`
 

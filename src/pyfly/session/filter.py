@@ -52,7 +52,8 @@ class SessionFilter(OncePerRequestFilter):
     does not clear the cookie either (another request of the same browser, a login in another tab,
     may have set a new one meanwhile). A new or rotated id is inserted with ``save``. A store without
     ``replace`` gets every change through ``save``, an insert-or-replace, and cannot tell a revoked
-    session from a live one.
+    session from a live one: the filter logs ``session_store_without_replace`` (a WARNING) when it is
+    built on one.
 
     ``request.state.persist_session`` saves the session at once (a coroutine function taking no
     arguments): the OAuth2 login handler saves the session it has just logged in before it registers
@@ -74,6 +75,9 @@ class SessionFilter(OncePerRequestFilter):
         self._store = store
         # Writes a session only while the store holds it; None for a store that cannot.
         self._replace = store.replace if isinstance(store, ConditionalSessionStore) else None
+        if self._replace is None:
+            # Such a store cannot keep a logout or an eviction final (see the class documentation).
+            logger.warning("session_store_without_replace", extra={"store": type(store).__name__})
         self._cookie_name = cookie_name
         self._ttl = ttl
         self._secure = secure

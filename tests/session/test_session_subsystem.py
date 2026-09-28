@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -351,6 +352,14 @@ class TestSessionFilter:
         assert await store.get("s1") is None
         assert response.set_cookie_calls == []
         assert response.deleted == []  # no deletion either: the browser may hold a newer cookie by now
+
+    def test_a_store_without_replace_is_reported_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyfly.session.filter"):
+            SessionFilter(store=InMemorySessionStore())
+            assert caplog.records == []
+            SessionFilter(store=_PlainStore())
+        assert [record.getMessage() for record in caplog.records] == ["session_store_without_replace"]
+        assert caplog.records[0].store == "_PlainStore"  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_a_store_without_replace_keeps_saving_changed_sessions(self) -> None:

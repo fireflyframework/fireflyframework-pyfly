@@ -42,6 +42,8 @@ class ConditionalSessionStore(SessionStore, Protocol):
     The ``SessionFilter`` saves a session the store already holds through :meth:`replace`, so a request that
     ends after its session was logged out, evicted or expired does not bring it back. A store without it gets
     every change through ``save``, an insert-or-replace, and cannot tell a revoked session from a live one.
+    A subclass of a shipped store that overrides ``save`` (to encrypt the data, say) must override
+    :meth:`replace` the same way: the filter writes every change of a stored session through ``replace``.
     """
 
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
