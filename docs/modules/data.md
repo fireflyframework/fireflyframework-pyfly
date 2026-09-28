@@ -101,13 +101,14 @@ The data module follows a hexagonal architecture with two distinct layers:
 │  BaseEntity      │   │  BaseDocument           │
 │  QueryMethod-    │   │  MongoQueryMethod-       │
 │    Compiler      │   │    Compiler             │
-│  reactive_       │   │  mongo_                 │
-│    transactional │   │    transactional        │
+│  SqlAlchemy-     │   │  MongoTransaction-      │
+│    Transaction-  │   │    Manager              │
+│    Manager       │   │                         │
 └────────┬─────────┘   └───────────┬─────────────┘
          │                         │
          ▼                         ▼
 ┌──────────────────┐   ┌───────────────────────┐
-│  SQLAlchemy      │   │  Beanie ODM + Motor    │
+│  SQLAlchemy      │   │  Beanie ODM + pymongo  │
 │  (async)         │   │  (async)               │
 └──────────────────┘   └───────────────────────┘
 ```
@@ -122,7 +123,7 @@ The data module follows a hexagonal architecture with two distinct layers:
 |----------------------|--------------------------------------|-------------------------------------------------|
 | Spring Data Commons  | `pyfly.data`                         | Shared ports, types, parser, `Page`, `Sort`     |
 | Spring Data JPA      | `pyfly.data.relational.sqlalchemy`   | Relational database adapter (SQLAlchemy)        |
-| Spring Data MongoDB  | `pyfly.data.document.mongodb`        | Document database adapter (Beanie/Motor)        |
+| Spring Data MongoDB  | `pyfly.data.document.mongodb`        | Document database adapter (Beanie/pymongo)      |
 
 ### Import Rules
 
@@ -402,7 +403,7 @@ With `properties=` (the relational post-processor passes the entity's columns, s
 | `exists_by_` | `bool`      | Check if any entity matches            |
 | `delete_by_` | `int`, `None`, `list[T]` | Delete matching entities (the count, nothing, or the entities) |
 
-On the relational adapter, the result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value. The MongoDB adapter does not shape results by the annotation yet: its `find_by_` returns a list (of `T`, or of the projection a `list[...]` annotation names; see [Data Document](data-document.md)).
+On both adapters, the result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value. The MongoDB adapter's `find_by_` returns documents, projections (read with a server-side projection) or `dict` rows, and its `delete_by_` the number of documents deleted (see [Data Document](data-document.md#result-shapes)).
 
 ### Operators
 
@@ -430,13 +431,13 @@ Operators are suffixed to field names. They are checked longest-first to avoid p
 | `_true`, `_is_true`    | `is_true`     | the boolean is true  | 0     |
 | `_false`, `_is_false`  | `is_false`    | the boolean is false | 0     |
 
-Every keyword may be preceded by `_is` (`_is_between`, `_is_in`). `_ignore_case` (or `_ignoring_case`) after a predicate compares that string property without case; `_all_ignore_case` at the end of the criteria does it for every string property of the query. The keywords after the first column of the table, the `_is` forms, `_ignore_case` and `_all_ignore_case` need the parse against the entity's properties (the relational adapter's).
+Every keyword may be preceded by `_is` (`_is_between`, `_is_in`). `_ignore_case` (or `_ignoring_case`) after a predicate compares that string property without case; `_all_ignore_case` at the end of the criteria does it for every string property of the query. The keywords after the first column of the table, the `_is` forms, `_ignore_case` and `_all_ignore_case` need the parse against the entity's properties, which both adapters' post-processors do.
 
-"As it is" means the argument's `%` and `_` are plain characters (escaped on the relational backend), so `find_by_name_containing("50%")` does not match `"500"`; `_like` takes a pattern whose wildcards stay wildcards.
+"As it is" means the argument's `%` and `_` are plain characters (escaped on both backends), so `find_by_name_containing("50%")` does not match `"500"`; `_like` takes a pattern whose wildcards stay wildcards. On MongoDB the operators keep SQL's meaning: `_like` is anchored and case-sensitive, and `_not`, `_not_in` and `_not_like` are false for a null or missing field (see [Data Document](data-document.md#mongoquerymethodcompiler-operator-mapping)).
 
 ### Connectors
 
-Connect multiple predicates with `_and_` or `_or_`. On the relational adapter, `and` binds tighter than `or`, as in Spring and SQL (the MongoDB adapter still combines mixed connectors left to right, see [Data Document](data-document.md)):
+Connect multiple predicates with `_and_` or `_or_`. On both adapters, `and` binds tighter than `or`, as in Spring and SQL:
 
 ```python
 # AND: status = ? AND customer_id = ?
@@ -657,7 +658,8 @@ Sort and filter property names are validated against the entity by `PropertyReso
 a Python `@property`, a typo, an operator key such as `$where`) raises `InvalidPropertyError`, an
 `InvalidRequestException` the web layer answers with 400. `PropertyResolver.for_entity(Model,
 allowed=("name", "created_at"))` narrows the names to an allow-list; repositories take theirs from
-`__sortable__` and `__filterable__`.
+`__sortable__` and `__filterable__`. The MongoDB adapter registers the introspector of Beanie documents: a
+document's properties are its fields, and `id` maps to `_id` and an aliased field to its alias.
 
 ### Page[T]
 
@@ -1261,9 +1263,9 @@ Some capabilities are **backend-specific** today:
 | CRUD + batch, Pageable/Sort/Page, derived queries, `@query`, Specifications, QBE | ✅ | ✅ |
 | Projections | ✅ | ✅ (closed/field-subset) |
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
-| Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ❌ not yet |
-| Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
-| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ⚠️ commit/abort per call (replica set); the unit-of-work manager for MongoDB is still to come |
+| Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ✅ Beanie's `use_revision` (a stale write raises `OptimisticLockingFailureException`) |
+| Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ✅ `created/updated_at` **and** `created/updated_by` (`BaseDocument`) |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, but `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
 
 **Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; open
 (SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational
@@ -1272,10 +1274,10 @@ derived-query keywords `Distinct` / `Top<N>` / `First` and property paths throug
 instead); `ExampleMatcher` string-match modes; named queries and `Pageable`/SpEL injection into `@query`. For
 these, fall back to `@query` (or `native=True`) — it covers every case the derived parser doesn't.
 
-On the relational backend, `@modifying` (Spring's `@Modifying`) marks a bulk `UPDATE`/`DELETE` `@query`, derived
-queries return `T | None`, `Page[T]` and `Slice[T]`, and the derived-query keywords `StartingWith` /
-`EndingWith` / `IgnoreCase` / `AllIgnoreCase` / `True` / `False` / `After` / `Before` / `NotIn` / `NotLike` /
-`NotContaining` are available (see [Operators](#operators)); the document backend adopts them next.
+On the relational backend, `@modifying` (Spring's `@Modifying`) marks a bulk `UPDATE`/`DELETE` `@query`. On both
+backends, derived queries return `T | None`, `Page[T]` and `Slice[T]`, and the derived-query keywords
+`StartingWith` / `EndingWith` / `IgnoreCase` / `AllIgnoreCase` / `True` / `False` / `After` / `Before` / `NotIn` /
+`NotLike` / `NotContaining` are available (see [Operators](#operators)).
 
 ---
 
