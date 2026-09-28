@@ -454,6 +454,40 @@ async def test_a_group_registered_for_some_destinations_gets_only_those(
     assert received.ids() == ["payment"]
 
 
+async def test_a_group_registered_for_every_destination_and_a_named_one_is_owed_each_event_once(
+    relational_backend: RelationalBackend,
+) -> None:
+    """Two nodes of one group boot at once, one consuming every destination (the default) and one ``orders``
+    alone (a rolling deploy that changes ``pyfly.eda.destinations``): the group is left registered for both. On
+    PostgreSQL a publish to ``orders`` from a process that does not consume it then owed the group the event
+    twice, and the publisher's business unit failed on the deliveries' primary key. A group is owed each event
+    once, whichever of its destinations match and whether or not the publishing bus includes it."""
+    engine = relational_backend.create_engine()
+    await relational_backend.create_tables(OutboxOrder)
+    outbox = Outbox(engine)
+    await outbox.start()
+    await outbox.register("app", ["*", "orders"])  # what the two nodes' registrations leave behind
+    publisher = await _bus(engine, group="publisher")  # a process that only publishes
+    node = await _bus(engine, group="app")  # a node of the group: its publishes include the group as well
+    received = Recorder()
+    node.subscribe("*", received)
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+
+    async with template.transaction() as unit:
+        assert unit is not None
+        unit.resource.add(OutboxOrder(name="order-1"))
+        await publisher.publish("orders", "order.placed", {"n": 1})
+    async with template.transaction():
+        await node.publish("orders", "order.placed", {"n": 2})
+    await outbox.append(EventEnvelope(event_type="payment.taken", payload={"n": 3}, destination="payments"))
+    await outbox.append(EventEnvelope(event_type="order.placed", payload={"n": 4}, destination="orders"))
+
+    assert await _count(engine, "wp09_outbox_order") == 1  # the business unit committed
+    assert [p.envelope.payload["n"] for p in await outbox.pending("app")] == [1, 2, 3, 4]  # each owed once
+    await _drain(node.relay)
+    assert received.ids() == [1, 2, 3, 4]
+
+
 async def test_a_claim_whose_lease_ended_is_taken_again_and_the_late_settle_is_refused(
     relational_backend: RelationalBackend,
 ) -> None:

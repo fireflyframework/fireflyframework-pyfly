@@ -613,13 +613,15 @@ class Outbox:
         deliveries = preparer.format_table(tables.deliveries)
         consumers = preparer.format_table(tables.consumers)
         notify = ", pg_notify(:channel, '')" if self._notify_channel else ""
-        # UNION: every group once, the registered ones and the included ones alike.
+        # Every group once: DISTINCT for a group registered for both the destination and every destination (the
+        # nodes of one group registering different destinations at once leave both rows), UNION for the included
+        # groups that are registered as well. One group twice would fail the publishing unit on the primary key.
         included = "".join(f" UNION SELECT CAST(:include_{index} AS VARCHAR)" for index in range(len(include)))
         statement = text(
             f"WITH e AS (INSERT INTO {events} (event_id, destination, event_type, payload, headers, created_at) "
             "VALUES (:event_id, :destination, :event_type, :payload, :headers, :created_at) RETURNING id), "
             f"d AS (INSERT INTO {deliveries} (consumer_group, outbox_id, available_at, attempts) "
-            f"SELECT g.consumer_group, e.id, :created_at, 0 FROM (SELECT c.consumer_group FROM {consumers} c "
+            f"SELECT g.consumer_group, e.id, :created_at, 0 FROM (SELECT DISTINCT c.consumer_group FROM {consumers} c "
             f"WHERE c.destination IN (:destination, :every){included}) g CROSS JOIN e) "
             f"SELECT e.id{notify} FROM e"
         ).bindparams(bindparam("created_at", type_=UtcTimestamp()))
