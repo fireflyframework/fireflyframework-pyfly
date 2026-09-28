@@ -398,8 +398,9 @@ class _RestoreOnRollback(TransactionSynchronizationAdapter):
             self.states.setdefault(id(state.document), state)
 
     async def after_completion(self, status: CompletionStatus) -> None:
+        states, self.states = self.states, {}  # a completed unit keeps no document alive
         if status is CompletionStatus.ROLLED_BACK:
-            for state in self.states.values():
+            for state in states.values():
                 state.restore()
 
 

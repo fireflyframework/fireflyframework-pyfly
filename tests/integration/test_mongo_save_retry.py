@@ -24,7 +24,10 @@ conflict) or of a fixed ``DuplicateKeyException`` saves them, instead of raising
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -360,6 +363,27 @@ async def test_a_new_document_whose_write_concern_fails_keeps_the_id_it_was_stor
     finally:
         await client.drop_database(name)
         await client.close()
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["committed", "rolled-back"])
+async def test_a_completed_unit_keeps_no_document_alive(
+    db: BeanieDatabase, template: TransactionTemplate, fail: bool
+) -> None:
+    repository = RtRepository()
+    documents = [RtDoc(code=f"d{index}") for index in range(3)]
+    references = [weakref.ref(document) for document in documents]
+    units = []
+    with contextlib.suppress(RuntimeError):
+        async with template.transaction():
+            units.append(repository._current_unit())
+            await repository.save(documents[0])
+            await repository.save_all(documents[1:])
+            if fail:
+                raise RuntimeError("rolled back")
+    del documents
+    gc.collect()
+    assert units[0].completed
+    assert [reference() for reference in references] == [None, None, None]
 
 
 async def test_without_a_transaction_the_documents_written_before_a_failure_stay_saved(mongo_url: str) -> None:
