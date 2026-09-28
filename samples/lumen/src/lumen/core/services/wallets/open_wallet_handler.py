@@ -8,10 +8,9 @@ aggregate's pending events and publishes them on the EDA bus so listeners
 (e.g. the wallet audit projection) can react.
 
 The handler runs inside ``@transactional()``: the decorator opens a unit
-of work from the injected ``async_sessionmaker`` (``self._session_factory``),
-swaps that session onto the repository for the call, commits on success,
-and rolls back on failure. Without it the framework's single shared
-session would only *flush* — never commit — so the write would not survive.
+of work on the datasource of the injected ``async_sessionmaker``
+(``self._session_factory``), every repository call inside the method joins
+it, and it commits on success and rolls back on failure.
 """
 
 from __future__ import annotations
