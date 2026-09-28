@@ -127,3 +127,66 @@ async def test_session_store_get_missing_returns_none(redis_url: str) -> None:
         assert result is None
     finally:
         await client.aclose()
+
+
+@requires_docker
+@pytest.mark.asyncio
+async def test_session_store_replace_changes_only_a_session_redis_holds(redis_url: str) -> None:
+    """replace() writes only over a session Redis still holds (``SET ... XX``) and moves its expiry on: a session
+    deleted (logged out, evicted) or expired is not brought back."""
+    import uuid
+
+    import redis.asyncio as aioredis
+
+    from pyfly.session.adapters.redis import RedisSessionStore
+
+    client = aioredis.from_url(redis_url)
+    try:
+        store = RedisSessionStore(client)
+        sid = f"sess-replace-{uuid.uuid4().hex}"
+
+        assert await store.replace(sid, {"a": 1}, ttl=60) is False
+        assert await store.exists(sid) is False
+
+        await store.save(sid, {"a": 1}, ttl=10)
+        assert await store.replace(sid, {"a": 2}, ttl=60) is True
+        assert await store.get(sid) == {"a": 2}
+        assert await client.ttl(f"pyfly:session:{sid}") > 10
+
+        await store.delete(sid)
+        assert await store.replace(sid, {"a": 3}, ttl=60) is False
+        assert await store.exists(sid) is False
+    finally:
+        await client.aclose()
+
+
+@requires_docker
+@pytest.mark.asyncio
+async def test_session_store_rename_moves_only_a_session_redis_holds(redis_url: str) -> None:
+    """rename() moves a session to a new key with the new data and TTL only if Redis still holds the old key (one
+    script): a session deleted (logged out, evicted) or expired is not brought back under the new id."""
+    import uuid
+
+    import redis.asyncio as aioredis
+
+    from pyfly.session.adapters.redis import RedisSessionStore
+
+    client = aioredis.from_url(redis_url)
+    try:
+        store = RedisSessionStore(client)
+        old, new, newer = (f"sess-rename-{uuid.uuid4().hex}" for _ in range(3))
+
+        assert await store.rename(old, new, {"a": 1}, ttl=60) is False
+        assert await store.exists(new) is False
+
+        await store.save(old, {"a": 1}, ttl=10)
+        assert await store.rename(old, new, {"a": 2}, ttl=60) is True
+        assert await store.exists(old) is False
+        assert await store.get(new) == {"a": 2}
+        assert await client.ttl(f"pyfly:session:{new}") > 10
+
+        await store.delete(new)
+        assert await store.rename(new, newer, {"a": 3}, ttl=60) is False
+        assert await store.exists(newer) is False
+    finally:
+        await client.aclose()

@@ -71,6 +71,10 @@ class OAuth2LoginHandler:
 
     Args:
         client_repository: Repository to look up client registrations.
+        concurrency: An optional ``SessionConcurrencyController``. The callback then saves the logged-in
+            session (``request.state.persist_session``) and registers it, enforcing the per-principal cap;
+            that save is the login's last write of the session. If the save or the registration fails, the
+            session is invalidated.
     """
 
     def __init__(
@@ -232,13 +236,29 @@ class OAuth2LoginHandler:
 
         # Rotate the session id on successful authentication to prevent session
         # fixation — the pre-auth id (which an attacker may have fixed) is dropped.
-        session.rotate_id()
+        session.rotate_id(on_login=True)
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
+        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
+        session.remove_attribute(_REDIRECT_URI_KEY)
 
         # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
         # is now bound to the (rotated) session id, so this is the one correct enforcement point.
+        # The session is saved first: the controller counts a session while the store has it,
+        # so a concurrent login of the same principal must find this one there. That save is
+        # the login's last write of the session (every change above is made before it, and the
+        # SessionFilter does not save an unchanged session again): a concurrent login may evict
+        # this session meanwhile, and a later save would bring it back, live and uncounted.
         if self._concurrency is not None:
-            allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            try:
+                persist = getattr(request.state, "persist_session", None)
+                if persist is not None:
+                    await persist()
+                allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+            except BaseException:
+                # Saved but perhaps never registered: the SessionFilter deletes it rather than leave a
+                # logged-in session the cap does not count.
+                session.invalidate()
+                raise
             if not allowed:
                 session.invalidate()
                 return JSONResponse(
@@ -247,9 +267,6 @@ class OAuth2LoginHandler:
                 )
 
         logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
-
-        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
-        session.remove_attribute(_REDIRECT_URI_KEY)
         return RedirectResponse(url=str(redirect_uri), status_code=302)
 
     # ------------------------------------------------------------------
@@ -257,14 +274,22 @@ class OAuth2LoginHandler:
     # ------------------------------------------------------------------
 
     async def _handle_logout(self, request: Request) -> Response:
-        """Invalidate the session and redirect to the root."""
+        """Invalidate the session, deregister it from the concurrency controller, and redirect to the root.
+
+        The session is invalidated first: a deregistration that fails (the registry's database or Redis down,
+        a pool timeout) is logged as ``session_deregistration_failed`` and never undoes the logout. The
+        controller drops the registration left behind as dead, at the principal's next capped login or
+        through the purge.
+        """
         session: HttpSession = request.state.session
-        if self._concurrency is not None:
-            principal = session.get_attribute(_SECURITY_CONTEXT_KEY)
-            user_id = getattr(principal, "user_id", None)
-            if user_id is not None:
-                await self._concurrency.on_logout(user_id, session.id)
+        user_id = getattr(session.get_attribute(_SECURITY_CONTEXT_KEY), "user_id", None)
+        session.set_attribute(_SECURITY_CONTEXT_KEY, None)
         session.invalidate()
+        if self._concurrency is not None and user_id is not None:
+            try:
+                await self._concurrency.on_logout(user_id, session.id)
+            except Exception:  # noqa: BLE001 — the session has ended already; a stale registration is dropped later
+                logger.warning("session_deregistration_failed", exc_info=True)
         return RedirectResponse(url="/", status_code=302)
 
     # ------------------------------------------------------------------

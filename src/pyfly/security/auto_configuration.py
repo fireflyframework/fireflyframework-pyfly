@@ -329,14 +329,22 @@ class LogoutAutoConfiguration:
     """Auto-configures a generic logout filter (opt-in) from ``pyfly.security.logout.*``."""
 
     @bean
-    def logout_filter(self, config: Config) -> WebFilter:
+    def logout_filter(self, config: Config, container: Container) -> WebFilter:
+        from pyfly.session.concurrency import SessionConcurrencyController
         from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
 
+        # A logout deregisters the session from the session concurrency controller, when there is one
+        # (pyfly.session.concurrency.enabled), as the OAuth2 login handler's logout does.
+        try:
+            concurrency = container.resolve(SessionConcurrencyController)
+        except (NoSuchBeanError, NoUniqueBeanError):
+            concurrency = None
         return LogoutFilter(
             logout_url=str(config.get("pyfly.security.logout.logout-url", "/logout")),
             logout_success_url=str(config.get("pyfly.security.logout.success-url", "/login?logout")),
             delete_cookies=_csv_or_list(config.get("pyfly.security.logout.delete-cookies")),
             use_redirect=_as_bool(config.get("pyfly.security.logout.use-redirect", True)),
+            concurrency=concurrency,
         )
 
 
@@ -452,9 +460,12 @@ class OAuth2AuthorizationServerAutoConfiguration:
         """Select the token-store backend (Spring parity for a persistent authorization server).
 
         ``pyfly.security.oauth2.token-store.provider``: ``memory`` (default, single-instance),
-        ``redis`` (fast cross-instance revocation, TTL = refresh-token lifetime), or ``postgres``
-        (durable + auditable). The Redis client / SQLAlchemy engine are obtained here (the
+        ``redis`` (fast cross-instance revocation, records expire on their own), or ``postgres``
+        (durable + auditable, on any SQL backend). The Redis client is obtained here (the
         composition root) and injected — the adapters never import their driver at module scope.
+        The SQL store's datasource is resolved in the context's ``DataSourceRegistry``:
+        ``token-store.datasource`` names one, ``token-store.url`` is an alias resolved through the
+        registry, and with neither it is the primary.
         """
         provider = str(config.get("pyfly.security.oauth2.token-store.provider", "memory")).lower()
         if provider == "redis" and AutoConfiguration.is_available("redis.asyncio"):
@@ -468,14 +479,18 @@ class OAuth2AuthorizationServerAutoConfiguration:
             )
             return RedisTokenStore(aioredis.from_url(url), ttl=refresh_ttl)  # type: ignore[no-untyped-call,unused-ignore]
         if provider == "postgres":
+            from pyfly.data.relational.framework_schema import (
+                context_datasource_registry,
+                creates_tables,
+                module_datasource,
+            )
             from pyfly.security.adapters.postgres_token_store import PostgresTokenStore
 
-            def _engine() -> Any:
-                from sqlalchemy.ext.asyncio import AsyncEngine
-
-                return container.resolve(AsyncEngine)
-
-            return PostgresTokenStore(_engine)
+            registry = context_datasource_registry(config, container)
+            datasource = module_datasource(
+                registry, config, "pyfly.security.oauth2.token-store", name="oauth2-token-store"
+            )
+            return PostgresTokenStore(datasource, create_table=creates_tables(registry.properties.ddl_auto))
         return InMemoryTokenStore()
 
 

@@ -1473,7 +1473,7 @@ class X509Config:
 
 ### Logout
 
-`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`.
+`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`. Given a session concurrency controller (`concurrency=`; the auto-configuration passes the `SessionConcurrencyController` bean when `pyfly.session.concurrency.enabled=true`), it also deregisters the session, as the OAuth2 login handler's logout does, so the per-principal cap stops counting it at once. The session is invalidated first: a deregistration that fails (the registry down) is logged as `session_deregistration_failed` and never undoes the logout.
 
 Enable config-driven logout (requires `starlette`):
 
@@ -1547,6 +1547,8 @@ class SwitchUserConfig:
 ```
 
 An impersonated request can be recognised with `security_context.has_role("PREVIOUS_ADMINISTRATOR")`, and the original principal read from `security_context.attributes["switch_user_original"]`.
+
+The switch and the exit put the context they establish on `request.state.security_context` and on the current `RequestContext`, as every authenticating filter does, so method security and the CQRS query cache see the impersonated (or restored) principal within the same request; on later requests `OAuth2SessionSecurityFilter` restores it from the session.
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/switch_user_filter.py`
 

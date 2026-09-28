@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
+from pyfly.context.request_context import RequestContext
 from pyfly.security.context import SecurityContext
 from pyfly.security.user_details import UserDetailsService
 from pyfly.web.filters import OncePerRequestFilter
@@ -106,7 +107,7 @@ class SwitchUserFilter(OncePerRequestFilter):
         session = request.state.session
         session.set_attribute(_ORIGINAL_CONTEXT_KEY, current)
         session.set_attribute(_SECURITY_CONTEXT_KEY, impersonated)
-        request.state.security_context = impersonated
+        _establish(request, impersonated)
         logger.info("User %s is now impersonating %s", current.user_id, user.username)
         return RedirectResponse(url=self._success_url, status_code=302)
 
@@ -119,6 +120,16 @@ class SwitchUserFilter(OncePerRequestFilter):
             return JSONResponse({"error": "not_impersonating"}, status_code=400)
         session.set_attribute(_SECURITY_CONTEXT_KEY, original)
         session.remove_attribute(_ORIGINAL_CONTEXT_KEY)
-        request.state.security_context = original
+        _establish(request, original)
         logger.info("Impersonation ended; restored principal %s", original.user_id)
         return RedirectResponse(url=self._success_url, status_code=302)
+
+
+def _establish(request: Request, context: SecurityContext) -> None:
+    """Make *context* the request's principal: on ``request.state`` and on the current
+    :class:`~pyfly.context.request_context.RequestContext`, which method security and the CQRS query cache
+    read (as every authenticating filter does)."""
+    request.state.security_context = context
+    request_context = RequestContext.current()
+    if request_context is not None:
+        request_context.security_context = context
