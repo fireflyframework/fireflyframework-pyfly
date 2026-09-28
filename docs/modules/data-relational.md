@@ -1810,20 +1810,21 @@ datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-featur
 ### Framework Tables
 
 The tables the framework keeps in an application's database (`pyfly_orchestration_state`,
-`pyfly_cache_entries`, `pyfly_locks`, `pyfly_users`, the OAuth2 token store's `pyfly_oauth2_grants` and
-`pyfly_oauth2_token_families`, and the sessions' `pyfly_sessions`, `pyfly_session_registrations` and
-`pyfly_session_principals`) are SQLAlchemy Core tables on one `MetaData`,
-`pyfly.data.relational.framework_schema.framework_metadata`, with portable
-types: bounded `KeyString` keys compared exactly (a binary collation on MySQL and MariaDB, whose default
+`pyfly_cache_entries`, `pyfly_locks`, `pyfly_users`, the event store's `pyfly_event_store`,
+`pyfly_event_store_head`, `pyfly_snapshots` and `pyfly_projection_checkpoints`, the transactional outbox's
+`pyfly_outbox_events`, `pyfly_outbox_deliveries`, `pyfly_outbox_consumers` and `pyfly_outbox_dead_letters`, the
+OAuth2 token store's `pyfly_oauth2_grants` and `pyfly_oauth2_token_families`, and the sessions' `pyfly_sessions`,
+`pyfly_session_registrations` and `pyfly_session_principals`) are SQLAlchemy Core tables on one `MetaData`,
+`pyfly.data.relational.framework_schema.framework_metadata`, with portable types: bounded `KeyString` keys compared exactly (a binary collation on MySQL and MariaDB, whose default
 collations ignore case and accents), `UtcTimestamp` instants (UTC with microseconds on every backend, aware in
 Python: `TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), `LONGTEXT`/`LONGBLOB` payloads on
 MySQL and MariaDB, and a naming convention for indexes.
 
 The `env.py` of `pyfly db init` lists it in Alembic's `target_metadata`, so autogenerate migrates the framework
 tables (their revisions import `pyfly.data.relational.framework_schema` for its column types) and never drops
-them. The first revision it writes for a project therefore creates all four, whether or not the application
-uses those stores: they stay empty until a store writes to them, and a revision that dropped them would have
-the next autogenerate propose them again. An `env.py` written by hand lists it too:
+them. The first revision it writes for a project therefore creates every one of them, whether or not the
+application uses those stores: they stay empty until a store writes to them, and a revision that dropped them
+would have the next autogenerate propose them again. An `env.py` written by hand lists it too:
 
 ```python
 # migrations/env.py
