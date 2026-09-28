@@ -141,7 +141,8 @@ await runner.start()                         # or declare the runner as a bean: 
 Every event gets a **global position** on the store's global stream, and `stream_all(after_position=p,
 limit=n)` returns the committed events after position `p`, in position order, each with its
 `global_position` set. Positions only move forward for a reader: once it has seen position `p`, no event appears
-below it later, and an aggregate's events are on the stream in sequence order. A projection therefore keeps one
+below it later, and an aggregate's events are on the stream in sequence order (except the events an earlier
+release stored: see [Upgrading from 26.09.07](#upgrading-from-260907)). A projection therefore keeps one
 number as its place, and never skips an event whose transaction committed late, never gets an event twice from
 paging, and never stalls on events that share a timestamp. `occurred_at` is the event's data (the clock of the
 process that built it), never a cursor. The order across aggregates depends on the
@@ -326,7 +327,8 @@ readers skip events. Changing a table's strategy is a migration with every write
   backlog (events no reader has read for a while, or an earlier release's) is sorted once per 100 000 events,
   and the rounds number that list in turn. An append never touches the head row: business transactions never
   wait for one another there, and none fails on it under snapshot isolation (MariaDB 11's `REPEATABLE READ`,
-  PostgreSQL's). The reader needs write access to the tables, and a read inside
+  PostgreSQL's). The reader needs write access to the tables; on SQLite a reader that numbers queues for the
+  write lock like any writer (up to `busy_timeout`, 5 s by default, then `database is locked`). A read inside
   a unit of work on the store's datasource shows only what is already numbered: a reader that only ever runs in
   one (a `@transactional(read_only=True)` endpoint listing recent events) sees new events once a reader outside
   one (a projection runner, `last_position()`) has numbered them. What a read costs: one that finds new events to
@@ -384,13 +386,16 @@ for projections with checkpoints, the tables of the `projection_checkpoint_store
 follows the event store's provider, on first use).
 
 The events already stored have no global position yet. They get theirs oldest `occurred_at` first, before any
-event appended since: with `head-row` as the stream is read (a start does not wait for them; a projection's page
-read numbers what its page needs, and `last_position()`, which a runner with `start_from="latest"` calls, numbers
-all of them before it returns), with `xid8` at start. The store sorts such a backlog once per 100 000 events and
-numbers it in rounds of 1000, at roughly 10 000 to 30 000 events a second: in containers on a laptop, a million
-events took 54 s on PostgreSQL 17 and 93 s on MySQL 8 (100 000 took 3 s on both). A large table can be numbered
-in one statement instead, before the upgraded application first starts, while no event has a position yet (the
-set-based `UPDATE` took 18 to 39 s for a million events on PostgreSQL and 110 s on MySQL, in one transaction):
+event appended since. `occurred_at` is the clock of the process that built the event, and 26.09.07 ordered its
+stream by it: where the clocks of those processes disagreed, an aggregate's earlier event is placed after its
+later one, as that release streamed them. With `head-row` they are numbered as the stream is read (a start does
+not wait for them; a projection's page read numbers what its page needs, and `last_position()`, which a runner
+with `start_from="latest"` calls, numbers all of them before it returns), with `xid8` at start. The store sorts
+such a backlog once per 100 000 events and numbers it in rounds of 1000, at roughly 10 000 to 30 000 events a
+second: in containers on a laptop, a million events took 54 s on PostgreSQL 17 and 93 s on MySQL 8 (100 000 took
+3 s on both). A large table can be numbered in one statement instead, before the upgraded application first
+starts, while no event has a position yet (the set-based `UPDATE` took 18 to 39 s for a million events on
+PostgreSQL and 110 s on MySQL, in one transaction):
 
 ```sql
 -- PostgreSQL, and SQLite 3.33 or later

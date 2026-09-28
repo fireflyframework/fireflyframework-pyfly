@@ -17,7 +17,8 @@ Every event an :class:`EventStore` holds has two places: its aggregate's ``seque
 aggregate, the optimistic-locking version) and a **global position** on the store's global stream, which
 :meth:`EventStore.stream_all` pages by (``after_position``). Positions only move forward for a reader: once it has
 seen position *p*, no event appears below *p* later, and an aggregate's events are on the stream in sequence
-order. A projection can therefore keep one number as its checkpoint and never skip an event that committed late,
+order (except the events an earlier release stored, which follow the clocks that stamped them: see ``head-row``
+below). A projection can therefore keep one number as its checkpoint and never skip an event that committed late,
 never get an event twice from paging, and never stall on events that share a timestamp. ``occurred_at`` is the
 event's data, not a cursor.
 
@@ -34,7 +35,9 @@ starts on it:
   business transactions do not wait for one another there, and none of them fails on it under snapshot isolation
   (MariaDB's ``REPEATABLE READ``, PostgreSQL's). The events of one round are ordered by the database's clock when
   it recorded them (``recorded_at``), then by aggregate and sequence: an aggregate's events keep their order, and
-  an event appended after another one committed comes after it.
+  an event appended after another one committed comes after it. (Events an earlier release stored have no
+  ``recorded_at`` and are placed by ``occurred_at``, the clock of the process that built them, as that release's
+  stream was; where those clocks disagreed, so do the positions of an aggregate's events.)
 - ``xid8`` (PostgreSQL 13 or later; opt-in, an accelerator whose reads write nothing): an event's position is
   its writer's transaction id times 2**20 plus its place among that transaction's events, set as it is inserted,
   and a reader only sees the positions below its snapshot's horizon (``pg_snapshot_xmin(pg_current_snapshot())``):
@@ -815,7 +818,7 @@ class SqlAlchemyEventStore:
     async def _read_backlog(self, session: AsyncSession) -> list[str]:
         """The committed events without a position, up to :data:`_NUMBERING_WINDOW` of them, in the order they get
         theirs: oldest record first (``recorded_at``, the database's clock; an earlier release's rows, which have
-        none, by ``occurred_at``), an aggregate's in sequence order.
+        none, by ``occurred_at``, the clocks of the processes that built them), then by aggregate and sequence.
 
         No index serves that order, so the read sorts every event without a position: it happens once per window,
         and the rounds number the list it returns in turn (a backlog of N events costs N/window sorts, not
