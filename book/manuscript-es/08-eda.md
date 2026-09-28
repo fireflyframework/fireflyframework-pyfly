@@ -224,13 +224,13 @@ async def publish_domain_events(
 
 En el Capítulo 7, los manejadores de comandos cargaban agregados, dirigían el comportamiento de dominio y guardaban —dejando los eventos acumulados tirados por el suelo. Ahora cierras esa carencia. Inyecta un `EventPublisher` junto al `WalletRepository` y un `async_sessionmaker`, decora `do_handle` con `@transactional()`, y tras `repo.upsert(...)` vacía el buffer del agregado y publica cada evento a través del puente.
 
-El decorador `@transactional()` (de `pyfly.data.relational.sqlalchemy`) abre una `AsyncSession` dedicada a partir del `async_sessionmaker` inyectado, la vincula al repositorio durante la llamada, hace commit en caso de éxito y rollback en caso de fallo. Eso significa que la secuencia cargar → mutar → guardar es una unidad de trabajo confirmada, y no se publica ningún evento a menos que la fila aterrice realmente en la base de datos.
+El decorador `@transactional()` (de `pyfly.data.relational.sqlalchemy`) liga una unidad de trabajo a la tarea en curso en el origen de datos del `async_sessionmaker` inyectado; cada llamada al repositorio del método se une a ella, y hace commit en caso de éxito y rollback en caso de fallo. Eso significa que la secuencia cargar → mutar → guardar es una unidad de trabajo confirmada, y un guardado que falla detiene el manejador antes de que se publique ningún evento.
 
 Aquí está el cambio, desglosado en las cuatro ediciones que harás a `DepositFundsHandler`.
 
 **Paso 1 — Añade el publicador al constructor.** Junto al parámetro existente `repository`, acepta `events: EventPublisher` y guárdalo como `self._events`. Tipéalo como el *protocolo* `EventPublisher`, nunca como `InMemoryEventBus` —eso es lo que mantiene al manejador ignorante de qué bus está corriendo.
 
-**Paso 2 — Acepta la fábrica de sesiones.** Añade `session_factory: async_sessionmaker[AsyncSession]` y guárdalo como `self._session_factory`. El decorador `@transactional()` busca exactamente este nombre de atributo para abrir su unidad de trabajo, así que el nombre importa.
+**Paso 2 — Acepta la fábrica de sesiones.** Añade `session_factory: async_sessionmaker[AsyncSession]` y guárdalo como `self._session_factory`. El decorador `@transactional()` lee este atributo para elegir el origen de datos en el que se ejecuta su unidad de trabajo (sin él, la unidad se ejecuta en el origen de datos por defecto de la aplicación), así que el nombre importa.
 
 **Paso 3 — Decora `do_handle` con `@transactional()`.** Esto envuelve toda la secuencia cargar-mutar-guardar en una sola transacción confirmada.
 
@@ -251,7 +251,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -273,7 +273,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -285,7 +287,7 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-Tres decisiones de diseño merecen mención. Primero, `events: EventPublisher` está tipado como el protocolo, no como `InMemoryEventBus` —el contenedor de inyección de dependencias inyecta la implementación que esté registrada, así que el manejador nunca sabe ni le importa qué bus está activo. Segundo, la llamada de publicación se sitúa *después* de `self._repository.upsert(...)` dentro de la unidad de trabajo `@transactional()`: si la persistencia falla, el decorador hace rollback antes de llegar a `publish_domain_events`, de modo que los oyentes nunca ven un hecho que nunca se persistió. Tercero, el manejador trabaja directamente con la entidad ORM mediante los mappers `to_aggregate` / `to_entity` —el agregado se rehidrata desde la fila, se muta y se mapea de vuelta a una fila antes del upsert. Si la publicación falla tras una persistencia con éxito, tienes un reto de entrega al-menos-una-vez —el Capítulo 10 lo aborda con patrones de outbox transaccional. Por ahora, el bus en memoria nunca falla.
+Tres decisiones de diseño merecen mención. Primero, `events: EventPublisher` está tipado como el protocolo, no como `InMemoryEventBus` —el contenedor de inyección de dependencias inyecta la implementación que esté registrada, así que el manejador nunca sabe ni le importa qué bus está activo. Segundo, la llamada de publicación se sitúa *después* de `self._repository.upsert(...)` dentro de la unidad de trabajo `@transactional()`: si la persistencia falla, la excepción sale del manejador antes de llegar a `publish_domain_events`, y el decorador hace rollback. Tercero, el manejador trabaja directamente con la entidad ORM mediante los mappers `to_aggregate` / `to_entity` —el agregado se rehidrata desde la fila, se muta y se mapea de vuelta a una fila antes del upsert. La publicación sigue ejecutándose antes de que la unidad haga commit, lo que deja un hueco que la nota de más abajo cierra con el outbox transaccional. Por ahora, el bus en memoria nunca falla.
 
 !!! note "Nota: Ejecútalo"
     Con la aplicación en ejecución (`uv run pyfly run --server uvicorn`), abre un monedero y deposita en él desde una segunda terminal:
@@ -306,7 +308,23 @@ Tres decisiones de diseño merecen mención. Primero, `events: EventPublisher` e
 
     La respuesta HTTP confirma el saldo, pero la evidencia más interesante está en el log de la aplicación: como el depósito publicó un evento `FundsDeposited` y el oyente de auditoría (que construirás en la siguiente sección) reacciona a él, verás una línea de log `wallet_audit_observed` para `event_type=FundsDeposited`. ¿Todavía no hay oyente? Entonces la publicación ocurre en silencio —que es precisamente el sentido: el manejador no sabe si alguien está escuchando.
 
-**Qué acaba de pasar.** El manejador de comandos ahora hace una cosa más tras guardar: vacía los eventos que el agregado acumuló y se los entrega al bus. La ordenación crucial es *guardar primero, publicar segundo*, todo dentro de una transacción. Si la escritura en la base de datos hace rollback, los eventos nunca se publican, así que un oyente nunca puede observar un hecho que en realidad no se persistió. El manejador ganó cuatro líneas y cero conocimiento nuevo —sigue sin tener ni idea de qué, si es que algo, reaccionará.
+**Qué acaba de pasar.** El manejador de comandos ahora hace una cosa más tras guardar: vacía los eventos que el agregado acumuló y se los entrega al bus. La ordenación crucial es *guardar primero, publicar segundo*, todo dentro de una transacción. Si el guardado falla, los eventos nunca se publican. El manejador ganó cuatro líneas y cero conocimiento nuevo —sigue sin tener ni idea de qué, si es que algo, reaccionará.
+
+!!! note "Publicar después del commit: el outbox transaccional"
+    El bus en memoria entrega en `publish()`: el oyente de auditoría se ejecuta dentro de la unidad de trabajo del manejador, *antes* de que haga commit, y un bus de broker envía en ese momento también. Un commit que falle después deja el evento entregado para un cambio que nunca se persistió. Desde la v26.09.08 PyFly cierra ese hueco para cualquier `EventPublisher` con un solo interruptor:
+
+    ```yaml
+    pyfly:
+      eda:
+        provider: memory          # o kafka, rabbitmq, redis
+        outbox:
+          enabled: true           # desactivado por defecto
+          store: auto             # sql, mongo o auto
+    ```
+
+    Cada `publish()` se añade entonces a un outbox en la unidad de trabajo de quien llama —las tablas `pyfly_outbox_*` del origen de datos principal, o colecciones en MongoDB— y un reenviador lo entrega al bus solo después de que la unidad haga commit: una unidad que hace rollback no publica nada, y una que hace commit publica al menos una vez, con el id del evento en la cabecera `x-pyfly-event-id` para que los consumidores dedupliquen con él. Los proveedores `database` y `postgres` ya son un outbox. El Capítulo 10 vuelve sobre ello para Kafka y RabbitMQ.
+
+    Otras dos piezas del framework tocan este camino. El `DomainEventPublisher` (activo por defecto) vacía los eventos pendientes de un agregado cuando su unidad hace commit y se los entrega a los oyentes `@app_event_listener` de la aplicación; Lumen llama a `wallet.clear_events()` dentro de la unidad, así que el publicador no encuentra nada pendiente y ningún evento sale dos veces. Fija `pyfly.eda.domain-events.destination` para que sea él quien los publique a través del bus de EDA, y elimina la llamada escrita a mano. Y un `@app_event_listener(phase=TransactionPhase.AFTER_COMMIT)` solo se ejecuta cuando la unidad en la que se publicó ha hecho commit.
 
 El `OpenWalletHandler` sigue el mismo patrón:
 
@@ -684,7 +702,7 @@ La arquitectura es genuinamente orientada a eventos dentro de un solo proceso. A
 | `publish_domain_events` | Puente —vacía `wallet.clear_events()`, serializa con `dataclasses.asdict`, llama a `publisher.publish` |
 | `ErrorStrategy` | Controla la gestión de fallos: `IGNORE`, `LOG_AND_CONTINUE`, `RETRY`, `DEAD_LETTER`, `FAIL_FAST` |
 
-Tres principios se trasladan al resto de la Parte III: **guarda antes de publicar** —los oyentes nunca deben ver hechos no confirmados; **diseña los oyentes para la idempotencia** —los reintentos deben ser seguros; **depende del puerto, no del adaptador** —el bus puede intercambiarse sin tocar el código de los oyentes.
+Tres principios se trasladan al resto de la Parte III: **guarda antes de publicar** —los oyentes nunca deben ver un hecho que no llegó a persistirse, y con el outbox transaccional nunca uno que no se confirmó; **diseña los oyentes para la idempotencia** —los reintentos deben ser seguros; **depende del puerto, no del adaptador** —el bus puede intercambiarse sin tocar el código de los oyentes.
 
 El Capítulo 9 lleva la idea del evento más lejos. En lugar de mantener un modelo de lectura separado junto a un agregado mutable, almacenas los eventos mismos como el sistema de registro —aplicando event sourcing (suministro de eventos) al libro mayor para que cada saldo histórico sea calculable desde primeros principios.
 

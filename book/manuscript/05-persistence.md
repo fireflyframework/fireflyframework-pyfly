@@ -8,7 +8,7 @@ Lumen has a wallet API that works — but every wallet disappears the moment you
 
 The naïve approach is to scatter SQLAlchemy `select()` and `session.commit()` calls through the command handlers. PyFly offers something far better: a **Spring-Data-style repository layer**. You declare an interface — `class WalletRepository(Repository[WalletEntity, str])` — and the framework *implements it for you*. Full async CRUD comes for free. Query methods are derived from their **names**. Pagination, sorting, composable filters, and read projections are first-class. There is no hand-written adapter and no SQL in the application code.
 
-This chapter rebuilds Lumen's persistence on that layer, exactly as the running sample does it: the SQLAlchemy entity, the repository with its derived and specification queries, `Page`/`Pageable`/`Sort`, projections for read views, and the transaction seam that keeps the `Wallet` aggregate intact. Everything here runs against a real SQLite file with zero external infrastructure — the sample's 41 tests are green on it. This chapter targets PyFly **v26.6.110**.
+This chapter rebuilds Lumen's persistence on that layer, exactly as the running sample does it: the SQLAlchemy entity, the repository with its derived and specification queries, `Page`/`Pageable`/`Sort`, projections for read views, and the transaction seam that keeps the `Wallet` aggregate intact. Everything here runs against a real SQLite file with zero external infrastructure — the sample's 43 tests pass on it. This chapter targets PyFly **v26.6.110**.
 
 We will build the persistence layer one piece at a time, and at every milestone there is a **Run it** box with the exact command to type and the output you should see. If you are following along in the Lumen sample, work from the project root (`samples/lumen`) where `pyfly.yaml` and `pyproject.toml` live; every command below assumes that directory.
 
@@ -46,7 +46,7 @@ We will build the persistence layer one piece at a time, and at every milestone 
 
 ::: figure art/figures/05-repository.svg | Figure 5.1 — Your code depends on the repository; the framework supplies the SQLAlchemy implementation behind it.
 
-A PyFly repository is a class that subclasses the generic `Repository[Entity, ID]` and is marked with the `@repository` stereotype. That is the whole declaration. From the two type parameters the framework learns the **entity type** and the **primary-key type**, and from there it provides a complete async data-access surface — `save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `count`, `exists_by_id`, plus pagination and specification queries — with the database `AsyncSession` injected for you.
+A PyFly repository is a class that subclasses the generic `Repository[Entity, ID]` and is marked with the `@repository` stereotype. That is the whole declaration. From the two type parameters the framework learns the **entity type** and the **primary-key type**, and from there it provides a complete async data-access surface — `save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `count`, `exists_by_id`, plus pagination and specification queries — and every call finds its database session in the unit of work it runs in.
 
 This is the Repository pattern as Spring Data popularised it, translated to idiomatic async Python. You write *what* you want (the method) and the framework writes *how* (the SQL).
 
@@ -77,7 +77,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -92,11 +92,11 @@ class WalletEntity(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        UtcDateTime(), default=lambda: datetime.now(UTC)
     )
 :::
 
-The `Mapped[T]` / `mapped_column(...)` syntax is SQLAlchemy 2.0 style: each type annotation drives both the Python attribute type and the generated column DDL (the `CREATE TABLE` statement), so every column has a single source of truth. Because `WalletEntity` subclasses `Base`, importing this module registers the `wallets` table in `Base.metadata` — the registry of every table the base knows about — and the framework's engine lifecycle then creates it on startup.
+The `Mapped[T]` / `mapped_column(...)` syntax is SQLAlchemy 2.0 style: each type annotation drives both the Python attribute type and the generated column DDL (the `CREATE TABLE` statement), so every column has a single source of truth. Because `WalletEntity` subclasses `Base`, importing this module registers the `wallets` table in `Base.metadata` — the registry of every table the base knows about — and the framework's engine lifecycle then creates it on startup. `UtcDateTime` is PyFly's column type for instants: it stores an aware UTC `datetime` on every backend (`TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), where a plain `DateTime` column on PostgreSQL is timezone-naive and refuses the aware value the mapper writes.
 
 !!! note "What just happened"
     You wrote one class, no SQL. The five typed attributes became five columns; `primary_key=True` marked `id` as the key; `index=True` on `owner_id` will speed up the "wallets owned by X" query you build later; `nullable=False` and `default=...` set the constraints. Importing this module is enough for the framework to know the table exists — you never call `CREATE TABLE` yourself.
@@ -143,8 +143,9 @@ class WalletRepository(Repository[WalletEntity, str]):
 
     The @repository stereotype registers this as a DI bean. The
     framework reads the entity/PK types from the
-    Repository[WalletEntity, str] base and injects the shared
-    AsyncSession.
+    Repository[WalletEntity, str] base; every call joins the unit
+    of work of the @transactional method that makes it, or runs in
+    a short unit of its own.
     """
 
     # (query methods follow — see the next sections)
@@ -154,7 +155,7 @@ There is no `__init__`, no SQL, and no adapter class. With just that declaration
 
 | Method                          | Returns             | What it does                              |
 |---------------------------------|---------------------|-------------------------------------------|
-| `save(entity)`                  | `T`                 | Insert or update; **flushes** + refreshes |
+| `save(entity)`                  | `T`                 | Insert a new row or merge an existing one |
 | `find_by_id(id)`                | `T \| None`         | Load by primary key                       |
 | `find_all(**filters)`           | `list[T]`           | All rows, optional equality filters       |
 | `find_all(sort)`                | `list[T]`           | All rows in a given `Sort` order          |
@@ -178,7 +179,7 @@ That is more than enough for most entities. Lumen adds three methods of its own 
 
 ### How the framework knows the types
 
-When you write `Repository[WalletEntity, str]`, the base class's `__init_subclass__` hook inspects `__orig_bases__` at class-definition time and pulls the entity type (`WalletEntity`) and id type (`str`) out of the generic parameters. (`__init_subclass__` is a Python hook that runs once, automatically, when a subclass is *defined* — so this happens at import time, before any object is created.) The `AsyncSession` — the database connection-and-transaction handle every query runs through — is then supplied as an injected dependency by the relational auto-configuration. Nothing is passed manually — the type parameters *are* the wiring.
+When you write `Repository[WalletEntity, str]`, the base class's `__init_subclass__` hook inspects `__orig_bases__` at class-definition time and pulls the entity type (`WalletEntity`) and id type (`str`) out of the generic parameters. (`__init_subclass__` is a Python hook that runs once, automatically, when a subclass is *defined* — so this happens at import time, before any object is created.) The repository holds no `AsyncSession` — the database connection-and-transaction handle every query runs through. Each call looks up the unit of work bound to the running task and uses its session, or, outside a transaction, opens a short unit of its own (the "Transactions" section below shows what that means for your writes). Nothing is passed manually — the type parameters *are* the wiring.
 
 !!! note "Run it: confirm the repository wires up"
     The fastest proof that the entity and repository are sound is the test suite, which exercises the repository against a real SQLite file with no server. From the Lumen project root:
@@ -190,8 +191,8 @@ When you write `Repository[WalletEntity, str]`, the base class's `__init_subclas
     You should see every repository test pass:
 
     ```
-    ......                                                            [100%]
-    6 passed in 0.30s
+    .....                                                             [100%]
+    5 passed in 0.30s
     ```
 
     These tests construct the repository directly and drive `upsert`, `find_by_id`, `count`, the derived query, and the specification path — the same methods this chapter builds. If they are green, your entity columns and the `Repository[WalletEntity, str]` declaration are correct.
@@ -536,15 +537,18 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
 
 ## Transactions and the aggregate seam
 
-The repository surface is clean — but two honest subtleties decide whether your writes actually survive. Both come from how the framework manages the session, and Lumen handles both deliberately.
+The repository surface is clean — but three honest subtleties decide what your writes do: which writes commit together, whether a write inserts or updates, and what happens when two requests change the same wallet at once. Lumen handles all three deliberately.
 
-### save() flushes; it does not commit
+### One unit of work per command
 
-This is the single most important thing to understand about the data layer. Two database verbs are easy to confuse. To **flush** is to send the pending SQL (the `INSERT`/`UPDATE`) to the database so it is visible to *this* connection's later reads — but still inside an open transaction that can be undone. To **commit** is to make those changes permanent and visible to everyone. A flush without a commit is rolled back when the session closes.
+This is the single most important thing to understand about the data layer. Two database verbs are easy to confuse. To **flush** is to send the pending SQL (the `INSERT`/`UPDATE`) to the database so it is visible to *this* connection's later reads — but still inside an open transaction that can be undone. To **commit** is to make those changes permanent and visible to everyone. A flush without a commit is rolled back when its transaction ends.
 
-The framework uses **one shared `AsyncSession`**, and `Repository.save()` calls `session.add()` followed by `session.flush()` and `session.refresh()` — it **flushes**, making the write visible *within* the current session, but it never **commits**. If nothing commits, the write is rolled back when the session closes and the wallet does not survive a restart. (This is exactly the disappearing-wallet problem from the opening **Run it** box.)
+Every repository call runs inside a **unit of work**. (A *unit of work* is one all-or-nothing batch of changes: either every write in it commits together, or — if anything fails — none of them do.) The repository holds no session of its own: each call looks up the unit bound to the running task, and where that unit comes from decides what commits:
 
-The commit happens at the **unit-of-work boundary**. (A *unit of work* is one all-or-nothing batch of changes: either every write in it commits together, or — if anything fails — none of them do.) You declare that boundary with `@transactional()`. A handler that writes decorates its `do_handle` with `@transactional()`, injects the `async_sessionmaker` — the factory that hands out sessions — as `self._session_factory`, and the decorator opens a unit of work, swaps that transactional session onto the repository for the call, **commits on success**, and rolls back on failure:
+- **Outside a transaction**, the call opens a short unit of its own. A read (`find*`, `count*`, `exists*`, …) runs and ends; any other method — `save`, `upsert`, `delete` — flushes and **commits** before it returns. One call, one commit.
+- **Inside `@transactional()`**, every call joins the method's unit: `save` and `upsert` only flush, and the unit commits once, when the method returns, or rolls every write back when it raises.
+
+A command handler is more than one call. Lumen's deposit loads the wallet, lets the aggregate check the amount, saves the new balance, and publishes the events; as separate commits, a failure halfway would leave half of that behind. So a handler that writes decorates its `do_handle` with `@transactional()`. Lumen's handlers also inject the `async_sessionmaker` — the factory that hands out sessions — as `self._session_factory`, which names the datasource the unit runs on (without the attribute, the unit runs on the application's default datasource, which for Lumen is the same database):
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 5.11 — A write handler: @transactional() commits the unit of work
 @command_handler
@@ -582,16 +586,19 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         return wallet_id
 :::
 
-`@transactional()` (imported from `pyfly.data.relational.sqlalchemy`) resolves the `async_sessionmaker` from `self._session_factory`, runs the body inside a `session.begin()` block, and commits at the end. Drop the decorator and the `upsert` would only flush — the wallet would never reach disk. The read handlers earlier in this chapter need no `@transactional`: a read makes no changes to commit.
+`@transactional()` (imported from `pyfly.data.relational.sqlalchemy`) binds a new unit of work to the running task on the datasource behind `self._session_factory`; every repository call inside the method joins it, and the unit **commits on success** and rolls back on failure. Drop the decorator and the wallet is still stored — the `upsert` commits in a unit of its own — but it is no longer one all-or-nothing step with the rest of the handler. The read handlers earlier in this chapter need no `@transactional`: a lone read runs in a short read unit of its own.
+
+!!! warning "Changed in v26.09.08"
+    Through v26.09.07 the repository shared one injected session, and a call made outside `@transactional` only flushed: nobody committed it, and the write was gone once the application stopped. Since v26.09.08 such a call commits in its own unit. Code that relied on those writes being discarded, or on committing a shared session later by hand, must wrap the calls in `@transactional` to make them one unit.
 
 !!! note "What just happened"
-    The rule in one line: **reads need nothing; writes need `@transactional()`.** `save`/`upsert` only *flush*, so a write handler must run inside a unit of work that commits. The decorator does three things for you — opens the transaction, hands the repository the right session for the call, and commits (or rolls back on an exception). This is why the opening wallet survived once persistence was on, and why removing the decorator would silently lose it.
+    The rule in one line: **reads need nothing; a write that spans several calls needs `@transactional()`.** A lone repository call commits on its own; the decorator turns the load, the checks, the save, and the events into one unit that commits — or rolls back — together. It does three things for you: opens the transaction, lets every repository call inside the method join it, and commits at the end (or rolls back on an exception).
 
 ### upsert, not save, for an aggregate that owns its id
 
-Notice the handler calls `self._repository.upsert(...)`, not `save(...)`. (*Upsert* is the portmanteau verb for "insert if new, update if already present" — one call for both cases.) That is the second subtlety. The framework's `save()` issues `session.add()`, which SQLAlchemy treats as a **pending INSERT**. But the `Wallet` aggregate generates its *own* primary key up front (`wlt-…`), so by the time a deposit or withdrawal persists an already-loaded wallet, a row with that id already exists — and a second `INSERT` on the same primary key raises `IntegrityError`.
+Notice the handler calls `self._repository.upsert(...)`, not `save(...)`. (*Upsert* is the portmanteau verb for "insert if new, update if already present" — one call for both cases.) That is the second subtlety. The `Wallet` aggregate generates its *own* primary key up front (`wlt-…`), so by the time a deposit or withdrawal persists an already-loaded wallet, a row with that id already exists, and the write must update it rather than insert a second row with the same key.
 
-The fix is `session.merge`, which inserts when the id is new and updates when it already exists. Lumen wraps it in an `upsert` convenience method:
+Lumen spells that intent out with an `upsert` method built on `session.merge`, which inserts when the id is new and updates when it already exists:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 5.12 — upsert: one call for both INSERT and UPDATE
 @repository
@@ -604,7 +611,8 @@ class WalletRepository(Repository[WalletEntity, str]):
         aggregate's id persists whether or not a row already exists —
         the aggregate owns its primary key, so identity is never
         ambiguous. Flushes so the write is visible in the current
-        unit of work; the surrounding @transactional commits it.
+        unit of work; the surrounding @transactional commits it
+        (outside one, the call's own unit does).
         """
         session = self._require_session()
         merged = await session.merge(entity)
@@ -612,10 +620,64 @@ class WalletRepository(Repository[WalletEntity, str]):
         return merged
 :::
 
-`_require_session()` is the inherited accessor that returns the active session (the transactional one, once `@transactional` has swapped it in). `merge` keys on the primary key, so both the first write (open) and every later write (deposit, withdraw) take the same code path with no `IntegrityError`. For entities whose ids are database-generated, `save` is the natural choice; for an aggregate that owns its id, `upsert` is.
+`_require_session()` is the inherited accessor that returns the session of the unit the call runs in — the handler's unit inside `@transactional`, or the call's own short unit outside one. `merge` keys on the primary key, so both the first write (open) and every later write (deposit, withdraw) take the same code path. Since v26.09.08 the inherited `save()` follows Spring Data's `save` and would do the same: a new entity is inserted, and one whose key is already set is merged into its row, so a second save of the same id updates it (use the instance `save()` returns). Through v26.09.07 `save()` always issued an `INSERT`, and a second save of the same key raised `IntegrityError` — which is why Lumen has `upsert`. It stays as the explicit spelling of the intent.
 
 !!! note "What just happened"
     Two questions decide every write: *did this row commit?* and *did this write insert or update?* `@transactional()` answers the first (it commits the unit of work); `upsert`/`merge` answers the second (one code path for both INSERT and UPDATE, because the aggregate owns its id). Get both right and a wallet you open, then deposit into, then read back after a restart returns the correct balance — which is exactly what the repository test below asserts against a *fresh* engine.
+
+### Two withdrawals at once
+
+The third subtlety is concurrency. The `Wallet` aggregate refuses an overdraft — but only of the balance it was loaded with. Two withdrawals of 60 from a wallet holding 100 can each load 100, each pass the check, and each save 40: both succeed, and the same funds were spent twice. A unit of work alone does not prevent that; under the default isolation level both units commit. Lumen closes the gap with a **pessimistic lock**: the withdrawal (and the deposit) read the row with `LockMode.PESSIMISTIC_WRITE` inside their `@transactional` unit:
+
+::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listing 5.12a — Lock the row, then let the aggregate check the balance
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
+
+
+@command_handler
+@service
+class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
+
+    @transactional()
+    async def do_handle(  # type: ignore[override]
+        self, command: WithdrawFunds
+    ) -> int:
+        # Lock the row until the unit ends: a concurrent withdrawal
+        # waits here.
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
+        if entity is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+
+        wallet = to_aggregate(entity)
+        wallet.withdraw(
+            Money(amount=command.amount, currency=wallet.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
+
+        await publish_domain_events(
+            self._events, wallet.clear_events()
+        )
+        return wallet.balance.amount
+:::
+
+On PostgreSQL, MySQL, and MariaDB the read is `SELECT … FOR UPDATE`: a second withdrawal of the same wallet waits at its read until the first unit ends, then sees the balance that unit left. SQLite has no row locks; there a write unit holds the database's single write lock from its `BEGIN IMMEDIATE`, with the same effect. A lock needs a read-write transaction: outside `@transactional` (or inside `@transactional(read_only=True)`) `find_by_id(..., lock=...)` raises `IllegalTransactionStateError`.
+
+There are two other ways to keep an invariant under concurrency. A **guarded update** checks and changes in one statement (`UPDATE … SET balance_minor = balance_minor - :amount WHERE id = :id AND balance_minor >= :amount`) and needs no transaction around it; Lumen's money-transfer saga uses it (Chapter 12). **Optimistic locking** (`VersionedMixin`) adds a version column and fails the losing commit with `OptimisticLockingFailureException` (HTTP 409). Every path that writes the row must use the same approach: a writer that skips the lock can still overwrite it.
+
+!!! note "Run it: race two withdrawals"
+    The sample ships a test that boots the application and races two withdrawals of 60 from a wallet holding 100 — through the command bus and through the transfer saga. From the Lumen project root:
+
+    ```bash
+    uv run --extra dev pytest tests/test_concurrent_balance_changes.py -q
+    ```
+
+    ```
+    .s.s                                                              [100%]
+    2 passed, 2 skipped in 0.30s
+    ```
+
+    Each race lets exactly one withdrawal through and leaves a balance of 40. The two skipped cases are the same races on PostgreSQL; they run when `LUMEN_TEST_POSTGRES_URL` names a server the tests may create databases on.
 
 ### The aggregate ↔ entity mapper seam
 
@@ -670,9 +732,9 @@ pyfly:
       ddl-auto: create
 :::
 
-`enabled: true` activates the relational auto-configuration, which builds the async SQLAlchemy engine and the `async_sessionmaker`, registers the `AsyncSession` and `session_factory` beans the repository and handlers inject, and installs the `RepositoryBeanPostProcessor` that compiles your derived-query stubs. `url` is a standard SQLAlchemy connection string — SQLite via `aiosqlite` here for zero-infrastructure development, `postgresql+asyncpg://…` in production. `ddl-auto: create` runs `Base.metadata.create_all` on startup, so the `wallets` table (discovered because `WalletEntity` subclasses `Base`) is built automatically the first time the app boots.
+`enabled: true` activates the relational auto-configuration, which builds the async SQLAlchemy engine and the `async_sessionmaker`, registers the `async_sessionmaker` the handlers inject, and installs the `RepositoryBeanPostProcessor` that compiles your derived-query stubs. `url` is a standard SQLAlchemy connection string — SQLite via `aiosqlite` here for zero-infrastructure development, `postgresql+asyncpg://…` in production. `ddl-auto: create` runs `Base.metadata.create_all` on startup, so the `wallets` table (discovered because `WalletEntity` subclasses `Base`) is built automatically the first time the app boots. On SQLite `create` is also the default; Lumen spells it out.
 
-The dependency footprint is tiny: `pyfly[data-relational]` pulls in `sqlalchemy[asyncio]` and `aiosqlite`, and nothing else. No database server, no driver install — which is exactly why the sample runs anywhere.
+The dependency footprint is tiny: `pyfly[data-relational]` pulls in `sqlalchemy[asyncio]`, `alembic`, and `aiosqlite`, and nothing else. No database server, no driver install — which is exactly why the sample runs anywhere.
 
 !!! note "Run it: the disappearing wallet, fixed"
     Re-run the opening experiment, now with persistence on. Open a wallet, stop the app, start it again, and read the balance back:
@@ -700,7 +762,7 @@ The dependency footprint is tiny: `pyfly[data-relational]` pulls in `sqlalchemy[
     Look in the project directory and you will see the `lumen.db` SQLite file the engine created on first boot, with the `wallets` table inside it. The whole chapter comes down to this: the wallet outlives the process.
 
 !!! tip "Schema lifecycle in production"
-    `ddl-auto: create` is right for development and samples: it creates missing tables and leaves existing ones alone. In production set `ddl-auto: none` and manage the schema with a migration tool (Alembic), which generates versioned scripts from the diff between `Base.metadata` and the live database. The application code does not change — only the `ddl-auto` setting and the migration pipeline.
+    `ddl-auto: create` is right for development and samples: it creates missing tables and leaves existing ones alone (a new column needs a migration). Unset, `ddl-auto` is `create` only for an embedded database such as SQLite and `none` on a database server, as in Spring Boot, so pointing `url` at PostgreSQL does not create the schema for you. In production manage it with Alembic migrations (`pyfly db migrate` and `pyfly db upgrade`, or `pyfly.data.relational.migrations.enabled: true` to apply them at startup), and set `ddl-auto: validate` to make the start fail when a table or column a model needs is missing. `update` is not a strategy: it, and any unknown value, fails the start naming the key, and so does `create` beside startup migrations. The application code does not change — only the `ddl-auto` setting and the migration pipeline.
 
 ---
 
@@ -759,7 +821,7 @@ async def test_specification_find_rich_paged_and_sorted(
 
 The first test drives the derived query: three wallets in, two owners out, and `find_by_owner_id("alice")` returns exactly the two — proof that the framework compiled `WHERE owner_id = :owner_id` from the method name. The second drives the `Specification` path: it asserts the threshold filter (`total == 2`, only mid and rich match `>= 1000`), the newest-first sort (`wlt-rich` is the newest of the two), the page metadata (`total_pages == 2`, `has_next`), and that the same `balance_at_least` predicate also runs unpaged through `find_all_by_spec`.
 
-The fixture mirrors what the framework does at startup — build the engine, run `Base.metadata.create_all` inside a `begin()` block so the DDL commits, hand back a session factory — so the test exercises the exact table the application creates. Other tests in the same file prove `upsert` round-trips through a *fresh* engine (durability across reconnect) and that `find_all(pageable)` counts and slices a five-wallet table correctly.
+The fixture mirrors what the framework does at startup — build the engine, run `Base.metadata.create_all` inside a `begin()` block so the DDL commits, hand back a session factory — so the test exercises the exact table the application creates. The tests hand the repository a session of their own (its *manual mode*): it uses that session as it is, and the test commits it; the booted application builds the repository without one, as described above. Other tests in the same file prove `upsert` round-trips through a *fresh* engine (durability across reconnect) and that `find_all(pageable)` counts and slices a five-wallet table correctly.
 
 !!! note "Run it: prove the whole layer green"
     Run the repository test file end to end. From the Lumen project root:
@@ -776,13 +838,13 @@ The fixture mirrors what the framework does at startup — build the engine, run
     tests/test_sql_wallet_repository.py::test_derived_find_by_owner_id PASSED
     tests/test_sql_wallet_repository.py::test_specification_find_rich_paged_and_sorted PASSED
     tests/test_sql_wallet_repository.py::test_find_all_pageable_counts_and_pages PASSED
-    6 passed in 0.31s
+    5 passed in 0.31s
     ```
 
     Run the whole suite (`uv run --extra dev pytest -q`) to confirm the rest of Lumen still passes alongside the persistence layer.
 
 !!! spring "Spring parity"
-    Constructing the repository directly against a real in-process database mirrors Spring's `@DataJpaTest` slice, which boots an H2 database and the JPA layer in isolation to test repositories without the full context. `Base.metadata.create_all` is the analogue of `spring.jpa.hibernate.ddl-auto=create`, and running `RepositoryBeanPostProcessor` by hand stands in for the Spring proxy that materialises derived queries on a `JpaRepository` at startup.
+    Constructing the repository directly against a real in-process database mirrors Spring's `@DataJpaTest` slice, which boots an H2 database and the JPA layer in isolation to test repositories without the full context. `Base.metadata.create_all` is the analogue of `spring.jpa.hibernate.ddl-auto=create`, and running `RepositoryBeanPostProcessor` by hand stands in for the Spring proxy that materialises derived queries on a `JpaRepository` at startup. PyFly also has a `@DataTest` slice whose tests roll back every unit of work (Chapter 16).
 
 ---
 
@@ -796,7 +858,7 @@ Lumen now persists wallets through PyFly's Spring-Data-style repository layer:
 - **Pagination** — `find_all(pageable)` returning a `Page[T]` with `total` / `total_pages` / `has_next`, mapped to DTOs with `Page.map`, exposed at `GET /api/v1/wallets`.
 - **Specification** — `balance_at_least(n)` composed with `& | ~` and run via `find_all_by_spec_paged`, exposed at `GET /api/v1/wallets/rich`.
 - **Projection** — `@projection BalanceView`, a concrete dataclass the `Mapper` projects rows onto for the balance read view.
-- **Transactions** — write handlers decorated `@transactional()` (because `save`/`upsert` only *flush*), using `upsert`/`session.merge` for an aggregate that owns its id, with the aggregate ↔ entity mapper keeping the domain model pure.
+- **Transactions** — a lone repository call commits in a unit of its own; write handlers are decorated `@transactional()` so the load, the checks, the save, and the events commit together; `upsert`/`session.merge` persists an aggregate that owns its id; `find_by_id(..., lock=LockMode.PESSIMISTIC_WRITE)` keeps `balance >= 0` when withdrawals race; and the aggregate ↔ entity mapper keeps the domain model pure.
 
 You wrote interfaces and stubs; the framework wrote the SQL. That is the payoff of the repository pattern.
 
@@ -808,6 +870,6 @@ You wrote interfaces and stubs; the framework wrote the SQL. That is the payoff 
 
 2. **Compose two specifications.** Define a second factory `in_currency(code: str) -> Specification[WalletEntity]` (predicate `currency == code`), then add a repository method that runs `balance_at_least(min_minor) & in_currency(code)` through `find_all_by_spec_paged`. Test that it returns only rich wallets in the chosen currency, newest first.
 
-3. **Trace the transaction boundary.** Temporarily change `OpenWalletHandler.do_handle` to call `self._repository.save(to_entity(wallet))` instead of `upsert`, open the same wallet twice in one test, and observe the `IntegrityError`. Restore `upsert`. Then remove the `@transactional()` decorator, open a wallet, and assert it does **not** survive a fresh-engine reconnect — proving that without the unit-of-work commit, `flush` alone is not durability.
+3. **Trace the transaction boundary.** In a test that boots the application (as `tests/test_app_context_integration.py` does), make `WithdrawFundsHandler.do_handle` raise right after the `upsert`, send a withdrawal, and assert the balance did not move — the unit rolled the write back. Then remove the `@transactional()` decorator (and the `lock=` argument, which needs a transaction) and repeat: the `upsert` now commits in its own unit before the failure, and the balance moves. That is the difference between one unit of work and one commit per call.
 
 4. **Project a different view.** Add an `@projection OwnerView` dataclass with just `id` and `owner_id`, register it on a `Mapper`, and write a handler-free test that loads a `WalletEntity` and projects it — verifying that only the two declared columns are read and the rest of the row is ignored.

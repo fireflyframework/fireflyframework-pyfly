@@ -647,7 +647,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -662,7 +662,7 @@ class WalletEntity(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        UtcDateTime(), default=lambda: datetime.now(UTC)
     )
 :::
 

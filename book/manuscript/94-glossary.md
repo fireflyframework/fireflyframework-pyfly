@@ -64,7 +64,7 @@
 
 **Migration** — A versioned, ordered script that evolves a relational database schema without destroying data. PyFly integrates Alembic for migration management; `pyfly db migrate` auto-generates a migration from entity changes and `pyfly db upgrade` applies pending migrations (Chapter 5).
 
-**Outbox pattern** — A technique for publishing domain events reliably alongside a database write: both the state change and the event records are written in the same local transaction; a background relay process reads unsent events from the outbox table and forwards them to the broker. This eliminates the two-phase commit between the database and the message broker (Chapters 9, 12).
+**Outbox pattern** — A technique for publishing domain events reliably alongside a database write: both the state change and the event records are written in the same local transaction; a background relay process reads unsent events from the outbox table and forwards them to the broker. This eliminates the two-phase commit between the database and the message broker. With `pyfly.eda.outbox.enabled: true` PyFly puts an outbox in front of any `EventPublisher`, on SQL tables or MongoDB collections; `TransactionalOutbox` does the same for an event store (Chapters 8, 9, 10).
 
 **Port** — A Python `Protocol` class that defines the interface a piece of business logic depends on, without specifying any implementation. The DI container wires the concrete adapter that satisfies the protocol at startup. Ports enable the hexagonal architecture and make adapters swappable with zero business-logic changes (Chapters 1, 2, 5).
 
@@ -96,7 +96,9 @@
 
 **TCC (Try-Confirm-Cancel)** — A distributed-transaction pattern in which each participant first *reserves* a resource (Try), then the coordinator either *confirms* all reservations or *cancels* them based on whether all Tries succeeded. TCC is useful when exact, immediate reservation semantics are required — for example, holding funds before capturing a payment. PyFly's `@tcc(name="…")` + `@tcc_participant(id="…", order=N)` decorators implement the TCC protocol alongside the saga engine (Chapter 12).
 
-**Testcontainers** — A library that starts real Docker containers (PostgreSQL, Redis, Kafka) for integration tests and tears them down when the suite finishes. PyFly's `pyfly.testing` module provides `postgres_container` and `redis_container` fixtures that wire Testcontainers into the DI container via `@ServiceConnection`-style configuration (Chapter 16).
+**Testcontainers** — A library that starts real Docker containers (PostgreSQL, Redis, Kafka) for integration tests and tears them down when the suite finishes. PyFly's `pyfly.testing` module provides factories such as `postgres_container`, `mysql_container`, `mariadb_container`, `mongodb_replica_set_container`, and `redis_container` that wire Testcontainers into the DI container via `@ServiceConnection`-style configuration (Chapter 16).
+
+**Unit of work** — One all-or-nothing batch of changes: every write in it commits together, or none does. In PyFly every transactional boundary is a `UnitOfWork` bound to the running task (`pyfly.data.transaction`): `@transactional` begins or joins one, repository calls inside it join it, and a repository call outside one runs in a short unit of its own that commits a write before returning (Chapters 5, 7).
 
 **Value object** — An immutable domain object identified by its value rather than by an identity field. Two value objects are equal if all their fields are equal. In PyFly, `ValueObject` is the base class; apply `@dataclass(frozen=True)` to enforce immutability. `Money` — an integer amount in **minor units** (cents) and a `Currency` `StrEnum` — is Lumen's canonical value object; `Wallet` is the aggregate root that owns it (Chapter 6).
 

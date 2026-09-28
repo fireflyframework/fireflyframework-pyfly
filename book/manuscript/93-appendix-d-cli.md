@@ -62,7 +62,7 @@ pyfly new                              # interactive mode (questionary TUI)
 | `granian` | Granian ASGI server (Rust/tokio) |
 | `hypercorn` | Hypercorn ASGI server (HTTP/2, HTTP/3) |
 | `data-relational` | SQLAlchemy ORM (async), Alembic migrations |
-| `data-document` | Beanie ODM, Motor (MongoDB) |
+| `data-document` | Beanie ODM on PyMongo's async client (MongoDB) |
 | `eda` | In-memory event bus, Kafka + RabbitMQ support |
 | `cache` | Caching layer (in-memory default; Redis if installed) |
 | `client` | Resilient HTTP client (httpx + retry/circuit-breaker) |
@@ -199,9 +199,13 @@ pyfly db init
 ```
 
 Creates `alembic/` and `alembic.ini` in the current directory. Overwrites
-`alembic/env.py` with a PyFly template that wires `async_engine_from_config`
-and `Base.metadata` from `pyfly.data.relational.sqlalchemy`. Exits with an error
-if `alembic/` already exists.
+`alembic/env.py` with a PyFly template that imports the modules declaring your
+entities, lists `Base.metadata` and the framework's own tables
+(`framework_metadata`) as `target_metadata`, and runs on the application's
+primary datasource, so autogenerate never proposes dropping either. Exits with
+an error if `alembic/` already exists. Regenerate an `env.py` created before
+v26.09.08: it listed no models, and its autogenerate would drop every table
+(PyFly now refuses such a revision).
 
 ### pyfly db migrate
 

@@ -409,7 +409,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cache_put
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -440,7 +440,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def _deposit(self, command: DepositFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -459,6 +461,9 @@ committed balance — not a stale pre-deposit snapshot. `_deposit` runs inside
 sequence is committed as one unit of work before the cache is refreshed. The
 next `@cacheable` read in `GetBalanceHandler` picks up this fresh value
 without touching the database.
+
+!!! note "Cache writes wait for the commit"
+    Since v26.09.08 the cache decorators go through `TransactionAwareCache`, PyFly's version of Spring's `TransactionAwareCacheDecorator`: a `put`, `evict`, or `clear` made inside a unit of work runs once that unit has committed, and is dropped when it rolls back, so no request is served a value that never committed. Here `@cache_put` wraps the whole `@transactional` method, so the unit has already committed when the put runs; wrapped inside a larger transaction, the put would wait for that transaction's commit. Reads and `put_if_absent` run at once, outside the caller's unit.
 
 !!! note "Cache key must match"
     The `@cache_put` key `"wallet:balance:{command.wallet_id}"` must match the `@cacheable` key `"wallet:balance:{query.wallet_id}"` when both resolve to the same wallet id. Mismatched keys mean the deposit writes to a different cache slot than the balance read looks up — staleness returns.

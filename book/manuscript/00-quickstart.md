@@ -431,7 +431,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -443,14 +443,16 @@ class WalletEntity(Base):
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=lambda: datetime.now(UTC)
+    )
 :::
 
 Because the class subclasses `Base`, importing it registers the `wallets` table; with `ddl-auto: create` the framework creates that table on startup.
 
 ### The repository
 
-Instead of hand-writing SQL, you subclass the framework's generic `Repository[Entity, IdType]`. That single declaration tells the framework the entity type and the primary-key type, and in return you get the full async repository surface for free — `save`, `find_by_id`, `find_all`, `count`, `delete`, paging, and more — with the database session injected for you.
+Instead of hand-writing SQL, you subclass the framework's generic `Repository[Entity, IdType]`. That single declaration tells the framework the entity type and the primary-key type, and in return you get the full async repository surface for free — `save`, `find_by_id`, `find_all`, `count`, `delete`, paging, and more. Every call runs in the unit of work of the code that makes it, or in a short one of its own that commits a write before returning.
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listing 0.8 — A Spring-Data-style repository
 from __future__ import annotations
@@ -519,7 +521,7 @@ class OpenWallet(Command[str]):
 
 ### The handler
 
-The handler is where the work happens: generate an id, create the `Wallet` aggregate, persist it through the repository, then drain and publish the aggregate's events. It runs inside `@transactional()`, which opens a unit of work, commits on success, and rolls back on failure. The repository and the event publisher are injected by the container — you only declare them in `__init__`.
+The handler is where the work happens: generate an id, create the `Wallet` aggregate, persist it through the repository, then drain and publish the aggregate's events. It runs inside `@transactional()`, which opens a unit of work that every repository call in the method joins, commits on success, and rolls back on failure. The repository and the event publisher are injected by the container — you only declare them in `__init__`.
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listing 0.10 — The OpenWallet handler
 from __future__ import annotations

@@ -164,7 +164,7 @@ confirmar el cambio: el cron de cada minuto era solo una sonda.
 
 ### fixed_rate frente a fixed_delay
 
-**`fixed_rate`** mide desde el **inicio** de una ejecución hasta el inicio de la siguiente. **`fixed_delay`** mide desde el **final** de una ejecución hasta el inicio de la siguiente. Usa `fixed_rate` para latidos y métricas donde necesitas una cadencia constante con independencia del tiempo de ejecución. Usa `fixed_delay` cuando necesitas un hueco de respiro garantizado; por ejemplo, al sondear una API aguas arriba que limita la tasa por frecuencia de peticiones.
+**`fixed_rate`** mide desde el **inicio** de una ejecución hasta el inicio de la siguiente. **`fixed_delay`** mide desde el **final** de una ejecución hasta el inicio de la siguiente. Usa `fixed_rate` para latidos y métricas donde necesitas una cadencia constante con independencia del tiempo de ejecución. Usa `fixed_delay` cuando necesitas un hueco de respiro garantizado; por ejemplo, al sondear una API aguas arriba que limita la tasa por frecuencia de peticiones. Desde la v26.09.08 un trabajo `fixed_rate` o `cron` nunca se solapa consigo mismo: cuando una ejecución dura más que su periodo, la siguiente la espera (`@scheduled(concurrent=N)` permite que se solapen hasta *N* ejecuciones), y `cron` calcula su siguiente disparo cuando ha terminado una ejecución.
 
 ::: listing lumen/health/monitor.py | Listado 17.2 — Latido fixed_rate y sondeo fixed_delay
 from datetime import timedelta
@@ -321,7 +321,7 @@ class LockConfig:
 
 ### @async_method
 
-**`@async_method`** marca un método para ejecución fire-and-forget (dispara y olvida) a través del `TaskExecutorPort`. La persona que llama retorna de inmediato; el framework encamina la corrutina a través del ejecutor configurado en segundo plano:
+**`@async_method`** marca un método para ejecución en segundo plano a través del `TaskExecutorPort`, al estilo de `@Async` de Spring. Esperar la llamada la envía y retorna de inmediato con la `asyncio.Task` que la ejecuta; espera esa tarea cuando necesites el resultado:
 
 ```python
 from pyfly.scheduling import async_method
@@ -332,11 +332,17 @@ class AlertService:
 
     @async_method
     async def send_alert(self, msg: str) -> None:
-        """Caller does not await — AlertService dispatches asynchronously."""
+        """Runs in a task of its own, outside the caller's transaction."""
         ...
+
+
+async def notify(alerts: AlertService) -> None:
+    # The call returns the asyncio.Task at once; await it for the result.
+    task = await alerts.send_alert("funds received")
+    await task
 ```
 
-Bajo el capó `@async_method` establece `__pyfly_async__ = True` en la función; el framework detecta esta bandera y envía la corrutina al `TaskExecutorPort`.
+Bajo el capó `@async_method` establece `__pyfly_async__ = True` en la función; el contexto de la aplicación sustituye el método del bean por un despachador que envía la llamada al `TaskExecutorPort`. La tarea empieza con el estado transaccional limpio: un método `@transactional` abre su propia unidad de trabajo, así que su fallo nunca revierte a quien llama y el commit de quien llama no lo espera. Una excepción no capturada va al bean `AsyncUncaughtExceptionHandler`, que por defecto la registra en el log. (Hasta la v26.09.07 esperar la llamada devolvía el resultado del método.)
 
 !!! spring "Equivalencia con Spring"
     `@scheduled(fixed_rate=...)` refleja el
@@ -356,7 +362,7 @@ pyfly:
       type: asyncio        # 'asyncio' (default, in-loop) or 'thread'
       max-workers: 4       # worker threads when type is 'thread'
     lock:
-      provider: none       # none | memory | redis | postgres
+      provider: none       # none | memory | redis | database | postgres
 ```
 
 Cuando `enabled` es `false`, `TaskScheduler` no arranca ningún bucle y todos los métodos `@scheduled` se omiten en silencio.
@@ -369,10 +375,13 @@ trabajo realice trabajo intensivo de CPU o llame a una biblioteca bloqueante, de
 !!! tip "Cómo elegir un proveedor de bloqueo"
     `lock.provider` selecciona el backend detrás de `@scheduled(lock=...)`, descrito
     a continuación: `none` (el valor por defecto: sin coordinación), `memory` (exclusión mutua
-    dentro de un proceso), `redis` o `postgres` (verdadera coordinación entre instancias
-    sin cambios en el código). En `redis`/`postgres` PyFly construye el
-    bean `DistributedLock` por ti a partir de `pyfly.scheduling.lock.redis.url` o el
-    `AsyncEngine` ya existente de la aplicación; el `@bean` artesanal del Listado 17.4 es la
+    dentro de un proceso), `redis`, `database` o `postgres` (verdadera coordinación entre
+    instancias sin cambios en el código). `database` —y `postgres`, que es el mismo
+    bloqueo— es una tabla de concesiones portable (`LeaseLock`, la tabla `pyfly_locks`)
+    en la base de datos de la aplicación, sea cual sea su backend; los bloqueos
+    consultivos de PostgreSQL son opcionales
+    (`pyfly.scheduling.lock.postgres.advisory: true`). En `redis` PyFly construye el
+    bloqueo a partir de `pyfly.scheduling.lock.redis.url`; el `@bean` artesanal del Listado 17.4 es la
     alternativa de hazlo-tú-mismo cuando necesitas semánticas personalizadas.
 
 ---
@@ -1135,8 +1144,8 @@ uv run --extra dev pytest -q
 Deberías ver que todas las pruebas existentes siguen pasando:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
 Los tres ejercicios de abajo añaden sus propias pruebas de programación, notificación y webhook —

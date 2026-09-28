@@ -8,7 +8,7 @@ Lumen tiene una API de monederos (wallets) que funciona, pero cada monedero desa
 
 El enfoque ingenuo es esparcir llamadas a `select()` y `session.commit()` de SQLAlchemy por los manejadores de comandos. PyFly ofrece algo mucho mejor: una **capa de repositorios al estilo de Spring Data**. Declaras una interfaz —`class WalletRepository(Repository[WalletEntity, str])`— y el framework *la implementa por ti*. El CRUD asíncrono completo viene gratis. Los métodos de consulta se derivan de sus **nombres**. La paginación, la ordenación, los filtros componibles y las proyecciones de lectura son ciudadanos de primera clase. No hay ningún adaptador escrito a mano ni SQL en el código de la aplicación.
 
-Este capítulo reconstruye la persistencia de Lumen sobre esa capa, exactamente como lo hace el ejemplo en ejecución: la entidad de SQLAlchemy, el repositorio con sus consultas derivadas y por especificación, `Page`/`Pageable`/`Sort`, las proyecciones para las vistas de lectura y la junta transaccional que mantiene íntegro el agregado `Wallet`. Todo lo que aparece aquí se ejecuta contra un fichero SQLite real con cero infraestructura externa: los 41 tests del ejemplo están en verde sobre él. Este capítulo se dirige a PyFly **v26.6.110**.
+Este capítulo reconstruye la persistencia de Lumen sobre esa capa, exactamente como lo hace el ejemplo en ejecución: la entidad de SQLAlchemy, el repositorio con sus consultas derivadas y por especificación, `Page`/`Pageable`/`Sort`, las proyecciones para las vistas de lectura y la junta transaccional que mantiene íntegro el agregado `Wallet`. Todo lo que aparece aquí se ejecuta contra un fichero SQLite real con cero infraestructura externa: los 43 tests del ejemplo pasan sobre él. Este capítulo se dirige a PyFly **v26.6.110**.
 
 Construiremos la capa de persistencia pieza a pieza, y en cada hito hay un recuadro **Ejecútalo** con el comando exacto que debes escribir y la salida que deberías ver. Si estás siguiendo el ejemplo Lumen, trabaja desde la raíz del proyecto (`samples/lumen`), donde viven `pyfly.yaml` y `pyproject.toml`; todos los comandos de abajo dan por hecho ese directorio.
 
@@ -46,7 +46,7 @@ Construiremos la capa de persistencia pieza a pieza, y en cada hito hay un recua
 
 ::: figure art/figures/05-repository.svg | Figura 5.1 — Tu código depende del repositorio; el framework suministra la implementación de SQLAlchemy que hay detrás.
 
-Un repositorio de PyFly es una clase que hereda del genérico `Repository[Entity, ID]` y va marcada con el estereotipo `@repository`. Esa es toda la declaración. A partir de los dos parámetros de tipo el framework aprende el **tipo de entidad** y el **tipo de la clave primaria**, y desde ahí proporciona una superficie completa de acceso a datos asíncrono —`save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `count`, `exists_by_id`, además de paginación y consultas por especificación— con la `AsyncSession` de la base de datos inyectada por ti.
+Un repositorio de PyFly es una clase que hereda del genérico `Repository[Entity, ID]` y va marcada con el estereotipo `@repository`. Esa es toda la declaración. A partir de los dos parámetros de tipo el framework aprende el **tipo de entidad** y el **tipo de la clave primaria**, y desde ahí proporciona una superficie completa de acceso a datos asíncrono —`save`, `find_by_id`, `find_all`, `delete`/`delete_by_id`, `count`, `exists_by_id`, además de paginación y consultas por especificación—, y cada llamada encuentra su sesión de base de datos en la unidad de trabajo en la que se ejecuta.
 
 Este es el patrón Repositorio tal como lo popularizó Spring Data, trasladado a un Python asíncrono idiomático. Tú escribes *qué* quieres (el método) y el framework escribe *cómo* (el SQL).
 
@@ -77,7 +77,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -92,11 +92,11 @@ class WalletEntity(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        UtcDateTime(), default=lambda: datetime.now(UTC)
     )
 :::
 
-La sintaxis `Mapped[T]` / `mapped_column(...)` es el estilo de SQLAlchemy 2.0: cada anotación de tipo dirige tanto el tipo del atributo de Python como el DDL de columna generado (la sentencia `CREATE TABLE`), de modo que cada columna tiene una única fuente de verdad. Como `WalletEntity` hereda de `Base`, importar este módulo registra la tabla `wallets` en `Base.metadata` —el registro de todas las tablas que conoce la base—, y el ciclo de vida del motor del framework la crea entonces al arrancar.
+La sintaxis `Mapped[T]` / `mapped_column(...)` es el estilo de SQLAlchemy 2.0: cada anotación de tipo dirige tanto el tipo del atributo de Python como el DDL de columna generado (la sentencia `CREATE TABLE`), de modo que cada columna tiene una única fuente de verdad. Como `WalletEntity` hereda de `Base`, importar este módulo registra la tabla `wallets` en `Base.metadata` —el registro de todas las tablas que conoce la base—, y el ciclo de vida del motor del framework la crea entonces al arrancar. `UtcDateTime` es el tipo de columna de PyFly para los instantes: guarda un `datetime` UTC con zona horaria en todos los backends (`TIMESTAMPTZ` en PostgreSQL, `DATETIME(6)` en MySQL y MariaDB), mientras que una columna `DateTime` normal en PostgreSQL no lleva zona horaria y rechaza el valor con zona que escribe el mapeador.
 
 !!! note "Qué acaba de pasar"
     Escribiste una clase, sin SQL. Los cinco atributos tipados se convirtieron en cinco columnas; `primary_key=True` marcó `id` como la clave; `index=True` en `owner_id` acelerará la consulta de "monederos propiedad de X" que construyes más adelante; `nullable=False` y `default=...` fijan las restricciones. Importar este módulo basta para que el framework sepa que la tabla existe: nunca llamas a `CREATE TABLE` tú mismo.
@@ -143,8 +143,9 @@ class WalletRepository(Repository[WalletEntity, str]):
 
     The @repository stereotype registers this as a DI bean. The
     framework reads the entity/PK types from the
-    Repository[WalletEntity, str] base and injects the shared
-    AsyncSession.
+    Repository[WalletEntity, str] base; every call joins the unit
+    of work of the @transactional method that makes it, or runs in
+    a short unit of its own.
     """
 
     # (query methods follow — see the next sections)
@@ -154,7 +155,7 @@ No hay `__init__`, ni SQL, ni clase adaptadora. Con solo esa declaración, cualq
 
 | Método                          | Devuelve            | Qué hace                                       |
 |---------------------------------|---------------------|------------------------------------------------|
-| `save(entity)`                  | `T`                 | Inserta o actualiza; **vuelca** (flush) + refresca |
+| `save(entity)`                  | `T`                 | Inserta una fila nueva o fusiona una existente |
 | `find_by_id(id)`                | `T \| None`         | Carga por clave primaria                       |
 | `find_all(**filters)`           | `list[T]`           | Todas las filas, filtros de igualdad opcionales |
 | `find_all(sort)`                | `list[T]`           | Todas las filas en un orden `Sort` dado        |
@@ -178,7 +179,7 @@ Eso es más que suficiente para la mayoría de las entidades. Lumen añade tres 
 
 ### Cómo conoce los tipos el framework
 
-Cuando escribes `Repository[WalletEntity, str]`, el hook `__init_subclass__` de la clase base inspecciona `__orig_bases__` en el momento de la definición de la clase y extrae el tipo de entidad (`WalletEntity`) y el tipo del id (`str`) de los parámetros genéricos. (`__init_subclass__` es un hook de Python que se ejecuta una vez, de forma automática, cuando se *define* una subclase, así que esto ocurre en tiempo de importación, antes de crear ningún objeto.) La `AsyncSession` —el manejador de conexión-y-transacción de la base de datos por el que pasa cada consulta— se suministra entonces como dependencia inyectada por la autoconfiguración relacional. No se pasa nada manualmente: los parámetros de tipo *son* el cableado.
+Cuando escribes `Repository[WalletEntity, str]`, el hook `__init_subclass__` de la clase base inspecciona `__orig_bases__` en el momento de la definición de la clase y extrae el tipo de entidad (`WalletEntity`) y el tipo del id (`str`) de los parámetros genéricos. (`__init_subclass__` es un hook de Python que se ejecuta una vez, de forma automática, cuando se *define* una subclase, así que esto ocurre en tiempo de importación, antes de crear ningún objeto.) El repositorio no guarda ninguna `AsyncSession` —el manejador de conexión-y-transacción de la base de datos por el que pasa cada consulta—. Cada llamada busca la unidad de trabajo ligada a la tarea en curso y usa su sesión o, fuera de una transacción, abre una unidad breve propia (la sección "Transacciones", más abajo, muestra qué significa eso para tus escrituras). No se pasa nada manualmente: los parámetros de tipo *son* el cableado.
 
 !!! note "Ejecútalo: confirma que el repositorio se cablea"
     La prueba más rápida de que la entidad y el repositorio están sanos es la batería de tests, que ejercita el repositorio contra un fichero SQLite real sin servidor. Desde la raíz del proyecto Lumen:
@@ -190,8 +191,8 @@ Cuando escribes `Repository[WalletEntity, str]`, el hook `__init_subclass__` de 
     Deberías ver pasar todos los tests del repositorio:
 
     ```
-    ......                                                            [100%]
-    6 passed in 0.30s
+    .....                                                             [100%]
+    5 passed in 0.30s
     ```
 
     Estos tests construyen el repositorio directamente y ejercitan `upsert`, `find_by_id`, `count`, la consulta derivada y la ruta de especificación: los mismos métodos que construye este capítulo. Si están en verde, las columnas de tu entidad y la declaración `Repository[WalletEntity, str]` son correctas.
@@ -536,15 +537,18 @@ class GetBalanceHandler(QueryHandler[GetBalance, BalanceDto | None]):
 
 ## Transacciones y la junta del agregado
 
-La superficie del repositorio es limpia, pero dos sutilezas honestas deciden si tus escrituras realmente sobreviven. Ambas provienen de cómo gestiona el framework la sesión, y Lumen maneja ambas de forma deliberada.
+La superficie del repositorio es limpia, pero tres sutilezas honestas deciden qué hacen tus escrituras: qué escrituras se confirman juntas, si una escritura inserta o actualiza, y qué pasa cuando dos peticiones cambian el mismo monedero a la vez. Lumen maneja las tres de forma deliberada.
 
-### save() vuelca (flush); no confirma (commit)
+### Una unidad de trabajo por comando
 
-Esto es lo más importante que hay que entender sobre la capa de datos. Hay dos verbos de base de datos fáciles de confundir. **Volcar** (flush) es enviar el SQL pendiente (el `INSERT`/`UPDATE`) a la base de datos para que sea visible a las lecturas posteriores de *esta* conexión, pero todavía dentro de una transacción abierta que puede deshacerse. **Confirmar** (commit) es hacer esos cambios permanentes y visibles para todos. Un flush sin commit se revierte cuando se cierra la sesión.
+Esto es lo más importante que hay que entender sobre la capa de datos. Hay dos verbos de base de datos fáciles de confundir. **Volcar** (flush) es enviar el SQL pendiente (el `INSERT`/`UPDATE`) a la base de datos para que sea visible a las lecturas posteriores de *esta* conexión, pero todavía dentro de una transacción abierta que puede deshacerse. **Confirmar** (commit) es hacer esos cambios permanentes y visibles para todos. Un flush sin commit se revierte cuando termina su transacción.
 
-El framework usa **una sola `AsyncSession` compartida**, y `Repository.save()` llama a `session.add()` seguido de `session.flush()` y `session.refresh()`: **vuelca**, haciendo la escritura visible *dentro* de la sesión actual, pero nunca **confirma**. Si nada confirma, la escritura se revierte cuando se cierra la sesión y el monedero no sobrevive a un reinicio. (Este es exactamente el problema del monedero que desaparece del recuadro **Ejecútalo** de la introducción.)
+Cada llamada al repositorio se ejecuta dentro de una **unidad de trabajo**. (Una *unidad de trabajo* es un lote de cambios de todo o nada: o bien cada escritura que contiene se confirma junta, o bien —si algo falla— ninguna lo hace.) El repositorio no guarda una sesión propia: cada llamada busca la unidad ligada a la tarea en curso, y de dónde sale esa unidad decide qué se confirma:
 
-El commit ocurre en el **límite de la unidad de trabajo**. (Una *unidad de trabajo* es un lote de cambios de todo o nada: o bien cada escritura que contiene se confirma junta, o bien —si algo falla— ninguna lo hace.) Declaras ese límite con `@transactional()`. Un manejador que escribe decora su `do_handle` con `@transactional()`, inyecta el `async_sessionmaker` —la factoría que entrega sesiones— como `self._session_factory`, y el decorador abre una unidad de trabajo, intercambia esa sesión transaccional en el repositorio durante la llamada, **confirma si tiene éxito** y revierte si falla:
+- **Fuera de una transacción**, la llamada abre una unidad breve propia. Una lectura (`find*`, `count*`, `exists*`, …) se ejecuta y termina; cualquier otro método —`save`, `upsert`, `delete`— vuelca y **confirma** antes de devolver. Una llamada, una confirmación.
+- **Dentro de `@transactional()`**, cada llamada se une a la unidad del método: `save` y `upsert` solo vuelcan, y la unidad confirma una sola vez, cuando el método devuelve, o revierte todas las escrituras cuando lanza una excepción.
+
+Un manejador de comandos es más de una llamada. El ingreso de Lumen carga el monedero, deja que el agregado compruebe el importe, guarda el nuevo saldo y publica los eventos; como confirmaciones separadas, un fallo a medio camino dejaría la mitad hecha. Por eso un manejador que escribe decora su `do_handle` con `@transactional()`. Los manejadores de Lumen además inyectan el `async_sessionmaker` —la factoría que entrega sesiones— como `self._session_factory`, que indica el origen de datos en el que se ejecuta la unidad (sin ese atributo, la unidad se ejecuta en el origen de datos por defecto de la aplicación, que en Lumen es la misma base de datos):
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listado 5.11 — Un manejador de escritura: @transactional() confirma la unidad de trabajo
 @command_handler
@@ -582,16 +586,19 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         return wallet_id
 :::
 
-`@transactional()` (importado de `pyfly.data.relational.sqlalchemy`) resuelve el `async_sessionmaker` desde `self._session_factory`, ejecuta el cuerpo dentro de un bloque `session.begin()` y confirma al final. Quita el decorador y el `upsert` solo volcaría: el monedero nunca llegaría al disco. Los manejadores de lectura anteriores de este capítulo no necesitan `@transactional`: una lectura no hace cambios que confirmar.
+`@transactional()` (importado de `pyfly.data.relational.sqlalchemy`) liga una nueva unidad de trabajo a la tarea en curso, en el origen de datos que hay detrás de `self._session_factory`; cada llamada al repositorio dentro del método se une a ella, y la unidad **confirma si tiene éxito** y revierte si falla. Quita el decorador y el monedero se sigue guardando —el `upsert` confirma en una unidad propia—, pero ya no forma un único paso de todo o nada con el resto del manejador. Los manejadores de lectura anteriores de este capítulo no necesitan `@transactional`: una lectura suelta se ejecuta en una unidad de lectura breve propia.
+
+!!! warning "Cambió en v26.09.08"
+    Hasta la v26.09.07 el repositorio compartía una sola sesión inyectada, y una llamada hecha fuera de `@transactional` solo volcaba: nadie la confirmaba, y la escritura desaparecía al parar la aplicación. Desde la v26.09.08 una llamada así confirma en su propia unidad. El código que contaba con que esas escrituras se descartaran, o con confirmar más tarde a mano una sesión compartida, debe envolver las llamadas en `@transactional` para que formen una sola unidad.
 
 !!! note "Qué acaba de pasar"
-    La regla en una línea: **las lecturas no necesitan nada; las escrituras necesitan `@transactional()`.** `save`/`upsert` solo *vuelcan*, así que un manejador de escritura debe ejecutarse dentro de una unidad de trabajo que confirme. El decorador hace tres cosas por ti: abre la transacción, entrega al repositorio la sesión correcta para la llamada y confirma (o revierte ante una excepción). Por eso el monedero recién abierto sobrevivió una vez activada la persistencia, y por eso quitar el decorador lo perdería silenciosamente.
+    La regla en una línea: **las lecturas no necesitan nada; una escritura que abarca varias llamadas necesita `@transactional()`.** Una llamada suelta al repositorio confirma por sí sola; el decorador convierte la carga, las comprobaciones, el guardado y los eventos en una sola unidad que se confirma —o se revierte— de una vez. Hace tres cosas por ti: abre la transacción, deja que cada llamada al repositorio dentro del método se una a ella y confirma al final (o revierte ante una excepción).
 
 ### upsert, no save, para un agregado que es dueño de su id
 
-Fíjate en que el manejador llama a `self._repository.upsert(...)`, no a `save(...)`. (*Upsert* es el verbo combinado para "insertar si es nuevo, actualizar si ya está presente": una sola llamada para ambos casos.) Esa es la segunda sutileza. El `save()` del framework emite `session.add()`, que SQLAlchemy trata como un **INSERT pendiente**. Pero el agregado `Wallet` genera su *propia* clave primaria por adelantado (`wlt-…`), así que para cuando un ingreso o una retirada persisten un monedero ya cargado, ya existe una fila con ese id, y un segundo `INSERT` sobre la misma clave primaria lanza `IntegrityError`.
+Fíjate en que el manejador llama a `self._repository.upsert(...)`, no a `save(...)`. (*Upsert* es el verbo combinado para "insertar si es nuevo, actualizar si ya está presente": una sola llamada para ambos casos.) Esa es la segunda sutileza. El agregado `Wallet` genera su *propia* clave primaria por adelantado (`wlt-…`), así que para cuando un ingreso o una retirada persisten un monedero ya cargado, ya existe una fila con ese id, y la escritura debe actualizarla en lugar de insertar una segunda fila con la misma clave.
 
-El arreglo es `session.merge`, que inserta cuando el id es nuevo y actualiza cuando ya existe. Lumen lo envuelve en un método de conveniencia `upsert`:
+Lumen deja clara esa intención con un método `upsert` construido sobre `session.merge`, que inserta cuando el id es nuevo y actualiza cuando ya existe:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listado 5.12 — upsert: una sola llamada tanto para INSERT como para UPDATE
 @repository
@@ -604,7 +611,8 @@ class WalletRepository(Repository[WalletEntity, str]):
         aggregate's id persists whether or not a row already exists —
         the aggregate owns its primary key, so identity is never
         ambiguous. Flushes so the write is visible in the current
-        unit of work; the surrounding @transactional commits it.
+        unit of work; the surrounding @transactional commits it
+        (outside one, the call's own unit does).
         """
         session = self._require_session()
         merged = await session.merge(entity)
@@ -612,10 +620,64 @@ class WalletRepository(Repository[WalletEntity, str]):
         return merged
 :::
 
-`_require_session()` es el accesor heredado que devuelve la sesión activa (la transaccional, una vez que `@transactional` la ha intercambiado). `merge` se basa en la clave primaria, así que tanto la primera escritura (apertura) como toda escritura posterior (ingreso, retirada) toman la misma ruta de código sin `IntegrityError`. Para entidades cuyos ids genera la base de datos, `save` es la opción natural; para un agregado que es dueño de su id, lo es `upsert`.
+`_require_session()` es el accesor heredado que devuelve la sesión de la unidad en la que se ejecuta la llamada: la unidad del manejador dentro de `@transactional`, o la unidad breve de la propia llamada fuera de él. `merge` se basa en la clave primaria, así que tanto la primera escritura (apertura) como toda escritura posterior (ingreso, retirada) toman la misma ruta de código. Desde la v26.09.08 el `save()` heredado sigue el `save` de Spring Data y haría lo mismo: una entidad nueva se inserta, y una cuya clave ya está fijada se fusiona con su fila, así que un segundo guardado del mismo id la actualiza (usa la instancia que devuelve `save()`). Hasta la v26.09.07 `save()` emitía siempre un `INSERT`, y un segundo guardado de la misma clave lanzaba `IntegrityError`: por eso Lumen tiene `upsert`. Se queda como la forma explícita de expresar la intención.
 
 !!! note "Qué acaba de pasar"
     Dos preguntas deciden cada escritura: *¿se confirmó esta fila?* y *¿esta escritura insertó o actualizó?* `@transactional()` responde a la primera (confirma la unidad de trabajo); `upsert`/`merge` responde a la segunda (una sola ruta de código tanto para INSERT como para UPDATE, porque el agregado es dueño de su id). Acierta en ambas y un monedero que abres, ingresas en él y luego lees de vuelta tras un reinicio devuelve el saldo correcto, que es exactamente lo que afirma el test del repositorio de más abajo contra un motor *recién creado*.
+
+### Dos retiradas a la vez
+
+La tercera sutileza es la concurrencia. El agregado `Wallet` rechaza un descubierto, pero solo del saldo con el que se cargó. Dos retiradas de 60 de un monedero con 100 pueden cargar 100 cada una, pasar cada una la comprobación y guardar 40 cada una: las dos tienen éxito, y los mismos fondos se gastan dos veces. Una unidad de trabajo por sí sola no lo impide; con el nivel de aislamiento por defecto las dos unidades confirman. Lumen cierra el hueco con un **bloqueo pesimista**: la retirada (y el ingreso) leen la fila con `LockMode.PESSIMISTIC_WRITE` dentro de su unidad `@transactional`:
+
+::: listing lumen/core/services/wallets/withdraw_funds_handler.py | Listado 5.12a — Bloquea la fila y deja que el agregado compruebe el saldo
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
+
+
+@command_handler
+@service
+class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
+
+    @transactional()
+    async def do_handle(  # type: ignore[override]
+        self, command: WithdrawFunds
+    ) -> int:
+        # Lock the row until the unit ends: a concurrent withdrawal
+        # waits here.
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
+        if entity is None:
+            raise AggregateNotFound("Wallet", command.wallet_id)
+
+        wallet = to_aggregate(entity)
+        wallet.withdraw(
+            Money(amount=command.amount, currency=wallet.currency)
+        )
+        await self._repository.upsert(to_entity(wallet))
+
+        await publish_domain_events(
+            self._events, wallet.clear_events()
+        )
+        return wallet.balance.amount
+:::
+
+En PostgreSQL, MySQL y MariaDB la lectura es `SELECT … FOR UPDATE`: una segunda retirada del mismo monedero espera en su lectura hasta que termina la primera unidad, y entonces ve el saldo que dejó esa unidad. SQLite no tiene bloqueos de fila; allí una unidad de escritura retiene el único bloqueo de escritura de la base de datos desde su `BEGIN IMMEDIATE`, con el mismo efecto. Un bloqueo necesita una transacción de lectura-escritura: fuera de `@transactional` (o dentro de `@transactional(read_only=True)`) `find_by_id(..., lock=...)` lanza `IllegalTransactionStateError`.
+
+Hay otras dos formas de mantener un invariante bajo concurrencia. Una **actualización con guarda** comprueba y cambia en una sola sentencia (`UPDATE … SET balance_minor = balance_minor - :amount WHERE id = :id AND balance_minor >= :amount`) y no necesita transacción a su alrededor; la usa la saga de transferencias de Lumen (Capítulo 12). El **bloqueo optimista** (`VersionedMixin`) añade una columna de versión y hace fallar la confirmación perdedora con `OptimisticLockingFailureException` (HTTP 409). Todas las rutas que escriben la fila deben usar el mismo enfoque: un escritor que se salta el bloqueo aún puede sobrescribirla.
+
+!!! note "Ejecútalo: dos retiradas en carrera"
+    El ejemplo incluye un test que arranca la aplicación y lanza en carrera dos retiradas de 60 de un monedero con 100, a través del bus de comandos y a través de la saga de transferencias. Desde la raíz del proyecto Lumen:
+
+    ```bash
+    uv run --extra dev pytest tests/test_concurrent_balance_changes.py -q
+    ```
+
+    ```
+    .s.s                                                              [100%]
+    2 passed, 2 skipped in 0.30s
+    ```
+
+    Cada carrera deja pasar exactamente una retirada y un saldo de 40. Los dos casos omitidos son las mismas carreras sobre PostgreSQL; se ejecutan cuando `LUMEN_TEST_POSTGRES_URL` indica un servidor en el que los tests pueden crear bases de datos.
 
 ### La junta mapeadora agregado ↔ entidad
 
@@ -670,9 +732,9 @@ pyfly:
       ddl-auto: create
 :::
 
-`enabled: true` activa la autoconfiguración relacional, que construye el motor asíncrono de SQLAlchemy y el `async_sessionmaker`, registra los beans `AsyncSession` y `session_factory` que inyectan el repositorio y los manejadores, e instala el `RepositoryBeanPostProcessor` que compila tus esbozos de consulta derivada. `url` es una cadena de conexión estándar de SQLAlchemy: SQLite vía `aiosqlite` aquí para un desarrollo de cero infraestructura, `postgresql+asyncpg://…` en producción. `ddl-auto: create` ejecuta `Base.metadata.create_all` al arrancar, así que la tabla `wallets` (descubierta porque `WalletEntity` hereda de `Base`) se construye automáticamente la primera vez que arranca la aplicación.
+`enabled: true` activa la autoconfiguración relacional, que construye el motor asíncrono de SQLAlchemy y el `async_sessionmaker`, registra el `async_sessionmaker` que inyectan los manejadores, e instala el `RepositoryBeanPostProcessor` que compila tus esbozos de consulta derivada. `url` es una cadena de conexión estándar de SQLAlchemy: SQLite vía `aiosqlite` aquí para un desarrollo de cero infraestructura, `postgresql+asyncpg://…` en producción. `ddl-auto: create` ejecuta `Base.metadata.create_all` al arrancar, así que la tabla `wallets` (descubierta porque `WalletEntity` hereda de `Base`) se construye automáticamente la primera vez que arranca la aplicación. En SQLite `create` es además el valor por defecto; Lumen lo escribe explícitamente.
 
-La huella de dependencias es minúscula: `pyfly[data-relational]` arrastra `sqlalchemy[asyncio]` y `aiosqlite`, y nada más. Sin servidor de base de datos, sin instalación de drivers, que es exactamente por lo que el ejemplo se ejecuta en cualquier sitio.
+La huella de dependencias es minúscula: `pyfly[data-relational]` arrastra `sqlalchemy[asyncio]`, `alembic` y `aiosqlite`, y nada más. Sin servidor de base de datos, sin instalación de drivers, que es exactamente por lo que el ejemplo se ejecuta en cualquier sitio.
 
 !!! note "Ejecútalo: el monedero que desaparece, arreglado"
     Vuelve a ejecutar el experimento de la introducción, ahora con la persistencia activada. Abre un monedero, detén la aplicación, arráncala de nuevo y lee el saldo de vuelta:
@@ -700,7 +762,7 @@ La huella de dependencias es minúscula: `pyfly[data-relational]` arrastra `sqla
     Mira en el directorio del proyecto y verás el fichero SQLite `lumen.db` que el motor creó en el primer arranque, con la tabla `wallets` dentro. Todo el capítulo se reduce a esto: el monedero sobrevive al proceso.
 
 !!! tip "Ciclo de vida del esquema en producción"
-    `ddl-auto: create` es lo correcto para desarrollo y ejemplos: crea las tablas que faltan y deja en paz las existentes. En producción fija `ddl-auto: none` y gestiona el esquema con una herramienta de migración (Alembic), que genera scripts versionados a partir del diff entre `Base.metadata` y la base de datos en vivo. El código de la aplicación no cambia: solo el ajuste `ddl-auto` y la canalización de migración.
+    `ddl-auto: create` es lo correcto para desarrollo y ejemplos: crea las tablas que faltan y deja en paz las existentes (una columna nueva necesita una migración). Si no se fija, `ddl-auto` vale `create` solo para una base de datos embebida como SQLite y `none` en un servidor de base de datos, como en Spring Boot, así que apuntar `url` a PostgreSQL no crea el esquema por ti. En producción gestiónalo con migraciones de Alembic (`pyfly db migrate` y `pyfly db upgrade`, o `pyfly.data.relational.migrations.enabled: true` para aplicarlas al arrancar), y fija `ddl-auto: validate` para que el arranque falle cuando falte una tabla o una columna que necesita un modelo. `update` no es una estrategia: con él, o con cualquier valor desconocido, el arranque falla nombrando la clave, y lo mismo ocurre con `create` junto a las migraciones de arranque. El código de la aplicación no cambia: solo el ajuste `ddl-auto` y la canalización de migración.
 
 ---
 
@@ -759,7 +821,7 @@ async def test_specification_find_rich_paged_and_sorted(
 
 El primer test ejercita la consulta derivada: tres monederos de entrada, dos propietarios de salida, y `find_by_owner_id("alice")` devuelve exactamente los dos: prueba de que el framework compiló `WHERE owner_id = :owner_id` a partir del nombre del método. El segundo ejercita la ruta de `Specification`: afirma el filtro de umbral (`total == 2`, solo mid y rich cumplen `>= 1000`), la ordenación de más reciente primero (`wlt-rich` es el más reciente de los dos), los metadatos de la página (`total_pages == 2`, `has_next`) y que el mismo predicado `balance_at_least` también se ejecuta sin paginar a través de `find_all_by_spec`.
 
-El fixture refleja lo que hace el framework al arrancar —construir el motor, ejecutar `Base.metadata.create_all` dentro de un bloque `begin()` para que el DDL se confirme, devolver una factoría de sesiones—, de modo que el test ejercita la misma tabla exacta que crea la aplicación. Otros tests del mismo fichero prueban que `upsert` hace un ida y vuelta a través de un motor *recién creado* (durabilidad a través de una reconexión) y que `find_all(pageable)` cuenta y corta correctamente una tabla de cinco monederos.
+El fixture refleja lo que hace el framework al arrancar —construir el motor, ejecutar `Base.metadata.create_all` dentro de un bloque `begin()` para que el DDL se confirme, devolver una factoría de sesiones—, de modo que el test ejercita la misma tabla exacta que crea la aplicación. Los tests entregan al repositorio una sesión propia (su *modo manual*): la usa tal cual y el test la confirma; la aplicación arrancada construye el repositorio sin ella, como se describió antes. Otros tests del mismo fichero prueban que `upsert` hace un ida y vuelta a través de un motor *recién creado* (durabilidad a través de una reconexión) y que `find_all(pageable)` cuenta y corta correctamente una tabla de cinco monederos.
 
 !!! note "Ejecútalo: demuestra toda la capa en verde"
     Ejecuta el fichero de test del repositorio de principio a fin. Desde la raíz del proyecto Lumen:
@@ -776,13 +838,13 @@ El fixture refleja lo que hace el framework al arrancar —construir el motor, e
     tests/test_sql_wallet_repository.py::test_derived_find_by_owner_id PASSED
     tests/test_sql_wallet_repository.py::test_specification_find_rich_paged_and_sorted PASSED
     tests/test_sql_wallet_repository.py::test_find_all_pageable_counts_and_pages PASSED
-    6 passed in 0.31s
+    5 passed in 0.31s
     ```
 
     Ejecuta toda la batería (`uv run --extra dev pytest -q`) para confirmar que el resto de Lumen sigue pasando junto a la capa de persistencia.
 
 !!! spring "Equivalencia con Spring"
-    Construir el repositorio directamente contra una base de datos real en el mismo proceso refleja el slice `@DataJpaTest` de Spring, que arranca una base de datos H2 y la capa JPA de forma aislada para probar repositorios sin el contexto completo. `Base.metadata.create_all` es el análogo de `spring.jpa.hibernate.ddl-auto=create`, y ejecutar `RepositoryBeanPostProcessor` a mano hace las veces del proxy de Spring que materializa las consultas derivadas sobre un `JpaRepository` al arrancar.
+    Construir el repositorio directamente contra una base de datos real en el mismo proceso refleja el slice `@DataJpaTest` de Spring, que arranca una base de datos H2 y la capa JPA de forma aislada para probar repositorios sin el contexto completo. `Base.metadata.create_all` es el análogo de `spring.jpa.hibernate.ddl-auto=create`, y ejecutar `RepositoryBeanPostProcessor` a mano hace las veces del proxy de Spring que materializa las consultas derivadas sobre un `JpaRepository` al arrancar. PyFly tiene además un slice `@DataTest` cuyos tests revierten todas sus unidades de trabajo (Capítulo 16).
 
 ---
 
@@ -796,7 +858,7 @@ Lumen ahora persiste los monederos a través de la capa de repositorios al estil
 - **Paginación** — `find_all(pageable)` devolviendo un `Page[T]` con `total` / `total_pages` / `has_next`, mapeado a DTOs con `Page.map`, expuesto en `GET /api/v1/wallets`.
 - **Especificación** — `balance_at_least(n)` compuesta con `& | ~` y ejecutada vía `find_all_by_spec_paged`, expuesta en `GET /api/v1/wallets/rich`.
 - **Proyección** — `@projection BalanceView`, una dataclass concreta sobre la que el `Mapper` proyecta las filas para la vista de lectura del saldo.
-- **Transacciones** — manejadores de escritura decorados con `@transactional()` (porque `save`/`upsert` solo *vuelcan*), usando `upsert`/`session.merge` para un agregado que es dueño de su id, con el mapeador agregado ↔ entidad manteniendo puro el modelo de dominio.
+- **Transacciones** — una llamada suelta al repositorio confirma en una unidad propia; los manejadores de escritura se decoran con `@transactional()` para que la carga, las comprobaciones, el guardado y los eventos se confirmen juntos; `upsert`/`session.merge` persiste un agregado que es dueño de su id; `find_by_id(..., lock=LockMode.PESSIMISTIC_WRITE)` mantiene `balance >= 0` cuando compiten retiradas; y el mapeador agregado ↔ entidad mantiene puro el modelo de dominio.
 
 Escribiste interfaces y esbozos; el framework escribió el SQL. Esa es la recompensa del patrón Repositorio.
 
@@ -808,6 +870,6 @@ Escribiste interfaces y esbozos; el framework escribió el SQL. Esa es la recomp
 
 2. **Compón dos especificaciones.** Define una segunda factoría `in_currency(code: str) -> Specification[WalletEntity]` (predicado `currency == code`), y luego añade un método de repositorio que ejecute `balance_at_least(min_minor) & in_currency(code)` a través de `find_all_by_spec_paged`. Prueba que devuelve solo los monederos ricos en la moneda elegida, de más reciente primero.
 
-3. **Sigue el rastro del límite transaccional.** Cambia temporalmente `OpenWalletHandler.do_handle` para que llame a `self._repository.save(to_entity(wallet))` en lugar de `upsert`, abre el mismo monedero dos veces en un test y observa el `IntegrityError`. Restaura `upsert`. Luego quita el decorador `@transactional()`, abre un monedero y afirma que **no** sobrevive a una reconexión con motor recién creado, demostrando que sin la confirmación de la unidad de trabajo, el `flush` por sí solo no es durabilidad.
+3. **Sigue el rastro del límite transaccional.** En un test que arranque la aplicación (como hace `tests/test_app_context_integration.py`), haz que `WithdrawFundsHandler.do_handle` lance una excepción justo después del `upsert`, envía una retirada y afirma que el saldo no se movió: la unidad revirtió la escritura. Luego quita el decorador `@transactional()` (y el argumento `lock=`, que necesita una transacción) y repite: el `upsert` confirma ahora en su propia unidad antes del fallo, y el saldo se mueve. Esa es la diferencia entre una unidad de trabajo y una confirmación por llamada.
 
 4. **Proyecta una vista diferente.** Añade una dataclass `@projection OwnerView` con solo `id` y `owner_id`, regístrala en un `Mapper` y escribe un test sin manejador que cargue un `WalletEntity` y lo proyecte, verificando que solo se leen las dos columnas declaradas y que se ignora el resto de la fila.

@@ -429,7 +429,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.cache import CacheAdapter, cache_put
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -460,7 +460,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def _deposit(self, command: DepositFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -479,6 +481,9 @@ ejecuta dentro de `@transactional()`, de modo que la secuencia `find_by_id →
 to_aggregate → mutate → upsert` se confirma como una unidad de trabajo antes de
 que se refresque la caché. La siguiente lectura `@cacheable` en
 `GetBalanceHandler` recoge este valor fresco sin tocar la base de datos.
+
+!!! note "Las escrituras en caché esperan al commit"
+    Desde la v26.09.08 los decoradores de caché pasan por `TransactionAwareCache`, la versión de PyFly del `TransactionAwareCacheDecorator` de Spring: un `put`, `evict` o `clear` hecho dentro de una unidad de trabajo se ejecuta cuando esa unidad ha hecho commit, y se descarta cuando se revierte, así que ninguna petición recibe un valor que nunca se confirmó. Aquí `@cache_put` envuelve todo el método `@transactional`, de modo que la unidad ya ha hecho commit cuando se ejecuta el `put`; envuelto dentro de una transacción mayor, el `put` esperaría al commit de esa transacción. Las lecturas y `put_if_absent` se ejecutan de inmediato, fuera de la unidad de quien llama.
 
 !!! note "La clave de caché debe coincidir"
     La clave `@cache_put` `"wallet:balance:{command.wallet_id}"` debe coincidir con la clave `@cacheable` `"wallet:balance:{query.wallet_id}"` cuando ambas resuelven al mismo id de monedero. Claves que no coinciden significan que el depósito escribe en una ranura de caché distinta de la que consulta la lectura de saldo — la obsolescencia regresa.

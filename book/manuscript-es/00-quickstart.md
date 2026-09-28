@@ -431,7 +431,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -443,14 +443,16 @@ class WalletEntity(Base):
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     balance_minor: Mapped[int] = mapped_column(nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=lambda: datetime.now(UTC)
+    )
 :::
 
 Como la clase es subclase de `Base`, importarla registra la tabla `wallets`; con `ddl-auto: create` el framework crea esa tabla al arrancar.
 
 ### El repositorio
 
-En lugar de escribir SQL a mano, creas una subclase del `Repository[Entity, IdType]` genérico del framework. Esa única declaración le dice al framework el tipo de la entidad y el tipo de la clave primaria, y a cambio obtienes gratis toda la superficie del repositorio asíncrono: `save`, `find_by_id`, `find_all`, `count`, `delete`, paginación y más, con la sesión de base de datos inyectada por ti.
+En lugar de escribir SQL a mano, creas una subclase del `Repository[Entity, IdType]` genérico del framework. Esa única declaración le dice al framework el tipo de la entidad y el tipo de la clave primaria, y a cambio obtienes gratis toda la superficie del repositorio asíncrono: `save`, `find_by_id`, `find_all`, `count`, `delete`, paginación y más. Cada llamada se ejecuta en la unidad de trabajo del código que la hace, o en una breve propia que confirma la escritura antes de devolver.
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listado 0.8 — Un repositorio al estilo de Spring Data
 from __future__ import annotations
@@ -519,7 +521,7 @@ class OpenWallet(Command[str]):
 
 ### El manejador
 
-El manejador es donde ocurre el trabajo: generar un id, crear el agregado `Wallet`, persistirlo a través del repositorio y luego drenar y publicar los eventos del agregado. Se ejecuta dentro de `@transactional()`, que abre una unidad de trabajo, confirma en caso de éxito y revierte en caso de fallo. El repositorio y el publicador de eventos los inyecta el contenedor —tú solo los declaras en `__init__`—.
+El manejador es donde ocurre el trabajo: generar un id, crear el agregado `Wallet`, persistirlo a través del repositorio y luego drenar y publicar los eventos del agregado. Se ejecuta dentro de `@transactional()`, que abre una unidad de trabajo a la que se une cada llamada al repositorio del método, confirma en caso de éxito y revierte en caso de fallo. El repositorio y el publicador de eventos los inyecta el contenedor —tú solo los declaras en `__init__`—.
 
 ::: listing lumen/core/services/wallets/open_wallet_handler.py | Listado 0.10 — El manejador de OpenWallet
 from __future__ import annotations

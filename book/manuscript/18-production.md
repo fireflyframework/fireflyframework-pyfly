@@ -1039,8 +1039,10 @@ as a list you can paste into a pull-request template.
 - [ ] Structured logging is enabled (`pyfly[observability]`) and
       log level is `INFO` in production, not `DEBUG`.
 - [ ] OpenTelemetry exporter is pointed at the production collector.
-- [ ] Database migrations (`pyfly db upgrade`) run in a pre-deploy
-      step, not at application startup.
+- [ ] Database migrations run before traffic arrives: `pyfly db upgrade`
+      in a pre-deploy step, or `pyfly.data.relational.migrations.enabled:
+      true`, which serializes them across instances at startup.
+      `ddl-auto` is `none` (its default on a database server) or `validate`.
 - [ ] The generated OpenAPI spec is versioned in CI and downstream
       SDK packages pin to a specific spec revision.
 - [ ] `pyfly doctor` passes on every developer machine and CI runner.

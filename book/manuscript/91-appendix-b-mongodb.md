@@ -2,12 +2,14 @@
 
 # MongoDB & Document Data {.chtitle}
 
-PyFly's document data layer wraps MongoDB through **Beanie ODM** and **Motor** (the
-async MongoDB driver). The API mirrors the relational adapter deliberately — the same
+PyFly's document data layer wraps MongoDB through **Beanie ODM** and PyMongo's
+asynchronous API (**`AsyncMongoClient`**). The API mirrors the relational adapter deliberately — the same
 `MongoRepository[T, ID]` base class, the same derived query naming convention, the same
 `Page`/`Pageable`/`Sort` vocabulary — so switching between relational and document
 storage touches only the document class definition and the repository base class, not
-the service layer.
+the service layer. It runs on the same unit-of-work model, too: `@transactional`, the
+rollback rules and the propagations work the same way (except `NESTED`: MongoDB has no
+savepoints).
 
 All concrete types live in `pyfly.data.document.mongodb`. Shared types (`Page`,
 `Pageable`, `Sort`) come from `pyfly.data`.
@@ -42,8 +44,11 @@ pyfly:
 | `pyfly.data.document.enabled` | bool | `false` | Enable the MongoDB adapter |
 | `pyfly.data.document.uri` | str | `mongodb://localhost:27017` | Connection URI |
 | `pyfly.data.document.database` | str | `pyfly` | Database name |
-| `pyfly.data.document.min_pool_size` | int | `0` | Motor pool minimum |
-| `pyfly.data.document.max_pool_size` | int | `100` | Motor pool maximum |
+| `pyfly.data.document.min_pool_size` | int | `0` | Connection pool minimum (`minPoolSize`) |
+| `pyfly.data.document.max_pool_size` | int | `100` | Connection pool maximum (`maxPoolSize`) |
+| `pyfly.data.document.datasource` | str | `document` | Datasource name of the document units of work |
+| `pyfly.data.document.tz_aware` | bool | `true` | Datetimes come back as aware UTC values |
+| `pyfly.data.document.transaction.default` | bool | unset | Whether the document datasource is the default of `@transactional` (by default, when the relational layer is off) |
 
 Every key has a matching environment variable: replace dots with underscores and
 uppercase — e.g. `PYFLY_DATA_DOCUMENT_URI`. For MongoDB Atlas or a replica set:
@@ -208,7 +213,7 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 
 | Method | Return type | Description |
 |---|---|---|
-| `save(entity)` | `T` | Insert or update via Beanie `entity.save()` |
+| `save(entity)` | `T` | Insert a new document (`insert_one`) or update a stored one, in one command |
 | `find_by_id(id)` | `T \| None` | Find by primary key |
 | `find_all(**filters)` | `list[T]` | Find all; keyword args become equality filters |
 | `find_all(sort)` | `list[T]` | Fetch all documents, ordered by a `Sort` |
@@ -218,10 +223,11 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 | `delete_by_id(id)` | `None` | Delete by primary key; no-op if not found |
 | `count()` | `int` | Count all documents in the collection |
 | `exists_by_id(id)` | `bool` | True if a document with this ID exists |
-| `save_all(entities)` | `list[T]` | Bulk insert via `insert_many` |
+| `save_all(entities)` | `list[T]` | One ordered bulk write for new and stored documents (atomic on a replica set) |
 | `find_all_by_id(ids)` | `list[T]` | Find all with IDs in a list |
 | `delete_all_by_id(ids)` | `None` | Delete all with IDs in a list |
 | `delete_all(entities=None)` | `None` | Delete the given documents; with no args, truncate the entire collection |
+| `delete_all_in_batch(entities=None)` | `None` | Bulk delete that bypasses delete event actions |
 | `find_all_by_spec(spec)` | `list[T]` | Find matching a `MongoSpecification` |
 | `find_all_by_spec_paged(spec, pageable)` | `Page[T]` | Find matching a `MongoSpecification` with pagination and sort |
 
@@ -231,6 +237,8 @@ class ProductRepository(MongoRepository[ProductDocument, PydanticObjectId]):
 # {"status": "PENDING", "customer_id": "abc"}
 orders = await repo.find_all(status="PENDING", customer_id="abc")
 ```
+
+The repository never holds a session. Inside a unit of work of its datasource (`@transactional`, a message delivery) every call passes the unit's session to the driver, so its writes are part of the transaction. Outside one, each call runs in a short unit of its own: a read without a transaction, a write that sends one command (`save`, `delete`) on its own, and a method that writes more than once (`save_all`) in a transaction that commits at the end of the call. A failed save gives the documents back the id and revision they had, so the same objects can be saved again; a new document is inserted with `insert_one`, so move logic from an `insert`/`save` override into `@before_event`/`@after_event` actions.
 
 ---
 
@@ -249,19 +257,19 @@ Data: `{prefix}_by_{predicates}[_order_by_{fields}]`.
 | Method suffix | MongoDB filter | Args consumed |
 |---|---|---|
 | *(none, default)* | `{field: value}` | 1 |
-| `_not` | `{field: {"$ne": value}}` | 1 |
+| `_not` | `{field: {"$nin": [value, None]}}` (null is never a match, as on SQL) | 1 |
 | `_greater_than` | `{field: {"$gt": value}}` | 1 |
 | `_greater_than_equal` | `{field: {"$gte": value}}` | 1 |
 | `_less_than` | `{field: {"$lt": value}}` | 1 |
 | `_less_than_equal` | `{field: {"$lte": value}}` | 1 |
 | `_between` | `{field: {"$gte": low, "$lte": high}}` | 2 |
-| `_like` | `{field: {"$regex": pattern}}` (SQL % → .*) | 1 |
-| `_containing` | `{field: {"$regex": ".*val.*", "$options": "i"}}` | 1 |
+| `_like` | `{field: {"$regex": "^...$"}}` (SQL `LIKE`: anchored, case-sensitive) | 1 |
+| `_containing` | `{field: {"$regex": "<escaped value>"}}` (case-sensitive) | 1 |
 | `_in` | `{field: {"$in": values}}` | 1 (list) |
 | `_is_null` | `{field: None}` | 0 |
 | `_is_not_null` | `{field: {"$ne": None}}` | 0 |
 
-Ordering: append `_order_by_{field}_{asc|desc}`. Multiple sort fields are chained:
+Add `_ignore_case` after a predicate for a case-insensitive match. (Before v26.09.08, `_containing` ignored case and `_like` was unanchored.) Ordering: append `_order_by_{field}_{asc|desc}`. Multiple sort fields are chained:
 
 ```python
 # sort=[("name", ASC), ("created_at", DESC)]
@@ -351,8 +359,9 @@ Pageable is 1-based, so page `1` is the first page.
 
 ## Transaction management
 
-Multi-document transactions require a **replica set** deployment. Standalone MongoDB
-does not support them.
+Multi-document transactions require a **replica set** deployment — a single-node one is
+enough. Standalone MongoDB does not support them: there `@transactional` raises
+`IllegalTransactionStateError` instead of running without a transaction.
 
 ::: listing pyfly.yaml | Listing B.9 — Single-node replica set for local development
 # Start MongoDB: mongod --replSet rs0 --bind_ip localhost
@@ -365,42 +374,60 @@ pyfly:
       database: myapp
 :::
 
-The `@mongo_transactional` decorator wraps an async function in a Motor session and
-transaction. The function's Beanie operations participate automatically:
+MongoDB uses the **same** `@transactional` as the relational adapter. Its
+`MongoTransactionManager` binds a pymongo `ClientSession` to the running task, and every
+repository call inside the method passes it to the driver:
 
-::: listing billing/transfer.py | Listing B.10 — Atomic fund transfer with @mongo_transactional
-from motor.motor_asyncio import AsyncIOMotorClient
-from pyfly.data.document.mongodb import mongo_transactional
+::: listing billing/transfer.py | Listing B.10 — Atomic fund transfer with @transactional
+from pyfly.container import service
+from pyfly.data import transactional
 
-from billing.account_document import AccountDocument
+from billing.account_repository import AccountRepository
 
 
-def make_transfer_fn(client: AsyncIOMotorClient):
-    @mongo_transactional(client)
+@service
+class TransferService:
+    def __init__(self, accounts: AccountRepository) -> None:
+        self._accounts = accounts
+
+    @transactional(datasource="document")
     async def transfer(
-        from_id: str, to_id: str, amount: float
+        self, from_id: str, to_id: str, amount: float
     ) -> None:
-        src = await AccountDocument.get(from_id)
-        dst = await AccountDocument.get(to_id)
+        src = await self._accounts.find_by_id(from_id)
+        dst = await self._accounts.find_by_id(to_id)
         if src is None or dst is None or src.balance < amount:
             raise ValueError("Invalid transfer")
         src.balance -= amount
         dst.balance += amount
-        await src.save()
-        await dst.save()
-    return transfer
+        await self._accounts.save(src)
+        await self._accounts.save(dst)  # a failure here undoes the debit
 :::
 
-On success the transaction commits; on any exception it aborts and re-raises. Unlike
-the relational `@reactive_transactional`, the Motor session is not injected as an
-argument — Beanie picks it up through the Motor context.
+On success the transaction commits; on any exception it aborts and re-raises. `datasource="document"`
+names the document datasource; in an application without a relational layer it is the default,
+and a bare `@transactional` finds it. A service with both a relational `_session_factory` and a
+`_motor_client` must name its datasource, or the call raises `IllegalTransactionStateError`. The
+rest follows the relational rules: `REQUIRES_NEW` suspends the unit, `NESTED` raises
+`NestedTransactionNotSupportedError`, only `Isolation.DEFAULT` is accepted, a caught failure of a
+participant makes the commit raise `UnexpectedRollbackError`, and a commit whose outcome the driver
+cannot know raises `CommitOutcomeUnknownError`. Code that calls Beanie or pymongo directly passes
+the session on: a `session` parameter receives it, and `current_session()` returns it.
 
-The `motor_client` bean is registered automatically by `DocumentAutoConfiguration`
-when the adapter is enabled. Inject it into your service via the DI container.
+The transactional outbox runs on MongoDB as well: with `pyfly.eda.outbox.enabled: true`, a
+MongoDB-only application appends its events to `pyfly_outbox_*` collections in the unit's own
+transaction (`pyfly.eda.outbox.store: mongo`, which `auto` picks there).
 
 !!! warning "Replica set required"
-    `@mongo_transactional` will raise an error against a standalone MongoDB instance.
-    Use the `?replicaSet=rs0` URI fragment (see Listing B.9) even for local dev.
+    `@transactional` raises `IllegalTransactionStateError` against a standalone MongoDB instance.
+    Use the `?replicaSet=rs0` URI fragment (see Listing B.9) even for local dev. In a MongoDB-only
+    application on a standalone server, also set `pyfly.messaging.listener.transactional: false`:
+    each message delivery would otherwise open a document unit and fail.
+
+!!! note "Motor is gone"
+    Since v26.09.08 only PyMongo's `AsyncMongoClient` is accepted: the transaction manager refuses
+    a Motor or mongomock client with `TypeError`. `mongo_transactional` still imports, as a
+    deprecated alias of `@transactional`.
 
 ---
 
@@ -411,18 +438,21 @@ when the adapter is enabled. Inject it into your service via the DI container.
 1. `beanie` is importable (`@conditional_on_class("beanie")`), and
 2. `pyfly.data.document.enabled` is `"true"` in config.
 
-It registers three beans automatically:
+It registers these beans automatically:
 
 | Bean | Type | Role |
 |---|---|---|
-| `motor_client` | `AsyncIOMotorClient` | Async MongoDB connection pool |
+| `mongo_client` | `AsyncMongoClient` | The client and its connection pool (your own singleton `AsyncMongoClient` bean replaces it) |
 | `mongo_post_processor` | `MongoRepositoryBeanPostProcessor` | Compiles derived query stubs |
 | `odm_initializer` | `BeanieInitializer` | Calls `init_beanie()` at startup |
+| `mongo_transaction_manager` | `MongoTransactionManager` | Runs the document units of work |
+| `mongo_health_indicator` | `MongoHealthIndicator` | Readiness check (`ping`, 2 s) |
 
-`BeanieInitializer.start()` discovers `BaseDocument` subclasses in two passes: first
-from every registered `MongoRepository._entity_type` (set by `__init_subclass__`),
-then directly registered `BaseDocument` subclasses. This means defining a repository
-is sufficient — you do not need to register document models separately.
+`BeanieInitializer` discovers the document classes itself: the document of every
+`MongoRepository` bean, every Beanie document registered in the container, the classes
+or modules listed in `pyfly.data.document.models`, and the documents their `Link` fields
+name. This means defining a repository is sufficient — you do not need to register
+document models separately.
 
 Source files: `src/pyfly/data/document/auto_configuration.py`,
 `src/pyfly/data/document/mongodb/initializer.py`.
@@ -431,17 +461,54 @@ Source files: `src/pyfly/data/document/auto_configuration.py`,
 
 ## Testing
 
-For unit tests, use [mongomock-motor](https://github.com/michaelkryukov/mongomock-motor)
-or point at a dedicated test database:
+Test transactional code against a real replica set. `mongodb_replica_set_container()`
+starts a single-node `rs0` replica set in Docker, and `pyfly_config` turns the document
+layer on with its URI:
 
-::: listing pyfly-test.yaml | Listing B.11 — Test database configuration
-pyfly:
-  data:
-    document:
-      enabled: true
-      database: "myapp_test"
+::: listing tests/test_transfer.py | Listing B.11 — A transaction test on a replica set
+import pytest
+
+from pyfly.testing import (
+    data_slice,
+    mongodb_replica_set_container,
+    pyfly_config,
+    requires_docker,
+)
+
+from billing.account_document import AccountDocument
+from billing.account_repository import AccountRepository
+from billing.transfer import TransferService
+
+
+@pytest.fixture(scope="module")
+def mongo():
+    with mongodb_replica_set_container() as container:
+        yield container
+
+
+@requires_docker
+async def test_transfer_commits_both_sides(mongo) -> None:
+    config = pyfly_config(
+        mongo, base={"pyfly.data.document.database": "billing_test"}
+    )
+    async with await data_slice(
+        AccountRepository, TransferService, config=config
+    ) as ctx:
+        accounts = ctx.get_bean(AccountRepository)
+        transfers = ctx.get_bean(TransferService)
+        await accounts.delete_all()
+        src = await accounts.save(AccountDocument(balance=100))
+        dst = await accounts.save(AccountDocument(balance=0))
+
+        await transfers.transfer(str(src.id), str(dst.id), 60)
+        with pytest.raises(ValueError):
+            await transfers.transfer(str(src.id), str(dst.id), 60)
+
+        assert (await accounts.find_by_id(src.id)).balance == 40
+        assert (await accounts.find_by_id(dst.id)).balance == 60
 :::
 
-For integration tests, PyFly's Testcontainers support spins up a real MongoDB
-container automatically — see the testing chapter and
-`@ServiceConnection(MongoDBContainer)`.
+`@requires_docker` skips the test where Docker is not available. The slice's rollback
+covers relational datasources only, so the test clears its collection first. Install the
+support with `pip install 'pyfly[testcontainers]'`; mongomock and Motor are no longer
+supported.

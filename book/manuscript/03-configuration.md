@@ -342,7 +342,7 @@ Decorate a `@dataclass` with `@config_properties(prefix="...")`. The `prefix` id
 **Step 1 — Write the class.** Here is the framework's own `RelationalProperties`, which binds the `pyfly.data.relational.*` block:
 
 ::: listing pyfly/config/properties/data.py | Listing 3.5 — RelationalProperties: typed settings for the data layer
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pyfly.core.config import config_properties
 
@@ -350,17 +350,19 @@ from pyfly.core.config import config_properties
 @config_properties(prefix="pyfly.data.relational")
 @dataclass
 class RelationalProperties:
-    """Typed binding for pyfly.data.relational.*"""
+    """Typed binding for pyfly.data.relational.* (abridged)."""
 
     enabled: bool = False
-    url: str = "sqlite+aiosqlite:///pyfly.db"
-    echo: bool = False
-    pool_size: int = 5
+    url: str | None = None
+    echo: EchoSetting = False  # True, False or "debug"
+    ddl_auto: str | None = None
+    pool: PoolProperties = field(default_factory=PoolProperties)
+    # ... sqlite, read_replica, datasources, migrations, schema
 :::
 
 The decorator sets `__pyfly_config_prefix__` on the class and marks it as an injectable bean. Field types must be `int`, `float`, `bool`, or `str` for automatic coercion; more complex types are left as-is.
 
-Notice that each field carries a default value matching the framework's built-in `pyfly-defaults.yaml`. This is intentional: the class is self-documenting, and it can be constructed and used in unit tests without any YAML file on disk — just instantiate `RelationalProperties()` and you get the development defaults.
+Notice that each field carries a default. This is intentional: the class is self-documenting, and it can be constructed and used in unit tests without any YAML file on disk — just instantiate `RelationalProperties()`. Two defaults are deliberately empty. `url` is `None` because a relational application without `pyfly.data.relational.url` fails at startup (only the `dev` profile falls back to a local SQLite file, with a warning), and `ddl_auto` left unset resolves to `create` for an embedded database such as SQLite and to `none` for a database server. The nested settings, such as `pool.size` and `pool.recycle`, are dataclasses of their own.
 
 **Step 2 — Apply the pattern to your own settings.** The same decorator works for application-level configuration. Here is how a `WalletProperties` class would look for Lumen's business rules:
 
@@ -515,7 +517,7 @@ Every dot-notation config key maps to a `PYFLY_`-prefixed environment variable t
 | `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` |
 | `pyfly.web.debug` | `PYFLY_WEB_DEBUG` |
 | `pyfly.data.relational.url` | `PYFLY_DATA_RELATIONAL_URL` |
-| `pyfly.data.relational.pool-size` | `PYFLY_DATA_RELATIONAL_POOL_SIZE` |
+| `pyfly.data.relational.pool.size` | `PYFLY_DATA_RELATIONAL_POOL_SIZE` |
 | `pyfly.logging.level.root` | `PYFLY_LOGGING_LEVEL_ROOT` |
 | `pyfly.eda.provider` | `PYFLY_EDA_PROVIDER` |
 | `pyfly.profiles.active` | `PYFLY_PROFILES_ACTIVE` |
@@ -573,7 +575,7 @@ PYFLY_DATA_RELATIONAL_ECHO=true uv run pyfly run
 This is a practical escape hatch during incremental rollouts: the deploying team can inject a new value before the YAML file is updated and reviewed, and the application picks it up without a code change.
 
 !!! warning "Multi-word field names and env-only injection"
-    Env-only injection treats each underscore in a `PYFLY_*` name as a path separator, so `PYFLY_DATA_RELATIONAL_POOL_SIZE` is read as the nested path `pool` → `size`, not the flat field `pool_size`. For a single-word field like `echo` this is unambiguous and `bind()` injects it cleanly. For a multi-word field such as `pool_size`, give the key a real home in your YAML (even just `pool-size: 5`) so the env var overrides an existing leaf instead of relying on env-only injection. Read-time `config.get("pyfly.data.relational.pool-size")` always returns the env value regardless, because `get()` maps the whole dotted key in one step.
+    Env-only injection treats each underscore in a `PYFLY_*` name as a path separator, so `PYFLY_DATA_RELATIONAL_POOL_MAX_OVERFLOW` is read as the nested path `pool` → `max` → `overflow`, not the field `pool.max_overflow`. For single-word segments like `echo`, or `pool.size` (exactly `pool` → `size`), this is unambiguous and `bind()` injects them cleanly. For a multi-word field such as `max_overflow`, give the key a real home in your YAML (even just `max-overflow: 10` under `pool:`) so the env var overrides an existing leaf instead of relying on env-only injection. Read-time `config.get("pyfly.data.relational.pool.max-overflow")` always returns the env value regardless, because `get()` maps the whole dotted key in one step.
 
 ---
 
