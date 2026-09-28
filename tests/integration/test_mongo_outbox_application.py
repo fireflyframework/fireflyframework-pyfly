@@ -18,14 +18,15 @@ store: the in-process transport made transactional (``pyfly.eda.outbox.enabled``
 their outbox in the document database, on the document datasource's units of work. A ``@transactional`` method
 that saves a document and publishes an event commits both or neither: a rolled-back one reaches no listener, a
 committed one reaches it once. The events a MongoDB aggregate raises (``pyfly.eda.domain-events.destination``) are
-appended in the unit that saves it, as an outbox bus appends a relational aggregate's. (The Kafka and RabbitMQ lanes
-are ``test_mongo_outbox_forwarding_brokers.py``.)
+appended in the unit that saves it, as an outbox bus appends a relational aggregate's; saved outside a transaction,
+in a transaction of the store's own. (The Kafka and RabbitMQ lanes are ``test_mongo_outbox_forwarding_brokers.py``.)
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -46,6 +47,7 @@ from pyfly.eda.domain_events import EVENT_ID_HEADER
 from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.types import EventEnvelope
+from pyfly.kernel.exceptions import DuplicateKeyException
 from tests.support.backend_matrix import MongoBackend
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker, pytest.mark.mongo]
@@ -221,5 +223,61 @@ async def test_the_events_of_a_mongodb_aggregate_go_through_the_outbox_in_the_un
         assert received[0].headers[EVENT_ID_HEADER] == received[0].payload["event_id"]  # the domain event's id
         database = publisher.store.client[mongo_backend.database]
         assert await database["wp06b_shipped_orders"].count_documents({}) == 1
+    finally:
+        await ctx.stop()
+
+
+async def test_the_events_of_a_mongodb_aggregate_saved_outside_a_transaction_are_appended_whole(
+    mongo_backend: MongoBackend,
+) -> None:
+    """``MongoRepository.save`` outside ``@transactional`` writes the document in a unit that runs no transaction,
+    and appends the aggregate's events as that unit commits: in a transaction of the store's own, so an event is
+    written with its deliveries or not at all (never left owed to no group, where retention would drop it)."""
+    config = mongo_backend.config(
+        {
+            "pyfly.eda.provider": "memory",
+            "pyfly.eda.outbox.enabled": "true",
+            "pyfly.eda.outbox.poll-interval": "0.2",
+            "pyfly.eda.domain-events.destination": "shipping",
+        }
+    )
+    ctx = ApplicationContext(config)
+    for bean in (EdaAutoConfiguration, ShippedOrderRepository, ShippedEvents):
+        ctx.register_bean(bean)
+    await ctx.start()
+    try:
+        publisher = ctx.get_bean(EventPublisher)
+        assert isinstance(publisher, TransactionalEventPublisher)
+        store = publisher.store
+        assert isinstance(store, MongoOutboxStore)
+        orders = ctx.get_bean(ShippedOrderRepository)
+        received = ctx.get_bean(ShippedEvents).received
+        database = store.client[mongo_backend.database]
+
+        order = ShippedOrder(reference="s-1")
+        order.ship()
+        await orders.save(order)
+        await _eventually(lambda: len(received) >= 1)
+
+        counter = await database[store.collections.counters].find_one({"_id": store.collections.events})
+        assert counter is not None
+        doomed = int(counter["value"]) + 1
+        # The next event's delivery to the relay's group clashes with this one (not due for a day, so the relay
+        # leaves it alone) on the unique (consumer_group, outbox_id) index.
+        clash = {"consumer_group": publisher.relay.group, "outbox_id": doomed}
+        await database[store.collections.deliveries].insert_one(
+            {**clash, "available_at": store.now() + timedelta(days=1), "attempts": 0}
+        )
+        failed = ShippedOrder(reference="s-2")
+        failed.ship()
+        with pytest.raises(DuplicateKeyException):  # the repository's translation of the append's failure
+            await orders.save(failed)
+        assert await database[store.collections.events].find_one({"_id": doomed}) is None
+        await database[store.collections.deliveries].delete_one(clash)
+
+        await asyncio.sleep(1.0)  # a copy too many would arrive meanwhile
+        assert [(envelope.destination, envelope.payload["order"]) for envelope in received] == [("shipping", "s-1")]
+        assert await database[store.collections.events].count_documents({}) == 1
+        assert await store.pending(publisher.relay.group) == []
     finally:
         await ctx.stop()

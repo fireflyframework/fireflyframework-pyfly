@@ -1056,12 +1056,15 @@ class OrderService:
 - It needs a replica set (see [Replica Set Requirement](#replica-set-requirement)): on a standalone server the
   publisher refuses to start.
 - It runs on the document datasource's client and units of work (`pyfly.data.document.datasource`): a publish joins
-  the `@transactional` unit of that datasource, and a read-only unit refuses it.
+  the `@transactional` unit of that datasource (outside one, it runs in a short transaction of its own), and a
+  read-only unit refuses it.
 - `pyfly.eda.outbox.store: auto` picks it when the application has the document layer and no relational datasource;
   `mongo` asks for it in an application with both.
 - The events an `AggregateDocument` raises go the same way with `pyfly.eda.domain-events.destination`: they are
   appended to the outbox in the unit that saves the document (see
-  [Aggregate Documents and Domain Events](#aggregate-documents-and-domain-events)).
+  [Aggregate Documents and Domain Events](#aggregate-documents-and-domain-events)). A `MongoRepository.save`
+  outside `@transactional` writes the document on its own, with no transaction; its events are then written with
+  their deliveries in a short transaction of the store's own, whole or not at all.
 
 Its guarantees are those of the SQL outbox store; the configuration keys, the collections and their indexes, the
 outbox ids and the claims are in [The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo).

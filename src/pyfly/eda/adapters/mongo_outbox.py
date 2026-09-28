@@ -43,9 +43,13 @@ dead letters. With ``create_indexes=False`` it only checks them, and fails namin
 
 **A replica set.** An append writes the event and its deliveries in one multi-document transaction: the one of the
 unit of work bound for the store's datasource (a ``@transactional`` method of the document datasource, which the
-event then commits or rolls back with), or a short one of its own. MongoDB runs multi-document transactions on a
-replica set or a sharded cluster, never on a standalone server, so :meth:`MongoOutboxStore.start` refuses one (a
-single-node replica set is enough: ``mongod --replSet rs0``, then ``rs.initiate()``).
+event then commits or rolls back with), or a short one of its own, outside a unit and in a unit that runs no
+transaction. The one a single-command repository write opens outside ``@transactional`` runs none: a
+``MongoRepository.save`` there writes the document on its own, and the events of its aggregate, appended as its unit
+commits, are written with their deliveries in a transaction of the store's own, whole or not at all. MongoDB runs
+multi-document transactions on a replica set or a sharded cluster, never on a standalone server, so
+:meth:`MongoOutboxStore.start` refuses one (a single-node replica set is enough: ``mongod --replSet rs0``, then
+``rs.initiate()``).
 
 **Outbox ids.** An event's outbox id is an integer taken from the counter with one atomic ``findAndModify``
 (``$inc``) *outside* the unit's transaction. Two transactions that increment one document conflict: MongoDB aborts
@@ -65,13 +69,14 @@ coming back empty-handed. Every later write on a claim (complete, settle, extend
 token: once another claim took the delivery, it does nothing.
 
 **Units.** Every command runs under the operation guard of its unit, on the unit's ``ClientSession``: the
-caller's unit when one is bound for the store's datasource (an append then commits with the business writes; so
-do the relay's statements when a caller runs them inside a unit), else a short unit of its own. That unit runs a
-transaction where the work is several writes that belong together (an append, a registration, an
-unregistration, a settle that writes dead letters, a retention batch; one MongoDB aborts for a write conflict
-with a concurrent transaction is run again, a few times), and no transaction where the work is one command, which
-MongoDB applies to each document atomically (a claim, a completion, an extension, a release, a plain settle).
-Such a unit reports a failure after its write as an unknown outcome, never as a rollback: the write stood.
+caller's unit when one is bound for the store's datasource and can hold the work (an append then commits with the
+business writes; so do the relay's statements when a caller runs them inside a unit), else a short unit of its
+own. Several writes that belong together (an append, a registration, an unregistration, a settle that writes dead
+letters, a retention batch) join only a unit that runs a transaction, and otherwise run in a transaction of their
+own (one MongoDB aborts for a write conflict with a concurrent transaction is run again, a few times). The work of
+one command, which MongoDB applies to each document atomically (a claim, a completion, an extension, a release, a
+plain settle), and a read join any unit, or run in one of their own without a transaction. Such a unit reports a
+failure after its first command as an unknown outcome, never as a rollback: a write may have stood.
 
 **Sharing.** The store does not own its client: the application's document client belongs to the context that
 built it (:data:`~pyfly.data.document.mongodb.initializer.BINDINGS` closes it when the last context using it
@@ -396,11 +401,18 @@ class MongoOutboxStore:
 
     @contextlib.asynccontextmanager
     async def _unit(self, *, read_only: bool = False, single: bool = False) -> AsyncIterator[UnitOfWork]:
-        """The unit the store's commands run in: the one bound for its datasource (joined), else a short one of its
-        own, with a transaction unless *read_only* or *single* (one command, atomic on each document)."""
+        """The unit the store's commands run in: the one bound for its datasource (joined) when it can hold them,
+        else a short one of its own, with a transaction unless *read_only* or *single* (one command, atomic on each
+        document).
+
+        Several writes that belong together join only a unit that runs a transaction. A unit that runs none (the
+        one a single-command repository write opens outside ``@transactional``, such as ``MongoRepository.save``,
+        whose aggregate's events are appended as it commits) would send them as separate commands, and a failure
+        between them would leave an event owed to no group: they run in a transaction of the store's own instead.
+        """
         manager = self.manager()
         joined = self._joined(manager, write=not read_only)
-        if joined is not None:
+        if joined is not None and (read_only or single or in_transaction(joined)):
             token = bind_state(current_state().with_scope(manager.datasource, joined))
             try:
                 yield joined
@@ -414,11 +426,13 @@ class MongoOutboxStore:
             yield unit
 
     async def _atomically(self, work: Callable[[UnitOfWork], Awaitable[T]]) -> T:
-        """Await ``work(unit)`` in the unit bound for the store's datasource, else in a transaction of its own, run
-        again (a few times) when MongoDB aborts it for a transient reason: a write conflict with a concurrent
-        transaction, such as another node registering the same group."""
+        """Await ``work(unit)`` in the transaction of the unit bound for the store's datasource, else (no unit, or
+        one that runs no transaction) in a transaction of its own, run again (a few times) when MongoDB aborts it
+        for a transient reason: a write conflict with a concurrent transaction, such as another node registering
+        the same group."""
         manager = self.manager()
-        if self._joined(manager, write=True) is not None:
+        joined = self._joined(manager, write=True)
+        if joined is not None and in_transaction(joined):
             async with self._unit() as unit:
                 return await work(unit)
         for attempt in range(1, _TRANSIENT_ATTEMPTS + 1):
@@ -449,8 +463,8 @@ class MongoOutboxStore:
     async def append(
         self, envelope: EventEnvelope, *, groups: Sequence[str] | None = None, include: Sequence[str] = ()
     ) -> int:
-        """Write *envelope* in the unit of work bound for the store's datasource (or a short transaction of its own)
-        and return its outbox id.
+        """Write *envelope* in the transaction of the unit of work bound for the store's datasource (outside one, or
+        in a unit that runs no transaction, in a short transaction of its own) and return its outbox id.
 
         It is owed to every consumer group registered for its destination, or to *groups* when given (then no
         registration is consulted), and to the groups in *include* as well, whether or not they are registered

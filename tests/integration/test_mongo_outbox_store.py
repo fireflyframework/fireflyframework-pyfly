@@ -19,6 +19,8 @@
   still delivered: there is no id cursor to skip it;
 - a relay process killed in the middle of its lease leaves its delivery to be claimed again once the lease ends;
 - two relays on two clients split a group's deliveries and never take one twice;
+- in a unit that runs no transaction (a single-command repository write outside ``@transactional``) the store
+  runs its writes in a transaction of its own: an append that fails leaves no event without its deliveries;
 - a single-command unit of the store's own that fails after its write reports an unknown outcome;
 - a standalone server is refused, a read-only unit refuses an append, the indexes are created (or checked), and
   the consumers that share a store each stop it without closing the client.
@@ -39,6 +41,7 @@ from typing import Any
 
 import pytest
 from pymongo import AsyncMongoClient, monitoring
+from pymongo.errors import BulkWriteError
 
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
 from pyfly.data.transaction import (
@@ -47,6 +50,7 @@ from pyfly.data.transaction import (
     detached,
     track_commits,
 )
+from pyfly.data.transaction.template import AutoUnit
 from pyfly.eda.adapters.database import DatabaseEventBus
 from pyfly.eda.adapters.memory import InMemoryEventBus
 from pyfly.eda.adapters.mongo_outbox import MongoOutboxCollections, MongoOutboxStore
@@ -317,6 +321,76 @@ class _CancelOn(monitoring.CommandListener):
 
     def failed(self, event: monitoring.CommandFailedEvent) -> None:
         pass
+
+
+class _Writes(monitoring.CommandListener):
+    """Records the writes sent on the outbox collections: command, collection, and whether it ran in a
+    transaction (a command in one carries ``autocommit: false``)."""
+
+    def __init__(self, collections: MongoOutboxCollections) -> None:
+        self.watched = {collections.events, collections.deliveries, collections.consumers}
+        self.writes: list[tuple[str, str, bool]] = []
+
+    def started(self, event: monitoring.CommandStartedEvent) -> None:
+        name = event.command_name
+        if name in ("insert", "update", "delete") and event.command.get(name) in self.watched:
+            self.writes.append((name, event.command[name], event.command.get("autocommit") is False))
+
+    def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
+        pass
+
+    def failed(self, event: monitoring.CommandFailedEvent) -> None:
+        pass
+
+
+async def test_the_store_runs_a_transaction_of_its_own_in_a_unit_that_runs_none(mongo: Mongo) -> None:
+    """A single-command repository write outside ``@transactional`` (``MongoRepository.save``) runs in a unit
+    with no transaction, and the domain events it publishes are appended in it: every write of an append, a
+    registration or an unregistration still belongs to one transaction, the store's own."""
+    listener = _Writes(MongoOutboxCollections.named())
+    client = mongo.another_client(event_listeners=[listener])
+    manager = MongoTransactionManager.for_client(client)
+    store = MongoOutboxStore(manager, database=mongo.backend.database)
+    await store.start()
+    await store.append(_event("before the group"))
+
+    async with AutoUnit(manager, read_only=False, autocommit=True):  # the unit of a save outside @transactional
+        await store.register("g", ["orders"], start="earliest")
+        await store.append(_event(1))
+        await store.unregister("g")
+
+    names = store.collections
+    assert {(name, collection) for name, collection, _ in listener.writes} == {
+        ("insert", names.events),
+        ("insert", names.deliveries),
+        ("update", names.consumers),  # the registration
+        ("update", names.deliveries),  # its backfill
+        ("delete", names.consumers),  # the unregistration
+        ("delete", names.deliveries),
+    }
+    assert all(in_transaction for _, _, in_transaction in listener.writes), listener.writes
+
+
+async def test_an_append_in_a_unit_without_a_transaction_leaves_no_event_without_its_deliveries(mongo: Mongo) -> None:
+    """The event and its deliveries commit together even in a unit that runs no transaction: a deliveries insert
+    that fails leaves no event behind (an event owed to no group is never claimed, and retention would take it for
+    delivered)."""
+    store = mongo.store()
+    await store.start()
+    await store.register("g", None)
+    counter = await mongo.collection(store.collections.counters).find_one({"_id": store.collections.events})
+    assert counter is not None
+    doomed = int(counter["value"]) + 1
+    # The next append's delivery to g clashes with this one on the unique (consumer_group, outbox_id) index.
+    await mongo.collection(store.collections.deliveries).insert_one(
+        {"consumer_group": "g", "outbox_id": doomed, "available_at": store.now() + LEASE, "attempts": 0}
+    )
+
+    with pytest.raises(BulkWriteError):
+        async with AutoUnit(mongo.manager, read_only=False, autocommit=True):
+            await store.append(_event("doomed"))
+
+    assert await mongo.collection(store.collections.events).find_one({"_id": doomed}) is None
 
 
 async def test_a_single_command_unit_that_fails_after_its_write_reports_an_unknown_outcome(mongo: Mongo) -> None:

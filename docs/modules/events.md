@@ -630,14 +630,18 @@ letters work alike. What differs is where the data lives, and why:
   (`pyfly.data.document.datasource`, `document`; in a document-only application the one a bare `@transactional`
   runs on): the event and its deliveries are written in that unit's MongoDB transaction, so a `@transactional`
   method that saves documents and publishes commits both or neither. Outside a unit, the publish runs in a short
-  transaction of its own. A read-only unit refuses the publish (`IllegalTransactionStateError`), as a
-  `MongoRepository` refuses a write there. In an application with both layers `auto` stays on the SQL store: set
-  `store: mongo` to have the events commit with the document units instead (an event published in a relational unit
-  is then written in a unit of the document datasource, a second write).
-- **A replica set.** The store writes an event and its deliveries in one multi-document transaction, which MongoDB
-  runs on a replica set or a sharded cluster only. Its `start()` refuses a standalone server with
-  `IllegalTransactionStateError`, so the publisher, and the application, fail to start rather than write events that
-  could lose their deliveries. A single-node replica set is enough ([Replica Set
+  transaction of its own, and so does a publish in a unit that runs no transaction: the one a single-command
+  repository write opens outside `@transactional`. A `MongoRepository.save` there writes the document on its own,
+  and the events of its aggregate, published as that write's unit commits, are written with their deliveries in the
+  store's transaction, whole or not at all (a failure then fails the save, whose document stands). A read-only unit
+  refuses the publish (`IllegalTransactionStateError`), as a `MongoRepository` refuses a write there. In an
+  application with both layers `auto` stays on the SQL store: set `store: mongo` to have the events commit with the
+  document units instead (an event published in a relational unit is then written in a unit of the document
+  datasource, a second write).
+- **A replica set.** The store writes an event and its deliveries in one multi-document transaction (the caller's
+  unit's, or one of its own), which MongoDB runs on a replica set or a sharded cluster only. Its `start()` refuses a
+  standalone server with `IllegalTransactionStateError`, so the publisher, and the application, fail to start rather
+  than write events that could lose their deliveries. A single-node replica set is enough ([Replica Set
   Requirement](data-document.md#replica-set-requirement)).
 - **Collections and indexes.** Five collections of the document database (`pyfly.data.document.database`), created
   with their indexes when the store starts (idempotent: an index that exists is left as it is):
@@ -663,8 +667,9 @@ letters work alike. What differs is where the data lives, and why:
   document atomically, so two relays never take one delivery; a claim that lost some of what it read to another
   relay reads on past them, as `FOR UPDATE SKIP LOCKED` would. A claim, a completion, an extension, a release and a
   plain settle are single commands without a transaction; a registration, an unregistration, a settle with dead
-  letters and a retention batch are transactions, run again when MongoDB aborts one for a write conflict (another
-  process registering the same group at once).
+  letters and a retention batch are transactions (the caller's unit's when it runs one, else the store's own), run
+  again when MongoDB aborts one of the store's own for a write conflict (another process registering the same group
+  at once).
 - **The payload is JSON**, as the SQL store keeps it: a consumer gets the same values from either store (an instant,
   a decimal or a UUID in a payload arrives as a string).
 - **The client is the application's.** The store runs on the document datasource's client and units of work,
