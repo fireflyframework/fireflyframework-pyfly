@@ -100,9 +100,10 @@ from bson.codec_options import CodecOptions
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, IndexModel, ReturnDocument, UpdateOne
 from pymongo.errors import PyMongoError
 
-from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager, in_transaction
+from pyfly.data.document.mongodb.transaction_manager import DOCUMENT, MongoTransactionManager, in_transaction
 from pyfly.data.transaction.context import bind_state, current_state, reset_state
 from pyfly.data.transaction.errors import IllegalTransactionStateError
+from pyfly.data.transaction.registry import resolve_manager
 from pyfly.data.transaction.template import AutoUnit
 from pyfly.eda.dlq import EdaDeadLetterEntry
 from pyfly.eda.outbox import encode_json
@@ -240,37 +241,33 @@ class MongoOutboxStore:
     """The :class:`~pyfly.eda.ports.outbox.OutboxStore` on MongoDB: the outbox collections in one database, and the
     commands that write and read them (see the module documentation).
 
-    *client* is the application's ``AsyncMongoClient``, whose transaction manager the units run on
-    (:meth:`MongoTransactionManager.for_client
-    <pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager.for_client>`, resolved at each use), or
-    that :class:`~pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager` itself. The store never
-    closes the client. *database* is the database of the collections (by default the one the client's URI names,
-    else ``pyfly``), and *collections* their names (the ``pyfly_outbox_*`` ones by default). With *create_indexes*
-    false, :meth:`start` only checks the indexes. *clock* gives the current UTC instant (by default the system's,
-    to the millisecond).
+    *datasource* is the document datasource the store's units run on, resolved at each use: its name
+    (``document`` by default: the manager the application context registered under it), its
+    :class:`~pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager`, or an ``AsyncMongoClient`` (the
+    client's manager, :meth:`MongoTransactionManager.for_client
+    <pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager.for_client>`). The store reads and writes
+    with that manager's client and never closes it. *database* is the database of the collections (by default the
+    one the client's URI names, else ``pyfly``), and *collections* their names (the ``pyfly_outbox_*`` ones by
+    default). With *create_indexes* false, :meth:`start` only checks the indexes. *clock* gives the current UTC
+    instant (by default the system's, to the millisecond).
     """
 
     def __init__(
         self,
-        client: AsyncMongoClient[Any] | MongoTransactionManager,
+        datasource: str | AsyncMongoClient[Any] | MongoTransactionManager = DOCUMENT,
         *,
         database: str | None = None,
         collections: MongoOutboxCollections | None = None,
         create_indexes: bool = True,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if isinstance(client, MongoTransactionManager):
-            self._manager: MongoTransactionManager | None = client
-            self._client: AsyncMongoClient[Any] = client.client
-        elif isinstance(client, AsyncMongoClient):
-            self._manager = None
-            self._client = client
-        else:
+        if not isinstance(datasource, (str, AsyncMongoClient, MongoTransactionManager)):
             raise TypeError(
-                f"MongoOutboxStore takes a pymongo AsyncMongoClient or its MongoTransactionManager, got "
-                f"{type(client).__name__}"
+                "MongoOutboxStore runs on a document datasource: its name, its MongoTransactionManager or its pymongo "
+                f"AsyncMongoClient, got {type(datasource).__name__}"
             )
-        self._database_name = database or self._client.get_default_database(default=DEFAULT_DATABASE).name
+        self._target = datasource
+        self._database_name = database
         self._collections = collections or MongoOutboxCollections.named()
         self._create_indexes = create_indexes
         self._clock = clock or _now
@@ -278,13 +275,20 @@ class MongoOutboxStore:
     # -- identity -------------------------------------------------------------------------------------------------
 
     @property
+    def datasource(self) -> str | AsyncMongoClient[Any] | MongoTransactionManager:
+        """The document datasource the store runs on, as given."""
+        return self._target
+
+    @property
     def client(self) -> AsyncMongoClient[Any]:
-        """The client the store reads and writes with (it does not own it)."""
-        return self._client
+        """The client the store reads and writes with, resolved now (the store does not own it)."""
+        return self.manager().client
 
     @property
     def database(self) -> str:
         """The database of the outbox collections."""
+        if self._database_name is None:
+            self._database_name = self.client.get_default_database(default=DEFAULT_DATABASE).name
         return self._database_name
 
     @property
@@ -298,16 +302,30 @@ class MongoOutboxStore:
         return self._create_indexes
 
     def manager(self) -> MongoTransactionManager:
-        """The transaction manager the store's units run on, resolved now: the one it was given, else its client's
-        (the application's, once the context registered it)."""
-        return self._manager if self._manager is not None else MongoTransactionManager.for_client(self._client)
+        """The transaction manager the store's units run on, resolved now: the one it was given, the one of its
+        client, or the one registered under its datasource name (raises
+        :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` when that is no document datasource)."""
+        target = self._target
+        if isinstance(target, MongoTransactionManager):
+            return target
+        if isinstance(target, AsyncMongoClient):
+            return MongoTransactionManager.for_client(target)
+        manager = resolve_manager(target)
+        if not isinstance(manager, MongoTransactionManager):
+            raise IllegalTransactionStateError(
+                f"The MongoDB outbox store runs on a document datasource, and datasource {target!r} is served by "
+                f"{manager!r}. Name the document datasource (pyfly.data.document.datasource), or keep the outbox "
+                "on this one with the SQL store (pyfly.eda.outbox.store=sql).",
+                datasource=target,
+            )
+        return manager
 
     def now(self) -> datetime:
         """The store's clock."""
         return self._clock()
 
     def _db(self) -> AsyncDatabase[dict[str, Any]]:
-        return self._client.get_database(self._database_name, codec_options=_CODEC_OPTIONS)
+        return self.client.get_database(self.database, codec_options=_CODEC_OPTIONS)
 
     def _collection(self, name: str) -> AsyncCollection[dict[str, Any]]:
         return self._db().get_collection(name)
@@ -337,7 +355,7 @@ class MongoOutboxStore:
                 if wanted not in present:
                     raise IllegalTransactionStateError(
                         f"The MongoDB outbox store's index {wanted!r} of collection {name!r} (database "
-                        f"{self._database_name!r}) is missing, and the store was told not to create its indexes. "
+                        f"{self.database!r}) is missing, and the store was told not to create its indexes. "
                         "Create them (start the store once with index creation on), or let it create them.",
                         datasource=manager.datasource,
                     )

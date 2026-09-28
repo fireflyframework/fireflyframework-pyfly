@@ -380,10 +380,54 @@ class TestTransactionalOutboxConfiguration:
         config = _outbox_config(tmp_path, **{"pyfly.eda.provider": "database", "pyfly.eda.outbox.enabled": "true"})
         assert type(EdaAutoConfiguration().event_publisher(config)) is DatabaseEventBus
 
-    def test_the_mongo_store_is_not_available_until_it_lands(self, tmp_path: Path) -> None:
+    def test_the_mongo_store_runs_on_the_document_datasource(self) -> None:
+        from pyfly.eda.adapters.database import DatabaseEventBus
+        from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
+        from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
+
+        base = {
+            "pyfly.data.document.enabled": "true",
+            "pyfly.data.document.database": "shop",
+            "pyfly.data.document.datasource": "catalog",
+            "pyfly.eda.outbox.enabled": "true",
+            "pyfly.eda.outbox.store": "mongo",
+        }
+        publisher = EdaAutoConfiguration().event_publisher(pyfly_config(base={**base, "pyfly.eda.provider": "memory"}))
+        assert isinstance(publisher, TransactionalEventPublisher)
+        assert isinstance(publisher.store, MongoOutboxStore)
+        # The document datasource's units, resolved when the store runs: an append joins them.
+        assert publisher.store.datasource == "catalog"
+        assert publisher.store.database == "shop"
+        assert publisher.store.creates_indexes is True  # whatever ddl-auto says: an index is not a table
+
+        bus = EdaAutoConfiguration().event_publisher(
+            pyfly_config(
+                base={**base, "pyfly.eda.provider": "database", "pyfly.eda.outbox.auto-create-tables": "false"}
+            )
+        )
+        assert type(bus) is DatabaseEventBus
+        assert isinstance(bus.outbox, MongoOutboxStore)
+        assert bus.sql_store is None
+        assert bus.outbox.creates_indexes is False
+
+    def test_the_postgres_provider_is_the_sql_outbox(self, tmp_path: Path) -> None:
         import pytest
 
-        for provider in ("memory", "database", "postgres"):
+        config = _outbox_config(
+            tmp_path,
+            **{
+                "pyfly.data.document.enabled": "true",
+                "pyfly.eda.provider": "postgres",
+                "pyfly.eda.outbox.store": "mongo",
+            },
+        )
+        with pytest.raises(ValueError, match="pyfly.eda.provider=postgres keeps the outbox in PostgreSQL"):
+            EdaAutoConfiguration().event_publisher(config)
+
+    def test_the_mongo_store_needs_the_document_data_layer(self, tmp_path: Path) -> None:
+        import pytest
+
+        for provider in ("memory", "database"):
             config = _outbox_config(
                 tmp_path,
                 **{
@@ -392,12 +436,11 @@ class TestTransactionalOutboxConfiguration:
                     "pyfly.eda.outbox.store": "mongo",
                 },
             )
-            with pytest.raises(ValueError, match="not available until the Mongo outbox store lands"):
+            with pytest.raises(ValueError, match="pyfly.data.document.enabled=true"):
                 EdaAutoConfiguration().event_publisher(config)
 
     def test_auto_picks_the_store_of_the_applications_datasource(self, tmp_path: Path) -> None:
-        import pytest
-
+        from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
         from pyfly.eda.outbox import SqlOutboxStore
 
         document_only = pyfly_config(
@@ -408,8 +451,9 @@ class TestTransactionalOutboxConfiguration:
                 "pyfly.eda.outbox.enabled": "true",
             }
         )
-        with pytest.raises(ValueError, match="not available until the Mongo outbox store lands"):
-            EdaAutoConfiguration().event_publisher(document_only)
+        store = EdaAutoConfiguration().event_publisher(document_only).store  # type: ignore[attr-defined]
+        assert isinstance(store, MongoOutboxStore)
+        assert store.datasource == "document"
 
         both = _outbox_config(
             tmp_path,
@@ -471,6 +515,23 @@ class TestTransactionalOutboxConfiguration:
             EdaAutoConfiguration().event_publisher(config)
 
 
+def _raised_in(error: BaseException, filename: str, function: str) -> bool:
+    """Whether *error*, or an exception it was raised from, passed through *function* of *filename*."""
+    import traceback
+
+    current: BaseException | None = error
+    for _ in range(20):
+        if current is None:
+            return False
+        if any(
+            frame.filename.endswith(filename) and frame.name == function
+            for frame in traceback.extract_tb(current.__traceback__)
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _cause_chain(error: BaseException) -> list[str]:
     chain: list[str] = []
     current: BaseException | None = error
@@ -496,6 +557,9 @@ class TestAutoOutboxStoreInAnApplicationContext:
         return context
 
     async def test_a_document_only_application_gets_the_mongo_store(self) -> None:
+        """The document layer's server cannot be reached here: the context fails to start in the Mongo outbox
+        store's start, the store auto chose (the SQL store would fail on its missing primary datasource first). The
+        replica-set lane runs such a context for real (``tests/integration/test_mongo_outbox_application.py``)."""
         import pytest
 
         for provider in ("memory", "database"):
@@ -504,13 +568,15 @@ class TestAutoOutboxStoreInAnApplicationContext:
                     {
                         "pyfly.data.document.enabled": "true",
                         "pyfly.data.document.uri": "mongodb://localhost:1",
+                        "pyfly.data.document.server-selection-timeout": "0.2",
                         "pyfly.eda.provider": provider,
                         "pyfly.eda.outbox.enabled": "true",
                     }
                 )
                 await context.stop()
             chain = _cause_chain(raised.value)
-            assert any("not available until the Mongo outbox store lands" in link for link in chain), (provider, chain)
+            assert not any("No primary datasource" in link for link in chain), (provider, chain)
+            assert _raised_in(raised.value, "mongo_outbox.py", "start"), (provider, chain)
 
     async def test_an_application_with_a_relational_datasource_keeps_the_sql_store(self, tmp_path: Path) -> None:
         from pyfly.eda.outbox import SqlOutboxStore
