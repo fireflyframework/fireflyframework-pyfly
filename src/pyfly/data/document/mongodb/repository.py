@@ -49,6 +49,10 @@ Spring Data semantics, at the fewest round trips:
   ``findAndModify`` upsert); ``save_all`` is one ordered ``bulk_write``
   (``InsertOne`` for the new documents, a revision-aware ``UpdateOne`` for the others) that runs Beanie's
   validation, event actions and state management for each document, as ``save`` does (C039).
+- The ids and revisions both make on the client are the documents' only once they are stored: a call that fails
+  gives the documents it did not write the id, revision and saved state they had, and so does a rollback of the
+  transaction they were written in (after the call returned too), so saving the same objects again retries the
+  same writes.
 - Ids are converted to the document's id type in every ``_id`` filter (C038): ``MongoRepository[Doc, str]``
   finds an ``ObjectId`` document by its string. An id the type cannot hold matches nothing.
 - Sort orders, ``find_all(**filters)`` keys and derived queries name Python fields; ``id`` is stored as
@@ -88,6 +92,7 @@ from beanie.odm.utils.dump import get_dict, get_top_level_nones
 from beanie.odm.utils.parsing import parse_obj
 from pymongo import InsertOne, UpdateOne
 from pymongo.asynchronous.client_session import AsyncClientSession
+from pymongo.errors import BulkWriteError
 
 from pyfly.container.types import NoAutowire
 from pyfly.data.document.mongodb import exception_translation as _translation  # noqa: F401 — registers it
@@ -108,6 +113,7 @@ from pyfly.data.transaction.context import bind_state, current_state, reset_stat
 from pyfly.data.transaction.decorator import is_transactional
 from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.registry import TransactionManagerRegistry, installed_registry
+from pyfly.data.transaction.synchronization import CompletionStatus, TransactionSynchronizationAdapter
 from pyfly.data.transaction.template import AutoUnit, complete_auto_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork, cancel_requests
 
@@ -351,6 +357,73 @@ _RUNS_EVENT_ACTIONS: frozenset[str] = frozenset(
 )
 """The framework's methods that run the document's event actions: user code, so they hold the operation guard
 for each driver command only, never for the whole call (module documentation)."""
+
+_WRITTEN_DOCUMENTS = "pyfly_mongo_written_documents"
+"""``UnitOfWork.attributes`` key: the :class:`_RestoreOnRollback` of a unit that runs a transaction."""
+
+
+class _DocumentState:
+    """What a save changes on a document that must match the server's copy: its id, its revision, and its saved
+    state (Beanie's state management)."""
+
+    __slots__ = ("document", "id", "previous_saved_state", "revision_id", "saved_state")
+
+    def __init__(self, document: Any) -> None:
+        self.document = document
+        self.id = document.id
+        self.revision_id = document.revision_id
+        self.saved_state = document._saved_state
+        self.previous_saved_state = document._previous_saved_state
+
+    def restore(self) -> None:
+        """Give the document back the state it had when this snapshot was taken."""
+        document = self.document
+        document.id = self.id
+        document.revision_id = self.revision_id
+        document._saved_state = self.saved_state
+        document._previous_saved_state = self.previous_saved_state
+
+
+class _RestoreOnRollback(TransactionSynchronizationAdapter):
+    """Gives the documents a transaction's saves wrote the state they had before the first of them, when the
+    transaction rolls back: none of those writes is stored. A commit whose outcome is unknown leaves them as the
+    saves left them."""
+
+    def __init__(self) -> None:
+        self.states: dict[int, _DocumentState] = {}
+
+    def remember(self, states: Iterable[_DocumentState]) -> None:
+        for state in states:
+            self.states.setdefault(id(state.document), state)
+
+    async def after_completion(self, status: CompletionStatus) -> None:
+        if status is CompletionStatus.ROLLED_BACK:
+            for state in self.states.values():
+                state.restore()
+
+
+def _snapshots(unit: UnitOfWork, documents: Iterable[Any]) -> list[_DocumentState]:
+    """The state of *documents* before a save writes them; in a transaction, also kept so that a rollback of *unit*
+    gives it back."""
+    states = [_DocumentState(document) for document in documents]
+    if in_transaction(unit):
+        restorer = unit.attributes.get(_WRITTEN_DOCUMENTS)
+        if restorer is None:
+            restorer = _RestoreOnRollback()
+            unit.register_synchronization(restorer)
+            unit.attributes[_WRITTEN_DOCUMENTS] = restorer
+        restorer.remember(states)
+    return states
+
+
+def _written_before(error: BaseException, count: int) -> int:
+    """How many of the *count* operations an ordered bulk write that raised *error* outside a transaction wrote:
+    the ones before its first write error (all of them when only the write concern failed), none for any other
+    error (nothing written, or an outcome the driver cannot know, as Beanie's ``insert`` takes it)."""
+    if not isinstance(error, BulkWriteError):
+        return 0
+    errors = error.details.get("writeErrors") or []
+    return min(int(failure["index"]) for failure in errors) if errors else count
 
 
 class MongoRepository(Generic[T, ID]):
@@ -803,34 +876,53 @@ class MongoRepository(Generic[T, ID]):
     async def save(self, entity: T) -> T:
         """Insert a new document, or save one that is not new (``is_new()`` hook, else ``id is None``) as Beanie's
         ``save`` does: validation and event actions in Beanie's order, around one command (``insert``, or the
-        revision-aware ``findAndModify`` upsert of a stored document)."""
+        revision-aware ``findAndModify`` upsert of a stored document).
+
+        A save whose write fails, or whose transaction rolls back, gives the document back the id, revision and
+        saved state it had, so saving it again retries the same write (a new document is inserted again)."""
         document: Any = entity
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         new = self._is_new(document)
-        await _validate(document)
+        (state,) = _snapshots(self._current_unit(), (document,))
+        try:
+            await _validate(document)
+            if new:
+                fields = await self._before_insert(document, settings)
+                async with self._operation(write=True) as session:
+                    result = await self._collection().insert_one(fields, session=session)
+            else:
+                await _run_actions(document, EventTypes.SAVE, ActionDirections.BEFORE)
+                await _run_actions(document, EventTypes.UPDATE, ActionDirections.BEFORE)
+                changes: list[dict[str, Any]] = [
+                    {"$set": get_dict(document, to_db=True, keep_nulls=settings.keep_nulls)}
+                ]
+                if not settings.keep_nulls:
+                    nones = get_top_level_nones(document)
+                    if nones:
+                        changes.append({"$unset": dict.fromkeys(nones, "")})
+                async with self._operation(write=True) as session:
+                    # Beanie's update of a stored document (its revision check and state), without its actions.
+                    await document.update(*changes, session=session, upsert=True, skip_actions=_SKIP_ACTIONS)
+        except BaseException:
+            state.restore()
+            raise
         if new:
-            fields = await self._before_insert(document, settings)
-            async with self._operation(write=True) as session:
-                result = await self._collection().insert_one(fields, session=session)
             if document.id is None:
                 document.id = _as_id(self._model, result.inserted_id)
             document._save_state()
             await _run_actions(document, EventTypes.INSERT, ActionDirections.AFTER)
         else:
-            await _run_actions(document, EventTypes.SAVE, ActionDirections.BEFORE)
-            await _run_actions(document, EventTypes.UPDATE, ActionDirections.BEFORE)
-            changes: list[dict[str, Any]] = [{"$set": get_dict(document, to_db=True, keep_nulls=settings.keep_nulls)}]
-            if not settings.keep_nulls:
-                nones = get_top_level_nones(document)
-                if nones:
-                    changes.append({"$unset": dict.fromkeys(nones, "")})
-            async with self._operation(write=True) as session:
-                # Beanie's update of a stored document (its revision check and state), without its actions.
-                await document.update(*changes, session=session, upsert=True, skip_actions=_SKIP_ACTIONS)
             await _run_actions(document, EventTypes.UPDATE, ActionDirections.AFTER)
             await _run_actions(document, EventTypes.SAVE, ActionDirections.AFTER)
         self._collect_events((document,))
         return entity
+
+    def _stored(self, entity: Any, new: bool, document: dict[str, Any]) -> None:
+        """Record that ``save_all`` wrote *entity* (from its operation's *document*): the id the driver gave a new
+        one, and its saved state."""
+        if new and entity.id is None and ID_FIELD in document:
+            entity.id = _as_id(self._model, document[ID_FIELD])
+        entity._save_state()
 
     async def _before_insert(self, entity: Any, settings: Any) -> dict[str, Any]:
         """Ready a new document for its insert: its id made on the client, its insert actions run, a revision
@@ -847,52 +939,68 @@ class MongoRepository(Generic[T, ID]):
 
         Outside a transaction on a replica set the call is one transaction, which MongoDB bounds in time
         (``transactionLifetimeLimitSeconds``, 60 s by default) and size (``TransactionTooLargeForCache``): save a
-        large data set in batches of a few thousand documents, each atomic on its own."""
+        large data set in batches of a few thousand documents, each atomic on its own.
+
+        A call that fails gives the documents it did not write the id, revision and saved state they had, and so
+        does a rollback of its transaction, so saving the same documents again retries the same writes. Without a
+        transaction (a standalone server) the documents the bulk write reached before a failing one are stored,
+        and keep their new ids and revisions."""
         items: list[Any] = list(entities)
         if not items:
             return []
         settings = self._model.get_settings()  # type: ignore[attr-defined]
+        unit = self._current_unit()
+        transactional = in_transaction(unit)
+        states = _snapshots(unit, items)
         operations: list[InsertOne[Any] | UpdateOne] = []
         plans: list[tuple[Any, bool, dict[str, Any]]] = []
         guarded = 0
-        for entity in items:
-            new = self._is_new(entity)
-            await _validate(entity)
-            if new:
-                document = await self._before_insert(entity, settings)
-                operations.append(InsertOne(document))
-            else:
-                await _run_actions(entity, EventTypes.SAVE, ActionDirections.BEFORE)
-                await _run_actions(entity, EventTypes.UPDATE, ActionDirections.BEFORE)
-                criteria: dict[str, Any] = {ID_FIELD: entity.id}
-                upsert = True
-                if settings.use_revision:
-                    if entity.revision_id is not None:
-                        criteria["revision_id"] = entity.revision_id
-                        upsert = False
-                        guarded += 1
-                    entity.revision_id = uuid.uuid4()
-                document = get_dict(entity, to_db=True, keep_nulls=settings.keep_nulls)
-                update: dict[str, Any] = {"$set": document}
-                if not settings.keep_nulls:
-                    nones = get_top_level_nones(entity)
-                    if nones:
-                        update["$unset"] = dict.fromkeys(nones, "")
-                operations.append(UpdateOne(encode(self._model, criteria), update, upsert=upsert))
-            plans.append((entity, new, document))
-        async with self._operation(write=True) as session:
-            result = await self._collection().bulk_write(operations, ordered=True, session=session)
-            updates = len(items) - result.inserted_count
-            if guarded and result.matched_count + result.upserted_count < updates:
-                conflict = RevisionIdWasChanged()
-                unit = self._current_unit()
-                if in_transaction(unit):
-                    unit.set_rollback_only(conflict)  # the documents written before it must not commit
-                raise conflict
+        conflict: RevisionIdWasChanged | None = None
+        try:
+            for entity in items:
+                new = self._is_new(entity)
+                await _validate(entity)
+                if new:
+                    document = await self._before_insert(entity, settings)
+                    operations.append(InsertOne(document))
+                else:
+                    await _run_actions(entity, EventTypes.SAVE, ActionDirections.BEFORE)
+                    await _run_actions(entity, EventTypes.UPDATE, ActionDirections.BEFORE)
+                    criteria: dict[str, Any] = {ID_FIELD: entity.id}
+                    upsert = True
+                    if settings.use_revision:
+                        if entity.revision_id is not None:
+                            criteria["revision_id"] = entity.revision_id
+                            upsert = False
+                            guarded += 1
+                        entity.revision_id = uuid.uuid4()
+                    document = get_dict(entity, to_db=True, keep_nulls=settings.keep_nulls)
+                    update: dict[str, Any] = {"$set": document}
+                    if not settings.keep_nulls:
+                        nones = get_top_level_nones(entity)
+                        if nones:
+                            update["$unset"] = dict.fromkeys(nones, "")
+                    operations.append(UpdateOne(encode(self._model, criteria), update, upsert=upsert))
+                plans.append((entity, new, document))
+            async with self._operation(write=True) as session:
+                result = await self._collection().bulk_write(operations, ordered=True, session=session)
+                updates = len(items) - result.inserted_count
+                if guarded and result.matched_count + result.upserted_count < updates:
+                    conflict = RevisionIdWasChanged()
+                    if transactional:
+                        unit.set_rollback_only(conflict)  # the documents written before it must not commit
+                    raise conflict
+        except BaseException as error:
+            if not transactional and error is conflict:
+                raise  # every document was sent: the ones whose revision matched are stored with their new one
+            written = 0 if transactional else _written_before(error, len(plans))
+            for entity, new, document in plans[:written]:
+                self._stored(entity, new, document)
+            for state in states[written:]:
+                state.restore()
+            raise
         for entity, new, document in plans:
-            if new and entity.id is None and ID_FIELD in document:
-                entity.id = _as_id(self._model, document[ID_FIELD])
-            entity._save_state()
+            self._stored(entity, new, document)
             if new:
                 await _run_actions(entity, EventTypes.INSERT, ActionDirections.AFTER)
             else:
